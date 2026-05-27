@@ -41,6 +41,23 @@ pub const Param = struct {
     is_rest: bool = false,
 };
 
+/// One property in an object destructuring pattern: `{ key: target = default }`.
+/// `key_expr` non-null means a computed key. `target` is an identifier or a
+/// nested pattern.
+pub const ObjPatProp = struct {
+    key: []const u8 = "",
+    key_expr: ?*Node = null,
+    target: *Node,
+    default: ?*Node = null,
+};
+
+/// One element in an array destructuring pattern: `target = default` (null
+/// `target` is an elision / hole).
+pub const ArrPatElem = struct {
+    target: ?*Node = null,
+    default: ?*Node = null,
+};
+
 pub const FunctionNode = struct {
     name: []const u8 = "",
     params: []const Param,
@@ -109,9 +126,14 @@ pub const Node = union(enum) {
     /// A `...expr` spread element, only valid inside an array literal or an
     /// argument list; the interpreter expands its iterable in place.
     spread: *Node,
+    /// Destructuring binding patterns (used as a declaration/assignment target,
+    /// never evaluated as an expression). `rest` names a `...rest` binding.
+    obj_pattern: struct { props: []ObjPatProp, rest: ?[]const u8 },
+    arr_pattern: struct { elems: []ArrPatElem, rest: ?*Node },
 
     // statements
     var_decl: struct { kind: DeclKind, name: []const u8, init: ?*Node },
+    destructure_decl: struct { kind: DeclKind, pattern: *Node, init: *Node },
     func_decl: *FunctionNode, // `function name(...) {...}` -> binds name
     return_stmt: ?*Node,
     throw_stmt: *Node,

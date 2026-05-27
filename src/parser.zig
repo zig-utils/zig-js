@@ -105,8 +105,87 @@ pub const Parser = struct {
         return self.alloc(.{ .expr_stmt = expr });
     }
 
+    // ----- destructuring binding patterns ---------------------------------
+
+    /// A binding target: an identifier or a nested object/array pattern.
+    fn parseBindingTarget(self: *Parser) ParseError!*Node {
+        if (self.check(.lbrace)) return self.parseObjectPattern();
+        if (self.check(.lbracket)) return self.parseArrayPattern();
+        const name = self.advance();
+        if (name.kind != .identifier) return ParseError.UnexpectedToken;
+        return self.alloc(.{ .identifier = name.text });
+    }
+
+    fn parseObjectPattern(self: *Parser) ParseError!*Node {
+        try self.expect(.lbrace);
+        var props: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
+        var rest: ?[]const u8 = null;
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            if (self.match(.ellipsis)) {
+                const r = self.advance();
+                if (r.kind != .identifier) return ParseError.UnexpectedToken;
+                rest = r.text;
+                break;
+            }
+            var key: []const u8 = "";
+            var key_expr: ?*Node = null;
+            if (self.match(.lbracket)) {
+                key_expr = try self.parseAssignment();
+                try self.expect(.rbracket);
+            } else {
+                const kt = self.advance();
+                key = switch (kt.kind) {
+                    .identifier, .string => kt.text,
+                    .number => try std.fmt.allocPrint(self.arena, "{d}", .{kt.number}),
+                    else => return ParseError.UnexpectedToken,
+                };
+            }
+            // `{ key }` shorthand, or `{ key: target }`.
+            const target = if (self.match(.colon))
+                try self.parseBindingTarget()
+            else
+                try self.alloc(.{ .identifier = key });
+            const default = if (self.match(.assign)) try self.parseAssignment() else null;
+            try props.append(self.arena, .{ .key = key, .key_expr = key_expr, .target = target, .default = default });
+            if (!self.match(.comma)) break;
+        }
+        try self.expect(.rbrace);
+        return self.alloc(.{ .obj_pattern = .{ .props = props.items, .rest = rest } });
+    }
+
+    fn parseArrayPattern(self: *Parser) ParseError!*Node {
+        try self.expect(.lbracket);
+        var elems: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
+        var rest: ?*Node = null;
+        while (!self.check(.rbracket) and !self.check(.eof)) {
+            if (self.check(.comma)) { // elision / hole
+                try elems.append(self.arena, .{});
+                _ = self.advance();
+                continue;
+            }
+            if (self.match(.ellipsis)) {
+                rest = try self.parseBindingTarget();
+                break;
+            }
+            const target = try self.parseBindingTarget();
+            const default = if (self.match(.assign)) try self.parseAssignment() else null;
+            try elems.append(self.arena, .{ .target = target, .default = default });
+            if (!self.match(.comma)) break;
+        }
+        try self.expect(.rbracket);
+        return self.alloc(.{ .arr_pattern = .{ .elems = elems.items, .rest = rest } });
+    }
+
     fn parseVarDecl(self: *Parser, kind: ast.DeclKind) ParseError!*Node {
         _ = self.advance(); // var/let/const
+        // Destructuring declaration: `let {a, b} = obj` / `let [x, y] = arr`.
+        if (self.check(.lbrace) or self.check(.lbracket)) {
+            const pattern = try self.parseBindingTarget();
+            try self.expect(.assign);
+            const init_expr = try self.parseAssignment();
+            _ = self.match(.semicolon);
+            return self.alloc(.{ .destructure_decl = .{ .kind = kind, .pattern = pattern, .init = init_expr } });
+        }
         // One or more comma-separated declarators: `let a, b = 1, c`.
         var decls: std.ArrayListUnmanaged(*Node) = .empty;
         while (true) {

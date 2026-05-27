@@ -154,6 +154,8 @@ pub const Interpreter = struct {
             .array_lit => |elems| try self.evalArrayLit(elems),
             // Spreads are consumed by array/argument evaluation, never on their own.
             .spread => return self.throwError("SyntaxError", "unexpected spread element"),
+            // Patterns are binding targets, not expressions.
+            .obj_pattern, .arr_pattern => return self.throwError("SyntaxError", "unexpected destructuring pattern"),
 
             .conditional => |c| if ((try self.eval(c.cond)).toBoolean())
                 try self.eval(c.consequent)
@@ -169,6 +171,12 @@ pub const Interpreter = struct {
             .func_decl => |fnode| blk: {
                 const fnv = try self.makeFunction(fnode, self.env);
                 try self.env.put(fnode.name, fnv);
+                break :blk .undefined;
+            },
+
+            .destructure_decl => |d| blk: {
+                const v = try self.eval(d.init);
+                try self.bindPattern(d.pattern, v);
                 break :blk .undefined;
             },
 
@@ -604,6 +612,95 @@ pub const Interpreter = struct {
             .undefined, .null => return self.throwError("TypeError", "cannot read property of null or undefined"),
             else => return .undefined,
         }
+    }
+
+    // ---- destructuring ----------------------------------------------------
+
+    /// Bind a value to a destructuring target: an identifier (declared in the
+    /// current scope) or a nested object/array pattern.
+    fn bindPattern(self: *Interpreter, target: *Node, val: Value) EvalError!void {
+        switch (target.*) {
+            .identifier => |name| try self.env.put(name, val),
+            .obj_pattern => |p| try self.destructureObject(p.props, p.rest, val),
+            .arr_pattern => |p| try self.destructureArray(p.elems, p.rest, val),
+            else => return self.throwError("SyntaxError", "invalid destructuring target"),
+        }
+    }
+
+    fn destructureObject(self: *Interpreter, props: []ast.ObjPatProp, rest: ?[]const u8, val: Value) EvalError!void {
+        if (val == .undefined or val == .null)
+            return self.throwError("TypeError", "cannot destructure null or undefined");
+        var consumed: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (props) |prop| {
+            const key = if (prop.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else prop.key;
+            try consumed.append(self.arena, key);
+            var v = try self.getProperty(val, key);
+            if (v == .undefined) {
+                if (prop.default) |d| v = try self.eval(d);
+            }
+            try self.bindPattern(prop.target, v);
+        }
+        if (rest) |rest_name| {
+            const rest_obj = try self.newObject();
+            if (val == .object) {
+                const keys = try val.object.ownKeys(self.arena);
+                outer: for (keys) |k| {
+                    for (consumed.items) |c| {
+                        if (std.mem.eql(u8, c, k)) continue :outer;
+                    }
+                    try self.setProp(rest_obj.object, k, val.object.getOwn(k) orelse .undefined);
+                }
+            }
+            try self.env.put(rest_name, rest_obj);
+        }
+    }
+
+    fn destructureArray(self: *Interpreter, elems: []ast.ArrPatElem, rest: ?*Node, val: Value) EvalError!void {
+        if (val == .undefined or val == .null)
+            return self.throwError("TypeError", "cannot destructure null or undefined");
+        var idx: usize = 0;
+        for (elems) |elem| {
+            var v = try self.elementAt(val, idx);
+            idx += 1;
+            if (elem.target) |t| {
+                if (v == .undefined) {
+                    if (elem.default) |d| v = try self.eval(d);
+                }
+                try self.bindPattern(t, v);
+            }
+        }
+        if (rest) |rest_target| {
+            const rest_arr = try self.newArray();
+            const len = iterableLen(val);
+            while (idx < len) : (idx += 1) {
+                try rest_arr.object.elements.append(self.arena, try self.elementAt(val, idx));
+            }
+            try self.bindPattern(rest_target, rest_arr);
+        }
+    }
+
+    /// Element `i` of an array/string for array destructuring (undefined if out
+    /// of range). Non-iterable values raise a TypeError.
+    fn elementAt(self: *Interpreter, val: Value, i: usize) EvalError!Value {
+        switch (val) {
+            .object => |o| {
+                if (!o.is_array) return self.throwError("TypeError", "value is not iterable");
+                return if (i < o.elements.items.len) o.elements.items[i] else .undefined;
+            },
+            .string => |s| {
+                if (i >= s.len) return .undefined;
+                return .{ .string = try self.arena.dupe(u8, s[i .. i + 1]) };
+            },
+            else => return self.throwError("TypeError", "value is not iterable"),
+        }
+    }
+
+    fn iterableLen(val: Value) usize {
+        return switch (val) {
+            .object => |o| if (o.is_array) o.elements.items.len else 0,
+            .string => |s| s.len,
+            else => 0,
+        };
     }
 
     fn assignTo(self: *Interpreter, target: *Node, v: Value) EvalError!void {
@@ -1069,6 +1166,22 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter destructuring declarations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // object pattern
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let { a, b } = { a: 1, b: 2 }; a + b")).number);
+    // object pattern with rename + default
+    try std.testing.expectEqual(@as(f64, 12), (try evalSource(a, "let { a: x, c = 10 } = { a: 2 }; x + c")).number);
+    // array pattern with hole and rest
+    try std.testing.expectEqualStrings("1|3,4", (try evalSource(a, "let [first, , ...rest] = [1, 2, 3, 4]; first + '|' + rest")).string);
+    // nested pattern
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let { p: { x, y } } = { p: { x: 3, y: 4 } }; x + y")).number);
+    // object rest collects the remaining own properties
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let { a, ...others } = { a: 1, b: 2, c: 3 }; others.b + others.c")).number);
 }
 
 test "interpreter spread in arrays and calls" {
