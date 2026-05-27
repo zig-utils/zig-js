@@ -1,6 +1,8 @@
 const std = @import("std");
 const interp = @import("interpreter.zig");
 const value = @import("value.zig");
+const compiler = @import("compiler.zig");
+const vm = @import("vm.zig");
 const Parser = @import("parser.zig").Parser;
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
@@ -49,15 +51,30 @@ pub const Context = struct {
         return self.arena_state.allocator();
     }
 
-    /// Lex + parse + interpret `source`, returning the completion value. On an
+    /// Lex + parse + run `source`, returning the completion value. On an
     /// uncaught JS exception this returns `error.Throw` and leaves the thrown
     /// value in `self.exception` for the caller (e.g. the C-API boundary).
+    ///
+    /// Fast path: compile to bytecode and run on the VM. Programs that use
+    /// constructs the compiler doesn't lower yet fall back to the tree-walker,
+    /// so behavior is identical either way — the VM just handles the hot subset.
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
         const a = self.arena();
         var parser = try Parser.init(a, source);
         const prog = try parser.parseProgram();
         var interpreter = interp.Interpreter{ .arena = a, .env = &self.env };
         self.exception = null;
+
+        if (compiler.Compiler.compileProgram(a, prog)) |chunk| {
+            return vm.run(&interpreter, chunk) catch |err| {
+                if (err == error.Throw) self.exception = interpreter.exception;
+                return err;
+            };
+        } else |err| switch (err) {
+            error.Unsupported => {}, // fall through to the tree-walker
+            error.OutOfMemory => return error.OutOfMemory,
+        }
+
         return interpreter.eval(prog) catch |err| {
             if (err == error.Throw) self.exception = interpreter.exception;
             return err;

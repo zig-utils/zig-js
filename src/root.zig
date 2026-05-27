@@ -49,6 +49,9 @@ test {
     _ = @import("ast.zig");
     _ = @import("parser.zig");
     _ = @import("interpreter.zig");
+    _ = @import("bytecode.zig");
+    _ = @import("compiler.zig");
+    _ = @import("vm.zig");
     _ = @import("context.zig");
     _ = @import("c_api.zig");
 }

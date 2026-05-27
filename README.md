@@ -16,10 +16,13 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > tests** (3,590 / 14,385) via a subset harness shim, and `zig build conformance` keeps a 33/33
 > always-green smoke suite.
 >
-> The tree-walker is the **correctness bootstrap, not the performance endgame.** The path to a
-> genuine JSC competitor is a bytecode VM + inline caches (object shapes) + NaN-boxed values + a
-> generational GC, then a baseline/optimizing JIT — each tier validated against the test262 gate
-> this layer establishes. See craft's `docs/architecture/web-engine-plan.md`.
+> **Performance tiers.** The tree-walker is the correctness bootstrap, not the endgame. Tier-1 —
+> a **stack bytecode VM** (`bytecode.zig` + `compiler.zig` + `vm.zig`) — is now in place and is the
+> default execution path; programs using constructs it doesn't lower yet fall back to the
+> tree-walker, so semantics never change. Still ahead: slot-allocated locals, NaN-boxed values,
+> object shapes + inline caches, a generational GC, then a baseline/optimizing JIT — each tier
+> validated against the test262 gate this layer establishes. See craft's
+> `docs/architecture/web-engine-plan.md`.
 
 ## Conformance progress
 

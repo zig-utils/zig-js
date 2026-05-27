@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const value = @import("value.zig");
+const bc = @import("bytecode.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -62,6 +63,10 @@ pub const Function = struct {
     is_expr_body: bool,
     closure: *Environment,
     name: []const u8 = "",
+    /// Compiled body for the bytecode VM. Set when the function was created by
+    /// the VM (`make_closure`); null for tree-walk-created closures, which are
+    /// invoked via `callFunction`.
+    chunk: ?*bc.Chunk = null,
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:
@@ -103,7 +108,7 @@ pub const Interpreter = struct {
 
     /// Raise a JS exception of the given error class. Always returns
     /// `error.Throw` (or `error.OutOfMemory` if the error object can't be built).
-    fn throwError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
+    pub fn throwError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
         self.exception = try self.makeError(name, message);
         return error.Throw;
     }
@@ -514,6 +519,12 @@ pub const Interpreter = struct {
     fn evalBinary(self: *Interpreter, op: ast.BinaryOp, left_node: *Node, right_node: *Node) EvalError!Value {
         const l = try self.eval(left_node);
         const r = try self.eval(right_node);
+        return self.applyBinary(op, l, r);
+    }
+
+    /// Apply a binary operator to two already-evaluated operands. Shared by the
+    /// tree-walker and the bytecode VM.
+    pub fn applyBinary(self: *Interpreter, op: ast.BinaryOp, l: Value, r: Value) EvalError!Value {
         return switch (op) {
             .add => blk: {
                 // String concatenation if either operand is a string.
