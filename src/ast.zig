@@ -40,6 +40,9 @@ pub const Param = struct {
     name: []const u8,
     default: ?*Node = null,
     is_rest: bool = false,
+    /// A destructuring pattern parameter (`function f({a}, [b])`); when set,
+    /// `name` is empty and the argument is bound against this pattern.
+    pattern: ?*Node = null,
 };
 
 /// One property in an object destructuring pattern: `{ key: target = default }`.

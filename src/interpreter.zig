@@ -204,7 +204,7 @@ pub const Interpreter = struct {
 
             .destructure_decl => |d| blk: {
                 const v = try self.eval(d.init);
-                try self.bindPattern(d.pattern, v);
+                try self.bindPattern(d.pattern, v, true);
                 break :blk .undefined;
             },
 
@@ -701,7 +701,7 @@ pub const Interpreter = struct {
             if (v == .undefined) {
                 if (p.default) |d| v = try self.eval(d);
             }
-            try call_env.put(p.name, v);
+            if (p.pattern) |pat| try self.bindPattern(pat, v, true) else try call_env.put(p.name, v);
         }
 
         if (func.is_expr_body) return self.eval(func.body);
@@ -834,18 +834,25 @@ pub const Interpreter = struct {
 
     // ---- destructuring ----------------------------------------------------
 
-    /// Bind a value to a destructuring target: an identifier (declared in the
-    /// current scope) or a nested object/array pattern.
-    fn bindPattern(self: *Interpreter, target: *Node, val: Value) EvalError!void {
+    /// Bind a value to a destructuring target. `declare` selects whether leaf
+    /// identifiers are declared in the current scope (`let {a}=…`) or assigned
+    /// to an existing binding / member (`({a}=…)` and parameter binding uses
+    /// declare).
+    fn bindPattern(self: *Interpreter, target: *Node, val: Value, declare: bool) EvalError!void {
         switch (target.*) {
-            .identifier => |name| try self.env.put(name, val),
-            .obj_pattern => |p| try self.destructureObject(p.props, p.rest, val),
-            .arr_pattern => |p| try self.destructureArray(p.elems, p.rest, val),
+            .identifier => |name| if (declare) try self.env.put(name, val) else try self.env.assign(name, val),
+            .member => |m| { // assignment destructuring into obj.prop / arr[i]
+                const recv = try self.eval(m.object);
+                const key = try self.memberKey(m.property, m.computed);
+                try self.setMember(recv, key, val);
+            },
+            .obj_pattern => |p| try self.destructureObject(p.props, p.rest, val, declare),
+            .arr_pattern => |p| try self.destructureArray(p.elems, p.rest, val, declare),
             else => return self.throwError("SyntaxError", "invalid destructuring target"),
         }
     }
 
-    fn destructureObject(self: *Interpreter, props: []ast.ObjPatProp, rest: ?[]const u8, val: Value) EvalError!void {
+    fn destructureObject(self: *Interpreter, props: []ast.ObjPatProp, rest: ?[]const u8, val: Value, declare: bool) EvalError!void {
         if (val == .undefined or val == .null)
             return self.throwError("TypeError", "cannot destructure null or undefined");
         var consumed: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -856,7 +863,7 @@ pub const Interpreter = struct {
             if (v == .undefined) {
                 if (prop.default) |d| v = try self.eval(d);
             }
-            try self.bindPattern(prop.target, v);
+            try self.bindPattern(prop.target, v, declare);
         }
         if (rest) |rest_name| {
             const rest_obj = try self.newObject();
@@ -869,11 +876,11 @@ pub const Interpreter = struct {
                     try self.setProp(rest_obj.object, k, val.object.getOwn(k) orelse .undefined);
                 }
             }
-            try self.env.put(rest_name, rest_obj);
+            if (declare) try self.env.put(rest_name, rest_obj) else try self.env.assign(rest_name, rest_obj);
         }
     }
 
-    fn destructureArray(self: *Interpreter, elems: []ast.ArrPatElem, rest: ?*Node, val: Value) EvalError!void {
+    fn destructureArray(self: *Interpreter, elems: []ast.ArrPatElem, rest: ?*Node, val: Value, declare: bool) EvalError!void {
         if (val == .undefined or val == .null)
             return self.throwError("TypeError", "cannot destructure null or undefined");
         var idx: usize = 0;
@@ -884,7 +891,7 @@ pub const Interpreter = struct {
                 if (v == .undefined) {
                     if (elem.default) |d| v = try self.eval(d);
                 }
-                try self.bindPattern(t, v);
+                try self.bindPattern(t, v, declare);
             }
         }
         if (rest) |rest_target| {
@@ -893,7 +900,7 @@ pub const Interpreter = struct {
             while (idx < len) : (idx += 1) {
                 try rest_arr.object.elements.append(self.arena, try self.elementAt(val, idx));
             }
-            try self.bindPattern(rest_target, rest_arr);
+            try self.bindPattern(rest_target, rest_arr, declare);
         }
     }
 
@@ -929,6 +936,8 @@ pub const Interpreter = struct {
                 const key = try self.memberKey(m.property, m.computed);
                 try self.setMember(recv, key, v);
             },
+            // Assignment destructuring: `[a, b] = x` / `({a} = o)`.
+            .obj_pattern, .arr_pattern => try self.bindPattern(target, v, false),
             else => return self.throwError("ReferenceError", "invalid assignment target"),
         }
     }
@@ -1856,6 +1865,23 @@ test "interpreter class extends and super" {
         \\class C extends P {}
         \\C.sq(4)
     )).number);
+}
+
+test "interpreter assignment and parameter destructuring" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // assignment destructuring (array)
+    try std.testing.expectEqual(@as(f64, 12), (try evalSource(a, "let x = 0, y = 0; [x, y] = [10, 2]; x + y")).number);
+    // assignment destructuring (object) — needs parens at statement start
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let a2 = 0, b2 = 0; ({ a: a2, b: b2 } = { a: 1, b: 2 }); a2 + b2")).number);
+    // destructuring into a member target
+    try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let o = {}; [o.x] = [9]; o.x")).number);
+    // parameter destructuring
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "function f({ x, y }) { return x + y; } f({ x: 3, y: 4 })")).number);
+    try std.testing.expectEqual(@as(f64, 30), (try evalSource(a, "function g([a3, b3]) { return a3 * b3; } g([5, 6])")).number);
+    // parameter default + destructuring
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "function h({ n = 5 }) { return n; } h({})")).number);
 }
 
 test "interpreter destructuring declarations" {

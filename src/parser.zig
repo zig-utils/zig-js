@@ -146,6 +146,47 @@ pub const Parser = struct {
         return self.alloc(.{ .expr_stmt = expr });
     }
 
+    /// Convert an array/object *literal* on the LHS of `=` into a destructuring
+    /// pattern (the cover-grammar reinterpretation).
+    fn litToPattern(self: *Parser, node: *Node) ParseError!*Node {
+        switch (node.*) {
+            .array_lit => |elems| {
+                var out: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
+                var rest: ?*Node = null;
+                for (elems) |e| {
+                    if (e.* == .spread) {
+                        rest = try self.exprToTarget(e.spread);
+                    } else if (e.* == .assign) {
+                        try out.append(self.arena, .{ .target = try self.exprToTarget(e.assign.target), .default = e.assign.value });
+                    } else {
+                        try out.append(self.arena, .{ .target = try self.exprToTarget(e) });
+                    }
+                }
+                return self.alloc(.{ .arr_pattern = .{ .elems = out.items, .rest = rest } });
+            },
+            .object_lit => |props| {
+                var out: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
+                for (props) |p| {
+                    if (p.value.* == .assign) {
+                        try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value.assign.target), .default = p.value.assign.value });
+                    } else {
+                        try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value) });
+                    }
+                }
+                return self.alloc(.{ .obj_pattern = .{ .props = out.items, .rest = null } });
+            },
+            else => return ParseError.InvalidAssignmentTarget,
+        }
+    }
+
+    fn exprToTarget(self: *Parser, node: *Node) ParseError!*Node {
+        return switch (node.*) {
+            .identifier, .member => node,
+            .array_lit, .object_lit => try self.litToPattern(node),
+            else => ParseError.InvalidAssignmentTarget,
+        };
+    }
+
     // ----- destructuring binding patterns ---------------------------------
 
     /// A binding target: an identifier or a nested object/array pattern.
@@ -427,6 +468,14 @@ pub const Parser = struct {
         var params: std.ArrayListUnmanaged(ast.Param) = .empty;
         while (!self.check(.rparen) and !self.check(.eof)) {
             const is_rest = self.match(.ellipsis);
+            // Destructuring parameter: `function f({a}, [b])`.
+            if (!is_rest and (self.check(.lbrace) or self.check(.lbracket))) {
+                const pat = try self.parseBindingTarget();
+                const default = if (self.match(.assign)) try self.parseAssignment() else null;
+                try params.append(self.arena, .{ .name = "", .pattern = pat, .default = default });
+                if (!self.match(.comma)) break;
+                continue;
+            }
             const p = self.advance();
             if (p.kind != .identifier) return ParseError.UnexpectedToken;
             var default: ?*Node = null;
@@ -495,10 +544,15 @@ pub const Parser = struct {
 
         const left = try self.parseConditional();
         if (self.check(.assign)) {
-            if (left.* != .identifier and left.* != .member) return ParseError.InvalidAssignmentTarget;
+            // An array/object literal on the LHS is a destructuring pattern.
+            const target = switch (left.*) {
+                .identifier, .member => left,
+                .array_lit, .object_lit => try self.litToPattern(left),
+                else => return ParseError.InvalidAssignmentTarget,
+            };
             _ = self.advance();
             const value = try self.parseAssignment();
-            return self.alloc(.{ .assign = .{ .target = left, .value = value } });
+            return self.alloc(.{ .assign = .{ .target = target, .value = value } });
         }
         // Compound assignment `a op= b` desugars to `a = a op b`.
         const compound: ?ast.BinaryOp = switch (self.cur().kind) {
@@ -803,8 +857,14 @@ pub const Parser = struct {
             } else if (self.match(.colon)) {
                 val = try self.parseAssignment();
             } else if (key_tok.kind == .identifier) {
-                // Shorthand `{ a }` -> `{ a: a }`.
-                val = try self.alloc(.{ .identifier = key });
+                const ident = try self.alloc(.{ .identifier = key });
+                // Shorthand `{ a }`, or `{ a = default }` (a destructuring
+                // default surfaced via the cover grammar).
+                if (self.match(.assign)) {
+                    val = try self.alloc(.{ .assign = .{ .target = ident, .value = try self.parseAssignment() } });
+                } else {
+                    val = ident;
+                }
             } else return ParseError.ExpectedToken;
             try props.append(self.arena, .{ .key = key, .value = val });
             if (!self.match(.comma)) break;

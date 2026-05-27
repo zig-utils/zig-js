@@ -448,7 +448,7 @@ pub const Compiler = struct {
         for (fnode.params) |p| {
             // Default values and rest params need a runtime prologue the VM
             // doesn't emit yet — fall back to the tree-walker for those.
-            if (p.default != null or p.is_rest) return error.Unsupported;
+            if (p.default != null or p.is_rest or p.pattern != null) return error.Unsupported;
             _ = try scope.addLocal(self.arena, p.name);
         }
         if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
