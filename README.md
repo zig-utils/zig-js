@@ -17,11 +17,14 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > always-green smoke suite.
 >
 > **Performance tiers.** The tree-walker is the correctness bootstrap, not the endgame. Tier-1 —
-> a **stack bytecode VM** (`bytecode.zig` + `compiler.zig` + `vm.zig`) — is now in place and is the
-> default execution path; programs using constructs it doesn't lower yet fall back to the
-> tree-walker, so semantics never change. Still ahead: slot-allocated locals, NaN-boxed values,
-> object shapes + inline caches, a generational GC, then a baseline/optimizing JIT — each tier
-> validated against the test262 gate this layer establishes. See craft's
+> a **stack bytecode VM** (`bytecode.zig` + `compiler.zig` + `vm.zig`) — is the default execution
+> path and now lowers nearly the whole language (objects, arrays, members, `new`, methods, `++`,
+> `instanceof`, …); only `throw`/`try` still falls back to the tree-walker, so semantics never
+> change. `zig build bench` measures it: tier-1 is currently only ~1.05–1.12× over the tree-walker,
+> because both still resolve every variable through an `Environment` hashmap and allocate a scope
+> per call. That's the signal for the **next tier — slot-allocated locals** (compile-time variable
+> resolution into a flat register file), then NaN-boxed values, object shapes + inline caches, a
+> generational GC, and a JIT. Each tier is gated by test262. See craft's
 > `docs/architecture/web-engine-plan.md`.
 
 ## Conformance progress
@@ -121,8 +124,9 @@ source ─► lexer ─► parser (Pratt) ─► AST ─► tree-walk interprete
 zig build                       # builds libzig-js.a (the JSC drop-in)
 zig build test                  # runs unit + C-API tests (33/33)
 zig build conformance           # runs the always-green smoke suite (33/33)
-zig build test262               # runs the real WebKit test262 corpus, prints pass %
+zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
+zig build bench                 # times the bytecode VM against the tree-walker
 ```
 
 `zig build test262` defaults its corpus root to `../../WebKit/JSTests/test262` (the sibling
