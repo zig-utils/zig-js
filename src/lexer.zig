@@ -6,6 +6,7 @@ pub const TokenKind = enum {
     string,
     template, // `...${expr}...` — `text` is the raw inner source (between backticks)
     regex, // /pattern/flags — `text` is the pattern, `flags` the flag chars
+    private_name, // #ident (class private member); `text` includes the `#`
     identifier,
     // punctuation / operators
     plus,
@@ -30,6 +31,9 @@ pub const TokenKind = enum {
     caret_eq, // ^=
     qq, // ??
     question_dot, // ?.
+    amp_amp_eq, // &&=
+    pipe_pipe_eq, // ||=
+    qq_eq, // ??=
     assign,
     eq, // ==
     eq_strict, // ===
@@ -157,6 +161,12 @@ pub const Lexer = struct {
             while (self.i < self.src.len and isIdentPart(self.src[self.i])) self.i += 1;
             return .{ .kind = .identifier, .text = self.src[start..self.i], .pos = start };
         }
+        // Private names (#ident) for class private members.
+        if (c == '#' and isIdentStart(self.peek2())) {
+            self.i += 1; // '#'
+            while (self.i < self.src.len and isIdentPart(self.src[self.i])) self.i += 1;
+            return .{ .kind = .private_name, .text = self.src[start..self.i], .pos = start };
+        }
         // Strings
         if (c == '"' or c == '\'') return self.lexString();
         // Template literals
@@ -239,6 +249,10 @@ pub const Lexer = struct {
             '?' => {
                 if (self.peek() == '?') {
                     self.i += 1;
+                    if (self.peek() == '=') {
+                        self.i += 1;
+                        return tok(.qq_eq, self.src[start..self.i], start);
+                    }
                     return tok(.qq, self.src[start..self.i], start);
                 }
                 // `?.` optional chaining — but `?.5` is the conditional `?` then `.5`.
@@ -316,6 +330,10 @@ pub const Lexer = struct {
             '&' => {
                 if (self.peek() == '&') {
                     self.i += 1;
+                    if (self.peek() == '=') {
+                        self.i += 1;
+                        return tok(.amp_amp_eq, self.src[start..self.i], start);
+                    }
                     return tok(.amp_amp, self.src[start..self.i], start);
                 }
                 if (self.peek() == '=') {
@@ -327,6 +345,10 @@ pub const Lexer = struct {
             '|' => {
                 if (self.peek() == '|') {
                     self.i += 1;
+                    if (self.peek() == '=') {
+                        self.i += 1;
+                        return tok(.pipe_pipe_eq, self.src[start..self.i], start);
+                    }
                     return tok(.pipe_pipe, self.src[start..self.i], start);
                 }
                 if (self.peek() == '=') {

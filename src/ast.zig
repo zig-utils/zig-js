@@ -84,6 +84,9 @@ pub const ClassMember = struct {
     is_ctor: bool = false,
     is_field: bool = false,
     accessor: AccessorKind = .none,
+    /// `static { ... }` initialization block (run at class definition with
+    /// `this` = the class).
+    static_block: ?*Node = null,
 };
 
 /// Accessor flavor of an object-literal property or class member.

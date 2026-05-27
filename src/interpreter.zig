@@ -564,6 +564,17 @@ pub const Interpreter = struct {
         }
 
         for (members) |m| {
+            // `static { ... }` block: run with `this` = the class object.
+            if (m.static_block) |block| {
+                const saved_this = self.this_value;
+                self.this_value = class_val;
+                _ = self.eval(block) catch |e| {
+                    self.this_value = saved_this;
+                    return e;
+                };
+                self.this_value = saved_this;
+                continue;
+            }
             const key = if (m.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else m.key;
             if (m.is_field) {
                 if (m.is_static) {
@@ -2048,6 +2059,39 @@ test "interpreter classes (methods, static, instanceof, computed)" {
         \\  quad() { return this.dbl() * 2; }
         \\}
         \\(new Box(5)).quad()
+    )).number);
+}
+
+test "interpreter logical assignment operators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let x = 0; x ||= 5; x")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "let x = 1; x ||= 5; x")).number);
+    try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let x = 2; x &&= 9; x")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalSource(a, "let x = 0; x &&= 9; x")).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let x = null; x ??= 7; x")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let x = 3; x ??= 7; x")).number);
+}
+
+test "interpreter class private fields/methods and static blocks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // private field + private method
+    try std.testing.expectEqual(@as(f64, 30), (try evalSource(a,
+        \\class Counter {
+        \\  #count = 0;
+        \\  #step() { return 10; }
+        \\  bump() { this.#count = this.#count + this.#step(); return this.#count; }
+        \\}
+        \\let c = new Counter();
+        \\c.bump(); c.bump(); c.bump()
+    )).number);
+    // static initialization block
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
+        \\class C { static x; static { this.x = 42; } }
+        \\C.x
     )).number);
 }
 

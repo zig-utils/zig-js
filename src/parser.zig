@@ -577,6 +577,20 @@ pub const Parser = struct {
             const bin = try self.alloc(.{ .binary = .{ .op = op, .left = left, .right = rhs } });
             return self.alloc(.{ .assign = .{ .target = left, .value = bin } });
         }
+        // Logical assignment: `a &&= b` -> `a && (a = b)`, etc. (short-circuiting).
+        const logassign: ?ast.LogicalOp = switch (self.cur().kind) {
+            .amp_amp_eq => .@"and",
+            .pipe_pipe_eq => .@"or",
+            .qq_eq => .nullish,
+            else => null,
+        };
+        if (logassign) |op| {
+            if (left.* != .identifier and left.* != .member) return ParseError.InvalidAssignmentTarget;
+            _ = self.advance();
+            const rhs = try self.parseAssignment();
+            const set = try self.alloc(.{ .assign = .{ .target = left, .value = rhs } });
+            return self.alloc(.{ .logical = .{ .op = op, .left = left, .right = set } });
+        }
         return left;
     }
 
@@ -733,7 +747,7 @@ pub const Parser = struct {
         while (true) {
             if (self.match(.dot)) {
                 const name = self.advance();
-                if (name.kind != .identifier) return ParseError.UnexpectedToken;
+                if (name.kind != .identifier and name.kind != .private_name) return ParseError.UnexpectedToken;
                 e = try self.alloc(.{ .member = .{ .object = e, .property = name.text } });
             } else if (self.match(.question_dot)) {
                 has_optional = true;
@@ -939,7 +953,7 @@ pub const Parser = struct {
         }
         const t = self.advance();
         const key: []const u8 = switch (t.kind) {
-            .identifier, .string => t.text,
+            .identifier, .string, .private_name => t.text,
             .number => try std.fmt.allocPrint(self.arena, "{d}", .{t.number}),
             else => return ParseError.UnexpectedToken,
         };
@@ -967,6 +981,12 @@ pub const Parser = struct {
             if (isKeyword(self.cur(), "static") and self.peekKind(1) != .lparen and self.peekKind(1) != .assign) {
                 is_static = true;
                 _ = self.advance();
+            }
+            // `static { ... }` initialization block.
+            if (is_static and self.check(.lbrace)) {
+                const block = try self.parseBlock();
+                try members.append(self.arena, .{ .is_static = true, .static_block = block });
+                continue;
             }
             // Accessor: `get x() {}` / `set x(v) {}`.
             if ((isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
