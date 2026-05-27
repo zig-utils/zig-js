@@ -110,6 +110,15 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "return")) return self.parseReturn();
             if (std.mem.eql(u8, t.text, "throw")) return self.parseThrow();
             if (std.mem.eql(u8, t.text, "try")) return self.parseTry();
+            if (std.mem.eql(u8, t.text, "class")) {
+                // `class C {...}` declaration binds C; anonymous class is an expr.
+                const cls = try self.parseClassExpr();
+                if (cls.class_expr.name.len > 0) {
+                    return self.alloc(.{ .var_decl = .{ .kind = .let, .name = cls.class_expr.name, .init = cls } });
+                }
+                _ = self.match(.semicolon);
+                return self.alloc(.{ .expr_stmt = cls });
+            }
             if (std.mem.eql(u8, t.text, "break")) {
                 _ = self.advance();
                 const label = self.optionalLabel();
@@ -804,6 +813,53 @@ pub const Parser = struct {
         return self.alloc(.{ .object_lit = props.items });
     }
 
+    /// Parse a property/method name: identifier/string/number, or a computed
+    /// `[expr]`. Returns the static key (or "" if computed) and the computed expr.
+    fn parsePropertyName(self: *Parser) ParseError!struct { key: []const u8, expr: ?*Node } {
+        if (self.match(.lbracket)) {
+            const e = try self.parseAssignment();
+            try self.expect(.rbracket);
+            return .{ .key = "", .expr = e };
+        }
+        const t = self.advance();
+        const key: []const u8 = switch (t.kind) {
+            .identifier, .string => t.text,
+            .number => try std.fmt.allocPrint(self.arena, "{d}", .{t.number}),
+            else => return ParseError.UnexpectedToken,
+        };
+        return .{ .key = key, .expr = null };
+    }
+
+    /// `class [Name] { members }`. v1: constructor, instance methods, static
+    /// methods, computed method names. `extends`/`super`/accessors are deferred
+    /// (return a parse error, so such tests simply stay unparsed for now).
+    fn parseClassExpr(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // class
+        var name: []const u8 = "";
+        if (self.check(.identifier) and !isKeyword(self.cur(), "extends")) name = self.advance().text;
+        if (isKeyword(self.cur(), "extends")) return ParseError.UnexpectedToken; // inheritance deferred
+        try self.expect(.lbrace);
+        var members: std.ArrayListUnmanaged(ast.ClassMember) = .empty;
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            if (self.match(.semicolon)) continue; // stray semicolons allowed
+            var is_static = false;
+            if (isKeyword(self.cur(), "static") and self.peekKind(1) != .lparen and self.peekKind(1) != .assign) {
+                is_static = true;
+                _ = self.advance();
+            }
+            // Accessors (get/set) need an accessor model — defer.
+            if ((isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and
+                self.peekKind(1) != .lparen and self.peekKind(1) != .assign)
+                return ParseError.UnexpectedToken;
+            const pn = try self.parsePropertyName();
+            const func = try self.parseMethodTail(pn.key);
+            const is_ctor = !is_static and pn.expr == null and std.mem.eql(u8, pn.key, "constructor");
+            try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .func = func, .is_static = is_static, .is_ctor = is_ctor });
+        }
+        try self.expect(.rbrace);
+        return self.alloc(.{ .class_expr = .{ .name = name, .members = members.items } });
+    }
+
     /// Parse `(params) { body }` after a method name, returning a function node.
     fn parseMethodTail(self: *Parser, name: []const u8) ParseError!*Node {
         const params = try self.parseParamList();
@@ -829,6 +885,7 @@ pub const Parser = struct {
             const w = self.cur().text;
             if (std.mem.eql(u8, w, "function")) return self.parseFunctionExpr();
             if (std.mem.eql(u8, w, "new")) return self.parseNew();
+            if (std.mem.eql(u8, w, "class")) return self.parseClassExpr();
         }
         if (self.check(.lbrace)) return self.parseObjectLiteral();
         if (self.check(.lbracket)) return self.parseArrayLiteral();

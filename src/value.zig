@@ -31,6 +31,10 @@ pub const Object = struct {
     /// plus a flat per-object `slots` array indexed by the shape. See shape.zig.
     shape: ?*Shape = null,
     slots: std.ArrayListUnmanaged(Value) = .empty,
+    /// Prototype link ([[Prototype]]): property lookup walks this chain. An
+    /// instance's proto is its constructor's `.prototype`; a class's `.prototype`
+    /// protos to its superclass's `.prototype`.
+    proto: ?*Object = null,
     elements: std.ArrayListUnmanaged(Value) = .empty,
     is_array: bool = false,
     callback: ?HostCallback = null,

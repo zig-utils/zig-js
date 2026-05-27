@@ -328,9 +328,7 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
         if (callee.object.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             if (func.chunk) |fchunk| {
-                const this_obj = try vm.arena.create(value.Object);
-                this_obj.* = .{ .ctor_ref = callee.object };
-                const this_val: Value = .{ .object = this_obj };
+                const this_val = try vm.newInstance(callee.object);
                 const ret = try runFunction(vm, func, fchunk, args, this_val);
                 return if (ret == .object) ret else this_val;
             }

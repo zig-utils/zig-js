@@ -66,6 +66,17 @@ pub const FunctionNode = struct {
     is_expr_body: bool = false,
 };
 
+/// A `class` member: a method (`func` is a `.function` node). `is_ctor` marks
+/// the `constructor`; `is_static` marks `static` members; computed names live
+/// in `key_expr`.
+pub const ClassMember = struct {
+    key: []const u8 = "",
+    key_expr: ?*Node = null,
+    func: *Node,
+    is_static: bool = false,
+    is_ctor: bool = false,
+};
+
 /// One entry in an object literal. The key is either a static string
 /// (identifier / string / numeric literal, in `key`) or a computed expression
 /// (`{ [expr]: v }`, in `key_expr`). `value` is the property value (a function
@@ -118,6 +129,7 @@ pub const Node = union(enum) {
     assign: struct { target: *Node, value: *Node },
     conditional: struct { cond: *Node, consequent: *Node, alternate: *Node },
     function: *FunctionNode, // function/arrow expression -> a function value
+    class_expr: struct { name: []const u8, members: []ClassMember },
     call: struct { callee: *Node, args: []*Node },
     new_expr: struct { callee: *Node, args: []*Node },
     /// `object.property` (computed == null) or `object[computed]`.

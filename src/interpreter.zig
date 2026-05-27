@@ -150,6 +150,7 @@ pub const Interpreter = struct {
             },
 
             .function => |fnode| try self.makeFunction(fnode, self.env),
+            .class_expr => |c| try self.evalClass(c.name, c.members),
 
             .call => |c| try self.evalCall(c.callee, c.args),
             .new_expr => |n| try self.evalNew(n.callee, n.args),
@@ -436,6 +437,39 @@ pub const Interpreter = struct {
         return .{ .object = obj };
     }
 
+    /// Evaluate a `class` to a constructor function value: methods go on its
+    /// `.prototype`, static members on the class object itself. (extends/super
+    /// and accessors are deferred.)
+    fn evalClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember) EvalError!Value {
+        // The class object is its constructor function (explicit or default-empty).
+        var class_val: Value = undefined;
+        var found_ctor = false;
+        for (members) |m| {
+            if (m.is_ctor) {
+                class_val = try self.eval(m.func);
+                found_ctor = true;
+                break;
+            }
+        }
+        if (!found_ctor) {
+            const body = try self.arena.create(Node);
+            body.* = .{ .block = &.{} };
+            const fnode = try self.arena.create(ast.FunctionNode);
+            fnode.* = .{ .name = name, .params = &.{}, .body = body, .is_expr_body = false };
+            class_val = try self.makeFunction(fnode, self.env);
+        }
+        const class_obj = class_val.object;
+        const proto = try self.protoObject(class_obj);
+        for (members) |m| {
+            if (m.is_ctor) continue;
+            const key = if (m.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else m.key;
+            const fv = try self.eval(m.func);
+            if (m.is_static) try self.setProp(class_obj, key, fv) else try self.setProp(proto, key, fv);
+        }
+        try self.setProp(proto, "constructor", class_val);
+        return class_val;
+    }
+
     fn evalArgs(self: *Interpreter, arg_nodes: []*Node) EvalError![]Value {
         // Fast path: no spreads → fixed-size slice.
         var has_spread = false;
@@ -570,9 +604,7 @@ pub const Interpreter = struct {
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
         if (obj.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
-            const this_obj = try self.arena.create(value.Object);
-            this_obj.* = .{ .ctor_ref = obj };
-            const this_val: Value = .{ .object = this_obj };
+            const this_val = try self.newInstance(obj);
             const ret = try self.callFunction(func, args, this_val);
             return if (ret == .object) ret else this_val;
         }
@@ -591,6 +623,25 @@ pub const Interpreter = struct {
     pub fn newObject(self: *Interpreter) EvalError!Value {
         const obj = try self.arena.create(value.Object);
         obj.* = .{};
+        return .{ .object = obj };
+    }
+
+    /// The `.prototype` object of a constructor, creating it on first use (every
+    /// function/class has one; instances proto to it).
+    pub fn protoObject(self: *Interpreter, ctor: *value.Object) EvalError!*value.Object {
+        if (ctor.getOwn("prototype")) |p| {
+            if (p == .object) return p.object;
+        }
+        const proto = (try self.newObject()).object;
+        try self.setProp(ctor, "prototype", .{ .object = proto });
+        return proto;
+    }
+
+    /// Create an instance for `new ctor(...)`: a fresh object whose prototype is
+    /// the constructor's `.prototype`.
+    pub fn newInstance(self: *Interpreter, ctor: *value.Object) EvalError!Value {
+        const obj = try self.arena.create(value.Object);
+        obj.* = .{ .ctor_ref = ctor, .proto = try self.protoObject(ctor) };
         return .{ .object = obj };
     }
 
@@ -638,7 +689,13 @@ pub const Interpreter = struct {
                     if (arrayIndex(key)) |i|
                         return if (i < o.elements.items.len) o.elements.items[i] else .undefined;
                 }
-                return o.getOwn(key) orelse .undefined;
+                // Own property, then walk the prototype chain.
+                var cur: ?*value.Object = o;
+                while (cur) |c| {
+                    if (c.getOwn(key)) |v| return v;
+                    cur = c.proto;
+                }
+                return .undefined;
             },
             .string => |s| {
                 if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(s.len) };
@@ -928,6 +985,16 @@ pub const Interpreter = struct {
         if (l != .object) return false;
         const lo = l.object;
         const rc = r.object;
+        // Prototype-chain check: is `rc.prototype` anywhere in `lo`'s proto chain?
+        if (rc.getOwn("prototype")) |p| {
+            if (p == .object) {
+                var cur: ?*value.Object = lo.proto;
+                while (cur) |c| {
+                    if (c == p.object) return true;
+                    cur = c.proto;
+                }
+            }
+        }
         if (lo.ctor_ref) |cr| if (cr == rc) return true;
         if (rc.error_ctor) |name| {
             if (lo.is_error and (std.mem.eql(u8, lo.error_name, name) or std.mem.eql(u8, name, "Error")))
@@ -1243,6 +1310,46 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter classes (methods, static, instanceof, computed)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // constructor + instance method via prototype
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a,
+        \\class Point {
+        \\  constructor(x, y) { this.x = x; this.y = y; }
+        \\  sum() { return this.x + this.y; }
+        \\}
+        \\let p = new Point(3, 4);
+        \\p.sum()
+    )).number);
+    // instanceof via prototype chain
+    try std.testing.expect((try evalSource(a,
+        \\class C { constructor() { this.v = 1; } }
+        \\(new C()) instanceof C
+    )).boolean);
+    // static method
+    try std.testing.expectEqual(@as(f64, 9), (try evalSource(a,
+        \\class M { static sq(n) { return n * n; } }
+        \\M.sq(3)
+    )).number);
+    // class expression + computed method name
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
+        \\let k = 'go';
+        \\let C = class { [k]() { return 42; } };
+        \\(new C()).go()
+    )).number);
+    // method calling another method through `this`
+    try std.testing.expectEqual(@as(f64, 20), (try evalSource(a,
+        \\class Box {
+        \\  constructor(n) { this.n = n; }
+        \\  dbl() { return this.n * 2; }
+        \\  quad() { return this.dbl() * 2; }
+        \\}
+        \\(new Box(5)).quad()
+    )).number);
 }
 
 test "interpreter destructuring declarations" {
