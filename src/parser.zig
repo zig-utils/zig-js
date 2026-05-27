@@ -56,6 +56,29 @@ pub const Parser = struct {
         return t.kind == .identifier and std.mem.eql(u8, t.text, word);
     }
 
+    /// A label after `break`/`continue` on the same logical line.
+    fn optionalLabel(self: *Parser) ?[]const u8 {
+        if (self.check(.identifier) and !isReservedWord(self.cur().text)) {
+            return self.advance().text;
+        }
+        return null;
+    }
+
+    fn isReservedWord(text: []const u8) bool {
+        const words = [_][]const u8{
+            "true",     "false",   "null",     "undefined", "this",  "typeof",
+            "void",     "new",     "in",       "instanceof", "function", "return",
+            "var",      "let",     "const",    "if",        "else",  "while",
+            "do",       "for",     "switch",   "case",      "default", "break",
+            "continue", "throw",   "try",      "catch",     "finally", "delete",
+            "class",    "extends", "super",    "yield",
+        };
+        for (words) |w| {
+            if (std.mem.eql(u8, text, w)) return true;
+        }
+        return false;
+    }
+
     fn alloc(self: *Parser, node: Node) ParseError!*Node {
         const p = try self.arena.create(Node);
         p.* = node;
@@ -89,13 +112,22 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "try")) return self.parseTry();
             if (std.mem.eql(u8, t.text, "break")) {
                 _ = self.advance();
+                const label = self.optionalLabel();
                 _ = self.match(.semicolon);
-                return self.alloc(.break_stmt);
+                return self.alloc(.{ .break_stmt = label });
             }
             if (std.mem.eql(u8, t.text, "continue")) {
                 _ = self.advance();
+                const label = self.optionalLabel();
                 _ = self.match(.semicolon);
-                return self.alloc(.continue_stmt);
+                return self.alloc(.{ .continue_stmt = label });
+            }
+            // Labeled statement: `label: stmt` (identifier directly followed by `:`).
+            if (self.peekKind(1) == .colon and !isReservedWord(t.text)) {
+                _ = self.advance(); // label
+                _ = self.advance(); // ':'
+                const body = try self.parseStatement();
+                return self.alloc(.{ .labeled_stmt = .{ .label = t.text, .body = body } });
             }
         }
         if (t.kind == .lbrace) return self.parseBlock();

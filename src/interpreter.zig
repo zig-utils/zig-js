@@ -96,6 +96,10 @@ pub const Interpreter = struct {
     /// The in-flight thrown value while `error.Throw` propagates. Read by
     /// `catch` and by the Context/C-API boundary.
     exception: Value = .undefined,
+    /// Target label of a pending labeled `break`/`continue` (null = unlabeled).
+    signal_label: ?[]const u8 = null,
+    /// Label of the enclosing `labeled_stmt`, handed to the loop it wraps.
+    current_label: ?[]const u8 = null,
 
     // ---- exception helpers ------------------------------------------------
 
@@ -194,13 +198,25 @@ pub const Interpreter = struct {
 
             .try_stmt => |t| try self.evalTry(t),
 
-            .break_stmt => blk: {
+            .break_stmt => |label| blk: {
                 self.signal = .brk;
+                self.signal_label = label;
                 break :blk .undefined;
             },
-            .continue_stmt => blk: {
+            .continue_stmt => |label| blk: {
                 self.signal = .cont;
+                self.signal_label = label;
                 break :blk .undefined;
+            },
+            .labeled_stmt => |l| blk: {
+                self.current_label = l.label; // adopted by the loop it wraps
+                const result = try self.eval(l.body);
+                // A labeled break that reached here (e.g. on a labeled block) is consumed.
+                if (self.signal == .brk and labelEq(self.signal_label, l.label)) {
+                    self.signal = .none;
+                    self.signal_label = null;
+                }
+                break :blk result;
             },
 
             .expr_stmt => |e| try self.eval(e),
@@ -217,10 +233,11 @@ pub const Interpreter = struct {
 
             .while_stmt => |s| try self.evalWhile(s.cond, s.body),
             .do_while_stmt => |s| blk: {
+                const my_label = self.takeLabel();
                 var last: Value = .undefined;
                 while (true) {
                     last = try self.eval(s.body);
-                    if (self.loopSignal()) |stop| if (stop) break;
+                    if (self.loopSignal(my_label)) |stop| if (stop) break;
                     if (!(try self.eval(s.cond)).toBoolean()) break;
                 }
                 break :blk last;
@@ -235,6 +252,7 @@ pub const Interpreter = struct {
     /// indices of arrays). Each iteration binds the loop variable then runs the
     /// body, honoring break/continue/return.
     fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, name: []const u8, iterable: *Node, body: *Node, is_of: bool) EvalError!Value {
+        const my_label = self.takeLabel();
         const iter = try self.eval(iterable);
         var last: Value = .undefined;
         if (is_of) {
@@ -245,7 +263,7 @@ pub const Interpreter = struct {
                     while (i < o.elements.items.len) : (i += 1) {
                         try self.bindLoopVar(decl_kind, name, o.elements.items[i]);
                         last = try self.eval(body);
-                        if (self.loopSignal()) |stop| if (stop) break;
+                        if (self.loopSignal(my_label)) |stop| if (stop) break;
                     }
                 },
                 .string => |s| {
@@ -253,7 +271,7 @@ pub const Interpreter = struct {
                         const one = try self.arena.dupe(u8, &.{ch});
                         try self.bindLoopVar(decl_kind, name, .{ .string = one });
                         last = try self.eval(body);
-                        if (self.loopSignal()) |stop| if (stop) break;
+                        if (self.loopSignal(my_label)) |stop| if (stop) break;
                     }
                 },
                 else => return self.throwError("TypeError", "value is not iterable"),
@@ -268,14 +286,14 @@ pub const Interpreter = struct {
                             const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
                             try self.bindLoopVar(decl_kind, name, .{ .string = key });
                             last = try self.eval(body);
-                            if (self.loopSignal()) |stop| if (stop) break;
+                            if (self.loopSignal(my_label)) |stop| if (stop) break;
                         }
                     } else {
                         const keys = try o.ownKeys(self.arena);
                         for (keys) |k| {
                             try self.bindLoopVar(decl_kind, name, .{ .string = k });
                             last = try self.eval(body);
-                            if (self.loopSignal()) |stop| if (stop) break;
+                            if (self.loopSignal(my_label)) |stop| if (stop) break;
                         }
                     }
                 },
@@ -320,21 +338,25 @@ pub const Interpreter = struct {
                     if (self.signal != .none) break :outer;
                 }
             }
-            if (self.signal == .brk) self.signal = .none; // `break` exits the switch
+            // An unlabeled `break` exits the switch; a labeled one targets an
+            // enclosing loop and must keep propagating.
+            if (self.signal == .brk and self.signal_label == null) self.signal = .none;
         }
         return last;
     }
 
     fn evalWhile(self: *Interpreter, cond: *Node, body: *Node) EvalError!Value {
+        const my_label = self.takeLabel();
         var last: Value = .undefined;
         while ((try self.eval(cond)).toBoolean()) {
             last = try self.eval(body);
-            if (self.loopSignal()) |stop| if (stop) break;
+            if (self.loopSignal(my_label)) |stop| if (stop) break;
         }
         return last;
     }
 
     fn evalFor(self: *Interpreter, init_node: ?*Node, cond: ?*Node, update: ?*Node, body: *Node) EvalError!Value {
+        const my_label = self.takeLabel();
         if (init_node) |ini| _ = try self.eval(ini);
         var last: Value = .undefined;
         while (true) {
@@ -342,27 +364,44 @@ pub const Interpreter = struct {
                 if (!(try self.eval(c)).toBoolean()) break;
             }
             last = try self.eval(body);
-            if (self.loopSignal()) |stop| if (stop) break;
+            if (self.loopSignal(my_label)) |stop| if (stop) break;
             if (update) |u| _ = try self.eval(u);
         }
         return last;
     }
 
-    /// Inspect the control-flow signal at a loop boundary. Returns null when
-    /// there is nothing pending (`ret` is left set so it keeps unwinding);
-    /// returns true to break the loop, false to continue iterating. Consumes
-    /// `brk`/`cont`.
-    fn loopSignal(self: *Interpreter) ?bool {
+    /// Consume the label of the enclosing `labeled_stmt`, if any. A loop calls
+    /// this at entry so it knows which labeled break/continue target it, and so
+    /// nested loops don't inherit the label.
+    fn takeLabel(self: *Interpreter) ?[]const u8 {
+        const l = self.current_label;
+        self.current_label = null;
+        return l;
+    }
+
+    /// Inspect the control-flow signal at a loop boundary, given the loop's own
+    /// label (`my_label`). Returns null (nothing pending), true (break this
+    /// loop), or false (continue). A labeled break/continue aimed at an *outer*
+    /// loop breaks this loop but leaves the signal set to keep propagating.
+    fn loopSignal(self: *Interpreter, my_label: ?[]const u8) ?bool {
         switch (self.signal) {
             .none => return null,
-            .ret => return true, // leave the signal set; the function unwinds
+            .ret => return true, // leave set; the function unwinds
             .brk => {
-                self.signal = .none;
-                return true;
+                if (self.signal_label == null or labelEq(self.signal_label, my_label)) {
+                    self.signal = .none;
+                    self.signal_label = null;
+                    return true;
+                }
+                return true; // labeled break for an outer loop: exit, keep signal
             },
             .cont => {
-                self.signal = .none;
-                return false;
+                if (self.signal_label == null or labelEq(self.signal_label, my_label)) {
+                    self.signal = .none;
+                    self.signal_label = null;
+                    return false;
+                }
+                return true; // labeled continue for an outer loop: exit, keep signal
             },
         }
     }
@@ -929,6 +968,11 @@ fn lessThan(a: Value, b: Value) EvalError!bool {
     return x < y;
 }
 
+fn labelEq(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
 fn relationalNaN(a: Value, b: Value) bool {
     if (a == .string and b == .string) return false;
     return std.math.isNan(a.toNumber()) or std.math.isNan(b.toNumber());
@@ -1275,6 +1319,36 @@ test "interpreter object method shorthand and computed keys" {
         \\let o = { ['a' + 'b']: 'ok' };
         \\o.ab
     )).string);
+}
+
+test "interpreter labeled break and continue" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // labeled break exits the outer loop
+    try std.testing.expectEqual(@as(f64, 23), (try evalSource(a,
+        \\let hits = 0, found = 0;
+        \\outer: for (let i = 0; i < 5; i++) {
+        \\  for (let j = 0; j < 5; j++) {
+        \\    hits = hits + 1;
+        \\    if (i === 2 && j === 3) { found = i * 10 + j; break outer; }
+        \\  }
+        \\}
+        \\found
+    )).number);
+    // labeled continue continues the outer loop
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a,
+        \\let count = 0;
+        \\outer: for (let i = 0; i < 5; i++) {
+        \\  for (let j = 0; j < 5; j++) {
+        \\    if (j === 1) { continue outer; }
+        \\  }
+        \\  count = count + 100; // never reached
+        \\}
+        \\let n = 0;
+        \\outer2: for (let i = 0; i < 5; i++) { n = n + 1; continue outer2; }
+        \\n
+    )).number);
 }
 
 test "interpreter do-while and comma operator" {

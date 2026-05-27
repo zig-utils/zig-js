@@ -163,12 +163,14 @@ pub const Compiler = struct {
             .while_stmt => |s| try self.compileWhile(s.cond, s.body),
             .do_while_stmt => |s| try self.compileDoWhile(s.body, s.cond),
             .for_stmt => |f| try self.compileFor(f.init, f.cond, f.update, f.body),
-            .break_stmt => {
+            .break_stmt => |label| {
+                if (label != null) return error.Unsupported; // labeled break → tree-walk
                 const loop = self.currentLoop() orelse return error.Unsupported;
                 const j = try self.chunk.emit(.jump, 0);
                 try loop.breaks.append(self.arena, j);
             },
-            .continue_stmt => {
+            .continue_stmt => |label| {
+                if (label != null) return error.Unsupported; // labeled continue → tree-walk
                 const loop = self.currentLoop() orelse return error.Unsupported;
                 const j = try self.chunk.emit(.jump, 0);
                 try loop.continues.append(self.arena, j);

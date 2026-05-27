@@ -139,8 +139,9 @@ pub const Node = union(enum) {
     return_stmt: ?*Node,
     throw_stmt: *Node,
     try_stmt: *TryNode,
-    break_stmt,
-    continue_stmt,
+    break_stmt: ?[]const u8, // optional target label
+    continue_stmt: ?[]const u8,
+    labeled_stmt: struct { label: []const u8, body: *Node },
     expr_stmt: *Node,
     block: []*Node,
     if_stmt: struct { cond: *Node, consequent: *Node, alternate: ?*Node },
