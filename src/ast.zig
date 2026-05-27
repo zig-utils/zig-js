@@ -40,10 +40,13 @@ pub const FunctionNode = struct {
     is_expr_body: bool = false,
 };
 
-/// One `key: value` entry in an object literal. v1 keys are static strings
-/// (identifier, string-literal, or numeric-literal keys, all stored as text).
+/// One entry in an object literal. The key is either a static string
+/// (identifier / string / numeric literal, in `key`) or a computed expression
+/// (`{ [expr]: v }`, in `key_expr`). `value` is the property value (a function
+/// node for method shorthand).
 pub const Property = struct {
-    key: []const u8,
+    key: []const u8 = "",
+    key_expr: ?*Node = null,
     value: *Node,
 };
 

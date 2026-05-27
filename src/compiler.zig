@@ -388,8 +388,12 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.new_object, 0);
                 for (props) |p| {
                     try self.compileExpr(p.value);
-                    const ni = try self.chunk.addName(p.key);
-                    _ = try self.chunk.emit(.init_prop, ni);
+                    if (p.key_expr) |ke| {
+                        try self.compileExpr(ke);
+                        _ = try self.chunk.emit(.init_prop_computed, 0);
+                    } else {
+                        _ = try self.chunk.emit(.init_prop, try self.chunk.addName(p.key));
+                    }
                 }
             },
             .array_lit => |elems| {

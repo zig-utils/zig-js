@@ -135,6 +135,12 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
                 try vm.setMember(obj, chunk.names.items[inst.a], v);
             },
+            .init_prop_computed => {
+                const key = stack.pop().?;
+                const v = stack.pop().?;
+                const obj = stack.items[stack.items.len - 1]; // leave object on stack
+                try vm.setMember(obj, try key.toString(vm.arena), v);
+            },
             .array_append => {
                 const v = stack.pop().?;
                 const arr = stack.items[stack.items.len - 1];

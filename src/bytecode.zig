@@ -89,6 +89,7 @@ pub const Op = enum(u8) {
     new_object, // push a fresh {}
     new_array, // push a fresh []
     init_prop, // operand a: name index; pop value, set on object at top, leave object
+    init_prop_computed, // pop key, pop value, set on object at top, leave object
     array_append, // pop value, append to the array at top, leave array
     get_prop, // operand a: name index; pop object -> push object[name]
     get_index, // pop key, pop object -> push object[key]

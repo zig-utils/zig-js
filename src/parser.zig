@@ -637,6 +637,20 @@ pub const Parser = struct {
         try self.expect(.lbrace);
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
+            // Computed key: `{ [expr]: v }`.
+            if (self.match(.lbracket)) {
+                const key_expr = try self.parseAssignment();
+                try self.expect(.rbracket);
+                if (self.check(.lparen)) {
+                    const fnode = try self.parseMethodTail("");
+                    try props.append(self.arena, .{ .key_expr = key_expr, .value = fnode });
+                } else {
+                    try self.expect(.colon);
+                    try props.append(self.arena, .{ .key_expr = key_expr, .value = try self.parseAssignment() });
+                }
+                if (!self.match(.comma)) break;
+                continue;
+            }
             const key_tok = self.advance();
             const key: []const u8 = switch (key_tok.kind) {
                 .identifier, .string => key_tok.text,
@@ -644,7 +658,10 @@ pub const Parser = struct {
                 else => return ParseError.UnexpectedToken,
             };
             var val: *Node = undefined;
-            if (self.match(.colon)) {
+            if (self.check(.lparen)) {
+                // Method shorthand `{ m(args) { ... } }` -> a function value.
+                val = try self.parseMethodTail(key);
+            } else if (self.match(.colon)) {
                 val = try self.parseAssignment();
             } else if (key_tok.kind == .identifier) {
                 // Shorthand `{ a }` -> `{ a: a }`.
@@ -655,6 +672,15 @@ pub const Parser = struct {
         }
         try self.expect(.rbrace);
         return self.alloc(.{ .object_lit = props.items });
+    }
+
+    /// Parse `(params) { body }` after a method name, returning a function node.
+    fn parseMethodTail(self: *Parser, name: []const u8) ParseError!*Node {
+        const params = try self.parseParamList();
+        const body = try self.parseBlock();
+        const fnode = try self.arena.create(ast.FunctionNode);
+        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false };
+        return self.alloc(.{ .function = fnode });
     }
 
     fn parseArrayLiteral(self: *Parser) ParseError!*Node {

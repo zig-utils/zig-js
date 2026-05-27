@@ -510,7 +510,10 @@ pub const Interpreter = struct {
 
     fn evalObjectLit(self: *Interpreter, props: []ast.Property) EvalError!Value {
         const v = try self.newObject();
-        for (props) |p| try self.setProp(v.object, p.key, try self.eval(p.value));
+        for (props) |p| {
+            const key = if (p.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else p.key;
+            try self.setProp(v.object, key, try self.eval(p.value));
+        }
         return v;
     }
 
@@ -1014,6 +1017,28 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter object method shorthand and computed keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // method shorthand binds this
+    try std.testing.expectEqual(@as(f64, 10), (try evalSource(a,
+        \\let o = { n: 10, get() { return this.n; } };
+        \\o.get()
+    )).number);
+    // computed key
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a,
+        \\let k = 'x';
+        \\let o = { [k]: 5 };
+        \\o.x
+    )).number);
+    // computed key from an expression
+    try std.testing.expectEqualStrings("ok", (try evalSource(a,
+        \\let o = { ['a' + 'b']: 'ok' };
+        \\o.ab
+    )).string);
 }
 
 test "interpreter do-while and comma operator" {
