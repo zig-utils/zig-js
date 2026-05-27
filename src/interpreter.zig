@@ -64,6 +64,7 @@ pub const Function = struct {
     params: []const ast.Param,
     body: *ast.Node,
     is_expr_body: bool,
+    is_arrow: bool = false,
     closure: *Environment,
     name: []const u8 = "",
     /// Compiled body for the bytecode VM. Set when the function was created by
@@ -454,6 +455,7 @@ pub const Interpreter = struct {
             .params = fnode.params,
             .body = fnode.body,
             .is_expr_body = fnode.is_expr_body,
+            .is_arrow = fnode.is_arrow,
             .closure = closure,
             .name = fnode.name,
         };
@@ -691,6 +693,13 @@ pub const Interpreter = struct {
             self.this_value = saved_this;
             self.home_object = saved_home;
             self.super_ctor = saved_super;
+        }
+
+        // Non-arrow functions get an `arguments` array-like over the call args.
+        if (!func.is_arrow) {
+            const args_obj = try self.newArray();
+            for (args) |av| try args_obj.object.elements.append(self.arena, av);
+            try call_env.put("arguments", args_obj);
         }
 
         // Bind parameters in `call_env` (so a default can reference earlier
@@ -1527,12 +1536,16 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, object_ns, "getPrototypeOf", builtins.objectGetPrototypeOf);
     try setNative(a, root_shape, object_ns, "defineProperty", builtins.objectDefineProperty);
     try setNative(a, root_shape, object_ns, "getOwnPropertyNames", builtins.objectGetOwnPropertyNames);
+    try setNative(a, root_shape, object_ns, "entries", builtins.objectEntries);
+    try setNative(a, root_shape, object_ns, "fromEntries", builtins.objectFromEntries);
     try env.put("Object", .{ .object = object_ns });
 
-    // Array namespace (Array.isArray; Array.prototype methods stay on arrays).
+    // Array namespace (isArray/of/from; prototype methods stay on arrays).
     const array_ns = try a.create(value.Object);
     array_ns.* = .{};
     try setNative(a, root_shape, array_ns, "isArray", builtins.arrayIsArray);
+    try setNative(a, root_shape, array_ns, "of", builtins.arrayOf);
+    try setNative(a, root_shape, array_ns, "from", builtins.arrayFrom);
     try env.put("Array", .{ .object = array_ns });
 }
 
@@ -1875,6 +1888,22 @@ test "interpreter String.prototype methods" {
     try std.testing.expectEqualStrings("abab", (try evalSource(a, "'ab'.repeat(2)")).string);
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + 'a-b-c'.split('-')")).string);
     try std.testing.expectEqualStrings("hi", (try evalSource(a, "'  hi  '.trim()")).string);
+}
+
+test "interpreter arguments object and Array/Object statics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // arguments object
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "function sum() { let s = 0; for (let i = 0; i < arguments.length; i++) { s += arguments[i]; } return s; } sum(1, 2, 3)")).number);
+    // arrows have no own arguments (inherit) — here referencing arguments at top level is fine
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "function f() { return arguments.length; } f(7, 8, 9)")).number);
+    // Array.of / from
+    try std.testing.expectEqualStrings("1,2,3", (try evalSource(a, "'' + Array.of(1, 2, 3)")).string);
+    try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + Array.from('abc')")).string);
+    // Object.entries / fromEntries
+    try std.testing.expectEqual(@as(f64, 2), (try evalSource(a, "Object.entries({ a: 1, b: 2 }).length")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let o = Object.fromEntries([['x', 5]]); o.x")).number);
 }
 
 test "interpreter regex literals (zig-regex backed)" {

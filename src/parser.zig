@@ -612,9 +612,9 @@ pub const Parser = struct {
         try self.expect(.arrow);
         const fnode = try self.arena.create(ast.FunctionNode);
         if (self.check(.lbrace)) {
-            fnode.* = .{ .params = params, .body = try self.parseBlock(), .is_expr_body = false };
+            fnode.* = .{ .params = params, .body = try self.parseBlock(), .is_expr_body = false, .is_arrow = true };
         } else {
-            fnode.* = .{ .params = params, .body = try self.parseAssignment(), .is_expr_body = true };
+            fnode.* = .{ .params = params, .body = try self.parseAssignment(), .is_expr_body = true, .is_arrow = true };
         }
         return self.alloc(.{ .function = fnode });
     }

@@ -221,6 +221,74 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
     return target;
 }
 
+pub fn objectEntries(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const result = try self.newArray();
+    if (arg(args, 0) == .object) {
+        const o = arg(args, 0).object;
+        const keys = try o.ownKeys(self.arena);
+        for (keys) |k| {
+            const pair = try self.newArray();
+            try pair.object.elements.append(self.arena, .{ .string = k });
+            try pair.object.elements.append(self.arena, o.getOwn(k) orelse .undefined);
+            try result.object.elements.append(self.arena, pair);
+        }
+    }
+    return result;
+}
+
+pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const result = try self.newObject();
+    if (arg(args, 0) == .object and arg(args, 0).object.is_array) {
+        for (arg(args, 0).object.elements.items) |entry| {
+            if (entry != .object or !entry.object.is_array) continue;
+            const items = entry.object.elements.items;
+            const k = if (items.len > 0) try items[0].toString(self.arena) else "";
+            const v = if (items.len > 1) items[1] else .undefined;
+            try self.setMember(result, k, v);
+        }
+    }
+    return result;
+}
+
+pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const result = try self.newArray();
+    for (args) |v| try result.object.elements.append(self.arena, v);
+    return result;
+}
+
+pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const result = try self.newArray();
+    const src = arg(args, 0);
+    switch (src) {
+        .object => |o| {
+            if (o.is_array) {
+                for (o.elements.items) |v| try result.object.elements.append(self.arena, v);
+            } else if (o.getOwn("length")) |len_v| {
+                // Array-like: copy indices 0..length-1.
+                const n: usize = @intFromFloat(@max(@trunc(len_v.toNumber()), 0));
+                var i: usize = 0;
+                while (i < n) : (i += 1) {
+                    const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                    try result.object.elements.append(self.arena, o.getOwn(key) orelse .undefined);
+                }
+            }
+        },
+        .string => |s| {
+            for (s) |c| try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, &.{c}) });
+        },
+        else => {},
+    }
+    return result;
+}
+
 pub fn identity1(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = ctx;
     _ = this;

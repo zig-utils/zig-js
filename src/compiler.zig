@@ -95,6 +95,8 @@ pub const Compiler = struct {
 
     /// Emit a load of `name` to the appropriate location (local / upvalue / global).
     fn emitLoad(self: *Compiler, name: []const u8) CompileError!void {
+        // `arguments` inside a function is bound by the tree-walker only.
+        if (self.scope != null and std.mem.eql(u8, name, "arguments")) return error.Unsupported;
         switch (self.resolve(name)) {
             .local => |slot| _ = try self.chunk.emit(.load_local, slot),
             .upval => |u| _ = try self.chunk.emitAB(.load_upval, u.depth, u.slot),

@@ -67,6 +67,8 @@ pub const FunctionNode = struct {
     params: []const Param,
     body: *Node,
     is_expr_body: bool = false,
+    /// Arrow functions don't get their own `arguments` (or `this`).
+    is_arrow: bool = false,
 };
 
 /// A `class` member: a method (`func` is a `.function` node) or a field
