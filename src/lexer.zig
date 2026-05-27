@@ -12,6 +12,13 @@ pub const TokenKind = enum {
     star_star,
     slash,
     percent,
+    plus_plus,
+    minus_minus,
+    plus_eq,
+    minus_eq,
+    star_eq,
+    slash_eq,
+    percent_eq,
     assign,
     eq, // ==
     eq_strict, // ===
@@ -114,17 +121,53 @@ pub const Lexer = struct {
         // Operators / punctuation
         self.i += 1;
         switch (c) {
-            '+' => return tok(.plus, self.src[start..self.i], start),
-            '-' => return tok(.minus, self.src[start..self.i], start),
+            '+' => {
+                if (self.peek() == '+') {
+                    self.i += 1;
+                    return tok(.plus_plus, self.src[start..self.i], start);
+                }
+                if (self.peek() == '=') {
+                    self.i += 1;
+                    return tok(.plus_eq, self.src[start..self.i], start);
+                }
+                return tok(.plus, self.src[start..self.i], start);
+            },
+            '-' => {
+                if (self.peek() == '-') {
+                    self.i += 1;
+                    return tok(.minus_minus, self.src[start..self.i], start);
+                }
+                if (self.peek() == '=') {
+                    self.i += 1;
+                    return tok(.minus_eq, self.src[start..self.i], start);
+                }
+                return tok(.minus, self.src[start..self.i], start);
+            },
             '*' => {
                 if (self.peek() == '*') {
                     self.i += 1;
                     return tok(.star_star, self.src[start..self.i], start);
                 }
+                if (self.peek() == '=') {
+                    self.i += 1;
+                    return tok(.star_eq, self.src[start..self.i], start);
+                }
                 return tok(.star, self.src[start..self.i], start);
             },
-            '/' => return tok(.slash, self.src[start..self.i], start),
-            '%' => return tok(.percent, self.src[start..self.i], start),
+            '/' => {
+                if (self.peek() == '=') {
+                    self.i += 1;
+                    return tok(.slash_eq, self.src[start..self.i], start);
+                }
+                return tok(.slash, self.src[start..self.i], start);
+            },
+            '%' => {
+                if (self.peek() == '=') {
+                    self.i += 1;
+                    return tok(.percent_eq, self.src[start..self.i], start);
+                }
+                return tok(.percent, self.src[start..self.i], start);
+            },
             '(' => return tok(.lparen, self.src[start..self.i], start),
             ')' => return tok(.rparen, self.src[start..self.i], start),
             '{' => return tok(.lbrace, self.src[start..self.i], start),

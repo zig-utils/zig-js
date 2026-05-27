@@ -37,9 +37,22 @@ pub const Object = struct {
     /// Opaque `data` pointer carried for `JSObjectMake(ctx, class, data)` and
     /// surfaced to host callbacks via private-data accessors later.
     private_data: ?*anyopaque = null,
+    /// True for `Error`-family instances; drives `toString` and `instanceof`.
+    is_error: bool = false,
+    /// For error instances, the error class name (e.g. "TypeError"); for a
+    /// builtin error *constructor* object, see `error_ctor`.
+    error_name: []const u8 = "",
+    /// Non-null marks this object as a builtin error constructor; the value is
+    /// the class name it produces ("Error", "TypeError", ...). Callable both
+    /// plainly (`TypeError("x")`) and via `new`.
+    error_ctor: ?[]const u8 = null,
+    /// For objects created by `new F()`, the constructor function's object —
+    /// used by `instanceof` to walk the (flat, v1) construction link.
+    ctor_ref: ?*Object = null,
 
     pub fn isCallableObject(self: *const Object) bool {
-        return self.callback != null or self.native != null or self.js_func != null;
+        return self.callback != null or self.native != null or
+            self.js_func != null or self.error_ctor != null;
     }
 };
 
@@ -54,7 +67,7 @@ pub const Value = union(enum) {
 
     pub fn isCallable(self: Value) bool {
         return switch (self) {
-            .object => |o| o.callback != null or o.native != null or o.js_func != null,
+            .object => |o| o.isCallableObject(),
             else => false,
         };
     }
@@ -95,17 +108,49 @@ pub const Value = union(enum) {
     }
 
     /// ECMAScript ToString, allocating in `arena`.
-    pub fn toString(self: Value, arena: std.mem.Allocator) ![]const u8 {
+    pub fn toString(self: Value, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
         return switch (self) {
             .undefined => "undefined",
             .null => "null",
             .boolean => |b| if (b) "true" else "false",
             .number => |n| try numberToString(arena, n),
             .string => |s| s,
-            .object => |o| if (o.is_array) "[object Array]" else "[object Object]",
+            .object => |o| try objectToString(o, arena),
         };
     }
 };
+
+/// ECMAScript-ish ToString for objects: errors render `Name: message`, arrays
+/// join their elements with commas (Array.prototype.toString), everything else
+/// is `[object Object]`.
+fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+    if (o.is_error) {
+        const name = if (o.properties.get("name")) |v|
+            (if (v == .string) v.string else o.error_name)
+        else
+            o.error_name;
+        const msg = if (o.properties.get("message")) |v|
+            (if (v == .string) v.string else "")
+        else
+            "";
+        if (msg.len == 0) return name;
+        return std.mem.concat(arena, u8, &.{ name, ": ", msg });
+    }
+    if (o.is_array) {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        for (o.elements.items, 0..) |el, i| {
+            if (i != 0) try buf.append(arena, ',');
+            // null/undefined render as empty per Array.prototype.join.
+            const part = switch (el) {
+                .undefined, .null => "",
+                else => try el.toString(arena),
+            };
+            try buf.appendSlice(arena, part);
+        }
+        return buf.toOwnedSlice(arena);
+    }
+    return "[object Object]";
+}
 
 /// ECMAScript ToString for numbers (best-effort; full Number::toString comes
 /// with the test262 number slice). Integer-valued numbers print without a

@@ -57,6 +57,21 @@ const cases = [_]Case{
     .{ .name = "arrow IIFE", .src = "assertEq(((x) => x * x)(5), 25);" },
     .{ .name = "closure counter", .src = "function c() { let n = 0; return function () { n = n + 1; return n; }; } let f = c(); f(); f(); assertEq(f(), 3);" },
     .{ .name = "lexical scope", .src = "let a = 1; function outer() { let a = 2; function inner() { return a; } return inner(); } assertEq(outer(), 2);" },
+    .{ .name = "object literal + member", .src = "let o = { x: 1, y: 2 }; assertEq(o.x + o.y, 3);" },
+    .{ .name = "computed member set/get", .src = "let o = {}; o['k'] = 9; assertEq(o.k, 9);" },
+    .{ .name = "array literal + index + length", .src = "let xs = [10, 20, 30]; assert(xs[1] === 20 && xs.length === 3);" },
+    .{ .name = "array push/pop", .src = "let xs = [1]; xs.push(2); xs.push(3); assertEq(xs.pop(), 3); assertEq(xs.length, 2);" },
+    .{ .name = "array join via concat", .src = "assertEq('' + [1, 2, 3], '1,2,3');" },
+    .{ .name = "string length + index", .src = "assert('hello'.length === 5 && 'hello'[1] === 'e');" },
+    .{ .name = "for loop sum", .src = "let s = 0; for (let i = 0; i < 10; i++) { s += i; } assertEq(s, 45);" },
+    .{ .name = "break / continue", .src = "let s = 0; for (let i = 0; i < 10; i++) { if (i % 2 === 0) { continue; } if (i > 7) { break; } s += i; } assertEq(s, 16);" },
+    .{ .name = "prefix vs postfix ++", .src = "let x = 5; let a = x++; let b = ++x; assert(a === 5 && b === 7);" },
+    .{ .name = "throw / try / catch", .src = "let r = 0; try { throw 7; } catch (e) { r = e; } assertEq(r, 7);" },
+    .{ .name = "try / finally", .src = "let r = 0; try { r = 1; } finally { r = r + 10; } assertEq(r, 11);" },
+    .{ .name = "engine TypeError is catchable", .src = "let n = ''; try { let x = 1; x(); } catch (e) { n = e.name; } assertEq(n, 'TypeError');" },
+    .{ .name = "new + this + instanceof", .src = "function P(x) { this.x = x; } let p = new P(8); assert(p.x === 8 && p instanceof P);" },
+    .{ .name = "built-in Error + instanceof", .src = "let e = new TypeError('bad'); assert(e.name === 'TypeError' && e instanceof Error);" },
+    .{ .name = "method call binds this", .src = "let o = { n: 3, get: function () { return this.n; } }; assertEq(o.get(), 3);" },
 };
 
 fn defineNative(ctx: *js.Context, name: []const u8, f: js.NativeFn) !void {

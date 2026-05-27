@@ -14,6 +14,7 @@
 const std = @import("std");
 const value = @import("value.zig");
 const ContextMod = @import("context.zig");
+const interp = @import("interpreter.zig");
 const JsString = @import("jsstring.zig").JsString;
 
 const Context = ContextMod.Context;
@@ -118,7 +119,13 @@ export fn JSEvaluateScript(
     const c = ctxFrom(ctx) orelse return null;
     const s = strFrom(script) orelse return null;
     const result = c.evaluate(s.bytes) catch |err| {
-        setException(c, exception, @errorName(err));
+        // A JS `throw` surfaces the actual thrown value; host failures (parse
+        // errors, OOM) surface their error name as a string.
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, c.exception orelse .{ .string = "uncaught exception" });
+        } else {
+            setException(c, exception, @errorName(err));
+        }
         return null;
     };
     return box(c, result);
@@ -328,17 +335,31 @@ export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, ind
     return box(c, .undefined);
 }
 
+fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef) ?[]Value {
+    const args = c.arena().alloc(Value, argc) catch return null;
+    var i: usize = 0;
+    while (i < argc) : (i += 1) args[i] = unbox(argv[i]);
+    return args;
+}
+
 export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_object: JSObjectRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectFrom(function) orelse {
         setException(c, exception, "TypeError: value is not a function");
         return null;
     };
-    const cb = obj.callback orelse {
-        setException(c, exception, "TypeError: value is not a function");
+    // C-ABI host callbacks run directly across the FFI boundary.
+    if (obj.callback) |cb| return cb(ctx, function, this_object, argc, argv, exception);
+    // JS functions / native builtins / error constructors run on the interpreter.
+    const args = collectArgs(c, argc, argv) orelse return null;
+    var interpreter = interp.Interpreter{ .arena = c.arena(), .env = &c.env };
+    const res = interpreter.callValueWithThis(.{ .object = obj }, args, unbox(this_object)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, interpreter.exception);
+        } else setException(c, exception, @errorName(err));
         return null;
     };
-    return cb(ctx, function, this_object, argc, argv, exception);
+    return box(c, res);
 }
 
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
@@ -350,24 +371,32 @@ export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef,
 }
 
 export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
-    _ = constructor;
-    _ = argc;
-    _ = argv;
     const c = ctxFrom(ctx) orelse return null;
-    setException(c, exception, "NotImplemented: JSObjectCallAsConstructor");
-    return null;
+    const obj = objectFrom(constructor) orelse {
+        setException(c, exception, "TypeError: value is not a constructor");
+        return null;
+    };
+    const args = collectArgs(c, argc, argv) orelse return null;
+    var interpreter = interp.Interpreter{ .arena = c.arena(), .env = &c.env };
+    const res = interpreter.construct(.{ .object = obj }, args) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, interpreter.exception);
+        } else setException(c, exception, @errorName(err));
+        return null;
+    };
+    return box(c, res);
 }
 
 export fn JSObjectIsFunction(ctx: JSContextRef, object: JSObjectRef) callconv(.c) bool {
     _ = ctx;
     const obj = objectFrom(object) orelse return false;
-    return obj.callback != null;
+    return obj.isCallableObject();
 }
 
 export fn JSObjectIsConstructor(ctx: JSContextRef, object: JSObjectRef) callconv(.c) bool {
     _ = ctx;
-    _ = object;
-    return false;
+    const obj = objectFrom(object) orelse return false;
+    return obj.js_func != null or obj.error_ctor != null;
 }
 
 // ---- JSString lifecycle ------------------------------------------------

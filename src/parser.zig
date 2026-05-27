@@ -80,8 +80,21 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "const")) return self.parseVarDecl(.@"const");
             if (std.mem.eql(u8, t.text, "if")) return self.parseIf();
             if (std.mem.eql(u8, t.text, "while")) return self.parseWhile();
+            if (std.mem.eql(u8, t.text, "for")) return self.parseFor();
             if (std.mem.eql(u8, t.text, "function")) return self.parseFunctionDecl();
             if (std.mem.eql(u8, t.text, "return")) return self.parseReturn();
+            if (std.mem.eql(u8, t.text, "throw")) return self.parseThrow();
+            if (std.mem.eql(u8, t.text, "try")) return self.parseTry();
+            if (std.mem.eql(u8, t.text, "break")) {
+                _ = self.advance();
+                _ = self.match(.semicolon);
+                return self.alloc(.break_stmt);
+            }
+            if (std.mem.eql(u8, t.text, "continue")) {
+                _ = self.advance();
+                _ = self.match(.semicolon);
+                return self.alloc(.continue_stmt);
+            }
         }
         if (t.kind == .lbrace) return self.parseBlock();
 
@@ -135,6 +148,32 @@ pub const Parser = struct {
         return self.alloc(.{ .while_stmt = .{ .cond = cond, .body = body } });
     }
 
+    fn parseFor(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // for
+        try self.expect(.lparen);
+        var init_node: ?*Node = null;
+        if (self.match(.semicolon)) {
+            // empty initializer
+        } else if (isKeyword(self.cur(), "var")) {
+            init_node = try self.parseVarDecl(.@"var"); // consumes the ';'
+        } else if (isKeyword(self.cur(), "let")) {
+            init_node = try self.parseVarDecl(.let);
+        } else if (isKeyword(self.cur(), "const")) {
+            init_node = try self.parseVarDecl(.@"const");
+        } else {
+            init_node = try self.parseExpression();
+            try self.expect(.semicolon);
+        }
+        var cond: ?*Node = null;
+        if (!self.check(.semicolon)) cond = try self.parseExpression();
+        try self.expect(.semicolon);
+        var update: ?*Node = null;
+        if (!self.check(.rparen)) update = try self.parseExpression();
+        try self.expect(.rparen);
+        const body = try self.parseStatement();
+        return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
+    }
+
     fn parseReturn(self: *Parser) ParseError!*Node {
         _ = self.advance(); // return
         var arg: ?*Node = null;
@@ -143,6 +182,39 @@ pub const Parser = struct {
         }
         _ = self.match(.semicolon);
         return self.alloc(.{ .return_stmt = arg });
+    }
+
+    fn parseThrow(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // throw
+        const arg = try self.parseExpression();
+        _ = self.match(.semicolon);
+        return self.alloc(.{ .throw_stmt = arg });
+    }
+
+    fn parseTry(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // try
+        const block = try self.parseBlock();
+        var catch_param: ?[]const u8 = null;
+        var catch_block: ?*Node = null;
+        var finally_block: ?*Node = null;
+        if (isKeyword(self.cur(), "catch")) {
+            _ = self.advance();
+            if (self.match(.lparen)) {
+                const p = self.advance();
+                if (p.kind != .identifier) return ParseError.UnexpectedToken;
+                catch_param = p.text;
+                try self.expect(.rparen);
+            }
+            catch_block = try self.parseBlock();
+        }
+        if (isKeyword(self.cur(), "finally")) {
+            _ = self.advance();
+            finally_block = try self.parseBlock();
+        }
+        if (catch_block == null and finally_block == null) return ParseError.UnexpectedToken;
+        const node = try self.arena.create(ast.TryNode);
+        node.* = .{ .block = block, .catch_param = catch_param, .catch_block = catch_block, .finally_block = finally_block };
+        return self.alloc(.{ .try_stmt = node });
     }
 
     /// Parse `(p1, p2, ...)` into a slice of identifier names.
@@ -207,10 +279,26 @@ pub const Parser = struct {
 
         const left = try self.parseConditional();
         if (self.check(.assign)) {
-            if (left.* != .identifier) return ParseError.InvalidAssignmentTarget;
+            if (left.* != .identifier and left.* != .member) return ParseError.InvalidAssignmentTarget;
             _ = self.advance();
             const value = try self.parseAssignment();
-            return self.alloc(.{ .assign = .{ .name = left.identifier, .value = value } });
+            return self.alloc(.{ .assign = .{ .target = left, .value = value } });
+        }
+        // Compound assignment `a op= b` desugars to `a = a op b`.
+        const compound: ?ast.BinaryOp = switch (self.cur().kind) {
+            .plus_eq => .add,
+            .minus_eq => .sub,
+            .star_eq => .mul,
+            .slash_eq => .div,
+            .percent_eq => .mod,
+            else => null,
+        };
+        if (compound) |op| {
+            if (left.* != .identifier and left.* != .member) return ParseError.InvalidAssignmentTarget;
+            _ = self.advance();
+            const rhs = try self.parseAssignment();
+            const bin = try self.alloc(.{ .binary = .{ .op = op, .left = left, .right = rhs } });
+            return self.alloc(.{ .assign = .{ .target = left, .value = bin } });
         }
         return left;
     }
@@ -267,6 +355,13 @@ pub const Parser = struct {
 
     const BinInfo = struct { bp: u8, binary: ?ast.BinaryOp = null, logical: ?ast.LogicalOp = null, right_assoc: bool = false };
 
+    /// Binding info for the current token, including keyword operators
+    /// (`instanceof`) that the lexer emits as plain identifiers.
+    fn curBinInfo(self: *Parser) ?BinInfo {
+        if (isKeyword(self.cur(), "instanceof")) return .{ .bp = 6, .binary = .instanceof };
+        return binInfo(self.cur().kind);
+    }
+
     fn binInfo(kind: TokenKind) ?BinInfo {
         return switch (kind) {
             .pipe_pipe => .{ .bp = 3, .logical = .@"or" },
@@ -291,7 +386,7 @@ pub const Parser = struct {
 
     fn parseBinary(self: *Parser, min_bp: u8) ParseError!*Node {
         var left = try self.parseUnary();
-        while (binInfo(self.cur().kind)) |info| {
+        while (self.curBinInfo()) |info| {
             if (info.bp < min_bp) break;
             _ = self.advance();
             const next_min: u8 = if (info.right_assoc) info.bp else info.bp + 1;
@@ -306,6 +401,12 @@ pub const Parser = struct {
     }
 
     fn parseUnary(self: *Parser) ParseError!*Node {
+        if (self.check(.plus_plus) or self.check(.minus_minus)) {
+            const inc = self.cur().kind == .plus_plus;
+            _ = self.advance();
+            const operand = try self.parseUnary();
+            return self.alloc(.{ .update = .{ .inc = inc, .prefix = true, .target = operand } });
+        }
         const t = self.cur();
         const op: ?ast.UnaryOp = switch (t.kind) {
             .minus => .neg,
@@ -322,24 +423,111 @@ pub const Parser = struct {
     }
 
     fn parsePostfix(self: *Parser) ParseError!*Node {
-        var e = try self.parsePrimary();
-        while (self.check(.lparen)) {
-            try self.expect(.lparen);
-            var args: std.ArrayListUnmanaged(*Node) = .empty;
-            while (!self.check(.rparen) and !self.check(.eof)) {
-                try args.append(self.arena, try self.parseAssignment());
-                if (!self.match(.comma)) break;
-            }
-            try self.expect(.rparen);
-            e = try self.alloc(.{ .call = .{ .callee = e, .args = args.items } });
+        const e = try self.parsePrimary();
+        const m = try self.parseMemberTail(e);
+        if (self.check(.plus_plus) or self.check(.minus_minus)) {
+            const inc = self.cur().kind == .plus_plus;
+            _ = self.advance();
+            return self.alloc(.{ .update = .{ .inc = inc, .prefix = false, .target = m } });
+        }
+        return m;
+    }
+
+    /// Consume a chain of `.prop`, `[expr]`, and `(args)` operators on `e`.
+    fn parseMemberTail(self: *Parser, start: *Node) ParseError!*Node {
+        var e = start;
+        while (true) {
+            if (self.match(.dot)) {
+                const name = self.advance();
+                if (name.kind != .identifier) return ParseError.UnexpectedToken;
+                e = try self.alloc(.{ .member = .{ .object = e, .property = name.text } });
+            } else if (self.match(.lbracket)) {
+                const idx = try self.parseExpression();
+                try self.expect(.rbracket);
+                e = try self.alloc(.{ .member = .{ .object = e, .computed = idx } });
+            } else if (self.check(.lparen)) {
+                const args = try self.parseArgs();
+                e = try self.alloc(.{ .call = .{ .callee = e, .args = args } });
+            } else break;
         }
         return e;
     }
 
-    fn parsePrimary(self: *Parser) ParseError!*Node {
-        if (self.check(.identifier) and std.mem.eql(u8, self.cur().text, "function")) {
-            return self.parseFunctionExpr();
+    fn parseArgs(self: *Parser) ParseError![]*Node {
+        try self.expect(.lparen);
+        var args: std.ArrayListUnmanaged(*Node) = .empty;
+        while (!self.check(.rparen) and !self.check(.eof)) {
+            try args.append(self.arena, try self.parseAssignment());
+            if (!self.match(.comma)) break;
         }
+        try self.expect(.rparen);
+        return args.items;
+    }
+
+    /// `new Callee(args)` — the callee is a member expression *without* a call
+    /// (the first `(...)` is the constructor's argument list). Any trailing
+    /// `.prop` / call chain is handled by the enclosing `parseMemberTail`.
+    fn parseNew(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // new
+        var callee = try self.parsePrimary();
+        while (true) {
+            if (self.match(.dot)) {
+                const name = self.advance();
+                if (name.kind != .identifier) return ParseError.UnexpectedToken;
+                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name.text } });
+            } else if (self.match(.lbracket)) {
+                const idx = try self.parseExpression();
+                try self.expect(.rbracket);
+                callee = try self.alloc(.{ .member = .{ .object = callee, .computed = idx } });
+            } else break;
+        }
+        const args: []*Node = if (self.check(.lparen)) try self.parseArgs() else &.{};
+        return self.alloc(.{ .new_expr = .{ .callee = callee, .args = args } });
+    }
+
+    fn parseObjectLiteral(self: *Parser) ParseError!*Node {
+        try self.expect(.lbrace);
+        var props: std.ArrayListUnmanaged(ast.Property) = .empty;
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            const key_tok = self.advance();
+            const key: []const u8 = switch (key_tok.kind) {
+                .identifier, .string => key_tok.text,
+                .number => try std.fmt.allocPrint(self.arena, "{d}", .{key_tok.number}),
+                else => return ParseError.UnexpectedToken,
+            };
+            var val: *Node = undefined;
+            if (self.match(.colon)) {
+                val = try self.parseAssignment();
+            } else if (key_tok.kind == .identifier) {
+                // Shorthand `{ a }` -> `{ a: a }`.
+                val = try self.alloc(.{ .identifier = key });
+            } else return ParseError.ExpectedToken;
+            try props.append(self.arena, .{ .key = key, .value = val });
+            if (!self.match(.comma)) break;
+        }
+        try self.expect(.rbrace);
+        return self.alloc(.{ .object_lit = props.items });
+    }
+
+    fn parseArrayLiteral(self: *Parser) ParseError!*Node {
+        try self.expect(.lbracket);
+        var elems: std.ArrayListUnmanaged(*Node) = .empty;
+        while (!self.check(.rbracket) and !self.check(.eof)) {
+            try elems.append(self.arena, try self.parseAssignment());
+            if (!self.match(.comma)) break;
+        }
+        try self.expect(.rbracket);
+        return self.alloc(.{ .array_lit = elems.items });
+    }
+
+    fn parsePrimary(self: *Parser) ParseError!*Node {
+        if (self.check(.identifier)) {
+            const w = self.cur().text;
+            if (std.mem.eql(u8, w, "function")) return self.parseFunctionExpr();
+            if (std.mem.eql(u8, w, "new")) return self.parseNew();
+        }
+        if (self.check(.lbrace)) return self.parseObjectLiteral();
+        if (self.check(.lbracket)) return self.parseArrayLiteral();
         const t = self.advance();
         switch (t.kind) {
             .number => return self.alloc(.{ .number = t.number }),
@@ -354,6 +542,7 @@ pub const Parser = struct {
                 if (std.mem.eql(u8, t.text, "false")) return self.alloc(.{ .boolean = false });
                 if (std.mem.eql(u8, t.text, "null")) return self.alloc(.null_lit);
                 if (std.mem.eql(u8, t.text, "undefined")) return self.alloc(.undefined_lit);
+                if (std.mem.eql(u8, t.text, "this")) return self.alloc(.this_expr);
                 return self.alloc(.{ .identifier = t.text });
             },
             else => return ParseError.UnexpectedToken,

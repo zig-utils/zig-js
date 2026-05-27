@@ -35,6 +35,7 @@ pub const Context = struct {
             .env = .{ .arena = a },
             .global_object = global_obj,
         };
+        try interp.installGlobals(&self.env);
         return self;
     }
 
@@ -48,13 +49,19 @@ pub const Context = struct {
         return self.arena_state.allocator();
     }
 
-    /// Lex + parse + interpret `source`, returning the completion value.
+    /// Lex + parse + interpret `source`, returning the completion value. On an
+    /// uncaught JS exception this returns `error.Throw` and leaves the thrown
+    /// value in `self.exception` for the caller (e.g. the C-API boundary).
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
         const a = self.arena();
         var parser = try Parser.init(a, source);
         const prog = try parser.parseProgram();
         var interpreter = interp.Interpreter{ .arena = a, .env = &self.env };
-        return interpreter.eval(prog);
+        self.exception = null;
+        return interpreter.eval(prog) catch |err| {
+            if (err == error.Throw) self.exception = interpreter.exception;
+            return err;
+        };
     }
 };
 
