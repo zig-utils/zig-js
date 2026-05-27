@@ -67,6 +67,11 @@ pub const Function = struct {
     /// the VM (`make_closure`); null for tree-walk-created closures, which are
     /// invoked via `callFunction`.
     chunk: ?*bc.Chunk = null,
+    /// VM closure capture: the defining function's frame (type-erased `*vm.Frame`),
+    /// for resolving upvalues. Null at the top level. The slot count to allocate
+    /// for this function's own frame.
+    frame: ?*anyopaque = null,
+    local_count: u32 = 0,
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:

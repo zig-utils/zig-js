@@ -28,10 +28,16 @@ pub const Op = enum(u8) {
     dup, // duplicate top of stack
     set_acc, // pop -> completion accumulator (program-level result)
 
-    // --- variables (resolved against the Environment chain) ---
-    load_var, // operand: name index; push value (ReferenceError if unbound)
-    store_var, // operand: name index; assign nearest binding, leave value on stack
-    def_var, // operand: name index; pop value, define in current scope
+    // --- globals (resolved by name against the Environment) ---
+    load_var, // operand a: name index; push value (ReferenceError if unbound)
+    store_var, // operand a: name index; assign global, leave value on stack
+    def_var, // operand a: name index; pop value, define global
+
+    // --- locals & upvalues (resolved to frame slots at compile time) ---
+    load_local, // operand a: slot in the current frame
+    store_local, // operand a: slot; assign, leave value on stack
+    load_upval, // operand a: parent depth, b: slot
+    store_upval, // operand a: parent depth, b: slot; leave value on stack
 
     // --- unary ---
     neg,
@@ -102,6 +108,9 @@ pub const FnTemplate = struct {
     is_expr_body: bool,
     body: *ast.Node,
     chunk: *Chunk,
+    /// Number of frame slots (params + function-scoped declarations) the VM
+    /// allocates per call.
+    local_count: u32,
 };
 
 /// A unit of compiled code: the instruction stream plus its constant, name,

@@ -24,9 +24,20 @@ const Environment = interp.Environment;
 const Function = interp.Function;
 const EvalError = interp.EvalError;
 
+/// A function activation's flat local store. `slots` holds parameters then
+/// function-scoped declarations (indexes assigned by the compiler); `parent` is
+/// the *defining* function's frame, walked to resolve upvalues. Heap-allocated
+/// so a closure can outlive the call that created it. Globals live in the
+/// Environment, not here.
+pub const Frame = struct {
+    slots: []Value,
+    parent: ?*Frame,
+};
+
 /// Run `chunk` to completion, returning the program's accumulator (for a
-/// top-level chunk) or the function's return value (for a callee chunk).
-pub fn run(vm: *Interpreter, chunk: *Chunk) EvalError!Value {
+/// top-level chunk, `frame == null`) or the function's return value. `frame`
+/// is the current activation for `load_local`/`load_upval`.
+pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     var stack: std.ArrayListUnmanaged(Value) = .empty;
     var acc: Value = .undefined;
     var ip: usize = 0;
@@ -57,6 +68,21 @@ pub fn run(vm: *Interpreter, chunk: *Chunk) EvalError!Value {
             .def_var => {
                 const name = chunk.names.items[inst.a];
                 try vm.env.put(name, stack.pop().?);
+            },
+
+            .load_local => try stack.append(vm.arena, frame.?.slots[inst.a]),
+            .store_local => frame.?.slots[inst.a] = stack.items[stack.items.len - 1], // leaves value
+            .load_upval => {
+                var f = frame.?;
+                var d = inst.a;
+                while (d > 0) : (d -= 1) f = f.parent.?;
+                try stack.append(vm.arena, f.slots[inst.b]);
+            },
+            .store_upval => {
+                var f = frame.?;
+                var d = inst.a;
+                while (d > 0) : (d -= 1) f = f.parent.?;
+                f.slots[inst.b] = stack.items[stack.items.len - 1]; // leaves value
             },
 
             .neg => {
@@ -134,7 +160,7 @@ pub fn run(vm: *Interpreter, chunk: *Chunk) EvalError!Value {
                 try stack.append(vm.arena, .{ .boolean = try vm.instanceOf(l, r) });
             },
 
-            .make_closure => try stack.append(vm.arena, try makeClosure(vm, chunk.fns.items[inst.a])),
+            .make_closure => try stack.append(vm.arena, try makeClosure(vm, chunk.fns.items[inst.a], frame)),
             .call => {
                 const argc = inst.a;
                 const base = stack.items.len - argc;
@@ -195,9 +221,10 @@ fn binOp(op: bc.Op) @import("ast.zig").BinaryOp {
     };
 }
 
-/// Build a Function value from a template, capturing the current environment as
-/// its closure. Tagged with the compiled `chunk` so calls take the VM path.
-fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate) EvalError!Value {
+/// Build a Function value from a template, capturing the current `frame` as the
+/// closure's upvalue source. Tagged with the compiled `chunk` so calls take the
+/// VM path; `closure` (the global env) is kept only to satisfy the shared type.
+fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
     const func = try vm.arena.create(Function);
     func.* = .{
         .params = tmpl.params,
@@ -206,6 +233,8 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate) EvalError!Value {
         .closure = vm.env,
         .name = tmpl.name,
         .chunk = tmpl.chunk,
+        .frame = frame,
+        .local_count = tmpl.local_count,
     };
     const obj = try vm.arena.create(value.Object);
     obj.* = .{ .js_func = @ptrCast(func) };
@@ -245,20 +274,23 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
 }
 
 fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value) EvalError!Value {
-    const call_env = try vm.arena.create(Environment);
-    call_env.* = .{ .arena = vm.arena, .parent = func.closure };
-    for (func.params, 0..) |p, i| {
-        try call_env.put(p, if (i < args.len) args[i] else .undefined);
+    // Allocate the activation frame: slots default to undefined, the first
+    // `params.len` are filled from the arguments. Globals stay in `vm.env`.
+    const slots = try vm.arena.alloc(Value, func.local_count);
+    @memset(slots, .undefined);
+    for (func.params, 0..) |_, i| {
+        if (i < args.len) slots[i] = args[i];
     }
-    const saved_env = vm.env;
+    const frame = try vm.arena.create(Frame);
+    frame.* = .{
+        .slots = slots,
+        .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
+    };
+
     const saved_this = vm.this_value;
-    vm.env = call_env;
     vm.this_value = this_val;
-    defer {
-        vm.env = saved_env;
-        vm.this_value = saved_this;
-    }
-    return run(vm, fchunk);
+    defer vm.this_value = saved_this;
+    return run(vm, fchunk, frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +310,7 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     var env = Environment{ .arena = arena };
     try interp.installGlobals(&env);
     var machine = Interpreter{ .arena = arena, .env = &env };
-    return run(&machine, chunk);
+    return run(&machine, chunk, null);
 }
 
 test "vm: arithmetic, precedence, comparison, logical" {

@@ -1,11 +1,19 @@
 //! AST → bytecode compiler for the tier-1 VM.
 //!
 //! Lowers the subset of the AST the VM executes directly. Anything outside that
-//! subset (objects, member access, `new`, `throw`/`try`, `++`/`--`, member
-//! assignment, `instanceof`, `this`) returns `error.Unsupported`, which the
-//! Context treats as a signal to run the whole program on the tree-walker
-//! instead. That keeps conformance flat while the VM's coverage grows — the
-//! compiler is widened one node at a time, never the semantics.
+//! subset (`throw`/`try`, computed method calls, member `++`/`--`) returns
+//! `error.Unsupported`, which the Context treats as a signal to run the whole
+//! program on the tree-walker instead. That keeps conformance flat while the
+//! VM's coverage grows — the compiler is widened one node at a time, never the
+//! semantics.
+//!
+//! Variable resolution happens here, at compile time: a function's parameters
+//! and (function-scoped) declarations are assigned frame **slot** indices,
+//! captured names become `(depth, slot)` **upvalues**, and anything not found in
+//! an enclosing function is a **global** resolved by name against the
+//! Environment. Top-level program variables are globals (they persist across
+//! `evaluate` calls, like a real global object). This mirrors the tree-walker's
+//! block-transparent scoping exactly.
 
 const std = @import("std");
 const ast = @import("ast.zig");
@@ -25,14 +33,40 @@ const Loop = struct {
     continues: std.ArrayListUnmanaged(usize) = .empty,
 };
 
+/// A function's local namespace: name → frame slot. Built once, up front, from
+/// the parameters and the function-scoped declarations (var/let/const/function),
+/// matching the engine's block-transparent scoping.
+const FnScope = struct {
+    parent: ?*FnScope,
+    names: std.StringHashMapUnmanaged(u32) = .{},
+    count: u32 = 0,
+
+    fn addLocal(self: *FnScope, arena: std.mem.Allocator, name: []const u8) CompileError!u32 {
+        if (self.names.get(name)) |slot| return slot;
+        const slot = self.count;
+        try self.names.put(arena, name, slot);
+        self.count += 1;
+        return slot;
+    }
+};
+
+/// Where a referenced name lives.
+const Resolved = union(enum) {
+    local: u32, // slot in the current frame
+    upval: struct { depth: u32, slot: u32 }, // an enclosing function's frame
+    global, // by name, against the Environment
+};
+
 pub const Compiler = struct {
     arena: std.mem.Allocator,
     chunk: *Chunk,
     mode: Mode,
+    scope: ?*FnScope = null,
     loops: std.ArrayListUnmanaged(*Loop) = .empty,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
-    /// the VM returns its completion accumulator.
+    /// the VM returns its completion accumulator. Program scope is null, so all
+    /// top-level bindings are globals.
     pub fn compileProgram(arena: std.mem.Allocator, program: *Node) CompileError!*Chunk {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
@@ -41,6 +75,55 @@ pub const Compiler = struct {
         for (program.program) |stmt| try c.compileStmt(stmt);
         _ = try chunk.emit(.halt, 0);
         return chunk;
+    }
+
+    // ---- name resolution --------------------------------------------------
+
+    fn resolve(self: *Compiler, name: []const u8) Resolved {
+        var depth: u32 = 0;
+        var scope = self.scope;
+        while (scope) |sc| {
+            if (sc.names.get(name)) |slot| {
+                return if (depth == 0) .{ .local = slot } else .{ .upval = .{ .depth = depth, .slot = slot } };
+            }
+            depth += 1;
+            scope = sc.parent;
+        }
+        return .global;
+    }
+
+    /// Emit a load of `name` to the appropriate location (local / upvalue / global).
+    fn emitLoad(self: *Compiler, name: []const u8) CompileError!void {
+        switch (self.resolve(name)) {
+            .local => |slot| _ = try self.chunk.emit(.load_local, slot),
+            .upval => |u| _ = try self.chunk.emitAB(.load_upval, u.depth, u.slot),
+            .global => _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
+        }
+    }
+
+    /// Emit a store to `name` (assignment); leaves the value on the stack.
+    fn emitStore(self: *Compiler, name: []const u8) CompileError!void {
+        switch (self.resolve(name)) {
+            .local => |slot| _ = try self.chunk.emit(.store_local, slot),
+            .upval => |u| _ = try self.chunk.emitAB(.store_upval, u.depth, u.slot),
+            .global => _ = try self.chunk.emit(.store_var, try self.chunk.addName(name)),
+        }
+    }
+
+    /// Emit a definition of `name` (var/let/const/function decl) with its value
+    /// already on the stack; consumes the value.
+    fn emitDefine(self: *Compiler, name: []const u8) CompileError!void {
+        switch (self.resolve(name)) {
+            .local => |slot| {
+                _ = try self.chunk.emit(.store_local, slot);
+                _ = try self.chunk.emit(.pop, 0);
+            },
+            .upval => |u| {
+                _ = try self.chunk.emitAB(.store_upval, u.depth, u.slot);
+                _ = try self.chunk.emit(.pop, 0);
+            },
+            .global => _ = try self.chunk.emit(.def_var, try self.chunk.addName(name)),
+        }
     }
 
     // ---- statements -------------------------------------------------------
@@ -53,14 +136,12 @@ pub const Compiler = struct {
                 } else {
                     _ = try self.chunk.emit(.load_undefined, 0);
                 }
-                const ni = try self.chunk.addName(d.name);
-                _ = try self.chunk.emit(.def_var, ni);
+                try self.emitDefine(d.name);
             },
             .func_decl => |fnode| {
                 const fi = try self.compileFunction(fnode);
                 _ = try self.chunk.emit(.make_closure, fi);
-                const ni = try self.chunk.addName(fnode.name);
-                _ = try self.chunk.emit(.def_var, ni);
+                try self.emitDefine(fnode.name);
             },
             .return_stmt => |maybe| {
                 if (maybe) |e| {
@@ -169,10 +250,7 @@ pub const Compiler = struct {
             .boolean => |b| _ = try self.chunk.emit(if (b) .load_true else .load_false, 0),
             .null_lit => _ = try self.chunk.emit(.load_null, 0),
             .undefined_lit => _ = try self.chunk.emit(.load_undefined, 0),
-            .identifier => |name| {
-                const ni = try self.chunk.addName(name);
-                _ = try self.chunk.emit(.load_var, ni);
-            },
+            .identifier => |name| try self.emitLoad(name),
             .unary => |u| {
                 try self.compileExpr(u.operand);
                 _ = try self.chunk.emit(switch (u.op) {
@@ -215,8 +293,7 @@ pub const Compiler = struct {
             .assign => |a| switch (a.target.*) {
                 .identifier => |name| {
                     try self.compileExpr(a.value);
-                    const ni = try self.chunk.addName(name);
-                    _ = try self.chunk.emit(.store_var, ni);
+                    try self.emitStore(name);
                 },
                 .member => |m| {
                     try self.compileExpr(m.object);
@@ -302,20 +379,20 @@ pub const Compiler = struct {
     /// the new value, postfix the old.
     fn compileUpdate(self: *Compiler, inc: bool, prefix: bool, target: *Node) CompileError!void {
         if (target.* != .identifier) return error.Unsupported;
-        const ni = try self.chunk.addName(target.identifier);
+        const name = target.identifier;
         const one = try self.chunk.addConst(.{ .number = 1 });
         const delta: bc.Op = if (inc) .add else .sub;
         if (prefix) {
-            _ = try self.chunk.emit(.load_var, ni);
+            try self.emitLoad(name);
             _ = try self.chunk.emit(.load_const, one);
             _ = try self.chunk.emit(delta, 0);
-            _ = try self.chunk.emit(.store_var, ni); // leaves the new value
+            try self.emitStore(name); // leaves the new value
         } else {
-            _ = try self.chunk.emit(.load_var, ni);
+            try self.emitLoad(name);
             _ = try self.chunk.emit(.dup, 0); // keep the old value
             _ = try self.chunk.emit(.load_const, one);
             _ = try self.chunk.emit(delta, 0);
-            _ = try self.chunk.emit(.store_var, ni);
+            try self.emitStore(name);
             _ = try self.chunk.emit(.pop, 0); // discard the new value, leave the old
         }
     }
@@ -323,7 +400,16 @@ pub const Compiler = struct {
     fn compileFunction(self: *Compiler, fnode: *const ast.FunctionNode) CompileError!u32 {
         const sub = try self.arena.create(Chunk);
         sub.* = Chunk.init(self.arena);
-        var sub_c = Compiler{ .arena = self.arena, .chunk = sub, .mode = .function };
+
+        // Build this function's slot namespace: parameters first, then every
+        // function-scoped declaration in the body (not descending into nested
+        // functions). The scope chains to the enclosing function for upvalues.
+        const scope = try self.arena.create(FnScope);
+        scope.* = .{ .parent = self.scope };
+        for (fnode.params) |p| _ = try scope.addLocal(self.arena, p);
+        if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
+
+        var sub_c = Compiler{ .arena = self.arena, .chunk = sub, .mode = .function, .scope = scope };
         if (fnode.is_expr_body) {
             try sub_c.compileExpr(fnode.body);
             _ = try sub.emit(.ret, 0);
@@ -338,6 +424,7 @@ pub const Compiler = struct {
             .is_expr_body = fnode.is_expr_body,
             .body = fnode.body,
             .chunk = sub,
+            .local_count = scope.count,
         };
         return self.chunk.addFn(tmpl);
     }
@@ -360,3 +447,28 @@ pub const Compiler = struct {
         return self.loops.items[self.loops.items.len - 1];
     }
 };
+
+/// Collect a function's slot-allocated declarations: every `var`/`let`/`const`
+/// and nested `function` name reachable in the body, *without* descending into
+/// nested function/arrow bodies (those names belong to those functions). Blocks
+/// are transparent — matching the engine's function-level scoping — so a name
+/// gets one slot regardless of how deeply it's nested in `if`/`for`/`while`.
+fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) CompileError!void {
+    switch (node.*) {
+        .var_decl => |d| _ = try scope.addLocal(arena, d.name),
+        .func_decl => |f| _ = try scope.addLocal(arena, f.name),
+        .block => |stmts| for (stmts) |s| try collectLocals(arena, scope, s),
+        .if_stmt => |s| {
+            try collectLocals(arena, scope, s.consequent);
+            if (s.alternate) |alt| try collectLocals(arena, scope, alt);
+        },
+        .while_stmt => |s| try collectLocals(arena, scope, s.body),
+        .for_stmt => |f| {
+            if (f.init) |ini| try collectLocals(arena, scope, ini);
+            try collectLocals(arena, scope, f.body);
+        },
+        // Expressions (incl. nested function/arrow literals) declare no names in
+        // this function's scope.
+        else => {},
+    }
+}
