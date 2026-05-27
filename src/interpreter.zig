@@ -903,6 +903,124 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// Build a `Map`, optionally populated from an iterable of `[k,v]` pairs.
+    pub fn makeMap(self: *Interpreter, init_v: Value) EvalError!Value {
+        const o = (try self.newObject()).object;
+        o.is_map = true;
+        try self.setProp(o, "size", .{ .number = 0 });
+        if (init_v == .object and init_v.object.is_array) {
+            for (init_v.object.elements.items) |entry| {
+                if (entry == .object and entry.object.is_array) {
+                    const items = entry.object.elements.items;
+                    _ = try self.mapMethod(o, "set", &.{ if (items.len > 0) items[0] else .undefined, if (items.len > 1) items[1] else .undefined });
+                }
+            }
+        }
+        return .{ .object = o };
+    }
+
+    /// Build a `Set`, optionally populated from an iterable of values.
+    pub fn makeSet(self: *Interpreter, init_v: Value) EvalError!Value {
+        const o = (try self.newObject()).object;
+        o.is_set = true;
+        try self.setProp(o, "size", .{ .number = 0 });
+        if (init_v == .object and init_v.object.is_array) {
+            for (init_v.object.elements.items) |v| _ = try self.setMethod(o, "add", &.{v});
+        }
+        return .{ .object = o };
+    }
+
+    fn mapMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
+        const self_v = Value{ .object = o };
+        if (eq(name, "set")) {
+            const k = arg0(args);
+            for (o.elements.items) |e| {
+                if (value.strictEquals(e.object.elements.items[0], k)) {
+                    e.object.elements.items[1] = arg(args, 1);
+                    return self_v;
+                }
+            }
+            const pair = (try self.newArray()).object;
+            try pair.elements.append(self.arena, k);
+            try pair.elements.append(self.arena, arg(args, 1));
+            try o.elements.append(self.arena, .{ .object = pair });
+            try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
+            return self_v;
+        }
+        if (eq(name, "get")) {
+            for (o.elements.items) |e| {
+                if (value.strictEquals(e.object.elements.items[0], arg0(args))) return e.object.elements.items[1];
+            }
+            return Value.undefined;
+        }
+        if (eq(name, "has")) {
+            for (o.elements.items) |e| {
+                if (value.strictEquals(e.object.elements.items[0], arg0(args))) return Value{ .boolean = true };
+            }
+            return Value{ .boolean = false };
+        }
+        if (eq(name, "delete")) {
+            for (o.elements.items, 0..) |e, i| {
+                if (value.strictEquals(e.object.elements.items[0], arg0(args))) {
+                    _ = o.elements.orderedRemove(i);
+                    try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
+                    return Value{ .boolean = true };
+                }
+            }
+            return Value{ .boolean = false };
+        }
+        if (eq(name, "clear")) {
+            o.elements.clearRetainingCapacity();
+            try self.setProp(o, "size", .{ .number = 0 });
+            return Value.undefined;
+        }
+        if (eq(name, "forEach")) {
+            const cb = arg0(args);
+            for (o.elements.items) |e| _ = try self.callValue(cb, &.{ e.object.elements.items[1], e.object.elements.items[0], self_v });
+            return Value.undefined;
+        }
+        return null;
+    }
+
+    fn setMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
+        const self_v = Value{ .object = o };
+        if (eq(name, "add")) {
+            for (o.elements.items) |e| {
+                if (value.strictEquals(e, arg0(args))) return self_v;
+            }
+            try o.elements.append(self.arena, arg0(args));
+            try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
+            return self_v;
+        }
+        if (eq(name, "has")) {
+            for (o.elements.items) |e| {
+                if (value.strictEquals(e, arg0(args))) return Value{ .boolean = true };
+            }
+            return Value{ .boolean = false };
+        }
+        if (eq(name, "delete")) {
+            for (o.elements.items, 0..) |e, i| {
+                if (value.strictEquals(e, arg0(args))) {
+                    _ = o.elements.orderedRemove(i);
+                    try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
+                    return Value{ .boolean = true };
+                }
+            }
+            return Value{ .boolean = false };
+        }
+        if (eq(name, "clear")) {
+            o.elements.clearRetainingCapacity();
+            try self.setProp(o, "size", .{ .number = 0 });
+            return Value.undefined;
+        }
+        if (eq(name, "forEach")) {
+            const cb = arg0(args);
+            for (o.elements.items) |e| _ = try self.callValue(cb, &.{ e, e, self_v });
+            return Value.undefined;
+        }
+        return null;
+    }
+
     fn evalArrayLit(self: *Interpreter, elems: []*Node) EvalError!Value {
         const v = try self.newArray();
         for (elems) |en| {
@@ -1122,6 +1240,8 @@ pub const Interpreter = struct {
         switch (recv) {
             .object => |o| {
                 if (o.is_regex) return try self.regexMethod(o, name, args);
+                if (o.is_map) return try self.mapMethod(o, name, args);
+                if (o.is_set) return try self.setMethod(o, name, args);
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
             },
             .string => |s| return try self.stringMethod(s, name, args),
@@ -1562,6 +1682,10 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try defineGlobalFn(env, "isNaN", builtins.isNaNFn);
     try defineGlobalFn(env, "isFinite", builtins.isFiniteFn);
     try defineGlobalFn(env, "RegExp", builtins.regExpFn);
+    try defineGlobalFn(env, "Map", builtins.mapFn);
+    try defineGlobalFn(env, "Set", builtins.setFn);
+    try defineGlobalFn(env, "WeakMap", builtins.mapFn);
+    try defineGlobalFn(env, "WeakSet", builtins.setFn);
     try defineGlobalFn(env, "Boolean", builtins.booleanFn);
 
     // String — callable, with statics.
@@ -2056,6 +2180,19 @@ test "interpreter arguments object and Array/Object statics" {
     // Object.entries / fromEntries
     try std.testing.expectEqual(@as(f64, 2), (try evalSource(a, "Object.entries({ a: 1, b: 2 }).length")).number);
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let o = Object.fromEntries([['x', 5]]); o.x")).number);
+}
+
+test "interpreter Map and Set" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let m = new Map(); m.set('a', 5); m.get('a')")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalSource(a, "let m = new Map(); m.set('a', 1); m.set('b', 2); m.size")).number);
+    try std.testing.expect((try evalSource(a, "let m = new Map(); m.set('k', 1); m.has('k')")).boolean);
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "let m = new Map([['a', 1], ['b', 2]]); m.delete('b'); m.size")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let s = new Set([1, 2, 2, 3, 3]); s.size")).number);
+    try std.testing.expect((try evalSource(a, "let s = new Set(); s.add(7); s.has(7)")).boolean);
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let s = new Set([1, 2, 3]); let t = 0; s.forEach(function (v) { t += v; }); t")).number);
 }
 
 test "interpreter regex literals (zig-regex backed)" {

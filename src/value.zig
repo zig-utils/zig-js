@@ -61,6 +61,10 @@ pub const Object = struct {
     /// True for `RegExp` instances (carries `source`/`flags` properties; matching
     /// is backed by zig-regex).
     is_regex: bool = false,
+    /// `Map`/`Set` instances. A Map keeps `[key,value]` pair-arrays in
+    /// `elements`; a Set keeps values directly. `size` is a maintained property.
+    is_map: bool = false,
+    is_set: bool = false,
     /// For error instances, the error class name (e.g. "TypeError"); for a
     /// builtin error *constructor* object, see `error_ctor`.
     error_name: []const u8 = "",

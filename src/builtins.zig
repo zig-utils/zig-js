@@ -301,6 +301,16 @@ pub fn arrayIsArray(ctx: *anyopaque, this: Value, args: []const Value) HostError
     return .{ .boolean = arg(args, 0) == .object and arg(args, 0).object.is_array };
 }
 
+pub fn mapFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    return interp(ctx).makeMap(arg(args, 0));
+}
+
+pub fn setFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    return interp(ctx).makeSet(arg(args, 0));
+}
+
 /// `RegExp(pattern, flags)` / `new RegExp(...)`. Accepts a string source or an
 /// existing RegExp (copying its source).
 pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
