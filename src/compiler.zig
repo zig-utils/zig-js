@@ -207,8 +207,9 @@ pub const Compiler = struct {
 
     fn compileFor(self: *Compiler, init_node: ?*Node, cond: ?*Node, update: ?*Node, body: *Node) CompileError!void {
         if (init_node) |ini| {
-            // The init clause is a var_decl statement or a bare expression.
-            if (ini.* == .var_decl) {
+            // The init clause is a declaration statement (var_decl, or a block of
+            // them for multiple declarators) or a bare expression.
+            if (ini.* == .var_decl or ini.* == .block) {
                 try self.compileStmt(ini);
             } else {
                 try self.compileExpr(ini);
@@ -260,6 +261,7 @@ pub const Compiler = struct {
                     .not => .not,
                     .typeof => .typeof_op,
                     .bit_not => .bit_not,
+                    .void_op => .void_op,
                 }, 0);
             },
             .binary => |b| {

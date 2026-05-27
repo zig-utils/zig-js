@@ -105,6 +105,10 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
                 const v = stack.pop().?;
                 try stack.append(vm.arena, .{ .number = @floatFromInt(~v.toInt32()) });
             },
+            .void_op => {
+                _ = stack.pop().?;
+                try stack.append(vm.arena, .undefined);
+            },
 
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;

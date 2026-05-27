@@ -203,7 +203,43 @@ pub const Interpreter = struct {
 
             .while_stmt => |s| try self.evalWhile(s.cond, s.body),
             .for_stmt => |f| try self.evalFor(f.init, f.cond, f.update, f.body),
+            .switch_stmt => |s| try self.evalSwitch(s.disc, s.cases),
         };
+    }
+
+    /// `switch`: evaluate the discriminant, find the first strictly-equal `case`
+    /// (or `default`), then run from there with fall-through until a `break`.
+    fn evalSwitch(self: *Interpreter, disc_node: *Node, cases: []ast.SwitchCase) EvalError!Value {
+        const disc = try self.eval(disc_node);
+        var start: ?usize = null;
+        for (cases, 0..) |c, i| {
+            if (c.@"test") |t| {
+                if (value.strictEquals(disc, try self.eval(t))) {
+                    start = i;
+                    break;
+                }
+            }
+        }
+        if (start == null) {
+            for (cases, 0..) |c, i| {
+                if (c.@"test" == null) {
+                    start = i;
+                    break;
+                }
+            }
+        }
+        var last: Value = .undefined;
+        if (start) |si| {
+            var i = si;
+            outer: while (i < cases.len) : (i += 1) {
+                for (cases[i].body) |stmt| {
+                    last = try self.eval(stmt);
+                    if (self.signal != .none) break :outer;
+                }
+            }
+            if (self.signal == .brk) self.signal = .none; // `break` exits the switch
+        }
+        return last;
     }
 
     fn evalWhile(self: *Interpreter, cond: *Node, body: *Node) EvalError!Value {
@@ -539,6 +575,7 @@ pub const Interpreter = struct {
             .not => .{ .boolean = !v.toBoolean() },
             .typeof => .{ .string = v.typeOf() },
             .bit_not => .{ .number = @floatFromInt(~v.toInt32()) },
+            .void_op => .undefined,
         };
     }
 
@@ -904,6 +941,37 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter switch (match, fall-through, default, break)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 20), (try evalSource(a,
+        \\let r = 0;
+        \\switch (2) { case 1: r = 10; break; case 2: r = 20; break; default: r = 99; }
+        \\r
+    )).number);
+    // default when no case matches
+    try std.testing.expectEqual(@as(f64, 99), (try evalSource(a,
+        \\let r = 0;
+        \\switch (7) { case 1: r = 10; break; default: r = 99; }
+        \\r
+    )).number);
+    // fall-through (no break) accumulates
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a,
+        \\let r = 0;
+        \\switch (1) { case 1: r = r + 1; case 2: r = r + 2; break; case 3: r = r + 99; }
+        \\r
+    )).number);
+}
+
+test "interpreter multiple declarators and void" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let x = 1, y = 2, z = 3; x + y + z")).number);
+    try std.testing.expect((try evalSource(a, "void 5 === undefined")).boolean);
 }
 
 test "interpreter break / continue" {

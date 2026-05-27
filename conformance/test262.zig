@@ -60,26 +60,24 @@ const harness_shim =
     \\
 ;
 
-/// Pass/skip, or a categorized failure so we can see *why* tests fail and aim
-/// breadth work at the real blockers.
+/// The outcome of one test. Positive (valid) tests and negative (must-fail)
+/// tests are scored on separate axes: a valid test measures whether we can *run*
+/// the program; a negative test measures *strictness* (rejecting invalid input,
+/// e.g. early errors) — a capability we mostly don't have yet, so mixing the two
+/// would let a weaker parser "win" by failing to parse valid code too.
 const Outcome = enum {
-    pass,
+    pass, // valid test ran correctly
+    pass_negative, // negative test failed the way it should
     skip,
-    fail_parse, // syntax we can't lex/parse yet (missing grammar)
-    fail_runtime, // threw at run time (missing builtin / semantics / a real assert failure)
-    fail_negative, // a negative test that didn't fail the way it should
-    fail_other, // host failure (OOM, …)
-
-    fn isFail(self: Outcome) bool {
-        return switch (self) {
-            .pass, .skip => false,
-            else => true,
-        };
-    }
+    fail_parse, // valid: syntax we can't lex/parse yet (missing grammar)
+    fail_runtime, // valid: threw at run time (missing builtin / semantics)
+    fail_negative, // negative: we didn't reject it the way we should
+    fail_other, // valid: host failure (OOM, …)
 };
 
 const Stats = struct {
     pass: usize = 0,
+    pass_negative: usize = 0,
     skip: usize = 0,
     fail_parse: usize = 0,
     fail_runtime: usize = 0,
@@ -89,6 +87,7 @@ const Stats = struct {
     fn add(self: *Stats, o: Outcome) void {
         switch (o) {
             .pass => self.pass += 1,
+            .pass_negative => self.pass_negative += 1,
             .skip => self.skip += 1,
             .fail_parse => self.fail_parse += 1,
             .fail_runtime => self.fail_runtime += 1,
@@ -97,16 +96,22 @@ const Stats = struct {
         }
     }
 
-    fn fails(self: Stats) usize {
-        return self.fail_parse + self.fail_runtime + self.fail_negative + self.fail_other;
+    /// Valid (positive) tests only — the real "can we run it" capability.
+    fn validTotal(self: Stats) usize {
+        return self.pass + self.fail_parse + self.fail_runtime + self.fail_other;
     }
 
-    fn ran(self: Stats) usize {
-        return self.pass + self.fails();
+    fn negTotal(self: Stats) usize {
+        return self.pass_negative + self.fail_negative;
+    }
+
+    fn pct(num: usize, den: usize) f64 {
+        return if (den == 0) 0.0 else @as(f64, @floatFromInt(num)) / @as(f64, @floatFromInt(den)) * 100.0;
     }
 
     fn merge(self: *Stats, other: Stats) void {
         self.pass += other.pass;
+        self.pass_negative += other.pass_negative;
         self.skip += other.skip;
         self.fail_parse += other.fail_parse;
         self.fail_runtime += other.fail_runtime;
@@ -164,7 +169,7 @@ fn runOne(gpa: std.mem.Allocator, src: []const u8) Outcome {
     defer ctx.destroy();
 
     if (ctx.evaluate(buf.items)) |_| {
-        // No error. Pass unless the test expected a failure.
+        // No error. A valid test passes; a negative test should have failed.
         return if (meta.negative) .fail_negative else .pass;
     } else |err| {
         if (meta.negative) {
@@ -172,7 +177,7 @@ fn runOne(gpa: std.mem.Allocator, src: []const u8) Outcome {
             // must throw. `error.Throw` is a runtime throw; anything else is a
             // parse/host error.
             const ok = if (meta.negative_parse) err != error.Throw else err == error.Throw;
-            return if (ok) .pass else .fail_negative;
+            return if (ok) .pass_negative else .fail_negative;
         }
         return switch (err) {
             error.Throw => .fail_runtime,
@@ -227,9 +232,12 @@ pub fn main() !void {
 
             stats.add(runOne(gpa, src));
         }
-        const ran = stats.ran();
-        const pct = if (ran == 0) 0.0 else @as(f64, @floatFromInt(stats.pass)) / @as(f64, @floatFromInt(ran)) * 100.0;
-        std.debug.print("  {s}: {d}/{d} passed ({d:.1}%), {d} skipped\n", .{ sub, stats.pass, ran, pct, stats.skip });
+        const vt = stats.validTotal();
+        std.debug.print("  {s}: valid {d}/{d} ({d:.1}%)  [parse-fail {d} · runtime-fail {d}]  neg {d}/{d}\n", .{
+            sub,                          stats.pass, vt, Stats.pct(stats.pass, vt),
+            stats.fail_parse,             stats.fail_runtime,
+            stats.pass_negative,          stats.negTotal(),
+        });
         total.merge(stats);
     }
 
@@ -238,10 +246,13 @@ pub fn main() !void {
         return;
     }
 
-    const ran = total.ran();
-    const pct = if (ran == 0) 0.0 else @as(f64, @floatFromInt(total.pass)) / @as(f64, @floatFromInt(ran)) * 100.0;
-    std.debug.print("------------------------\nTOTAL: {d}/{d} passed ({d:.1}%), {d} skipped\n", .{ total.pass, ran, pct, total.skip });
-    std.debug.print("failures: {d} parse · {d} runtime · {d} negative · {d} other\n", .{
-        total.fail_parse, total.fail_runtime, total.fail_negative, total.fail_other,
+    const vt = total.validTotal();
+    std.debug.print("------------------------\n", .{});
+    std.debug.print("VALID (can we run it):  {d}/{d} ({d:.1}%)   parse-fail {d} · runtime-fail {d}\n", .{
+        total.pass, vt, Stats.pct(total.pass, vt), total.fail_parse, total.fail_runtime,
     });
+    std.debug.print("NEGATIVE (strictness):  {d}/{d} ({d:.1}%)   [early-error rejection — mostly unimplemented]\n", .{
+        total.pass_negative, total.negTotal(), Stats.pct(total.pass_negative, total.negTotal()),
+    });
+    std.debug.print("skipped (module/async/includes): {d}\n", .{total.skip});
 }

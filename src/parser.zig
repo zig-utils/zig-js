@@ -81,6 +81,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "if")) return self.parseIf();
             if (std.mem.eql(u8, t.text, "while")) return self.parseWhile();
             if (std.mem.eql(u8, t.text, "for")) return self.parseFor();
+            if (std.mem.eql(u8, t.text, "switch")) return self.parseSwitch();
             if (std.mem.eql(u8, t.text, "function")) return self.parseFunctionDecl();
             if (std.mem.eql(u8, t.text, "return")) return self.parseReturn();
             if (std.mem.eql(u8, t.text, "throw")) return self.parseThrow();
@@ -105,14 +106,21 @@ pub const Parser = struct {
 
     fn parseVarDecl(self: *Parser, kind: ast.DeclKind) ParseError!*Node {
         _ = self.advance(); // var/let/const
-        const name_tok = self.advance();
-        if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
-        var init_expr: ?*Node = null;
-        if (self.match(.assign)) {
-            init_expr = try self.parseAssignment();
+        // One or more comma-separated declarators: `let a, b = 1, c`.
+        var decls: std.ArrayListUnmanaged(*Node) = .empty;
+        while (true) {
+            const name_tok = self.advance();
+            if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
+            var init_expr: ?*Node = null;
+            if (self.match(.assign)) init_expr = try self.parseAssignment();
+            try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr } }));
+            if (!self.match(.comma)) break;
         }
         _ = self.match(.semicolon);
-        return self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr } });
+        // A single declarator stays a bare var_decl; multiples become a
+        // (transparent) block so every consumer handles them uniformly.
+        if (decls.items.len == 1) return decls.items[0];
+        return self.alloc(.{ .block = decls.items });
     }
 
     fn parseBlock(self: *Parser) ParseError!*Node {
@@ -172,6 +180,35 @@ pub const Parser = struct {
         try self.expect(.rparen);
         const body = try self.parseStatement();
         return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
+    }
+
+    fn parseSwitch(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // switch
+        try self.expect(.lparen);
+        const disc = try self.parseExpression();
+        try self.expect(.rparen);
+        try self.expect(.lbrace);
+        var cases: std.ArrayListUnmanaged(ast.SwitchCase) = .empty;
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            var test_expr: ?*Node = null;
+            if (isKeyword(self.cur(), "case")) {
+                _ = self.advance();
+                test_expr = try self.parseExpression();
+            } else if (isKeyword(self.cur(), "default")) {
+                _ = self.advance();
+            } else return ParseError.UnexpectedToken;
+            try self.expect(.colon);
+            // Statements until the next case/default/closing brace.
+            var body: std.ArrayListUnmanaged(*Node) = .empty;
+            while (!self.check(.rbrace) and !self.check(.eof) and
+                !isKeyword(self.cur(), "case") and !isKeyword(self.cur(), "default"))
+            {
+                try body.append(self.arena, try self.parseStatement());
+            }
+            try cases.append(self.arena, .{ .@"test" = test_expr, .body = body.items });
+        }
+        try self.expect(.rbrace);
+        return self.alloc(.{ .switch_stmt = .{ .disc = disc, .cases = cases.items } });
     }
 
     fn parseReturn(self: *Parser) ParseError!*Node {
@@ -421,7 +458,12 @@ pub const Parser = struct {
             .plus => .pos,
             .bang => .not,
             .tilde => .bit_not,
-            else => if (isKeyword(t, "typeof")) ast.UnaryOp.typeof else null,
+            else => if (isKeyword(t, "typeof"))
+                ast.UnaryOp.typeof
+            else if (isKeyword(t, "void"))
+                ast.UnaryOp.void_op
+            else
+                null,
         };
         if (op) |o| {
             _ = self.advance();

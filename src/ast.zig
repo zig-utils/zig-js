@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const UnaryOp = enum { neg, pos, not, typeof, bit_not };
+pub const UnaryOp = enum { neg, pos, not, typeof, bit_not, void_op };
 
 pub const BinaryOp = enum {
     add,
@@ -45,6 +45,14 @@ pub const FunctionNode = struct {
 pub const Property = struct {
     key: []const u8,
     value: *Node,
+};
+
+/// One `case <test>:` (or `default:` when `test` is null) clause of a switch.
+/// `body` is the statement list that runs from this clause (with fall-through).
+pub const SwitchCase = struct {
+    /// null for the `default:` clause.
+    @"test": ?*Node,
+    body: []*Node,
 };
 
 /// A `try { ... } catch (e) { ... } finally { ... }` statement. `catch_param`
@@ -99,5 +107,6 @@ pub const Node = union(enum) {
     if_stmt: struct { cond: *Node, consequent: *Node, alternate: ?*Node },
     while_stmt: struct { cond: *Node, body: *Node },
     for_stmt: struct { init: ?*Node, cond: ?*Node, update: ?*Node, body: *Node },
+    switch_stmt: struct { disc: *Node, cases: []SwitchCase },
     program: []*Node,
 };

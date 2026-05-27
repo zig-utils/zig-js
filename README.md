@@ -36,20 +36,23 @@ C API; link `zig-js` instead and those call sites work unchanged.
 ## Conformance progress
 
 Measured by `zig build test262` against the pinned [tc39/test262](https://github.com/tc39/test262)
-submodule. "Ran" excludes tests skipped for features the engine doesn't model yet (ES modules,
-async, or extra harness `includes:`); the bar is how far there still is to go.
+submodule, over the `language/` subtrees (excluding tests skipped for ES modules, async, or extra
+harness `includes:`). The score is split on two honest axes — **valid** tests measure whether we
+can *run* a program; **negative** tests measure *strictness* (rejecting invalid input). Mixing them
+flatters a weak parser (it "passes" negatives by failing to parse valid code too), so they're kept
+apart:
 
-| test262 area           | passing |    ran | of corpus |   % ran |
-| ---------------------- | ------: | -----: | --------: | ------: |
-| `language/types`       |      53 |    113 |       113 |  46.9 % |
-| `language/expressions` |   2,112 |  8,134 |    11,038 |  26.0 % |
-| `language/statements`  |   1,425 |  6,138 |     9,337 |  23.2 % |
-| **`language/` total**  | **3,590** | **14,385** | **20,488** | **25.0 %** |
+| axis | meaning | passing |
+| ---- | ------- | ------: |
+| **valid** | can we run the program? | **789 / 10,909 (7.2%)** |
+| negative | do we reject invalid input? (early errors — mostly unimplemented, so this is largely "we couldn't parse it either") | 2,848 / 3,476 (81.9%) |
 
-> Snapshot of the current tree-walker. The remaining ~75% needs template literals, `switch`,
-> `for-of`/`for-in`, destructuring, generators, getters/setters, and the `Object`/`Array`/
-> `String`/`Number`/`JSON`/`RegExp` builtins — plus `built-ins/` and `intl402/` are not yet
-> scored at all. Re-run `zig build test262` any time; bump the corpus with
+> The valid number is the real one, and it's honest about how far there is to go. Of the ~10k
+> failing valid tests, **~8,300 fail at parse time** (missing grammar: template literals, `class`,
+> `for-of`/`for-in`, destructuring, spread/rest, generators, regex literals, …) and **~1,800 at run
+> time** (missing builtins: `Object`/`Array`/`String`/`Number`/`Math`/`JSON`/`RegExp`). So the
+> conformance lever is the parser first, then builtins — `zig build test262` prints the parse-fail
+> vs runtime-fail split so the work stays data-driven. Bump the corpus with
 > `git submodule update --remote test262`.
 
 ## Two ways to use it
