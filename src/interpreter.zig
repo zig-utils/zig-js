@@ -1125,6 +1125,8 @@ pub const Interpreter = struct {
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
             },
             .string => |s| return try self.stringMethod(s, name, args),
+            .number => |n| return try self.numberMethod(n, name, args),
+            .boolean => |b| return try self.booleanMethod(b, name, args),
             else => {},
         }
         return null;
@@ -1275,7 +1277,36 @@ pub const Interpreter = struct {
         return null;
     }
 
+    fn numberMethod(self: *Interpreter, n: f64, name: []const u8, args: []const Value) EvalError!?Value {
+        if (eq(name, "valueOf")) return Value{ .number = n };
+        if (eq(name, "toString") or eq(name, "toLocaleString")) {
+            var radix: usize = 10;
+            if (args.len > 0 and args[0] != .undefined) {
+                const r = args[0].toNumber();
+                if (r >= 2 and r <= 36) radix = @intFromFloat(r);
+            }
+            if (radix != 10 and @floor(n) == n and !std.math.isNan(n) and !std.math.isInf(n)) {
+                return Value{ .string = try intToRadix(self.arena, n, radix) };
+            }
+            return Value{ .string = try value.numberToString(self.arena, n) };
+        }
+        if (eq(name, "toFixed")) {
+            const d: usize = @intFromFloat(@max(0, @min(100, arg0(args).toNumber())));
+            return Value{ .string = try toFixed(self.arena, n, d) };
+        }
+        return null;
+    }
+
+    fn booleanMethod(self: *Interpreter, b: bool, name: []const u8, args: []const Value) EvalError!?Value {
+        _ = self;
+        _ = args;
+        if (eq(name, "valueOf")) return Value{ .boolean = b };
+        if (eq(name, "toString")) return Value{ .string = if (b) "true" else "false" };
+        return null;
+    }
+
     fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value) EvalError!?Value {
+        if (eq(name, "valueOf") or eq(name, "toString")) return Value{ .string = s };
         if (eq(name, "charAt")) {
             const i = relIndex(arg0(args), s.len, 0);
             return if (i < s.len) Value{ .string = try self.arena.dupe(u8, s[i .. i + 1]) } else Value{ .string = "" };
@@ -1642,6 +1673,40 @@ fn hasProperty(o: *value.Object, name: []const u8) bool {
 
 fn arg0(args: []const Value) Value {
     return if (args.len > 0) args[0] else .undefined;
+}
+
+/// Integer `n` formatted in `radix` (2–36), e.g. `(255).toString(16)` → "ff".
+fn intToRadix(arena: std.mem.Allocator, n: f64, radix: usize) ![]const u8 {
+    if (n == 0) return "0";
+    const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const neg = n < 0;
+    var v: u64 = @intFromFloat(@abs(n));
+    while (v > 0) {
+        try buf.append(arena, digits[@intCast(v % radix)]);
+        v /= radix;
+    }
+    if (neg) try buf.append(arena, '-');
+    std.mem.reverse(u8, buf.items);
+    return buf.items;
+}
+
+/// `n.toFixed(d)` — fixed-point with `d` decimals (no exponent forms).
+fn toFixed(arena: std.mem.Allocator, n: f64, d: usize) ![]const u8 {
+    if (std.math.isNan(n)) return "NaN";
+    if (std.math.isInf(n)) return if (n < 0) "-Infinity" else "Infinity";
+    const neg = n < 0;
+    const scale = std.math.pow(f64, 10, @floatFromInt(d));
+    const scaled: u64 = @intFromFloat(@round(@abs(n) * scale));
+    const int_part = scaled / @as(u64, @intFromFloat(scale));
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    if (neg) try buf.append(arena, '-');
+    try buf.print(arena, "{d}", .{int_part});
+    if (d > 0) {
+        const frac = scaled % @as(u64, @intFromFloat(scale));
+        try buf.print(arena, ".{d:0>[1]}", .{ frac, d });
+    }
+    return buf.items;
 }
 
 fn arg(args: []const Value, i: usize) Value {
@@ -2102,6 +2167,19 @@ test "interpreter classes (methods, static, instanceof, computed)" {
         \\}
         \\(new Box(5)).quad()
     )).number);
+}
+
+test "interpreter number/boolean primitive methods" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("255", (try evalSource(a, "(255).toString()")).string);
+    try std.testing.expectEqualStrings("ff", (try evalSource(a, "(255).toString(16)")).string);
+    try std.testing.expectEqualStrings("1010", (try evalSource(a, "(10).toString(2)")).string);
+    try std.testing.expectEqualStrings("3.14", (try evalSource(a, "(3.14159).toFixed(2)")).string);
+    try std.testing.expectEqualStrings("5.00", (try evalSource(a, "(5).toFixed(2)")).string);
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "(7).valueOf()")).number);
+    try std.testing.expectEqualStrings("true", (try evalSource(a, "true.toString()")).string);
 }
 
 test "interpreter with statement" {
