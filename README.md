@@ -22,16 +22,16 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > | ---- | ---- | ------ | ------------------ |
 > | 0 | tree-walk interpreter | ✅ | 1× (baseline) |
 > | 1 | **stack bytecode VM** — lowers nearly the whole language (objects, arrays, members, `new`, methods, `++`, `instanceof`); only `throw`/`try` falls back | ✅ | ~1.1× |
-> | 2 | **slot-allocated locals + frame-linked closures** — params/locals resolved to a flat frame array at compile time; globals stay by name | ✅ | **1.3–1.85×** |
-> | 3 | object shapes (hidden classes) + inline caches | next | — |
-> | 4 | NaN-boxed values | planned | — |
+> | 2 | **slot-allocated locals + frame-linked closures** — params/locals resolved to a flat frame array at compile time; globals stay by name | ✅ | 1.3–1.85× |
+> | 3 | **object shapes (hidden classes) + inline caches** — shared shape transition tree + flat slots; monomorphic IC per property site | ✅ | **1.6–1.7×** across the board |
+> | 4 | NaN-boxed values | next | — |
 > | 5 | generational GC (replaces the arena) | planned | — |
 > | 6 | baseline → optimizing JIT | planned | — |
 >
-> Tier-2 nearly doubled the compute/call-heavy cases; object-property churn (1.33×) is now the
-> laggard, which is exactly what tier-3 shapes + inline caches target. The tree-walker remains as
-> the correctness oracle and the fallback for not-yet-lowered constructs. See craft's
-> `docs/architecture/web-engine-plan.md`.
+> Tier-2 nearly doubled compute/call-heavy code; tier-3 brought object-property churn from the
+> 1.33× laggard up to 1.73× (objects no longer allocate a per-instance hashmap, and repeat
+> property access is an inline-cache hit). The tree-walker remains the correctness oracle and the
+> fallback for not-yet-lowered constructs. See craft's `docs/architecture/web-engine-plan.md`.
 
 ## Conformance progress
 
