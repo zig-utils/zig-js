@@ -41,6 +41,9 @@ pub const Object = struct {
     /// instance's proto is its constructor's `.prototype`; a class's `.prototype`
     /// protos to its superclass's `.prototype`.
     proto: ?*Object = null,
+    /// Accessor (get/set) properties, lazily allocated. Checked before the data
+    /// slot at each level of the prototype walk.
+    accessors: ?*std.StringHashMapUnmanaged(Accessor) = null,
     elements: std.ArrayListUnmanaged(Value) = .empty,
     is_array: bool = false,
     callback: ?HostCallback = null,
@@ -81,6 +84,28 @@ pub const Object = struct {
         return list.items;
     }
 
+    /// An own accessor (get/set) property, if present.
+    pub fn getAccessor(self: *const Object, name: []const u8) ?Accessor {
+        const m = self.accessors orelse return null;
+        return m.get(name);
+    }
+
+    /// Define/merge an own accessor (get and/or set). Promotes the name to an
+    /// accessor property.
+    pub fn setAccessor(self: *Object, arena: std.mem.Allocator, name: []const u8, get: ?Value, set: ?Value) std.mem.Allocator.Error!void {
+        if (self.accessors == null) {
+            self.accessors = try arena.create(std.StringHashMapUnmanaged(Accessor));
+            self.accessors.?.* = .{};
+        }
+        const gop = try self.accessors.?.getOrPut(arena, name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try arena.dupe(u8, name);
+            gop.value_ptr.* = .{};
+        }
+        if (get) |g| gop.value_ptr.get = g;
+        if (set) |s| gop.value_ptr.set = s;
+    }
+
     /// Read an own named property, or null if absent. No allocation.
     pub fn getOwn(self: *const Object, name: []const u8) ?Value {
         const sh = self.shape orelse return null;
@@ -105,6 +130,9 @@ pub const Object = struct {
         self.shape = child;
     }
 };
+
+/// An accessor property: getter and/or setter functions.
+pub const Accessor = struct { get: ?Value = null, set: ?Value = null };
 
 /// A JavaScript value. Strings and objects point into the Context arena.
 pub const Value = union(enum) {

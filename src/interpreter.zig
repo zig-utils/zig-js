@@ -569,7 +569,11 @@ pub const Interpreter = struct {
                 mf.home_object = home;
                 mf.super_ctor = super_obj;
             }
-            try self.setProp(home, key, fv);
+            switch (m.accessor) {
+                .none => try self.setProp(home, key, fv),
+                .get => try self.defineAccessor(home, key, fv, null),
+                .set => try self.defineAccessor(home, key, null, fv),
+            }
         }
         try self.setProp(proto, "constructor", class_val);
         return class_val;
@@ -778,7 +782,11 @@ pub const Interpreter = struct {
         const v = try self.newObject();
         for (props) |p| {
             const key = if (p.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else p.key;
-            try self.setProp(v.object, key, try self.eval(p.value));
+            switch (p.accessor) {
+                .none => try self.setProp(v.object, key, try self.eval(p.value)),
+                .get => try self.defineAccessor(v.object, key, try self.eval(p.value), null),
+                .set => try self.defineAccessor(v.object, key, null, try self.eval(p.value)),
+            }
         }
         return v;
     }
@@ -811,9 +819,13 @@ pub const Interpreter = struct {
                     if (arrayIndex(key)) |i|
                         return if (i < o.elements.items.len) o.elements.items[i] else .undefined;
                 }
-                // Own property, then walk the prototype chain.
+                // Accessor or data, then walk the prototype chain.
                 var cur: ?*value.Object = o;
                 while (cur) |c| {
+                    if (c.getAccessor(key)) |acc| {
+                        if (acc.get) |g| return self.callValueWithThis(g, &.{}, recv);
+                        return .undefined; // accessor with no getter
+                    }
                     if (c.getOwn(key)) |v| return v;
                     cur = c.proto;
                 }
@@ -955,7 +967,21 @@ pub const Interpreter = struct {
                 return;
             }
         }
+        // A setter anywhere on the prototype chain intercepts the assignment.
+        var cur: ?*value.Object = o;
+        while (cur) |c| {
+            if (c.getAccessor(key)) |acc| {
+                if (acc.set) |s| _ = try self.callValueWithThis(s, &.{v}, recv);
+                return; // setter-less accessor: ignore (sloppy mode)
+            }
+            cur = c.proto;
+        }
         try self.setProp(o, key, v);
+    }
+
+    /// Define an accessor (get/set) on an object via its `setAccessor`.
+    fn defineAccessor(self: *Interpreter, obj: *value.Object, name: []const u8, get: ?Value, set: ?Value) EvalError!void {
+        try obj.setAccessor(self.arena, name, get, set);
     }
 
     /// Call `recv[name](args)` with `this = recv`. Dispatches the builtin
@@ -1826,6 +1852,28 @@ test "interpreter classes (methods, static, instanceof, computed)" {
         \\  quad() { return this.dbl() * 2; }
         \\}
         \\(new Box(5)).quad()
+    )).number);
+}
+
+test "interpreter getters and setters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // object literal getter/setter
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
+        \\let o = { _v: 0, get v() { return this._v; }, set v(x) { this._v = x * 2; } };
+        \\o.v = 21;
+        \\o.v
+    )).number);
+    // class getter via prototype
+    try std.testing.expectEqual(@as(f64, 25), (try evalSource(a,
+        \\class Sq { constructor(n) { this.n = n; } get area() { return this.n * this.n; } }
+        \\(new Sq(5)).area
+    )).number);
+    // class setter
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a,
+        \\class C { set half(x) { this.stored = x / 2; } }
+        \\let c = new C(); c.half = 12; c.stored
     )).number);
 }
 

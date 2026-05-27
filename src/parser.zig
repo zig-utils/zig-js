@@ -844,6 +844,16 @@ pub const Parser = struct {
                 if (!self.match(.comma)) break;
                 continue;
             }
+            // Accessor: `get x() {}` / `set x(v) {}` (get/set followed by a key).
+            if ((isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
+                const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
+                _ = self.advance(); // get/set
+                const pn = try self.parsePropertyName();
+                const func = try self.parseMethodTail(pn.key);
+                try props.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .value = func, .accessor = kind });
+                if (!self.match(.comma)) break;
+                continue;
+            }
             const key_tok = self.advance();
             const key: []const u8 = switch (key_tok.kind) {
                 .identifier, .string => key_tok.text,
@@ -894,6 +904,15 @@ pub const Parser = struct {
         return ParseError.UnexpectedToken;
     }
 
+    /// True when the next token starts a property name — used to tell an
+    /// accessor (`get x`) from a method/property literally named `get`.
+    fn propNameAhead(self: *Parser) bool {
+        return switch (self.peekKind(1)) {
+            .identifier, .string, .number, .lbracket => true,
+            else => false,
+        };
+    }
+
     /// Parse a property/method name: identifier/string/number, or a computed
     /// `[expr]`. Returns the static key (or "" if computed) and the computed expr.
     fn parsePropertyName(self: *Parser) ParseError!struct { key: []const u8, expr: ?*Node } {
@@ -933,10 +952,15 @@ pub const Parser = struct {
                 is_static = true;
                 _ = self.advance();
             }
-            // Accessors (get/set) need an accessor model — defer.
-            if ((isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and
-                self.peekKind(1) != .lparen and self.peekKind(1) != .assign)
-                return ParseError.UnexpectedToken;
+            // Accessor: `get x() {}` / `set x(v) {}`.
+            if ((isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
+                const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
+                _ = self.advance(); // get/set
+                const apn = try self.parsePropertyName();
+                const func = try self.parseMethodTail(apn.key);
+                try members.append(self.arena, .{ .key = apn.key, .key_expr = apn.expr, .func = func, .is_static = is_static, .accessor = kind });
+                continue;
+            }
             const pn = try self.parsePropertyName();
             if (self.check(.lparen)) {
                 // Method.

@@ -81,16 +81,22 @@ pub const ClassMember = struct {
     is_static: bool = false,
     is_ctor: bool = false,
     is_field: bool = false,
+    accessor: AccessorKind = .none,
 };
+
+/// Accessor flavor of an object-literal property or class member.
+pub const AccessorKind = enum { none, get, set };
 
 /// One entry in an object literal. The key is either a static string
 /// (identifier / string / numeric literal, in `key`) or a computed expression
 /// (`{ [expr]: v }`, in `key_expr`). `value` is the property value (a function
-/// node for method shorthand).
+/// node for method shorthand). `accessor` marks `get`/`set` (then `value` is the
+/// getter/setter function).
 pub const Property = struct {
     key: []const u8 = "",
     key_expr: ?*Node = null,
     value: *Node,
+    accessor: AccessorKind = .none,
 };
 
 /// One `case <test>:` (or `default:` when `test` is null) clause of a switch.
