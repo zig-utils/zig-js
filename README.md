@@ -8,11 +8,37 @@ It exists to give [`craft`](../../Tools/craft)'s "Loom" web engine and
 both own. lang's `packages/runtime/src/jsc/extern_fns.zig` declares the system JavaScriptCore
 C API; link `zig-js` instead and those call sites work unchanged.
 
-> Status: **early v1.** A correct tree-walking interpreter over a modern expression/statement
-> subset — including functions, closures, recursion, and arrow functions — plus the JSC C-API
-> surface lang consumes, and a test262-style conformance runner (`zig build conformance`, 18/18).
-> Next milestones: `throw`/`try`/`catch`, object/array literals + member access, real test262
-> ingestion, then a bytecode VM and a GC. See craft's `docs/architecture/web-engine-plan.md`.
+> Status: **early v1.** A correct tree-walking interpreter over a broad expression/statement
+> subset — functions, closures, arrows, objects, arrays, member access, `this`, `new`,
+> constructors, `instanceof`, `throw`/`try`/`catch`/`finally`, `for`/`while`/`break`/`continue`,
+> `++`/`--` and compound assignment — plus the JSC C-API surface lang consumes. It runs the
+> **real WebKit test262 corpus**: `zig build test262` currently passes **~25% of the `language/`
+> tests** (3,590 / 14,385) via a subset harness shim, and `zig build conformance` keeps a 33/33
+> always-green smoke suite.
+>
+> The tree-walker is the **correctness bootstrap, not the performance endgame.** The path to a
+> genuine JSC competitor is a bytecode VM + inline caches (object shapes) + NaN-boxed values + a
+> generational GC, then a baseline/optimizing JIT — each tier validated against the test262 gate
+> this layer establishes. See craft's `docs/architecture/web-engine-plan.md`.
+
+## Conformance progress
+
+Measured by `zig build test262` against the pinned [tc39/test262](https://github.com/tc39/test262)
+submodule. "Ran" excludes tests skipped for features the engine doesn't model yet (ES modules,
+async, or extra harness `includes:`); the bar is how far there still is to go.
+
+| test262 area           | passing |    ran | of corpus |   % ran |
+| ---------------------- | ------: | -----: | --------: | ------: |
+| `language/types`       |      53 |    113 |       113 |  46.9 % |
+| `language/expressions` |   2,112 |  8,134 |    11,038 |  26.0 % |
+| `language/statements`  |   1,425 |  6,138 |     9,337 |  23.2 % |
+| **`language/` total**  | **3,590** | **14,385** | **20,488** | **25.0 %** |
+
+> Snapshot of the current tree-walker. The remaining ~75% needs template literals, `switch`,
+> `for-of`/`for-in`, destructuring, generators, getters/setters, and the `Object`/`Array`/
+> `String`/`Number`/`JSON`/`RegExp` builtins — plus `built-ins/` and `intl402/` are not yet
+> scored at all. Re-run `zig build test262` any time; bump the corpus with
+> `git submodule update --remote test262`.
 
 ## Two ways to use it
 
@@ -44,20 +70,29 @@ Implemented C-API symbols: context lifecycle (`JSGlobalContextCreate/Release/Ret
 (`JSValueGetType`, `JSValueIs*`, `JSValueIsEqual`/`StrictEqual`), constructors
 (`JSValueMake*`), coercion (`JSValueTo*`, `JSValueProtect/Unprotect`), objects
 (`JSObjectMake`, `JSObjectMakeArray`, `JSObjectGet/SetProperty`, `JSObjectGetPropertyAtIndex`,
-`JSObjectCallAsFunction`, `JSObjectMakeFunctionWithCallback`, `JSObjectIsFunction`), and
-strings (`JSStringCreateWithUTF8CString`, `JSStringRetain/Release`, `JSStringGetLength`,
-`JSStringGetUTF8CString`). `JSObjectMakeDeferredPromise` / `JSObjectCallAsConstructor` raise a
-`NotImplemented` exception until the object/function milestones land.
+`JSObjectCallAsFunction`, `JSObjectCallAsConstructor`, `JSObjectMakeFunctionWithCallback`,
+`JSObjectIsFunction`/`IsConstructor`), and strings (`JSStringCreateWithUTF8CString`,
+`JSStringRetain/Release`, `JSStringGetLength`, `JSStringGetUTF8CString`).
+`JSObjectCallAsFunction`/`CallAsConstructor` drive the interpreter, so JS functions and the
+built-in `Error` constructors are callable across the C boundary; thrown JS values surface as
+the C-API `exception` out-param. `JSObjectMakeDeferredPromise` raises a `NotImplemented`
+exception until promises land.
 
 ## Language subset (v1)
 
-- Literals: number (int/float/hex/exp), string (`'…'` / `"…"` with escapes), `true`/`false`/`null`/`undefined`
-- Variables: `var` / `let` / `const`, assignment, identifier reference, lexical scoping
+- Literals: number (int/float/hex/exp), string (`'…'` / `"…"` with escapes), `true`/`false`/`null`/`undefined`,
+  object literals `{ … }` (incl. shorthand) and array literals `[ … ]`
+- Variables: `var` / `let` / `const`, assignment, compound assignment (`+= -= *= /= %=`),
+  identifier reference, lexical scoping
 - Operators: `+ - * / % **`, comparisons (`< <= > >= == != === !==`), logical (`&& ||`),
-  unary (`- + ! typeof`), ternary `?:`, grouping, JS `+` string concatenation
-- Functions: declarations, expressions, arrow functions, calls, `return`, closures, recursion
-- Statements: expression statements, `if`/`else`, `while`, blocks; program returns the
-  completion value (what `JSEvaluateScript` hands back)
+  unary (`- + ! typeof`), `++`/`--` (prefix & postfix), ternary `?:`, `instanceof`, grouping,
+  member access (`.x`, `[expr]`), JS `+` string concatenation
+- Functions: declarations, expressions, arrow functions, calls, method calls (with `this`),
+  `return`, closures, recursion; `new`, user constructors, and the `Error`-family builtins
+- Objects/arrays: property get/set, array index/`length`, `push`/`pop`, comma-join `toString`
+- Statements: expression statements, `if`/`else`, `while`, `for`, `break`/`continue`,
+  `throw`/`try`/`catch`/`finally`, blocks; the program returns the completion value (what
+  `JSEvaluateScript` hands back)
 
 ## Architecture
 
@@ -80,12 +115,15 @@ source ─► lexer ─► parser (Pratt) ─► AST ─► tree-walk interprete
 ## Build & test
 
 ```sh
-zig build              # builds libzig-js.a (the JSC drop-in)
-zig build test         # runs unit + C-API tests (23/23)
-zig build conformance  # runs the test262-style suite, prints pass % (18/18)
+zig build                       # builds libzig-js.a (the JSC drop-in)
+zig build test                  # runs unit + C-API tests (33/33)
+zig build conformance           # runs the always-green smoke suite (33/33)
+zig build test262               # runs the real WebKit test262 corpus, prints pass %
+zig build test262 -Dtest262=DIR # …with an explicit corpus root
 ```
 
-Requires Zig **0.17.0-dev**.
+`zig build test262` defaults its corpus root to `../../WebKit/JSTests/test262` (the sibling
+WebKit checkout) and skips cleanly if it isn't present. Requires Zig **0.17.0-dev**.
 
 ## License
 
