@@ -59,6 +59,18 @@ pub const Object = struct {
             self.js_func != null or self.error_ctor != null;
     }
 
+    /// Own named property keys in insertion order (for `for-in` / enumeration).
+    pub fn ownKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var s = self.shape;
+        while (s) |sh| {
+            if (sh.name) |n| try list.append(arena, n);
+            s = sh.parent;
+        }
+        std.mem.reverse([]const u8, list.items); // chain is newest-first → insertion order
+        return list.items;
+    }
+
     /// Read an own named property, or null if absent. No allocation.
     pub fn getOwn(self: *const Object, name: []const u8) ?Value {
         const sh = self.shape orelse return null;

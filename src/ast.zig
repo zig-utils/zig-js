@@ -107,6 +107,10 @@ pub const Node = union(enum) {
     if_stmt: struct { cond: *Node, consequent: *Node, alternate: ?*Node },
     while_stmt: struct { cond: *Node, body: *Node },
     for_stmt: struct { init: ?*Node, cond: ?*Node, update: ?*Node, body: *Node },
+    /// `for (decl_kind name of/in iterable) body`. `decl_kind` null means the
+    /// binding is an existing variable (assigned, not declared). `is_of` picks
+    /// `for-of` (values) vs `for-in` (keys).
+    for_in: struct { decl_kind: ?DeclKind, name: []const u8, iterable: *Node, body: *Node, is_of: bool },
     switch_stmt: struct { disc: *Node, cases: []SwitchCase },
     program: []*Node,
 };

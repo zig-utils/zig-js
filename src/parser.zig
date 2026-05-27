@@ -159,6 +159,40 @@ pub const Parser = struct {
     fn parseFor(self: *Parser) ParseError!*Node {
         _ = self.advance(); // for
         try self.expect(.lparen);
+
+        // Detect `for (... in/of ...)`. Save position so we can fall back to a
+        // classic `for (init; cond; update)` if it isn't an iteration form.
+        const save = self.pos;
+        var decl_kind: ?ast.DeclKind = null;
+        if (isKeyword(self.cur(), "var")) {
+            decl_kind = .@"var";
+            _ = self.advance();
+        } else if (isKeyword(self.cur(), "let")) {
+            decl_kind = .let;
+            _ = self.advance();
+        } else if (isKeyword(self.cur(), "const")) {
+            decl_kind = .@"const";
+            _ = self.advance();
+        }
+        if (self.check(.identifier)) {
+            const next = self.tokens[@min(self.pos + 1, self.tokens.len - 1)];
+            if (isKeyword(next, "in") or isKeyword(next, "of")) {
+                const name = self.advance().text;
+                const is_of = isKeyword(self.advance(), "of"); // consume in/of
+                const iterable = try self.parseAssignment();
+                try self.expect(.rparen);
+                const body = try self.parseStatement();
+                return self.alloc(.{ .for_in = .{
+                    .decl_kind = decl_kind,
+                    .name = name,
+                    .iterable = iterable,
+                    .body = body,
+                    .is_of = is_of,
+                } });
+            }
+        }
+        self.pos = save; // not an iteration form — rewind and parse a classic for
+
         var init_node: ?*Node = null;
         if (self.match(.semicolon)) {
             // empty initializer

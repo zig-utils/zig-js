@@ -204,7 +204,67 @@ pub const Interpreter = struct {
             .while_stmt => |s| try self.evalWhile(s.cond, s.body),
             .for_stmt => |f| try self.evalFor(f.init, f.cond, f.update, f.body),
             .switch_stmt => |s| try self.evalSwitch(s.disc, s.cases),
+            .for_in => |f| try self.evalForInOf(f.decl_kind, f.name, f.iterable, f.body, f.is_of),
         };
+    }
+
+    /// `for-of` (values of arrays/strings) and `for-in` (own keys of objects /
+    /// indices of arrays). Each iteration binds the loop variable then runs the
+    /// body, honoring break/continue/return.
+    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, name: []const u8, iterable: *Node, body: *Node, is_of: bool) EvalError!Value {
+        const iter = try self.eval(iterable);
+        var last: Value = .undefined;
+        if (is_of) {
+            switch (iter) {
+                .object => |o| {
+                    if (!o.is_array) return self.throwError("TypeError", "value is not iterable");
+                    var i: usize = 0;
+                    while (i < o.elements.items.len) : (i += 1) {
+                        try self.bindLoopVar(decl_kind, name, o.elements.items[i]);
+                        last = try self.eval(body);
+                        if (self.loopSignal()) |stop| if (stop) break;
+                    }
+                },
+                .string => |s| {
+                    for (s) |ch| {
+                        const one = try self.arena.dupe(u8, &.{ch});
+                        try self.bindLoopVar(decl_kind, name, .{ .string = one });
+                        last = try self.eval(body);
+                        if (self.loopSignal()) |stop| if (stop) break;
+                    }
+                },
+                else => return self.throwError("TypeError", "value is not iterable"),
+            }
+        } else {
+            // for-in: enumerate keys (skip null/undefined per spec).
+            switch (iter) {
+                .object => |o| {
+                    if (o.is_array) {
+                        var i: usize = 0;
+                        while (i < o.elements.items.len) : (i += 1) {
+                            const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                            try self.bindLoopVar(decl_kind, name, .{ .string = key });
+                            last = try self.eval(body);
+                            if (self.loopSignal()) |stop| if (stop) break;
+                        }
+                    } else {
+                        const keys = try o.ownKeys(self.arena);
+                        for (keys) |k| {
+                            try self.bindLoopVar(decl_kind, name, .{ .string = k });
+                            last = try self.eval(body);
+                            if (self.loopSignal()) |stop| if (stop) break;
+                        }
+                    }
+                },
+                .undefined, .null => {}, // iterating null/undefined is a no-op
+                else => {},
+            }
+        }
+        return last;
+    }
+
+    fn bindLoopVar(self: *Interpreter, decl_kind: ?ast.DeclKind, name: []const u8, v: Value) EvalError!void {
+        if (decl_kind != null) try self.env.put(name, v) else try self.env.assign(name, v);
     }
 
     /// `switch`: evaluate the discriminant, find the first strictly-equal `case`
@@ -941,6 +1001,37 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter for-of and for-in" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // for-of over an array
+    try std.testing.expectEqual(@as(f64, 60), (try evalSource(a,
+        \\let s = 0;
+        \\for (let v of [10, 20, 30]) { s = s + v; }
+        \\s
+    )).number);
+    // for-of over a string (concatenate chars)
+    try std.testing.expectEqualStrings("abc", (try evalSource(a,
+        \\let r = '';
+        \\for (let c of 'abc') { r = r + c; }
+        \\r
+    )).string);
+    // for-in over object keys
+    try std.testing.expectEqualStrings("a,b,c", (try evalSource(a,
+        \\let o = { a: 1, b: 2, c: 3 };
+        \\let r = [];
+        \\for (let k in o) { r.push(k); }
+        \\'' + r
+    )).string);
+    // break inside for-of
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a,
+        \\let n = 0;
+        \\for (let v of [1, 2, 3, 4, 5]) { if (v === 3) { break; } n = v; }
+        \\n + 1
+    )).number);
 }
 
 test "interpreter template literals" {
