@@ -26,6 +26,12 @@ pub const Environment = @import("interpreter.zig").Environment;
 pub const Lexer = @import("lexer.zig").Lexer;
 pub const Parser = @import("parser.zig").Parser;
 pub const JsString = @import("jsstring.zig").JsString;
+pub const installGlobals = @import("interpreter.zig").installGlobals;
+
+// Bytecode pipeline (tier-1 VM): compiler lowers the AST, vm executes it.
+pub const bytecode = @import("bytecode.zig");
+pub const Compiler = @import("compiler.zig").Compiler;
+pub const vm = @import("vm.zig");
 
 // JavaScriptCore C-API drop-in (re-exported for documentation / direct use).
 pub const c_api = @import("c_api.zig");

@@ -198,7 +198,7 @@ pub const Compiler = struct {
                     .neq => .neq,
                     .eq_strict => .eq_strict,
                     .neq_strict => .neq_strict,
-                    .instanceof => return error.Unsupported,
+                    .instanceof => .instance_of,
                 };
                 try self.compileExpr(b.left);
                 try self.compileExpr(b.right);
@@ -212,11 +212,25 @@ pub const Compiler = struct {
                 try self.compileExpr(l.right);
                 self.chunk.patchToHere(short);
             },
-            .assign => |a| {
-                if (a.target.* != .identifier) return error.Unsupported; // member assign → fallback
-                try self.compileExpr(a.value);
-                const ni = try self.chunk.addName(a.target.identifier);
-                _ = try self.chunk.emit(.store_var, ni);
+            .assign => |a| switch (a.target.*) {
+                .identifier => |name| {
+                    try self.compileExpr(a.value);
+                    const ni = try self.chunk.addName(name);
+                    _ = try self.chunk.emit(.store_var, ni);
+                },
+                .member => |m| {
+                    try self.compileExpr(m.object);
+                    if (m.computed) |ce| {
+                        try self.compileExpr(ce);
+                        try self.compileExpr(a.value);
+                        _ = try self.chunk.emit(.set_index, 0);
+                    } else {
+                        try self.compileExpr(a.value);
+                        const ni = try self.chunk.addName(m.property);
+                        _ = try self.chunk.emit(.set_prop, ni);
+                    }
+                },
+                else => return error.Unsupported,
             },
             .conditional => |c| {
                 try self.compileExpr(c.cond);
@@ -232,14 +246,77 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.make_closure, fi);
             },
             .call => |c| {
-                // Method calls (callee is a member) need `this` binding → fallback.
-                if (c.callee.* == .member) return error.Unsupported;
-                try self.compileExpr(c.callee);
-                for (c.args) |arg| try self.compileExpr(arg);
-                _ = try self.chunk.emit(.call, @intCast(c.args.len));
+                if (c.callee.* == .member and c.callee.member.computed == null) {
+                    // `recv.name(args)`: bind `this = recv` at the call_method site.
+                    const m = c.callee.member;
+                    try self.compileExpr(m.object);
+                    for (c.args) |arg| try self.compileExpr(arg);
+                    const ni = try self.chunk.addName(m.property);
+                    _ = try self.chunk.emitAB(.call_method, ni, @intCast(c.args.len));
+                } else if (c.callee.* == .member) {
+                    return error.Unsupported; // computed method call → fallback
+                } else {
+                    try self.compileExpr(c.callee);
+                    for (c.args) |arg| try self.compileExpr(arg);
+                    _ = try self.chunk.emit(.call, @intCast(c.args.len));
+                }
             },
-            // this / update / member / new / object & array literals → fallback.
+            .this_expr => _ = try self.chunk.emit(.load_this, 0),
+            .member => |m| {
+                try self.compileExpr(m.object);
+                if (m.computed) |ce| {
+                    try self.compileExpr(ce);
+                    _ = try self.chunk.emit(.get_index, 0);
+                } else {
+                    const ni = try self.chunk.addName(m.property);
+                    _ = try self.chunk.emit(.get_prop, ni);
+                }
+            },
+            .new_expr => |n| {
+                try self.compileExpr(n.callee);
+                for (n.args) |arg| try self.compileExpr(arg);
+                _ = try self.chunk.emit(.new_call, @intCast(n.args.len));
+            },
+            .object_lit => |props| {
+                _ = try self.chunk.emit(.new_object, 0);
+                for (props) |p| {
+                    try self.compileExpr(p.value);
+                    const ni = try self.chunk.addName(p.key);
+                    _ = try self.chunk.emit(.init_prop, ni);
+                }
+            },
+            .array_lit => |elems| {
+                _ = try self.chunk.emit(.new_array, 0);
+                for (elems) |e| {
+                    try self.compileExpr(e);
+                    _ = try self.chunk.emit(.array_append, 0);
+                }
+            },
+            .update => |u| try self.compileUpdate(u.inc, u.prefix, u.target),
+            // Statement-only nodes never appear in expression position.
             else => return error.Unsupported,
+        }
+    }
+
+    /// `++x` / `x++` on an identifier (member targets fall back). Prefix yields
+    /// the new value, postfix the old.
+    fn compileUpdate(self: *Compiler, inc: bool, prefix: bool, target: *Node) CompileError!void {
+        if (target.* != .identifier) return error.Unsupported;
+        const ni = try self.chunk.addName(target.identifier);
+        const one = try self.chunk.addConst(.{ .number = 1 });
+        const delta: bc.Op = if (inc) .add else .sub;
+        if (prefix) {
+            _ = try self.chunk.emit(.load_var, ni);
+            _ = try self.chunk.emit(.load_const, one);
+            _ = try self.chunk.emit(delta, 0);
+            _ = try self.chunk.emit(.store_var, ni); // leaves the new value
+        } else {
+            _ = try self.chunk.emit(.load_var, ni);
+            _ = try self.chunk.emit(.dup, 0); // keep the old value
+            _ = try self.chunk.emit(.load_const, one);
+            _ = try self.chunk.emit(delta, 0);
+            _ = try self.chunk.emit(.store_var, ni);
+            _ = try self.chunk.emit(.pop, 0); // discard the new value, leave the old
         }
     }
 

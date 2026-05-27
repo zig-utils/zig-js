@@ -61,18 +61,36 @@ pub const Op = enum(u8) {
     jump_if_true_peek, // peek cond (leave on stack); jump when truthy  [for ||]
     jump_if_false_peek, // peek cond (leave on stack); jump when falsy   [for &&]
 
+    // --- objects, arrays, members ---
+    load_this, // push the current `this`
+    new_object, // push a fresh {}
+    new_array, // push a fresh []
+    init_prop, // operand a: name index; pop value, set on object at top, leave object
+    array_append, // pop value, append to the array at top, leave array
+    get_prop, // operand a: name index; pop object -> push object[name]
+    get_index, // pop key, pop object -> push object[key]
+    set_prop, // operand a: name index; pop value, pop object -> push value (after set)
+    set_index, // pop value, pop key, pop object -> push value (after set)
+    instance_of, // pop rhs, pop lhs -> push (lhs instanceof rhs)
+
     // --- functions ---
     make_closure, // operand: fn-template index; push a Function value capturing env
-    call, // operand: argc; stack: callee, arg0..argN-1 -> push result
+    call, // operand a: argc; stack: callee, arg0..argN-1 -> push result
+    call_method, // operand a: name index, b: argc; stack: recv, args... -> push result
+    new_call, // operand a: argc; stack: callee, args... -> push constructed object
     ret, // pop -> return value, end frame
     ret_undef, // return undefined, end frame
 
     halt, // end program; result is the accumulator
 };
 
+/// A single instruction. `a` is the primary operand (const/name/fn index, jump
+/// target, or argc); `b` is a secondary operand used only by `call_method`
+/// (which needs both a method-name index and an argument count).
 pub const Inst = struct {
     op: Op,
     a: u32 = 0,
+    b: u32 = 0,
 };
 
 /// A compiled function prototype referenced by `make_closure`. Carries the
@@ -103,6 +121,13 @@ pub const Chunk = struct {
     pub fn emit(self: *Chunk, op: Op, a: u32) std.mem.Allocator.Error!usize {
         const idx = self.code.items.len;
         try self.code.append(self.arena, .{ .op = op, .a = a });
+        return idx;
+    }
+
+    /// Emit an instruction with both operands (only `call_method` needs `b`).
+    pub fn emitAB(self: *Chunk, op: Op, a: u32, b: u32) std.mem.Allocator.Error!usize {
+        const idx = self.code.items.len;
+        try self.code.append(self.arena, .{ .op = op, .a = a, .b = b });
         return idx;
     }
 

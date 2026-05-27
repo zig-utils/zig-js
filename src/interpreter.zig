@@ -285,10 +285,8 @@ pub const Interpreter = struct {
             const m = callee_node.member;
             const recv = try self.eval(m.object);
             const key = try self.memberKey(m.property, m.computed);
-            if (try self.builtinMethod(recv, key, arg_nodes)) |result| return result;
-            const method = try self.getProperty(recv, key);
             const args = try self.evalArgs(arg_nodes);
-            return self.callValueWithThis(method, args, recv);
+            return self.callMethod(recv, key, args);
         }
         const callee = try self.eval(callee_node);
         const args = try self.evalArgs(arg_nodes);
@@ -379,18 +377,31 @@ pub const Interpreter = struct {
         return static;
     }
 
-    fn evalObjectLit(self: *Interpreter, props: []ast.Property) EvalError!Value {
+    /// Allocate a fresh plain object. The single creation point so later tiers
+    /// (object shapes) have one seam to hook.
+    pub fn newObject(self: *Interpreter) EvalError!Value {
         const obj = try self.arena.create(value.Object);
         obj.* = .{};
-        for (props) |p| try self.setProp(obj, p.key, try self.eval(p.value));
         return .{ .object = obj };
     }
 
-    fn evalArrayLit(self: *Interpreter, elems: []*Node) EvalError!Value {
+    /// Allocate a fresh array object.
+    pub fn newArray(self: *Interpreter) EvalError!Value {
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .is_array = true };
-        for (elems) |en| try obj.elements.append(self.arena, try self.eval(en));
         return .{ .object = obj };
+    }
+
+    fn evalObjectLit(self: *Interpreter, props: []ast.Property) EvalError!Value {
+        const v = try self.newObject();
+        for (props) |p| try self.setProp(v.object, p.key, try self.eval(p.value));
+        return v;
+    }
+
+    fn evalArrayLit(self: *Interpreter, elems: []*Node) EvalError!Value {
+        const v = try self.newArray();
+        for (elems) |en| try v.object.elements.append(self.arena, try self.eval(en));
+        return v;
     }
 
     /// `index`-as-string -> array element index, or null if not an integer.
@@ -400,7 +411,7 @@ pub const Interpreter = struct {
         return std.fmt.parseInt(usize, key, 10) catch null;
     }
 
-    fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
+    pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         switch (recv) {
             .object => |o| {
                 if (o.is_array) {
@@ -430,35 +441,50 @@ pub const Interpreter = struct {
             .member => |m| {
                 const recv = try self.eval(m.object);
                 const key = try self.memberKey(m.property, m.computed);
-                if (recv != .object) return self.throwError("TypeError", "cannot set property of non-object");
-                const o = recv.object;
-                if (o.is_array) {
-                    if (arrayIndex(key)) |i| {
-                        while (o.elements.items.len <= i) try o.elements.append(self.arena, .undefined);
-                        o.elements.items[i] = v;
-                        return;
-                    }
-                }
-                try self.setProp(o, key, v);
+                try self.setMember(recv, key, v);
             },
             else => return self.throwError("ReferenceError", "invalid assignment target"),
         }
     }
 
+    /// Assign `recv[key] = v`. Arrays route integer keys to the dense element
+    /// store (growing with holes); everything else is a named property. Shared
+    /// by the tree-walker and the VM.
+    pub fn setMember(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
+        if (recv != .object) return self.throwError("TypeError", "cannot set property of non-object");
+        const o = recv.object;
+        if (o.is_array) {
+            if (arrayIndex(key)) |i| {
+                while (o.elements.items.len <= i) try o.elements.append(self.arena, .undefined);
+                o.elements.items[i] = v;
+                return;
+            }
+        }
+        try self.setProp(o, key, v);
+    }
+
+    /// Call `recv[name](args)` with `this = recv`. Dispatches the builtin
+    /// methods that aren't stored as own properties first. Shared by the
+    /// tree-walker's `evalCall` and the VM's `call_method`.
+    pub fn callMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!Value {
+        if (try self.arrayBuiltin(recv, name, args)) |result| return result;
+        const method = try self.getProperty(recv, name);
+        return self.callValueWithThis(method, args, recv);
+    }
+
     /// Dispatch the small set of builtin methods (`Array.prototype.push/pop`)
-    /// that aren't stored as own properties. Returns null when `key` is not a
-    /// recognized builtin for `recv`, so the caller falls back to a normal
-    /// property lookup + call.
-    fn builtinMethod(self: *Interpreter, recv: Value, key: []const u8, arg_nodes: []*Node) EvalError!?Value {
+    /// that aren't stored as own properties. Returns null when `name` is not a
+    /// recognized builtin for `recv`, so the caller falls back to a property
+    /// lookup + call.
+    pub fn arrayBuiltin(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
         if (recv != .object or !recv.object.is_array) return null;
         const o = recv.object;
-        if (o.properties.get(key) != null) return null; // own property shadows builtin
-        if (std.mem.eql(u8, key, "push")) {
-            const args = try self.evalArgs(arg_nodes);
+        if (o.properties.get(name) != null) return null; // own property shadows builtin
+        if (std.mem.eql(u8, name, "push")) {
             for (args) |a| try o.elements.append(self.arena, a);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
         }
-        if (std.mem.eql(u8, key, "pop")) {
+        if (std.mem.eql(u8, name, "pop")) {
             if (o.elements.items.len == 0) return Value.undefined;
             return o.elements.pop() orelse Value.undefined;
         }
@@ -556,7 +582,7 @@ pub const Interpreter = struct {
     /// `new F()` carry `ctor_ref` pointing at F's object, and builtin error
     /// constructors carry `error_ctor`; this checks those links rather than a
     /// full prototype chain.
-    fn instanceOf(self: *Interpreter, l: Value, r: Value) EvalError!bool {
+    pub fn instanceOf(self: *Interpreter, l: Value, r: Value) EvalError!bool {
         if (r != .object or !r.object.isCallableObject())
             return self.throwError("TypeError", "Right-hand side of 'instanceof' is not callable");
         if (l != .object) return false;
