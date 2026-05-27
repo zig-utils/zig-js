@@ -1394,7 +1394,84 @@ pub const Interpreter = struct {
             }
             return acc;
         }
+        if (eq(name, "at")) {
+            const fl = @trunc(arg0(args).toNumber());
+            const idx: i64 = if (fl < 0) @as(i64, @intCast(items.len)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
+            if (idx < 0 or idx >= items.len) return Value.undefined;
+            return items[@intCast(idx)];
+        }
+        if (eq(name, "lastIndexOf")) {
+            const target = arg0(args);
+            var i = items.len;
+            while (i > 0) {
+                i -= 1;
+                if (value.strictEquals(items[i], target)) return Value{ .number = @floatFromInt(i) };
+            }
+            return Value{ .number = -1 };
+        }
+        if (eq(name, "findIndex")) {
+            const cb = arg0(args);
+            for (items, 0..) |el, i| {
+                if ((try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                    return Value{ .number = @floatFromInt(i) };
+            }
+            return Value{ .number = -1 };
+        }
+        if (eq(name, "fill")) {
+            const v = arg0(args);
+            const start = relIndex(arg(args, 1), items.len, 0);
+            const end = relIndex(arg(args, 2), items.len, @floatFromInt(items.len));
+            var i = start;
+            while (i < end and i < items.len) : (i += 1) items[i] = v;
+            return Value{ .object = o };
+        }
+        if (eq(name, "flat")) {
+            const depth: f64 = if (args.len > 0 and args[0] != .undefined) arg0(args).toNumber() else 1;
+            const result = try self.newArray();
+            try self.flattenInto(result.object, items, depth);
+            return result;
+        }
+        if (eq(name, "sort")) {
+            const cmp = arg0(args);
+            // Insertion sort so the comparator (which may throw) is `try`-able.
+            var i: usize = 1;
+            while (i < items.len) : (i += 1) {
+                const key = items[i];
+                var j = i;
+                while (j > 0 and (try self.sortCompare(items[j - 1], key, cmp)) > 0) : (j -= 1) {
+                    items[j] = items[j - 1];
+                }
+                items[j] = key;
+            }
+            return Value{ .object = o };
+        }
         return null;
+    }
+
+    fn flattenInto(self: *Interpreter, dst: *value.Object, items: []const Value, depth: f64) EvalError!void {
+        for (items) |el| {
+            if (depth > 0 and el == .object and el.object.is_array) {
+                try self.flattenInto(dst, el.object.elements.items, depth - 1);
+            } else {
+                try dst.elements.append(self.arena, el);
+            }
+        }
+    }
+
+    /// Comparator for Array.prototype.sort: >0 if `a` sorts after `b`.
+    fn sortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f64 {
+        if (cmp == .object and cmp.object.isCallableObject()) {
+            const r = try self.callValue(cmp, &.{ a, b });
+            const n = r.toNumber();
+            return if (std.math.isNan(n)) 0 else n;
+        }
+        const as = try a.toString(self.arena);
+        const bs = try b.toString(self.arena);
+        return switch (std.mem.order(u8, as, bs)) {
+            .lt => -1,
+            .eq => 0,
+            .gt => 1,
+        };
     }
 
     fn numberMethod(self: *Interpreter, n: f64, name: []const u8, args: []const Value) EvalError!?Value {
@@ -1504,6 +1581,70 @@ pub const Interpreter = struct {
             var it = std.mem.splitSequence(u8, s, sep);
             while (it.next()) |part| try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, part) });
             return result;
+        }
+        if (eq(name, "at")) {
+            const fl = @trunc(arg0(args).toNumber());
+            const idx: i64 = if (fl < 0) @as(i64, @intCast(s.len)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
+            if (idx < 0 or idx >= s.len) return Value.undefined;
+            return Value{ .string = try self.arena.dupe(u8, s[@intCast(idx) .. @as(usize, @intCast(idx)) + 1]) };
+        }
+        if (eq(name, "trimStart")) {
+            var a: usize = 0;
+            while (a < s.len and (s[a] == ' ' or s[a] == '\t' or s[a] == '\r' or s[a] == '\n')) a += 1;
+            return Value{ .string = s[a..] };
+        }
+        if (eq(name, "trimEnd")) {
+            var e: usize = s.len;
+            while (e > 0 and (s[e - 1] == ' ' or s[e - 1] == '\t' or s[e - 1] == '\r' or s[e - 1] == '\n')) e -= 1;
+            return Value{ .string = s[0..e] };
+        }
+        if (eq(name, "padStart") or eq(name, "padEnd")) {
+            const target: usize = @intFromFloat(@max(0, arg0(args).toNumber()));
+            if (s.len >= target) return Value{ .string = try self.arena.dupe(u8, s) };
+            const pad = if (args.len > 1 and args[1] != .undefined) try args[1].toString(self.arena) else " ";
+            if (pad.len == 0) return Value{ .string = try self.arena.dupe(u8, s) };
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            const fill_len = target - s.len;
+            if (eq(name, "padEnd")) try buf.appendSlice(self.arena, s);
+            var k: usize = 0;
+            while (k < fill_len) : (k += 1) try buf.append(self.arena, pad[k % pad.len]);
+            if (eq(name, "padStart")) try buf.appendSlice(self.arena, s);
+            return Value{ .string = try buf.toOwnedSlice(self.arena) };
+        }
+        if (eq(name, "replace") or eq(name, "replaceAll")) {
+            const all = eq(name, "replaceAll");
+            const repl = try arg(args, 1).toString(self.arena);
+            // Regex pattern: use zig-regex; honor the `g` flag (and replaceAll).
+            if (arg0(args) == .object and arg0(args).object.is_regex) {
+                const ro = arg0(args).object;
+                const g = all or ((ro.getOwn("global") orelse Value{ .boolean = false }).boolean);
+                var re = try self.compileRegex(ro);
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                var rest = s;
+                while (re.find(rest) catch null) |m| {
+                    try buf.appendSlice(self.arena, rest[0..m.start]);
+                    try buf.appendSlice(self.arena, repl);
+                    const adv = if (m.end > m.start) m.end else m.start + 1;
+                    if (adv > rest.len) break;
+                    if (m.end == m.start and m.start < rest.len) try buf.append(self.arena, rest[m.start]);
+                    rest = rest[adv..];
+                    if (!g) break;
+                }
+                try buf.appendSlice(self.arena, rest);
+                return Value{ .string = try buf.toOwnedSlice(self.arena) };
+            }
+            const pat = try arg0(args).toString(self.arena);
+            if (pat.len == 0) return Value{ .string = try self.arena.dupe(u8, s) };
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            var rest = s;
+            while (std.mem.indexOf(u8, rest, pat)) |idx| {
+                try buf.appendSlice(self.arena, rest[0..idx]);
+                try buf.appendSlice(self.arena, repl);
+                rest = rest[idx + pat.len ..];
+                if (!all) break;
+            }
+            try buf.appendSlice(self.arena, rest);
+            return Value{ .string = try buf.toOwnedSlice(self.arena) };
         }
         return null;
     }
@@ -2113,6 +2254,24 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter Array.sort/at/fill/flat and String.replace/pad/at" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("1,2,3", (try evalSource(a, "'' + [3, 1, 2].sort()")).string);
+    try std.testing.expectEqualStrings("1,2,3,10", (try evalSource(a, "'' + [10, 1, 3, 2].sort(function (x, y) { return x - y; })")).string);
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "[1, 2, 3].at(-1)")).number);
+    try std.testing.expectEqualStrings("9,9,9", (try evalSource(a, "'' + [0, 0, 0].fill(9)")).string);
+    try std.testing.expectEqualStrings("1,2,3,4", (try evalSource(a, "'' + [1, [2, [3]], 4].flat(2)")).string);
+    // String.replace (string + regex), replaceAll, pad, at
+    try std.testing.expectEqualStrings("a-b-c", (try evalSource(a, "'a b c'.replaceAll(' ', '-')")).string);
+    try std.testing.expectEqualStrings("aXc", (try evalSource(a, "'abc'.replace(/b/, 'X')")).string);
+    try std.testing.expectEqualStrings("X-X", (try evalSource(a, "'a-a'.replace(/a/g, 'X')")).string);
+    try std.testing.expectEqualStrings("007", (try evalSource(a, "'7'.padStart(3, '0')")).string);
+    try std.testing.expectEqualStrings("c", (try evalSource(a, "'abc'.at(-1)")).string);
+    try std.testing.expectEqualStrings("hi", (try evalSource(a, "'  hi'.trimStart()")).string);
 }
 
 test "interpreter Array.prototype methods" {
