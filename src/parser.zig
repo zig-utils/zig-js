@@ -106,6 +106,14 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "do")) return self.parseDoWhile();
             if (std.mem.eql(u8, t.text, "for")) return self.parseFor();
             if (std.mem.eql(u8, t.text, "switch")) return self.parseSwitch();
+            if (std.mem.eql(u8, t.text, "with")) {
+                _ = self.advance();
+                try self.expect(.lparen);
+                const obj = try self.parseExpression();
+                try self.expect(.rparen);
+                const body = try self.parseStatement();
+                return self.alloc(.{ .with_stmt = .{ .obj = obj, .body = body } });
+            }
             if (std.mem.eql(u8, t.text, "function")) return self.parseFunctionDecl();
             if (std.mem.eql(u8, t.text, "return")) return self.parseReturn();
             if (std.mem.eql(u8, t.text, "throw")) return self.parseThrow();

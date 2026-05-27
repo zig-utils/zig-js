@@ -191,5 +191,6 @@ pub const Node = union(enum) {
     /// `for-of` (values) vs `for-in` (keys).
     for_in: struct { decl_kind: ?DeclKind, name: []const u8, iterable: *Node, body: *Node, is_of: bool },
     switch_stmt: struct { disc: *Node, cases: []SwitchCase },
+    with_stmt: struct { obj: *Node, body: *Node },
     program: []*Node,
 };

@@ -112,6 +112,9 @@ pub const Interpreter = struct {
     /// constructor of the executing derived constructor (for `super(...)`).
     home_object: ?*value.Object = null,
     super_ctor: ?*value.Object = null,
+    /// Active `with` scope objects (innermost last); bare identifiers consult
+    /// these before the lexical environment.
+    with_stack: std.ArrayListUnmanaged(*value.Object) = .empty,
 
     // ---- exception helpers ------------------------------------------------
 
@@ -144,7 +147,17 @@ pub const Interpreter = struct {
             .null_lit => .null,
             .undefined_lit => .undefined,
             .this_expr => self.this_value,
-            .identifier => |name| self.env.get(name) orelse return self.throwError("ReferenceError", name),
+            .identifier => |name| blk: {
+                // `with` scope objects take precedence over the lexical env.
+                if (self.with_stack.items.len > 0) {
+                    var i = self.with_stack.items.len;
+                    while (i > 0) : (i -= 1) {
+                        const o = self.with_stack.items[i - 1];
+                        if (hasProperty(o, name)) break :blk try self.getProperty(.{ .object = o }, name);
+                    }
+                }
+                break :blk self.env.get(name) orelse return self.throwError("ReferenceError", name);
+            },
 
             .unary => |u| try self.evalUnary(u.op, u.operand),
             .update => |u| try self.evalUpdate(u.inc, u.prefix, u.target),
@@ -264,6 +277,14 @@ pub const Interpreter = struct {
             else
                 .undefined,
 
+            .with_stmt => |w| blk: {
+                const obj = try self.eval(w.obj);
+                if (obj != .object) return self.throwError("TypeError", "with(non-object)");
+                try self.with_stack.append(self.arena, obj.object);
+                const result = self.eval(w.body);
+                _ = self.with_stack.pop();
+                break :blk try result;
+            },
             .while_stmt => |s| try self.evalWhile(s.cond, s.body),
             .do_while_stmt => |s| blk: {
                 const my_label = self.takeLabel();
@@ -1033,7 +1054,17 @@ pub const Interpreter = struct {
 
     fn assignTo(self: *Interpreter, target: *Node, v: Value) EvalError!void {
         switch (target.*) {
-            .identifier => |name| try self.env.assign(name, v),
+            .identifier => |name| {
+                // Assigning a name found on a `with` object writes to that object.
+                if (self.with_stack.items.len > 0) {
+                    var i = self.with_stack.items.len;
+                    while (i > 0) : (i -= 1) {
+                        const o = self.with_stack.items[i - 1];
+                        if (hasProperty(o, name)) return self.setMember(.{ .object = o }, name, v);
+                    }
+                }
+                try self.env.assign(name, v);
+            },
             .member => |m| {
                 const recv = try self.eval(m.object);
                 const key = try self.memberKey(m.property, m.computed);
@@ -1598,6 +1629,17 @@ fn lessThan(a: Value, b: Value) EvalError!bool {
     return x < y;
 }
 
+/// Does `o` (own or via its prototype chain) have a data or accessor property
+/// named `name`? Used by `with`-scope identifier resolution.
+fn hasProperty(o: *value.Object, name: []const u8) bool {
+    var cur: ?*value.Object = o;
+    while (cur) |c| {
+        if (c.getOwn(name) != null or c.getAccessor(name) != null) return true;
+        cur = c.proto;
+    }
+    return false;
+}
+
 fn arg0(args: []const Value) Value {
     return if (args.len > 0) args[0] else .undefined;
 }
@@ -2059,6 +2101,30 @@ test "interpreter classes (methods, static, instanceof, computed)" {
         \\  quad() { return this.dbl() * 2; }
         \\}
         \\(new Box(5)).quad()
+    )).number);
+}
+
+test "interpreter with statement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // reads resolve against the with object
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a,
+        \\let r = 0;
+        \\with ({ x: 3, y: 4 }) { r = x + y; }
+        \\r
+    )).number);
+    // writes to a name on the with object update the object
+    try std.testing.expectEqual(@as(f64, 9), (try evalSource(a,
+        \\let o = { v: 1 };
+        \\with (o) { v = 9; }
+        \\o.v
+    )).number);
+    // names not on the object fall through to the outer scope
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a,
+        \\let outer = 5;
+        \\with ({ x: 1 }) { x = outer; }
+        \\outer
     )).number);
 }
 
