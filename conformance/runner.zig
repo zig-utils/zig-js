@@ -19,7 +19,9 @@ const Value = js.Value;
 var failed: bool = false;
 var fail_msg: []const u8 = "";
 
-fn jsAssert(args: []const Value) Value {
+fn jsAssert(ctx: *anyopaque, this: Value, args: []const Value) js.HostError!Value {
+    _ = ctx;
+    _ = this;
     if (args.len < 1 or !args[0].toBoolean()) {
         failed = true;
         fail_msg = if (args.len >= 2 and args[1] == .string) args[1].string else "assertion failed";
@@ -27,7 +29,9 @@ fn jsAssert(args: []const Value) Value {
     return .undefined;
 }
 
-fn jsAssertEq(args: []const Value) Value {
+fn jsAssertEq(ctx: *anyopaque, this: Value, args: []const Value) js.HostError!Value {
+    _ = ctx;
+    _ = this;
     const ok = args.len >= 2 and js.strictEquals(args[0], args[1]);
     if (!ok) {
         failed = true;

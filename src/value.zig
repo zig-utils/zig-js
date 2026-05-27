@@ -14,11 +14,17 @@ pub const HostCallback = *const fn (
     exception: [*c]?*anyopaque,
 ) callconv(.c) ?*anyopaque;
 
+/// Error set a native builtin may return (mirrors the interpreter's EvalError;
+/// error values are global by name, so they coerce).
+pub const HostError = error{ OutOfMemory, Throw };
+
 /// A Zig-native function exposed to JS. Unlike `HostCallback` (the C-ABI JSC
 /// shape used across the FFI boundary), this is the in-process hook the
-/// interpreter can call directly with `Value` args — used for engine builtins
-/// and the conformance harness's `assert`.
-pub const NativeFn = *const fn (args: []const Value) Value;
+/// interpreter calls directly: `ctx` is the `*Interpreter` (type-erased to
+/// avoid an import cycle; cast it back), `this` is the receiver, and the native
+/// may allocate via the interpreter's arena and raise JS exceptions. Used for
+/// engine builtins and the conformance harness's `assert`.
+pub const NativeFn = *const fn (ctx: *anyopaque, this: Value, args: []const Value) HostError!Value;
 
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:

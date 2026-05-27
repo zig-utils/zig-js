@@ -41,7 +41,7 @@ pub const Context = struct {
             .global_object = global_obj,
             .root_shape = try Shape.createRoot(a),
         };
-        try interp.installGlobals(&self.env);
+        try interp.installGlobals(&self.env, self.root_shape);
         return self;
     }
 

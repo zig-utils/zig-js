@@ -372,8 +372,8 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     const prog = try parser.parseProgram();
     const chunk = try Compiler.compileProgram(arena, prog);
     var env = Environment{ .arena = arena };
-    try interp.installGlobals(&env);
     const root_shape = try @import("shape.zig").Shape.createRoot(arena);
+    try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape };
     return run(&machine, chunk, null);
 }

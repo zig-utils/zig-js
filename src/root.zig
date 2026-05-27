@@ -18,6 +18,7 @@ const std = @import("std");
 pub const Value = @import("value.zig").Value;
 pub const Object = @import("value.zig").Object;
 pub const NativeFn = @import("value.zig").NativeFn;
+pub const HostError = @import("value.zig").HostError;
 pub const strictEquals = @import("value.zig").strictEquals;
 pub const looseEquals = @import("value.zig").looseEquals;
 pub const Context = @import("context.zig").Context;
@@ -56,6 +57,7 @@ test {
     _ = @import("ast.zig");
     _ = @import("parser.zig");
     _ = @import("interpreter.zig");
+    _ = @import("builtins.zig");
     _ = @import("bytecode.zig");
     _ = @import("compiler.zig");
     _ = @import("vm.zig");

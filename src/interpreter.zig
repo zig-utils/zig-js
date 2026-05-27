@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const value = @import("value.zig");
 const bc = @import("bytecode.zig");
+const builtins = @import("builtins.zig");
 const Shape = @import("shape.zig").Shape;
 
 const Node = ast.Node;
@@ -563,7 +564,7 @@ pub const Interpreter = struct {
         if (callee != .object) return self.throwError("TypeError", "value is not a function");
         const obj = callee.object;
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
-        if (obj.native) |nf| return nf(args);
+        if (obj.native) |nf| return nf(@ptrCast(self), this_val, args);
         if (obj.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             return self.callFunction(func, args, this_val);
@@ -1034,9 +1035,10 @@ pub const Interpreter = struct {
 };
 
 /// Install the engine's global bindings into `env`: the `Error`-family
-/// constructors (as builtin `error_ctor` objects) plus `NaN`/`Infinity`. Called
-/// once per Context at creation, before any user code runs.
-pub fn installGlobals(env: *Environment) EvalError!void {
+/// constructors, `NaN`/`Infinity`/`undefined`, the `Math` and `Object`/`Array`
+/// namespaces, and the common global functions. `root_shape` backs the property
+/// stores of the namespace objects. Called once per Context, before user code.
+pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
         "Error",      "TypeError",  "RangeError", "ReferenceError",
@@ -1050,6 +1052,58 @@ pub fn installGlobals(env: *Environment) EvalError!void {
     try env.put("NaN", .{ .number = std.math.nan(f64) });
     try env.put("Infinity", .{ .number = std.math.inf(f64) });
     try env.put("undefined", .undefined);
+
+    // Global functions.
+    try defineGlobalFn(env, "parseInt", builtins.parseIntFn);
+    try defineGlobalFn(env, "parseFloat", builtins.parseFloatFn);
+    try defineGlobalFn(env, "isNaN", builtins.isNaNFn);
+    try defineGlobalFn(env, "isFinite", builtins.isFiniteFn);
+    try defineGlobalFn(env, "String", builtins.stringFn);
+    try defineGlobalFn(env, "Number", builtins.numberFn);
+    try defineGlobalFn(env, "Boolean", builtins.booleanFn);
+
+    // Math namespace.
+    const math_obj = try a.create(value.Object);
+    math_obj.* = .{};
+    try setNative(a, root_shape, math_obj, "floor", builtins.mathFloor);
+    try setNative(a, root_shape, math_obj, "ceil", builtins.mathCeil);
+    try setNative(a, root_shape, math_obj, "round", builtins.mathRound);
+    try setNative(a, root_shape, math_obj, "trunc", builtins.mathTrunc);
+    try setNative(a, root_shape, math_obj, "abs", builtins.mathAbs);
+    try setNative(a, root_shape, math_obj, "sqrt", builtins.mathSqrt);
+    try setNative(a, root_shape, math_obj, "sign", builtins.mathSign);
+    try setNative(a, root_shape, math_obj, "pow", builtins.mathPow);
+    try setNative(a, root_shape, math_obj, "max", builtins.mathMax);
+    try setNative(a, root_shape, math_obj, "min", builtins.mathMin);
+    try math_obj.setOwn(a, root_shape, "PI", .{ .number = std.math.pi });
+    try env.put("Math", .{ .object = math_obj });
+
+    // Object namespace.
+    const object_ns = try a.create(value.Object);
+    object_ns.* = .{};
+    try setNative(a, root_shape, object_ns, "keys", builtins.objectKeys);
+    try setNative(a, root_shape, object_ns, "values", builtins.objectValues);
+    try setNative(a, root_shape, object_ns, "assign", builtins.objectAssign);
+    try setNative(a, root_shape, object_ns, "freeze", builtins.identity1);
+    try env.put("Object", .{ .object = object_ns });
+
+    // Array namespace (Array.isArray; Array.prototype methods stay on arrays).
+    const array_ns = try a.create(value.Object);
+    array_ns.* = .{};
+    try setNative(a, root_shape, array_ns, "isArray", builtins.arrayIsArray);
+    try env.put("Array", .{ .object = array_ns });
+}
+
+fn defineGlobalFn(env: *Environment, name: []const u8, f: value.NativeFn) EvalError!void {
+    const o = try env.arena.create(value.Object);
+    o.* = .{ .native = f };
+    try env.put(name, .{ .object = o });
+}
+
+fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, f: value.NativeFn) EvalError!void {
+    const m = try a.create(value.Object);
+    m.* = .{ .native = f };
+    try obj.setOwn(a, root_shape, name, .{ .object = m });
 }
 
 /// Abstract Relational Comparison (subset): string<string is lexicographic,
@@ -1084,8 +1138,9 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     var parser = try Parser.init(arena, src);
     const prog = try parser.parseProgram();
     var env = Environment{ .arena = arena };
-    try installGlobals(&env);
-    var interp = Interpreter{ .arena = arena, .env = &env, .root_shape = try Shape.createRoot(arena) };
+    const root_shape = try Shape.createRoot(arena);
+    try installGlobals(&env, root_shape);
+    var interp = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape };
     return interp.eval(prog);
 }
 
@@ -1339,6 +1394,30 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter builtins: Math, Object, Array, globals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "Math.floor(3.7)")).number);
+    try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "Math.round(3.5)")).number);
+    try std.testing.expectEqual(@as(f64, 8), (try evalSource(a, "Math.pow(2, 3)")).number);
+    try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "Math.max(1, 9, 4)")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "Math.abs(-5)")).number);
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a, "parseInt('42px')")).number);
+    try std.testing.expectEqual(@as(f64, 255), (try evalSource(a, "parseInt('0xff')")).number);
+    try std.testing.expectEqual(@as(f64, 3.14), (try evalSource(a, "parseFloat('3.14abc')")).number);
+    try std.testing.expect((try evalSource(a, "isNaN(NaN)")).boolean);
+    try std.testing.expectEqualStrings("42", (try evalSource(a, "String(42)")).string);
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "Number('3')")).number);
+    try std.testing.expect((try evalSource(a, "Array.isArray([1, 2])")).boolean);
+    try std.testing.expect(!(try evalSource(a, "Array.isArray({})")).boolean);
+    // Object.keys / values
+    try std.testing.expectEqualStrings("a,b", (try evalSource(a, "'' + Object.keys({ a: 1, b: 2 })")).string);
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let v = Object.values({ a: 1, b: 2 }); v[0] + v[1]")).number);
+    // Object.assign
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let t = Object.assign({ a: 1 }, { b: 2 }); t.a + t.b")).number);
 }
 
 test "interpreter classes (methods, static, instanceof, computed)" {
