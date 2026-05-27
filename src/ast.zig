@@ -33,9 +33,17 @@ pub const DeclKind = enum { @"var", let, @"const" };
 /// Shared shape for function declarations, function expressions, and arrow
 /// functions. `is_expr_body` is true for concise arrow bodies (`x => x + 1`),
 /// where `body` is an expression rather than a block.
+/// A function parameter: a name, an optional default value (`a = 1`), and a
+/// rest flag (`...rest`, which must be the last parameter).
+pub const Param = struct {
+    name: []const u8,
+    default: ?*Node = null,
+    is_rest: bool = false,
+};
+
 pub const FunctionNode = struct {
     name: []const u8 = "",
-    params: []const []const u8,
+    params: []const Param,
     body: *Node,
     is_expr_body: bool = false,
 };

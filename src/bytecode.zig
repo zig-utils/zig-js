@@ -122,7 +122,7 @@ pub const Inst = struct {
 /// (the migration fallback) in addition to VM-callable.
 pub const FnTemplate = struct {
     name: []const u8,
-    params: []const []const u8,
+    params: []const ast.Param,
     is_expr_body: bool,
     body: *ast.Node,
     chunk: *Chunk,

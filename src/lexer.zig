@@ -44,6 +44,7 @@ pub const TokenKind = enum {
     semicolon,
     comma,
     dot,
+    ellipsis, // ...
     arrow, // =>
     lparen,
     rparen,
@@ -186,7 +187,13 @@ pub const Lexer = struct {
             ']' => return tok(.rbracket, self.src[start..self.i], start),
             ';' => return tok(.semicolon, self.src[start..self.i], start),
             ',' => return tok(.comma, self.src[start..self.i], start),
-            '.' => return tok(.dot, self.src[start..self.i], start),
+            '.' => {
+                if (self.peek() == '.' and self.peek2() == '.') {
+                    self.i += 2;
+                    return tok(.ellipsis, self.src[start..self.i], start);
+                }
+                return tok(.dot, self.src[start..self.i], start);
+            },
             '?' => return tok(.question, self.src[start..self.i], start),
             ':' => return tok(.colon, self.src[start..self.i], start),
             '<' => {

@@ -440,7 +440,12 @@ pub const Compiler = struct {
         // functions). The scope chains to the enclosing function for upvalues.
         const scope = try self.arena.create(FnScope);
         scope.* = .{ .parent = self.scope };
-        for (fnode.params) |p| _ = try scope.addLocal(self.arena, p);
+        for (fnode.params) |p| {
+            // Default values and rest params need a runtime prologue the VM
+            // doesn't emit yet — fall back to the tree-walker for those.
+            if (p.default != null or p.is_rest) return error.Unsupported;
+            _ = try scope.addLocal(self.arena, p.name);
+        }
         if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
 
         var sub_c = Compiler{ .arena = self.arena, .chunk = sub, .mode = .function, .scope = scope };

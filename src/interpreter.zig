@@ -59,7 +59,7 @@ pub const Environment = struct {
 /// A JS-defined function value: parameter names, body AST, and the environment
 /// captured at definition (the closure). Stored type-erased on `Object.js_func`.
 pub const Function = struct {
-    params: []const []const u8,
+    params: []const ast.Param,
     body: *ast.Node,
     is_expr_body: bool,
     closure: *Environment,
@@ -437,9 +437,6 @@ pub const Interpreter = struct {
     fn callFunction(self: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
         const call_env = try self.arena.create(Environment);
         call_env.* = .{ .arena = self.arena, .parent = func.closure };
-        for (func.params, 0..) |p, i| {
-            try call_env.put(p, if (i < args.len) args[i] else .undefined);
-        }
 
         const saved_env = self.env;
         const saved_signal = self.signal;
@@ -453,6 +450,23 @@ pub const Interpreter = struct {
             self.signal = saved_signal;
             self.ret_value = saved_ret;
             self.this_value = saved_this;
+        }
+
+        // Bind parameters in `call_env` (so a default can reference earlier
+        // params). A rest parameter collects the remaining args into an array.
+        for (func.params, 0..) |p, i| {
+            if (p.is_rest) {
+                const rest = try self.newArray();
+                var j = i;
+                while (j < args.len) : (j += 1) try rest.object.elements.append(self.arena, args[j]);
+                try call_env.put(p.name, rest);
+                break;
+            }
+            var v: Value = if (i < args.len) args[i] else .undefined;
+            if (v == .undefined) {
+                if (p.default) |d| v = try self.eval(d);
+            }
+            try call_env.put(p.name, v);
         }
 
         if (func.is_expr_body) return self.eval(func.body);
@@ -1017,6 +1031,23 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter default and rest parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // default used when arg missing/undefined
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "function f(a, b = 3) { return a + b; } f(2)")).number);
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "function f(a, b = 3) { return a + b; } f(2, 4)")).number);
+    // default can reference an earlier parameter
+    try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "function f(a, b = a * 2) { return b; } f(2)")).number);
+    // rest collects remaining args into an array
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "function f(a, ...rest) { return rest.length; } f(1, 2, 3, 4)")).number);
+    try std.testing.expectEqual(@as(f64, 30), (try evalSource(a,
+        \\function sum(...xs) { let s = 0; for (let v of xs) { s = s + v; } return s; }
+        \\sum(10, 20)
+    )).number);
 }
 
 test "interpreter object method shorthand and computed keys" {

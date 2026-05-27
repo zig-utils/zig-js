@@ -301,14 +301,18 @@ pub const Parser = struct {
         return self.alloc(.{ .try_stmt = node });
     }
 
-    /// Parse `(p1, p2, ...)` into a slice of identifier names.
-    fn parseParamList(self: *Parser) ParseError![]const []const u8 {
+    /// Parse `(p1, p2 = default, ...rest)` into a slice of parameters.
+    fn parseParamList(self: *Parser) ParseError![]const ast.Param {
         try self.expect(.lparen);
-        var params: std.ArrayListUnmanaged([]const u8) = .empty;
+        var params: std.ArrayListUnmanaged(ast.Param) = .empty;
         while (!self.check(.rparen) and !self.check(.eof)) {
+            const is_rest = self.match(.ellipsis);
             const p = self.advance();
             if (p.kind != .identifier) return ParseError.UnexpectedToken;
-            try params.append(self.arena, p.text);
+            var default: ?*Node = null;
+            if (!is_rest and self.match(.assign)) default = try self.parseAssignment();
+            try params.append(self.arena, .{ .name = p.text, .default = default, .is_rest = is_rest });
+            if (is_rest) break; // a rest parameter must be last
             if (!self.match(.comma)) break;
         }
         try self.expect(.rparen);
@@ -361,7 +365,7 @@ pub const Parser = struct {
         // Arrow functions: `x => ...` and `(a, b) => ...`.
         if (self.check(.identifier) and self.peekKind(1) == .arrow) {
             const param = self.advance().text;
-            const params = try self.arena.dupe([]const u8, &.{param});
+            const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
             return self.parseArrowBody(params);
         }
         if (self.check(.lparen) and self.arrowAhead()) {
@@ -423,7 +427,7 @@ pub const Parser = struct {
         return false;
     }
 
-    fn parseArrowBody(self: *Parser, params: []const []const u8) ParseError!*Node {
+    fn parseArrowBody(self: *Parser, params: []const ast.Param) ParseError!*Node {
         try self.expect(.arrow);
         const fnode = try self.arena.create(ast.FunctionNode);
         if (self.check(.lbrace)) {
