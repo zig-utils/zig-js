@@ -132,7 +132,11 @@ pub const Node = union(enum) {
     assign: struct { target: *Node, value: *Node },
     conditional: struct { cond: *Node, consequent: *Node, alternate: *Node },
     function: *FunctionNode, // function/arrow expression -> a function value
-    class_expr: struct { name: []const u8, members: []ClassMember },
+    class_expr: struct { name: []const u8, superclass: ?*Node, members: []ClassMember },
+    /// `super(args)` — call the superclass constructor on the current `this`.
+    super_call: []*Node,
+    /// `super.prop` / `super[expr]` — look up on the home object's prototype.
+    super_member: struct { property: []const u8 = "", computed: ?*Node = null },
     call: struct { callee: *Node, args: []*Node },
     new_expr: struct { callee: *Node, args: []*Node },
     /// `object.property` (computed == null) or `object[computed]`.

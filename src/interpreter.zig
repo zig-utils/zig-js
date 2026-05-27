@@ -74,6 +74,11 @@ pub const Function = struct {
     /// for this function's own frame.
     frame: ?*anyopaque = null,
     local_count: u32 = 0,
+    /// Class method support: the object on which this method/constructor lives
+    /// (its [[HomeObject]]); `super.x` resolves on `home_object.proto`.
+    home_object: ?*value.Object = null,
+    /// For a derived class constructor: the superclass object, called by `super(...)`.
+    super_ctor: ?*value.Object = null,
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:
@@ -101,6 +106,10 @@ pub const Interpreter = struct {
     signal_label: ?[]const u8 = null,
     /// Label of the enclosing `labeled_stmt`, handed to the loop it wraps.
     current_label: ?[]const u8 = null,
+    /// [[HomeObject]] of the executing method (for `super.x`) and the superclass
+    /// constructor of the executing derived constructor (for `super(...)`).
+    home_object: ?*value.Object = null,
+    super_ctor: ?*value.Object = null,
 
     // ---- exception helpers ------------------------------------------------
 
@@ -151,7 +160,20 @@ pub const Interpreter = struct {
             },
 
             .function => |fnode| try self.makeFunction(fnode, self.env),
-            .class_expr => |c| try self.evalClass(c.name, c.members),
+            .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members),
+
+            .super_call => |sc| blk: {
+                const sup = self.super_ctor orelse return self.throwError("SyntaxError", "'super' keyword unexpected here");
+                const args = try self.evalArgs(sc);
+                // Run the superclass constructor on the current `this`.
+                _ = try self.callValueWithThis(.{ .object = sup }, args, self.this_value);
+                break :blk .undefined;
+            },
+            .super_member => |m| blk: {
+                const parent = (self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method")).proto orelse break :blk .undefined;
+                const key = try self.memberKey(m.property, m.computed);
+                break :blk try self.getProperty(.{ .object = parent }, key);
+            },
 
             .call => |c| try self.evalCall(c.callee, c.args),
             .new_expr => |n| try self.evalNew(n.callee, n.args),
@@ -438,11 +460,31 @@ pub const Interpreter = struct {
         return .{ .object = obj };
     }
 
+    fn funcOf(v: Value) ?*Function {
+        if (v == .object) {
+            if (v.object.js_func) |e| return @ptrCast(@alignCast(e));
+        }
+        return null;
+    }
+
     /// Evaluate a `class` to a constructor function value: methods go on its
     /// `.prototype`, static members on the class object itself, and instance
-    /// fields are desugared into the constructor (`this.f = init`). (extends/
-    /// super and accessors are deferred.)
-    fn evalClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember) EvalError!Value {
+    /// fields are desugared into the constructor (`this.f = init`). With
+    /// `extends`, the prototypes are linked and methods get a home object so
+    /// `super.x` / `super(...)` resolve. (Accessors are still deferred.)
+    fn evalClass(self: *Interpreter, name: []const u8, superclass: ?*Node, members: []ast.ClassMember) EvalError!Value {
+        var super_obj: ?*value.Object = null;
+        var super_proto: ?*value.Object = null;
+        if (superclass) |sc| {
+            const sv = try self.eval(sc);
+            if (sv != .object) return self.throwError("TypeError", "class extends value is not a constructor");
+            super_obj = sv.object;
+            super_proto = try self.protoObject(sv.object);
+        }
+        return self.buildClass(name, members, super_obj, super_proto);
+    }
+
+    fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object) EvalError!Value {
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
         for (members) |m| {
@@ -463,25 +505,53 @@ pub const Interpreter = struct {
             try field_inits.append(self.arena, stmt);
         }
 
-        // Constructor: explicit (augmented with field inits) or default.
+        // Constructor: explicit (augmented with field inits) or default. For a
+        // derived class with no explicit constructor, synthesize
+        // `constructor(...args) { super(...args); }`.
         var ctor_node: ?*const ast.FunctionNode = null;
         for (members) |m| {
             if (m.is_ctor) ctor_node = m.func.?.function;
         }
-        const orig: []*Node = if (ctor_node) |cf| cf.body.block else &.{};
+        var default_params: []const ast.Param = &.{};
+        var default_super: []*Node = &.{};
+        if (ctor_node == null and super_obj != null) {
+            const args_id = try self.arena.create(Node);
+            args_id.* = .{ .identifier = "args" };
+            const spread_node = try self.arena.create(Node);
+            spread_node.* = .{ .spread = args_id };
+            const super_args = try self.arena.dupe(*Node, &.{spread_node});
+            const super_node = try self.arena.create(Node);
+            super_node.* = .{ .super_call = super_args };
+            const stmt = try self.arena.create(Node);
+            stmt.* = .{ .expr_stmt = super_node };
+            default_super = try self.arena.dupe(*Node, &.{stmt});
+            default_params = try self.arena.dupe(ast.Param, &.{.{ .name = "args", .is_rest = true }});
+        }
+        const orig: []*Node = if (ctor_node) |cf| cf.body.block else default_super;
         const body_stmts = try std.mem.concat(self.arena, *Node, &.{ field_inits.items, orig });
         const body = try self.arena.create(Node);
         body.* = .{ .block = body_stmts };
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{
             .name = name,
-            .params = if (ctor_node) |cf| cf.params else &.{},
+            .params = if (ctor_node) |cf| cf.params else default_params,
             .body = body,
             .is_expr_body = false,
         };
         const class_val = try self.makeFunction(fnode, self.env);
         const class_obj = class_val.object;
         const proto = try self.protoObject(class_obj);
+
+        // Link the prototype chains for inheritance.
+        if (super_obj) |so| {
+            proto.proto = super_proto;
+            class_obj.proto = so; // static methods inherit
+        }
+        // The constructor's home object is the prototype; super(...) targets the superclass.
+        if (funcOf(class_val)) |cf| {
+            cf.home_object = proto;
+            cf.super_ctor = super_obj;
+        }
 
         for (members) |m| {
             const key = if (m.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else m.key;
@@ -494,7 +564,12 @@ pub const Interpreter = struct {
             }
             if (m.is_ctor) continue;
             const fv = try self.eval(m.func.?);
-            if (m.is_static) try self.setProp(class_obj, key, fv) else try self.setProp(proto, key, fv);
+            const home = if (m.is_static) class_obj else proto;
+            if (funcOf(fv)) |mf| {
+                mf.home_object = home;
+                mf.super_ctor = super_obj;
+            }
+            try self.setProp(home, key, fv);
         }
         try self.setProp(proto, "constructor", class_val);
         return class_val;
@@ -547,6 +622,17 @@ pub const Interpreter = struct {
             const args = try self.evalArgs(arg_nodes);
             return self.callMethod(recv, key, args);
         }
+        // `super.m(args)`: look the method up on the home object's prototype,
+        // but invoke it with the current `this`.
+        if (callee_node.* == .super_member) {
+            const sm = callee_node.super_member;
+            const parent = (self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method")).proto orelse
+                return self.throwError("TypeError", "no superclass method");
+            const key = try self.memberKey(sm.property, sm.computed);
+            const method = try self.getProperty(.{ .object = parent }, key);
+            const args = try self.evalArgs(arg_nodes);
+            return self.callValueWithThis(method, args, self.this_value);
+        }
         const callee = try self.eval(callee_node);
         const args = try self.evalArgs(arg_nodes);
         return self.callValue(callee, args);
@@ -585,14 +671,20 @@ pub const Interpreter = struct {
         const saved_signal = self.signal;
         const saved_ret = self.ret_value;
         const saved_this = self.this_value;
+        const saved_home = self.home_object;
+        const saved_super = self.super_ctor;
         self.env = call_env;
         self.signal = .none;
         self.this_value = this_val;
+        self.home_object = func.home_object;
+        self.super_ctor = func.super_ctor;
         defer {
             self.env = saved_env;
             self.signal = saved_signal;
             self.ret_value = saved_ret;
             self.this_value = saved_this;
+            self.home_object = saved_home;
+            self.super_ctor = saved_super;
         }
 
         // Bind parameters in `call_env` (so a default can reference earlier
@@ -1725,6 +1817,44 @@ test "interpreter classes (methods, static, instanceof, computed)" {
         \\  quad() { return this.dbl() * 2; }
         \\}
         \\(new Box(5)).quad()
+    )).number);
+}
+
+test "interpreter class extends and super" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // super() in constructor + inherited method
+    try std.testing.expectEqual(@as(f64, 30), (try evalSource(a,
+        \\class Animal { constructor(n) { this.legs = n; } legCount() { return this.legs; } }
+        \\class Dog extends Animal { constructor() { super(4); } }
+        \\let d = new Dog();
+        \\d.legCount() * 7 + 2
+    )).number);
+    // super.method() calls the parent's version
+    try std.testing.expectEqual(@as(f64, 11), (try evalSource(a,
+        \\class A { val() { return 10; } }
+        \\class B extends A { val() { return super.val() + 1; } }
+        \\(new B()).val()
+    )).number);
+    // instanceof across the chain
+    try std.testing.expect((try evalSource(a,
+        \\class A {}
+        \\class B extends A {}
+        \\let b = new B();
+        \\b instanceof B && b instanceof A
+    )).boolean);
+    // default derived constructor forwards args
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
+        \\class Base { constructor(x) { this.x = x; } }
+        \\class Sub extends Base {}
+        \\(new Sub(42)).x
+    )).number);
+    // inherited static method
+    try std.testing.expectEqual(@as(f64, 16), (try evalSource(a,
+        \\class P { static sq(n) { return n * n; } }
+        \\class C extends P {}
+        \\C.sq(4)
     )).number);
 }
 

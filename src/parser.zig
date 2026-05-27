@@ -813,6 +813,27 @@ pub const Parser = struct {
         return self.alloc(.{ .object_lit = props.items });
     }
 
+    /// `super(args)` or `super.prop` / `super[expr]`. (`super.m(args)` is a
+    /// super_member that the enclosing member-tail turns into a call.)
+    fn parseSuper(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // super
+        if (self.check(.lparen)) {
+            const args = try self.parseArgs();
+            return self.alloc(.{ .super_call = args });
+        }
+        if (self.match(.dot)) {
+            const name = self.advance();
+            if (name.kind != .identifier) return ParseError.UnexpectedToken;
+            return self.alloc(.{ .super_member = .{ .property = name.text } });
+        }
+        if (self.match(.lbracket)) {
+            const idx = try self.parseExpression();
+            try self.expect(.rbracket);
+            return self.alloc(.{ .super_member = .{ .computed = idx } });
+        }
+        return ParseError.UnexpectedToken;
+    }
+
     /// Parse a property/method name: identifier/string/number, or a computed
     /// `[expr]`. Returns the static key (or "" if computed) and the computed expr.
     fn parsePropertyName(self: *Parser) ParseError!struct { key: []const u8, expr: ?*Node } {
@@ -837,7 +858,12 @@ pub const Parser = struct {
         _ = self.advance(); // class
         var name: []const u8 = "";
         if (self.check(.identifier) and !isKeyword(self.cur(), "extends")) name = self.advance().text;
-        if (isKeyword(self.cur(), "extends")) return ParseError.UnexpectedToken; // inheritance deferred
+        var superclass: ?*Node = null;
+        if (isKeyword(self.cur(), "extends")) {
+            _ = self.advance();
+            // Superclass is a LeftHandSide expression (allow member/call chains).
+            superclass = try self.parseUnary();
+        }
         try self.expect(.lbrace);
         var members: std.ArrayListUnmanaged(ast.ClassMember) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
@@ -865,7 +891,7 @@ pub const Parser = struct {
             }
         }
         try self.expect(.rbrace);
-        return self.alloc(.{ .class_expr = .{ .name = name, .members = members.items } });
+        return self.alloc(.{ .class_expr = .{ .name = name, .superclass = superclass, .members = members.items } });
     }
 
     /// Parse `(params) { body }` after a method name, returning a function node.
@@ -894,6 +920,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, w, "function")) return self.parseFunctionExpr();
             if (std.mem.eql(u8, w, "new")) return self.parseNew();
             if (std.mem.eql(u8, w, "class")) return self.parseClassExpr();
+            if (std.mem.eql(u8, w, "super")) return self.parseSuper();
         }
         if (self.check(.lbrace)) return self.parseObjectLiteral();
         if (self.check(.lbracket)) return self.parseArrayLiteral();
