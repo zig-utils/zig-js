@@ -199,14 +199,20 @@ pub fn main() !void {
 
     // Only walk a curated set of language subtrees — bounds runtime and keeps
     // the report focused on the slice the current subset can plausibly run.
-    // Only `language/` for now: `built-ins/` surfaces engine *panics* (overflow
-    // casts, unreachable arms, deep recursion / OOM with no per-test isolation),
-    // which abort the whole runner. Scoring it needs engine hardening + a
-    // sandboxed per-test runner first (a documented follow-up).
+    // `language/` plus the built-ins subtrees verified to run without aborting
+    // the (in-process) runner. The full `built-ins/` tree still hits engine
+    // panics / pathological inputs in some subdirs (RegExp/TypedArray/etc.);
+    // scoring all of it needs a sandboxed per-test runner (subprocess isolation)
+    // — a documented follow-up. These four are where most of the builtins work
+    // is exercised.
     const subtrees = [_][]const u8{
         "test/language/types",
         "test/language/expressions",
         "test/language/statements",
+        "test/built-ins/Math",
+        "test/built-ins/String",
+        "test/built-ins/Array",
+        "test/built-ins/Object",
     };
 
     var total: Stats = .{};
