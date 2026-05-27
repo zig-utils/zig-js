@@ -861,26 +861,246 @@ pub const Interpreter = struct {
     /// methods that aren't stored as own properties first. Shared by the
     /// tree-walker's `evalCall` and the VM's `call_method`.
     pub fn callMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!Value {
-        if (try self.arrayBuiltin(recv, name, args)) |result| return result;
+        if (try self.builtinMethod(recv, name, args)) |result| return result;
         const method = try self.getProperty(recv, name);
         return self.callValueWithThis(method, args, recv);
     }
 
-    /// Dispatch the small set of builtin methods (`Array.prototype.push/pop`)
-    /// that aren't stored as own properties. Returns null when `name` is not a
-    /// recognized builtin for `recv`, so the caller falls back to a property
-    /// lookup + call.
-    pub fn arrayBuiltin(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
-        if (recv != .object or !recv.object.is_array) return null;
-        const o = recv.object;
-        if (o.getOwn(name) != null) return null; // own property shadows builtin
-        if (std.mem.eql(u8, name, "push")) {
+    /// Dispatch `Array.prototype` / `String.prototype` methods (which aren't
+    /// stored as own properties). Returns null when `name` isn't a recognized
+    /// builtin for `recv`, so the caller falls back to a property lookup + call.
+    pub fn builtinMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
+        switch (recv) {
+            .object => |o| if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args),
+            .string => |s| return try self.stringMethod(s, name, args),
+            else => {},
+        }
+        return null;
+    }
+
+    fn eq(a: []const u8, b: []const u8) bool {
+        return std.mem.eql(u8, a, b);
+    }
+
+    /// Normalize a relative index (negative counts from the end) into [0, len].
+    fn relIndex(v: Value, len: usize, default: f64) usize {
+        const n = if (v == .undefined) default else v.toNumber();
+        if (std.math.isNan(n)) return 0;
+        const fl = @trunc(n);
+        if (fl < 0) {
+            const from_end = @as(f64, @floatFromInt(len)) + fl;
+            return if (from_end < 0) 0 else @intFromFloat(from_end);
+        }
+        const flen: f64 = @floatFromInt(len);
+        return if (fl > flen) len else @intFromFloat(fl);
+    }
+
+    fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
+        const items = o.elements.items;
+        if (eq(name, "push")) {
             for (args) |a| try o.elements.append(self.arena, a);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
         }
-        if (std.mem.eql(u8, name, "pop")) {
-            if (o.elements.items.len == 0) return Value.undefined;
-            return o.elements.pop() orelse Value.undefined;
+        if (eq(name, "pop")) return if (items.len == 0) Value.undefined else (o.elements.pop() orelse Value.undefined);
+        if (eq(name, "shift")) {
+            if (items.len == 0) return Value.undefined;
+            const first = items[0];
+            _ = o.elements.orderedRemove(0);
+            return first;
+        }
+        if (eq(name, "unshift")) {
+            var i: usize = args.len;
+            while (i > 0) : (i -= 1) try o.elements.insert(self.arena, 0, args[i - 1]);
+            return Value{ .number = @floatFromInt(o.elements.items.len) };
+        }
+        if (eq(name, "indexOf")) {
+            const target = arg0(args);
+            for (items, 0..) |el, i| if (value.strictEquals(el, target)) return Value{ .number = @floatFromInt(i) };
+            return Value{ .number = -1 };
+        }
+        if (eq(name, "includes")) {
+            const target = arg0(args);
+            for (items) |el| if (value.strictEquals(el, target)) return Value{ .boolean = true };
+            return Value{ .boolean = false };
+        }
+        if (eq(name, "join")) {
+            const sep = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else ",";
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            for (items, 0..) |el, i| {
+                if (i != 0) try buf.appendSlice(self.arena, sep);
+                switch (el) {
+                    .undefined, .null => {},
+                    else => try buf.appendSlice(self.arena, try el.toString(self.arena)),
+                }
+            }
+            return Value{ .string = try buf.toOwnedSlice(self.arena) };
+        }
+        if (eq(name, "slice")) {
+            const start = relIndex(arg0(args), items.len, 0);
+            const end = relIndex(arg(args, 1), items.len, @floatFromInt(items.len));
+            const result = try self.newArray();
+            var i = start;
+            while (i < end and i < items.len) : (i += 1) try result.object.elements.append(self.arena, items[i]);
+            return result;
+        }
+        if (eq(name, "concat")) {
+            const result = try self.newArray();
+            for (items) |el| try result.object.elements.append(self.arena, el);
+            for (args) |a| {
+                if (a == .object and a.object.is_array) {
+                    for (a.object.elements.items) |el| try result.object.elements.append(self.arena, el);
+                } else try result.object.elements.append(self.arena, a);
+            }
+            return result;
+        }
+        if (eq(name, "reverse")) {
+            std.mem.reverse(Value, o.elements.items);
+            return Value{ .object = o };
+        }
+        if (eq(name, "map")) {
+            const cb = arg0(args);
+            const result = try self.newArray();
+            for (items, 0..) |el, i| {
+                const r = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
+                try result.object.elements.append(self.arena, r);
+            }
+            return result;
+        }
+        if (eq(name, "filter")) {
+            const cb = arg0(args);
+            const result = try self.newArray();
+            for (items, 0..) |el, i| {
+                if ((try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                    try result.object.elements.append(self.arena, el);
+            }
+            return result;
+        }
+        if (eq(name, "forEach")) {
+            const cb = arg0(args);
+            for (items, 0..) |el, i| _ = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
+            return Value.undefined;
+        }
+        if (eq(name, "some")) {
+            const cb = arg0(args);
+            for (items, 0..) |el, i| {
+                if ((try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                    return Value{ .boolean = true };
+            }
+            return Value{ .boolean = false };
+        }
+        if (eq(name, "every")) {
+            const cb = arg0(args);
+            for (items, 0..) |el, i| {
+                if (!(try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                    return Value{ .boolean = false };
+            }
+            return Value{ .boolean = true };
+        }
+        if (eq(name, "find")) {
+            const cb = arg0(args);
+            for (items, 0..) |el, i| {
+                if ((try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean()) return el;
+            }
+            return Value.undefined;
+        }
+        if (eq(name, "reduce")) {
+            const cb = arg0(args);
+            var acc: Value = undefined;
+            var start: usize = 0;
+            if (args.len >= 2) {
+                acc = args[1];
+            } else {
+                if (items.len == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                acc = items[0];
+                start = 1;
+            }
+            var i = start;
+            while (i < items.len) : (i += 1) {
+                acc = try self.callValue(cb, &.{ acc, items[i], .{ .number = @floatFromInt(i) }, .{ .object = o } });
+            }
+            return acc;
+        }
+        return null;
+    }
+
+    fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value) EvalError!?Value {
+        if (eq(name, "charAt")) {
+            const i = relIndex(arg0(args), s.len, 0);
+            return if (i < s.len) Value{ .string = try self.arena.dupe(u8, s[i .. i + 1]) } else Value{ .string = "" };
+        }
+        if (eq(name, "charCodeAt")) {
+            const i: usize = @intFromFloat(@max(@trunc(arg0(args).toNumber()), 0));
+            return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value{ .number = std.math.nan(f64) };
+        }
+        if (eq(name, "indexOf")) {
+            const sub = try arg0(args).toString(self.arena);
+            return Value{ .number = if (std.mem.indexOf(u8, s, sub)) |idx| @floatFromInt(idx) else -1 };
+        }
+        if (eq(name, "includes")) {
+            const sub = try arg0(args).toString(self.arena);
+            return Value{ .boolean = std.mem.indexOf(u8, s, sub) != null };
+        }
+        if (eq(name, "startsWith")) {
+            const sub = try arg0(args).toString(self.arena);
+            return Value{ .boolean = std.mem.startsWith(u8, s, sub) };
+        }
+        if (eq(name, "endsWith")) {
+            const sub = try arg0(args).toString(self.arena);
+            return Value{ .boolean = std.mem.endsWith(u8, s, sub) };
+        }
+        if (eq(name, "slice")) {
+            const start = relIndex(arg0(args), s.len, 0);
+            const end = relIndex(arg(args, 1), s.len, @floatFromInt(s.len));
+            return Value{ .string = if (start < end) try self.arena.dupe(u8, s[start..end]) else "" };
+        }
+        if (eq(name, "substring")) {
+            var a0 = relIndex(arg0(args), s.len, 0);
+            var b0 = relIndex(arg(args, 1), s.len, @floatFromInt(s.len));
+            if (a0 > b0) {
+                const t = a0;
+                a0 = b0;
+                b0 = t;
+            }
+            return Value{ .string = try self.arena.dupe(u8, s[a0..b0]) };
+        }
+        if (eq(name, "toUpperCase")) {
+            const out = try self.arena.dupe(u8, s);
+            for (out) |*c| c.* = std.ascii.toUpper(c.*);
+            return Value{ .string = out };
+        }
+        if (eq(name, "toLowerCase")) {
+            const out = try self.arena.dupe(u8, s);
+            for (out) |*c| c.* = std.ascii.toLower(c.*);
+            return Value{ .string = out };
+        }
+        if (eq(name, "trim")) return Value{ .string = std.mem.trim(u8, s, " \t\r\n") };
+        if (eq(name, "repeat")) {
+            const n: usize = @intFromFloat(@max(@trunc(arg0(args).toNumber()), 0));
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            var i: usize = 0;
+            while (i < n) : (i += 1) try buf.appendSlice(self.arena, s);
+            return Value{ .string = try buf.toOwnedSlice(self.arena) };
+        }
+        if (eq(name, "concat")) {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            try buf.appendSlice(self.arena, s);
+            for (args) |a| try buf.appendSlice(self.arena, try a.toString(self.arena));
+            return Value{ .string = try buf.toOwnedSlice(self.arena) };
+        }
+        if (eq(name, "split")) {
+            const result = try self.newArray();
+            if (args.len == 0 or args[0] == .undefined) {
+                try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, s) });
+                return result;
+            }
+            const sep = try args[0].toString(self.arena);
+            if (sep.len == 0) {
+                for (s) |c| try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, &.{c}) });
+                return result;
+            }
+            var it = std.mem.splitSequence(u8, s, sep);
+            while (it.next()) |part| try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, part) });
+            return result;
         }
         return null;
     }
@@ -1116,6 +1336,14 @@ fn lessThan(a: Value, b: Value) EvalError!bool {
     const y = b.toNumber();
     if (std.math.isNan(x) or std.math.isNan(y)) return false;
     return x < y;
+}
+
+fn arg0(args: []const Value) Value {
+    return if (args.len > 0) args[0] else .undefined;
+}
+
+fn arg(args: []const Value, i: usize) Value {
+    return if (i < args.len) args[i] else .undefined;
 }
 
 fn labelEq(a: ?[]const u8, b: ?[]const u8) bool {
@@ -1394,6 +1622,37 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter Array.prototype methods" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("1-2-3", (try evalSource(a, "[1, 2, 3].join('-')")).string);
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "[10, 20, 30].indexOf(20)")).number);
+    try std.testing.expect((try evalSource(a, "[1, 2, 3].includes(2)")).boolean);
+    try std.testing.expectEqualStrings("2,4,6", (try evalSource(a, "'' + [1, 2, 3].map(function (x) { return x * 2; })")).string);
+    try std.testing.expectEqualStrings("2,4", (try evalSource(a, "'' + [1, 2, 3, 4].filter(function (x) { return x % 2 === 0; })")).string);
+    try std.testing.expectEqual(@as(f64, 10), (try evalSource(a, "[1, 2, 3, 4].reduce(function (a, b) { return a + b; }, 0)")).number);
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let s = 0; [1, 2, 3].forEach(function (x) { s = s + x; }); s")).number);
+    try std.testing.expect((try evalSource(a, "[1, 2, 3].some(function (x) { return x > 2; })")).boolean);
+    try std.testing.expect((try evalSource(a, "[2, 4, 6].every(function (x) { return x % 2 === 0; })")).boolean);
+    try std.testing.expectEqualStrings("2,3", (try evalSource(a, "'' + [1, 2, 3].slice(1)")).string);
+    try std.testing.expectEqualStrings("1,2,3,4", (try evalSource(a, "'' + [1, 2].concat([3, 4])")).string);
+}
+
+test "interpreter String.prototype methods" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("ELLO", (try evalSource(a, "'hello'.slice(1).toUpperCase()")).string);
+    try std.testing.expectEqual(@as(f64, 2), (try evalSource(a, "'hello'.indexOf('l')")).number);
+    try std.testing.expect((try evalSource(a, "'hello world'.includes('world')")).boolean);
+    try std.testing.expect((try evalSource(a, "'hello'.startsWith('he')")).boolean);
+    try std.testing.expectEqualStrings("ell", (try evalSource(a, "'hello'.substring(1, 4)")).string);
+    try std.testing.expectEqualStrings("abab", (try evalSource(a, "'ab'.repeat(2)")).string);
+    try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + 'a-b-c'.split('-')")).string);
+    try std.testing.expectEqualStrings("hi", (try evalSource(a, "'  hi  '.trim()")).string);
 }
 
 test "interpreter builtins: Math, Object, Array, globals" {

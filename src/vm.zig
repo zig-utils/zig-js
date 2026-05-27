@@ -234,7 +234,7 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
                 const recv = stack.items[base - 1];
                 const args = stack.items[base..];
                 const name = chunk.names.items[inst.a];
-                const result = if (try vm.arrayBuiltin(recv, name, args)) |r|
+                const result = if (try vm.builtinMethod(recv, name, args)) |r|
                     r
                 else
                     try callValue(vm, try vm.getProperty(recv, name), args, recv);
