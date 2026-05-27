@@ -14,8 +14,17 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const value = @import("value.zig");
+const Shape = @import("shape.zig").Shape;
 
 const Value = value.Value;
+
+/// A monomorphic inline cache for a `get_prop`/`set_prop` site: remembers the
+/// last object shape seen there and the slot the property lived at, so a repeat
+/// access on the same shape skips the lookup entirely. One per instruction.
+pub const InlineCache = struct {
+    shape: ?*Shape = null,
+    slot: u32 = 0,
+};
 
 pub const Op = enum(u8) {
     // --- stack / constants ---
@@ -121,9 +130,18 @@ pub const Chunk = struct {
     consts: std.ArrayListUnmanaged(Value) = .empty,
     names: std.ArrayListUnmanaged([]const u8) = .empty,
     fns: std.ArrayListUnmanaged(*FnTemplate) = .empty,
+    /// One inline cache per instruction, allocated by `finalize` once the code
+    /// stream is complete. Warm across runs of the same chunk.
+    ics: []InlineCache = &.{},
 
     pub fn init(arena: std.mem.Allocator) Chunk {
         return .{ .arena = arena };
+    }
+
+    /// Allocate the inline-cache table. Call once after emitting all code.
+    pub fn finalize(self: *Chunk) std.mem.Allocator.Error!void {
+        self.ics = try self.arena.alloc(InlineCache, self.code.items.len);
+        @memset(self.ics, .{});
     }
 
     /// Emit an instruction, returning its index (for later jump back-patching).

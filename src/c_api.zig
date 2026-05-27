@@ -314,7 +314,7 @@ export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectFrom(object) orelse return box(c, .undefined);
     const key = strFrom(name) orelse return box(c, .undefined);
-    return box(c, obj.properties.get(key.bytes) orelse .undefined);
+    return box(c, obj.getOwn(key.bytes) orelse .undefined);
 }
 
 export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, val: JSValueRef, attrs: c_uint, exception: ExceptionRef) callconv(.c) void {
@@ -323,8 +323,7 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
     const c = ctxFrom(ctx) orelse return;
     const obj = objectFrom(object) orelse return;
     const key = strFrom(name) orelse return;
-    const key_copy = c.arena().dupe(u8, key.bytes) catch return;
-    obj.properties.put(c.arena(), key_copy, unbox(val)) catch return;
+    obj.setOwn(c.arena(), c.root_shape, key.bytes, unbox(val)) catch return;
 }
 
 export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, index: c_uint, exception: ExceptionRef) callconv(.c) JSValueRef {
@@ -352,7 +351,7 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
     if (obj.callback) |cb| return cb(ctx, function, this_object, argc, argv, exception);
     // JS functions / native builtins / error constructors run on the interpreter.
     const args = collectArgs(c, argc, argv) orelse return null;
-    var interpreter = interp.Interpreter{ .arena = c.arena(), .env = &c.env };
+    var interpreter = c.interpreter();
     const res = interpreter.callValueWithThis(.{ .object = obj }, args, unbox(this_object)) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, interpreter.exception);
@@ -377,7 +376,7 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
         return null;
     };
     const args = collectArgs(c, argc, argv) orelse return null;
-    var interpreter = interp.Interpreter{ .arena = c.arena(), .env = &c.env };
+    var interpreter = c.interpreter();
     const res = interpreter.construct(.{ .object = obj }, args) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, interpreter.exception);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Shape = @import("shape.zig").Shape;
 
 /// The C-ABI shape of a host (Zig/C) function exposed to JS via
 /// `JSObjectMakeFunctionWithCallback`. Kept here so both the interpreter and
@@ -26,7 +27,10 @@ pub const NativeFn = *const fn (args: []const Value) Value;
 /// C-ABI host callback (`callback`). Everything is allocated in the owning
 /// Context's arena, so there is no per-object teardown yet.
 pub const Object = struct {
-    properties: std.StringHashMapUnmanaged(Value) = .{},
+    /// Named properties live behind a shared `Shape` (null = no own properties)
+    /// plus a flat per-object `slots` array indexed by the shape. See shape.zig.
+    shape: ?*Shape = null,
+    slots: std.ArrayListUnmanaged(Value) = .empty,
     elements: std.ArrayListUnmanaged(Value) = .empty,
     is_array: bool = false,
     callback: ?HostCallback = null,
@@ -53,6 +57,30 @@ pub const Object = struct {
     pub fn isCallableObject(self: *const Object) bool {
         return self.callback != null or self.native != null or
             self.js_func != null or self.error_ctor != null;
+    }
+
+    /// Read an own named property, or null if absent. No allocation.
+    pub fn getOwn(self: *const Object, name: []const u8) ?Value {
+        const sh = self.shape orelse return null;
+        // `lookup` doesn't mutate; the const-cast keeps Object read-only here.
+        const slot = (@constCast(sh)).lookup(name) orelse return null;
+        return self.slots.items[slot];
+    }
+
+    /// Set an own named property, transitioning the shape and growing `slots`
+    /// when the name is new. `root` is the Context's empty shape; `arena` backs
+    /// the slot storage and shape tree.
+    pub fn setOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
+        if (self.shape) |sh| {
+            if (sh.lookup(name)) |slot| {
+                self.slots.items[slot] = v;
+                return;
+            }
+        }
+        const base = self.shape orelse root;
+        const child = try base.transition(name);
+        try self.slots.append(arena, v); // new slot index == base.count == child.slot
+        self.shape = child;
     }
 };
 
@@ -125,11 +153,11 @@ pub const Value = union(enum) {
 /// is `[object Object]`.
 fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
     if (o.is_error) {
-        const name = if (o.properties.get("name")) |v|
+        const name = if (o.getOwn("name")) |v|
             (if (v == .string) v.string else o.error_name)
         else
             o.error_name;
-        const msg = if (o.properties.get("message")) |v|
+        const msg = if (o.getOwn("message")) |v|
             (if (v == .string) v.string else "")
         else
             "";

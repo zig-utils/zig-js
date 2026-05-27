@@ -134,7 +134,31 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
             },
             .get_prop => {
                 const obj = stack.pop().?;
-                try stack.append(vm.arena, try vm.getProperty(obj, chunk.names.items[inst.a]));
+                const name = chunk.names.items[inst.a];
+                var result: Value = undefined;
+                fast: {
+                    // Inline cache: plain (non-array) objects with a shape.
+                    if (obj == .object and !obj.object.is_array) {
+                        const o = obj.object;
+                        const ic = &chunk.ics[ip - 1];
+                        if (o.shape != null and o.shape == ic.shape) {
+                            result = o.slots.items[ic.slot];
+                            break :fast;
+                        }
+                        if (o.shape) |sh| {
+                            if (sh.lookup(name)) |slot| {
+                                ic.shape = sh;
+                                ic.slot = slot;
+                                result = o.slots.items[slot];
+                                break :fast;
+                            }
+                        }
+                        result = .undefined; // own-property miss on a plain object
+                        break :fast;
+                    }
+                    result = try vm.getProperty(obj, name); // arrays, strings, null/undefined
+                }
+                try stack.append(vm.arena, result);
             },
             .get_index => {
                 const key = stack.pop().?;
@@ -144,7 +168,28 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
             .set_prop => {
                 const v = stack.pop().?;
                 const obj = stack.pop().?;
-                try vm.setMember(obj, chunk.names.items[inst.a], v);
+                const name = chunk.names.items[inst.a];
+                fast: {
+                    // Inline cache hits only update an existing slot; adding a
+                    // property transitions the shape, so it goes the slow path.
+                    if (obj == .object and !obj.object.is_array) {
+                        const o = obj.object;
+                        const ic = &chunk.ics[ip - 1];
+                        if (o.shape != null and o.shape == ic.shape) {
+                            o.slots.items[ic.slot] = v;
+                            break :fast;
+                        }
+                        if (o.shape) |sh| {
+                            if (sh.lookup(name)) |slot| {
+                                ic.shape = sh;
+                                ic.slot = slot;
+                                o.slots.items[slot] = v;
+                                break :fast;
+                            }
+                        }
+                    }
+                    try vm.setMember(obj, name, v);
+                }
                 try stack.append(vm.arena, v); // assignment yields the value
             },
             .set_index => {
@@ -309,7 +354,8 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     const chunk = try Compiler.compileProgram(arena, prog);
     var env = Environment{ .arena = arena };
     try interp.installGlobals(&env);
-    var machine = Interpreter{ .arena = arena, .env = &env };
+    const root_shape = try @import("shape.zig").Shape.createRoot(arena);
+    var machine = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape };
     return run(&machine, chunk, null);
 }
 

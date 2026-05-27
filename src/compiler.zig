@@ -74,6 +74,7 @@ pub const Compiler = struct {
         if (program.* != .program) return error.Unsupported;
         for (program.program) |stmt| try c.compileStmt(stmt);
         _ = try chunk.emit(.halt, 0);
+        try chunk.finalize();
         return chunk;
     }
 
@@ -417,6 +418,7 @@ pub const Compiler = struct {
             try sub_c.compileStmt(fnode.body); // body is a block
             _ = try sub.emit(.ret_undef, 0);
         }
+        try sub.finalize();
         const tmpl = try self.arena.create(bc.FnTemplate);
         tmpl.* = .{
             .name = fnode.name,

@@ -50,6 +50,7 @@ pub fn evalNumber(source: []const u8) !f64 {
 test {
     // Pull in every module so `zig build test` runs their inline tests.
     _ = @import("value.zig");
+    _ = @import("shape.zig");
     _ = @import("jsstring.zig");
     _ = @import("lexer.zig");
     _ = @import("ast.zig");

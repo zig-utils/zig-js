@@ -3,6 +3,7 @@ const interp = @import("interpreter.zig");
 const value = @import("value.zig");
 const compiler = @import("compiler.zig");
 const vm = @import("vm.zig");
+const Shape = @import("shape.zig").Shape;
 const Parser = @import("parser.zig").Parser;
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
@@ -16,6 +17,8 @@ pub const Context = struct {
     arena_state: *std.heap.ArenaAllocator,
     env: interp.Environment,
     global_object: *value.Object,
+    /// The empty root shape every object in this context transitions from.
+    root_shape: *Shape,
     exception: ?value.Value = null,
 
     pub fn create(gpa: std.mem.Allocator) !*Context {
@@ -36,9 +39,15 @@ pub const Context = struct {
             .arena_state = arena_state,
             .env = .{ .arena = a },
             .global_object = global_obj,
+            .root_shape = try Shape.createRoot(a),
         };
         try interp.installGlobals(&self.env);
         return self;
+    }
+
+    /// An interpreter bound to this context's arena, globals, and shape tree.
+    pub fn interpreter(self: *Context) interp.Interpreter {
+        return .{ .arena = self.arena(), .env = &self.env, .root_shape = self.root_shape };
     }
 
     pub fn destroy(self: *Context) void {
@@ -62,12 +71,12 @@ pub const Context = struct {
         const a = self.arena();
         var parser = try Parser.init(a, source);
         const prog = try parser.parseProgram();
-        var interpreter = interp.Interpreter{ .arena = a, .env = &self.env };
+        var machine = self.interpreter();
         self.exception = null;
 
         if (compiler.Compiler.compileProgram(a, prog)) |chunk| {
-            return vm.run(&interpreter, chunk) catch |err| {
-                if (err == error.Throw) self.exception = interpreter.exception;
+            return vm.run(&machine, chunk, null) catch |err| {
+                if (err == error.Throw) self.exception = machine.exception;
                 return err;
             };
         } else |err| switch (err) {
@@ -75,8 +84,8 @@ pub const Context = struct {
             error.OutOfMemory => return error.OutOfMemory,
         }
 
-        return interpreter.eval(prog) catch |err| {
-            if (err == error.Throw) self.exception = interpreter.exception;
+        return machine.eval(prog) catch |err| {
+            if (err == error.Throw) self.exception = machine.exception;
             return err;
         };
     }

@@ -60,11 +60,11 @@ fn timeVM(gpa: std.mem.Allocator, io: std.Io, case: Case) !u64 {
     const prog = try parser.parseProgram();
     const chunk = try js.Compiler.compileProgram(a, prog);
 
-    var machine = js.Interpreter{ .arena = a, .env = &ctx.env };
+    var machine = ctx.interpreter();
     const t0 = nowNs(io);
     var i: usize = 0;
     while (i < case.iters) : (i += 1) {
-        _ = try js.vm.run(&machine, chunk);
+        _ = try js.vm.run(&machine, chunk, null);
     }
     return @intCast(nowNs(io) - t0);
 }
@@ -79,7 +79,7 @@ fn timeTreeWalk(gpa: std.mem.Allocator, io: std.Io, case: Case) !u64 {
     var parser = try js.Parser.init(a, case.hot);
     const prog = try parser.parseProgram();
 
-    var machine = js.Interpreter{ .arena = a, .env = &ctx.env };
+    var machine = ctx.interpreter();
     const t0 = nowNs(io);
     var i: usize = 0;
     while (i < case.iters) : (i += 1) {

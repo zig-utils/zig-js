@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const value = @import("value.zig");
 const bc = @import("bytecode.zig");
+const Shape = @import("shape.zig").Shape;
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -83,6 +84,9 @@ const Signal = enum { none, ret, brk, cont };
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     env: *Environment,
+    /// The Context's empty root shape — the origin of every object's shape
+    /// transition chain (see shape.zig).
+    root_shape: *Shape,
     signal: Signal = .none,
     ret_value: Value = .undefined,
     /// The `this` binding for the currently-executing function (undefined at
@@ -95,11 +99,9 @@ pub const Interpreter = struct {
 
     // ---- exception helpers ------------------------------------------------
 
-    /// Set a string property on an object, duplicating the key into the arena.
+    /// Set a named property on an object via its shape (see `Object.setOwn`).
     fn setProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
-        const gop = try obj.properties.getOrPut(self.arena, key);
-        if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, key);
-        gop.value_ptr.* = v;
+        try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 
     /// Build an `Error`-family instance with `name`/`message` properties.
@@ -425,7 +427,7 @@ pub const Interpreter = struct {
                     if (arrayIndex(key)) |i|
                         return if (i < o.elements.items.len) o.elements.items[i] else .undefined;
                 }
-                return o.properties.get(key) orelse .undefined;
+                return o.getOwn(key) orelse .undefined;
             },
             .string => |s| {
                 if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(s.len) };
@@ -484,7 +486,7 @@ pub const Interpreter = struct {
     pub fn arrayBuiltin(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
         if (recv != .object or !recv.object.is_array) return null;
         const o = recv.object;
-        if (o.properties.get(name) != null) return null; // own property shadows builtin
+        if (o.getOwn(name) != null) return null; // own property shadows builtin
         if (std.mem.eql(u8, name, "push")) {
             for (args) |a| try o.elements.append(self.arena, a);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
@@ -649,7 +651,7 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     const prog = try parser.parseProgram();
     var env = Environment{ .arena = arena };
     try installGlobals(&env);
-    var interp = Interpreter{ .arena = arena, .env = &env };
+    var interp = Interpreter{ .arena = arena, .env = &env, .root_shape = try Shape.createRoot(arena) };
     return interp.eval(prog);
 }
 
