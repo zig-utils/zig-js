@@ -199,6 +199,10 @@ pub fn main() !void {
 
     // Only walk a curated set of language subtrees — bounds runtime and keeps
     // the report focused on the slice the current subset can plausibly run.
+    // Only `language/` for now: `built-ins/` surfaces engine *panics* (overflow
+    // casts, unreachable arms, deep recursion / OOM with no per-test isolation),
+    // which abort the whole runner. Scoring it needs engine hardening + a
+    // sandboxed per-test runner first (a documented follow-up).
     const subtrees = [_][]const u8{
         "test/language/types",
         "test/language/expressions",
