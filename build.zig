@@ -51,4 +51,29 @@ pub fn build(b: *std.Build) void {
     const run_conformance = b.addRunArtifact(conformance);
     const conformance_step = b.step("conformance", "Run the JS conformance suite");
     conformance_step.dependOn(&run_conformance.step);
+
+    // test262 ingestion: `zig build test262 [-Dtest262=<root>]` runs the real
+    // tc39/test262 corpus through the engine and reports the (partial) pass
+    // rate. The default root is the pinned `test262` git submodule, so we always
+    // measure against upstream's latest (run `git submodule update --remote` to
+    // bump it).
+    const t262_root = b.option([]const u8, "test262", "Path to the test262 corpus root") orelse
+        "test262";
+    const t262_options = b.addOptions();
+    t262_options.addOption([]const u8, "root", t262_root);
+
+    const test262 = b.addExecutable(.{
+        .name = "test262",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/test262.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    test262.root_module.addOptions("build_options", t262_options);
+    const run_test262 = b.addRunArtifact(test262);
+    if (b.args) |args| run_test262.addArgs(args);
+    const test262_step = b.step("test262", "Run the real test262 corpus and report pass rate");
+    test262_step.dependOn(&run_test262.step);
 }
