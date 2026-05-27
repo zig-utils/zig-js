@@ -1405,9 +1405,39 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try defineGlobalFn(env, "parseFloat", builtins.parseFloatFn);
     try defineGlobalFn(env, "isNaN", builtins.isNaNFn);
     try defineGlobalFn(env, "isFinite", builtins.isFiniteFn);
-    try defineGlobalFn(env, "String", builtins.stringFn);
-    try defineGlobalFn(env, "Number", builtins.numberFn);
     try defineGlobalFn(env, "Boolean", builtins.booleanFn);
+
+    // String — callable, with statics.
+    const string_ns = try a.create(value.Object);
+    string_ns.* = .{ .native = builtins.stringFn };
+    try setNative(a, root_shape, string_ns, "fromCharCode", builtins.stringFromCharCode);
+    try env.put("String", .{ .object = string_ns });
+
+    // Number — callable, with statics and constants.
+    const number_ns = try a.create(value.Object);
+    number_ns.* = .{ .native = builtins.numberFn };
+    try setNative(a, root_shape, number_ns, "isInteger", builtins.numberIsInteger);
+    try setNative(a, root_shape, number_ns, "isSafeInteger", builtins.numberIsSafeInteger);
+    try setNative(a, root_shape, number_ns, "isNaN", builtins.numberIsNaN);
+    try setNative(a, root_shape, number_ns, "isFinite", builtins.numberIsFinite);
+    try setNative(a, root_shape, number_ns, "parseFloat", builtins.parseFloatFn);
+    try setNative(a, root_shape, number_ns, "parseInt", builtins.parseIntFn);
+    try number_ns.setOwn(a, root_shape, "MAX_SAFE_INTEGER", .{ .number = 9007199254740991 });
+    try number_ns.setOwn(a, root_shape, "MIN_SAFE_INTEGER", .{ .number = -9007199254740991 });
+    try number_ns.setOwn(a, root_shape, "MAX_VALUE", .{ .number = std.math.floatMax(f64) });
+    try number_ns.setOwn(a, root_shape, "MIN_VALUE", .{ .number = std.math.floatMin(f64) });
+    try number_ns.setOwn(a, root_shape, "EPSILON", .{ .number = std.math.floatEps(f64) });
+    try number_ns.setOwn(a, root_shape, "POSITIVE_INFINITY", .{ .number = std.math.inf(f64) });
+    try number_ns.setOwn(a, root_shape, "NEGATIVE_INFINITY", .{ .number = -std.math.inf(f64) });
+    try number_ns.setOwn(a, root_shape, "NaN", .{ .number = std.math.nan(f64) });
+    try env.put("Number", .{ .object = number_ns });
+
+    // JSON namespace.
+    const json_ns = try a.create(value.Object);
+    json_ns.* = .{};
+    try setNative(a, root_shape, json_ns, "stringify", builtins.jsonStringify);
+    try setNative(a, root_shape, json_ns, "parse", builtins.jsonParse);
+    try env.put("JSON", .{ .object = json_ns });
 
     // Math namespace.
     const math_obj = try a.create(value.Object);
@@ -1432,6 +1462,10 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, object_ns, "values", builtins.objectValues);
     try setNative(a, root_shape, object_ns, "assign", builtins.objectAssign);
     try setNative(a, root_shape, object_ns, "freeze", builtins.identity1);
+    try setNative(a, root_shape, object_ns, "create", builtins.objectCreate);
+    try setNative(a, root_shape, object_ns, "getPrototypeOf", builtins.objectGetPrototypeOf);
+    try setNative(a, root_shape, object_ns, "defineProperty", builtins.objectDefineProperty);
+    try setNative(a, root_shape, object_ns, "getOwnPropertyNames", builtins.objectGetOwnPropertyNames);
     try env.put("Object", .{ .object = object_ns });
 
     // Array namespace (Array.isArray; Array.prototype methods stay on arrays).
@@ -1780,6 +1814,26 @@ test "interpreter String.prototype methods" {
     try std.testing.expectEqualStrings("abab", (try evalSource(a, "'ab'.repeat(2)")).string);
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + 'a-b-c'.split('-')")).string);
     try std.testing.expectEqualStrings("hi", (try evalSource(a, "'  hi  '.trim()")).string);
+}
+
+test "interpreter JSON, Object, Number builtins" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("{\"a\":1,\"b\":[2,3]}", (try evalSource(a, "JSON.stringify({ a: 1, b: [2, 3] })")).string);
+    try std.testing.expectEqualStrings("[1,\"x\",true,null]", (try evalSource(a, "JSON.stringify([1, 'x', true, null])")).string);
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let o = JSON.parse('{\"n\": 3}'); o.n")).number);
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let v = JSON.parse('[1,2,3]'); v[0] + v[1] + v[2]")).number);
+    // Object.create + getPrototypeOf
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let p = { x: 7 }; let o = Object.create(p); o.x")).number);
+    // Object.defineProperty (data + accessor)
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let o = {}; Object.defineProperty(o, 'k', { value: 5 }); o.k")).number);
+    try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let o = { _v: 9 }; Object.defineProperty(o, 'v', { get: function () { return this._v; } }); o.v")).number);
+    // Number statics
+    try std.testing.expect((try evalSource(a, "Number.isInteger(5)")).boolean);
+    try std.testing.expect(!(try evalSource(a, "Number.isInteger(5.5)")).boolean);
+    try std.testing.expect((try evalSource(a, "Number.isNaN(NaN)")).boolean);
+    try std.testing.expectEqualStrings("AB", (try evalSource(a, "String.fromCharCode(65, 66)")).string);
 }
 
 test "interpreter builtins: Math, Object, Array, globals" {

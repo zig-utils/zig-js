@@ -232,3 +232,347 @@ pub fn arrayIsArray(ctx: *anyopaque, this: Value, args: []const Value) HostError
     _ = this;
     return .{ .boolean = arg(args, 0) == .object and arg(args, 0).object.is_array };
 }
+
+pub fn objectGetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    if (arg(args, 0) == .object) {
+        if (arg(args, 0).object.proto) |p| return .{ .object = p };
+    }
+    return .null;
+}
+
+pub fn objectCreate(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const obj = (try self.newObject()).object;
+    switch (arg(args, 0)) {
+        .object => |p| obj.proto = p,
+        .null => obj.proto = null,
+        else => return self.throwError("TypeError", "Object prototype may only be an Object or null"),
+    }
+    return .{ .object = obj };
+}
+
+pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const target = arg(args, 0);
+    if (target != .object) return self.throwError("TypeError", "Object.defineProperty called on non-object");
+    const key = try arg(args, 1).toString(self.arena);
+    const desc = arg(args, 2);
+    if (desc != .object) return self.throwError("TypeError", "Property description must be an object");
+    const get = desc.object.getOwn("get");
+    const set = desc.object.getOwn("set");
+    if (get != null or set != null) {
+        try target.object.setAccessor(self.arena, key, get, set);
+    } else {
+        try self.setMember(target, key, desc.object.getOwn("value") orelse .undefined);
+    }
+    return target;
+}
+
+pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const result = try self.newArray();
+    if (arg(args, 0) == .object) {
+        const o = arg(args, 0).object;
+        if (o.is_array) {
+            var i: usize = 0;
+            while (i < o.elements.items.len) : (i += 1) {
+                try result.object.elements.append(self.arena, .{ .string = try std.fmt.allocPrint(self.arena, "{d}", .{i}) });
+            }
+        }
+        const keys = try o.ownKeys(self.arena);
+        for (keys) |k| try result.object.elements.append(self.arena, .{ .string = k });
+    }
+    return result;
+}
+
+// ---- Number statics ----------------------------------------------------
+
+pub fn numberIsInteger(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const v = arg(args, 0);
+    if (v != .number) return .{ .boolean = false };
+    const n = v.number;
+    return .{ .boolean = !std.math.isNan(n) and !std.math.isInf(n) and @trunc(n) == n };
+}
+
+pub fn numberIsSafeInteger(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const v = arg(args, 0);
+    if (v != .number) return .{ .boolean = false };
+    const n = v.number;
+    return .{ .boolean = !std.math.isNan(n) and !std.math.isInf(n) and @trunc(n) == n and @abs(n) <= 9007199254740991 };
+}
+
+pub fn numberIsNaN(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const v = arg(args, 0);
+    return .{ .boolean = v == .number and std.math.isNan(v.number) };
+}
+
+pub fn numberIsFinite(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const v = arg(args, 0);
+    return .{ .boolean = v == .number and !std.math.isNan(v.number) and !std.math.isInf(v.number) };
+}
+
+pub fn stringFromCharCode(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (args) |c| {
+        const code: u8 = @intCast(@as(u32, @intFromFloat(@mod(@trunc(c.toNumber()), 256))));
+        try buf.append(self.arena, code);
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+// ---- JSON --------------------------------------------------------------
+
+pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const present = try stringifyValue(self, &buf, arg(args, 0));
+    if (!present) return .undefined;
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+/// Serialize `v` into `buf`. Returns false when the value is omitted
+/// (undefined / function), per `JSON.stringify`.
+fn stringifyValue(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), v: Value) HostError!bool {
+    const a = self.arena;
+    switch (v) {
+        .undefined => return false,
+        .null => {
+            try buf.appendSlice(a, "null");
+            return true;
+        },
+        .boolean => |b| {
+            try buf.appendSlice(a, if (b) "true" else "false");
+            return true;
+        },
+        .number => |n| {
+            if (std.math.isNan(n) or std.math.isInf(n)) {
+                try buf.appendSlice(a, "null");
+            } else {
+                try buf.appendSlice(a, try value.numberToString(a, n));
+            }
+            return true;
+        },
+        .string => |s| {
+            try writeJsonString(a, buf, s);
+            return true;
+        },
+        .object => |o| {
+            if (o.isCallableObject()) return false;
+            if (o.is_array) {
+                try buf.append(a, '[');
+                for (o.elements.items, 0..) |el, i| {
+                    if (i != 0) try buf.append(a, ',');
+                    if (!try stringifyValue(self, buf, el)) try buf.appendSlice(a, "null");
+                }
+                try buf.append(a, ']');
+            } else {
+                try buf.append(a, '{');
+                const keys = try o.ownKeys(a);
+                var first = true;
+                for (keys) |k| {
+                    const pv = try self.getProperty(v, k);
+                    // Probe whether the property is omitted before writing the key.
+                    var tmp: std.ArrayListUnmanaged(u8) = .empty;
+                    if (!try stringifyValue(self, &tmp, pv)) continue;
+                    if (!first) try buf.append(a, ',');
+                    first = false;
+                    try writeJsonString(a, buf, k);
+                    try buf.append(a, ':');
+                    try buf.appendSlice(a, tmp.items);
+                }
+                try buf.append(a, '}');
+            }
+            return true;
+        },
+    }
+}
+
+fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) HostError!void {
+    try buf.append(a, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try buf.appendSlice(a, "\\\""),
+            '\\' => try buf.appendSlice(a, "\\\\"),
+            '\n' => try buf.appendSlice(a, "\\n"),
+            '\t' => try buf.appendSlice(a, "\\t"),
+            '\r' => try buf.appendSlice(a, "\\r"),
+            else => try buf.append(a, c),
+        }
+    }
+    try buf.append(a, '"');
+}
+
+pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const text = try arg(args, 0).toString(self.arena);
+    var p = JsonParser{ .s = text, .i = 0, .interp = self };
+    p.skipWs();
+    const v = p.parseValue() catch return self.throwError("SyntaxError", "JSON.parse: invalid JSON");
+    p.skipWs();
+    if (p.i != text.len) return self.throwError("SyntaxError", "JSON.parse: trailing characters");
+    return v;
+}
+
+/// Explicit error set so the mutually-recursive parser methods don't form an
+/// inferred-error-set dependency loop.
+const JErr = error{Invalid} || HostError;
+
+const JsonParser = struct {
+    s: []const u8,
+    i: usize,
+    interp: *Interpreter,
+
+    fn skipWs(p: *JsonParser) void {
+        while (p.i < p.s.len and (p.s[p.i] == ' ' or p.s[p.i] == '\t' or p.s[p.i] == '\n' or p.s[p.i] == '\r')) p.i += 1;
+    }
+
+    fn parseValue(p: *JsonParser) JErr!Value {
+        p.skipWs();
+        if (p.i >= p.s.len) return error.Invalid;
+        const c = p.s[p.i];
+        switch (c) {
+            '{' => return p.parseObject(),
+            '[' => return p.parseArray(),
+            '"' => return .{ .string = try p.parseString() },
+            't' => return p.parseLiteral("true", .{ .boolean = true }),
+            'f' => return p.parseLiteral("false", .{ .boolean = false }),
+            'n' => return p.parseLiteral("null", .null),
+            else => return p.parseNumber(),
+        }
+    }
+
+    fn parseLiteral(p: *JsonParser, lit: []const u8, v: Value) JErr!Value {
+        if (p.i + lit.len > p.s.len or !std.mem.eql(u8, p.s[p.i .. p.i + lit.len], lit)) return error.Invalid;
+        p.i += lit.len;
+        return v;
+    }
+
+    fn parseNumber(p: *JsonParser) JErr!Value {
+        const start = p.i;
+        while (p.i < p.s.len) : (p.i += 1) {
+            switch (p.s[p.i]) {
+                '0'...'9', '-', '+', '.', 'e', 'E' => {},
+                else => break,
+            }
+        }
+        if (p.i == start) return error.Invalid;
+        const n = std.fmt.parseFloat(f64, p.s[start..p.i]) catch return error.Invalid;
+        return .{ .number = n };
+    }
+
+    fn parseString(p: *JsonParser) JErr![]const u8 {
+        p.i += 1; // opening quote
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        const a = p.interp.arena;
+        while (p.i < p.s.len) {
+            const c = p.s[p.i];
+            if (c == '"') {
+                p.i += 1;
+                return buf.toOwnedSlice(a);
+            }
+            if (c == '\\') {
+                p.i += 1;
+                if (p.i >= p.s.len) return error.Invalid;
+                const e = p.s[p.i];
+                try buf.append(a, switch (e) {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    'b' => 8,
+                    'f' => 12,
+                    '/' => '/',
+                    '"' => '"',
+                    '\\' => '\\',
+                    'u' => {
+                        // \uXXXX — emit the low byte (ASCII subset for v1).
+                        if (p.i + 4 >= p.s.len) return error.Invalid;
+                        const code = std.fmt.parseInt(u16, p.s[p.i + 1 .. p.i + 5], 16) catch return error.Invalid;
+                        p.i += 4;
+                        try buf.append(a, @intCast(code & 0xff));
+                        p.i += 1;
+                        continue;
+                    },
+                    else => e,
+                });
+                p.i += 1;
+            } else {
+                try buf.append(a, c);
+                p.i += 1;
+            }
+        }
+        return error.Invalid;
+    }
+
+    fn parseArray(p: *JsonParser) JErr!Value {
+        p.i += 1; // [
+        const result = try p.interp.newArray();
+        p.skipWs();
+        if (p.i < p.s.len and p.s[p.i] == ']') {
+            p.i += 1;
+            return result;
+        }
+        while (true) {
+            const v = try p.parseValue();
+            try result.object.elements.append(p.interp.arena, v);
+            p.skipWs();
+            if (p.i >= p.s.len) return error.Invalid;
+            if (p.s[p.i] == ',') {
+                p.i += 1;
+                continue;
+            }
+            if (p.s[p.i] == ']') {
+                p.i += 1;
+                return result;
+            }
+            return error.Invalid;
+        }
+    }
+
+    fn parseObject(p: *JsonParser) JErr!Value {
+        p.i += 1; // {
+        const result = try p.interp.newObject();
+        p.skipWs();
+        if (p.i < p.s.len and p.s[p.i] == '}') {
+            p.i += 1;
+            return result;
+        }
+        while (true) {
+            p.skipWs();
+            if (p.i >= p.s.len or p.s[p.i] != '"') return error.Invalid;
+            const key = try p.parseString();
+            p.skipWs();
+            if (p.i >= p.s.len or p.s[p.i] != ':') return error.Invalid;
+            p.i += 1;
+            const v = try p.parseValue();
+            try p.interp.setMember(result, key, v);
+            p.skipWs();
+            if (p.i >= p.s.len) return error.Invalid;
+            if (p.s[p.i] == ',') {
+                p.i += 1;
+                continue;
+            }
+            if (p.s[p.i] == '}') {
+                p.i += 1;
+                return result;
+            }
+            return error.Invalid;
+        }
+    }
+};
