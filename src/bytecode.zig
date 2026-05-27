@@ -71,6 +71,7 @@ pub const Op = enum(u8) {
     neq,
     eq_strict,
     neq_strict,
+    in_op,
     bit_and,
     bit_or,
     bit_xor,

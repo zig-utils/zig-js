@@ -296,6 +296,7 @@ pub const Compiler = struct {
                     .eq_strict => .eq_strict,
                     .neq_strict => .neq_strict,
                     .instanceof => .instance_of,
+                    .in_op => .in_op,
                     .bit_and => .bit_and,
                     .bit_or => .bit_or,
                     .bit_xor => .bit_xor,
@@ -313,6 +314,7 @@ pub const Compiler = struct {
                 try self.compileExpr(s.second);
             },
             .logical => |l| {
+                if (l.op == .nullish) return error.Unsupported; // distinct short-circuit predicate → tree-walk
                 try self.compileExpr(l.left);
                 const peek: bc.Op = if (l.op == .@"and") .jump_if_false_peek else .jump_if_true_peek;
                 const short = try self.chunk.emit(peek, 0);

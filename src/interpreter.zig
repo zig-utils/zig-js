@@ -809,6 +809,7 @@ pub const Interpreter = struct {
         return switch (op) {
             .@"and" => if (l.toBoolean()) try self.eval(right) else l,
             .@"or" => if (l.toBoolean()) l else try self.eval(right),
+            .nullish => if (l == .null or l == .undefined) try self.eval(right) else l,
         };
     }
 
@@ -845,6 +846,7 @@ pub const Interpreter = struct {
             .eq_strict => .{ .boolean = value.strictEquals(l, r) },
             .neq_strict => .{ .boolean = !value.strictEquals(l, r) },
             .instanceof => .{ .boolean = try self.instanceOf(l, r) },
+            .in_op => .{ .boolean = try self.inOperator(l, r) },
             .bit_and => .{ .number = @floatFromInt(l.toInt32() & r.toInt32()) },
             .bit_or => .{ .number = @floatFromInt(l.toInt32() | r.toInt32()) },
             .bit_xor => .{ .number = @floatFromInt(l.toInt32() ^ r.toInt32()) },
@@ -867,6 +869,20 @@ pub const Interpreter = struct {
     /// `new F()` carry `ctor_ref` pointing at F's object, and builtin error
     /// constructors carry `error_ctor`; this checks those links rather than a
     /// full prototype chain.
+    /// `key in obj`: true if `obj` has the (own, since we lack a prototype
+    /// chain) property or array index named by `key`.
+    pub fn inOperator(self: *Interpreter, l: Value, r: Value) EvalError!bool {
+        if (r != .object) return self.throwError("TypeError", "cannot use 'in' on a non-object");
+        const o = r.object;
+        const key = try l.toString(self.arena);
+        if (o.getOwn(key) != null) return true;
+        if (o.is_array) {
+            if (std.mem.eql(u8, key, "length")) return true;
+            if (arrayIndex(key)) |i| return i < o.elements.items.len;
+        }
+        return false;
+    }
+
     pub fn instanceOf(self: *Interpreter, l: Value, r: Value) EvalError!bool {
         if (r != .object or !r.object.isCallableObject())
             return self.throwError("TypeError", "Right-hand side of 'instanceof' is not callable");
@@ -1151,6 +1167,23 @@ test "interpreter for loop + ++ + compound assignment" {
     // postfix vs prefix
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let x = 5; let y = x++; y")).number);
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let x = 5; let y = ++x; y")).number);
+}
+
+test "interpreter compound assignments, nullish, and in" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 12), (try evalSource(a, "let x = 3; x **= 2; x + 3")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "let x = 5; x &= 3; x")).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let x = 5; x |= 2; x")).number);
+    try std.testing.expectEqual(@as(f64, 40), (try evalSource(a, "let x = 5; x <<= 3; x")).number);
+    // nullish coalescing
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "null ?? 5")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalSource(a, "0 ?? 5")).number); // 0 is not null/undefined
+    // in operator
+    try std.testing.expect((try evalSource(a, "'a' in { a: 1 }")).boolean);
+    try std.testing.expect(!(try evalSource(a, "'z' in { a: 1 }")).boolean);
+    try std.testing.expect((try evalSource(a, "0 in [10, 20]")).boolean);
 }
 
 test "interpreter bitwise and shift operators" {

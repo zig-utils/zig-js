@@ -466,6 +466,13 @@ pub const Parser = struct {
             .star_eq => .mul,
             .slash_eq => .div,
             .percent_eq => .mod,
+            .star_star_eq => .pow,
+            .shl_eq => .shl,
+            .shr_eq => .shr,
+            .ushr_eq => .ushr,
+            .amp_eq => .bit_and,
+            .pipe_eq => .bit_or,
+            .caret_eq => .bit_xor,
             else => null,
         };
         if (compound) |op| {
@@ -536,11 +543,13 @@ pub const Parser = struct {
     /// relational < shift < additive < multiplicative < `**`.
     fn curBinInfo(self: *Parser) ?BinInfo {
         if (isKeyword(self.cur(), "instanceof")) return .{ .bp = 7, .binary = .instanceof };
+        if (isKeyword(self.cur(), "in")) return .{ .bp = 7, .binary = .in_op };
         return binInfo(self.cur().kind);
     }
 
     fn binInfo(kind: TokenKind) ?BinInfo {
         return switch (kind) {
+            .qq => .{ .bp = 1, .logical = .nullish },
             .pipe_pipe => .{ .bp = 1, .logical = .@"or" },
             .amp_amp => .{ .bp = 2, .logical = .@"and" },
             .pipe => .{ .bp = 3, .binary = .bit_or },

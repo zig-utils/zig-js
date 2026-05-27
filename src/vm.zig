@@ -110,7 +110,7 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
                 try stack.append(vm.arena, .undefined);
             },
 
-            .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
+            .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
                 try stack.append(vm.arena, try vm.applyBinary(binOp(inst.op), l, r));
@@ -276,6 +276,7 @@ fn binOp(op: bc.Op) @import("ast.zig").BinaryOp {
         .neq => .neq,
         .eq_strict => .eq_strict,
         .neq_strict => .neq_strict,
+        .in_op => .in_op,
         .bit_and => .bit_and,
         .bit_or => .bit_or,
         .bit_xor => .bit_xor,

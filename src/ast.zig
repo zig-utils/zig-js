@@ -18,6 +18,7 @@ pub const BinaryOp = enum {
     eq_strict,
     neq_strict,
     instanceof,
+    in_op,
     bit_and,
     bit_or,
     bit_xor,
@@ -26,7 +27,7 @@ pub const BinaryOp = enum {
     ushr,
 };
 
-pub const LogicalOp = enum { @"and", @"or" };
+pub const LogicalOp = enum { @"and", @"or", nullish };
 
 pub const DeclKind = enum { @"var", let, @"const" };
 

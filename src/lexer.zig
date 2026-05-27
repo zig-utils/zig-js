@@ -20,6 +20,14 @@ pub const TokenKind = enum {
     star_eq,
     slash_eq,
     percent_eq,
+    star_star_eq, // **=
+    shl_eq, // <<=
+    shr_eq, // >>=
+    ushr_eq, // >>>=
+    amp_eq, // &=
+    pipe_eq, // |=
+    caret_eq, // ^=
+    qq, // ??
     assign,
     eq, // ==
     eq_strict, // ===
@@ -157,6 +165,10 @@ pub const Lexer = struct {
             '*' => {
                 if (self.peek() == '*') {
                     self.i += 1;
+                    if (self.peek() == '=') {
+                        self.i += 1;
+                        return tok(.star_star_eq, self.src[start..self.i], start);
+                    }
                     return tok(.star_star, self.src[start..self.i], start);
                 }
                 if (self.peek() == '=') {
@@ -194,11 +206,21 @@ pub const Lexer = struct {
                 }
                 return tok(.dot, self.src[start..self.i], start);
             },
-            '?' => return tok(.question, self.src[start..self.i], start),
+            '?' => {
+                if (self.peek() == '?') {
+                    self.i += 1;
+                    return tok(.qq, self.src[start..self.i], start);
+                }
+                return tok(.question, self.src[start..self.i], start);
+            },
             ':' => return tok(.colon, self.src[start..self.i], start),
             '<' => {
                 if (self.peek() == '<') {
                     self.i += 1;
+                    if (self.peek() == '=') {
+                        self.i += 1;
+                        return tok(.shl_eq, self.src[start..self.i], start);
+                    }
                     return tok(.shl, self.src[start..self.i], start);
                 }
                 if (self.peek() == '=') {
@@ -212,7 +234,15 @@ pub const Lexer = struct {
                     self.i += 1;
                     if (self.peek() == '>') {
                         self.i += 1;
+                        if (self.peek() == '=') {
+                            self.i += 1;
+                            return tok(.ushr_eq, self.src[start..self.i], start);
+                        }
                         return tok(.ushr, self.src[start..self.i], start);
+                    }
+                    if (self.peek() == '=') {
+                        self.i += 1;
+                        return tok(.shr_eq, self.src[start..self.i], start);
                     }
                     return tok(.shr, self.src[start..self.i], start);
                 }
@@ -253,6 +283,10 @@ pub const Lexer = struct {
                     self.i += 1;
                     return tok(.amp_amp, self.src[start..self.i], start);
                 }
+                if (self.peek() == '=') {
+                    self.i += 1;
+                    return tok(.amp_eq, self.src[start..self.i], start);
+                }
                 return tok(.amp, self.src[start..self.i], start);
             },
             '|' => {
@@ -260,9 +294,19 @@ pub const Lexer = struct {
                     self.i += 1;
                     return tok(.pipe_pipe, self.src[start..self.i], start);
                 }
+                if (self.peek() == '=') {
+                    self.i += 1;
+                    return tok(.pipe_eq, self.src[start..self.i], start);
+                }
                 return tok(.pipe, self.src[start..self.i], start);
             },
-            '^' => return tok(.caret, self.src[start..self.i], start),
+            '^' => {
+                if (self.peek() == '=') {
+                    self.i += 1;
+                    return tok(.caret_eq, self.src[start..self.i], start);
+                }
+                return tok(.caret, self.src[start..self.i], start);
+            },
             '~' => return tok(.tilde, self.src[start..self.i], start),
             else => return LexError.UnexpectedCharacter,
         }
