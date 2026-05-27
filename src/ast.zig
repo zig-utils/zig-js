@@ -106,6 +106,9 @@ pub const Node = union(enum) {
     member: struct { object: *Node, property: []const u8 = "", computed: ?*Node = null },
     object_lit: []Property,
     array_lit: []*Node,
+    /// A `...expr` spread element, only valid inside an array literal or an
+    /// argument list; the interpreter expands its iterable in place.
+    spread: *Node,
 
     // statements
     var_decl: struct { kind: DeclKind, name: []const u8, init: ?*Node },

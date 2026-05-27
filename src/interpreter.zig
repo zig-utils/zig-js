@@ -152,6 +152,8 @@ pub const Interpreter = struct {
             .member => |m| try self.getProperty(try self.eval(m.object), try self.memberKey(m.property, m.computed)),
             .object_lit => |props| try self.evalObjectLit(props),
             .array_lit => |elems| try self.evalArrayLit(elems),
+            // Spreads are consumed by array/argument evaluation, never on their own.
+            .spread => return self.throwError("SyntaxError", "unexpected spread element"),
 
             .conditional => |c| if ((try self.eval(c.cond)).toBoolean())
                 try self.eval(c.consequent)
@@ -388,9 +390,39 @@ pub const Interpreter = struct {
     }
 
     fn evalArgs(self: *Interpreter, arg_nodes: []*Node) EvalError![]Value {
-        const args = try self.arena.alloc(Value, arg_nodes.len);
-        for (arg_nodes, 0..) |an, i| args[i] = try self.eval(an);
-        return args;
+        // Fast path: no spreads → fixed-size slice.
+        var has_spread = false;
+        for (arg_nodes) |an| {
+            if (an.* == .spread) has_spread = true;
+        }
+        if (!has_spread) {
+            const args = try self.arena.alloc(Value, arg_nodes.len);
+            for (arg_nodes, 0..) |an, i| args[i] = try self.eval(an);
+            return args;
+        }
+        var list: std.ArrayListUnmanaged(Value) = .empty;
+        for (arg_nodes) |an| {
+            if (an.* == .spread) {
+                try self.spreadInto(&list, try self.eval(an.spread));
+            } else {
+                try list.append(self.arena, try self.eval(an));
+            }
+        }
+        return list.items;
+    }
+
+    /// Expand an iterable (array or string) into `list` — for `...spread`.
+    fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
+        switch (v) {
+            .object => |o| {
+                if (!o.is_array) return self.throwError("TypeError", "spread value is not iterable");
+                for (o.elements.items) |e| try list.append(self.arena, e);
+            },
+            .string => |s| {
+                for (s) |ch| try list.append(self.arena, .{ .string = try self.arena.dupe(u8, &.{ch}) });
+            },
+            else => return self.throwError("TypeError", "spread value is not iterable"),
+        }
     }
 
     fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node) EvalError!Value {
@@ -533,7 +565,13 @@ pub const Interpreter = struct {
 
     fn evalArrayLit(self: *Interpreter, elems: []*Node) EvalError!Value {
         const v = try self.newArray();
-        for (elems) |en| try v.object.elements.append(self.arena, try self.eval(en));
+        for (elems) |en| {
+            if (en.* == .spread) {
+                try self.spreadInto(&v.object.elements, try self.eval(en.spread));
+            } else {
+                try v.object.elements.append(self.arena, try self.eval(en));
+            }
+        }
         return v;
     }
 
@@ -1031,6 +1069,27 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter spread in arrays and calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // spread in an array literal
+    try std.testing.expectEqualStrings("1,2,3,4", (try evalSource(a, "let xs = [2, 3]; '' + [1, ...xs, 4]")).string);
+    // spread a string into an array
+    try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + [...'abc']")).string);
+    // spread args into a call
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a,
+        \\function add(a, b, c) { return a + b + c; }
+        \\let args = [1, 2, 3];
+        \\add(...args)
+    )).number);
+    // mixed fixed + spread args
+    try std.testing.expectEqual(@as(f64, 10), (try evalSource(a,
+        \\function add(a, b, c, d) { return a + b + c + d; }
+        \\add(1, ...[2, 3], 4)
+    )).number);
 }
 
 test "interpreter default and rest parameters" {

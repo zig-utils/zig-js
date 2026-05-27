@@ -399,6 +399,7 @@ pub const Compiler = struct {
             .array_lit => |elems| {
                 _ = try self.chunk.emit(.new_array, 0);
                 for (elems) |e| {
+                    if (e.* == .spread) return error.Unsupported; // dynamic length → fallback
                     try self.compileExpr(e);
                     _ = try self.chunk.emit(.array_append, 0);
                 }

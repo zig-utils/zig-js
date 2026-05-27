@@ -567,11 +567,17 @@ pub const Parser = struct {
         try self.expect(.lparen);
         var args: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.rparen) and !self.check(.eof)) {
-            try args.append(self.arena, try self.parseAssignment());
+            try args.append(self.arena, try self.parseSpreadable());
             if (!self.match(.comma)) break;
         }
         try self.expect(.rparen);
         return args.items;
+    }
+
+    /// An array element or call argument, which may be a `...spread`.
+    fn parseSpreadable(self: *Parser) ParseError!*Node {
+        if (self.match(.ellipsis)) return self.alloc(.{ .spread = try self.parseAssignment() });
+        return self.parseAssignment();
     }
 
     /// `new Callee(args)` — the callee is a member expression *without* a call
@@ -691,7 +697,7 @@ pub const Parser = struct {
         try self.expect(.lbracket);
         var elems: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.rbracket) and !self.check(.eof)) {
-            try elems.append(self.arena, try self.parseAssignment());
+            try elems.append(self.arena, try self.parseSpreadable());
             if (!self.match(.comma)) break;
         }
         try self.expect(.rbracket);
