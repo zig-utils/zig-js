@@ -44,6 +44,8 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     const code = chunk.code.items;
 
     while (ip < code.len) {
+        vm.steps += 1;
+        if (vm.steps > interp.max_steps) return vm.throwError("RangeError", "evaluation step budget exceeded");
         const inst = code[ip];
         ip += 1;
         switch (inst.op) {
@@ -338,6 +340,10 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
 }
 
 fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value) EvalError!Value {
+    if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
+    vm.depth += 1;
+    defer vm.depth -= 1;
+
     // Allocate the activation frame: slots default to undefined, the first
     // `params.len` are filled from the arguments. Globals stay in `vm.env`.
     const slots = try vm.arena.alloc(Value, func.local_count);

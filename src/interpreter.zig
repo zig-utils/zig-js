@@ -9,6 +9,20 @@ const Shape = @import("shape.zig").Shape;
 const Node = ast.Node;
 const Value = value.Value;
 
+/// Robustness limits so adversarial input throws a catchable error instead of
+/// crashing the process (stack overflow / runaway loop).
+pub const max_call_depth: u32 = 2000;
+pub const max_steps: u64 = 100_000_000;
+
+/// Coerce a JS number to a length/index, clamping NaN/negative to 0 and huge
+/// values to a cap (so `@intFromFloat` never panics; oversized allocations then
+/// fail gracefully as OutOfMemory).
+pub fn toLen(n: f64) usize {
+    if (std.math.isNan(n) or n <= 0) return 0;
+    if (n > 4294967295) return 4294967295;
+    return @intFromFloat(@trunc(n));
+}
+
 /// `error.Throw` is the carrier for *any* JS exception: the thrown value lives
 /// in `Interpreter.exception`. `error.OutOfMemory` is the only genuine host
 /// failure. (ReferenceError/TypeError are no longer Zig errors — they are real,
@@ -115,6 +129,9 @@ pub const Interpreter = struct {
     /// Active `with` scope objects (innermost last); bare identifiers consult
     /// these before the lexical environment.
     with_stack: std.ArrayListUnmanaged(*value.Object) = .empty,
+    /// Robustness counters: function call depth and total evaluation steps.
+    depth: u32 = 0,
+    steps: u64 = 0,
 
     // ---- exception helpers ------------------------------------------------
 
@@ -140,6 +157,8 @@ pub const Interpreter = struct {
     }
 
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
+        self.steps += 1;
+        if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
         return switch (node.*) {
             .number => |n| .{ .number = n },
             .string => |s| .{ .string = s },
@@ -718,6 +737,10 @@ pub const Interpreter = struct {
     }
 
     fn callFunction(self: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
+        if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
+        self.depth += 1;
+        defer self.depth -= 1;
+
         const call_env = try self.arena.create(Environment);
         call_env.* = .{ .arena = self.arena, .parent = func.closure };
 
@@ -1046,8 +1069,10 @@ pub const Interpreter = struct {
                 if (o.is_array) {
                     if (std.mem.eql(u8, key, "length"))
                         return .{ .number = @floatFromInt(o.elements.items.len) };
-                    if (arrayIndex(key)) |i|
-                        return if (i < o.elements.items.len) o.elements.items[i] else .undefined;
+                    if (arrayIndex(key)) |i| {
+                        if (i < o.elements.items.len) return o.elements.items[i];
+                        // else fall through: may be a sparse named property.
+                    }
                 }
                 // Accessor or data, then walk the prototype chain.
                 var cur: ?*value.Object = o;
@@ -1202,9 +1227,19 @@ pub const Interpreter = struct {
         const o = recv.object;
         if (o.is_array) {
             if (arrayIndex(key)) |i| {
-                while (o.elements.items.len <= i) try o.elements.append(self.arena, .undefined);
-                o.elements.items[i] = v;
-                return;
+                if (i < o.elements.items.len) {
+                    o.elements.items[i] = v;
+                    return;
+                }
+                // Grow densely only for near-contiguous, bounded indices; large
+                // or gappy indices become sparse named properties (no giant alloc).
+                const dense_cap: usize = 1 << 24;
+                if (i < dense_cap and i <= o.elements.items.len + 1024) {
+                    while (o.elements.items.len <= i) try o.elements.append(self.arena, .undefined);
+                    o.elements.items[i] = v;
+                    return;
+                }
+                // fall through: store as a named (sparse) property
             }
         }
         // A setter anywhere on the prototype chain intercepts the assignment.
@@ -1488,8 +1523,7 @@ pub const Interpreter = struct {
             return Value{ .string = try value.numberToString(self.arena, n) };
         }
         if (eq(name, "toFixed")) {
-            const d: usize = @intFromFloat(@max(0, @min(100, arg0(args).toNumber())));
-            return Value{ .string = try toFixed(self.arena, n, d) };
+            return Value{ .string = try toFixed(self.arena, n, @min(toLen(arg0(args).toNumber()), 18)) };
         }
         return null;
     }
@@ -1509,7 +1543,7 @@ pub const Interpreter = struct {
             return if (i < s.len) Value{ .string = try self.arena.dupe(u8, s[i .. i + 1]) } else Value{ .string = "" };
         }
         if (eq(name, "charCodeAt")) {
-            const i: usize = @intFromFloat(@max(@trunc(arg0(args).toNumber()), 0));
+            const i = toLen(arg0(args).toNumber());
             return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value{ .number = std.math.nan(f64) };
         }
         if (eq(name, "indexOf")) {
@@ -1555,7 +1589,9 @@ pub const Interpreter = struct {
         }
         if (eq(name, "trim")) return Value{ .string = std.mem.trim(u8, s, " \t\r\n") };
         if (eq(name, "repeat")) {
-            const n: usize = @intFromFloat(@max(@trunc(arg0(args).toNumber()), 0));
+            const rn = arg0(args).toNumber();
+            if (rn < 0 or std.math.isInf(rn)) return self.throwError("RangeError", "Invalid count value");
+            const n = toLen(rn);
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             var i: usize = 0;
             while (i < n) : (i += 1) try buf.appendSlice(self.arena, s);
@@ -1599,7 +1635,7 @@ pub const Interpreter = struct {
             return Value{ .string = s[0..e] };
         }
         if (eq(name, "padStart") or eq(name, "padEnd")) {
-            const target: usize = @intFromFloat(@max(0, arg0(args).toNumber()));
+            const target = toLen(arg0(args).toNumber());
             if (s.len >= target) return Value{ .string = try self.arena.dupe(u8, s) };
             const pad = if (args.len > 1 and args[1] != .undefined) try args[1].toString(self.arena) else " ";
             if (pad.len == 0) return Value{ .string = try self.arena.dupe(u8, s) };
@@ -1946,7 +1982,8 @@ fn intToRadix(arena: std.mem.Allocator, n: f64, radix: usize) ![]const u8 {
     const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const neg = n < 0;
-    var v: u64 = @intFromFloat(@abs(n));
+    const an = @abs(n);
+    var v: u64 = if (an > 18446744073709551615.0) std.math.maxInt(u64) else @intFromFloat(an);
     while (v > 0) {
         try buf.append(arena, digits[@intCast(v % radix)]);
         v /= radix;
@@ -1956,20 +1993,22 @@ fn intToRadix(arena: std.mem.Allocator, n: f64, radix: usize) ![]const u8 {
     return buf.items;
 }
 
-/// `n.toFixed(d)` — fixed-point with `d` decimals (no exponent forms).
+/// `n.toFixed(d)` — fixed-point with `d` decimals (d ≤ 18; no exponent forms).
+/// Falls back to the default number string when the scaled value would overflow.
 fn toFixed(arena: std.mem.Allocator, n: f64, d: usize) ![]const u8 {
     if (std.math.isNan(n)) return "NaN";
     if (std.math.isInf(n)) return if (n < 0) "-Infinity" else "Infinity";
     const neg = n < 0;
     const scale = std.math.pow(f64, 10, @floatFromInt(d));
-    const scaled: u64 = @intFromFloat(@round(@abs(n) * scale));
-    const int_part = scaled / @as(u64, @intFromFloat(scale));
+    const scaled_f = @round(@abs(n) * scale);
+    if (scaled_f >= 18446744073709551615.0) return value.numberToString(arena, n); // too big for fixed-point
+    const scaled: u64 = @intFromFloat(scaled_f);
+    const scale_u: u64 = @intFromFloat(scale);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (neg) try buf.append(arena, '-');
-    try buf.print(arena, "{d}", .{int_part});
+    try buf.print(arena, "{d}", .{scaled / scale_u});
     if (d > 0) {
-        const frac = scaled % @as(u64, @intFromFloat(scale));
-        try buf.print(arena, ".{d:0>[1]}", .{ frac, d });
+        try buf.print(arena, ".{d:0>[1]}", .{ scaled % scale_u, d });
     }
     return buf.items;
 }
