@@ -29,6 +29,7 @@ pub const TokenKind = enum {
     pipe_eq, // |=
     caret_eq, // ^=
     qq, // ??
+    question_dot, // ?.
     assign,
     eq, // ==
     eq_strict, // ===
@@ -240,6 +241,11 @@ pub const Lexer = struct {
                     self.i += 1;
                     return tok(.qq, self.src[start..self.i], start);
                 }
+                // `?.` optional chaining — but `?.5` is the conditional `?` then `.5`.
+                if (self.peek() == '.' and !std.ascii.isDigit(self.peek2())) {
+                    self.i += 1;
+                    return tok(.question_dot, self.src[start..self.i], start);
+                }
                 return tok(.question, self.src[start..self.i], start);
             },
             ':' => return tok(.colon, self.src[start..self.i], start),
@@ -343,25 +349,37 @@ pub const Lexer = struct {
 
     fn lexNumber(self: *Lexer) LexError!Token {
         const start = self.i;
-        // Hex / binary / octal prefixes
-        if (self.peek() == '0' and (self.peek2() == 'x' or self.peek2() == 'X')) {
-            self.i += 2;
-            const hs = self.i;
-            while (self.i < self.src.len and std.ascii.isHex(self.src[self.i])) self.i += 1;
-            const n = std.fmt.parseInt(u64, self.src[hs..self.i], 16) catch return LexError.InvalidNumber;
-            return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start };
+        // Radix prefixes: 0x / 0o / 0b (digits may use `_` separators).
+        if (self.peek() == '0' and self.peek2() != 0) {
+            const radix: ?u8 = switch (self.peek2()) {
+                'x', 'X' => 16,
+                'o', 'O' => 8,
+                'b', 'B' => 2,
+                else => null,
+            };
+            if (radix) |r| {
+                self.i += 2;
+                const ds = self.i;
+                while (self.i < self.src.len and (isRadixDigit(self.src[self.i], r) or self.src[self.i] == '_')) self.i += 1;
+                const cleaned = try stripSeparators(self.arena, self.src[ds..self.i]);
+                const n = std.fmt.parseInt(u128, cleaned, r) catch return LexError.InvalidNumber;
+                if (self.peek() == 'n') self.i += 1; // BigInt suffix: treated as a number for v1
+                return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start };
+            }
         }
-        while (self.i < self.src.len and std.ascii.isDigit(self.src[self.i])) self.i += 1;
+        while (self.i < self.src.len and (std.ascii.isDigit(self.src[self.i]) or self.src[self.i] == '_')) self.i += 1;
         if (self.peek() == '.') {
             self.i += 1;
-            while (self.i < self.src.len and std.ascii.isDigit(self.src[self.i])) self.i += 1;
+            while (self.i < self.src.len and (std.ascii.isDigit(self.src[self.i]) or self.src[self.i] == '_')) self.i += 1;
         }
         if (self.peek() == 'e' or self.peek() == 'E') {
             self.i += 1;
             if (self.peek() == '+' or self.peek() == '-') self.i += 1;
-            while (self.i < self.src.len and std.ascii.isDigit(self.src[self.i])) self.i += 1;
+            while (self.i < self.src.len and (std.ascii.isDigit(self.src[self.i]) or self.src[self.i] == '_')) self.i += 1;
         }
-        const n = std.fmt.parseFloat(f64, self.src[start..self.i]) catch return LexError.InvalidNumber;
+        if (self.peek() == 'n') self.i += 1; // BigInt suffix → number for v1
+        const cleaned = try stripSeparators(self.arena, self.src[start..self.i]);
+        const n = std.fmt.parseFloat(f64, cleaned) catch return LexError.InvalidNumber;
         return .{ .kind = .number, .text = self.src[start..self.i], .number = n, .pos = start };
     }
 
@@ -494,6 +512,28 @@ pub const Lexer = struct {
 
 fn tok(kind: TokenKind, text: []const u8, pos: usize) Token {
     return .{ .kind = kind, .text = text, .pos = pos };
+}
+
+fn isRadixDigit(c: u8, radix: u8) bool {
+    const v: u8 = switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => return false,
+    };
+    return v < radix;
+}
+
+/// Strip `_` numeric separators, trimming a trailing BigInt `n` too. Returns a
+/// slice safe to hand to `parseInt`/`parseFloat`.
+fn stripSeparators(arena: std.mem.Allocator, s: []const u8) LexError![]const u8 {
+    if (std.mem.indexOfScalar(u8, s, '_') == null and (s.len == 0 or s[s.len - 1] != 'n')) return s;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        if (c == '_' or c == 'n') continue;
+        try buf.append(arena, c);
+    }
+    return buf.toOwnedSlice(arena);
 }
 
 /// Keywords after which a `/` begins a regex (they expect an operand).

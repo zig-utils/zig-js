@@ -726,14 +726,29 @@ pub const Parser = struct {
         return m;
     }
 
-    /// Consume a chain of `.prop`, `[expr]`, and `(args)` operators on `e`.
+    /// Consume a chain of `.prop`, `[expr]`, `?.…`, and `(args)` operators on `e`.
     fn parseMemberTail(self: *Parser, start: *Node) ParseError!*Node {
         var e = start;
+        var has_optional = false;
         while (true) {
             if (self.match(.dot)) {
                 const name = self.advance();
                 if (name.kind != .identifier) return ParseError.UnexpectedToken;
                 e = try self.alloc(.{ .member = .{ .object = e, .property = name.text } });
+            } else if (self.match(.question_dot)) {
+                has_optional = true;
+                if (self.check(.lparen)) {
+                    const args = try self.parseArgs();
+                    e = try self.alloc(.{ .call = .{ .callee = e, .args = args, .optional = true } });
+                } else if (self.match(.lbracket)) {
+                    const idx = try self.parseExpression();
+                    try self.expect(.rbracket);
+                    e = try self.alloc(.{ .member = .{ .object = e, .computed = idx, .optional = true } });
+                } else {
+                    const name = self.advance();
+                    if (name.kind != .identifier) return ParseError.UnexpectedToken;
+                    e = try self.alloc(.{ .member = .{ .object = e, .property = name.text, .optional = true } });
+                }
             } else if (self.match(.lbracket)) {
                 const idx = try self.parseExpression();
                 try self.expect(.rbracket);
@@ -743,6 +758,7 @@ pub const Parser = struct {
                 e = try self.alloc(.{ .call = .{ .callee = e, .args = args } });
             } else break;
         }
+        if (has_optional) e = try self.alloc(.{ .optional_chain = e });
         return e;
     }
 

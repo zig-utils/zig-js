@@ -13,7 +13,7 @@ const Value = value.Value;
 /// in `Interpreter.exception`. `error.OutOfMemory` is the only genuine host
 /// failure. (ReferenceError/TypeError are no longer Zig errors — they are real,
 /// catchable JS `Error` objects raised via `error.Throw`.)
-pub const EvalError = error{ OutOfMemory, Throw };
+pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 
 /// A lexical scope with a parent chain. Function calls push a fresh scope whose
 /// `parent` is the function's closure environment, which gives real closures.
@@ -177,9 +177,15 @@ pub const Interpreter = struct {
                 break :blk try self.getProperty(.{ .object = parent }, key);
             },
 
-            .call => |c| try self.evalCall(c.callee, c.args),
+            .call => |c| try self.evalCall(c.callee, c.args, c.optional),
             .new_expr => |n| try self.evalNew(n.callee, n.args),
-            .member => |m| try self.getProperty(try self.eval(m.object), try self.memberKey(m.property, m.computed)),
+            .member => |m| blk: {
+                const obj = try self.eval(m.object);
+                if (m.optional and (obj == .null or obj == .undefined)) return error.OptShortCircuit;
+                break :blk try self.getProperty(obj, try self.memberKey(m.property, m.computed));
+            },
+            .optional_chain => |inner| self.eval(inner) catch |e|
+                if (e == error.OptShortCircuit) Value.undefined else return e,
             .object_lit => |props| try self.evalObjectLit(props),
             .array_lit => |elems| try self.evalArrayLit(elems),
             .regex_literal => |r| try self.makeRegex(r.pattern, r.flags),
@@ -619,14 +625,21 @@ pub const Interpreter = struct {
         }
     }
 
-    fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node) EvalError!Value {
+    fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool) EvalError!Value {
         // Method call `obj.m(...)`: evaluate the receiver once so it can both
         // resolve the method and bind `this`. Array/string builtins (push,
         // pop, ...) that aren't own properties are dispatched here too.
         if (callee_node.* == .member) {
             const m = callee_node.member;
             const recv = try self.eval(m.object);
+            if (m.optional and (recv == .null or recv == .undefined)) return error.OptShortCircuit;
             const key = try self.memberKey(m.property, m.computed);
+            // `recv.m?.(...)`: short-circuit if the method itself is nullish.
+            if (optional) {
+                const method = try self.getProperty(recv, key);
+                if (method == .null or method == .undefined) return error.OptShortCircuit;
+                return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
+            }
             const args = try self.evalArgs(arg_nodes);
             return self.callMethod(recv, key, args);
         }
@@ -642,6 +655,7 @@ pub const Interpreter = struct {
             return self.callValueWithThis(method, args, self.this_value);
         }
         const callee = try self.eval(callee_node);
+        if (optional and (callee == .null or callee == .undefined)) return error.OptShortCircuit;
         const args = try self.evalArgs(arg_nodes);
         return self.callValue(callee, args);
     }
@@ -1888,6 +1902,26 @@ test "interpreter String.prototype methods" {
     try std.testing.expectEqualStrings("abab", (try evalSource(a, "'ab'.repeat(2)")).string);
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + 'a-b-c'.split('-')")).string);
     try std.testing.expectEqualStrings("hi", (try evalSource(a, "'  hi  '.trim()")).string);
+}
+
+test "interpreter numeric literals (separators, binary/octal) and optional chaining" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // numeric separators + radix prefixes
+    try std.testing.expectEqual(@as(f64, 1000000), (try evalSource(a, "1_000_000")).number);
+    try std.testing.expectEqual(@as(f64, 255), (try evalSource(a, "0b1111_1111")).number);
+    try std.testing.expectEqual(@as(f64, 511), (try evalSource(a, "0o777")).number);
+    try std.testing.expectEqual(@as(f64, 3000), (try evalSource(a, "3_000")).number);
+    // optional chaining
+    try std.testing.expect((try evalSource(a, "let o = { a: { b: 5 } }; o.a?.b === 5")).boolean);
+    try std.testing.expect((try evalSource(a, "let o = {}; o.x?.y === undefined")).boolean);
+    try std.testing.expect((try evalSource(a, "let o = null; o?.a?.b === undefined")).boolean);
+    // optional call
+    try std.testing.expect((try evalSource(a, "let o = { f: function () { return 7; } }; o.f?.() === 7")).boolean);
+    try std.testing.expect((try evalSource(a, "let o = {}; o.missing?.() === undefined")).boolean);
+    // optional method short-circuits the whole chain
+    try std.testing.expect((try evalSource(a, "let o = null; o?.a.b.c === undefined")).boolean);
 }
 
 test "interpreter arguments object and Array/Object statics" {

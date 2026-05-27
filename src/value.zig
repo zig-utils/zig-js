@@ -15,8 +15,10 @@ pub const HostCallback = *const fn (
 ) callconv(.c) ?*anyopaque;
 
 /// Error set a native builtin may return (mirrors the interpreter's EvalError;
-/// error values are global by name, so they coerce).
-pub const HostError = error{ OutOfMemory, Throw };
+/// error values are global by name, so they coerce). `OptShortCircuit` is an
+/// internal control-flow signal natives never actually produce, included only
+/// so the sets unify.
+pub const HostError = error{ OutOfMemory, Throw, OptShortCircuit };
 
 /// A Zig-native function exposed to JS. Unlike `HostCallback` (the C-ABI JSC
 /// shape used across the FFI boundary), this is the in-process hook the

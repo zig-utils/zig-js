@@ -148,10 +148,14 @@ pub const Node = union(enum) {
     super_call: []*Node,
     /// `super.prop` / `super[expr]` — look up on the home object's prototype.
     super_member: struct { property: []const u8 = "", computed: ?*Node = null },
-    call: struct { callee: *Node, args: []*Node },
+    call: struct { callee: *Node, args: []*Node, optional: bool = false },
     new_expr: struct { callee: *Node, args: []*Node },
-    /// `object.property` (computed == null) or `object[computed]`.
-    member: struct { object: *Node, property: []const u8 = "", computed: ?*Node = null },
+    /// `object.property` (computed == null) or `object[computed]`. `optional`
+    /// marks `?.` access (short-circuits the chain when the object is nullish).
+    member: struct { object: *Node, property: []const u8 = "", computed: ?*Node = null, optional: bool = false },
+    /// Root of an optional chain (`a?.b.c`): catches the short-circuit and
+    /// yields `undefined`.
+    optional_chain: *Node,
     object_lit: []Property,
     array_lit: []*Node,
     regex_literal: struct { pattern: []const u8, flags: []const u8 },
