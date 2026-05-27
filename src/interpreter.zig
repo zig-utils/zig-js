@@ -134,6 +134,10 @@ pub const Interpreter = struct {
             .update => |u| try self.evalUpdate(u.inc, u.prefix, u.target),
             .binary => |b| try self.evalBinary(b.op, b.left, b.right),
             .logical => |l| try self.evalLogical(l.op, l.left, l.right),
+            .sequence => |s| blk: {
+                _ = try self.eval(s.first);
+                break :blk try self.eval(s.second);
+            },
 
             .assign => |a| blk: {
                 const v = try self.eval(a.value);
@@ -202,6 +206,15 @@ pub const Interpreter = struct {
                 .undefined,
 
             .while_stmt => |s| try self.evalWhile(s.cond, s.body),
+            .do_while_stmt => |s| blk: {
+                var last: Value = .undefined;
+                while (true) {
+                    last = try self.eval(s.body);
+                    if (self.loopSignal()) |stop| if (stop) break;
+                    if (!(try self.eval(s.cond)).toBoolean()) break;
+                }
+                break :blk last;
+            },
             .for_stmt => |f| try self.evalFor(f.init, f.cond, f.update, f.body),
             .switch_stmt => |s| try self.evalSwitch(s.disc, s.cases),
             .for_in => |f| try self.evalForInOf(f.decl_kind, f.name, f.iterable, f.body, f.is_of),
@@ -1001,6 +1014,26 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
     // precedence: | looser than &, both looser than ==
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
+}
+
+test "interpreter do-while and comma operator" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 15), (try evalSource(a,
+        \\let s = 0, i = 1;
+        \\do { s = s + i; i = i + 1; } while (i <= 5);
+        \\s
+    )).number);
+    // do-while body always runs at least once
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a,
+        \\let n = 0;
+        \\do { n = n + 1; } while (false);
+        \\n
+    )).number);
+    // comma operator yields the last value
+    try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "(1, 2, 3)")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let x = 0; x = (x = 2, x + 3); x")).number);
 }
 
 test "interpreter for-of and for-in" {

@@ -80,6 +80,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "const")) return self.parseVarDecl(.@"const");
             if (std.mem.eql(u8, t.text, "if")) return self.parseIf();
             if (std.mem.eql(u8, t.text, "while")) return self.parseWhile();
+            if (std.mem.eql(u8, t.text, "do")) return self.parseDoWhile();
             if (std.mem.eql(u8, t.text, "for")) return self.parseFor();
             if (std.mem.eql(u8, t.text, "switch")) return self.parseSwitch();
             if (std.mem.eql(u8, t.text, "function")) return self.parseFunctionDecl();
@@ -154,6 +155,18 @@ pub const Parser = struct {
         try self.expect(.rparen);
         const body = try self.parseStatement();
         return self.alloc(.{ .while_stmt = .{ .cond = cond, .body = body } });
+    }
+
+    fn parseDoWhile(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // do
+        const body = try self.parseStatement();
+        if (!isKeyword(self.cur(), "while")) return ParseError.ExpectedToken;
+        _ = self.advance(); // while
+        try self.expect(.lparen);
+        const cond = try self.parseExpression();
+        try self.expect(.rparen);
+        _ = self.match(.semicolon);
+        return self.alloc(.{ .do_while_stmt = .{ .body = body, .cond = cond } });
     }
 
     fn parseFor(self: *Parser) ParseError!*Node {
@@ -333,7 +346,15 @@ pub const Parser = struct {
     // ----- expressions ----------------------------------------------------
 
     fn parseExpression(self: *Parser) ParseError!*Node {
-        return self.parseAssignment();
+        var e = try self.parseAssignment();
+        // The comma operator (only at true expression positions — arg lists,
+        // array/object elements, and declarators use parseAssignment directly).
+        while (self.check(.comma)) {
+            _ = self.advance();
+            const rhs = try self.parseAssignment();
+            e = try self.alloc(.{ .sequence = .{ .first = e, .second = rhs } });
+        }
+        return e;
     }
 
     fn parseAssignment(self: *Parser) ParseError!*Node {

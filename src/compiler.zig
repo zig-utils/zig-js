@@ -161,6 +161,7 @@ pub const Compiler = struct {
             },
             .if_stmt => |s| try self.compileIf(s.cond, s.consequent, s.alternate),
             .while_stmt => |s| try self.compileWhile(s.cond, s.body),
+            .do_while_stmt => |s| try self.compileDoWhile(s.body, s.cond),
             .for_stmt => |f| try self.compileFor(f.init, f.cond, f.update, f.body),
             .break_stmt => {
                 const loop = self.currentLoop() orelse return error.Unsupported;
@@ -201,6 +202,20 @@ pub const Compiler = struct {
         self.chunk.patchToHere(to_end);
         // `continue` re-tests the condition.
         for (loop.continues.items) |j| self.chunk.patchTo(j, cond_at);
+        for (loop.breaks.items) |j| self.chunk.patchToHere(j);
+        self.popLoop();
+    }
+
+    fn compileDoWhile(self: *Compiler, body: *Node, cond: *Node) CompileError!void {
+        const loop = try self.pushLoop();
+        const top = self.chunk.here();
+        try self.compileStmt(body);
+        const cont_at = self.chunk.here(); // `continue` re-tests the condition
+        try self.compileExpr(cond);
+        const to_end = try self.chunk.emit(.jump_if_false, 0);
+        _ = try self.chunk.emit(.jump, @intCast(top));
+        self.chunk.patchToHere(to_end);
+        for (loop.continues.items) |j| self.chunk.patchTo(j, cont_at);
         for (loop.breaks.items) |j| self.chunk.patchToHere(j);
         self.popLoop();
     }
@@ -291,6 +306,11 @@ pub const Compiler = struct {
                 try self.compileExpr(b.left);
                 try self.compileExpr(b.right);
                 _ = try self.chunk.emit(op, 0);
+            },
+            .sequence => |s| {
+                try self.compileExpr(s.first);
+                _ = try self.chunk.emit(.pop, 0);
+                try self.compileExpr(s.second);
             },
             .logical => |l| {
                 try self.compileExpr(l.left);

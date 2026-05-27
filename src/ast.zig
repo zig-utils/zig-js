@@ -84,6 +84,8 @@ pub const Node = union(enum) {
     update: struct { inc: bool, prefix: bool, target: *Node },
     binary: struct { op: BinaryOp, left: *Node, right: *Node },
     logical: struct { op: LogicalOp, left: *Node, right: *Node },
+    /// The comma operator: evaluate `first` (discarded), then `second` (result).
+    sequence: struct { first: *Node, second: *Node },
     assign: struct { target: *Node, value: *Node },
     conditional: struct { cond: *Node, consequent: *Node, alternate: *Node },
     function: *FunctionNode, // function/arrow expression -> a function value
@@ -106,6 +108,7 @@ pub const Node = union(enum) {
     block: []*Node,
     if_stmt: struct { cond: *Node, consequent: *Node, alternate: ?*Node },
     while_stmt: struct { cond: *Node, body: *Node },
+    do_while_stmt: struct { body: *Node, cond: *Node },
     for_stmt: struct { init: ?*Node, cond: ?*Node, update: ?*Node, body: *Node },
     /// `for (decl_kind name of/in iterable) body`. `decl_kind` null means the
     /// binding is an existing variable (assigned, not declared). `is_of` picks
