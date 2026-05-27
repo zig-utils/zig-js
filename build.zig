@@ -76,4 +76,19 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_test262.addArgs(args);
     const test262_step = b.step("test262", "Run the real test262 corpus and report pass rate");
     test262_step.dependOn(&run_test262.step);
+
+    // Benchmarks: `zig build bench` times the VM against the tree-walker.
+    // ReleaseFast so the numbers reflect real performance, not Debug overhead.
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench);
+    const bench_step = b.step("bench", "Benchmark the bytecode VM against the tree-walker");
+    bench_step.dependOn(&run_bench.step);
 }
