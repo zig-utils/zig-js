@@ -60,12 +60,59 @@ const harness_shim =
     \\
 ;
 
-const Outcome = enum { pass, fail, skip };
+/// Pass/skip, or a categorized failure so we can see *why* tests fail and aim
+/// breadth work at the real blockers.
+const Outcome = enum {
+    pass,
+    skip,
+    fail_parse, // syntax we can't lex/parse yet (missing grammar)
+    fail_runtime, // threw at run time (missing builtin / semantics / a real assert failure)
+    fail_negative, // a negative test that didn't fail the way it should
+    fail_other, // host failure (OOM, …)
+
+    fn isFail(self: Outcome) bool {
+        return switch (self) {
+            .pass, .skip => false,
+            else => true,
+        };
+    }
+};
 
 const Stats = struct {
     pass: usize = 0,
-    fail: usize = 0,
     skip: usize = 0,
+    fail_parse: usize = 0,
+    fail_runtime: usize = 0,
+    fail_negative: usize = 0,
+    fail_other: usize = 0,
+
+    fn add(self: *Stats, o: Outcome) void {
+        switch (o) {
+            .pass => self.pass += 1,
+            .skip => self.skip += 1,
+            .fail_parse => self.fail_parse += 1,
+            .fail_runtime => self.fail_runtime += 1,
+            .fail_negative => self.fail_negative += 1,
+            .fail_other => self.fail_other += 1,
+        }
+    }
+
+    fn fails(self: Stats) usize {
+        return self.fail_parse + self.fail_runtime + self.fail_negative + self.fail_other;
+    }
+
+    fn ran(self: Stats) usize {
+        return self.pass + self.fails();
+    }
+
+    fn merge(self: *Stats, other: Stats) void {
+        self.pass += other.pass;
+        self.skip += other.skip;
+        self.fail_parse += other.fail_parse;
+        self.fail_runtime += other.fail_runtime;
+        self.fail_negative += other.fail_negative;
+        self.fail_other += other.fail_other;
+    }
 };
 
 /// Parsed subset of a test262 frontmatter block.
@@ -118,16 +165,20 @@ fn runOne(gpa: std.mem.Allocator, src: []const u8) Outcome {
 
     if (ctx.evaluate(buf.items)) |_| {
         // No error. Pass unless the test expected a failure.
-        return if (meta.negative) .fail else .pass;
+        return if (meta.negative) .fail_negative else .pass;
     } else |err| {
         if (meta.negative) {
             // A parse-phase negative must fail at parse time; a runtime negative
             // must throw. `error.Throw` is a runtime throw; anything else is a
             // parse/host error.
-            if (meta.negative_parse) return if (err == error.Throw) .fail else .pass;
-            return if (err == error.Throw) .pass else .fail;
+            const ok = if (meta.negative_parse) err != error.Throw else err == error.Throw;
+            return if (ok) .pass else .fail_negative;
         }
-        return .fail;
+        return switch (err) {
+            error.Throw => .fail_runtime,
+            error.OutOfMemory => .fail_other,
+            else => .fail_parse, // lex/parse errors (UnexpectedToken, …)
+        };
     }
 }
 
@@ -174,18 +225,12 @@ pub fn main() !void {
             const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(1 << 20)) catch continue;
             defer gpa.free(src);
 
-            switch (runOne(gpa, src)) {
-                .pass => stats.pass += 1,
-                .fail => stats.fail += 1,
-                .skip => stats.skip += 1,
-            }
+            stats.add(runOne(gpa, src));
         }
-        const ran = stats.pass + stats.fail;
+        const ran = stats.ran();
         const pct = if (ran == 0) 0.0 else @as(f64, @floatFromInt(stats.pass)) / @as(f64, @floatFromInt(ran)) * 100.0;
         std.debug.print("  {s}: {d}/{d} passed ({d:.1}%), {d} skipped\n", .{ sub, stats.pass, ran, pct, stats.skip });
-        total.pass += stats.pass;
-        total.fail += stats.fail;
-        total.skip += stats.skip;
+        total.merge(stats);
     }
 
     if (!any_dir) {
@@ -193,7 +238,10 @@ pub fn main() !void {
         return;
     }
 
-    const ran = total.pass + total.fail;
+    const ran = total.ran();
     const pct = if (ran == 0) 0.0 else @as(f64, @floatFromInt(total.pass)) / @as(f64, @floatFromInt(ran)) * 100.0;
     std.debug.print("------------------------\nTOTAL: {d}/{d} passed ({d:.1}%), {d} skipped\n", .{ total.pass, ran, pct, total.skip });
+    std.debug.print("failures: {d} parse · {d} runtime · {d} negative · {d} other\n", .{
+        total.fail_parse, total.fail_runtime, total.fail_negative, total.fail_other,
+    });
 }
