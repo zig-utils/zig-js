@@ -66,15 +66,18 @@ pub const FunctionNode = struct {
     is_expr_body: bool = false,
 };
 
-/// A `class` member: a method (`func` is a `.function` node). `is_ctor` marks
-/// the `constructor`; `is_static` marks `static` members; computed names live
-/// in `key_expr`.
+/// A `class` member: a method (`func` is a `.function` node) or a field
+/// (`is_field`, with an optional `field_init`). `is_ctor` marks the
+/// `constructor`; `is_static` marks `static` members; computed names live in
+/// `key_expr`.
 pub const ClassMember = struct {
     key: []const u8 = "",
     key_expr: ?*Node = null,
-    func: *Node,
+    func: ?*Node = null,
+    field_init: ?*Node = null,
     is_static: bool = false,
     is_ctor: bool = false,
+    is_field: bool = false,
 };
 
 /// One entry in an object literal. The key is either a static string

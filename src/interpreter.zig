@@ -438,32 +438,61 @@ pub const Interpreter = struct {
     }
 
     /// Evaluate a `class` to a constructor function value: methods go on its
-    /// `.prototype`, static members on the class object itself. (extends/super
-    /// and accessors are deferred.)
+    /// `.prototype`, static members on the class object itself, and instance
+    /// fields are desugared into the constructor (`this.f = init`). (extends/
+    /// super and accessors are deferred.)
     fn evalClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember) EvalError!Value {
-        // The class object is its constructor function (explicit or default-empty).
-        var class_val: Value = undefined;
-        var found_ctor = false;
+        // Instance field initializers, prepended to the constructor body.
+        var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
         for (members) |m| {
-            if (m.is_ctor) {
-                class_val = try self.eval(m.func);
-                found_ctor = true;
-                break;
-            }
+            if (!m.is_field or m.is_static) continue;
+            const this_node = try self.arena.create(Node);
+            this_node.* = .this_expr;
+            const member_node = try self.arena.create(Node);
+            member_node.* = .{ .member = .{ .object = this_node, .property = m.key, .computed = m.key_expr } };
+            const value_node = m.field_init orelse blk: {
+                const u = try self.arena.create(Node);
+                u.* = .undefined_lit;
+                break :blk u;
+            };
+            const assign_node = try self.arena.create(Node);
+            assign_node.* = .{ .assign = .{ .target = member_node, .value = value_node } };
+            const stmt = try self.arena.create(Node);
+            stmt.* = .{ .expr_stmt = assign_node };
+            try field_inits.append(self.arena, stmt);
         }
-        if (!found_ctor) {
-            const body = try self.arena.create(Node);
-            body.* = .{ .block = &.{} };
-            const fnode = try self.arena.create(ast.FunctionNode);
-            fnode.* = .{ .name = name, .params = &.{}, .body = body, .is_expr_body = false };
-            class_val = try self.makeFunction(fnode, self.env);
+
+        // Constructor: explicit (augmented with field inits) or default.
+        var ctor_node: ?*const ast.FunctionNode = null;
+        for (members) |m| {
+            if (m.is_ctor) ctor_node = m.func.?.function;
         }
+        const orig: []*Node = if (ctor_node) |cf| cf.body.block else &.{};
+        const body_stmts = try std.mem.concat(self.arena, *Node, &.{ field_inits.items, orig });
+        const body = try self.arena.create(Node);
+        body.* = .{ .block = body_stmts };
+        const fnode = try self.arena.create(ast.FunctionNode);
+        fnode.* = .{
+            .name = name,
+            .params = if (ctor_node) |cf| cf.params else &.{},
+            .body = body,
+            .is_expr_body = false,
+        };
+        const class_val = try self.makeFunction(fnode, self.env);
         const class_obj = class_val.object;
         const proto = try self.protoObject(class_obj);
+
         for (members) |m| {
-            if (m.is_ctor) continue;
             const key = if (m.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else m.key;
-            const fv = try self.eval(m.func);
+            if (m.is_field) {
+                if (m.is_static) {
+                    const v = if (m.field_init) |init_node| try self.eval(init_node) else .undefined;
+                    try self.setProp(class_obj, key, v);
+                }
+                continue;
+            }
+            if (m.is_ctor) continue;
+            const fv = try self.eval(m.func.?);
             if (m.is_static) try self.setProp(class_obj, key, fv) else try self.setProp(proto, key, fv);
         }
         try self.setProp(proto, "constructor", class_val);
@@ -1340,6 +1369,15 @@ test "interpreter classes (methods, static, instanceof, computed)" {
         \\let k = 'go';
         \\let C = class { [k]() { return 42; } };
         \\(new C()).go()
+    )).number);
+    // instance fields + static field
+    try std.testing.expectEqual(@as(f64, 8), (try evalSource(a,
+        \\class F { x = 5; y; constructor() { this.y = 3; } total() { return this.x + this.y; } }
+        \\(new F()).total()
+    )).number);
+    try std.testing.expectEqual(@as(f64, 99), (try evalSource(a,
+        \\class S { static count = 99; }
+        \\S.count
     )).number);
     // method calling another method through `this`
     try std.testing.expectEqual(@as(f64, 20), (try evalSource(a,

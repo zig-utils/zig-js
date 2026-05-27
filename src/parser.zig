@@ -852,9 +852,17 @@ pub const Parser = struct {
                 self.peekKind(1) != .lparen and self.peekKind(1) != .assign)
                 return ParseError.UnexpectedToken;
             const pn = try self.parsePropertyName();
-            const func = try self.parseMethodTail(pn.key);
-            const is_ctor = !is_static and pn.expr == null and std.mem.eql(u8, pn.key, "constructor");
-            try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .func = func, .is_static = is_static, .is_ctor = is_ctor });
+            if (self.check(.lparen)) {
+                // Method.
+                const func = try self.parseMethodTail(pn.key);
+                const is_ctor = !is_static and pn.expr == null and std.mem.eql(u8, pn.key, "constructor");
+                try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .func = func, .is_static = is_static, .is_ctor = is_ctor });
+            } else {
+                // Field: `x;` or `x = init;`.
+                const init_expr = if (self.match(.assign)) try self.parseAssignment() else null;
+                _ = self.match(.semicolon);
+                try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .field_init = init_expr, .is_static = is_static, .is_field = true });
+            }
         }
         try self.expect(.rbrace);
         return self.alloc(.{ .class_expr = .{ .name = name, .members = members.items } });
