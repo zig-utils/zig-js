@@ -259,6 +259,7 @@ pub const Compiler = struct {
                     .pos => .pos,
                     .not => .not,
                     .typeof => .typeof_op,
+                    .bit_not => .bit_not,
                 }, 0);
             },
             .binary => |b| {
@@ -278,6 +279,12 @@ pub const Compiler = struct {
                     .eq_strict => .eq_strict,
                     .neq_strict => .neq_strict,
                     .instanceof => .instance_of,
+                    .bit_and => .bit_and,
+                    .bit_or => .bit_or,
+                    .bit_xor => .bit_xor,
+                    .shl => .shl,
+                    .shr => .shr,
+                    .ushr => .ushr,
                 };
                 try self.compileExpr(b.left);
                 try self.compileExpr(b.right);

@@ -53,6 +53,7 @@ pub const Op = enum(u8) {
     pos,
     not,
     typeof_op,
+    bit_not,
 
     // --- binary (pop rhs, pop lhs, push result) ---
     add,
@@ -69,6 +70,12 @@ pub const Op = enum(u8) {
     neq,
     eq_strict,
     neq_strict,
+    bit_and,
+    bit_or,
+    bit_xor,
+    shl,
+    shr,
+    ushr,
 
     // --- control flow (operand: instruction index) ---
     jump,

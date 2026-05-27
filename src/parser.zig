@@ -356,30 +356,38 @@ pub const Parser = struct {
     const BinInfo = struct { bp: u8, binary: ?ast.BinaryOp = null, logical: ?ast.LogicalOp = null, right_assoc: bool = false };
 
     /// Binding info for the current token, including keyword operators
-    /// (`instanceof`) that the lexer emits as plain identifiers.
+    /// (`instanceof`) that the lexer emits as plain identifiers. Binding powers
+    /// follow JS precedence: `||` < `&&` < `|` < `^` < `&` < equality <
+    /// relational < shift < additive < multiplicative < `**`.
     fn curBinInfo(self: *Parser) ?BinInfo {
-        if (isKeyword(self.cur(), "instanceof")) return .{ .bp = 6, .binary = .instanceof };
+        if (isKeyword(self.cur(), "instanceof")) return .{ .bp = 7, .binary = .instanceof };
         return binInfo(self.cur().kind);
     }
 
     fn binInfo(kind: TokenKind) ?BinInfo {
         return switch (kind) {
-            .pipe_pipe => .{ .bp = 3, .logical = .@"or" },
-            .amp_amp => .{ .bp = 4, .logical = .@"and" },
-            .eq => .{ .bp = 5, .binary = .eq },
-            .neq => .{ .bp = 5, .binary = .neq },
-            .eq_strict => .{ .bp = 5, .binary = .eq_strict },
-            .neq_strict => .{ .bp = 5, .binary = .neq_strict },
-            .lt => .{ .bp = 6, .binary = .lt },
-            .le => .{ .bp = 6, .binary = .le },
-            .gt => .{ .bp = 6, .binary = .gt },
-            .ge => .{ .bp = 6, .binary = .ge },
-            .plus => .{ .bp = 7, .binary = .add },
-            .minus => .{ .bp = 7, .binary = .sub },
-            .star => .{ .bp = 8, .binary = .mul },
-            .slash => .{ .bp = 8, .binary = .div },
-            .percent => .{ .bp = 8, .binary = .mod },
-            .star_star => .{ .bp = 9, .binary = .pow, .right_assoc = true },
+            .pipe_pipe => .{ .bp = 1, .logical = .@"or" },
+            .amp_amp => .{ .bp = 2, .logical = .@"and" },
+            .pipe => .{ .bp = 3, .binary = .bit_or },
+            .caret => .{ .bp = 4, .binary = .bit_xor },
+            .amp => .{ .bp = 5, .binary = .bit_and },
+            .eq => .{ .bp = 6, .binary = .eq },
+            .neq => .{ .bp = 6, .binary = .neq },
+            .eq_strict => .{ .bp = 6, .binary = .eq_strict },
+            .neq_strict => .{ .bp = 6, .binary = .neq_strict },
+            .lt => .{ .bp = 7, .binary = .lt },
+            .le => .{ .bp = 7, .binary = .le },
+            .gt => .{ .bp = 7, .binary = .gt },
+            .ge => .{ .bp = 7, .binary = .ge },
+            .shl => .{ .bp = 8, .binary = .shl },
+            .shr => .{ .bp = 8, .binary = .shr },
+            .ushr => .{ .bp = 8, .binary = .ushr },
+            .plus => .{ .bp = 9, .binary = .add },
+            .minus => .{ .bp = 9, .binary = .sub },
+            .star => .{ .bp = 10, .binary = .mul },
+            .slash => .{ .bp = 10, .binary = .div },
+            .percent => .{ .bp = 10, .binary = .mod },
+            .star_star => .{ .bp = 11, .binary = .pow, .right_assoc = true },
             else => null,
         };
     }
@@ -412,6 +420,7 @@ pub const Parser = struct {
             .minus => .neg,
             .plus => .pos,
             .bang => .not,
+            .tilde => .bit_not,
             else => if (isKeyword(t, "typeof")) ast.UnaryOp.typeof else null,
         };
         if (op) |o| {

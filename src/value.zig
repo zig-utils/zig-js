@@ -123,6 +123,21 @@ pub const Value = union(enum) {
         };
     }
 
+    /// ECMAScript ToInt32 — used by the bitwise/shift operators. NaN/±Inf → 0,
+    /// otherwise truncate toward zero and reduce modulo 2^32 into a signed int.
+    pub fn toInt32(self: Value) i32 {
+        const n = self.toNumber();
+        if (std.math.isNan(n) or std.math.isInf(n)) return 0;
+        const t = @trunc(n);
+        const m = t - @floor(t / 4294967296.0) * 4294967296.0; // t mod 2^32, in [0, 2^32)
+        return @bitCast(@as(u32, @intFromFloat(m)));
+    }
+
+    /// ECMAScript ToUint32 (the same bit pattern, read unsigned).
+    pub fn toUint32(self: Value) u32 {
+        return @bitCast(self.toInt32());
+    }
+
     /// The `typeof` operator result.
     pub fn typeOf(self: Value) []const u8 {
         return switch (self) {

@@ -101,8 +101,12 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
                 const v = stack.pop().?;
                 try stack.append(vm.arena, .{ .string = v.typeOf() });
             },
+            .bit_not => {
+                const v = stack.pop().?;
+                try stack.append(vm.arena, .{ .number = @floatFromInt(~v.toInt32()) });
+            },
 
-            .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+            .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
                 try stack.append(vm.arena, try vm.applyBinary(binOp(inst.op), l, r));
@@ -262,6 +266,12 @@ fn binOp(op: bc.Op) @import("ast.zig").BinaryOp {
         .neq => .neq,
         .eq_strict => .eq_strict,
         .neq_strict => .neq_strict,
+        .bit_and => .bit_and,
+        .bit_or => .bit_or,
+        .bit_xor => .bit_xor,
+        .shl => .shl,
+        .shr => .shr,
+        .ushr => .ushr,
         else => unreachable,
     };
 }

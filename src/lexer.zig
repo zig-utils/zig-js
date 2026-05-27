@@ -31,6 +31,13 @@ pub const TokenKind = enum {
     bang,
     amp_amp,
     pipe_pipe,
+    amp, // &
+    pipe, // |
+    caret, // ^
+    tilde, // ~
+    shl, // <<
+    shr, // >>
+    ushr, // >>>
     question,
     colon,
     semicolon,
@@ -180,6 +187,10 @@ pub const Lexer = struct {
             '?' => return tok(.question, self.src[start..self.i], start),
             ':' => return tok(.colon, self.src[start..self.i], start),
             '<' => {
+                if (self.peek() == '<') {
+                    self.i += 1;
+                    return tok(.shl, self.src[start..self.i], start);
+                }
                 if (self.peek() == '=') {
                     self.i += 1;
                     return tok(.le, self.src[start..self.i], start);
@@ -187,6 +198,14 @@ pub const Lexer = struct {
                 return tok(.lt, self.src[start..self.i], start);
             },
             '>' => {
+                if (self.peek() == '>') {
+                    self.i += 1;
+                    if (self.peek() == '>') {
+                        self.i += 1;
+                        return tok(.ushr, self.src[start..self.i], start);
+                    }
+                    return tok(.shr, self.src[start..self.i], start);
+                }
                 if (self.peek() == '=') {
                     self.i += 1;
                     return tok(.ge, self.src[start..self.i], start);
@@ -224,15 +243,17 @@ pub const Lexer = struct {
                     self.i += 1;
                     return tok(.amp_amp, self.src[start..self.i], start);
                 }
-                return LexError.UnexpectedCharacter;
+                return tok(.amp, self.src[start..self.i], start);
             },
             '|' => {
                 if (self.peek() == '|') {
                     self.i += 1;
                     return tok(.pipe_pipe, self.src[start..self.i], start);
                 }
-                return LexError.UnexpectedCharacter;
+                return tok(.pipe, self.src[start..self.i], start);
             },
+            '^' => return tok(.caret, self.src[start..self.i], start),
+            '~' => return tok(.tilde, self.src[start..self.i], start),
             else => return LexError.UnexpectedCharacter,
         }
     }

@@ -538,6 +538,7 @@ pub const Interpreter = struct {
             .pos => .{ .number = v.toNumber() },
             .not => .{ .boolean = !v.toBoolean() },
             .typeof => .{ .string = v.typeOf() },
+            .bit_not => .{ .number = @floatFromInt(~v.toInt32()) },
         };
     }
 
@@ -582,6 +583,21 @@ pub const Interpreter = struct {
             .eq_strict => .{ .boolean = value.strictEquals(l, r) },
             .neq_strict => .{ .boolean = !value.strictEquals(l, r) },
             .instanceof => .{ .boolean = try self.instanceOf(l, r) },
+            .bit_and => .{ .number = @floatFromInt(l.toInt32() & r.toInt32()) },
+            .bit_or => .{ .number = @floatFromInt(l.toInt32() | r.toInt32()) },
+            .bit_xor => .{ .number = @floatFromInt(l.toInt32() ^ r.toInt32()) },
+            .shl => blk: {
+                const sh: u5 = @intCast(r.toUint32() & 31);
+                break :blk .{ .number = @floatFromInt(@as(i32, @bitCast(l.toUint32() << sh))) };
+            },
+            .shr => blk: {
+                const sh: u5 = @intCast(r.toUint32() & 31);
+                break :blk .{ .number = @floatFromInt(l.toInt32() >> sh) };
+            },
+            .ushr => blk: {
+                const sh: u5 = @intCast(r.toUint32() & 31);
+                break :blk .{ .number = @floatFromInt(l.toUint32() >> sh) };
+            },
         };
     }
 
@@ -873,6 +889,21 @@ test "interpreter for loop + ++ + compound assignment" {
     // postfix vs prefix
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let x = 5; let y = x++; y")).number);
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let x = 5; let y = ++x; y")).number);
+}
+
+test "interpreter bitwise and shift operators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "5 & 3")).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "5 | 2")).number);
+    try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "5 ^ 3")).number);
+    try std.testing.expectEqual(@as(f64, -6), (try evalSource(a, "~5")).number);
+    try std.testing.expectEqual(@as(f64, 40), (try evalSource(a, "5 << 3")).number);
+    try std.testing.expectEqual(@as(f64, -3), (try evalSource(a, "-5 >> 1")).number);
+    try std.testing.expectEqual(@as(f64, 2147483645), (try evalSource(a, "-5 >>> 1")).number);
+    // precedence: | looser than &, both looser than ==
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
 }
 
 test "interpreter break / continue" {
