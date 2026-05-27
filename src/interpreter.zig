@@ -3,6 +3,7 @@ const ast = @import("ast.zig");
 const value = @import("value.zig");
 const bc = @import("bytecode.zig");
 const builtins = @import("builtins.zig");
+const regex = @import("regex");
 const Shape = @import("shape.zig").Shape;
 
 const Node = ast.Node;
@@ -180,6 +181,7 @@ pub const Interpreter = struct {
             .member => |m| try self.getProperty(try self.eval(m.object), try self.memberKey(m.property, m.computed)),
             .object_lit => |props| try self.evalObjectLit(props),
             .array_lit => |elems| try self.evalArrayLit(elems),
+            .regex_literal => |r| try self.makeRegex(r.pattern, r.flags),
             // Spreads are consumed by array/argument evaluation, never on their own.
             .spread => return self.throwError("SyntaxError", "unexpected spread element"),
             // Patterns are binding targets, not expressions.
@@ -728,6 +730,7 @@ pub const Interpreter = struct {
         if (callee != .object) return self.throwError("TypeError", "value is not a constructor");
         const obj = callee.object;
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
+        if (obj.native) |nf| return nf(@ptrCast(self), .undefined, args); // native ctor (RegExp, ...)
         if (obj.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             const this_val = try self.newInstance(obj);
@@ -789,6 +792,60 @@ pub const Interpreter = struct {
             }
         }
         return v;
+    }
+
+    /// Build a `RegExp` instance with `source`/`flags`/`lastIndex` and the
+    /// `global`/`ignoreCase`/`multiline` booleans. Matching (test/exec) is
+    /// dispatched in `regexMethod`, backed by zig-regex.
+    pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
+        const o = (try self.newObject()).object;
+        o.is_regex = true;
+        try self.setProp(o, "source", .{ .string = try self.arena.dupe(u8, pattern) });
+        try self.setProp(o, "flags", .{ .string = try self.arena.dupe(u8, flags) });
+        try self.setProp(o, "lastIndex", .{ .number = 0 });
+        try self.setProp(o, "global", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'g') != null });
+        try self.setProp(o, "ignoreCase", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'i') != null });
+        try self.setProp(o, "multiline", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'm') != null });
+        return .{ .object = o };
+    }
+
+    fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!regex.Regex {
+        const src = (o.getOwn("source") orelse Value{ .string = "" }).string;
+        const flags = (o.getOwn("flags") orelse Value{ .string = "" }).string;
+        const cf = regex.common.CompileFlags{
+            .case_insensitive = std.mem.indexOfScalar(u8, flags, 'i') != null,
+            .multiline = std.mem.indexOfScalar(u8, flags, 'm') != null,
+        };
+        return regex.Regex.compileWithFlags(self.arena, src, cf) catch
+            return self.throwError("SyntaxError", "invalid regular expression");
+    }
+
+    fn regexMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
+        if (eq(name, "test")) {
+            const input = try arg0(args).toString(self.arena);
+            var re = try self.compileRegex(o);
+            return Value{ .boolean = re.isMatch(input) catch false };
+        }
+        if (eq(name, "exec")) {
+            const input = try arg0(args).toString(self.arena);
+            var re = try self.compileRegex(o);
+            const found = re.find(input) catch null;
+            if (found) |m| {
+                const arr = try self.newArray();
+                try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
+                for (m.captures) |c| try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, c) });
+                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(m.start) });
+                try self.setProp(arr.object, "input", .{ .string = input });
+                return arr;
+            }
+            return Value.null;
+        }
+        if (eq(name, "toString")) {
+            const src = (o.getOwn("source") orelse Value{ .string = "" }).string;
+            const flags = (o.getOwn("flags") orelse Value{ .string = "" }).string;
+            return Value{ .string = try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }) };
+        }
+        return null;
     }
 
     fn evalArrayLit(self: *Interpreter, elems: []*Node) EvalError!Value {
@@ -998,7 +1055,10 @@ pub const Interpreter = struct {
     /// builtin for `recv`, so the caller falls back to a property lookup + call.
     pub fn builtinMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
         switch (recv) {
-            .object => |o| if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args),
+            .object => |o| {
+                if (o.is_regex) return try self.regexMethod(o, name, args);
+                if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
+            },
             .string => |s| return try self.stringMethod(s, name, args),
             else => {},
         }
@@ -1405,6 +1465,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try defineGlobalFn(env, "parseFloat", builtins.parseFloatFn);
     try defineGlobalFn(env, "isNaN", builtins.isNaNFn);
     try defineGlobalFn(env, "isFinite", builtins.isFiniteFn);
+    try defineGlobalFn(env, "RegExp", builtins.regExpFn);
     try defineGlobalFn(env, "Boolean", builtins.booleanFn);
 
     // String — callable, with statics.
@@ -1814,6 +1875,24 @@ test "interpreter String.prototype methods" {
     try std.testing.expectEqualStrings("abab", (try evalSource(a, "'ab'.repeat(2)")).string);
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + 'a-b-c'.split('-')")).string);
     try std.testing.expectEqualStrings("hi", (try evalSource(a, "'  hi  '.trim()")).string);
+}
+
+test "interpreter regex literals (zig-regex backed)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a, "/ab+c/.test('xabbbcx')")).boolean);
+    try std.testing.expect(!(try evalSource(a, "/^\\d+$/.test('12a')")).boolean);
+    try std.testing.expectEqualStrings("g", (try evalSource(a, "/foo/g.flags")).string);
+    try std.testing.expectEqualStrings("a.c", (try evalSource(a, "/a.c/.source")).string);
+    // case-insensitive flag honored via zig-regex
+    try std.testing.expect((try evalSource(a, "/abc/i.test('ABC')")).boolean);
+    // exec returns the match with index
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "let m = /b/.exec('abc'); m.index")).number);
+    // RegExp constructor
+    try std.testing.expect((try evalSource(a, "new RegExp('a+').test('baaa')")).boolean);
+    // division still lexes correctly after a value
+    try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "let x = 8; x / 2")).number);
 }
 
 test "interpreter JSON, Object, Number builtins" {

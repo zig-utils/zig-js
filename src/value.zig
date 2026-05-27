@@ -56,6 +56,9 @@ pub const Object = struct {
     private_data: ?*anyopaque = null,
     /// True for `Error`-family instances; drives `toString` and `instanceof`.
     is_error: bool = false,
+    /// True for `RegExp` instances (carries `source`/`flags` properties; matching
+    /// is backed by zig-regex).
+    is_regex: bool = false,
     /// For error instances, the error class name (e.g. "TypeError"); for a
     /// builtin error *constructor* object, see `error_ctor`.
     error_name: []const u8 = "",

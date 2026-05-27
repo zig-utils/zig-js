@@ -233,6 +233,22 @@ pub fn arrayIsArray(ctx: *anyopaque, this: Value, args: []const Value) HostError
     return .{ .boolean = arg(args, 0) == .object and arg(args, 0).object.is_array };
 }
 
+/// `RegExp(pattern, flags)` / `new RegExp(...)`. Accepts a string source or an
+/// existing RegExp (copying its source).
+pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const a0 = arg(args, 0);
+    var pattern: []const u8 = "";
+    if (a0 == .object and a0.object.is_regex) {
+        pattern = (a0.object.getOwn("source") orelse Value{ .string = "" }).string;
+    } else if (a0 != .undefined) {
+        pattern = try a0.toString(self.arena);
+    }
+    const flags = if (arg(args, 1) != .undefined) try arg(args, 1).toString(self.arena) else "";
+    return self.makeRegex(pattern, flags);
+}
+
 pub fn objectGetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = ctx;
     _ = this;

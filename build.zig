@@ -4,10 +4,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Homegrown regex engine, used to back JS RegExp.
+    const regex_dep = b.dependency("zig_regex", .{ .target = target, .optimize = optimize });
+    const regex_mod = regex_dep.module("regex");
+
     // The importable module: `@import("js")` once a consumer adds this package.
     const mod = b.addModule("js", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{.{ .name = "regex", .module = regex_mod }},
     });
 
     // A static library exposing the JavaScriptCore C-API drop-in symbols
@@ -20,6 +25,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "regex", .module = regex_mod }},
         }),
     });
     b.installArtifact(lib);
@@ -30,6 +36,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "regex", .module = regex_mod }},
         }),
     });
     const run_tests = b.addRunArtifact(tests);

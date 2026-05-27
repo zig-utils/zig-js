@@ -1013,6 +1013,7 @@ pub const Parser = struct {
             .number => return self.alloc(.{ .number = t.number }),
             .string => return self.alloc(.{ .string = t.text }),
             .template => return self.parseTemplate(t.text),
+            .regex => return self.alloc(.{ .regex_literal = .{ .pattern = t.text, .flags = t.flags } }),
             .lparen => {
                 const e = try self.parseExpression();
                 try self.expect(.rparen);

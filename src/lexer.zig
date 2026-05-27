@@ -5,6 +5,7 @@ pub const TokenKind = enum {
     number,
     string,
     template, // `...${expr}...` — `text` is the raw inner source (between backticks)
+    regex, // /pattern/flags — `text` is the pattern, `flags` the flag chars
     identifier,
     // punctuation / operators
     plus,
@@ -68,6 +69,8 @@ pub const Token = struct {
     /// strings) and the raw lexeme otherwise.
     text: []const u8,
     number: f64 = 0,
+    /// Regex flag characters (only for `.regex` tokens).
+    flags: []const u8 = "",
     pos: usize,
 };
 
@@ -79,6 +82,10 @@ pub const Lexer = struct {
     src: []const u8,
     i: usize = 0,
     arena: std.mem.Allocator,
+    /// Previous significant token, used to disambiguate `/` (division vs the
+    /// start of a regex literal).
+    prev_kind: TokenKind = .eof,
+    prev_text: []const u8 = "",
 
     pub fn init(arena: std.mem.Allocator, src: []const u8) Lexer {
         return .{ .src = src, .arena = arena };
@@ -116,6 +123,23 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) LexError!Token {
+        const t = try self.nextRaw();
+        self.prev_kind = t.kind;
+        self.prev_text = t.text;
+        return t;
+    }
+
+    /// True when a `/` here begins a regex literal rather than division — i.e.
+    /// the previous token does not end an expression.
+    fn regexAllowed(self: *Lexer) bool {
+        return switch (self.prev_kind) {
+            .number, .string, .template, .regex, .rparen, .rbracket => false,
+            .identifier => isOperandKeyword(self.prev_text), // `return /re/` yes, `x / y` no
+            else => true,
+        };
+    }
+
+    fn nextRaw(self: *Lexer) LexError!Token {
         self.skipTrivia();
         const start = self.i;
         if (self.i >= self.src.len) return .{ .kind = .eof, .text = "", .pos = start };
@@ -178,6 +202,11 @@ pub const Lexer = struct {
                 return tok(.star, self.src[start..self.i], start);
             },
             '/' => {
+                // Regex literal where an expression is expected.
+                if (self.regexAllowed()) {
+                    self.i = start; // rewind to the opening `/`
+                    return self.lexRegex();
+                }
                 if (self.peek() == '=') {
                     self.i += 1;
                     return tok(.slash_eq, self.src[start..self.i], start);
@@ -416,6 +445,37 @@ pub const Lexer = struct {
         return LexError.UnterminatedString;
     }
 
+    /// Scan `/pattern/flags`. `text` is the pattern (between the slashes,
+    /// escapes kept raw), `flags` the trailing flag chars.
+    fn lexRegex(self: *Lexer) LexError!Token {
+        const start = self.i;
+        self.i += 1; // opening /
+        const pat_start = self.i;
+        var in_class = false;
+        while (self.i < self.src.len) {
+            const c = self.src[self.i];
+            if (c == '\n') return LexError.UnterminatedString;
+            if (c == '\\') {
+                self.i += 2;
+                continue;
+            }
+            if (c == '[') {
+                in_class = true;
+            } else if (c == ']') {
+                in_class = false;
+            } else if (c == '/' and !in_class) {
+                break;
+            }
+            self.i += 1;
+        }
+        if (self.i >= self.src.len) return LexError.UnterminatedString;
+        const pattern = self.src[pat_start..self.i];
+        self.i += 1; // closing /
+        const flags_start = self.i;
+        while (self.i < self.src.len and std.ascii.isAlphabetic(self.src[self.i])) self.i += 1;
+        return .{ .kind = .regex, .text = pattern, .flags = self.src[flags_start..self.i], .pos = start };
+    }
+
     /// Advance past a quoted string starting at `self.i` (whose char is `quote`),
     /// honoring backslash escapes. Used while scanning inside `${ ... }`.
     fn skipStringLiteral(self: *Lexer, quote: u8) void {
@@ -434,6 +494,19 @@ pub const Lexer = struct {
 
 fn tok(kind: TokenKind, text: []const u8, pos: usize) Token {
     return .{ .kind = kind, .text = text, .pos = pos };
+}
+
+/// Keywords after which a `/` begins a regex (they expect an operand).
+fn isOperandKeyword(text: []const u8) bool {
+    const words = [_][]const u8{
+        "return", "typeof", "instanceof", "in",    "of",    "new",
+        "delete", "void",   "throw",      "case",  "do",    "else",
+        "yield",  "await",  "default",
+    };
+    for (words) |w| {
+        if (std.mem.eql(u8, text, w)) return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
