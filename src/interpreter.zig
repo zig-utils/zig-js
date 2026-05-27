@@ -943,6 +943,19 @@ test "interpreter bitwise and shift operators" {
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "1 | 2 & 3 | 4")).number);
 }
 
+test "interpreter template literals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("hello world", (try evalSource(a, "`hello world`")).string);
+    try std.testing.expectEqualStrings("1 + 2 = 3", (try evalSource(a, "let x = 1, y = 2; `${x} + ${y} = ${x + y}`")).string);
+    try std.testing.expectEqualStrings("a\nb", (try evalSource(a, "`a\\nb`")).string);
+    // nested braces inside the substitution
+    try std.testing.expectEqualStrings("v=7", (try evalSource(a, "let o = { n: 7 }; `v=${o.n}`")).string);
+    // empty + leading substitution still yields a string
+    try std.testing.expectEqualStrings("42", (try evalSource(a, "`${42}`")).string);
+}
+
 test "interpreter switch (match, fall-through, default, break)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

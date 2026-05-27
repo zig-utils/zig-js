@@ -536,6 +536,48 @@ pub const Parser = struct {
         return self.alloc(.{ .new_expr = .{ .callee = callee, .args = args } });
     }
 
+    /// Desugar a template literal's raw inner text into string concatenation:
+    /// `` `a${x}b` `` becomes `("a" + x) + "b"`. The leading string makes the
+    /// whole chain string-typed, so JS `+` applies ToString to each expression —
+    /// exactly untagged-template semantics. Works on the tree-walker and the VM
+    /// for free (it's just `add` nodes).
+    fn parseTemplate(self: *Parser, raw: []const u8) ParseError!*Node {
+        var node: ?*Node = null;
+        var lit: std.ArrayListUnmanaged(u8) = .empty;
+        var i: usize = 0;
+        while (i < raw.len) {
+            const c = raw[i];
+            if (c == '\\' and i + 1 < raw.len) {
+                try lit.append(self.arena, decodeTemplateEscape(raw[i + 1]));
+                i += 2;
+            } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
+                // Flush the literal run so far, then parse the substitution.
+                node = try self.concatStr(node, lit.items);
+                lit = .empty;
+                const expr_start = i + 2;
+                const expr_end = substEnd(raw, expr_start);
+                var sub = try Parser.init(self.arena, raw[expr_start..expr_end]);
+                node = try self.concatExpr(node, try sub.parseExpression());
+                i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
+            } else {
+                try lit.append(self.arena, c);
+                i += 1;
+            }
+        }
+        return self.concatStr(node, lit.items);
+    }
+
+    fn concatStr(self: *Parser, node: ?*Node, bytes: []const u8) ParseError!*Node {
+        const s = try self.alloc(.{ .string = try self.arena.dupe(u8, bytes) });
+        if (node) |n| return self.alloc(.{ .binary = .{ .op = .add, .left = n, .right = s } });
+        return s;
+    }
+
+    fn concatExpr(self: *Parser, node: ?*Node, expr: *Node) ParseError!*Node {
+        if (node) |n| return self.alloc(.{ .binary = .{ .op = .add, .left = n, .right = expr } });
+        return expr;
+    }
+
     fn parseObjectLiteral(self: *Parser) ParseError!*Node {
         try self.expect(.lbrace);
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
@@ -583,6 +625,7 @@ pub const Parser = struct {
         switch (t.kind) {
             .number => return self.alloc(.{ .number = t.number }),
             .string => return self.alloc(.{ .string = t.text }),
+            .template => return self.parseTemplate(t.text),
             .lparen => {
                 const e = try self.parseExpression();
                 try self.expect(.rparen);
@@ -600,6 +643,48 @@ pub const Parser = struct {
         }
     }
 };
+
+/// Decode one escape char in a template literal's literal text.
+fn decodeTemplateEscape(e: u8) u8 {
+    return switch (e) {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '0' => 0,
+        else => e, // \\ \` \$ \" \' → the char itself
+    };
+}
+
+/// Given the raw template text and the index just past a `${`, return the index
+/// of the matching `}` (or `raw.len` if unterminated). Brace- and string-aware.
+fn substEnd(raw: []const u8, start: usize) usize {
+    var depth: usize = 1;
+    var i = start;
+    while (i < raw.len) {
+        const c = raw[i];
+        switch (c) {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            '\'', '"' => {
+                i += 1;
+                while (i < raw.len) : (i += 1) {
+                    if (raw[i] == '\\') {
+                        i += 1;
+                        continue;
+                    }
+                    if (raw[i] == c) break;
+                }
+            },
+            '\\' => i += 1,
+            else => {},
+        }
+        i += 1;
+    }
+    return raw.len;
+}
 
 // ---------------------------------------------------------------------------
 // Tests

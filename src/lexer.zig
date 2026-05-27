@@ -4,6 +4,7 @@ pub const TokenKind = enum {
     eof,
     number,
     string,
+    template, // `...${expr}...` — `text` is the raw inner source (between backticks)
     identifier,
     // punctuation / operators
     plus,
@@ -124,6 +125,8 @@ pub const Lexer = struct {
         }
         // Strings
         if (c == '"' or c == '\'') return self.lexString();
+        // Template literals
+        if (c == '`') return self.lexTemplate();
 
         // Operators / punctuation
         self.i += 1;
@@ -316,6 +319,65 @@ pub const Lexer = struct {
             }
         }
         return LexError.UnterminatedString;
+    }
+
+    /// Scan a `` `...` `` template, returning a token whose `text` is the raw
+    /// inner source (still containing `${...}` and escapes — the parser splits
+    /// and decodes it). Tracks `${ }` brace depth and skips quoted strings so
+    /// braces inside a substitution or a string don't end the template early.
+    fn lexTemplate(self: *Lexer) LexError!Token {
+        const start = self.i;
+        self.i += 1; // opening backtick
+        const text_start = self.i;
+        var depth: usize = 0; // brace depth inside ${ ... }
+        while (self.i < self.src.len) {
+            const c = self.src[self.i];
+            if (depth == 0) {
+                if (c == '`') {
+                    const text = self.src[text_start..self.i];
+                    self.i += 1; // closing backtick
+                    return .{ .kind = .template, .text = text, .pos = start };
+                }
+                if (c == '\\') {
+                    self.i += 2; // escaped char (\` \$ \\ ...)
+                    continue;
+                }
+                if (c == '$' and self.peek2() == '{') {
+                    depth = 1;
+                    self.i += 2;
+                    continue;
+                }
+                self.i += 1;
+            } else {
+                switch (c) {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    '\'', '"' => {
+                        self.skipStringLiteral(c);
+                        continue;
+                    },
+                    '\\' => self.i += 1,
+                    else => {},
+                }
+                self.i += 1;
+            }
+        }
+        return LexError.UnterminatedString;
+    }
+
+    /// Advance past a quoted string starting at `self.i` (whose char is `quote`),
+    /// honoring backslash escapes. Used while scanning inside `${ ... }`.
+    fn skipStringLiteral(self: *Lexer, quote: u8) void {
+        self.i += 1; // opening quote
+        while (self.i < self.src.len) {
+            const c = self.src[self.i];
+            if (c == '\\') {
+                self.i += 2;
+                continue;
+            }
+            self.i += 1;
+            if (c == quote) return;
+        }
     }
 };
 
