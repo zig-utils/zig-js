@@ -16,15 +16,21 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > tests** (3,590 / 14,385) via a subset harness shim, and `zig build conformance` keeps a 33/33
 > always-green smoke suite.
 >
-> **Performance tiers.** The tree-walker is the correctness bootstrap, not the endgame. Tier-1 —
-> a **stack bytecode VM** (`bytecode.zig` + `compiler.zig` + `vm.zig`) — is the default execution
-> path and now lowers nearly the whole language (objects, arrays, members, `new`, methods, `++`,
-> `instanceof`, …); only `throw`/`try` still falls back to the tree-walker, so semantics never
-> change. `zig build bench` measures it: tier-1 is currently only ~1.05–1.12× over the tree-walker,
-> because both still resolve every variable through an `Environment` hashmap and allocate a scope
-> per call. That's the signal for the **next tier — slot-allocated locals** (compile-time variable
-> resolution into a flat register file), then NaN-boxed values, object shapes + inline caches, a
-> generational GC, and a JIT. Each tier is gated by test262. See craft's
+> **Performance tiers** (each gated by test262, measured by `zig build bench`):
+>
+> | tier | what | status | bench vs tree-walk |
+> | ---- | ---- | ------ | ------------------ |
+> | 0 | tree-walk interpreter | ✅ | 1× (baseline) |
+> | 1 | **stack bytecode VM** — lowers nearly the whole language (objects, arrays, members, `new`, methods, `++`, `instanceof`); only `throw`/`try` falls back | ✅ | ~1.1× |
+> | 2 | **slot-allocated locals + frame-linked closures** — params/locals resolved to a flat frame array at compile time; globals stay by name | ✅ | **1.3–1.85×** |
+> | 3 | object shapes (hidden classes) + inline caches | next | — |
+> | 4 | NaN-boxed values | planned | — |
+> | 5 | generational GC (replaces the arena) | planned | — |
+> | 6 | baseline → optimizing JIT | planned | — |
+>
+> Tier-2 nearly doubled the compute/call-heavy cases; object-property churn (1.33×) is now the
+> laggard, which is exactly what tier-3 shapes + inline caches target. The tree-walker remains as
+> the correctness oracle and the fallback for not-yet-lowered constructs. See craft's
 > `docs/architecture/web-engine-plan.md`.
 
 ## Conformance progress
