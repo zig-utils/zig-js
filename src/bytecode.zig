@@ -39,6 +39,7 @@ pub const Op = enum(u8) {
 
     // --- globals (resolved by name against the Environment) ---
     load_var, // operand a: name index; push value (ReferenceError if unbound)
+    load_var_or_undef, // operand a: name index; push value, or undefined if unbound (for `typeof`)
     store_var, // operand a: name index; assign global, leave value on stack
     def_var, // operand a: name index; pop value, define global
 

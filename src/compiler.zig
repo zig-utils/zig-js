@@ -318,6 +318,15 @@ pub const Compiler = struct {
             .undefined_lit => _ = try self.chunk.emit(.load_undefined, 0),
             .identifier => |name| try self.emitLoad(name),
             .unary => |u| {
+                // `typeof <unresolved global>` must yield "undefined", not throw,
+                // so a global-identifier operand loads non-throwingly.
+                if (u.op == .typeof and u.operand.* == .identifier and
+                    self.resolve(u.operand.identifier) == .global)
+                {
+                    _ = try self.chunk.emit(.load_var_or_undef, try self.chunk.addName(u.operand.identifier));
+                    _ = try self.chunk.emit(.typeof_op, 0);
+                    return;
+                }
                 try self.compileExpr(u.operand);
                 _ = try self.chunk.emit(switch (u.op) {
                     .neg => .neg,

@@ -107,6 +107,10 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const v = vm.env.get(name) orelse return vm.throwError("ReferenceError", name);
                 try stack.append(vm.arena, v);
             },
+            .load_var_or_undef => {
+                const name = chunk.names.items[inst.a];
+                try stack.append(vm.arena, vm.env.get(name) orelse .undefined);
+            },
             .store_var => {
                 const name = chunk.names.items[inst.a];
                 try vm.env.assign(name, stack.items[stack.items.len - 1]); // assignment leaves its value

@@ -374,6 +374,22 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "typeof on an undeclared identifier is \"undefined\" (no throw)" {
+    try expectEvalStr("undefined", "typeof undeclaredXYZ");
+    try std.testing.expect((try evalIn("typeof undeclaredXYZ === 'undefined'")).boolean);
+    try expectEvalStr("undefined", "function f() { return typeof zzz; } f()");
+    // A declared-but-undefined var is still "undefined".
+    try expectEvalStr("undefined", "var y; typeof y");
+    // typeof of a bound value is unaffected.
+    try expectEvalStr("object", "typeof Math");
+    // Actually *using* (not typeof-ing) an undeclared name still throws ReferenceError.
+    try std.testing.expect((try evalIn(
+        \\var t = "";
+        \\try { undeclaredABC; } catch (e) { t = e.name; }
+        \\t === "ReferenceError"
+    )).boolean);
+}
+
 test "function declarations are hoisted" {
     // Forward references work at program scope and inside function bodies.
     try std.testing.expectEqual(@as(f64, 5), (try evalIn("bar(); function bar() { return 5; }\nbar()")).number);

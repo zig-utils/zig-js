@@ -2724,6 +2724,10 @@ pub const Interpreter = struct {
     }
 
     fn evalUnary(self: *Interpreter, op: ast.UnaryOp, operand: *Node) EvalError!Value {
+        // `typeof <unresolved identifier>` is "undefined" rather than a thrown
+        // ReferenceError — the one context where an unbound name doesn't throw.
+        if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null)
+            return .{ .string = "undefined" };
         const v = try self.eval(operand);
         return switch (op) {
             .neg => .{ .number = -v.toNumber() },
