@@ -875,6 +875,12 @@ pub const Parser = struct {
     /// `.prop` / call chain is handled by the enclosing `parseMemberTail`.
     fn parseNew(self: *Parser) ParseError!*Node {
         _ = self.advance(); // new
+        // `new.target` meta-property.
+        if (self.match(.dot)) {
+            const m = self.advance();
+            if (m.kind != .identifier or !std.mem.eql(u8, m.text, "target")) return ParseError.UnexpectedToken;
+            return self.alloc(.new_target_expr);
+        }
         var callee = try self.parsePrimary();
         while (true) {
             if (self.match(.dot)) {

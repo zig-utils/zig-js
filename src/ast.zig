@@ -141,6 +141,8 @@ pub const Node = union(enum) {
     undefined_lit,
     identifier: []const u8,
     this_expr,
+    /// `new.target` — the constructor when invoked via `new`, else undefined.
+    new_target_expr,
     unary: struct { op: UnaryOp, operand: *Node },
     /// `delete operand` — removes an own property; evaluates to a boolean.
     delete_expr: *Node,

@@ -91,6 +91,19 @@ pub const Context = struct {
     }
 };
 
+test "new.target" {
+    // undefined in a plain call, the constructor under `new`.
+    try std.testing.expect((try evalIn(
+        \\function F() { return new.target === F; }
+        \\F() === false && new F() instanceof F
+    )).boolean);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn(
+        \\var hit = 0;
+        \\function F() { if (new.target) hit = 1; }
+        \\new F(); hit
+    )).number);
+}
+
 test "object spread" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\var base = { a: 1, b: 2 };

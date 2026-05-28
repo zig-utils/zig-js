@@ -133,6 +133,9 @@ pub const Interpreter = struct {
     /// constructor of the executing derived constructor (for `super(...)`).
     home_object: ?*value.Object = null,
     super_ctor: ?*value.Object = null,
+    /// `new.target`: the constructor of the in-flight `new` call (undefined in a
+    /// plain call). Inherited lexically by arrow functions.
+    new_target: Value = .undefined,
     /// Active `with` scope objects (innermost last); bare identifiers consult
     /// these before the lexical environment.
     with_stack: std.ArrayListUnmanaged(*value.Object) = .empty,
@@ -173,6 +176,7 @@ pub const Interpreter = struct {
             .null_lit => .null,
             .undefined_lit => .undefined,
             .this_expr => self.this_value,
+            .new_target_expr => self.new_target,
             .identifier => |name| blk: {
                 // `with` scope objects take precedence over the lexical env.
                 if (self.with_stack.items.len > 0) {
@@ -812,6 +816,12 @@ pub const Interpreter = struct {
     }
 
     fn callFunction(self: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
+        return self.callFunctionNT(func, args, this_val, .undefined);
+    }
+
+    /// `callFunction` with an explicit `new.target` (set by `construct`; a plain
+    /// call passes undefined). Arrow functions inherit the enclosing new.target.
+    fn callFunctionNT(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
         // Calling a `function*` builds a generator object (its body runs lazily,
         // on the suspendable VM, via `.next()`).
         if (func.is_generator) return vm.makeGenerator(self, func, args, this_val);
@@ -828,11 +838,13 @@ pub const Interpreter = struct {
         const saved_this = self.this_value;
         const saved_home = self.home_object;
         const saved_super = self.super_ctor;
+        const saved_nt = self.new_target;
         self.env = call_env;
         self.signal = .none;
         self.this_value = this_val;
         self.home_object = func.home_object;
         self.super_ctor = func.super_ctor;
+        self.new_target = if (func.is_arrow) saved_nt else new_target; // arrows inherit lexically
         defer {
             self.env = saved_env;
             self.signal = saved_signal;
@@ -840,6 +852,7 @@ pub const Interpreter = struct {
             self.this_value = saved_this;
             self.home_object = saved_home;
             self.super_ctor = saved_super;
+            self.new_target = saved_nt;
         }
 
         // Non-arrow functions get an `arguments` array-like over the call args.
@@ -896,7 +909,7 @@ pub const Interpreter = struct {
         if (obj.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             const this_val = try self.newInstance(obj);
-            const ret = try self.callFunction(func, args, this_val);
+            const ret = try self.callFunctionNT(func, args, this_val, callee); // new.target = the constructor
             return if (ret == .object) ret else this_val;
         }
         return self.throwError("TypeError", "value is not a constructor");
