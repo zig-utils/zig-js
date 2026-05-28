@@ -540,8 +540,17 @@ pub const Interpreter = struct {
     }
 
     fn evalStatements(self: *Interpreter, stmts: []*Node) EvalError!Value {
+        // Hoist function declarations to the top of the scope so forward
+        // references work (`bar(); function bar() {}`). Each is bound exactly
+        // once here; the main loop then skips them, preserving function identity
+        // (`var g = bar; function bar() {}` ⇒ `g === bar`).
+        for (stmts) |s| switch (s.*) {
+            .func_decl => |fnode| try self.env.put(fnode.name, try self.makeFunction(fnode, self.env)),
+            else => {},
+        };
         var last: Value = .undefined;
         for (stmts) |s| {
+            if (s.* == .func_decl) continue; // already hoisted above
             last = try self.eval(s);
             if (self.signal != .none) return last;
         }

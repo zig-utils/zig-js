@@ -76,7 +76,7 @@ pub const Compiler = struct {
         chunk.* = Chunk.init(arena);
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program };
         if (program.* != .program) return error.Unsupported;
-        for (program.program) |stmt| try c.compileStmt(stmt);
+        try c.compileStmtList(program.program);
         _ = try chunk.emit(.halt, 0);
         try chunk.finalize();
         return chunk;
@@ -159,6 +159,25 @@ pub const Compiler = struct {
 
     // ---- statements -------------------------------------------------------
 
+    /// Compile a statement list with function-declaration hoisting: every
+    /// `func_decl` is emitted (closure + define) first, so forward references
+    /// like `bar(); function bar() {}` resolve, then the remaining statements
+    /// run in order (func_decls skipped, so each binds exactly once).
+    fn compileStmtList(self: *Compiler, stmts: []*Node) CompileError!void {
+        for (stmts) |s| switch (s.*) {
+            .func_decl => |fnode| {
+                const fi = try self.compileFunction(fnode);
+                _ = try self.chunk.emit(.make_closure, fi);
+                try self.emitDefine(fnode.name);
+            },
+            else => {},
+        };
+        for (stmts) |s| {
+            if (s.* == .func_decl) continue;
+            try self.compileStmt(s);
+        }
+    }
+
     fn compileStmt(self: *Compiler, node: *Node) CompileError!void {
         switch (node.*) {
             .var_decl => |d| {
@@ -186,9 +205,7 @@ pub const Compiler = struct {
                 try self.compileExpr(e);
                 _ = try self.chunk.emit(if (self.mode == .program) .set_acc else .pop, 0);
             },
-            .block => |stmts| {
-                for (stmts) |s| try self.compileStmt(s);
-            },
+            .block => |stmts| try self.compileStmtList(stmts),
             .if_stmt => |s| try self.compileIf(s.cond, s.consequent, s.alternate),
             .while_stmt => |s| try self.compileWhile(s.cond, s.body),
             .do_while_stmt => |s| try self.compileDoWhile(s.body, s.cond),

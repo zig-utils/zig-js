@@ -374,6 +374,21 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "function declarations are hoisted" {
+    // Forward references work at program scope and inside function bodies.
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("bar(); function bar() { return 5; }\nbar()")).number);
+    try expectEvalStr("function", "typeof foo; function foo() {}");
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("foo.x = 1; function foo() {} foo.x")).number);
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn(
+        \\function f() { return inner(); function inner() { return 9; } }
+        \\f()
+    )).number);
+    // The hoisted binding is the same function object referenced before its text.
+    try std.testing.expect((try evalIn("var g = bar; function bar() {} g === bar")).boolean);
+    // A later declaration of the same name wins.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f() { return 1; } function f() { return 2; } f()")).number);
+}
+
 test "built-in methods are non-enumerable" {
     // Prototype methods and namespace statics are skipped by Object.keys/for-in.
     try std.testing.expect((try evalIn("Object.keys(Math).indexOf('max') === -1")).boolean);
