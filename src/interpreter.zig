@@ -1737,7 +1737,11 @@ pub const Interpreter = struct {
                 var cur: ?*value.Object = o;
                 while (cur) |c| {
                     if (c.getAccessor(key)) |acc| {
-                        if (acc.get) |g| return self.callValueWithThis(g, &.{}, recv);
+                        // An explicit `get: undefined` is stored as the undefined
+                        // value but means "no getter".
+                        if (acc.get) |g| {
+                            if (g != .undefined) return self.callValueWithThis(g, &.{}, recv);
+                        }
                         return .undefined; // accessor with no getter
                     }
                     if (c.getOwn(key)) |v| return v;
@@ -2018,8 +2022,11 @@ pub const Interpreter = struct {
         while (cur) |c| {
             if (c.getAccessor(key)) |acc| {
                 if (acc.set) |s| {
-                    _ = try self.callValueWithThis(s, &.{v}, recv);
-                    return;
+                    // An explicit `set: undefined` means "no setter".
+                    if (s != .undefined) {
+                        _ = try self.callValueWithThis(s, &.{v}, recv);
+                        return;
+                    }
                 }
                 // Accessor with no setter: sloppy ignores, strict throws.
                 return if (self.strict) self.throwError("TypeError", "Cannot set property which has only a getter") else {};
