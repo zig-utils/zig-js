@@ -937,6 +937,13 @@ pub const Parser = struct {
         try self.expect(.lbrace);
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
+            // Spread property `{ ...expr }`.
+            if (self.match(.ellipsis)) {
+                const e = try self.parseAssignment();
+                try props.append(self.arena, .{ .value = e, .is_spread = true });
+                if (!self.match(.comma)) break;
+                continue;
+            }
             // Generator method shorthand `{ *m() {} }` / `{ *[expr]() {} }`.
             const gen_method = self.match(.star);
             // Computed key: `{ [expr]: v }`.

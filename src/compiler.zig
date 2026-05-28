@@ -421,6 +421,8 @@ pub const Compiler = struct {
             .object_lit => |props| {
                 _ = try self.chunk.emit(.new_object, 0);
                 for (props) |p| {
+                    // Spread + accessor properties need the tree-walker.
+                    if (p.is_spread or p.accessor != .none) return error.Unsupported;
                     try self.compileExpr(p.value);
                     if (p.key_expr) |ke| {
                         try self.compileExpr(ke);

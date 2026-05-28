@@ -91,6 +91,18 @@ pub const Context = struct {
     }
 };
 
+test "object spread" {
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\var base = { a: 1, b: 2 };
+        \\var o = { ...base, c: 3 };
+        \\o.a + o.b + o.c
+    )).number);
+    // Later properties override earlier spread ones.
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn("var o = { x: 1, ...{ x: 9 } }; o.x")).number);
+    // Spreading null/undefined is a no-op.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var o = { ...null, ...undefined, a: 1 }; o.a")).number);
+}
+
 test "delete operator" {
     try std.testing.expect((try evalIn(
         \\var o = { a: 1, b: 2 };

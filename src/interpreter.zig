@@ -946,6 +946,28 @@ pub const Interpreter = struct {
     fn evalObjectLit(self: *Interpreter, props: []ast.Property) EvalError!Value {
         const v = try self.newObject();
         for (props) |p| {
+            if (p.is_spread) {
+                // `{ ...src }`: copy src's own enumerable properties / array
+                // elements (a string spreads its chars by index).
+                const src = try self.eval(p.value);
+                switch (src) {
+                    .object => |so| {
+                        if (so.is_array) {
+                            for (so.elements.items, 0..) |el, i| {
+                                try self.setMember(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}), el);
+                            }
+                        }
+                        for (try so.enumerableKeys(self.arena)) |k| {
+                            try self.setMember(v, k, try self.getProperty(src, k));
+                        }
+                    },
+                    .string => |s| for (s, 0..) |ch, i| {
+                        try self.setMember(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}), .{ .string = try self.arena.dupe(u8, &.{ch}) });
+                    },
+                    else => {}, // null/undefined/number/boolean spread → no own enumerable props
+                }
+                continue;
+            }
             const key = if (p.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else p.key;
             switch (p.accessor) {
                 .none => try self.setProp(v.object, key, try self.eval(p.value)),

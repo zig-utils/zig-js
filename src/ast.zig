@@ -105,6 +105,9 @@ pub const Property = struct {
     key_expr: ?*Node = null,
     value: *Node,
     accessor: AccessorKind = .none,
+    /// `{ ...expr }` spread property: copy `value`'s own enumerable properties
+    /// into the object being built (`key`/`accessor` unused).
+    is_spread: bool = false,
 };
 
 /// One `case <test>:` (or `default:` when `test` is null) clause of a switch.
