@@ -2247,6 +2247,40 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, array_ns, "of", builtins.arrayOf);
     try setNative(a, root_shape, array_ns, "from", builtins.arrayFrom);
     try env.put("Array", .{ .object = array_ns });
+
+    // ---- Real prototype objects ----------------------------------------
+    // Each holds its methods as properties (thunks routing to `builtinMethod`),
+    // hung off the matching global constructor's `.prototype`. This makes
+    // `Array.prototype.join`, `Object.prototype.hasOwnProperty`, and crucially
+    // `Function.prototype.call.bind(...)` resolve — the patterns test262's
+    // propertyHelper/verifyProperty (and many built-ins tests) depend on.
+    const object_proto = try a.create(value.Object);
+    object_proto.* = .{};
+    try setProtoMethods(a, root_shape, object_proto, &.{ "hasOwnProperty", "propertyIsEnumerable", "isPrototypeOf", "toString", "valueOf" });
+    try object_ns.setOwn(a, root_shape, "prototype", .{ .object = object_proto });
+
+    const func_proto = try a.create(value.Object);
+    func_proto.* = .{ .proto = object_proto };
+    try setProtoMethods(a, root_shape, func_proto, &.{ "call", "apply", "bind", "toString" });
+    const function_ns = try a.create(value.Object);
+    function_ns.* = .{ .proto = func_proto };
+    try function_ns.setOwn(a, root_shape, "prototype", .{ .object = func_proto });
+    try env.put("Function", .{ .object = function_ns });
+
+    const array_proto = try a.create(value.Object);
+    array_proto.* = .{ .proto = object_proto };
+    try setProtoMethods(a, root_shape, array_proto, &.{ "join", "push", "pop", "shift", "unshift", "slice", "splice", "concat", "reverse", "indexOf", "lastIndexOf", "includes", "map", "filter", "forEach", "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "fill", "flat", "flatMap", "sort", "keys", "values", "entries", "copyWithin", "at", "toString" });
+    try array_ns.setOwn(a, root_shape, "prototype", .{ .object = array_proto });
+
+    const string_proto = try a.create(value.Object);
+    string_proto.* = .{ .proto = object_proto };
+    try setProtoMethods(a, root_shape, string_proto, &.{ "charAt", "charCodeAt", "codePointAt", "indexOf", "lastIndexOf", "includes", "startsWith", "endsWith", "slice", "substring", "substr", "toUpperCase", "toLowerCase", "trim", "trimStart", "trimEnd", "repeat", "concat", "split", "at", "padStart", "padEnd", "replace", "replaceAll", "localeCompare", "toString", "valueOf" });
+    try string_ns.setOwn(a, root_shape, "prototype", .{ .object = string_proto });
+
+    const number_proto = try a.create(value.Object);
+    number_proto.* = .{ .proto = object_proto };
+    try setProtoMethods(a, root_shape, number_proto, &.{ "toString", "toFixed", "valueOf", "toLocaleString" });
+    try number_ns.setOwn(a, root_shape, "prototype", .{ .object = number_proto });
 }
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the
@@ -2288,6 +2322,23 @@ fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name:
     const m = try a.create(value.Object);
     m.* = .{ .native = f };
     try obj.setOwn(a, root_shape, name, .{ .object = m });
+}
+
+/// A prototype-object method: a native thunk that routes to the existing
+/// `builtinMethod` dispatch using `this`. Lets `X.prototype.method` be a real
+/// property whose value is callable (and `.call`/`.bind` work on it via the
+/// universal callable dispatch) — what test262's propertyHelper relies on.
+fn protoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            return (try self.builtinMethod(this, name, args)) orelse .undefined;
+        }
+    }.call;
+}
+
+fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime names: []const []const u8) EvalError!void {
+    inline for (names) |n| try setNative(a, rs, proto, n, protoMethod(n));
 }
 
 /// Abstract Relational Comparison (subset): string<string is lexicographic,

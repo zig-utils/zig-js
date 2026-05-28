@@ -144,6 +144,22 @@ test "Function.prototype: call / apply / bind" {
     )).number);
 }
 
+test "prototype objects: Function.prototype.call.bind + X.prototype methods" {
+    // The propertyHelper pattern: borrow a prototype method via call.bind.
+    try expectEvalStr("1-2-3",
+        \\var __join = Function.prototype.call.bind(Array.prototype.join);
+        \\__join([1, 2, 3], "-")
+    );
+    try std.testing.expect((try evalIn(
+        \\var __hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+        \\__hasOwn({ a: 1 }, "a") && !__hasOwn({ a: 1 }, "b")
+    )).boolean);
+    // Direct prototype-method access + .call.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn(
+        \\Array.prototype.indexOf.call([10, 20, 30], 30) + 1
+    )).number);
+}
+
 test "property descriptors: defineProperty attrs + getOwnPropertyDescriptor" {
     // defineProperty defaults omitted attrs to false; getOwnPropertyDescriptor reports them.
     try std.testing.expect((try evalIn(
