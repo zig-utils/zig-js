@@ -159,6 +159,13 @@ pub const Interpreter = struct {
         try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 
+    /// An own data property of the global object, used as the fallback for a
+    /// bare global reference (`this.x = 1` at top level → bare `x`).
+    pub fn globalProp(self: *Interpreter, name: []const u8) ?Value {
+        const g = self.global_object orelse return null;
+        return g.getOwn(name);
+    }
+
     /// Build an `Error`-family instance with `name`/`message` properties.
     fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         const obj = try self.arena.create(value.Object);
@@ -208,7 +215,13 @@ pub const Interpreter = struct {
                         if (hasProperty(o, name)) break :blk try self.getProperty(.{ .object = o }, name);
                     }
                 }
-                break :blk self.env.get(name) orelse return self.throwError("ReferenceError", name);
+                if (self.env.get(name)) |v| break :blk v;
+                // A property added to the global object (e.g. `this.x = 1` at top
+                // level) is reachable as a bare global reference.
+                if (self.global_object) |g| {
+                    if (objectHasOwn(g, name)) break :blk try self.getProperty(.{ .object = g }, name);
+                }
+                return self.throwError("ReferenceError", name);
             },
 
             .unary => |u| try self.evalUnary(u.op, u.operand),

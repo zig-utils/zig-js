@@ -104,7 +104,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .load_var => {
                 const name = chunk.names.items[inst.a];
-                const v = vm.env.get(name) orelse return vm.throwError("ReferenceError", name);
+                const v = vm.env.get(name) orelse vm.globalProp(name) orelse return vm.throwError("ReferenceError", name);
                 try stack.append(vm.arena, v);
             },
             .load_var_or_undef => {
