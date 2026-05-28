@@ -372,6 +372,30 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "Error prototypes: chain, name/message inheritance, toString" {
+    // Each constructor has a real prototype with name/message/constructor.
+    try expectEvalStr("object", "typeof Error.prototype");
+    try expectEvalStr("Error", "Error.prototype.name");
+    try expectEvalStr("", "Error.prototype.message");
+    try std.testing.expect((try evalIn("Error.prototype.constructor === Error")).boolean);
+    try std.testing.expect((try evalIn("Error.hasOwnProperty('prototype')")).boolean);
+    // Prototype chain: TypeError.prototype -> Error.prototype -> Object.prototype.
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(new Error()) === Error.prototype")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError.prototype) === Error.prototype")).boolean);
+    try std.testing.expect((try evalIn("new TypeError('x') instanceof Error")).boolean);
+    // name is inherited; message is own only when supplied.
+    try expectEvalStr("Error", "new Error().name");
+    try expectEvalStr("TypeError", "new TypeError().name");
+    try std.testing.expect((try evalIn("new Error('m').hasOwnProperty('message')")).boolean);
+    try std.testing.expect(!(try evalIn("new Error().hasOwnProperty('message')")).boolean);
+    try std.testing.expect(!(try evalIn("new Error().hasOwnProperty('name')")).boolean);
+    // toString: "name: message", or just one when the other is empty; generic.
+    try expectEvalStr("Error: hi", "new Error('hi').toString()");
+    try expectEvalStr("TypeError: x", "new TypeError('x').toString()");
+    try expectEvalStr("Error", "new Error().toString()");
+    try expectEvalStr("E: m", "Error.prototype.toString.call({ name: 'E', message: 'm' })");
+}
+
 test "Object.prototype legacy accessor helpers (__define/lookup__)" {
     try std.testing.expectEqual(@as(f64, 42), (try evalIn(
         \\var o = {}; o.__defineGetter__("x", function () { return 42; }); o.x

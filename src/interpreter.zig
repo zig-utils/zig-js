@@ -159,8 +159,21 @@ pub const Interpreter = struct {
     fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .is_error = true, .error_name = name };
-        try self.setProp(obj, "name", .{ .string = name });
-        try self.setProp(obj, "message", .{ .string = message });
+        // Link to `<name>.prototype` so `name` (and `toString`) are inherited and
+        // `instanceof` / `Object.getPrototypeOf` see a real chain.
+        if (self.env.get(name)) |ctor_v| {
+            if (ctor_v == .object) {
+                if (ctor_v.object.getOwn("prototype")) |proto_v| {
+                    if (proto_v == .object) obj.proto = proto_v.object;
+                }
+            }
+        }
+        // `message` is an own property only when one was supplied (else inherited,
+        // = "" from the prototype); `name` is always inherited from the prototype.
+        if (message.len > 0) {
+            try self.setProp(obj, "message", .{ .string = message });
+            try obj.setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
+        }
         return .{ .object = obj };
     }
 
@@ -1903,6 +1916,9 @@ pub const Interpreter = struct {
                         }
                         return Value.undefined;
                     }
+                    // Error.prototype.toString — before the generic Array `toString`
+                    // (join) fallback below would wrongly intercept error objects.
+                    if (o.is_error and eq(name, "toString")) return try errorToStringFn(@ptrCast(self), recv, args);
                 }
                 if (o.is_regex) return try self.regexMethod(o, name, args);
                 if (o.is_date) return try self.dateMethod(o, name, args);
@@ -2726,10 +2742,6 @@ pub const Interpreter = struct {
     }
 };
 
-/// Install the engine's global bindings into `env`: the `Error`-family
-/// constructors, `NaN`/`Infinity`/`undefined`, the `Math` and `Object`/`Array`
-/// namespaces, and the common global functions. `root_shape` backs the property
-/// stores of the namespace objects. Called once per Context, before user code.
 /// The global `eval`. Direct eval: the program text is parsed and run in the
 /// *current* lexical environment (`self.env` at the call site — natives don't
 /// push a scope), so `eval("var x = 1")` and `eval("x")` see and mutate the
@@ -2749,6 +2761,26 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     return self.eval(prog);
 }
 
+/// `Error.prototype.toString`: `"name: message"`, or just one when the other is
+/// empty. Generic — reads `name`/`message` off `this` (so the prototype chain and
+/// `.call(errorLike)` both work).
+fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Error.prototype.toString called on non-object");
+    const name_v = try self.getProperty(this, "name");
+    const name = if (name_v == .undefined) "Error" else try name_v.toString(self.arena);
+    const msg_v = try self.getProperty(this, "message");
+    const msg = if (msg_v == .undefined) "" else try msg_v.toString(self.arena);
+    if (name.len == 0) return .{ .string = msg };
+    if (msg.len == 0) return .{ .string = name };
+    return .{ .string = try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }) };
+}
+
+/// Install the engine's global bindings into `env`: the `Error`-family
+/// constructors, `NaN`/`Infinity`/`undefined`, the `Math` and `Object`/`Array`
+/// namespaces, and the common global functions. `root_shape` backs the property
+/// stores of the namespace objects. Called once per Context, before user code.
 pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
@@ -2912,6 +2944,32 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "__lookupGetter__", 1 },      .{ "__lookupSetter__", 1 },
     });
     try object_ns.setOwn(a, root_shape, "prototype", .{ .object = object_proto });
+
+    // Error prototypes: `Error.prototype` carries name/message/constructor/toString
+    // and protos to Object.prototype; each subclass (`TypeError.prototype`, …)
+    // protos to `Error.prototype`. Instances are linked in `makeError`.
+    const ro: value.PropAttr = .{ .enumerable = false, .configurable = true, .writable = true };
+    const error_proto = try a.create(value.Object);
+    error_proto.* = .{ .proto = object_proto };
+    for (error_names) |ename| {
+        const ctor_v = env.get(ename) orelse continue;
+        const ctor = ctor_v.object;
+        const is_base = std.mem.eql(u8, ename, "Error");
+        const proto = if (is_base) error_proto else blk: {
+            const p = try a.create(value.Object);
+            p.* = .{ .proto = error_proto };
+            break :blk p;
+        };
+        try proto.setOwn(a, root_shape, "name", .{ .string = ename });
+        try proto.setAttr(a, "name", ro);
+        try proto.setOwn(a, root_shape, "message", .{ .string = "" });
+        try proto.setAttr(a, "message", ro);
+        try proto.setOwn(a, root_shape, "constructor", ctor_v);
+        try proto.setAttr(a, "constructor", ro);
+        if (is_base) try setNative(a, root_shape, proto, "toString", 0, errorToStringFn);
+        try ctor.setOwn(a, root_shape, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
+    }
 
     const func_proto = try a.create(value.Object);
     func_proto.* = .{ .proto = object_proto };
