@@ -4178,7 +4178,7 @@ fn rootEnv(env: *Environment) *Environment {
     return root;
 }
 
-fn hasProperty(o: *value.Object, name: []const u8) bool {
+pub fn hasProperty(o: *value.Object, name: []const u8) bool {
     var cur: ?*value.Object = o;
     while (cur) |c| {
         if (c.getOwn(name) != null or c.getAccessor(name) != null) return true;

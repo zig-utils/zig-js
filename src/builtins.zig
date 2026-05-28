@@ -604,7 +604,22 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
 
 /// Core of `Object.defineProperty` / `defineProperties`: apply descriptor `d` to
 /// `target[key]`, honoring attributes and bypassing [[Set]].
-fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d: *value.Object) HostError!void {
+/// Read a property-descriptor field per ToPropertyDescriptor: present iff
+/// HasProperty (own *or inherited*), value via Get (so an inherited or accessor
+/// descriptor field is honored). Returns null when absent.
+fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?Value {
+    if (!interpreter.hasProperty(d, name)) return null;
+    return try self.getProperty(.{ .object = d }, name);
+}
+
+fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!void {
+    // Materialize the descriptor once over the prototype chain (a field may be
+    // inherited or itself an accessor), into a plain own-property record the
+    // rest of this function reads via `getOwn`.
+    const d = (try self.newObject()).object;
+    for ([_][]const u8{ "enumerable", "configurable", "value", "writable", "get", "set" }) |f| {
+        if (try descField(self, d_obj, f)) |v| try d.setOwn(self.arena, self.root_shape, f, v);
+    }
     const get = d.getOwn("get");
     const set = d.getOwn("set");
     // ToPropertyDescriptor validation: a descriptor may not mix accessor fields
