@@ -66,6 +66,24 @@ pub const Elem = struct {
     is_reject: bool,
 };
 
+/// Native resolve/reject closures (used for thenable assimilation): each reaches
+/// its target promise via the active-native callee's `private_data`.
+fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    try resolve(self, @ptrCast(@alignCast(fnobj.private_data.?)), if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
+fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    try reject(self, @ptrCast(@alignCast(fnobj.private_data.?)), if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
 pub fn promiseOf(v: Value) ?*Promise {
     if (v == .object) {
         if (v.object.promise) |p| return @ptrCast(@alignCast(p));
@@ -103,6 +121,26 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
             .rejected => try enqueue(self, .{ .reaction = reaction_r, .argument = inner.value, .fulfilled = false }),
         }
         return;
+    }
+    // Arbitrary thenable: adopt its state by calling `v.then(resolve, reject)`
+    // bound to this promise (a throw rejects). The pending-state guard makes any
+    // settle beyond the first a no-op.
+    if (v == .object and !v.object.is_array) {
+        const then_fn = try self.getProperty(v, "then");
+        if (then_fn.isCallable()) {
+            const res = try self.arena.create(Object);
+            res.* = .{ .native = resolveThunk, .private_data = @ptrCast(p) };
+            const rej = try self.arena.create(Object);
+            rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(p) };
+            if (self.callValueWithThis(then_fn, &.{ .{ .object = res }, .{ .object = rej } }, v)) |_| {} else |err| {
+                if (err == error.Throw) {
+                    const reason = self.exception;
+                    self.exception = .undefined;
+                    try reject(self, p, reason);
+                } else return err;
+            }
+            return;
+        }
     }
     p.state = .fulfilled;
     p.value = v;
