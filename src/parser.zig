@@ -782,6 +782,10 @@ pub const Parser = struct {
             return self.alloc(.{ .update = .{ .inc = inc, .prefix = true, .target = operand } });
         }
         const t = self.cur();
+        if (isKeyword(t, "delete")) {
+            _ = self.advance();
+            return self.alloc(.{ .delete_expr = try self.parseUnary() });
+        }
         const op: ?ast.UnaryOp = switch (t.kind) {
             .minus => .neg,
             .plus => .pos,

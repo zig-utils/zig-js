@@ -186,6 +186,18 @@ pub const Interpreter = struct {
             },
 
             .unary => |u| try self.evalUnary(u.op, u.operand),
+            .delete_expr => |target| blk: {
+                // `delete obj.prop` / `delete obj[expr]`: remove an own property
+                // (honoring [[Configurable]]). `delete <non-reference>` is true.
+                if (target.* == .member) {
+                    const m = target.member;
+                    const obj = try self.eval(m.object);
+                    if (obj != .object) break :blk .{ .boolean = true };
+                    const key = try self.memberKey(m.property, m.computed);
+                    break :blk .{ .boolean = try self.deleteOwn(obj.object, key) };
+                }
+                break :blk .{ .boolean = true };
+            },
             .update => |u| try self.evalUpdate(u.inc, u.prefix, u.target),
             .binary => |b| try self.evalBinary(b.op, b.left, b.right),
             .logical => |l| try self.evalLogical(l.op, l.left, l.right),
@@ -1330,6 +1342,47 @@ pub const Interpreter = struct {
             return; // can't add a new property to a non-extensible object
         }
         try self.setProp(o, key, v);
+    }
+
+    /// `delete obj[key]`: remove an own property, returning whether the object
+    /// no longer has it. Non-configurable own properties can't be deleted
+    /// (returns false); a missing property "deletes" successfully (true).
+    fn deleteOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        // Accessor property.
+        if (o.accessors) |m| {
+            if (m.getPtr(key) != null) {
+                if (!o.getAttr(key).configurable) return false;
+                _ = m.remove(key);
+                return true;
+            }
+        }
+        // Dense array element → leave a hole (undefined), length unchanged.
+        if (o.is_array) {
+            if (arrayIndex(key)) |i| {
+                if (i < o.elements.items.len) {
+                    o.elements.items[i] = .undefined;
+                    return true;
+                }
+            }
+        }
+        // Named data property: nothing to do if absent; reject if non-configurable.
+        if (o.getOwn(key) == null) return true;
+        if (!o.getAttr(key).configurable) return false;
+        // Rebuild shape+slots without `key` (delete is rare; correctness over speed).
+        const keys = try o.ownKeys(self.arena);
+        const Entry = struct { k: []const u8, v: Value, a: value.PropAttr };
+        var saved: std.ArrayListUnmanaged(Entry) = .empty;
+        for (keys) |k| {
+            if (std.mem.eql(u8, k, key)) continue;
+            try saved.append(self.arena, .{ .k = k, .v = o.getOwn(k).?, .a = o.getAttr(k) });
+        }
+        o.shape = self.root_shape;
+        o.slots = .empty;
+        for (saved.items) |e| {
+            try o.setOwn(self.arena, self.root_shape, e.k, e.v);
+            try o.setAttr(self.arena, e.k, e.a);
+        }
+        return true;
     }
 
     /// Define an accessor (get/set) on an object via its `setAccessor`.

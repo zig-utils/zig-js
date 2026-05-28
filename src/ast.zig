@@ -139,6 +139,8 @@ pub const Node = union(enum) {
     identifier: []const u8,
     this_expr,
     unary: struct { op: UnaryOp, operand: *Node },
+    /// `delete operand` — removes an own property; evaluates to a boolean.
+    delete_expr: *Node,
     /// `++x` / `x++` / `--x` / `x--`. `inc` selects +1 vs -1, `prefix` selects
     /// whether the expression yields the new (prefix) or old (postfix) value.
     update: struct { inc: bool, prefix: bool, target: *Node },

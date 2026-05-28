@@ -91,6 +91,23 @@ pub const Context = struct {
     }
 };
 
+test "delete operator" {
+    try std.testing.expect((try evalIn(
+        \\var o = { a: 1, b: 2 };
+        \\var ok = delete o.a;
+        \\ok && !("a" in o) && o.b === 2
+    )).boolean);
+    // Non-configurable property can't be deleted.
+    try std.testing.expect((try evalIn(
+        \\var o = {};
+        \\Object.defineProperty(o, "x", { value: 1, configurable: false });
+        \\var r = delete o.x;
+        \\!r && ("x" in o)
+    )).boolean);
+    // delete of a non-reference / missing property is true.
+    try std.testing.expect((try evalIn("delete 1 && delete {}.nope")).boolean);
+}
+
 test "for-of / for-in with destructuring + member targets" {
     try std.testing.expectEqual(@as(f64, 10), (try evalIn(
         \\var s = 0; for (const [a, b] of [[1, 2], [3, 4]]) { s += a + b; } s
