@@ -1725,7 +1725,14 @@ pub const Interpreter = struct {
     /// store (growing with holes); everything else is a named property. Shared
     /// by the tree-walker and the VM.
     pub fn setMember(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
-        if (recv != .object) return self.throwError("TypeError", "cannot set property of non-object");
+        if (recv != .object) {
+            // Setting a property on null/undefined always throws; on any other
+            // primitive (number/string/boolean) it is a silent no-op in sloppy
+            // mode — the only mode this engine runs.
+            if (recv == .null or recv == .undefined)
+                return self.throwError("TypeError", "Cannot set property of null or undefined");
+            return;
+        }
         const o = recv.object;
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) {

@@ -923,6 +923,24 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "sloppy-mode property set on a primitive is a no-op; null/undefined throws" {
+    // No-op on a primitive: doesn't throw, doesn't store.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var n = 5; n.foo = 1; n.foo === undefined ? 1 : 0")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("'str'.x = 1; 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("true.y = 1; 1")).number);
+    // null / undefined still throw a TypeError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { var o = null; o.x = 1; } catch (e) { t = e instanceof TypeError; }
+        \\t
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { var o; o.x = 1; } catch (e) { t = e instanceof TypeError; }
+        \\t
+    )).boolean);
+}
+
 test "Object.prototype.toString tags ([object X]) + Symbol.toStringTag" {
     try expectEvalStr("[object Object]", "Object.prototype.toString.call({})");
     try expectEvalStr("[object Array]", "Object.prototype.toString.call([])");
