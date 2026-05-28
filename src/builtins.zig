@@ -7,6 +7,7 @@ const std = @import("std");
 const value = @import("value.zig");
 const interpreter = @import("interpreter.zig");
 const Interpreter = interpreter.Interpreter;
+const Parser = @import("parser.zig").Parser;
 
 const Value = value.Value;
 const HostError = value.HostError;
@@ -51,6 +52,31 @@ pub fn booleanFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     _ = ctx;
     _ = this;
     return .{ .boolean = arg(args, 0).toBoolean() };
+}
+
+/// `Function(p1, ..., pn, body)` / `new Function(...)` — build a function from
+/// source. The last argument is the body; the earlier ones are parameter lists
+/// joined with commas. The text is wrapped in a function expression, parsed, and
+/// evaluated in the global scope (where `Function`-created functions live).
+pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    var params: std.ArrayListUnmanaged(u8) = .empty;
+    var body: []const u8 = "";
+    if (args.len > 0) {
+        body = try args[args.len - 1].toString(self.arena);
+        var i: usize = 0;
+        while (i + 1 < args.len) : (i += 1) {
+            if (i != 0) try params.append(self.arena, ',');
+            try params.appendSlice(self.arena, try args[i].toString(self.arena));
+        }
+    }
+    const source = try std.fmt.allocPrint(self.arena, "(function anonymous({s}\n) {{\n{s}\n}})", .{ params.items, body });
+    var parser = Parser.init(self.arena, source) catch
+        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    const prog = parser.parseProgram() catch
+        return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    return self.eval(prog);
 }
 
 pub fn parseFloatFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

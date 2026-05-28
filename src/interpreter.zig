@@ -2674,7 +2674,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "call", 1 }, .{ "apply", 2 }, .{ "bind", 1 }, .{ "toString", 0 },
     });
     const function_ns = try a.create(value.Object);
-    function_ns.* = .{ .proto = func_proto };
+    function_ns.* = .{ .native = builtins.functionConstructor, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, function_ns, "Function", 1);
     try function_ns.setOwn(a, root_shape, "prototype", .{ .object = func_proto });
     try env.put("Function", .{ .object = function_ns });

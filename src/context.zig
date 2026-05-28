@@ -372,6 +372,23 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "Function constructor builds callable functions from source" {
+    // Params + body, called and constructed.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).number);
+    try std.testing.expectEqual(@as(f64, 12), (try evalIn("new Function('a,b', 'return a * b')(3, 4)")).number);
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn("Function('return 42')()")).number);
+    // Spec name + arity of the synthesized function.
+    try expectEvalStr("anonymous", "Function('return 1').name");
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Function('a', 'b', 'return 0').length")).number);
+    try expectEvalStr("function", "typeof Function('return 1')");
+    // A syntactically invalid body throws SyntaxError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { Function("return )("); } catch (e) { t = e.name === "SyntaxError"; }
+        \\t
+    )).boolean);
+}
+
 test "String.prototype.split: limit + regex separators" {
     // `limit` truncates the result.
     try expectEvalStr("a|b", "'a,b,c'.split(',', 2).join('|')");
