@@ -46,6 +46,26 @@ pub const Microtask = struct {
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
 };
 
+/// Shared aggregation state for the combinators (`Promise.all`/`allSettled`/
+/// `any`). `result` is the combined promise; `values` the in-order results
+/// array; `remaining` counts inputs not yet settled; `kind` selects how each
+/// element's outcome is recorded.
+pub const Combine = struct {
+    result: *Promise,
+    values: *Object,
+    remaining: usize,
+    kind: enum { all, all_settled, any },
+};
+
+/// A per-element reaction's captured context: which `Combine` it belongs to and
+/// the element's index (so results land in order). Stored on the closure's
+/// `private_data`.
+pub const Elem = struct {
+    combine: *Combine,
+    index: usize,
+    is_reject: bool,
+};
+
 pub fn promiseOf(v: Value) ?*Promise {
     if (v == .object) {
         if (v.object.promise) |p| return @ptrCast(@alignCast(p));

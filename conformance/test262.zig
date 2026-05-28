@@ -326,6 +326,7 @@ const subtrees = [_][]const u8{
     "test/built-ins/Error",    "test/built-ins/JSON",    "test/built-ins/Map",
     "test/built-ins/Set",      "test/built-ins/WeakMap", "test/built-ins/WeakSet",
     "test/built-ins/Symbol",   "test/built-ins/Function", "test/built-ins/Date",
+    "test/built-ins/Promise",
 };
 
 pub fn main(init: std.process.Init) !void {

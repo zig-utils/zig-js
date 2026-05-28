@@ -3319,6 +3319,140 @@ fn promiseRejectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     return .{ .object = pobj };
 }
 
+/// Collect an iterable's elements into a slice: arrays use their dense store
+/// directly; anything else is driven through the iterator protocol.
+fn collectIterable(self: *Interpreter, v: Value) EvalError![]Value {
+    if (v == .object and v.object.is_array) return v.object.elements.items;
+    const iter = try self.iteratorOf(v);
+    var list: std.ArrayListUnmanaged(Value) = .empty;
+    while (true) {
+        const r = try self.callMethod(iter, "next", &.{});
+        if (r != .object) return self.throwError("TypeError", "iterator.next() did not return an object");
+        if ((try self.getProperty(r, "done")).toBoolean()) break;
+        try list.append(self.arena, try self.getProperty(r, "value"));
+    }
+    return list.items;
+}
+
+/// One element's settle reaction for `Promise.all`/`allSettled`/`any`: record
+/// the outcome at its index and, when the last input settles, settle the
+/// combined promise.
+fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    const e: *promise.Elem = @ptrCast(@alignCast(fnobj.private_data.?));
+    const c = e.combine;
+    const val = if (args.len > 0) args[0] else .undefined;
+    switch (c.kind) {
+        .all => {
+            if (e.is_reject) {
+                try promise.reject(self, c.result, val); // first rejection wins
+                return .undefined;
+            }
+            c.values.elements.items[e.index] = val;
+        },
+        .all_settled => {
+            const o = (try self.newObject()).object;
+            if (e.is_reject) {
+                try self.setProp(o, "status", .{ .string = "rejected" });
+                try self.setProp(o, "reason", val);
+            } else {
+                try self.setProp(o, "status", .{ .string = "fulfilled" });
+                try self.setProp(o, "value", val);
+            }
+            c.values.elements.items[e.index] = .{ .object = o };
+        },
+        .any => {
+            if (!e.is_reject) {
+                try promise.resolve(self, c.result, val); // first fulfillment wins
+                return .undefined;
+            }
+            c.values.elements.items[e.index] = val; // collect the error
+        },
+    }
+    c.remaining -= 1;
+    if (c.remaining == 0) {
+        if (c.kind == .any)
+            try promise.reject(self, c.result, .{ .object = c.values }) // all rejected
+        else
+            try promise.resolve(self, c.result, .{ .object = c.values });
+    }
+    return .undefined;
+}
+
+/// Shared setup for `Promise.all`/`allSettled`/`any`: build the combined promise
+/// and wire a per-element reaction onto each input (coerced via the source's
+/// `then`). An empty input settles immediately.
+fn setupCombinator(self: *Interpreter, iterable: Value, kind: @TypeOf(@as(promise.Combine, undefined).kind)) value.HostError!Value {
+    const elems = try collectIterable(self, iterable);
+    const result = try promise.newPromise(self);
+    const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    const values = (try self.newArray()).object;
+    for (elems) |_| try values.elements.append(self.arena, .undefined);
+    const combine = try self.arena.create(promise.Combine);
+    combine.* = .{ .result = rp, .values = values, .remaining = elems.len, .kind = kind };
+    if (elems.len == 0) {
+        if (kind == .any)
+            try promise.reject(self, rp, .{ .object = values })
+        else
+            try promise.resolve(self, rp, .{ .object = values });
+        return .{ .object = result };
+    }
+    for (elems, 0..) |el, i| {
+        const p = try promiseResolveStaticFn(@ptrCast(self), .undefined, &.{el});
+        const pp = promise.promiseOf(p).?;
+        const f = try self.arena.create(value.Object);
+        const fe = try self.arena.create(promise.Elem);
+        fe.* = .{ .combine = combine, .index = i, .is_reject = false };
+        f.* = .{ .native = combineElemFn, .private_data = @ptrCast(fe) };
+        const r = try self.arena.create(value.Object);
+        const re = try self.arena.create(promise.Elem);
+        re.* = .{ .combine = combine, .index = i, .is_reject = true };
+        r.* = .{ .native = combineElemFn, .private_data = @ptrCast(re) };
+        _ = try promise.then(self, pp, .{ .object = f }, .{ .object = r });
+    }
+    return .{ .object = result };
+}
+
+fn promiseAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return setupCombinator(self, if (args.len > 0) args[0] else .undefined, .all);
+}
+
+fn promiseAllSettledFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return setupCombinator(self, if (args.len > 0) args[0] else .undefined, .all_settled);
+}
+
+fn promiseAnyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return setupCombinator(self, if (args.len > 0) args[0] else .undefined, .any);
+}
+
+/// `Promise.race(iterable)` — settle with the first input to settle.
+fn promiseRaceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const elems = try collectIterable(self, if (args.len > 0) args[0] else .undefined);
+    const result = try promise.newPromise(self);
+    const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    for (elems) |el| {
+        const p = try promiseResolveStaticFn(@ptrCast(self), .undefined, &.{el});
+        const pp = promise.promiseOf(p).?;
+        // resolve/reject the shared result; the first to fire wins (later no-op).
+        const f = try self.arena.create(value.Object);
+        f.* = .{ .native = promiseResolveClosure, .private_data = @ptrCast(rp) };
+        const r = try self.arena.create(value.Object);
+        r.* = .{ .native = promiseRejectClosure, .private_data = @ptrCast(rp) };
+        _ = try promise.then(self, pp, .{ .object = f }, .{ .object = r });
+    }
+    return .{ .object = result };
+}
+
 /// `print(...)` — appends a space-joined line to the Context's print buffer
 /// (used by the test262 async harness's `$DONE`).
 fn printFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -3475,6 +3609,10 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try installNativeProps(a, root_shape, promise_ns, "Promise", 1);
     try setNative(a, root_shape, promise_ns, "resolve", 1, promiseResolveStaticFn);
     try setNative(a, root_shape, promise_ns, "reject", 1, promiseRejectStaticFn);
+    try setNative(a, root_shape, promise_ns, "all", 1, promiseAllFn);
+    try setNative(a, root_shape, promise_ns, "allSettled", 1, promiseAllSettledFn);
+    try setNative(a, root_shape, promise_ns, "any", 1, promiseAnyFn);
+    try setNative(a, root_shape, promise_ns, "race", 1, promiseRaceFn);
     try promise_ns.setOwn(a, root_shape, "prototype", .{ .object = promise_proto });
     try promise_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, promise_proto, promise_ns);

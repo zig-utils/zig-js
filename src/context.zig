@@ -973,6 +973,20 @@ test "async/await: synchronous-settling runtime" {
         \\out
     )).number);
     try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).boolean);
+    // Promise.all aggregates in order; observed inside an async awaiter.
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\var sum = 0;
+        \\async function f() { var a = await Promise.all([1, 2, 3]); sum = a[0] + a[1] + a[2]; }
+        \\f();
+        \\sum
+    )).number);
+    // Promise.race settles with the first (already-resolved) input.
+    try std.testing.expectEqual(@as(f64, 10), (try evalIn(
+        \\var r = 0;
+        \\async function f() { r = await Promise.race([Promise.resolve(10), 20]); }
+        \\f();
+        \\r
+    )).number);
 }
 
 test "array destructuring over the iterator protocol (generator, Set, string, rest)" {
