@@ -2334,7 +2334,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 
     // Object namespace.
     const object_ns = try a.create(value.Object);
-    object_ns.* = .{};
+    object_ns.* = .{ .native = builtins.objectConstructor };
     try setNative(a, root_shape, object_ns, "keys", builtins.objectKeys);
     try setNative(a, root_shape, object_ns, "values", builtins.objectValues);
     try setNative(a, root_shape, object_ns, "assign", builtins.objectAssign);
@@ -2359,9 +2359,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, object_ns, "fromEntries", builtins.objectFromEntries);
     try env.put("Object", .{ .object = object_ns });
 
-    // Array namespace (isArray/of/from; prototype methods stay on arrays).
+    // Array namespace (callable constructor + isArray/of/from).
     const array_ns = try a.create(value.Object);
-    array_ns.* = .{};
+    array_ns.* = .{ .native = builtins.arrayConstructor };
     try setNative(a, root_shape, array_ns, "isArray", builtins.arrayIsArray);
     try setNative(a, root_shape, array_ns, "of", builtins.arrayOf);
     try setNative(a, root_shape, array_ns, "from", builtins.arrayFrom);

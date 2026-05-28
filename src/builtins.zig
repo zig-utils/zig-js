@@ -379,6 +379,35 @@ pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Valu
     return result;
 }
 
+/// `Array(...)` / `new Array(...)`: a single numeric argument is a length
+/// (RangeError if not a valid array index count); otherwise the arguments become
+/// the elements.
+pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const arr = try self.newArray();
+    if (args.len == 1 and args[0] == .number) {
+        const n = args[0].number;
+        if (n < 0 or @trunc(n) != n or n > 4294967295) return self.throwError("RangeError", "Invalid array length");
+        var i: usize = 0;
+        const len: usize = @intFromFloat(n);
+        while (i < len) : (i += 1) try arr.object.elements.append(self.arena, .undefined);
+    } else {
+        for (args) |v| try arr.object.elements.append(self.arena, v);
+    }
+    return arr;
+}
+
+/// `Object(...)` / `new Object(...)`: returns the argument coerced to an object
+/// (a fresh `{}` for null/undefined; the object itself when already one).
+pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const v = arg(args, 0);
+    if (v == .object) return v;
+    return self.newObject(); // primitives → a fresh object (boxing is approximate in v1)
+}
+
 pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);

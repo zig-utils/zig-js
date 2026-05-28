@@ -91,6 +91,17 @@ pub const Context = struct {
     }
 };
 
+test "Array / Object constructors" {
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array(1, 2).length")).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var a = new Array(5, 6, 7); a[2]")).number);
+    try expectEvalStr("function", "typeof Array");
+    try std.testing.expect((try evalIn("var o = new Object(); typeof o === 'object'")).boolean);
+    try std.testing.expect((try evalIn("var x = {}; Object(x) === x")).boolean);
+    // Invalid array length throws RangeError.
+    try std.testing.expect((try evalIn("var t = false; try { new Array(-1); } catch (e) { t = e.name === 'RangeError'; } t")).boolean);
+}
+
 test "destructuring catch parameter" {
     try std.testing.expectEqual(@as(f64, 3), (try evalIn(
         \\var r = 0;
