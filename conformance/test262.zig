@@ -162,6 +162,9 @@ const Meta = struct {
     /// `flags: [onlyStrict]` — the test must run as strict-mode code, so a
     /// `"use strict"` directive is prepended to the assembled source.
     only_strict: bool = false,
+    /// `flags: [async]` — the test signals completion by calling `$DONE` (often
+    /// from a Promise reaction); success/failure is read from the print buffer.
+    is_async: bool = false,
     /// `includes:` harness file names. Slices point into the source frontmatter,
     /// which outlives `runOne`.
     includes: [8][]const u8 = undefined,
@@ -180,6 +183,11 @@ fn parseMeta(src: []const u8) Meta {
         const flags = front[fi..line_end];
         if (std.mem.indexOf(u8, flags, "raw")) |_| meta.raw = true;
         if (std.mem.indexOf(u8, flags, "onlyStrict")) |_| meta.only_strict = true;
+        if (std.mem.indexOf(u8, flags, "async")) |_| meta.is_async = true;
+        // The async/async-generator corpus needs machinery beyond the current
+        // synchronous-settling runtime (async generators, for-await, Promise
+        // combinators, exact ordering), so it stays skipped like modules; the
+        // runtime is exercised by the unit tests and the Promise built-ins.
         if (std.mem.indexOf(u8, flags, "module") != null or
             std.mem.indexOf(u8, flags, "async") != null or
             std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
@@ -282,7 +290,15 @@ fn runOne(gpa: std.mem.Allocator, harness: *Harness, src: []const u8) Outcome {
     defer ctx.destroy();
 
     if (ctx.evaluate(buf.items)) |_| {
-        return if (meta.negative) .fail_negative else .pass;
+        if (meta.negative) return .fail_negative;
+        // An async test passes only if it printed the harness success sentinel
+        // ($DONE with no error) by the time microtasks have drained.
+        if (meta.is_async) {
+            const out = ctx.print_buffer.items;
+            const done = std.mem.indexOf(u8, out, "Test262:AsyncTestComplete") != null;
+            return if (done) .pass else .fail_runtime;
+        }
+        return .pass;
     } else |err| {
         if (meta.negative) {
             const ok = if (meta.negative_parse) err != error.Throw else err == error.Throw;

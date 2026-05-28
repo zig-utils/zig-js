@@ -20,6 +20,10 @@ pub const Context = struct {
     /// The empty root shape every object in this context transitions from.
     root_shape: *Shape,
     exception: ?value.Value = null,
+    /// The microtask queue (Promise reactions) and the `print` output buffer —
+    /// persistent across `evaluate` calls, shared with each `Interpreter`.
+    microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty,
+    print_buffer: std.ArrayListUnmanaged(u8) = .empty,
 
     pub fn create(gpa: std.mem.Allocator) !*Context {
         const arena_state = try gpa.create(std.heap.ArenaAllocator);
@@ -73,6 +77,8 @@ pub const Context = struct {
             .global_object = self.global_object,
             .this_value = .{ .object = self.global_object },
             .root_shape = self.root_shape,
+            .microtasks = &self.microtasks,
+            .print_buffer = &self.print_buffer,
         };
     }
 
@@ -103,17 +109,19 @@ pub const Context = struct {
         machine.strict = parser.strict;
         self.exception = null;
 
-        if (compiler.Compiler.compileProgram(a, prog)) |chunk| {
-            return vm.run(&machine, chunk, null) catch |err| {
-                if (err == error.Throw) self.exception = machine.exception;
-                return err;
-            };
-        } else |err| switch (err) {
-            error.Unsupported => {}, // fall through to the tree-walker
+        const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
+            vm.run(&machine, chunk, null)
+        else |err| switch (err) {
+            error.Unsupported => machine.eval(prog), // construct the VM can't lower
             error.OutOfMemory => return error.OutOfMemory,
-        }
+        };
 
-        return machine.eval(prog) catch |err| {
+        // Microtask checkpoint: run queued Promise reactions before returning, so
+        // settled `.then`/`await` continuations and the async harness's `$DONE`
+        // have executed by the time `evaluate` returns.
+        machine.drainMicrotasks() catch {};
+
+        return outcome catch |err| {
             if (err == error.Throw) self.exception = machine.exception;
             return err;
         };
@@ -946,13 +954,25 @@ test "async: declarations/expressions/arrows/methods parse; never-called is vali
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function* ag() { yield await 1; } 1")).number);
 }
 
-test "async: calling an async function throws (runtime not yet implemented)" {
-    try std.testing.expect((try evalIn(
-        \\var threw = false;
-        \\async function f() { return 1; }
-        \\try { f(); } catch (e) { threw = e instanceof TypeError; }
-        \\threw
-    )).boolean);
+test "async/await: synchronous-settling runtime" {
+    // An async function returns a Promise.
+    try std.testing.expect((try evalIn("(async function () { return 1; })() instanceof Promise")).boolean);
+    // await settles inline (the body runs eagerly), so a value written inside the
+    // async function before it returns is observable synchronously.
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn(
+        \\var result = 0;
+        \\async function f() { result = await Promise.resolve(41) + 1; }
+        \\f();
+        \\result
+    )).number);
+    // await of a rejected promise throws inside the async body (catchable).
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn(
+        \\var out = 0;
+        \\async function g() { try { await Promise.reject(5); } catch (e) { out = e + 4; } }
+        \\g();
+        \\out
+    )).number);
+    try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).boolean);
 }
 
 test "array destructuring over the iterator protocol (generator, Set, string, rest)" {

@@ -5,6 +5,7 @@ const bc = @import("bytecode.zig");
 const builtins = @import("builtins.zig");
 const regex = @import("regex");
 const vm = @import("vm.zig");
+const promise = @import("promise.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 
@@ -121,6 +122,16 @@ const Signal = enum { none, ret, brk, cont };
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     env: *Environment,
+    /// The Context-owned microtask queue (Promise reactions). Drained after the
+    /// main script in `Context.evaluate` and inline by `await`.
+    microtasks: ?*std.ArrayListUnmanaged(promise.Microtask) = null,
+    /// The native-function object currently being invoked (set around each
+    /// native call), so a native can reach its own `private_data` — used by
+    /// Promise executor resolve/reject closures.
+    active_native: ?*value.Object = null,
+    /// Context-owned buffer the global `print` appends to (the async harness's
+    /// `$DONE` reports completion through `print`).
+    print_buffer: ?*std.ArrayListUnmanaged(u8) = null,
     /// The context's global object — the value of `globalThis` and of top-level
     /// `this`. Global `var`/function bindings also surface as its properties, so
     /// `this.x`, `"x" in globalThis`, and reflection over the global all work.
@@ -165,6 +176,22 @@ pub const Interpreter = struct {
     /// Set a named property on an object via its shape (see `Object.setOwn`).
     fn setProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
         try obj.setOwn(self.arena, self.root_shape, key, v);
+    }
+
+    /// Bind `name` in the current scope; at global scope (no enclosing
+    /// function), also surface it as an own property of the global object —
+    /// global `var`/function declarations are own properties of `globalThis`
+    /// ({ writable, enumerable, !configurable }), so `hasOwnProperty(globalThis,
+    /// name)` and reflection see them (the test262 async harness relies on this).
+    pub fn globalDefine(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
+        try self.env.put(name, v);
+        if (self.env.parent == null) {
+            if (self.global_object) |g| {
+                const existed = g.getOwn(name) != null;
+                try self.setProp(g, name, v);
+                if (!existed) try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = false });
+            }
+        }
     }
 
     /// An own data property of the global object, used as the fallback for a
@@ -275,10 +302,7 @@ pub const Interpreter = struct {
             // rather than producing a wrong value.
             .yield_expr => return self.throwError("SyntaxError", "yield is only supported in VM-compiled generator bodies"),
 
-            // `await` only appears inside an async function body, and calling an
-            // async function already throws above — so this is effectively
-            // unreachable, but reported clearly for safety.
-            .await_expr => return self.throwError("TypeError", "await is not yet executable (parsing only)"),
+            .await_expr => |a| try self.evalAwait(a.argument),
 
             .super_call => |sc| blk: {
                 const sup = self.super_ctor orelse return self.throwError("SyntaxError", "'super' keyword unexpected here");
@@ -322,13 +346,13 @@ pub const Interpreter = struct {
                     v = try self.eval(init_node);
                     try self.maybeNameAnon(v, init_node, d.name); // `var f = function(){}` ⇒ name "f"
                 }
-                try self.env.put(d.name, v);
+                try self.globalDefine(d.name, v);
                 break :blk .undefined;
             },
 
             .func_decl => |fnode| blk: {
                 const fnv = try self.makeFunction(fnode, self.env);
-                try self.env.put(fnode.name, fnv);
+                try self.globalDefine(fnode.name, fnv);
                 break :blk .undefined;
             },
 
@@ -575,7 +599,7 @@ pub const Interpreter = struct {
         // once here; the main loop then skips them, preserving function identity
         // (`var g = bar; function bar() {}` ⇒ `g === bar`).
         for (stmts) |s| switch (s.*) {
-            .func_decl => |fnode| try self.env.put(fnode.name, try self.makeFunction(fnode, self.env)),
+            .func_decl => |fnode| try self.globalDefine(fnode.name, try self.makeFunction(fnode, self.env)),
             else => {},
         };
         var last: Value = .undefined;
@@ -900,7 +924,14 @@ pub const Interpreter = struct {
             return self.callValueWithThis(bf.target, try self.concatArgs(bf.args, args), bf.this);
         }
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
-        if (obj.native) |nf| return nf(@ptrCast(self), this_val, args);
+        if (obj.native) |nf| {
+            // Expose the callee object to the native (it isn't a parameter), so
+            // closures-over-data like Promise resolve/reject can find their slot.
+            const saved_native = self.active_native;
+            self.active_native = obj;
+            defer self.active_native = saved_native;
+            return nf(@ptrCast(self), this_val, args);
+        }
         if (obj.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             return self.callFunction(func, args, this_val);
@@ -958,11 +989,35 @@ pub const Interpreter = struct {
     /// `callFunction` with an explicit `new.target` (set by `construct`; a plain
     /// call passes undefined). Arrow functions inherit the enclosing new.target.
     fn callFunctionNT(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
-        // Async functions parse and bind, but the Promise + microtask runtime
-        // that would run their bodies isn't implemented yet — calling one throws
-        // (checked before the generator branch so async generators don't run as
-        // plain generators). A *never-called* async function is fully valid.
-        if (func.is_async) return self.throwError("TypeError", "async functions are not yet executable (parsing only)");
+        // An async (non-generator) function runs its body synchronously and wraps
+        // the completion in a Promise: a normal return resolves it, a throw
+        // rejects it. `await` inside drives the microtask queue inline until the
+        // awaited promise settles (the synchronous-settling model). Async
+        // generators still need the suspendable VM, so they fall through.
+        if (func.is_async and !func.is_generator) {
+            const result = try promise.newPromise(self);
+            const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+            if (self.callPlain(func, args, this_val, new_target)) |rv| {
+                try promise.resolve(self, rp, rv);
+            } else |err| {
+                if (err == error.Throw) {
+                    const reason = self.exception;
+                    self.exception = .undefined;
+                    try promise.reject(self, rp, reason);
+                } else return err;
+            }
+            return .{ .object = result };
+        }
+        return self.callPlain(func, args, this_val, new_target);
+    }
+
+    /// The body of a plain (sync) function call: scope setup, param binding, and
+    /// evaluation. Async functions route through `callFunctionNT`, which wraps
+    /// this in a Promise.
+    fn callPlain(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+        // Async generators aren't executable yet (need yield+await suspension);
+        // async non-generators are run here by `callFunctionNT`'s wrapper.
+        if (func.is_async and func.is_generator) return self.throwError("TypeError", "async generators are not yet executable");
         // Calling a `function*` builds a generator object (its body runs lazily,
         // on the suspendable VM, via `.next()`).
         if (func.is_generator) return vm.makeGenerator(self, func, args, this_val);
@@ -1119,6 +1174,43 @@ pub const Interpreter = struct {
         const proto = (try self.newObject()).object;
         try self.setProp(ctor, "prototype", .{ .object = proto });
         return proto;
+    }
+
+    /// Run queued Promise reactions to completion (the event loop's microtask
+    /// checkpoint). Each job may enqueue more; the step budget bounds runaways.
+    pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
+        const q = self.microtasks orelse return;
+        var i: usize = 0;
+        while (i < q.items.len) : (i += 1) {
+            try promise.runJob(self, q.items[i]);
+        }
+        q.clearRetainingCapacity();
+    }
+
+    /// `await expr` (synchronous-settling): if the awaited value is a promise,
+    /// drive the microtask queue until it settles, then return its value (or
+    /// throw its rejection). A non-promise (or thenable-free value) is returned
+    /// as-is. Not spec-faithful on ordering, but correct on values.
+    fn evalAwait(self: *Interpreter, arg_node: *Node) EvalError!Value {
+        const v = try self.eval(arg_node);
+        const p = promise.promiseOf(v) orelse return v;
+        // Pump microtasks until the awaited promise leaves the pending state
+        // (the step budget bounds a promise that never settles synchronously).
+        const q = self.microtasks;
+        while (p.state == .pending) {
+            const queue = q orelse break;
+            if (queue.items.len == 0) break; // nothing left to settle it
+            const job = queue.orderedRemove(0);
+            try promise.runJob(self, job);
+        }
+        return switch (p.state) {
+            .fulfilled => p.value,
+            .rejected => blk: {
+                self.exception = p.value;
+                break :blk error.Throw;
+            },
+            .pending => .undefined, // never settled synchronously
+        };
     }
 
     /// Box a primitive into a wrapper object (`new Number/String/Boolean`). Its
@@ -3143,6 +3235,104 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     return self.eval(prog);
 }
 
+// --- Promise built-ins ----------------------------------------------------
+
+/// `new Promise(executor)` — create a pending promise and synchronously call
+/// `executor(resolve, reject)`. The resolve/reject closures carry the promise
+/// in their `private_data`; an executor that throws rejects the promise.
+fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const executor = if (args.len > 0) args[0] else .undefined;
+    if (!executor.isCallable()) return self.throwError("TypeError", "Promise resolver is not a function");
+    const pobj = try promise.newPromise(self);
+    const pp = pobj.promise.?;
+    const res_fn = try self.arena.create(value.Object);
+    res_fn.* = .{ .native = promiseResolveClosure, .private_data = pp };
+    const rej_fn = try self.arena.create(value.Object);
+    rej_fn.* = .{ .native = promiseRejectClosure, .private_data = pp };
+    if (self.callValueWithThis(executor, &.{ .{ .object = res_fn }, .{ .object = rej_fn } }, .undefined)) |_| {} else |err| {
+        if (err == error.Throw) {
+            const reason = self.exception;
+            self.exception = .undefined;
+            try promise.reject(self, @ptrCast(@alignCast(pp)), reason);
+        } else return err;
+    }
+    return .{ .object = pobj };
+}
+
+fn promiseResolveClosure(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    try promise.resolve(self, @ptrCast(@alignCast(fnobj.private_data.?)), if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
+fn promiseRejectClosure(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    try promise.reject(self, @ptrCast(@alignCast(fnobj.private_data.?)), if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
+fn promiseThenFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.then called on a non-Promise");
+    return promise.then(self, p, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+}
+
+fn promiseCatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.catch called on a non-Promise");
+    return promise.then(self, p, .undefined, if (args.len > 0) args[0] else .undefined);
+}
+
+fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.finally called on a non-Promise");
+    // Minimal `finally`: run the callback on settle; value/reason pass through
+    // (a precise implementation would re-thread the original completion).
+    const cb = if (args.len > 0) args[0] else .undefined;
+    return promise.then(self, p, cb, cb);
+}
+
+/// `Promise.resolve(v)` — `v` itself if already a promise, else a promise
+/// fulfilled with `v` (adopting a thenable's state).
+fn promiseResolveStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const v = if (args.len > 0) args[0] else .undefined;
+    if (promise.promiseOf(v) != null) return v;
+    const pobj = try promise.newPromise(self);
+    try promise.resolve(self, @ptrCast(@alignCast(pobj.promise.?)), v);
+    return .{ .object = pobj };
+}
+
+/// `Promise.reject(e)` — a promise rejected with `e`.
+fn promiseRejectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const pobj = try promise.newPromise(self);
+    try promise.reject(self, @ptrCast(@alignCast(pobj.promise.?)), if (args.len > 0) args[0] else .undefined);
+    return .{ .object = pobj };
+}
+
+/// `print(...)` — appends a space-joined line to the Context's print buffer
+/// (used by the test262 async harness's `$DONE`).
+fn printFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const buf = self.print_buffer orelse return .undefined;
+    for (args, 0..) |a, i| {
+        if (i != 0) try buf.append(self.arena, ' ');
+        try buf.appendSlice(self.arena, try a.toString(self.arena));
+    }
+    try buf.append(self.arena, '\n');
+    return .undefined;
+}
+
 /// `Object.prototype.toString` → `"[object Tag]"`. The tag comes from the
 /// object's kind (Array/Function/Error/Date/RegExp/Boolean/Number/String, else
 /// "Object"), but an own/inherited `Symbol.toStringTag` *string* overrides it
@@ -3272,6 +3462,23 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.mapFn);
     try defineGlobalFnC(env, root_shape, "WeakSet", 0, true, builtins.setFn);
     try defineGlobalFnC(env, root_shape, "Boolean", 1, true, builtins.booleanFn);
+    try defineGlobalFn(env, root_shape, "print", 1, printFn);
+
+    // Promise — constructor, prototype (then/catch/finally), and statics.
+    const promise_proto = try a.create(value.Object);
+    promise_proto.* = .{};
+    try setNative(a, root_shape, promise_proto, "then", 2, promiseThenFn);
+    try setNative(a, root_shape, promise_proto, "catch", 1, promiseCatchFn);
+    try setNative(a, root_shape, promise_proto, "finally", 1, promiseFinallyFn);
+    const promise_ns = try a.create(value.Object);
+    promise_ns.* = .{ .native = promiseConstructorFn, .native_ctor = true };
+    try installNativeProps(a, root_shape, promise_ns, "Promise", 1);
+    try setNative(a, root_shape, promise_ns, "resolve", 1, promiseResolveStaticFn);
+    try setNative(a, root_shape, promise_ns, "reject", 1, promiseRejectStaticFn);
+    try promise_ns.setOwn(a, root_shape, "prototype", .{ .object = promise_proto });
+    try promise_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, root_shape, promise_proto, promise_ns);
+    try env.put("Promise", .{ .object = promise_ns });
 
     // String — callable, with statics.
     const string_ns = try a.create(value.Object);

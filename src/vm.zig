@@ -117,7 +117,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .def_var => {
                 const name = chunk.names.items[inst.a];
-                try vm.env.put(name, stack.pop().?);
+                try vm.globalDefine(name, stack.pop().?);
             },
 
             .load_local => try stack.append(vm.arena, frame.?.slots[inst.a]),

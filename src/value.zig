@@ -108,6 +108,10 @@ pub const Object = struct {
     /// For objects created by `new F()`, the constructor function's object —
     /// used by `instanceof` to walk the (flat, v1) construction link.
     ctor_ref: ?*Object = null,
+    /// `*Interpreter.Promise`, type-erased (cycle break like `js_func`/`gen`).
+    /// Non-null marks a Promise object — its `then`/`catch`/`finally` are
+    /// dispatched specially and it carries pending reactions + settled state.
+    promise: ?*anyopaque = null,
     /// A primitive-wrapper object's boxed [[NumberData]]/[[StringData]]/
     /// [[BooleanData]] — set by `new Number(x)` / `new String(x)` / `new
     /// Boolean(x)`. Non-null marks the object as a wrapper: `typeof` is still
