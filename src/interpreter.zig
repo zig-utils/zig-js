@@ -241,7 +241,11 @@ pub const Interpreter = struct {
                     const obj = try self.eval(m.object);
                     if (obj != .object) break :blk .{ .boolean = true };
                     const key = try self.memberKey(m.property, m.computed);
-                    break :blk .{ .boolean = try self.deleteOwn(obj.object, key) };
+                    const ok = try self.deleteOwn(obj.object, key);
+                    // Strict mode: a failed delete (a non-configurable property)
+                    // is a TypeError rather than a `false` result.
+                    if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
+                    break :blk .{ .boolean = ok };
                 }
                 break :blk .{ .boolean = true };
             },
