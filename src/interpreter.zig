@@ -695,17 +695,19 @@ pub const Interpreter = struct {
         return list.items;
     }
 
-    /// Expand an iterable (array or string) into `list` — for `...spread`.
+    /// Expand an iterable into `list` — for `...spread`. Arrays take a fast
+    /// path; everything else (strings, generators, Sets/Maps, user objects with
+    /// `[Symbol.iterator]`) goes through the iterator protocol.
     fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
-        switch (v) {
-            .object => |o| {
-                if (!o.is_array) return self.throwError("TypeError", "spread value is not iterable");
-                for (o.elements.items) |e| try list.append(self.arena, e);
-            },
-            .string => |s| {
-                for (s) |ch| try list.append(self.arena, .{ .string = try self.arena.dupe(u8, &.{ch}) });
-            },
-            else => return self.throwError("TypeError", "spread value is not iterable"),
+        if (v == .object and v.object.is_array) {
+            for (v.object.elements.items) |e| try list.append(self.arena, e);
+            return;
+        }
+        const iter_obj = try self.iteratorOf(v); // throws TypeError if not iterable
+        while (true) {
+            const res = try self.callMethod(iter_obj, "next", &.{});
+            if ((try self.getProperty(res, "done")).toBoolean()) break;
+            try list.append(self.arena, try self.getProperty(res, "value"));
         }
     }
 

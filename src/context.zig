@@ -91,6 +91,19 @@ pub const Context = struct {
     }
 };
 
+test "spread of iterables (generator, string, user iterator)" {
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\function* g() { yield 1; yield 2; yield 3; }
+        \\var a = [...g()]; a[0] + a[1] + a[2]
+    )).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("[...'abc'].length")).number);
+    // Spread feeding a call.
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\function add(a, b, c) { return a + b + c; }
+        \\add(...[1, 2, 3])
+    )).number);
+}
+
 test "Symbol: typeof, identity, description, property keys, iterator" {
     try expectEvalStr("symbol", "typeof Symbol()");
     try std.testing.expect((try evalIn("var s = Symbol(); s === s && Symbol() !== Symbol()")).boolean);
