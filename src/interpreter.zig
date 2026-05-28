@@ -1657,6 +1657,9 @@ pub const Interpreter = struct {
                 if (self.global_object != null and o == self.global_object.?) {
                     if (rootEnv(self.env).get(key)) |v| return v;
                 }
+                // Accessing a private member the object doesn't carry is a brand
+                // violation — a TypeError, not `undefined`.
+                if (value.isPrivateKey(key)) return self.throwError("TypeError", "Cannot read private member from an object whose class did not declare it");
                 // `.constructor` falls back to the kind's global constructor
                 // (we don't wire instance prototypes yet).
                 if (std.mem.eql(u8, key, "constructor")) {

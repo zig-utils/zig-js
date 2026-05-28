@@ -156,7 +156,7 @@ pub const Object = struct {
     pub fn enumerableKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         for (try self.ownKeys(arena)) |k| {
-            if (isSymbolKey(k)) continue; // symbol-keyed props are never string-enumerable
+            if (isSymbolKey(k) or isPrivateKey(k)) continue; // symbol/private keys aren't string-enumerable
             if (self.getAttr(k).enumerable) try list.append(arena, k);
         }
         return list.items;
@@ -217,6 +217,13 @@ pub const Accessor = struct { get: ?Value = null, set: ?Value = null };
 /// string keys and are excluded from string enumeration.
 pub fn isSymbolKey(k: []const u8) bool {
     return k.len > 0 and k[0] == 0;
+}
+
+/// A class private member (`#x`). Stored under its `#`-prefixed name but hidden
+/// from all reflection (Object.keys/getOwnPropertyNames/for-in/JSON) and never
+/// enumerable — observable only through `obj.#x` inside the defining class.
+pub fn isPrivateKey(k: []const u8) bool {
+    return k.len > 0 and k[0] == '#';
 }
 
 /// A property's [[Writable]]/[[Enumerable]]/[[Configurable]] attributes. The
