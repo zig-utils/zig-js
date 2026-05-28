@@ -607,6 +607,55 @@ fn isLocked(ov: Value, frozen: bool) bool {
     return true;
 }
 
+pub fn objectIs(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    return .{ .boolean = sameValue(arg(args, 0), arg(args, 1)) };
+}
+
+/// SameValue: like `===` but NaN equals NaN and +0 differs from -0.
+fn sameValue(a: Value, b: Value) bool {
+    if (a == .number and b == .number) {
+        const x = a.number;
+        const y = b.number;
+        if (std.math.isNan(x) and std.math.isNan(y)) return true;
+        if (x == 0 and y == 0) return (1.0 / x) == (1.0 / y); // +0 vs -0
+        return x == y;
+    }
+    return value.strictEquals(a, b);
+}
+
+pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const o = arg(args, 0);
+    if (o == .object) {
+        const p = arg(args, 1);
+        o.object.proto = if (p == .object) p.object else null;
+    }
+    return o;
+}
+
+pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    _ = args;
+    return interp(ctx).newArray(); // no Symbol type yet → always empty
+}
+
+pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const result = try self.newObject();
+    if (arg(args, 0) == .object) {
+        const o = arg(args, 0).object;
+        for (try o.ownKeys(self.arena)) |k| {
+            const d = try objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ arg(args, 0), .{ .string = k } });
+            try self.setMember(result, k, d);
+        }
+    }
+    return result;
+}
+
 pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);

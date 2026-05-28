@@ -2229,7 +2229,11 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, object_ns, "defineProperty", builtins.objectDefineProperty);
     try setNative(a, root_shape, object_ns, "defineProperties", builtins.objectDefineProperties);
     try setNative(a, root_shape, object_ns, "getOwnPropertyDescriptor", builtins.objectGetOwnPropertyDescriptor);
+    try setNative(a, root_shape, object_ns, "getOwnPropertyDescriptors", builtins.objectGetOwnPropertyDescriptors);
     try setNative(a, root_shape, object_ns, "getOwnPropertyNames", builtins.objectGetOwnPropertyNames);
+    try setNative(a, root_shape, object_ns, "getOwnPropertySymbols", builtins.objectGetOwnPropertySymbols);
+    try setNative(a, root_shape, object_ns, "is", builtins.objectIs);
+    try setNative(a, root_shape, object_ns, "setPrototypeOf", builtins.objectSetPrototypeOf);
     try setNative(a, root_shape, object_ns, "preventExtensions", builtins.objectPreventExtensions);
     try setNative(a, root_shape, object_ns, "isExtensible", builtins.objectIsExtensible);
     try setNative(a, root_shape, object_ns, "seal", builtins.objectSeal);
