@@ -938,6 +938,24 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "defineProperty descriptor validation (accessor+data mix, non-callable get/set)" {
+    // Mixing a data field with an accessor field throws TypeError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { Object.defineProperty({}, 'p', { value: 1, get: function () {} }); }
+        \\catch (e) { t = e instanceof TypeError; } t
+    )).boolean);
+    // A non-callable getter throws TypeError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { Object.defineProperty({}, 'p', { get: 5 }); } catch (e) { t = e instanceof TypeError; } t
+    )).boolean);
+    // get: undefined is a valid accessor descriptor (no throw).
+    try std.testing.expect((try evalIn(
+        \\Object.defineProperty({}, 'p', { get: undefined }); true
+    )).boolean);
+}
+
 test "array index property attributes (defineProperty honors writable/enumerable)" {
     // Default array element descriptor is all-true.
     try std.testing.expect((try evalIn(

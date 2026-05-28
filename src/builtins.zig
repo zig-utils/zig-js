@@ -602,6 +602,19 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
 fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d: *value.Object) HostError!void {
     const get = d.getOwn("get");
     const set = d.getOwn("set");
+    // ToPropertyDescriptor validation: a descriptor may not mix accessor fields
+    // (get/set) with data fields (value/writable), and a present get/set must be
+    // callable or undefined.
+    if ((get != null or set != null) and (d.getOwn("value") != null or d.getOwn("writable") != null))
+        return self.throwError("TypeError", "Invalid property descriptor: cannot both specify accessors and a value or writable attribute");
+    if (get) |g| {
+        if (g != .undefined and !(g == .object and g.object.isCallableObject()))
+            return self.throwError("TypeError", "Getter must be a function");
+    }
+    if (set) |s| {
+        if (s != .undefined and !(s == .object and s.object.isCallableObject()))
+            return self.throwError("TypeError", "Setter must be a function");
+    }
     // Array index with a data descriptor: keep the value in the dense element
     // store and record its attributes in the string-keyed `attrs` map (so
     // reads/writes/getOwnPropertyDescriptor agree), rather than splitting it
