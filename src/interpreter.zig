@@ -1995,6 +1995,18 @@ pub const Interpreter = struct {
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
                     return try self.stringMethod(try recv.toString(self.arena), name, args);
                 }
+                // `Object.prototype.toString` ("[object Tag]") for a plain object.
+                // Plain objects don't proto-chain to Object.prototype, so the
+                // universal Object.prototype methods are provided here — but a
+                // `toString` defined on the prototype chain (e.g. a class method)
+                // wins, so defer to it when present.
+                if (o.getOwn(name) == null and eq(name, "toString")) {
+                    var p = o.proto;
+                    const proto_defined = while (p) |pp| : (p = pp.proto) {
+                        if (pp.getOwn(name) != null) break true;
+                    } else false;
+                    if (!proto_defined) return try objectProtoToStringFn(@ptrCast(self), recv, args);
+                }
             },
             .string => |s| return try self.stringMethod(s, name, args),
             .number => |n| {
@@ -2048,8 +2060,12 @@ pub const Interpreter = struct {
         const names = [_][]const u8{
             "join",      "indexOf", "lastIndexOf", "includes", "slice", "concat", "map",  "filter",
             "forEach",   "reduce",  "reduceRight", "some",     "every", "find",   "findIndex", "findLast",
-            "findLastIndex", "at",  "flat",        "flatMap",  "keys",  "values", "entries", "toString",
+            "findLastIndex", "at",  "flat",        "flatMap",  "keys",  "values", "entries",
         };
+        // NB: `toString` is intentionally NOT generic here — a plain object's
+        // `.toString()` must reach `Object.prototype.toString` (the `[object
+        // Tag]` native), not join an array-like into "". Real arrays still join
+        // via the `is_array` branch in `builtinMethod`.
         for (names) |n| if (eq(name, n)) return true;
         return false;
     }
@@ -2821,6 +2837,42 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     return self.eval(prog);
 }
 
+/// `Object.prototype.toString` → `"[object Tag]"`. The tag comes from the
+/// object's kind (Array/Function/Error/Date/RegExp/Boolean/Number/String, else
+/// "Object"), but an own/inherited `Symbol.toStringTag` *string* overrides it
+/// (per spec). Distinct from the kind-specific `toString`s (e.g.
+/// `[1,2].toString()` still joins) — this is the one on `Object.prototype`.
+fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const builtin_tag: []const u8 = switch (this) {
+        .undefined => return .{ .string = "[object Undefined]" },
+        .null => return .{ .string = "[object Null]" },
+        .number => "Number",
+        .boolean => "Boolean",
+        .string => "String",
+        .object => |o| if (o.is_array) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.isCallableObject()) "Function" else "Object",
+    };
+    // `Symbol.toStringTag` (a string) wins over the builtin tag.
+    var tag = builtin_tag;
+    if (this == .object) {
+        if (symbolToStringTagKey(self)) |tk| {
+            const tv = try self.getProperty(this, tk);
+            if (tv == .string) tag = tv.string;
+        }
+    }
+    return .{ .string = try std.mem.concat(self.arena, u8, &.{ "[object ", tag, "]" }) };
+}
+
+/// Internal key of the well-known `Symbol.toStringTag`, for `@@toStringTag`.
+fn symbolToStringTagKey(self: *Interpreter) ?[]const u8 {
+    const sym = self.env.get("Symbol") orelse return null;
+    if (sym != .object) return null;
+    const tt = sym.object.getOwn("toStringTag") orelse return null;
+    if (tt != .object or !tt.object.is_symbol) return null;
+    return tt.object.sym_key;
+}
+
 /// `Error.prototype.toString`: `"name: message"`, or just one when the other is
 /// empty. Generic — reads `name`/`message` off `this` (so the prototype chain and
 /// `.call(errorLike)` both work).
@@ -3039,10 +3091,14 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     object_proto.* = .{};
     try setProtoMethods(a, root_shape, object_proto, .{
         .{ "hasOwnProperty", 1 },        .{ "propertyIsEnumerable", 1 }, .{ "isPrototypeOf", 1 },
-        .{ "toString", 0 },              .{ "valueOf", 0 },
+        .{ "valueOf", 0 },
         .{ "__defineGetter__", 2 },      .{ "__defineSetter__", 2 },
         .{ "__lookupGetter__", 1 },      .{ "__lookupSetter__", 1 },
     });
+    // `Object.prototype.toString` is the dedicated `[object Tag]` native (not the
+    // kind-dispatched `toString`, so `Object.prototype.toString.call([])` gives
+    // "[object Array]" while `[].toString()` still joins).
+    try setNative(a, root_shape, object_proto, "toString", 0, objectProtoToStringFn);
     try object_ns.setOwn(a, root_shape, "prototype", .{ .object = object_proto });
 
     // Error prototypes: `Error.prototype` carries name/message/constructor/toString

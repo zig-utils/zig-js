@@ -923,6 +923,23 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "Object.prototype.toString tags ([object X]) + Symbol.toStringTag" {
+    try expectEvalStr("[object Object]", "Object.prototype.toString.call({})");
+    try expectEvalStr("[object Array]", "Object.prototype.toString.call([])");
+    try expectEvalStr("[object Function]", "Object.prototype.toString.call(function () {})");
+    try expectEvalStr("[object Error]", "Object.prototype.toString.call(new Error())");
+    try expectEvalStr("[object Date]", "Object.prototype.toString.call(new Date())");
+    try expectEvalStr("[object Number]", "Object.prototype.toString.call(5)");
+    try expectEvalStr("[object Boolean]", "Object.prototype.toString.call(true)");
+    try expectEvalStr("[object Undefined]", "Object.prototype.toString.call(undefined)");
+    try expectEvalStr("[object Null]", "Object.prototype.toString.call(null)");
+    // Symbol.toStringTag (string) overrides the builtin tag.
+    try expectEvalStr("[object Custom]", "Object.prototype.toString.call({ [Symbol.toStringTag]: 'Custom' })");
+    // The kind-specific toString is unaffected: arrays still join.
+    try expectEvalStr("1,2,3", "[1, 2, 3].toString()");
+    try expectEvalStr("[object Object]", "({}).toString()");
+}
+
 test "Symbol.for / Symbol.keyFor (global symbol registry)" {
     // Same key returns the same (===) registered symbol.
     try std.testing.expect((try evalIn("Symbol.for('x') === Symbol.for('x')")).boolean);
