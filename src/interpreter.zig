@@ -1080,6 +1080,12 @@ pub const Interpreter = struct {
         return .{ .y = y + @as(i64, if (m <= 2) 1 else 0), .m = m, .d = d };
     }
 
+    /// Clamp a signed component to a non-negative integer for `{d}` formatting
+    /// (negative years/fields are out of this engine's rendered range).
+    fn dnz(x: i64) u64 {
+        return if (x < 0) 0 else @intCast(x);
+    }
+
     /// Days since the epoch for a civil date (inverse of `civilFromDays`).
     fn daysFromCivil(y0: i64, m: i64, d: i64) i64 {
         const y = y0 - @as(i64, if (m <= 2) 1 else 0);
@@ -1091,32 +1097,148 @@ pub const Interpreter = struct {
         return era * 146097 + doe - 719468;
     }
 
+    const day_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const DateParts = struct { y: i64, mo: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, wday: i64 };
+
+    /// Decompose a finite epoch-ms time into broken-down (UTC) components.
+    fn dateDecompose(t: f64) DateParts {
+        const ti: i64 = @intFromFloat(t);
+        const days = @divFloor(ti, ms_per_day);
+        const tod = @mod(ti, ms_per_day);
+        const c = civilFromDays(days);
+        return .{
+            .y = c.y,                                  .mo = c.m - 1,
+            .d = c.d,                                  .h = @divFloor(tod, 3600000),
+            .mi = @mod(@divFloor(tod, 60000), 60),     .s = @mod(@divFloor(tod, 1000), 60),
+            .ms = @mod(tod, 1000),                     .wday = @mod(days + 4, 7),
+        };
+    }
+
+    /// Recompose broken-down components into an epoch-ms time, set it on `o`, and
+    /// return it — the shared back half of every `Date.prototype.set*`. Out-of-range
+    /// fields roll over (e.g. `setHours(0,0,0,-1)`); a non-finite or absurd field, or
+    /// a result past the ±8.64e15 ms range (TimeClip), yields NaN.
+    fn dateCommit(self: *Interpreter, o: *value.Object, y: f64, mo: f64, d: f64, h: f64, mi: f64, s: f64, ms: f64) EvalError!Value {
+        const nan = std.math.nan(f64);
+        var tf: f64 = nan;
+        const fields = [_]f64{ y, mo, d, h, mi, s, ms };
+        var ok = true;
+        for (fields) |f| {
+            if (!std.math.isFinite(f) or @abs(f) > 1e9) ok = false;
+        }
+        if (ok) {
+            var yi: i64 = @intFromFloat(@trunc(y));
+            var moi: i64 = @intFromFloat(@trunc(mo));
+            yi += @divFloor(moi, 12);
+            moi = @mod(moi, 12);
+            const days = daysFromCivil(yi, moi + 1, @intFromFloat(@trunc(d)));
+            const tod = @as(i64, @intFromFloat(@trunc(h))) * 3600000 + @as(i64, @intFromFloat(@trunc(mi))) * 60000 +
+                @as(i64, @intFromFloat(@trunc(s))) * 1000 + @as(i64, @intFromFloat(@trunc(ms)));
+            tf = @as(f64, @floatFromInt(days)) * @as(f64, @floatFromInt(ms_per_day)) + @as(f64, @floatFromInt(tod));
+            if (@abs(tf) > 8.64e15) tf = nan;
+        }
+        try self.setProp(o, "__t", .{ .number = tf });
+        return Value{ .number = tf };
+    }
+
     /// `Date.prototype` methods (UTC-based; v1 ignores local timezone, so
     /// get*/getUTC* coincide). Time is the own `__t` property.
     fn dateMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const t = (o.getOwn("__t") orelse Value{ .number = 0 }).number;
+        const nan = std.math.nan(f64);
         if (eq(name, "getTime") or eq(name, "valueOf")) return Value{ .number = t };
         if (eq(name, "setTime")) {
-            const nt = arg0(args).toNumber();
+            var nt = arg0(args).toNumber();
+            if (@abs(nt) > 8.64e15) nt = nan;
             try self.setProp(o, "__t", .{ .number = nt });
             return Value{ .number = nt };
         }
-        if (eq(name, "toString") or eq(name, "toISOString") or eq(name, "toUTCString") or eq(name, "toJSON")) {
-            if (std.math.isNan(t)) return Value{ .string = "Invalid Date" };
-            const ti: i64 = @intFromFloat(t);
-            const c = civilFromDays(@divFloor(ti, ms_per_day));
-            const tod = @mod(ti, ms_per_day);
-            const u = struct {
-                fn n(x: i64) u64 {
-                    return if (x < 0) 0 else @intCast(x);
-                }
-            }.n;
-            const s = try std.fmt.allocPrint(self.arena, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-                u(c.y), u(c.m), u(c.d), u(@divFloor(tod, 3600000)), u(@mod(@divFloor(tod, 60000), 60)), u(@mod(@divFloor(tod, 1000), 60)), u(@mod(tod, 1000)),
-            });
-            return Value{ .string = s };
+
+        // ---- setters ----------------------------------------------------------
+        if (std.mem.startsWith(u8, name, "set")) {
+            const fy = eq(name, "setFullYear") or eq(name, "setUTCFullYear");
+            // Non-fullyear setters on an invalid date stay invalid; setFullYear
+            // revives it from a zero base.
+            if (std.math.isNan(t) and !fy) return Value{ .number = nan };
+            const c = dateDecompose(if (std.math.isNan(t)) 0 else t);
+            var y: f64 = @floatFromInt(c.y);
+            var mo: f64 = @floatFromInt(c.mo);
+            var d: f64 = @floatFromInt(c.d);
+            var h: f64 = @floatFromInt(c.h);
+            var mi: f64 = @floatFromInt(c.mi);
+            var s: f64 = @floatFromInt(c.s);
+            var ms: f64 = @floatFromInt(c.ms);
+            const a = args;
+            if (fy) {
+                y = arg0(a).toNumber();
+                if (a.len > 1) mo = a[1].toNumber();
+                if (a.len > 2) d = a[2].toNumber();
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+            }
+            if (eq(name, "setMonth") or eq(name, "setUTCMonth")) {
+                mo = arg0(a).toNumber();
+                if (a.len > 1) d = a[1].toNumber();
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+            }
+            if (eq(name, "setDate") or eq(name, "setUTCDate")) {
+                d = arg0(a).toNumber();
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+            }
+            if (eq(name, "setHours") or eq(name, "setUTCHours")) {
+                h = arg0(a).toNumber();
+                if (a.len > 1) mi = a[1].toNumber();
+                if (a.len > 2) s = a[2].toNumber();
+                if (a.len > 3) ms = a[3].toNumber();
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+            }
+            if (eq(name, "setMinutes") or eq(name, "setUTCMinutes")) {
+                mi = arg0(a).toNumber();
+                if (a.len > 1) s = a[1].toNumber();
+                if (a.len > 2) ms = a[2].toNumber();
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+            }
+            if (eq(name, "setSeconds") or eq(name, "setUTCSeconds")) {
+                s = arg0(a).toNumber();
+                if (a.len > 1) ms = a[1].toNumber();
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+            }
+            if (eq(name, "setMilliseconds") or eq(name, "setUTCMilliseconds")) {
+                ms = arg0(a).toNumber();
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+            }
         }
-        if (std.math.isNan(t)) return Value{ .number = std.math.nan(f64) };
+
+        // ---- string conversions ----------------------------------------------
+        if (eq(name, "toISOString")) {
+            if (std.math.isNan(t)) return self.throwError("RangeError", "Invalid time value");
+            return Value{ .string = try self.dateISO(t) };
+        }
+        if (eq(name, "toJSON")) {
+            if (std.math.isNan(t)) return Value.null;
+            return Value{ .string = try self.dateISO(t) };
+        }
+        if (eq(name, "toUTCString") or eq(name, "toGMTString")) {
+            if (std.math.isNan(t)) return Value{ .string = "Invalid Date" };
+            const c = dateDecompose(t);
+            return Value{ .string = try std.fmt.allocPrint(self.arena, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+                day_names[@intCast(c.wday)], dnz(c.d), month_names[@intCast(c.mo)], dnz(c.y), dnz(c.h), dnz(c.mi), dnz(c.s),
+            }) };
+        }
+        if (eq(name, "toDateString") or eq(name, "toString") or eq(name, "toTimeString") or
+            eq(name, "toLocaleString") or eq(name, "toLocaleDateString") or eq(name, "toLocaleTimeString"))
+        {
+            if (std.math.isNan(t)) return Value{ .string = "Invalid Date" };
+            const c = dateDecompose(t);
+            const date_str = try std.fmt.allocPrint(self.arena, "{s} {s} {d:0>2} {d:0>4}", .{ day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), dnz(c.y) });
+            const time_str = try std.fmt.allocPrint(self.arena, "{d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{ dnz(c.h), dnz(c.mi), dnz(c.s) });
+            if (eq(name, "toDateString") or eq(name, "toLocaleDateString")) return Value{ .string = date_str };
+            if (eq(name, "toTimeString") or eq(name, "toLocaleTimeString")) return Value{ .string = time_str };
+            return Value{ .string = try std.mem.concat(self.arena, u8, &.{ date_str, " ", time_str }) };
+        }
+
+        // ---- getters ----------------------------------------------------------
+        if (std.math.isNan(t)) return Value{ .number = nan };
         const ti: i64 = @intFromFloat(t);
         const days = @divFloor(ti, ms_per_day);
         const tod = @mod(ti, ms_per_day);
@@ -1131,6 +1253,14 @@ pub const Interpreter = struct {
         if (eq(name, "getMilliseconds") or eq(name, "getUTCMilliseconds")) return Value{ .number = @floatFromInt(@mod(tod, 1000)) };
         if (eq(name, "getTimezoneOffset")) return Value{ .number = 0 };
         return null;
+    }
+
+    /// ISO 8601 rendering of a finite epoch-ms time (`2020-01-15T00:00:00.000Z`).
+    fn dateISO(self: *Interpreter, t: f64) EvalError![]const u8 {
+        const c = dateDecompose(t);
+        return std.fmt.allocPrint(self.arena, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+            dnz(c.y), dnz(c.mo + 1), dnz(c.d), dnz(c.h), dnz(c.mi), dnz(c.s), dnz(c.ms),
+        });
     }
 
     /// Compute a Date's epoch-ms from constructor arguments.
@@ -2737,6 +2867,12 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "getDay", 0 },       .{ "getUTCDay", 0 },    .{ "getHours", 0 },     .{ "getUTCHours", 0 },
         .{ "getMinutes", 0 },   .{ "getUTCMinutes", 0 }, .{ "getSeconds", 0 },  .{ "getUTCSeconds", 0 },
         .{ "getMilliseconds", 0 }, .{ "getUTCMilliseconds", 0 }, .{ "getTimezoneOffset", 0 },
+        .{ "setFullYear", 3 },  .{ "setUTCFullYear", 3 }, .{ "setMonth", 2 },   .{ "setUTCMonth", 2 },
+        .{ "setDate", 1 },      .{ "setUTCDate", 1 },   .{ "setHours", 4 },     .{ "setUTCHours", 4 },
+        .{ "setMinutes", 3 },   .{ "setUTCMinutes", 3 }, .{ "setSeconds", 2 },  .{ "setUTCSeconds", 2 },
+        .{ "setMilliseconds", 1 }, .{ "setUTCMilliseconds", 1 },
+        .{ "toString", 0 },     .{ "toDateString", 0 }, .{ "toTimeString", 0 }, .{ "toGMTString", 0 },
+        .{ "toLocaleString", 0 }, .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
     });
     try date_ns.setOwn(a, root_shape, "prototype", .{ .object = date_proto });
     try env.put("Date", .{ .object = date_ns });

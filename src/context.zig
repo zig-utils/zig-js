@@ -372,6 +372,36 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "Date setters + string conversions" {
+    // Time-component setters honor extra args and roll over out-of-range values.
+    try std.testing.expect((try evalIn(
+        \\var d = new Date(2016, 6, 1); d.setHours(0, 0, 0, 543);
+        \\d.getTime() === new Date(2016, 6, 1, 0, 0, 0, 543).getTime()
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var d = new Date(2016, 6, 1); d.setHours(0, 0, 0, -1);
+        \\d.getTime() === new Date(2016, 5, 30, 23, 59, 59, 999).getTime()
+    )).boolean);
+    // setMonth/setDate roll into adjacent months/years.
+    try std.testing.expectEqual(@as(f64, 1971), (try evalIn("var d = new Date(0); d.setMonth(13); d.getUTCFullYear()")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var d = new Date(0); d.setDate(32); d.getUTCMonth()")).number);
+    // setFullYear revives an invalid date; other setters leave it invalid.
+    try std.testing.expectEqual(@as(f64, 2020), (try evalIn("var d = new Date(NaN); d.setFullYear(2020); d.getUTCFullYear()")).number);
+    try std.testing.expect(std.math.isNan((try evalIn("var d = new Date(NaN); d.setHours(5); d.getTime()")).number));
+    // String conversions.
+    try expectEvalStr("Thu, 01 Jan 1970 00:00:00 GMT", "new Date(0).toUTCString()");
+    try expectEvalStr("Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)", "new Date(0).toString()");
+    try expectEvalStr("Thu Jan 01 1970", "new Date(0).toDateString()");
+    try expectEvalStr("00:00:00 GMT+0000 (Coordinated Universal Time)", "new Date(0).toTimeString()");
+    // toISOString throws RangeError on an invalid date; toJSON returns null.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { new Date(NaN).toISOString(); } catch (e) { t = e.name === "RangeError"; }
+        \\t
+    )).boolean);
+    try std.testing.expect((try evalIn("new Date(NaN).toJSON() === null")).boolean);
+}
+
 test "Function constructor builds callable functions from source" {
     // Params + body, called and constructed.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).number);
