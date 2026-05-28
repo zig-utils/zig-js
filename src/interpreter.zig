@@ -3266,6 +3266,9 @@ fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name:
     m.* = .{ .native = f };
     try installNativeProps(a, root_shape, m, name, len);
     try obj.setOwn(a, root_shape, name, .{ .object = m });
+    // Built-in methods/statics are non-enumerable (writable + configurable), per
+    // spec — so `Object.keys`/`for-in` skip them and verifyProperty is satisfied.
+    try obj.setAttr(a, name, .{ .enumerable = false, .configurable = true, .writable = true });
 }
 
 /// A prototype-object method: a native thunk that routes to the existing

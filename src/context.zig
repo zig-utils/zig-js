@@ -374,6 +374,18 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "built-in methods are non-enumerable" {
+    // Prototype methods and namespace statics are skipped by Object.keys/for-in.
+    try std.testing.expect((try evalIn("Object.keys(Math).indexOf('max') === -1")).boolean);
+    try std.testing.expect((try evalIn("Object.keys(JSON).length === 0")).boolean);
+    try std.testing.expect((try evalIn("Object.keys(Array.prototype).indexOf('push') === -1")).boolean);
+    try std.testing.expect(!(try evalIn("Array.prototype.propertyIsEnumerable('push')")).boolean);
+    try std.testing.expect((try evalIn("Object.keys(Object).indexOf('keys') === -1")).boolean);
+    // They remain present and callable.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Math.max(1, 2, 3)")).number);
+    try std.testing.expect((try evalIn("Array.prototype.hasOwnProperty('push')")).boolean);
+}
+
 test "built-in prototypes carry constructor; Boolean.prototype exists" {
     // Every built-in prototype links back to its constructor (non-enumerable).
     try std.testing.expect((try evalIn("Array.prototype.constructor === Array")).boolean);
