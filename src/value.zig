@@ -53,6 +53,10 @@ pub const Object = struct {
     /// `*Interpreter.Function`, type-erased to break the value↔interpreter
     /// import cycle. The interpreter casts it back when calling.
     js_func: ?*anyopaque = null,
+    /// `*vm.Generator`, type-erased (same cycle break as `js_func`). Non-null
+    /// marks a generator *object* — the iterator returned by calling a
+    /// `function*`; its `.next()`/`.return()`/`.throw()` drive the suspendable VM.
+    gen: ?*anyopaque = null,
     /// Opaque `data` pointer carried for `JSObjectMake(ctx, class, data)` and
     /// surfaced to host callbacks via private-data accessors later.
     private_data: ?*anyopaque = null,

@@ -34,13 +34,49 @@ pub const Frame = struct {
     parent: ?*Frame,
 };
 
+/// A resumable execution state: the operand stack, completion accumulator, and
+/// instruction pointer. For a normal call this lives on the host stack and is
+/// thrown away when `run` returns; for a generator it lives in the `Generator`
+/// and persists across `yield`/resume, which is what makes suspension faithful
+/// (the whole operand stack is saved, so a `yield` can sit mid-expression).
+pub const Exec = struct {
+    stack: std.ArrayListUnmanaged(Value) = .empty,
+    acc: Value = .undefined,
+    ip: usize = 0,
+};
+
+/// A suspended `function*` activation: its compiled body, persistent execution
+/// state, and the `Environment` its body resolves names against (a child of the
+/// closure, holding the params/locals across yields). Driven by `genNext`.
+pub const Generator = struct {
+    chunk: *Chunk,
+    exec: Exec = .{},
+    env: *Environment,
+    this_value: Value = .undefined,
+    home_object: ?*value.Object = null,
+    super_ctor: ?*value.Object = null,
+    started: bool = false,
+    done: bool = false,
+    suspended: bool = false,
+    running: bool = false,
+};
+
 /// Run `chunk` to completion, returning the program's accumulator (for a
 /// top-level chunk, `frame == null`) or the function's return value. `frame`
 /// is the current activation for `load_local`/`load_upval`.
 pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
-    var stack: std.ArrayListUnmanaged(Value) = .empty;
-    var acc: Value = .undefined;
-    var ip: usize = 0;
+    var exec = Exec{};
+    return execLoop(vm, &exec, chunk, frame, null);
+}
+
+/// The instruction loop. `exec` holds the (resumable) stack/acc/ip; `gen` is
+/// non-null only when running a generator body, enabling the `gen_yield` opcode
+/// to snapshot `exec` and suspend. For a normal call `gen` is null and
+/// `gen_yield` never appears (the compiler emits it only into generator chunks).
+fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    var stack = exec.stack;
+    var acc: Value = exec.acc;
+    var ip: usize = exec.ip;
     const code = chunk.code.items;
 
     while (ip < code.len) {
@@ -254,10 +290,131 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
 
             .ret => return stack.pop().?,
             .ret_undef => return .undefined,
+
+            .gen_yield => {
+                const v = stack.pop().?;
+                if (gen) |g| {
+                    // Snapshot the resumable state and hand the yielded value
+                    // back to `genNext`. The next resume pushes the sent value
+                    // (becoming this expression's result) and continues at `ip`.
+                    exec.stack = stack;
+                    exec.acc = acc;
+                    exec.ip = ip;
+                    g.suspended = true;
+                    return v;
+                }
+                return vm.throwError("SyntaxError", "yield outside a generator");
+            },
+
             .halt => return acc,
         }
     }
     return acc;
+}
+
+// ---------------------------------------------------------------------------
+// Generators: calling a `function*` builds a `Generator` (via `makeGenerator`),
+// and `.next(v)`/`.return(v)`/`.throw(e)` drive it. Each resume restores the
+// generator's `this`/env/home/super, runs the VM loop until the next `yield`
+// (or completion), then restores the caller's context.
+// ---------------------------------------------------------------------------
+
+/// `{ value, done }` — the IteratorResult every generator method returns.
+fn makeIterResult(vm: *Interpreter, v: Value, done: bool) EvalError!Value {
+    const o = try vm.newObject();
+    try vm.setMember(o, "value", v);
+    try vm.setMember(o, "done", .{ .boolean = done });
+    return o;
+}
+
+/// Build the generator object produced by calling a `function*`. The body is
+/// not run yet; it runs lazily on the first `.next()`.
+pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
+    const chunk = func.gen_chunk orelse
+        return vm.throwError("TypeError", "generator body uses syntax not yet supported by the VM");
+
+    // The generator's scope: a child of the closure, so free variables resolve
+    // outward while params/locals live here and persist across yields.
+    const genv = try vm.arena.create(Environment);
+    genv.* = .{ .arena = vm.arena, .parent = func.closure };
+
+    const args_obj = try vm.newArray(); // generators are never arrow functions
+    for (args) |av| try args_obj.object.elements.append(vm.arena, av);
+    try genv.put("arguments", args_obj);
+
+    // Bind simple-identifier params (compileGenerator rejected default/rest/pattern).
+    for (func.params, 0..) |p, i| {
+        try genv.put(p.name, if (i < args.len) args[i] else .undefined);
+    }
+
+    const g = try vm.arena.create(Generator);
+    g.* = .{
+        .chunk = chunk,
+        .env = genv,
+        .this_value = this_val,
+        .home_object = func.home_object,
+        .super_ctor = func.super_ctor,
+    };
+    const obj = try vm.arena.create(value.Object);
+    obj.* = .{ .gen = @ptrCast(g) };
+    return .{ .object = obj };
+}
+
+/// `gen.next(sent)`: resume the body. On the first call execution starts at the
+/// top; on later calls `sent` becomes the value of the `yield` it's resuming.
+pub fn genNext(vm: *Interpreter, gen_obj: *value.Object, sent: Value) EvalError!Value {
+    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    if (g.done) return makeIterResult(vm, .undefined, true);
+    if (g.running) return vm.throwError("TypeError", "generator is already running");
+    g.running = true;
+    defer g.running = false;
+
+    if (g.started) try g.exec.stack.append(vm.arena, sent); // result of the resumed `yield`
+    g.started = true;
+    g.suspended = false;
+
+    const s_env = vm.env;
+    const s_this = vm.this_value;
+    const s_home = vm.home_object;
+    const s_super = vm.super_ctor;
+    vm.env = g.env;
+    vm.this_value = g.this_value;
+    vm.home_object = g.home_object;
+    vm.super_ctor = g.super_ctor;
+    defer {
+        vm.env = s_env;
+        vm.this_value = s_this;
+        vm.home_object = s_home;
+        vm.super_ctor = s_super;
+    }
+
+    if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
+    vm.depth += 1;
+    defer vm.depth -= 1;
+
+    const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
+        g.done = true; // a thrown generator is finished
+        return e;
+    };
+    if (g.suspended) return makeIterResult(vm, v, false);
+    g.done = true;
+    return makeIterResult(vm, v, true); // `v` is the body's return value
+}
+
+/// `gen.return(v)`: finish the generator, yielding `{ value: v, done: true }`.
+/// (No `finally` blocks to run — the VM doesn't lower `try` yet.)
+pub fn genReturn(vm: *Interpreter, gen_obj: *value.Object, v: Value) EvalError!Value {
+    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    g.done = true;
+    return makeIterResult(vm, v, true);
+}
+
+/// `gen.throw(e)`: finish the generator by propagating `e` to the caller.
+pub fn genThrow(vm: *Interpreter, gen_obj: *value.Object, e: Value) EvalError!Value {
+    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    g.done = true;
+    vm.exception = e;
+    return error.Throw;
 }
 
 /// Map a binary opcode back to the shared `ast.BinaryOp`. The opcode set mirrors

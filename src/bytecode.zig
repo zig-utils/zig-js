@@ -106,6 +106,9 @@ pub const Op = enum(u8) {
     ret, // pop -> return value, end frame
     ret_undef, // return undefined, end frame
 
+    // --- generators ---
+    gen_yield, // pop -> yielded value, suspend the frame; resume pushes the sent value
+
     halt, // end program; result is the accumulator
 };
 

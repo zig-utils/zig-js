@@ -14,6 +14,9 @@ pub const Parser = struct {
     tokens: []Token,
     pos: usize = 0,
     arena: std.mem.Allocator,
+    /// True while parsing a generator body, so `yield` is recognized as a yield
+    /// expression rather than an identifier. Saved/restored around each function.
+    in_generator: bool = false,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
         var lx = lex.Lexer.init(arena, source);
@@ -498,18 +501,20 @@ pub const Parser = struct {
 
     fn parseFunctionDecl(self: *Parser) ParseError!*Node {
         _ = self.advance(); // function
+        const is_gen = self.match(.star); // `function*`
         const name_tok = self.advance();
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
         const params = try self.parseParamList();
-        const body = try self.parseBlock();
+        const body = try self.parseFnBody(is_gen);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .is_expr_body = false };
+        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen };
         return self.alloc(.{ .func_decl = fnode });
     }
 
     /// `function [name](params) { body }` in expression position.
     fn parseFunctionExpr(self: *Parser) ParseError!*Node {
         _ = self.advance(); // function
+        const is_gen = self.match(.star); // `function*`
         var name: []const u8 = "";
         if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "")) {
             // Optional name (anything that isn't the opening paren).
@@ -518,10 +523,40 @@ pub const Parser = struct {
             }
         }
         const params = try self.parseParamList();
-        const body = try self.parseBlock();
+        const body = try self.parseFnBody(is_gen);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false };
+        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen };
         return self.alloc(.{ .function = fnode });
+    }
+
+    /// Parse a function/method `{ body }`, recognizing `yield` as a yield
+    /// expression iff `is_gen`. The `in_generator` context is restored after.
+    fn parseFnBody(self: *Parser, is_gen: bool) ParseError!*Node {
+        const saved = self.in_generator;
+        self.in_generator = is_gen;
+        defer self.in_generator = saved;
+        return self.parseBlock();
+    }
+
+    /// `yield [expr]` / `yield* expr`. Only reached inside a generator body.
+    fn parseYield(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // yield
+        const delegate = self.match(.star);
+        var arg: ?*Node = null;
+        // A bare `yield` (no operand) is allowed before a terminator; `yield*`
+        // always takes an operand.
+        if (delegate or self.startsExpression()) arg = try self.parseAssignment();
+        return self.alloc(.{ .yield_expr = .{ .argument = arg, .delegate = delegate } });
+    }
+
+    /// Whether the current token can begin an expression (used to decide if a
+    /// bare `yield`/`return` has an operand). Conservative: treats clause
+    /// terminators as non-starters.
+    fn startsExpression(self: *Parser) bool {
+        return switch (self.cur().kind) {
+            .rparen, .rbracket, .rbrace, .comma, .semicolon, .colon, .eof => false,
+            else => true,
+        };
     }
 
     // ----- expressions ----------------------------------------------------
@@ -539,6 +574,8 @@ pub const Parser = struct {
     }
 
     fn parseAssignment(self: *Parser) ParseError!*Node {
+        // `yield` is an AssignmentExpression-level production inside generators.
+        if (self.in_generator and isKeyword(self.cur(), "yield")) return self.parseYield();
         // Arrow functions: `x => ...` and `(a, b) => ...`.
         if (self.check(.identifier) and self.peekKind(1) == .arrow) {
             const param = self.advance().text;
@@ -868,12 +905,14 @@ pub const Parser = struct {
         try self.expect(.lbrace);
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
+            // Generator method shorthand `{ *m() {} }` / `{ *[expr]() {} }`.
+            const gen_method = self.match(.star);
             // Computed key: `{ [expr]: v }`.
             if (self.match(.lbracket)) {
                 const key_expr = try self.parseAssignment();
                 try self.expect(.rbracket);
                 if (self.check(.lparen)) {
-                    const fnode = try self.parseMethodTail("");
+                    const fnode = try self.parseMethodTail("", gen_method);
                     try props.append(self.arena, .{ .key_expr = key_expr, .value = fnode });
                 } else {
                     try self.expect(.colon);
@@ -887,7 +926,7 @@ pub const Parser = struct {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
                 const pn = try self.parsePropertyName();
-                const func = try self.parseMethodTail(pn.key);
+                const func = try self.parseMethodTail(pn.key, false);
                 try props.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .value = func, .accessor = kind });
                 if (!self.match(.comma)) break;
                 continue;
@@ -901,7 +940,7 @@ pub const Parser = struct {
             var val: *Node = undefined;
             if (self.check(.lparen)) {
                 // Method shorthand `{ m(args) { ... } }` -> a function value.
-                val = try self.parseMethodTail(key);
+                val = try self.parseMethodTail(key, gen_method);
             } else if (self.match(.colon)) {
                 val = try self.parseAssignment();
             } else if (key_tok.kind == .identifier) {
@@ -996,20 +1035,22 @@ pub const Parser = struct {
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
                 continue;
             }
+            // Generator method: `*m() {}` / `static *m() {}`.
+            const gen_method = self.match(.star);
             // Accessor: `get x() {}` / `set x(v) {}`.
-            if ((isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
+            if (!gen_method and (isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
                 const apn = try self.parsePropertyName();
-                const func = try self.parseMethodTail(apn.key);
+                const func = try self.parseMethodTail(apn.key, false);
                 try members.append(self.arena, .{ .key = apn.key, .key_expr = apn.expr, .func = func, .is_static = is_static, .accessor = kind });
                 continue;
             }
             const pn = try self.parsePropertyName();
             if (self.check(.lparen)) {
                 // Method.
-                const func = try self.parseMethodTail(pn.key);
-                const is_ctor = !is_static and pn.expr == null and std.mem.eql(u8, pn.key, "constructor");
+                const func = try self.parseMethodTail(pn.key, gen_method);
+                const is_ctor = !is_static and !gen_method and pn.expr == null and std.mem.eql(u8, pn.key, "constructor");
                 try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .func = func, .is_static = is_static, .is_ctor = is_ctor });
             } else {
                 // Field: `x;` or `x = init;`.
@@ -1023,11 +1064,12 @@ pub const Parser = struct {
     }
 
     /// Parse `(params) { body }` after a method name, returning a function node.
-    fn parseMethodTail(self: *Parser, name: []const u8) ParseError!*Node {
+    /// `is_gen` marks a generator method (`*m() {}`).
+    fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool) ParseError!*Node {
         const params = try self.parseParamList();
-        const body = try self.parseBlock();
+        const body = try self.parseFnBody(is_gen);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false };
+        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen };
         return self.alloc(.{ .function = fnode });
     }
 

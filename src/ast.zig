@@ -69,6 +69,9 @@ pub const FunctionNode = struct {
     is_expr_body: bool = false,
     /// Arrow functions don't get their own `arguments` (or `this`).
     is_arrow: bool = false,
+    /// `function*` / `*method()` — calling it returns a generator object whose
+    /// body runs lazily on the suspendable VM.
+    is_generator: bool = false,
 };
 
 /// A `class` member: a method (`func` is a `.function` node) or a field
@@ -146,6 +149,10 @@ pub const Node = union(enum) {
     assign: struct { target: *Node, value: *Node },
     conditional: struct { cond: *Node, consequent: *Node, alternate: *Node },
     function: *FunctionNode, // function/arrow expression -> a function value
+    /// `yield [expr]` / `yield* expr` — only valid inside a generator body.
+    /// `delegate` marks `yield*`. Evaluates to the value passed to the next
+    /// `.next(v)` resume.
+    yield_expr: struct { argument: ?*Node = null, delegate: bool = false },
     class_expr: struct { name: []const u8, superclass: ?*Node, members: []ClassMember },
     /// `super(args)` — call the superclass constructor on the current `this`.
     super_call: []*Node,

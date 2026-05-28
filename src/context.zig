@@ -98,3 +98,61 @@ test "context persists globals across evaluations" {
     const v = try ctx.evaluate("counter = counter + 1;");
     try std.testing.expectEqual(@as(f64, 42), v.number);
 }
+
+/// Evaluate `src` in a fresh context and return its completion value.
+fn evalIn(src: []const u8) !value.Value {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    return ctx.evaluate(src);
+}
+
+test "generators: manual next() yields values then done" {
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\function* g() { yield 1; yield 2; yield 3; }
+        \\var it = g();
+        \\var a = it.next().value, b = it.next().value, c = it.next().value;
+        \\a + b + c
+    )).number);
+    // After exhaustion, next().done is true and value undefined.
+    try std.testing.expect((try evalIn(
+        \\function* g() { yield 1; }
+        \\var it = g(); it.next();
+        \\it.next().done
+    )).boolean);
+}
+
+test "generators: for-of drives the generator" {
+    try std.testing.expectEqual(@as(f64, 30), (try evalIn(
+        \\function* g() { yield 10; yield 20; }
+        \\var s = 0; for (var x of g()) { s += x; } s
+    )).number);
+}
+
+test "generators: next(v) is the value of the resumed yield" {
+    try std.testing.expectEqual(@as(f64, 15), (try evalIn(
+        \\function* g() { var x = yield 1; yield x + 10; }
+        \\var it = g(); it.next(); it.next(5).value
+    )).number);
+}
+
+test "generators: infinite generator bounded by the consumer" {
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\function* nat() { var i = 0; while (true) { yield i; i = i + 1; } }
+        \\var it = nat(); it.next(); it.next(); it.next().value
+    )).number);
+}
+
+test "generators: a return value finishes with done:true" {
+    try std.testing.expectEqual(@as(f64, 99), (try evalIn(
+        \\function* g() { yield 1; return 99; }
+        \\var it = g(); it.next(); it.next().value
+    )).number);
+}
+
+test "generators: locals persist across yields, closures captured" {
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn(
+        \\var base = 1;
+        \\function* g() { var n = base; yield n; n = n + 1; yield n; }
+        \\var it = g(); it.next(); it.next().value + base
+    )).number);
+}

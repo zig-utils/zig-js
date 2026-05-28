@@ -4,6 +4,8 @@ const value = @import("value.zig");
 const bc = @import("bytecode.zig");
 const builtins = @import("builtins.zig");
 const regex = @import("regex");
+const vm = @import("vm.zig");
+const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 
 const Node = ast.Node;
@@ -95,6 +97,11 @@ pub const Function = struct {
     home_object: ?*value.Object = null,
     /// For a derived class constructor: the superclass object, called by `super(...)`.
     super_ctor: ?*value.Object = null,
+    /// `function*`: calling this returns a generator object instead of running
+    /// the body. `gen_chunk` is the body compiled for the suspendable VM (null if
+    /// the body falls outside the VM's lowered subset — then calling it throws).
+    is_generator: bool = false,
+    gen_chunk: ?*bc.Chunk = null,
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:
@@ -195,6 +202,12 @@ pub const Interpreter = struct {
 
             .function => |fnode| try self.makeFunction(fnode, self.env),
             .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members),
+
+            // `yield` only executes inside a compiled generator body (on the
+            // suspendable VM). Reaching it in the tree-walker means a generator
+            // body fell outside the VM's lowered subset — report it clearly
+            // rather than producing a wrong value.
+            .yield_expr => return self.throwError("SyntaxError", "yield is only supported in VM-compiled generator bodies"),
 
             .super_call => |sc| blk: {
                 const sup = self.super_ctor orelse return self.throwError("SyntaxError", "'super' keyword unexpected here");
@@ -331,13 +344,24 @@ pub const Interpreter = struct {
         if (is_of) {
             switch (iter) {
                 .object => |o| {
-                    if (!o.is_array) return self.throwError("TypeError", "value is not iterable");
-                    var i: usize = 0;
-                    while (i < o.elements.items.len) : (i += 1) {
-                        try self.bindLoopVar(decl_kind, name, o.elements.items[i]);
-                        last = try self.eval(body);
-                        if (self.loopSignal(my_label)) |stop| if (stop) break;
-                    }
+                    if (o.gen != null) {
+                        // Drive the generator: `for (x of gen)` pulls `.next()`
+                        // until `{ done: true }`.
+                        while (true) {
+                            const res = try vm.genNext(self, o, .undefined);
+                            if ((try self.getProperty(res, "done")).toBoolean()) break;
+                            try self.bindLoopVar(decl_kind, name, try self.getProperty(res, "value"));
+                            last = try self.eval(body);
+                            if (self.loopSignal(my_label)) |stop| if (stop) break;
+                        }
+                    } else if (o.is_array) {
+                        var i: usize = 0;
+                        while (i < o.elements.items.len) : (i += 1) {
+                            try self.bindLoopVar(decl_kind, name, o.elements.items[i]);
+                            last = try self.eval(body);
+                            if (self.loopSignal(my_label)) |stop| if (stop) break;
+                        }
+                    } else return self.throwError("TypeError", "value is not iterable");
                 },
                 .string => |s| {
                     for (s) |ch| {
@@ -504,7 +528,17 @@ pub const Interpreter = struct {
             .is_arrow = fnode.is_arrow,
             .closure = closure,
             .name = fnode.name,
+            .is_generator = fnode.is_generator,
         };
+        // Compile a generator body up front for the suspendable VM. Bodies
+        // outside the VM's lowered subset leave `gen_chunk` null, so calling the
+        // generator throws a clear TypeError rather than running incorrectly.
+        if (fnode.is_generator) {
+            func.gen_chunk = Compiler.compileGenerator(self.arena, fnode) catch |e| switch (e) {
+                error.Unsupported => null,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+        }
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .js_func = @ptrCast(func) };
         return .{ .object = obj };
@@ -737,6 +771,9 @@ pub const Interpreter = struct {
     }
 
     fn callFunction(self: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
+        // Calling a `function*` builds a generator object (its body runs lazily,
+        // on the suspendable VM, via `.next()`).
+        if (func.is_generator) return vm.makeGenerator(self, func, args, this_val);
         if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
         self.depth += 1;
         defer self.depth -= 1;
@@ -1274,6 +1311,12 @@ pub const Interpreter = struct {
     pub fn builtinMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
         switch (recv) {
             .object => |o| {
+                if (o.gen != null) {
+                    const sent: Value = if (args.len > 0) args[0] else .undefined;
+                    if (eq(name, "next")) return try vm.genNext(self, o, sent);
+                    if (eq(name, "return")) return try vm.genReturn(self, o, sent);
+                    if (eq(name, "throw")) return try vm.genThrow(self, o, sent);
+                }
                 if (o.is_regex) return try self.regexMethod(o, name, args);
                 if (o.is_map) return try self.mapMethod(o, name, args);
                 if (o.is_set) return try self.setMethod(o, name, args);

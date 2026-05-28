@@ -63,6 +63,8 @@ pub const Compiler = struct {
     mode: Mode,
     scope: ?*FnScope = null,
     loops: std.ArrayListUnmanaged(*Loop) = .empty,
+    /// True while lowering a generator body, so `yield` may emit `gen_yield`.
+    in_generator: bool = false,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
@@ -74,6 +76,30 @@ pub const Compiler = struct {
         if (program.* != .program) return error.Unsupported;
         for (program.program) |stmt| try c.compileStmt(stmt);
         _ = try chunk.emit(.halt, 0);
+        try chunk.finalize();
+        return chunk;
+    }
+
+    /// Compile a `function*` body into its own chunk, run by the suspendable VM
+    /// (`vm.genNext`). Unlike `compileFunction`, this uses **env-mode** (no frame
+    /// scope): the body's parameters, locals, and free variables all resolve by
+    /// name against the generator's `Environment`, bound at call time. That keeps
+    /// a generator interoperable with the tree-walked code around it (shared
+    /// environment) and lets `yield` suspend mid-expression by snapshotting the
+    /// operand stack. Returns `error.Unsupported` for bodies (or parameter forms)
+    /// outside the VM's lowered subset, so the generator is reported unsupported
+    /// rather than run incorrectly.
+    pub fn compileGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!*Chunk {
+        // Default/rest/pattern params need a runtime prologue we don't emit here.
+        for (fnode.params) |p| {
+            if (p.default != null or p.is_rest or p.pattern != null) return error.Unsupported;
+        }
+        if (fnode.is_expr_body) return error.Unsupported; // generators always have a block body
+        const chunk = try arena.create(Chunk);
+        chunk.* = Chunk.init(arena);
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true };
+        try c.compileStmt(fnode.body); // body is a block
+        _ = try chunk.emit(.ret_undef, 0);
         try chunk.finalize();
         return chunk;
     }
@@ -411,6 +437,13 @@ pub const Compiler = struct {
                 }
             },
             .update => |u| try self.compileUpdate(u.inc, u.prefix, u.target),
+            .yield_expr => |y| {
+                // `yield*` (delegation) needs an iterator-driving loop we don't
+                // lower yet → report the generator unsupported.
+                if (!self.in_generator or y.delegate) return error.Unsupported;
+                if (y.argument) |arg| try self.compileExpr(arg) else _ = try self.chunk.emit(.load_undefined, 0);
+                _ = try self.chunk.emit(.gen_yield, 0);
+            },
             // Statement-only nodes never appear in expression position.
             else => return error.Unsupported,
         }
