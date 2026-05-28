@@ -372,6 +372,31 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "Object.prototype legacy accessor helpers (__define/lookup__)" {
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn(
+        \\var o = {}; o.__defineGetter__("x", function () { return 42; }); o.x
+    )).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\var o = {}; var v = 0; o.__defineSetter__("y", function (n) { v = n; }); o.y = 7; v
+    )).number);
+    // __lookupGetter__/__lookupSetter__ return the accessor fn, walking the proto chain.
+    try std.testing.expect((try evalIn(
+        \\var o = {}; o.__defineGetter__("x", function () { return 1; });
+        \\typeof o.__lookupGetter__("x") === "function" && o.__lookupGetter__("x")() === 1
+    )).boolean);
+    // Missing / data properties have no getter; a non-callable arg throws TypeError.
+    try std.testing.expect((try evalIn("({}).__lookupGetter__('nope') === undefined")).boolean);
+    try std.testing.expect((try evalIn("({ a: 1 }).__lookupGetter__('a') === undefined")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var t = false; try { ({}).__defineGetter__("x", 5); } catch (e) { t = e.name === "TypeError"; } t
+    )).boolean);
+    // Defined accessor is enumerable + configurable.
+    try std.testing.expect((try evalIn(
+        \\var o = {}; o.__defineGetter__("x", function () {});
+        \\var d = Object.getOwnPropertyDescriptor(o, "x"); d.enumerable && d.configurable
+    )).boolean);
+}
+
 test "large array length is logical (no OOM) + length assignment" {
     // `new Array(huge)` tracks length without materializing 4 billion holes.
     try std.testing.expectEqual(@as(f64, 4294967295), (try evalIn("new Array(4294967295).length")).number);

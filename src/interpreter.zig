@@ -1841,6 +1841,29 @@ pub const Interpreter = struct {
                         }
                         return Value{ .boolean = false };
                     }
+                    // Annex-B legacy accessor helpers.
+                    if (eq(name, "__defineGetter__") or eq(name, "__defineSetter__")) {
+                        const f = arg(args, 1);
+                        if (!f.isCallable()) return self.throwError("TypeError", "Object.prototype.__define[GS]etter__: Expecting function");
+                        const key = try arg0(args).toString(self.arena);
+                        if (eq(name, "__defineGetter__"))
+                            try o.setAccessor(self.arena, key, f, null)
+                        else
+                            try o.setAccessor(self.arena, key, null, f);
+                        try o.setAttr(self.arena, key, .{ .enumerable = true, .configurable = true });
+                        return Value.undefined;
+                    }
+                    if (eq(name, "__lookupGetter__") or eq(name, "__lookupSetter__")) {
+                        const key = try arg0(args).toString(self.arena);
+                        const want_get = eq(name, "__lookupGetter__");
+                        var cur: ?*value.Object = o;
+                        while (cur) |c| {
+                            if (c.getAccessor(key)) |acc| return (if (want_get) acc.get else acc.set) orelse Value.undefined;
+                            if (c.getOwn(key) != null) return Value.undefined; // shadowed by a data prop
+                            cur = c.proto;
+                        }
+                        return Value.undefined;
+                    }
                 }
                 if (o.is_regex) return try self.regexMethod(o, name, args);
                 if (o.is_date) return try self.dateMethod(o, name, args);
@@ -2826,6 +2849,8 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setProtoMethods(a, root_shape, object_proto, .{
         .{ "hasOwnProperty", 1 },        .{ "propertyIsEnumerable", 1 }, .{ "isPrototypeOf", 1 },
         .{ "toString", 0 },              .{ "valueOf", 0 },
+        .{ "__defineGetter__", 2 },      .{ "__defineSetter__", 2 },
+        .{ "__lookupGetter__", 1 },      .{ "__lookupSetter__", 1 },
     });
     try object_ns.setOwn(a, root_shape, "prototype", .{ .object = object_proto });
 
