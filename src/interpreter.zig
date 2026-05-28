@@ -3815,6 +3815,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     // "[object Array]" while `[].toString()` still joins).
     try setNative(a, root_shape, object_proto, "toString", 0, objectProtoToStringFn);
     try object_ns.setOwn(a, root_shape, "prototype", .{ .object = object_proto });
+    try object_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
 
     // Error prototypes: `Error.prototype` carries name/message/constructor/toString
     // and protos to Object.prototype; each subclass (`TypeError.prototype`, …)
@@ -3857,6 +3858,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     function_ns.* = .{ .native = builtins.functionConstructor, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, function_ns, "Function", 1);
     try function_ns.setOwn(a, root_shape, "prototype", .{ .object = func_proto });
+    try function_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, func_proto, function_ns);
     try env.put("Function", .{ .object = function_ns });
 
@@ -3889,6 +3891,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "with", 2 },
     });
     try array_ns.setOwn(a, root_shape, "prototype", .{ .object = array_proto });
+    try array_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, array_proto, array_ns);
 
     const string_proto = try a.create(value.Object);
@@ -3903,6 +3906,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "localeCompare", 1 }, .{ "toString", 0 },  .{ "valueOf", 0 },
     });
     try string_ns.setOwn(a, root_shape, "prototype", .{ .object = string_proto });
+    try string_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, string_proto, string_ns);
 
     const number_proto = try a.create(value.Object);
@@ -3911,6 +3915,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "toString", 1 }, .{ "toFixed", 1 }, .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
     });
     try number_ns.setOwn(a, root_shape, "prototype", .{ .object = number_proto });
+    try number_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, number_proto, number_ns);
 
     // Symbol — callable (returns a fresh symbol) with the well-known symbols.
@@ -3955,6 +3960,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "toLocaleString", 0 }, .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
     });
     try date_ns.setOwn(a, root_shape, "prototype", .{ .object = date_proto });
+    try date_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, date_proto, date_ns);
     try env.put("Date", .{ .object = date_ns });
 }
@@ -4036,6 +4042,17 @@ fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, 
     const o = try env.arena.create(value.Object);
     o.* = .{ .native = f, .native_ctor = is_ctor };
     try installNativeProps(env.arena, rs, o, name, len);
+    // A constructor's `.prototype` is an own, non-writable/-enumerable/
+    // -configurable data property (so `getOwnPropertyDescriptor(C, "prototype")`
+    // and reflection see it). Methods still dispatch via `builtinMethod`, and
+    // `instanceof` keeps working through its `ctor_ref`/`error_ctor` fallbacks.
+    if (is_ctor) {
+        const proto = try env.arena.create(value.Object);
+        proto.* = .{};
+        try setConstructor(env.arena, rs, proto, o);
+        try o.setOwn(env.arena, rs, "prototype", .{ .object = proto });
+        try o.setAttr(env.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    }
     try env.put(name, .{ .object = o });
 }
 
