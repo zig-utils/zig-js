@@ -1420,7 +1420,7 @@ pub const Interpreter = struct {
             .object => |o| {
                 if (o.is_array) {
                     if (std.mem.eql(u8, key, "length"))
-                        return .{ .number = @floatFromInt(o.elements.items.len) };
+                        return .{ .number = @floatFromInt(@max(o.elements.items.len, o.array_len)) };
                     if (arrayIndex(key)) |i| {
                         if (i < o.elements.items.len) return o.elements.items[i];
                         // else fall through: may be a sparse named property.
@@ -1605,6 +1605,18 @@ pub const Interpreter = struct {
         if (recv != .object) return self.throwError("TypeError", "cannot set property of non-object");
         const o = recv.object;
         if (o.is_array) {
+            if (std.mem.eql(u8, key, "length")) {
+                const n = v.toNumber();
+                const u = v.toUint32();
+                if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
+                if (u < o.elements.items.len) {
+                    o.elements.shrinkRetainingCapacity(u);
+                    o.array_len = 0; // physical length is now exactly `u`
+                } else {
+                    o.array_len = u; // grow logically; don't materialize holes
+                }
+                return;
+            }
             if (arrayIndex(key)) |i| {
                 if (i < o.elements.items.len) {
                     o.elements.items[i] = v;
@@ -1618,6 +1630,9 @@ pub const Interpreter = struct {
                     o.elements.items[i] = v;
                     return;
                 }
+                // A large/gappy index becomes a sparse named property; the array's
+                // logical length still extends past it (`a[1e9]=x` → length 1e9+1).
+                o.array_len = @max(o.array_len, i + 1);
                 // fall through: store as a named (sparse) property
             }
         }

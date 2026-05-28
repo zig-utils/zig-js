@@ -62,6 +62,11 @@ pub const Object = struct {
     /// property; methods are dispatched in `dateMethod`.
     is_date: bool = false,
     is_array: bool = false,
+    /// For arrays, a *logical* length floor used when it exceeds the physically
+    /// stored `elements` — so `new Array(4294967295)` / `arr.length = big` track a
+    /// length without materializing (and OOM-ing on) that many holes. The array's
+    /// observable length is `max(elements.items.len, array_len)`.
+    array_len: usize = 0,
     callback: ?HostCallback = null,
     native: ?NativeFn = null,
     /// For a `native` function, whether it implements [[Construct]] — i.e. is

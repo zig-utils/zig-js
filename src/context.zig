@@ -372,6 +372,29 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "large array length is logical (no OOM) + length assignment" {
+    // `new Array(huge)` tracks length without materializing 4 billion holes.
+    try std.testing.expectEqual(@as(f64, 4294967295), (try evalIn("new Array(4294967295).length")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Array(0).length")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).number);
+    try std.testing.expectEqual(@as(f64, 100), (try evalIn("new Array(100).length")).number);
+    // Assigning length truncates (dropping elements) or grows logically.
+    try std.testing.expect((try evalIn(
+        \\var a = [1, 2, 3]; a.length = 2;
+        \\a.length === 2 && a[1] === 2 && a[2] === undefined
+    )).boolean);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("var a = [1, 2, 3]; a.length = 5; a.length")).number);
+    // A large index extends the logical length past it.
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn("var a = []; a[5] = 1; a.length")).number);
+    // Invalid lengths throw RangeError.
+    try std.testing.expect((try evalIn(
+        \\var t = false; try { [].length = -1; } catch (e) { t = e.name === "RangeError"; } t
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var t = false; try { [].length = 1.5; } catch (e) { t = e.name === "RangeError"; } t
+    )).boolean);
+}
+
 test "Date setters + string conversions" {
     // Time-component setters honor extra args and roll over out-of-range values.
     try std.testing.expect((try evalIn(
