@@ -3345,6 +3345,31 @@ fn promiseRejectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     return .{ .object = pobj };
 }
 
+/// `Object.groupBy(items, callback)` — group `items` into a null-prototype
+/// object keyed by `callback(value, index)` (coerced to a property key), each
+/// bucket an array of the values in iteration order.
+fn objectGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cb = if (args.len > 1) args[1] else .undefined;
+    if (!cb.isCallable()) return self.throwError("TypeError", "Object.groupBy: callback is not a function");
+    const elems = try collectIterable(self, if (args.len > 0) args[0] else .undefined);
+    const obj = (try self.newObject()).object;
+    obj.proto = null; // groupBy result has a null prototype
+    for (elems, 0..) |el, i| {
+        const kv = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) } });
+        const key = if (kv == .object and kv.object.is_symbol) kv.object.sym_key else try kv.toString(self.arena);
+        if (obj.getOwn(key)) |bucket| {
+            try bucket.object.elements.append(self.arena, el);
+        } else {
+            const arr = try self.newArray();
+            try arr.object.elements.append(self.arena, el);
+            try self.setProp(obj, key, arr);
+        }
+    }
+    return .{ .object = obj };
+}
+
 /// Collect an iterable's elements into a slice: arrays use their dense store
 /// directly; anything else is driven through the iterator protocol.
 fn collectIterable(self: *Interpreter, v: Value) EvalError![]Value {
@@ -3758,6 +3783,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, object_ns, "isFrozen", 1, builtins.objectIsFrozen);
     try setNative(a, root_shape, object_ns, "entries", 1, builtins.objectEntries);
     try setNative(a, root_shape, object_ns, "fromEntries", 1, builtins.objectFromEntries);
+    try setNative(a, root_shape, object_ns, "groupBy", 2, objectGroupByFn);
     try setNative(a, root_shape, object_ns, "hasOwn", 2, builtins.objectHasOwn);
     try env.put("Object", .{ .object = object_ns });
 
