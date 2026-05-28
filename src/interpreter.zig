@@ -1555,9 +1555,11 @@ pub const Interpreter = struct {
                 if (o.is_array) {
                     if (std.mem.eql(u8, key, "length"))
                         return .{ .number = @floatFromInt(@max(o.elements.items.len, o.array_len)) };
+                    // An accessor defined on an index (via defineProperty) wins
+                    // over the dense element store, so the getter is invoked.
                     if (arrayIndex(key)) |i| {
-                        if (i < o.elements.items.len) return o.elements.items[i];
-                        // else fall through: may be a sparse named property.
+                        if (o.getAccessor(key) == null and i < o.elements.items.len) return o.elements.items[i];
+                        // else fall through: accessor, or a sparse named property.
                     }
                 }
                 // A String-wrapper object exposes `length` and indexed chars as
@@ -1817,7 +1819,11 @@ pub const Interpreter = struct {
                 }
                 return;
             }
-            if (arrayIndex(key)) |i| {
+            // An accessor defined on an index routes the write to its setter
+            // (handled by the prototype-chain setter walk below), not the store.
+            if (arrayIndex(key) != null and o.getAccessor(key) != null) {
+                // fall through to the setter walk
+            } else if (arrayIndex(key)) |i| {
                 // A per-index descriptor (recorded in `attrs`) may mark the
                 // element non-writable; in sloppy mode the write is a no-op.
                 if (o.attrs != null and !o.getAttr(key).writable) return;
