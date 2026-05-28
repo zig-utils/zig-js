@@ -174,6 +174,32 @@ test "property descriptors: defineProperty attrs + getOwnPropertyDescriptor" {
     )).boolean);
 }
 
+test "Object.freeze / seal / preventExtensions" {
+    // freeze: writes ignored, not extensible, isFrozen true.
+    try std.testing.expect((try evalIn(
+        \\var o = { a: 1 };
+        \\Object.freeze(o);
+        \\o.a = 2; o.b = 3;
+        \\o.a === 1 && o.b === undefined && Object.isFrozen(o) && !Object.isExtensible(o)
+    )).boolean);
+    // seal: existing writable, but no new props, isSealed true (not frozen).
+    try std.testing.expect((try evalIn(
+        \\var o = { a: 1 };
+        \\Object.seal(o);
+        \\o.a = 9; o.b = 3;
+        \\o.a === 9 && o.b === undefined && Object.isSealed(o) && !Object.isFrozen(o)
+    )).boolean);
+    // preventExtensions: can't add, can still modify.
+    try std.testing.expect((try evalIn(
+        \\var o = { a: 1 };
+        \\Object.preventExtensions(o);
+        \\o.b = 3; o.a = 5;
+        \\o.a === 5 && o.b === undefined && !Object.isExtensible(o)
+    )).boolean);
+    // empty frozen object is frozen.
+    try std.testing.expect((try evalIn("Object.isFrozen(Object.freeze({}))")).boolean);
+}
+
 test "Object.prototype: hasOwnProperty / isPrototypeOf" {
     try std.testing.expect((try evalIn(
         \\var o = { a: 1 }; o.hasOwnProperty("a")

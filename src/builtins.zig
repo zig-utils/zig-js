@@ -356,27 +356,138 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
     const key = try arg(args, 1).toString(self.arena);
     const desc = arg(args, 2);
     if (desc != .object) return self.throwError("TypeError", "Property description must be an object");
-    const d = desc.object;
+    try defineOne(self, target.object, key, desc.object);
+    return target;
+}
+
+/// Core of `Object.defineProperty` / `defineProperties`: apply descriptor `d` to
+/// `target[key]`, honoring attributes and bypassing [[Set]].
+fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d: *value.Object) HostError!void {
     const get = d.getOwn("get");
     const set = d.getOwn("set");
-
-    // Redefining an existing property keeps its current attributes for any field
-    // the descriptor omits; a brand-new property defaults omitted fields to false.
-    const exists = target.object.getOwn(key) != null or target.object.getAccessor(key) != null;
-    var attr: value.PropAttr = if (exists) target.object.getAttr(key) else .{ .writable = false, .enumerable = false, .configurable = false };
+    // Redefining keeps the current attributes for any omitted field; a new
+    // property defaults omitted fields to false.
+    const exists = target.getOwn(key) != null or target.getAccessor(key) != null;
+    var attr: value.PropAttr = if (exists) target.getAttr(key) else .{ .writable = false, .enumerable = false, .configurable = false };
     if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
     if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
-
     if (get != null or set != null) {
-        try target.object.setAccessor(self.arena, key, get, set);
+        try target.setAccessor(self.arena, key, get, set);
     } else {
         if (d.getOwn("writable")) |w| attr.writable = w.toBoolean();
-        // Define the value directly (bypassing [[Set]], so a non-writable or
-        // non-extensible target can still be given its initial value).
-        try target.object.setOwn(self.arena, self.root_shape, key, d.getOwn("value") orelse .undefined);
+        try target.setOwn(self.arena, self.root_shape, key, d.getOwn("value") orelse .undefined);
     }
-    try target.object.setAttr(self.arena, key, attr);
+    try target.setAttr(self.arena, key, attr);
+}
+
+pub fn objectDefineProperties(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const target = arg(args, 0);
+    if (target != .object) return self.throwError("TypeError", "Object.defineProperties called on non-object");
+    const props = arg(args, 1);
+    if (props == .object) {
+        for (try props.object.enumerableKeys(self.arena)) |k| {
+            const d = props.object.getOwn(k) orelse continue;
+            if (d != .object) return self.throwError("TypeError", "Property description must be an object");
+            try defineOne(self, target.object, k, d.object);
+        }
+    }
     return target;
+}
+
+pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const o = arg(args, 0);
+    if (o == .object) o.object.extensible = false;
+    return o;
+}
+
+pub fn objectIsExtensible(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const o = arg(args, 0);
+    return .{ .boolean = o == .object and o.object.extensible };
+}
+
+pub fn objectSeal(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    const self = interp(ctx);
+    _ = this;
+    const o = arg(args, 0);
+    if (o == .object) {
+        o.object.extensible = false;
+        try lockKeys(self, o.object, false);
+    }
+    return o;
+}
+
+pub fn objectFreeze(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    const self = interp(ctx);
+    _ = this;
+    const o = arg(args, 0);
+    if (o == .object) {
+        o.object.extensible = false;
+        try lockKeys(self, o.object, true);
+    }
+    return o;
+}
+
+/// Make every own property non-configurable (and, when `freeze`, every data
+/// property non-writable). Backs `seal`/`freeze`.
+fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
+    for (try o.ownKeys(self.arena)) |k| {
+        var a = o.getAttr(k);
+        a.configurable = false;
+        if (freeze) a.writable = false;
+        try o.setAttr(self.arena, k, a);
+    }
+    if (o.accessors) |m| {
+        var it = m.iterator();
+        while (it.next()) |e| {
+            var a = o.getAttr(e.key_ptr.*);
+            a.configurable = false;
+            try o.setAttr(self.arena, e.key_ptr.*, a);
+        }
+    }
+}
+
+pub fn objectIsSealed(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    return .{ .boolean = isLocked(arg(args, 0), false) };
+}
+
+pub fn objectIsFrozen(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    return .{ .boolean = isLocked(arg(args, 0), true) };
+}
+
+/// A non-object is trivially sealed/frozen. Otherwise: non-extensible, every own
+/// property non-configurable (and, for `frozen`, every data property
+/// non-writable). Arrays with elements can't be frozen (no per-index attrs yet).
+fn isLocked(ov: Value, frozen: bool) bool {
+    if (ov != .object) return true;
+    const o = ov.object;
+    if (o.extensible) return false;
+    if (o.is_array and o.elements.items.len > 0) return false;
+    var s = o.shape;
+    while (s) |sh| {
+        if (sh.name) |n| {
+            const a = o.getAttr(n);
+            if (a.configurable) return false;
+            if (frozen and a.writable) return false;
+        }
+        s = sh.parent;
+    }
+    if (o.accessors) |m| {
+        var it = m.iterator();
+        while (it.next()) |e| {
+            if (o.getAttr(e.key_ptr.*).configurable) return false;
+        }
+    }
+    return true;
 }
 
 pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

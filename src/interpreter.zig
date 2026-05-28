@@ -2076,8 +2076,15 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, object_ns, "create", builtins.objectCreate);
     try setNative(a, root_shape, object_ns, "getPrototypeOf", builtins.objectGetPrototypeOf);
     try setNative(a, root_shape, object_ns, "defineProperty", builtins.objectDefineProperty);
+    try setNative(a, root_shape, object_ns, "defineProperties", builtins.objectDefineProperties);
     try setNative(a, root_shape, object_ns, "getOwnPropertyDescriptor", builtins.objectGetOwnPropertyDescriptor);
     try setNative(a, root_shape, object_ns, "getOwnPropertyNames", builtins.objectGetOwnPropertyNames);
+    try setNative(a, root_shape, object_ns, "preventExtensions", builtins.objectPreventExtensions);
+    try setNative(a, root_shape, object_ns, "isExtensible", builtins.objectIsExtensible);
+    try setNative(a, root_shape, object_ns, "seal", builtins.objectSeal);
+    try setNative(a, root_shape, object_ns, "isSealed", builtins.objectIsSealed);
+    try setNative(a, root_shape, object_ns, "freeze", builtins.objectFreeze);
+    try setNative(a, root_shape, object_ns, "isFrozen", builtins.objectIsFrozen);
     try setNative(a, root_shape, object_ns, "entries", builtins.objectEntries);
     try setNative(a, root_shape, object_ns, "fromEntries", builtins.objectFromEntries);
     try env.put("Object", .{ .object = object_ns });
