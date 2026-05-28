@@ -639,7 +639,11 @@ pub const Interpreter = struct {
         if (val != .object or !val.object.isCallableObject()) return;
         const o = val.object;
         if (o.getOwn("name")) |c| {
-            if (c == .string and c.string.len != 0) return; // already named
+            // Already has a meaningful own `name`: a non-empty string, or — for a
+            // class with an explicit `static name(){}`/field — a non-string value.
+            // Only an empty-string placeholder (a freshly-built anonymous class)
+            // is overridable.
+            if (c != .string or c.string.len != 0) return;
         }
         try o.setOwn(self.arena, self.root_shape, "name", .{ .string = name });
         try o.setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
