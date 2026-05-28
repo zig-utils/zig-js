@@ -822,6 +822,25 @@ test "async: calling an async function throws (runtime not yet implemented)" {
     )).boolean);
 }
 
+test "eval: direct eval runs in the caller's scope" {
+    // Returns the completion value of the program.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("eval('1 + 2')")).number);
+    // Reads a binding from the surrounding scope.
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn("var x = 42; eval('x')")).number);
+    // Mutates a binding in the surrounding scope.
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn("var x = 1; eval('x = 9'); x")).number);
+    // Introduces a new binding visible after the eval.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("eval('var y = 7;'); y")).number);
+    // A non-string argument is returned unchanged.
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("eval(5)")).number);
+    // A syntax error in the source throws a SyntaxError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError; }
+        \\t
+    )).boolean);
+}
+
 test "async: `async` remains usable as an ordinary identifier" {
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("var async = 1; async + 2")).number);
     // `async` as a property name / shorthand / method name (not a modifier).

@@ -2691,6 +2691,25 @@ pub const Interpreter = struct {
 /// constructors, `NaN`/`Infinity`/`undefined`, the `Math` and `Object`/`Array`
 /// namespaces, and the common global functions. `root_shape` backs the property
 /// stores of the namespace objects. Called once per Context, before user code.
+/// The global `eval`. Direct eval: the program text is parsed and run in the
+/// *current* lexical environment (`self.env` at the call site — natives don't
+/// push a scope), so `eval("var x = 1")` and `eval("x")` see and mutate the
+/// caller's bindings, and function declarations introduced by the eval are
+/// visible after it. A non-string argument is returned unchanged (per spec).
+/// (Indirect eval's "run in the global scope" distinction isn't modeled yet —
+/// every eval runs where it's called; this is faithful for the common direct
+/// case and only differs for the rarer `(0, eval)(...)` form.)
+fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len == 0) return .undefined;
+    if (args[0] != .string) return args[0]; // eval of a non-string is the identity
+    const src = args[0].string;
+    var parser = Parser.init(self.arena, src) catch return self.throwError("SyntaxError", "eval: invalid source");
+    const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "eval: parse error");
+    return self.eval(prog);
+}
+
 pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
@@ -2708,6 +2727,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try env.put("undefined", .undefined);
 
     // Global functions.
+    try defineGlobalFn(env, root_shape, "eval", 1, evalFn);
     try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
     try defineGlobalFn(env, root_shape, "isNaN", 1, builtins.isNaNFn);
