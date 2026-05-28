@@ -1034,6 +1034,99 @@ pub const Interpreter = struct {
         return null;
     }
 
+    const ms_per_day: i64 = 86400000;
+
+    /// Build a `Date` whose time is `t` ms since the Unix epoch.
+    pub fn makeDate(self: *Interpreter, t: f64) EvalError!Value {
+        const o = (try self.newObject()).object;
+        o.is_date = true;
+        try self.setProp(o, "__t", .{ .number = t });
+        return .{ .object = o };
+    }
+
+    /// Civil date (year, month 1-12, day 1-31) from days since the epoch
+    /// (Howard Hinnant's algorithm).
+    fn civilFromDays(z0: i64) struct { y: i64, m: i64, d: i64 } {
+        const z = z0 + 719468;
+        const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
+        const doe = z - era * 146097;
+        const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
+        const y = yoe + era * 400;
+        const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
+        const mp = @divFloor(5 * doy + 2, 153);
+        const d = doy - @divFloor(153 * mp + 2, 5) + 1;
+        const m = if (mp < 10) mp + 3 else mp - 9;
+        return .{ .y = y + @as(i64, if (m <= 2) 1 else 0), .m = m, .d = d };
+    }
+
+    /// Days since the epoch for a civil date (inverse of `civilFromDays`).
+    fn daysFromCivil(y0: i64, m: i64, d: i64) i64 {
+        const y = y0 - @as(i64, if (m <= 2) 1 else 0);
+        const era = @divFloor(if (y >= 0) y else y - 399, 400);
+        const yoe = y - era * 400;
+        const mp = if (m > 2) m - 3 else m + 9;
+        const doy = @divFloor(153 * mp + 2, 5) + d - 1;
+        const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+        return era * 146097 + doe - 719468;
+    }
+
+    /// `Date.prototype` methods (UTC-based; v1 ignores local timezone, so
+    /// get*/getUTC* coincide). Time is the own `__t` property.
+    fn dateMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
+        const t = (o.getOwn("__t") orelse Value{ .number = 0 }).number;
+        if (eq(name, "getTime") or eq(name, "valueOf")) return Value{ .number = t };
+        if (eq(name, "setTime")) {
+            const nt = arg0(args).toNumber();
+            try self.setProp(o, "__t", .{ .number = nt });
+            return Value{ .number = nt };
+        }
+        if (eq(name, "toString") or eq(name, "toISOString") or eq(name, "toUTCString") or eq(name, "toJSON")) {
+            if (std.math.isNan(t)) return Value{ .string = "Invalid Date" };
+            const ti: i64 = @intFromFloat(t);
+            const c = civilFromDays(@divFloor(ti, ms_per_day));
+            const tod = @mod(ti, ms_per_day);
+            const u = struct {
+                fn n(x: i64) u64 {
+                    return if (x < 0) 0 else @intCast(x);
+                }
+            }.n;
+            const s = try std.fmt.allocPrint(self.arena, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+                u(c.y), u(c.m), u(c.d), u(@divFloor(tod, 3600000)), u(@mod(@divFloor(tod, 60000), 60)), u(@mod(@divFloor(tod, 1000), 60)), u(@mod(tod, 1000)),
+            });
+            return Value{ .string = s };
+        }
+        if (std.math.isNan(t)) return Value{ .number = std.math.nan(f64) };
+        const ti: i64 = @intFromFloat(t);
+        const days = @divFloor(ti, ms_per_day);
+        const tod = @mod(ti, ms_per_day);
+        const c = civilFromDays(days);
+        if (eq(name, "getFullYear") or eq(name, "getUTCFullYear")) return Value{ .number = @floatFromInt(c.y) };
+        if (eq(name, "getMonth") or eq(name, "getUTCMonth")) return Value{ .number = @floatFromInt(c.m - 1) };
+        if (eq(name, "getDate") or eq(name, "getUTCDate")) return Value{ .number = @floatFromInt(c.d) };
+        if (eq(name, "getDay") or eq(name, "getUTCDay")) return Value{ .number = @floatFromInt(@mod(days + 4, 7)) };
+        if (eq(name, "getHours") or eq(name, "getUTCHours")) return Value{ .number = @floatFromInt(@divFloor(tod, 3600000)) };
+        if (eq(name, "getMinutes") or eq(name, "getUTCMinutes")) return Value{ .number = @floatFromInt(@mod(@divFloor(tod, 60000), 60)) };
+        if (eq(name, "getSeconds") or eq(name, "getUTCSeconds")) return Value{ .number = @floatFromInt(@mod(@divFloor(tod, 1000), 60)) };
+        if (eq(name, "getMilliseconds") or eq(name, "getUTCMilliseconds")) return Value{ .number = @floatFromInt(@mod(tod, 1000)) };
+        if (eq(name, "getTimezoneOffset")) return Value{ .number = 0 };
+        return null;
+    }
+
+    /// Compute a Date's epoch-ms from constructor arguments.
+    pub fn dateTimeFromArgs(args: []const Value) f64 {
+        if (args.len == 0) return 0; // (a real clock isn't wired; epoch is deterministic)
+        if (args.len == 1) return args[0].toNumber();
+        const y: i64 = @intFromFloat(@trunc(args[0].toNumber()));
+        const mo: i64 = @intFromFloat(@trunc(args[1].toNumber()));
+        const d: i64 = if (args.len > 2) @intFromFloat(@trunc(args[2].toNumber())) else 1;
+        const h: i64 = if (args.len > 3) @intFromFloat(@trunc(args[3].toNumber())) else 0;
+        const mi: i64 = if (args.len > 4) @intFromFloat(@trunc(args[4].toNumber())) else 0;
+        const s: i64 = if (args.len > 5) @intFromFloat(@trunc(args[5].toNumber())) else 0;
+        const millis: i64 = if (args.len > 6) @intFromFloat(@trunc(args[6].toNumber())) else 0;
+        const days = daysFromCivil(y, mo + 1, d);
+        return @floatFromInt(days * ms_per_day + h * 3600000 + mi * 60000 + s * 1000 + millis);
+    }
+
     /// Build a `Map`, optionally populated from an iterable of `[k,v]` pairs.
     pub fn makeMap(self: *Interpreter, init_v: Value) EvalError!Value {
         const o = (try self.newObject()).object;
@@ -1568,6 +1661,7 @@ pub const Interpreter = struct {
                     }
                 }
                 if (o.is_regex) return try self.regexMethod(o, name, args);
+                if (o.is_date) return try self.dateMethod(o, name, args);
                 if (o.is_map) return try self.mapMethod(o, name, args);
                 if (o.is_set) return try self.setMethod(o, name, args);
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
@@ -2533,6 +2627,21 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name));
     }
     try env.put("Symbol", .{ .object = symbol_ns });
+
+    // Date — callable + constructable, with Date.now and a prototype.
+    const date_ns = try a.create(value.Object);
+    date_ns.* = .{ .native = dateConstructor };
+    try setNative(a, root_shape, date_ns, "now", dateNow);
+    const date_proto = try a.create(value.Object);
+    date_proto.* = .{ .proto = object_proto };
+    try setProtoMethods(a, root_shape, date_proto, &.{
+        "getTime",      "valueOf",      "setTime",      "toISOString",  "toJSON",       "toUTCString",
+        "getFullYear",  "getUTCFullYear", "getMonth",   "getUTCMonth",  "getDate",      "getUTCDate",
+        "getDay",       "getUTCDay",    "getHours",     "getUTCHours",  "getMinutes",   "getUTCMinutes",
+        "getSeconds",   "getUTCSeconds", "getMilliseconds", "getUTCMilliseconds", "getTimezoneOffset",
+    });
+    try date_ns.setOwn(a, root_shape, "prototype", .{ .object = date_proto });
+    try env.put("Date", .{ .object = date_ns });
 }
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the
@@ -2606,6 +2715,21 @@ fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8) EvalError!
     o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{symbol_counter});
     try o.setOwn(a, rs, "description", if (desc) |d| .{ .string = d } else .undefined);
     return .{ .object = o };
+}
+
+/// `Date(...)` / `new Date(...)` → a Date object for the computed time.
+fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.makeDate(Interpreter.dateTimeFromArgs(args));
+}
+
+/// `Date.now()` — v1 uses a deterministic epoch (no wall clock wired).
+fn dateNow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return .{ .number = 0 };
 }
 
 /// `Symbol([description])` — returns a fresh unique symbol (not constructable).

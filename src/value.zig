@@ -58,6 +58,9 @@ pub const Object = struct {
     /// encoding (used when a symbol is an object property key).
     is_symbol: bool = false,
     sym_key: []const u8 = "",
+    /// A `Date` instance — its time (ms since the Unix epoch) is the own `__t`
+    /// property; methods are dispatched in `dateMethod`.
+    is_date: bool = false,
     is_array: bool = false,
     callback: ?HostCallback = null,
     native: ?NativeFn = null,

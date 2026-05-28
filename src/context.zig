@@ -91,6 +91,19 @@ pub const Context = struct {
     }
 };
 
+test "Date basics" {
+    // Components constructor (month is 0-based) + UTC getters.
+    try std.testing.expectEqual(@as(f64, 2020), (try evalIn("new Date(2020, 0, 15).getUTCFullYear()")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(2020, 0, 15).getUTCMonth()")).number);
+    try std.testing.expectEqual(@as(f64, 15), (try evalIn("new Date(2020, 0, 15).getUTCDate()")).number);
+    // Epoch round-trips.
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(0).getTime()")).number);
+    try std.testing.expectEqual(@as(f64, 1970), (try evalIn("new Date(0).getUTCFullYear()")).number);
+    try expectEvalStr("number", "typeof Date.now()");
+    try expectEvalStr("1970-01-01T00:00:00.000Z", "new Date(0).toISOString()");
+    try std.testing.expect((try evalIn("typeof new Date() === 'object'")).boolean);
+}
+
 test "String generics + .constructor + match/search" {
     // String.prototype method on a non-string this (coerced).
     try expectEvalStr("123", "String.prototype.trim.call(123)");
