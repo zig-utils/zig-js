@@ -37,21 +37,26 @@ pub fn isFiniteFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 
 pub fn stringFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
-    if (args.len == 0) return .{ .string = "" };
-    return .{ .string = try args[0].toString(interp(ctx).arena) };
+    const ip = interp(ctx);
+    const s: []const u8 = if (args.len == 0) "" else try args[0].toString(ip.arena);
+    if (ip.new_target != .undefined) return ip.makeWrapper(.{ .string = s });
+    return .{ .string = s };
 }
 
 pub fn numberFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    if (args.len == 0) return .{ .number = 0 };
-    return .{ .number = args[0].toNumber() };
+    const ip = interp(ctx);
+    const n: f64 = if (args.len == 0) 0 else args[0].toNumber();
+    if (ip.new_target != .undefined) return ip.makeWrapper(.{ .number = n });
+    return .{ .number = n };
 }
 
 pub fn booleanFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return .{ .boolean = arg(args, 0).toBoolean() };
+    const ip = interp(ctx);
+    const b = arg(args, 0).toBoolean();
+    if (ip.new_target != .undefined) return ip.makeWrapper(.{ .boolean = b });
+    return .{ .boolean = b };
 }
 
 /// `Function(p1, ..., pn, body)` / `new Function(...)` — build a function from

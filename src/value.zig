@@ -108,6 +108,12 @@ pub const Object = struct {
     /// For objects created by `new F()`, the constructor function's object —
     /// used by `instanceof` to walk the (flat, v1) construction link.
     ctor_ref: ?*Object = null,
+    /// A primitive-wrapper object's boxed [[NumberData]]/[[StringData]]/
+    /// [[BooleanData]] — set by `new Number(x)` / `new String(x)` / `new
+    /// Boolean(x)`. Non-null marks the object as a wrapper: `typeof` is still
+    /// "object", but `valueOf`/ToPrimitive unwrap it and `Object.prototype.
+    /// toString` reports `[object Number|String|Boolean]`.
+    prim: ?Value = null,
 
     pub fn isCallableObject(self: *const Object) bool {
         return self.callback != null or self.native != null or
@@ -305,6 +311,8 @@ pub const Value = union(enum) {
 /// join their elements with commas (Array.prototype.toString), everything else
 /// is `[object Object]`.
 fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+    // A primitive-wrapper object stringifies as its boxed primitive.
+    if (o.prim) |p| return p.toString(arena);
     if (o.is_error) {
         const name = if (o.getOwn("name")) |v|
             (if (v == .string) v.string else o.error_name)

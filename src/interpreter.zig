@@ -1003,6 +1003,12 @@ pub const Interpreter = struct {
         if (obj.native) |nf| {
             // Most built-ins aren't constructors; only flagged ones are `new`-able.
             if (!obj.native_ctor) return self.throwError("TypeError", "value is not a constructor");
+            // Signal [[Construct]] to the native via `new_target` (restored after),
+            // so e.g. `new Number(x)` boxes a wrapper object while `Number(x)`
+            // returns a primitive.
+            const saved_nt = self.new_target;
+            self.new_target = callee;
+            defer self.new_target = saved_nt;
             return nf(@ptrCast(self), .undefined, args); // native ctor (Array, Map, RegExp, ...)
         }
         if (obj.js_func) |erased| {
@@ -1045,6 +1051,16 @@ pub const Interpreter = struct {
         const proto = (try self.newObject()).object;
         try self.setProp(ctor, "prototype", .{ .object = proto });
         return proto;
+    }
+
+    /// Box a primitive into a wrapper object (`new Number/String/Boolean`). Its
+    /// prototype is the in-flight constructor's `.prototype`, so methods,
+    /// `instanceof`, and `[object Number|String|Boolean]` all resolve correctly.
+    pub fn makeWrapper(self: *Interpreter, p: Value) EvalError!Value {
+        const o = try self.arena.create(value.Object);
+        o.* = .{ .prim = p };
+        if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+        return .{ .object = o };
     }
 
     /// Create an instance for `new ctor(...)`: a fresh object whose prototype is
@@ -1542,6 +1558,17 @@ pub const Interpreter = struct {
                     if (arrayIndex(key)) |i| {
                         if (i < o.elements.items.len) return o.elements.items[i];
                         // else fall through: may be a sparse named property.
+                    }
+                }
+                // A String-wrapper object exposes `length` and indexed chars as
+                // own integer-keyed properties (`new String("ab").length === 2`,
+                // `[0] === "a"`).
+                if (o.prim) |p| {
+                    if (p == .string) {
+                        if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(p.string.len) };
+                        if (arrayIndex(key)) |i| {
+                            if (i < p.string.len) return .{ .string = try self.arena.dupe(u8, p.string[i .. i + 1]) };
+                        }
                     }
                 }
                 // Accessor or data, then walk the prototype chain.
@@ -2061,6 +2088,14 @@ pub const Interpreter = struct {
                         if (pp.getOwn(name) != null) break true;
                     } else false;
                     if (!proto_defined) return try objectProtoToStringFn(@ptrCast(self), recv, args);
+                }
+                // A primitive-wrapper object (`new Number/String/Boolean`)
+                // delegates unmatched methods to its boxed primitive, so
+                // `(new Number(5)).valueOf()`, `.toFixed(2)`, `.charAt(0)`, … work.
+                if (o.prim) |p| {
+                    if (o.getOwn(name) == null) {
+                        if (try self.builtinMethod(p, name, args)) |r| return r;
+                    }
                 }
             },
             .string => |s| return try self.stringMethod(s, name, args),
@@ -2864,6 +2899,14 @@ pub const Interpreter = struct {
                 if (res != .object) return res;
             }
         }
+        // A primitive-wrapper object (`new Number/String/Boolean`) with no user
+        // override unwraps to its boxed primitive — except for a string hint,
+        // where it stringifies (so `new Number(5) + 1 === 6` but `String hint`
+        // gives "5").
+        if (o.prim) |p| {
+            if (hint == .string) return .{ .string = try p.toString(self.arena) };
+            return p;
+        }
         // No user override → the engine's built-in coercion: arrays join, errors
         // render "Name: message", plain objects "[object Object]", etc.
         return .{ .string = try v.toString(self.arena) };
@@ -3023,7 +3066,12 @@ fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         .number => "Number",
         .boolean => "Boolean",
         .string => "String",
-        .object => |o| if (o.is_array) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.isCallableObject()) "Function" else "Object",
+        .object => |o| if (o.is_array) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.prim) |p| (switch (p) {
+            .number => "Number",
+            .string => "String",
+            .boolean => "Boolean",
+            else => "Object",
+        }) else if (o.isCallableObject()) "Function" else "Object",
     };
     // `Symbol.toStringTag` (a string) wins over the builtin tag.
     var tag = builtin_tag;
