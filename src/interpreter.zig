@@ -2158,17 +2158,59 @@ pub const Interpreter = struct {
         }
         if (eq(name, "split")) {
             const result = try self.newArray();
+            const out = &result.object.elements;
+            // `limit` (ToUint32; absent → effectively unbounded). limit 0 → [].
+            const lim: usize = if (args.len > 1 and args[1] != .undefined) args[1].toUint32() else std.math.maxInt(u32);
+            if (lim == 0) return result;
+            // No separator → the whole string as the sole element.
             if (args.len == 0 or args[0] == .undefined) {
-                try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, s) });
+                try out.append(self.arena, .{ .string = try self.arena.dupe(u8, s) });
+                return result;
+            }
+            // Regex separator: split on each match, inserting capture groups, per
+            // the String.prototype.split(@@split) algorithm.
+            if (args[0] == .object and args[0].object.is_regex) {
+                var re = try self.compileRegex(args[0].object);
+                if (s.len == 0) {
+                    // Empty input: [""] unless the pattern matches the empty string.
+                    if ((re.find(s) catch null) == null) try out.append(self.arena, .{ .string = s });
+                    return result;
+                }
+                var p: usize = 0; // end of the previous piece
+                var q: usize = 0; // scan cursor
+                while (q < s.len) {
+                    const m = re.find(s[q..]) catch null orelse break;
+                    const m_start = q + m.start;
+                    const m_end = q + m.end;
+                    if (m_end == p) { // empty match flush against the last split — skip
+                        q = m_start + 1;
+                        continue;
+                    }
+                    try out.append(self.arena, .{ .string = try self.arena.dupe(u8, s[p..m_start]) });
+                    if (out.items.len >= lim) return result;
+                    for (m.captures) |c| {
+                        try out.append(self.arena, .{ .string = try self.arena.dupe(u8, c) });
+                        if (out.items.len >= lim) return result;
+                    }
+                    p = m_end;
+                    q = if (m_end > m_start) m_end else m_end + 1;
+                }
+                try out.append(self.arena, .{ .string = try self.arena.dupe(u8, s[p..]) });
                 return result;
             }
             const sep = try args[0].toString(self.arena);
             if (sep.len == 0) {
-                for (s) |c| try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, &.{c}) });
+                for (s) |c| {
+                    if (out.items.len >= lim) return result;
+                    try out.append(self.arena, .{ .string = try self.arena.dupe(u8, &.{c}) });
+                }
                 return result;
             }
             var it = std.mem.splitSequence(u8, s, sep);
-            while (it.next()) |part| try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, part) });
+            while (it.next()) |part| {
+                if (out.items.len >= lim) return result;
+                try out.append(self.arena, .{ .string = try self.arena.dupe(u8, part) });
+            }
             return result;
         }
         if (eq(name, "at")) {

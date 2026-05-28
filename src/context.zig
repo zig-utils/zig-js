@@ -372,6 +372,26 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "String.prototype.split: limit + regex separators" {
+    // `limit` truncates the result.
+    try expectEvalStr("a|b", "'a,b,c'.split(',', 2).join('|')");
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("'a,b,c'.split(',', 0).length")).number);
+    // Regex separators split on each match.
+    try expectEvalStr("2016|01|02", "'2016-01-02'.split(/-/).join('|')");
+    try expectEvalStr("a|b|c", "'a1b2c'.split(/\\d/).join('|')");
+    try expectEvalStr("a|b|c", "'a, b ,c'.split(/\\s*,\\s*/).join('|')");
+    // An empty-matching pattern splits between every character.
+    try expectEvalStr("a|b|c", "'abc'.split(/(?:)/).join('|')");
+    // Capture groups are spliced into the result.
+    try expectEvalStr(",t,es,t,", "'test'.split(/(t)/).join(',')");
+    // Empty input: [""] unless the pattern matches the empty string (then []).
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("''.split(/x/).length")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("''.split(/(?:)/).length")).number);
+    // String separators (and no separator) still behave.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("'a,b,c'.split(',').length")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("'abc'.split().length")).number);
+}
+
 test "Object.hasOwn" {
     try std.testing.expect((try evalIn("Object.hasOwn({ a: 1 }, \"a\")")).boolean);
     try std.testing.expect(!(try evalIn("Object.hasOwn({ a: 1 }, \"b\")")).boolean);
