@@ -1467,7 +1467,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
-            for (o.elements.items) |e| _ = try self.callValue(cb, &.{ e.object.elements.items[1], e.object.elements.items[0], self_v });
+            for (o.elements.items) |e| _ = try self.callValueWithThis(cb, &.{ e.object.elements.items[1], e.object.elements.items[0], self_v }, arg(args, 1));
             return Value.undefined;
         }
         return null;
@@ -1506,7 +1506,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
-            for (o.elements.items) |e| _ = try self.callValue(cb, &.{ e, e, self_v });
+            for (o.elements.items) |e| _ = try self.callValueWithThis(cb, &.{ e, e, self_v }, arg(args, 1));
             return Value.undefined;
         }
         return null;
@@ -2180,6 +2180,10 @@ pub const Interpreter = struct {
             }
             break :blk buf;
         };
+        // The optional `thisArg` (2nd argument) bound as `this` inside the
+        // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
+        // reduceRight take an initial value here instead and ignore it.
+        const cb_this = arg(args, 1);
         if (eq(name, "push")) {
             for (args) |a| try o.elements.append(self.arena, a);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
@@ -2296,7 +2300,7 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             const result = try self.newArray();
             for (items, 0..) |el, i| {
-                const r = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
+                const r = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
                 try result.object.elements.append(self.arena, r);
             }
             return result;
@@ -2305,20 +2309,20 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             const result = try self.newArray();
             for (items, 0..) |el, i| {
-                if ((try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     try result.object.elements.append(self.arena, el);
             }
             return result;
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
-            for (items, 0..) |el, i| _ = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
+            for (items, 0..) |el, i| _ = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
             return Value.undefined;
         }
         if (eq(name, "some")) {
             const cb = arg0(args);
             for (items, 0..) |el, i| {
-                if ((try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return Value{ .boolean = true };
             }
             return Value{ .boolean = false };
@@ -2326,7 +2330,7 @@ pub const Interpreter = struct {
         if (eq(name, "every")) {
             const cb = arg0(args);
             for (items, 0..) |el, i| {
-                if (!(try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                if (!(try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return Value{ .boolean = false };
             }
             return Value{ .boolean = true };
@@ -2334,7 +2338,7 @@ pub const Interpreter = struct {
         if (eq(name, "find")) {
             const cb = arg0(args);
             for (items, 0..) |el, i| {
-                if ((try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean()) return el;
+                if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean()) return el;
             }
             return Value.undefined;
         }
@@ -2373,7 +2377,7 @@ pub const Interpreter = struct {
         if (eq(name, "findIndex")) {
             const cb = arg0(args);
             for (items, 0..) |el, i| {
-                if ((try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return Value{ .number = @floatFromInt(i) };
             }
             return Value{ .number = -1 };
@@ -2459,7 +2463,7 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             const result = try self.newArray();
             for (items, 0..) |el, i| {
-                const m = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
+                const m = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
                 if (m == .object and m.object.is_array) {
                     for (m.object.elements.items) |e2| try result.object.elements.append(self.arena, e2);
                 } else try result.object.elements.append(self.arena, m);
@@ -2472,7 +2476,7 @@ pub const Interpreter = struct {
             var i: usize = items.len;
             while (i > 0) {
                 i -= 1;
-                if ((try self.callValue(cb, &.{ items[i], .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                if ((try self.callValueWithThis(cb, &.{ items[i], .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return if (want_index) Value{ .number = @floatFromInt(i) } else items[i];
             }
             return if (want_index) Value{ .number = -1 } else .undefined;
