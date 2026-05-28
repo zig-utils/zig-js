@@ -1618,7 +1618,7 @@ pub const Interpreter = struct {
         it.* = .{};
         try self.setProp(it, "__src", src);
         try self.setProp(it, "__i", .{ .number = 0 });
-        try setNative(self.arena, self.root_shape, it, "next", cursorIterNext);
+        try setNative(self.arena, self.root_shape, it, "next", 0, cursorIterNext);
         return .{ .object = it };
     }
 
@@ -2470,6 +2470,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     for (error_names) |name| {
         const o = try a.create(value.Object);
         o.* = .{ .error_ctor = name };
+        try installNativeProps(a, root_shape, o, name, 1);
         try env.put(name, .{ .object = o });
     }
     try env.put("NaN", .{ .number = std.math.nan(f64) });
@@ -2477,32 +2478,34 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try env.put("undefined", .undefined);
 
     // Global functions.
-    try defineGlobalFn(env, "parseInt", builtins.parseIntFn);
-    try defineGlobalFn(env, "parseFloat", builtins.parseFloatFn);
-    try defineGlobalFn(env, "isNaN", builtins.isNaNFn);
-    try defineGlobalFn(env, "isFinite", builtins.isFiniteFn);
-    try defineGlobalFn(env, "RegExp", builtins.regExpFn);
-    try defineGlobalFn(env, "Map", builtins.mapFn);
-    try defineGlobalFn(env, "Set", builtins.setFn);
-    try defineGlobalFn(env, "WeakMap", builtins.mapFn);
-    try defineGlobalFn(env, "WeakSet", builtins.setFn);
-    try defineGlobalFn(env, "Boolean", builtins.booleanFn);
+    try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
+    try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
+    try defineGlobalFn(env, root_shape, "isNaN", 1, builtins.isNaNFn);
+    try defineGlobalFn(env, root_shape, "isFinite", 1, builtins.isFiniteFn);
+    try defineGlobalFn(env, root_shape, "RegExp", 2, builtins.regExpFn);
+    try defineGlobalFn(env, root_shape, "Map", 0, builtins.mapFn);
+    try defineGlobalFn(env, root_shape, "Set", 0, builtins.setFn);
+    try defineGlobalFn(env, root_shape, "WeakMap", 0, builtins.mapFn);
+    try defineGlobalFn(env, root_shape, "WeakSet", 0, builtins.setFn);
+    try defineGlobalFn(env, root_shape, "Boolean", 1, builtins.booleanFn);
 
     // String — callable, with statics.
     const string_ns = try a.create(value.Object);
     string_ns.* = .{ .native = builtins.stringFn };
-    try setNative(a, root_shape, string_ns, "fromCharCode", builtins.stringFromCharCode);
+    try installNativeProps(a, root_shape, string_ns, "String", 1);
+    try setNative(a, root_shape, string_ns, "fromCharCode", 1, builtins.stringFromCharCode);
     try env.put("String", .{ .object = string_ns });
 
     // Number — callable, with statics and constants.
     const number_ns = try a.create(value.Object);
     number_ns.* = .{ .native = builtins.numberFn };
-    try setNative(a, root_shape, number_ns, "isInteger", builtins.numberIsInteger);
-    try setNative(a, root_shape, number_ns, "isSafeInteger", builtins.numberIsSafeInteger);
-    try setNative(a, root_shape, number_ns, "isNaN", builtins.numberIsNaN);
-    try setNative(a, root_shape, number_ns, "isFinite", builtins.numberIsFinite);
-    try setNative(a, root_shape, number_ns, "parseFloat", builtins.parseFloatFn);
-    try setNative(a, root_shape, number_ns, "parseInt", builtins.parseIntFn);
+    try installNativeProps(a, root_shape, number_ns, "Number", 1);
+    try setNative(a, root_shape, number_ns, "isInteger", 1, builtins.numberIsInteger);
+    try setNative(a, root_shape, number_ns, "isSafeInteger", 1, builtins.numberIsSafeInteger);
+    try setNative(a, root_shape, number_ns, "isNaN", 1, builtins.numberIsNaN);
+    try setNative(a, root_shape, number_ns, "isFinite", 1, builtins.numberIsFinite);
+    try setNative(a, root_shape, number_ns, "parseFloat", 1, builtins.parseFloatFn);
+    try setNative(a, root_shape, number_ns, "parseInt", 2, builtins.parseIntFn);
     try number_ns.setOwn(a, root_shape, "MAX_SAFE_INTEGER", .{ .number = 9007199254740991 });
     try number_ns.setOwn(a, root_shape, "MIN_SAFE_INTEGER", .{ .number = -9007199254740991 });
     try number_ns.setOwn(a, root_shape, "MAX_VALUE", .{ .number = std.math.floatMax(f64) });
@@ -2516,48 +2519,48 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     // JSON namespace.
     const json_ns = try a.create(value.Object);
     json_ns.* = .{};
-    try setNative(a, root_shape, json_ns, "stringify", builtins.jsonStringify);
-    try setNative(a, root_shape, json_ns, "parse", builtins.jsonParse);
+    try setNative(a, root_shape, json_ns, "stringify", 3, builtins.jsonStringify);
+    try setNative(a, root_shape, json_ns, "parse", 2, builtins.jsonParse);
     try env.put("JSON", .{ .object = json_ns });
 
     // Math namespace.
     const math_obj = try a.create(value.Object);
     math_obj.* = .{};
-    try setNative(a, root_shape, math_obj, "floor", builtins.mathFloor);
-    try setNative(a, root_shape, math_obj, "ceil", builtins.mathCeil);
-    try setNative(a, root_shape, math_obj, "round", builtins.mathRound);
-    try setNative(a, root_shape, math_obj, "trunc", builtins.mathTrunc);
-    try setNative(a, root_shape, math_obj, "abs", builtins.mathAbs);
-    try setNative(a, root_shape, math_obj, "sqrt", builtins.mathSqrt);
-    try setNative(a, root_shape, math_obj, "sign", builtins.mathSign);
-    try setNative(a, root_shape, math_obj, "pow", builtins.mathPow);
-    try setNative(a, root_shape, math_obj, "max", builtins.mathMax);
-    try setNative(a, root_shape, math_obj, "min", builtins.mathMin);
-    try setNative(a, root_shape, math_obj, "sin", builtins.unaryMath(builtins.mfns.sin));
-    try setNative(a, root_shape, math_obj, "cos", builtins.unaryMath(builtins.mfns.cos));
-    try setNative(a, root_shape, math_obj, "tan", builtins.unaryMath(builtins.mfns.tan));
-    try setNative(a, root_shape, math_obj, "asin", builtins.unaryMath(builtins.mfns.asin));
-    try setNative(a, root_shape, math_obj, "acos", builtins.unaryMath(builtins.mfns.acos));
-    try setNative(a, root_shape, math_obj, "atan", builtins.unaryMath(builtins.mfns.atan));
-    try setNative(a, root_shape, math_obj, "sinh", builtins.unaryMath(builtins.mfns.sinh));
-    try setNative(a, root_shape, math_obj, "cosh", builtins.unaryMath(builtins.mfns.cosh));
-    try setNative(a, root_shape, math_obj, "tanh", builtins.unaryMath(builtins.mfns.tanh));
-    try setNative(a, root_shape, math_obj, "asinh", builtins.unaryMath(builtins.mfns.asinh));
-    try setNative(a, root_shape, math_obj, "acosh", builtins.unaryMath(builtins.mfns.acosh));
-    try setNative(a, root_shape, math_obj, "atanh", builtins.unaryMath(builtins.mfns.atanh));
-    try setNative(a, root_shape, math_obj, "exp", builtins.unaryMath(builtins.mfns.exp));
-    try setNative(a, root_shape, math_obj, "expm1", builtins.unaryMath(builtins.mfns.expm1));
-    try setNative(a, root_shape, math_obj, "log", builtins.unaryMath(builtins.mfns.log));
-    try setNative(a, root_shape, math_obj, "log2", builtins.unaryMath(builtins.mfns.log2));
-    try setNative(a, root_shape, math_obj, "log10", builtins.unaryMath(builtins.mfns.log10));
-    try setNative(a, root_shape, math_obj, "log1p", builtins.unaryMath(builtins.mfns.log1p));
-    try setNative(a, root_shape, math_obj, "cbrt", builtins.unaryMath(builtins.mfns.cbrt));
-    try setNative(a, root_shape, math_obj, "fround", builtins.unaryMath(builtins.mfns.fround));
-    try setNative(a, root_shape, math_obj, "atan2", builtins.mathAtan2);
-    try setNative(a, root_shape, math_obj, "hypot", builtins.mathHypot);
-    try setNative(a, root_shape, math_obj, "clz32", builtins.mathClz32);
-    try setNative(a, root_shape, math_obj, "imul", builtins.mathImul);
-    try setNative(a, root_shape, math_obj, "random", builtins.mathRandom);
+    try setNative(a, root_shape, math_obj, "floor", 1, builtins.mathFloor);
+    try setNative(a, root_shape, math_obj, "ceil", 1, builtins.mathCeil);
+    try setNative(a, root_shape, math_obj, "round", 1, builtins.mathRound);
+    try setNative(a, root_shape, math_obj, "trunc", 1, builtins.mathTrunc);
+    try setNative(a, root_shape, math_obj, "abs", 1, builtins.mathAbs);
+    try setNative(a, root_shape, math_obj, "sqrt", 1, builtins.mathSqrt);
+    try setNative(a, root_shape, math_obj, "sign", 1, builtins.mathSign);
+    try setNative(a, root_shape, math_obj, "pow", 2, builtins.mathPow);
+    try setNative(a, root_shape, math_obj, "max", 2, builtins.mathMax);
+    try setNative(a, root_shape, math_obj, "min", 2, builtins.mathMin);
+    try setNative(a, root_shape, math_obj, "sin", 1, builtins.unaryMath(builtins.mfns.sin));
+    try setNative(a, root_shape, math_obj, "cos", 1, builtins.unaryMath(builtins.mfns.cos));
+    try setNative(a, root_shape, math_obj, "tan", 1, builtins.unaryMath(builtins.mfns.tan));
+    try setNative(a, root_shape, math_obj, "asin", 1, builtins.unaryMath(builtins.mfns.asin));
+    try setNative(a, root_shape, math_obj, "acos", 1, builtins.unaryMath(builtins.mfns.acos));
+    try setNative(a, root_shape, math_obj, "atan", 1, builtins.unaryMath(builtins.mfns.atan));
+    try setNative(a, root_shape, math_obj, "sinh", 1, builtins.unaryMath(builtins.mfns.sinh));
+    try setNative(a, root_shape, math_obj, "cosh", 1, builtins.unaryMath(builtins.mfns.cosh));
+    try setNative(a, root_shape, math_obj, "tanh", 1, builtins.unaryMath(builtins.mfns.tanh));
+    try setNative(a, root_shape, math_obj, "asinh", 1, builtins.unaryMath(builtins.mfns.asinh));
+    try setNative(a, root_shape, math_obj, "acosh", 1, builtins.unaryMath(builtins.mfns.acosh));
+    try setNative(a, root_shape, math_obj, "atanh", 1, builtins.unaryMath(builtins.mfns.atanh));
+    try setNative(a, root_shape, math_obj, "exp", 1, builtins.unaryMath(builtins.mfns.exp));
+    try setNative(a, root_shape, math_obj, "expm1", 1, builtins.unaryMath(builtins.mfns.expm1));
+    try setNative(a, root_shape, math_obj, "log", 1, builtins.unaryMath(builtins.mfns.log));
+    try setNative(a, root_shape, math_obj, "log2", 1, builtins.unaryMath(builtins.mfns.log2));
+    try setNative(a, root_shape, math_obj, "log10", 1, builtins.unaryMath(builtins.mfns.log10));
+    try setNative(a, root_shape, math_obj, "log1p", 1, builtins.unaryMath(builtins.mfns.log1p));
+    try setNative(a, root_shape, math_obj, "cbrt", 1, builtins.unaryMath(builtins.mfns.cbrt));
+    try setNative(a, root_shape, math_obj, "fround", 1, builtins.unaryMath(builtins.mfns.fround));
+    try setNative(a, root_shape, math_obj, "atan2", 2, builtins.mathAtan2);
+    try setNative(a, root_shape, math_obj, "hypot", 2, builtins.mathHypot);
+    try setNative(a, root_shape, math_obj, "clz32", 1, builtins.mathClz32);
+    try setNative(a, root_shape, math_obj, "imul", 2, builtins.mathImul);
+    try setNative(a, root_shape, math_obj, "random", 0, builtins.mathRandom);
     try math_obj.setOwn(a, root_shape, "PI", .{ .number = std.math.pi });
     try math_obj.setOwn(a, root_shape, "E", .{ .number = std.math.e });
     try math_obj.setOwn(a, root_shape, "LN2", .{ .number = std.math.ln2 });
@@ -2571,36 +2574,37 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     // Object namespace.
     const object_ns = try a.create(value.Object);
     object_ns.* = .{ .native = builtins.objectConstructor };
-    try setNative(a, root_shape, object_ns, "keys", builtins.objectKeys);
-    try setNative(a, root_shape, object_ns, "values", builtins.objectValues);
-    try setNative(a, root_shape, object_ns, "assign", builtins.objectAssign);
-    try setNative(a, root_shape, object_ns, "freeze", builtins.identity1);
-    try setNative(a, root_shape, object_ns, "create", builtins.objectCreate);
-    try setNative(a, root_shape, object_ns, "getPrototypeOf", builtins.objectGetPrototypeOf);
-    try setNative(a, root_shape, object_ns, "defineProperty", builtins.objectDefineProperty);
-    try setNative(a, root_shape, object_ns, "defineProperties", builtins.objectDefineProperties);
-    try setNative(a, root_shape, object_ns, "getOwnPropertyDescriptor", builtins.objectGetOwnPropertyDescriptor);
-    try setNative(a, root_shape, object_ns, "getOwnPropertyDescriptors", builtins.objectGetOwnPropertyDescriptors);
-    try setNative(a, root_shape, object_ns, "getOwnPropertyNames", builtins.objectGetOwnPropertyNames);
-    try setNative(a, root_shape, object_ns, "getOwnPropertySymbols", builtins.objectGetOwnPropertySymbols);
-    try setNative(a, root_shape, object_ns, "is", builtins.objectIs);
-    try setNative(a, root_shape, object_ns, "setPrototypeOf", builtins.objectSetPrototypeOf);
-    try setNative(a, root_shape, object_ns, "preventExtensions", builtins.objectPreventExtensions);
-    try setNative(a, root_shape, object_ns, "isExtensible", builtins.objectIsExtensible);
-    try setNative(a, root_shape, object_ns, "seal", builtins.objectSeal);
-    try setNative(a, root_shape, object_ns, "isSealed", builtins.objectIsSealed);
-    try setNative(a, root_shape, object_ns, "freeze", builtins.objectFreeze);
-    try setNative(a, root_shape, object_ns, "isFrozen", builtins.objectIsFrozen);
-    try setNative(a, root_shape, object_ns, "entries", builtins.objectEntries);
-    try setNative(a, root_shape, object_ns, "fromEntries", builtins.objectFromEntries);
+    try installNativeProps(a, root_shape, object_ns, "Object", 1);
+    try setNative(a, root_shape, object_ns, "keys", 1, builtins.objectKeys);
+    try setNative(a, root_shape, object_ns, "values", 1, builtins.objectValues);
+    try setNative(a, root_shape, object_ns, "assign", 2, builtins.objectAssign);
+    try setNative(a, root_shape, object_ns, "create", 2, builtins.objectCreate);
+    try setNative(a, root_shape, object_ns, "getPrototypeOf", 1, builtins.objectGetPrototypeOf);
+    try setNative(a, root_shape, object_ns, "defineProperty", 3, builtins.objectDefineProperty);
+    try setNative(a, root_shape, object_ns, "defineProperties", 2, builtins.objectDefineProperties);
+    try setNative(a, root_shape, object_ns, "getOwnPropertyDescriptor", 2, builtins.objectGetOwnPropertyDescriptor);
+    try setNative(a, root_shape, object_ns, "getOwnPropertyDescriptors", 1, builtins.objectGetOwnPropertyDescriptors);
+    try setNative(a, root_shape, object_ns, "getOwnPropertyNames", 1, builtins.objectGetOwnPropertyNames);
+    try setNative(a, root_shape, object_ns, "getOwnPropertySymbols", 1, builtins.objectGetOwnPropertySymbols);
+    try setNative(a, root_shape, object_ns, "is", 2, builtins.objectIs);
+    try setNative(a, root_shape, object_ns, "setPrototypeOf", 2, builtins.objectSetPrototypeOf);
+    try setNative(a, root_shape, object_ns, "preventExtensions", 1, builtins.objectPreventExtensions);
+    try setNative(a, root_shape, object_ns, "isExtensible", 1, builtins.objectIsExtensible);
+    try setNative(a, root_shape, object_ns, "seal", 1, builtins.objectSeal);
+    try setNative(a, root_shape, object_ns, "isSealed", 1, builtins.objectIsSealed);
+    try setNative(a, root_shape, object_ns, "freeze", 1, builtins.objectFreeze);
+    try setNative(a, root_shape, object_ns, "isFrozen", 1, builtins.objectIsFrozen);
+    try setNative(a, root_shape, object_ns, "entries", 1, builtins.objectEntries);
+    try setNative(a, root_shape, object_ns, "fromEntries", 1, builtins.objectFromEntries);
     try env.put("Object", .{ .object = object_ns });
 
     // Array namespace (callable constructor + isArray/of/from).
     const array_ns = try a.create(value.Object);
     array_ns.* = .{ .native = builtins.arrayConstructor };
-    try setNative(a, root_shape, array_ns, "isArray", builtins.arrayIsArray);
-    try setNative(a, root_shape, array_ns, "of", builtins.arrayOf);
-    try setNative(a, root_shape, array_ns, "from", builtins.arrayFrom);
+    try installNativeProps(a, root_shape, array_ns, "Array", 1);
+    try setNative(a, root_shape, array_ns, "isArray", 1, builtins.arrayIsArray);
+    try setNative(a, root_shape, array_ns, "of", 0, builtins.arrayOf);
+    try setNative(a, root_shape, array_ns, "from", 1, builtins.arrayFrom);
     try env.put("Array", .{ .object = array_ns });
 
     // ---- Real prototype objects ----------------------------------------
@@ -2611,35 +2615,62 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     // propertyHelper/verifyProperty (and many built-ins tests) depend on.
     const object_proto = try a.create(value.Object);
     object_proto.* = .{};
-    try setProtoMethods(a, root_shape, object_proto, &.{ "hasOwnProperty", "propertyIsEnumerable", "isPrototypeOf", "toString", "valueOf" });
+    try setProtoMethods(a, root_shape, object_proto, .{
+        .{ "hasOwnProperty", 1 },        .{ "propertyIsEnumerable", 1 }, .{ "isPrototypeOf", 1 },
+        .{ "toString", 0 },              .{ "valueOf", 0 },
+    });
     try object_ns.setOwn(a, root_shape, "prototype", .{ .object = object_proto });
 
     const func_proto = try a.create(value.Object);
     func_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, func_proto, &.{ "call", "apply", "bind", "toString" });
+    try setProtoMethods(a, root_shape, func_proto, .{
+        .{ "call", 1 }, .{ "apply", 2 }, .{ "bind", 1 }, .{ "toString", 0 },
+    });
     const function_ns = try a.create(value.Object);
     function_ns.* = .{ .proto = func_proto };
+    try installNativeProps(a, root_shape, function_ns, "Function", 1);
     try function_ns.setOwn(a, root_shape, "prototype", .{ .object = func_proto });
     try env.put("Function", .{ .object = function_ns });
 
     const array_proto = try a.create(value.Object);
     array_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, array_proto, &.{ "join", "push", "pop", "shift", "unshift", "slice", "splice", "concat", "reverse", "indexOf", "lastIndexOf", "includes", "map", "filter", "forEach", "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "fill", "flat", "flatMap", "sort", "keys", "values", "entries", "copyWithin", "at", "toString" });
+    try setProtoMethods(a, root_shape, array_proto, .{
+        .{ "join", 1 },       .{ "push", 1 },         .{ "pop", 0 },        .{ "shift", 0 },
+        .{ "unshift", 1 },    .{ "slice", 2 },        .{ "splice", 2 },     .{ "concat", 1 },
+        .{ "reverse", 0 },    .{ "indexOf", 1 },      .{ "lastIndexOf", 1 }, .{ "includes", 1 },
+        .{ "map", 1 },        .{ "filter", 1 },       .{ "forEach", 1 },    .{ "reduce", 1 },
+        .{ "reduceRight", 1 }, .{ "some", 1 },        .{ "every", 1 },      .{ "find", 1 },
+        .{ "findIndex", 1 },  .{ "findLast", 1 },     .{ "findLastIndex", 1 }, .{ "fill", 1 },
+        .{ "flat", 0 },       .{ "flatMap", 1 },      .{ "sort", 1 },       .{ "keys", 0 },
+        .{ "values", 0 },     .{ "entries", 0 },      .{ "copyWithin", 2 }, .{ "at", 1 },
+        .{ "toString", 0 },
+    });
     try array_ns.setOwn(a, root_shape, "prototype", .{ .object = array_proto });
 
     const string_proto = try a.create(value.Object);
     string_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, string_proto, &.{ "charAt", "charCodeAt", "codePointAt", "indexOf", "lastIndexOf", "includes", "startsWith", "endsWith", "slice", "substring", "substr", "toUpperCase", "toLowerCase", "trim", "trimStart", "trimEnd", "repeat", "concat", "split", "at", "padStart", "padEnd", "replace", "replaceAll", "localeCompare", "toString", "valueOf" });
+    try setProtoMethods(a, root_shape, string_proto, .{
+        .{ "charAt", 1 },     .{ "charCodeAt", 1 },   .{ "codePointAt", 1 }, .{ "indexOf", 1 },
+        .{ "lastIndexOf", 1 }, .{ "includes", 1 },    .{ "startsWith", 1 }, .{ "endsWith", 1 },
+        .{ "slice", 2 },      .{ "substring", 2 },    .{ "substr", 2 },     .{ "toUpperCase", 0 },
+        .{ "toLowerCase", 0 }, .{ "trim", 0 },        .{ "trimStart", 0 },  .{ "trimEnd", 0 },
+        .{ "repeat", 1 },     .{ "concat", 1 },       .{ "split", 2 },      .{ "at", 1 },
+        .{ "padStart", 1 },   .{ "padEnd", 1 },       .{ "replace", 2 },    .{ "replaceAll", 2 },
+        .{ "localeCompare", 1 }, .{ "toString", 0 },  .{ "valueOf", 0 },
+    });
     try string_ns.setOwn(a, root_shape, "prototype", .{ .object = string_proto });
 
     const number_proto = try a.create(value.Object);
     number_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, number_proto, &.{ "toString", "toFixed", "valueOf", "toLocaleString" });
+    try setProtoMethods(a, root_shape, number_proto, .{
+        .{ "toString", 1 }, .{ "toFixed", 1 }, .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
+    });
     try number_ns.setOwn(a, root_shape, "prototype", .{ .object = number_proto });
 
     // Symbol — callable (returns a fresh symbol) with the well-known symbols.
     const symbol_ns = try a.create(value.Object);
     symbol_ns.* = .{ .native = symbolFn };
+    try installNativeProps(a, root_shape, symbol_ns, "Symbol", 0);
     inline for (.{ "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables" }) |name| {
         try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name));
     }
@@ -2648,14 +2679,17 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     // Date — callable + constructable, with Date.now and a prototype.
     const date_ns = try a.create(value.Object);
     date_ns.* = .{ .native = dateConstructor };
-    try setNative(a, root_shape, date_ns, "now", dateNow);
+    try installNativeProps(a, root_shape, date_ns, "Date", 7);
+    try setNative(a, root_shape, date_ns, "now", 0, dateNow);
     const date_proto = try a.create(value.Object);
     date_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, date_proto, &.{
-        "getTime",      "valueOf",      "setTime",      "toISOString",  "toJSON",       "toUTCString",
-        "getFullYear",  "getUTCFullYear", "getMonth",   "getUTCMonth",  "getDate",      "getUTCDate",
-        "getDay",       "getUTCDay",    "getHours",     "getUTCHours",  "getMinutes",   "getUTCMinutes",
-        "getSeconds",   "getUTCSeconds", "getMilliseconds", "getUTCMilliseconds", "getTimezoneOffset",
+    try setProtoMethods(a, root_shape, date_proto, .{
+        .{ "getTime", 0 },      .{ "valueOf", 0 },      .{ "setTime", 1 },      .{ "toISOString", 0 },
+        .{ "toJSON", 1 },       .{ "toUTCString", 0 },  .{ "getFullYear", 0 },  .{ "getUTCFullYear", 0 },
+        .{ "getMonth", 0 },     .{ "getUTCMonth", 0 },  .{ "getDate", 0 },      .{ "getUTCDate", 0 },
+        .{ "getDay", 0 },       .{ "getUTCDay", 0 },    .{ "getHours", 0 },     .{ "getUTCHours", 0 },
+        .{ "getMinutes", 0 },   .{ "getUTCMinutes", 0 }, .{ "getSeconds", 0 },  .{ "getUTCSeconds", 0 },
+        .{ "getMilliseconds", 0 }, .{ "getUTCMilliseconds", 0 }, .{ "getTimezoneOffset", 0 },
     });
     try date_ns.setOwn(a, root_shape, "prototype", .{ .object = date_proto });
     try env.put("Date", .{ .object = date_ns });
@@ -2715,15 +2749,31 @@ pub fn installFunctionProps(
     try obj.setAttr(arena, "name", ro_attr);
 }
 
-fn defineGlobalFn(env: *Environment, name: []const u8, f: value.NativeFn) EvalError!void {
+/// Install the `name` and `length` own properties on a *native* (built-in)
+/// function object, per the spec: both are
+/// `{ writable: false, enumerable: false, configurable: true }`. `name` is the
+/// property the function is reached through; `length` is its spec arity. Mirrors
+/// `installFunctionProps` for user functions — test262's propertyHelper checks
+/// `name.js` / `length.js` for essentially every built-in method.
+fn installNativeProps(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, name: []const u8, len: usize) EvalError!void {
+    const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
+    try obj.setOwn(a, rs, "length", .{ .number = @floatFromInt(len) });
+    try obj.setAttr(a, "length", ro_attr);
+    try obj.setOwn(a, rs, "name", .{ .string = name });
+    try obj.setAttr(a, "name", ro_attr);
+}
+
+fn defineGlobalFn(env: *Environment, rs: *Shape, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
     const o = try env.arena.create(value.Object);
     o.* = .{ .native = f };
+    try installNativeProps(env.arena, rs, o, name, len);
     try env.put(name, .{ .object = o });
 }
 
-fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, f: value.NativeFn) EvalError!void {
+fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
     const m = try a.create(value.Object);
     m.* = .{ .native = f };
+    try installNativeProps(a, root_shape, m, name, len);
     try obj.setOwn(a, root_shape, name, .{ .object = m });
 }
 
@@ -2740,8 +2790,11 @@ fn protoMethod(comptime name: []const u8) value.NativeFn {
     }.call;
 }
 
-fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime names: []const []const u8) EvalError!void {
-    inline for (names) |n| try setNative(a, rs, proto, n, protoMethod(n));
+/// Install a set of prototype methods, each given as a `.{ name, arity }` tuple
+/// so the spec `length` is carried onto every method (the same name can have a
+/// different arity on different prototypes — e.g. `toString`).
+fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
+    inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], protoMethod(s[0]));
 }
 
 /// Monotonic id for unique Symbol property-key encodings (single-threaded;

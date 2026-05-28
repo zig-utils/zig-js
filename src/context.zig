@@ -349,6 +349,29 @@ test "function name + length own properties" {
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f(a, b, c) {} f.bind(null, 1).length")).number);
 }
 
+test "native functions carry name + length own properties" {
+    // Built-in methods/globals/constructors report their spec name and arity.
+    try expectEvalStr("defineProperty", "Object.defineProperty.name");
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Object.defineProperty.length")).number);
+    try expectEvalStr("push", "Array.prototype.push.name");
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("Array.prototype.push.length")).number);
+    try expectEvalStr("parseInt", "parseInt.name");
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("parseInt.length")).number);
+    try expectEvalStr("Object", "Object.name");
+    // Same name can have a different arity on a different prototype.
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.prototype.toString.length")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("Number.prototype.toString.length")).number);
+    // Own + non-enumerable + non-writable + configurable, like user functions.
+    try std.testing.expect((try evalIn(
+        \\Object.keys.hasOwnProperty("name") && Object.keys.hasOwnProperty("length")
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var d = Object.getOwnPropertyDescriptor(Math.max, "length");
+        \\!d.writable && !d.enumerable && d.configurable
+    )).boolean);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
+}
+
 test "Function.prototype: call / apply / bind" {
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\function add(a, b) { return a + b; }
