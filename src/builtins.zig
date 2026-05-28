@@ -5,7 +5,8 @@
 
 const std = @import("std");
 const value = @import("value.zig");
-const Interpreter = @import("interpreter.zig").Interpreter;
+const interpreter = @import("interpreter.zig");
+const Interpreter = interpreter.Interpreter;
 
 const Value = value.Value;
 const HostError = value.HostError;
@@ -321,6 +322,24 @@ pub fn objectValues(ctx: *anyopaque, this: Value, args: []const Value) HostError
         for (keys) |k| try result.object.elements.append(self.arena, o.getOwn(k) orelse .undefined);
     }
     return result;
+}
+
+/// `Object.hasOwn(O, P)` — HasOwnProperty after ToObject(O) / ToPropertyKey(P).
+/// The ergonomic replacement for `Object.prototype.hasOwnProperty.call`.
+pub fn objectHasOwn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const key = try arg(args, 1).toString(self.arena);
+    switch (arg(args, 0)) {
+        .undefined, .null => return self.throwError("TypeError", "Cannot convert undefined or null to object"),
+        .object => |o| return .{ .boolean = interpreter.objectHasOwn(o, key) },
+        .string => |s| {
+            if (std.mem.eql(u8, key, "length")) return .{ .boolean = true };
+            if (Interpreter.arrayIndex(key)) |i| return .{ .boolean = i < s.len };
+            return .{ .boolean = false };
+        },
+        else => return .{ .boolean = false },
+    }
 }
 
 pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

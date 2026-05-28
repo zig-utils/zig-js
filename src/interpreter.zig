@@ -1279,7 +1279,7 @@ pub const Interpreter = struct {
     }
 
     /// `index`-as-string -> array element index, or null if not an integer.
-    fn arrayIndex(key: []const u8) ?usize {
+    pub fn arrayIndex(key: []const u8) ?usize {
         if (key.len == 0) return null;
         for (key) |c| if (!std.ascii.isDigit(c)) return null;
         return std.fmt.parseInt(usize, key, 10) catch null;
@@ -2600,6 +2600,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, object_ns, "isFrozen", 1, builtins.objectIsFrozen);
     try setNative(a, root_shape, object_ns, "entries", 1, builtins.objectEntries);
     try setNative(a, root_shape, object_ns, "fromEntries", 1, builtins.objectFromEntries);
+    try setNative(a, root_shape, object_ns, "hasOwn", 2, builtins.objectHasOwn);
     try env.put("Object", .{ .object = object_ns });
 
     // Array namespace (callable constructor + isArray/of/from).
@@ -2867,8 +2868,8 @@ fn hasProperty(o: *value.Object, name: []const u8) bool {
 }
 
 /// Does `o` have `name` as an *own* property (data, accessor, array index, or
-/// array `length`)? Backs `hasOwnProperty` / `propertyIsEnumerable`.
-fn objectHasOwn(o: *value.Object, name: []const u8) bool {
+/// array `length`)? Backs `hasOwnProperty` / `propertyIsEnumerable` / `Object.hasOwn`.
+pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
     if (o.is_array) {
         if (std.mem.eql(u8, name, "length")) return true;

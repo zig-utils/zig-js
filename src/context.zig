@@ -372,6 +372,22 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "Object.hasOwn" {
+    try std.testing.expect((try evalIn("Object.hasOwn({ a: 1 }, \"a\")")).boolean);
+    try std.testing.expect(!(try evalIn("Object.hasOwn({ a: 1 }, \"b\")")).boolean);
+    // Own only — inherited properties are excluded.
+    try std.testing.expect(!(try evalIn("Object.hasOwn(Object.create({ a: 1 }), \"a\")")).boolean);
+    // Array indices, array length, and string indices/length.
+    try std.testing.expect((try evalIn("Object.hasOwn([1, 2], 0) && Object.hasOwn([1, 2], \"length\") && !Object.hasOwn([1, 2], 5)")).boolean);
+    try std.testing.expect((try evalIn("Object.hasOwn(\"ab\", 0) && Object.hasOwn(\"ab\", \"length\") && !Object.hasOwn(\"ab\", 9)")).boolean);
+    // null / undefined throw a TypeError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { Object.hasOwn(null, "x"); } catch (e) { t = e.name === "TypeError"; }
+        \\t
+    )).boolean);
+}
+
 test "defineProperty rejects incompatible redefinition of non-configurable props" {
     // A non-configurable property can't be made configurable, re-typed, or (when
     // non-writable) have its value/writability changed — each throws TypeError.
