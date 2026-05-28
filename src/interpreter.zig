@@ -3295,6 +3295,10 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try number_ns.setOwn(a, root_shape, "POSITIVE_INFINITY", .{ .number = std.math.inf(f64) });
     try number_ns.setOwn(a, root_shape, "NEGATIVE_INFINITY", .{ .number = -std.math.inf(f64) });
     try number_ns.setOwn(a, root_shape, "NaN", .{ .number = std.math.nan(f64) });
+    // The Number constants are { !writable, !enumerable, !configurable }.
+    const frozen_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = false };
+    for ([_][]const u8{ "MAX_SAFE_INTEGER", "MIN_SAFE_INTEGER", "MAX_VALUE", "MIN_VALUE", "EPSILON", "POSITIVE_INFINITY", "NEGATIVE_INFINITY", "NaN" }) |n|
+        try number_ns.setAttr(a, n, frozen_attr);
     try env.put("Number", .{ .object = number_ns });
 
     // JSON namespace.
@@ -3350,6 +3354,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try math_obj.setOwn(a, root_shape, "LOG10E", .{ .number = std.math.log10e });
     try math_obj.setOwn(a, root_shape, "SQRT2", .{ .number = std.math.sqrt2 });
     try math_obj.setOwn(a, root_shape, "SQRT1_2", .{ .number = 1.0 / std.math.sqrt2 });
+    // The Math constants are { !writable, !enumerable, !configurable }.
+    for ([_][]const u8{ "PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT2", "SQRT1_2" }) |n|
+        try math_obj.setAttr(a, n, .{ .writable = false, .enumerable = false, .configurable = false });
     try env.put("Math", .{ .object = math_obj });
 
     // Object namespace.
@@ -3440,6 +3447,12 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setProtoMethods(a, root_shape, func_proto, .{
         .{ "call", 1 }, .{ "apply", 2 }, .{ "bind", 1 }, .{ "toString", 0 },
     });
+    // `Function.prototype` is itself callable-shaped, with own `length` 0 and
+    // `name` "" — both { !writable, !enumerable, configurable }.
+    try func_proto.setOwn(a, root_shape, "length", .{ .number = 0 });
+    try func_proto.setAttr(a, "length", .{ .writable = false, .enumerable = false, .configurable = true });
+    try func_proto.setOwn(a, root_shape, "name", .{ .string = "" });
+    try func_proto.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
     const function_ns = try a.create(value.Object);
     function_ns.* = .{ .native = builtins.functionConstructor, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, function_ns, "Function", 1);
