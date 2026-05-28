@@ -144,6 +144,36 @@ test "Function.prototype: call / apply / bind" {
     )).number);
 }
 
+test "property descriptors: defineProperty attrs + getOwnPropertyDescriptor" {
+    // defineProperty defaults omitted attrs to false; getOwnPropertyDescriptor reports them.
+    try std.testing.expect((try evalIn(
+        \\var o = {};
+        \\Object.defineProperty(o, "x", { value: 5 });
+        \\var d = Object.getOwnPropertyDescriptor(o, "x");
+        \\d.value === 5 && d.writable === false && d.enumerable === false && d.configurable === false
+    )).boolean);
+    // A non-writable property ignores assignment (sloppy mode).
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn(
+        \\var o = {};
+        \\Object.defineProperty(o, "x", { value: 5, writable: false });
+        \\o.x = 99;
+        \\o.x
+    )).number);
+    // Non-enumerable property is skipped by Object.keys / for-in but kept by getOwnPropertyNames.
+    try std.testing.expect((try evalIn(
+        \\var o = { a: 1 };
+        \\Object.defineProperty(o, "hidden", { value: 2, enumerable: false });
+        \\Object.keys(o).length === 1 && Object.getOwnPropertyNames(o).length === 2 &&
+        \\  !o.propertyIsEnumerable("hidden") && o.propertyIsEnumerable("a")
+    )).boolean);
+    // Plain-assignment properties are writable/enumerable/configurable.
+    try std.testing.expect((try evalIn(
+        \\var o = { a: 1 };
+        \\var d = Object.getOwnPropertyDescriptor(o, "a");
+        \\d.writable && d.enumerable && d.configurable
+    )).boolean);
+}
+
 test "Object.prototype: hasOwnProperty / isPrototypeOf" {
     try std.testing.expect((try evalIn(
         \\var o = { a: 1 }; o.hasOwnProperty("a")

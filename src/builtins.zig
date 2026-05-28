@@ -188,7 +188,7 @@ pub fn objectKeys(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
     const self = interp(ctx);
     const result = try self.newArray();
     if (arg(args, 0) == .object) {
-        const keys = try arg(args, 0).object.ownKeys(self.arena);
+        const keys = try arg(args, 0).object.enumerableKeys(self.arena);
         for (keys) |k| try result.object.elements.append(self.arena, .{ .string = k });
     }
     return result;
@@ -200,7 +200,7 @@ pub fn objectValues(ctx: *anyopaque, this: Value, args: []const Value) HostError
     const result = try self.newArray();
     if (arg(args, 0) == .object) {
         const o = arg(args, 0).object;
-        const keys = try o.ownKeys(self.arena);
+        const keys = try o.enumerableKeys(self.arena);
         for (keys) |k| try result.object.elements.append(self.arena, o.getOwn(k) orelse .undefined);
     }
     return result;
@@ -215,7 +215,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
     while (i < args.len) : (i += 1) {
         if (args[i] != .object) continue;
         const src = args[i].object;
-        const keys = try src.ownKeys(self.arena);
+        const keys = try src.enumerableKeys(self.arena);
         for (keys) |k| try self.setMember(target, k, src.getOwn(k) orelse .undefined);
     }
     return target;
@@ -227,7 +227,7 @@ pub fn objectEntries(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     const result = try self.newArray();
     if (arg(args, 0) == .object) {
         const o = arg(args, 0).object;
-        const keys = try o.ownKeys(self.arena);
+        const keys = try o.enumerableKeys(self.arena);
         for (keys) |k| {
             const pair = try self.newArray();
             try pair.object.elements.append(self.arena, .{ .string = k });
@@ -356,14 +356,80 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
     const key = try arg(args, 1).toString(self.arena);
     const desc = arg(args, 2);
     if (desc != .object) return self.throwError("TypeError", "Property description must be an object");
-    const get = desc.object.getOwn("get");
-    const set = desc.object.getOwn("set");
+    const d = desc.object;
+    const get = d.getOwn("get");
+    const set = d.getOwn("set");
+
+    // Redefining an existing property keeps its current attributes for any field
+    // the descriptor omits; a brand-new property defaults omitted fields to false.
+    const exists = target.object.getOwn(key) != null or target.object.getAccessor(key) != null;
+    var attr: value.PropAttr = if (exists) target.object.getAttr(key) else .{ .writable = false, .enumerable = false, .configurable = false };
+    if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
+    if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
+
     if (get != null or set != null) {
         try target.object.setAccessor(self.arena, key, get, set);
     } else {
-        try self.setMember(target, key, desc.object.getOwn("value") orelse .undefined);
+        if (d.getOwn("writable")) |w| attr.writable = w.toBoolean();
+        // Define the value directly (bypassing [[Set]], so a non-writable or
+        // non-extensible target can still be given its initial value).
+        try target.object.setOwn(self.arena, self.root_shape, key, d.getOwn("value") orelse .undefined);
     }
+    try target.object.setAttr(self.arena, key, attr);
     return target;
+}
+
+pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const ov = arg(args, 0);
+    if (ov != .object) return .undefined;
+    const o = ov.object;
+    const key = try arg(args, 1).toString(self.arena);
+
+    if (o.getAccessor(key)) |acc| {
+        const a = o.getAttr(key);
+        const desc = try self.newObject();
+        try self.setMember(desc, "get", acc.get orelse .undefined);
+        try self.setMember(desc, "set", acc.set orelse .undefined);
+        try self.setMember(desc, "enumerable", .{ .boolean = a.enumerable });
+        try self.setMember(desc, "configurable", .{ .boolean = a.configurable });
+        return desc;
+    }
+    if (o.getOwn(key)) |v| {
+        const a = o.getAttr(key);
+        return dataDescriptor(self, v, a);
+    }
+    if (o.is_array) {
+        if (std.mem.eql(u8, key, "length"))
+            return dataDescriptor(self, .{ .number = @floatFromInt(o.elements.items.len) }, .{ .writable = true, .enumerable = false, .configurable = false });
+        if (arrayIndexOf(key)) |i| {
+            if (i < o.elements.items.len)
+                return dataDescriptor(self, o.elements.items[i], .{ .writable = true, .enumerable = true, .configurable = true });
+        }
+    }
+    return .undefined;
+}
+
+fn dataDescriptor(self: *Interpreter, v: Value, a: value.PropAttr) HostError!Value {
+    const desc = try self.newObject();
+    try self.setMember(desc, "value", v);
+    try self.setMember(desc, "writable", .{ .boolean = a.writable });
+    try self.setMember(desc, "enumerable", .{ .boolean = a.enumerable });
+    try self.setMember(desc, "configurable", .{ .boolean = a.configurable });
+    return desc;
+}
+
+/// Parse a canonical array index (no leading zeros, < 2^32-1) from a key.
+fn arrayIndexOf(key: []const u8) ?usize {
+    if (key.len == 0) return null;
+    if (key.len > 1 and key[0] == '0') return null;
+    var n: usize = 0;
+    for (key) |c| {
+        if (c < '0' or c > '9') return null;
+        n = n * 10 + (c - '0');
+    }
+    return n;
 }
 
 pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -478,7 +544,7 @@ fn stringifyValue(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), v: Value
                 try buf.append(a, ']');
             } else {
                 try buf.append(a, '{');
-                const keys = try o.ownKeys(a);
+                const keys = try o.enumerableKeys(a); // JSON serializes only enumerable own props
                 var first = true;
                 for (keys) |k| {
                     const pv = try self.getProperty(v, k);

@@ -189,8 +189,10 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const name = chunk.names.items[inst.a];
                 var result: Value = undefined;
                 fast: {
-                    // Inline cache: plain (non-array) objects with a shape.
-                    if (obj == .object and !obj.object.is_array) {
+                    // Inline cache: plain (non-array) objects with a shape and
+                    // no accessor/attribute overrides (those need the full
+                    // [[Get]] path: getters + the prototype walk).
+                    if (obj == .object and !obj.object.is_array and obj.object.accessors == null and obj.object.attrs == null) {
                         const o = obj.object;
                         const ic = &chunk.ics[ip - 1];
                         if (o.shape != null and o.shape == ic.shape) {
@@ -224,7 +226,9 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 fast: {
                     // Inline cache hits only update an existing slot; adding a
                     // property transitions the shape, so it goes the slow path.
-                    if (obj == .object and !obj.object.is_array) {
+                    // Objects with accessor/attribute overrides also take the
+                    // slow path ([[Set]] honors setters + non-writable).
+                    if (obj == .object and !obj.object.is_array and obj.object.accessors == null and obj.object.attrs == null) {
                         const o = obj.object;
                         const ic = &chunk.ics[ip - 1];
                         if (o.shape != null and o.shape == ic.shape) {

@@ -47,6 +47,12 @@ pub const Object = struct {
     /// slot at each level of the prototype walk.
     accessors: ?*std.StringHashMapUnmanaged(Accessor) = null,
     elements: std.ArrayListUnmanaged(Value) = .empty,
+    /// Per-property attribute overrides, lazily allocated. Absent name = the
+    /// all-true default (a plain-assignment property). See `PropAttr`.
+    attrs: ?*std.StringHashMapUnmanaged(PropAttr) = null,
+    /// When false (set by `Object.preventExtensions`/`seal`/`freeze`), new own
+    /// properties can't be added.
+    extensible: bool = true,
     is_array: bool = false,
     callback: ?HostCallback = null,
     native: ?NativeFn = null,
@@ -101,6 +107,35 @@ pub const Object = struct {
         return list.items;
     }
 
+    /// The attributes of own property `name` (all-true default if no override).
+    pub fn getAttr(self: *const Object, name: []const u8) PropAttr {
+        if (self.attrs) |m| {
+            if (m.get(name)) |a| return a;
+        }
+        return .{};
+    }
+
+    /// Record an attribute override for `name`.
+    pub fn setAttr(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
+        if (self.attrs == null) {
+            self.attrs = try arena.create(std.StringHashMapUnmanaged(PropAttr));
+            self.attrs.?.* = .{};
+        }
+        const gop = try self.attrs.?.getOrPut(arena, name);
+        if (!gop.found_existing) gop.key_ptr.* = try arena.dupe(u8, name);
+        gop.value_ptr.* = a;
+    }
+
+    /// Own named data + accessor keys whose [[Enumerable]] is true, in insertion
+    /// order (for `Object.keys`/`values`/`entries`, `for-in`, JSON).
+    pub fn enumerableKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (try self.ownKeys(arena)) |k| {
+            if (self.getAttr(k).enumerable) try list.append(arena, k);
+        }
+        return list.items;
+    }
+
     /// An own accessor (get/set) property, if present.
     pub fn getAccessor(self: *const Object, name: []const u8) ?Accessor {
         const m = self.accessors orelse return null;
@@ -150,6 +185,15 @@ pub const Object = struct {
 
 /// An accessor property: getter and/or setter functions.
 pub const Accessor = struct { get: ?Value = null, set: ?Value = null };
+
+/// A property's [[Writable]]/[[Enumerable]]/[[Configurable]] attributes. The
+/// default (all true) matches a property created by plain assignment, so only
+/// `Object.defineProperty`/`freeze`/etc. allocate an override entry.
+pub const PropAttr = struct {
+    writable: bool = true,
+    enumerable: bool = true,
+    configurable: bool = true,
+};
 
 /// A JavaScript value. Strings and objects point into the Context arena.
 pub const Value = union(enum) {

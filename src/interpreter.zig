@@ -386,7 +386,7 @@ pub const Interpreter = struct {
                             if (self.loopSignal(my_label)) |stop| if (stop) break;
                         }
                     } else {
-                        const keys = try o.ownKeys(self.arena);
+                        const keys = try o.enumerableKeys(self.arena); // for-in skips non-enumerable
                         for (keys) |k| {
                             try self.bindLoopVar(decl_kind, name, .{ .string = k });
                             last = try self.eval(body);
@@ -1320,6 +1320,12 @@ pub const Interpreter = struct {
             }
             cur = c.proto;
         }
+        // [[Set]] attribute checks (sloppy mode: silently ignore on rejection).
+        if (o.getOwn(key)) |_| {
+            if (!o.getAttr(key).writable) return; // non-writable own data property
+        } else if (!o.extensible) {
+            return; // can't add a new property to a non-extensible object
+        }
         try self.setProp(o, key, v);
     }
 
@@ -1406,9 +1412,10 @@ pub const Interpreter = struct {
                     }
                     if (eq(name, "propertyIsEnumerable")) {
                         const k = if (args.len > 0) try args[0].toString(self.arena) else "undefined";
-                        // Own props are enumerable by default (attributes not yet
-                        // modeled); array `length` is the notable non-enumerable.
-                        const enumerable = objectHasOwn(o, k) and !(o.is_array and std.mem.eql(u8, k, "length"));
+                        // Own + enumerable per its attributes; array `length` is
+                        // the notable non-enumerable.
+                        const enumerable = objectHasOwn(o, k) and o.getAttr(k).enumerable and
+                            !(o.is_array and std.mem.eql(u8, k, "length"));
                         return Value{ .boolean = enumerable };
                     }
                     if (eq(name, "isPrototypeOf")) {
@@ -2069,6 +2076,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, object_ns, "create", builtins.objectCreate);
     try setNative(a, root_shape, object_ns, "getPrototypeOf", builtins.objectGetPrototypeOf);
     try setNative(a, root_shape, object_ns, "defineProperty", builtins.objectDefineProperty);
+    try setNative(a, root_shape, object_ns, "getOwnPropertyDescriptor", builtins.objectGetOwnPropertyDescriptor);
     try setNative(a, root_shape, object_ns, "getOwnPropertyNames", builtins.objectGetOwnPropertyNames);
     try setNative(a, root_shape, object_ns, "entries", builtins.objectEntries);
     try setNative(a, root_shape, object_ns, "fromEntries", builtins.objectFromEntries);
