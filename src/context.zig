@@ -91,6 +91,25 @@ pub const Context = struct {
     }
 };
 
+test "Array.prototype generics on array-likes" {
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\var o = { length: 3, 0: 1, 1: 2, 2: 3 };
+        \\Array.prototype.reduce.call(o, function (a, b) { return a + b; }, 0)
+    )).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn(
+        \\var o = { length: 3, 0: 'a', 1: 'b', 2: 'c' };
+        \\Array.prototype.indexOf.call(o, 'b')
+    )).number);
+    try expectEvalStr("a-b-c",
+        \\var o = { length: 3, 0: 'a', 1: 'b', 2: 'c' };
+        \\Array.prototype.join.call(o, '-')
+    );
+    try std.testing.expect((try evalIn(
+        \\var o = { length: 2, 0: 10, 1: 20 };
+        \\Array.prototype.every.call(o, function (x) { return x >= 10; })
+    )).boolean);
+}
+
 test "Array / Object constructors" {
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).number);
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array(1, 2).length")).number);

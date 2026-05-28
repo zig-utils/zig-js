@@ -1544,6 +1544,11 @@ pub const Interpreter = struct {
                 if (o.is_map) return try self.mapMethod(o, name, args);
                 if (o.is_set) return try self.setMethod(o, name, args);
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
+                // Generic Array.prototype methods on an array-like `this`
+                // (`Array.prototype.map.call(obj, …)`).
+                if (o.getOwn(name) == null and isArrayGeneric(name)) {
+                    if (try self.arrayMethod(o, name, args)) |r| return r;
+                }
             },
             .string => |s| return try self.stringMethod(s, name, args),
             .number => |n| return try self.numberMethod(n, name, args),
@@ -1570,8 +1575,32 @@ pub const Interpreter = struct {
         return if (fl > flen) len else @intFromFloat(fl);
     }
 
+    /// Generic read-only Array.prototype methods that work on any array-like
+    /// `this` (e.g. `Array.prototype.map.call(arrayLikeObj, fn)`). Mutators stay
+    /// real-array-only.
+    fn isArrayGeneric(name: []const u8) bool {
+        const names = [_][]const u8{
+            "join",      "indexOf", "lastIndexOf", "includes", "slice", "concat", "map",  "filter",
+            "forEach",   "reduce",  "reduceRight", "some",     "every", "find",   "findIndex", "findLast",
+            "findLastIndex", "at",  "flat",        "flatMap",  "keys",  "values", "entries", "toString",
+        };
+        for (names) |n| if (eq(name, n)) return true;
+        return false;
+    }
+
     fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
-        const items = o.elements.items;
+        // Real arrays use the dense element store directly; an array-like `this`
+        // (via `.call`) materializes its `length`/indexed properties into a
+        // temporary slice so the read-only methods below work unchanged.
+        const items: []Value = if (o.is_array) o.elements.items else blk: {
+            const len = toLen((try self.getProperty(.{ .object = o }, "length")).toNumber());
+            if (len > (1 << 22)) return null; // guard against pathological array-like lengths (OOM)
+            const buf = try self.arena.alloc(Value, len);
+            for (buf, 0..) |*slot, i| {
+                slot.* = try self.getProperty(.{ .object = o }, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+            }
+            break :blk buf;
+        };
         if (eq(name, "push")) {
             for (args) |a| try o.elements.append(self.arena, a);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
