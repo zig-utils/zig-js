@@ -358,36 +358,16 @@ pub const Interpreter = struct {
         const iter = try self.eval(iterable);
         var last: Value = .undefined;
         if (is_of) {
-            switch (iter) {
-                .object => |o| {
-                    if (o.gen != null) {
-                        // Drive the generator: `for (x of gen)` pulls `.next()`
-                        // until `{ done: true }`.
-                        while (true) {
-                            const res = try vm.genNext(self, o, .undefined);
-                            if ((try self.getProperty(res, "done")).toBoolean()) break;
-                            try self.bindLoopTarget(decl_kind, target, try self.getProperty(res, "value"));
-                            last = try self.eval(body);
-                            if (self.loopSignal(my_label)) |stop| if (stop) break;
-                        }
-                    } else if (o.is_array) {
-                        var i: usize = 0;
-                        while (i < o.elements.items.len) : (i += 1) {
-                            try self.bindLoopTarget(decl_kind, target, o.elements.items[i]);
-                            last = try self.eval(body);
-                            if (self.loopSignal(my_label)) |stop| if (stop) break;
-                        }
-                    } else return self.throwError("TypeError", "value is not iterable");
-                },
-                .string => |s| {
-                    for (s) |ch| {
-                        const one = try self.arena.dupe(u8, &.{ch});
-                        try self.bindLoopTarget(decl_kind, target, .{ .string = one });
-                        last = try self.eval(body);
-                        if (self.loopSignal(my_label)) |stop| if (stop) break;
-                    }
-                },
-                else => return self.throwError("TypeError", "value is not iterable"),
+            // Generic iterator protocol: obtain the iterator (generators are
+            // their own; arrays/strings get an index cursor; a user object's
+            // `[Symbol.iterator]()` is honored), then pull `.next()` until done.
+            const iter_obj = try self.iteratorOf(iter);
+            while (true) {
+                const res = try self.callMethod(iter_obj, "next", &.{});
+                if ((try self.getProperty(res, "done")).toBoolean()) break;
+                try self.bindLoopTarget(decl_kind, target, try self.getProperty(res, "value"));
+                last = try self.eval(body);
+                if (self.loopSignal(my_label)) |stop| if (stop) break;
             }
         } else {
             // for-in: enumerate keys (skip null/undefined per spec).
@@ -918,7 +898,14 @@ pub const Interpreter = struct {
     // ---- objects, arrays, members -----------------------------------------
 
     fn memberKey(self: *Interpreter, static: []const u8, computed: ?*Node) EvalError![]const u8 {
-        if (computed) |ce| return (try self.eval(ce)).toString(self.arena);
+        if (computed) |ce| {
+            const k = try self.eval(ce);
+            // A Symbol key uses its unique internal encoding (so symbol-keyed
+            // properties don't collide with string keys and stay out of string
+            // enumeration); other keys coerce to string.
+            if (k == .object and k.object.is_symbol) return k.object.sym_key;
+            return k.toString(self.arena);
+        }
         return static;
     }
 
@@ -1443,6 +1430,14 @@ pub const Interpreter = struct {
         switch (v) {
             .object => |o| {
                 if (o.gen != null) return v;
+                // A user-defined `[Symbol.iterator]()` method takes precedence.
+                if (self.symbolIteratorKey()) |ik| {
+                    if (hasProperty(o, ik)) {
+                        const itfn = try self.getProperty(v, ik);
+                        if (itfn == .object and itfn.object.isCallableObject())
+                            return try self.callValueWithThis(itfn, &.{}, v);
+                    }
+                }
                 if (hasProperty(o, "next")) return v; // already an iterator (manual or generator-like)
                 if (o.is_array) return self.makeCursorIterator(v);
                 return self.throwError("TypeError", "value is not iterable");
@@ -1450,6 +1445,16 @@ pub const Interpreter = struct {
             .string => return self.makeCursorIterator(v),
             else => return self.throwError("TypeError", "value is not iterable"),
         }
+    }
+
+    /// The internal key of the well-known `Symbol.iterator` (from the `Symbol`
+    /// global), for resolving `obj[Symbol.iterator]`.
+    fn symbolIteratorKey(self: *Interpreter) ?[]const u8 {
+        const sym = self.env.get("Symbol") orelse return null;
+        if (sym != .object) return null;
+        const it = sym.object.getOwn("iterator") orelse return null;
+        if (it != .object or !it.object.is_symbol) return null;
+        return it.object.sym_key;
     }
 
     /// Wrap an array/string in an iterator object: `__src` + `__i` own properties
@@ -2376,6 +2381,14 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     number_proto.* = .{ .proto = object_proto };
     try setProtoMethods(a, root_shape, number_proto, &.{ "toString", "toFixed", "valueOf", "toLocaleString" });
     try number_ns.setOwn(a, root_shape, "prototype", .{ .object = number_proto });
+
+    // Symbol — callable (returns a fresh symbol) with the well-known symbols.
+    const symbol_ns = try a.create(value.Object);
+    symbol_ns.* = .{ .native = symbolFn };
+    inline for (.{ "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables" }) |name| {
+        try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name));
+    }
+    try env.put("Symbol", .{ .object = symbol_ns });
 }
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the
@@ -2434,6 +2447,29 @@ fn protoMethod(comptime name: []const u8) value.NativeFn {
 
 fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime names: []const []const u8) EvalError!void {
     inline for (names) |n| try setNative(a, rs, proto, n, protoMethod(n));
+}
+
+/// Monotonic id for unique Symbol property-key encodings (single-threaded;
+/// test262 workers are separate processes).
+var symbol_counter: usize = 0;
+
+/// Create a Symbol object: a tagged object with a unique `sym_key` (a NUL-led
+/// string that can't collide with user property names) and a `description`.
+fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8) EvalError!Value {
+    const o = try a.create(value.Object);
+    o.* = .{ .is_symbol = true };
+    symbol_counter += 1;
+    o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{symbol_counter});
+    try o.setOwn(a, rs, "description", if (desc) |d| .{ .string = d } else .undefined);
+    return .{ .object = o };
+}
+
+/// `Symbol([description])` — returns a fresh unique symbol (not constructable).
+fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const desc: ?[]const u8 = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else null;
+    return makeSymbolObj(self.arena, self.root_shape, desc);
 }
 
 /// Abstract Relational Comparison (subset): string<string is lexicographic,

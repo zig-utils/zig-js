@@ -722,7 +722,10 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Val
             }
         }
         const keys = try o.ownKeys(self.arena);
-        for (keys) |k| try result.object.elements.append(self.arena, .{ .string = k });
+        for (keys) |k| {
+            if (value.isSymbolKey(k)) continue; // symbol keys are excluded from getOwnPropertyNames
+            try result.object.elements.append(self.arena, .{ .string = k });
+        }
     }
     return result;
 }

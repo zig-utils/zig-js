@@ -91,6 +91,31 @@ pub const Context = struct {
     }
 };
 
+test "Symbol: typeof, identity, description, property keys, iterator" {
+    try expectEvalStr("symbol", "typeof Symbol()");
+    try std.testing.expect((try evalIn("var s = Symbol(); s === s && Symbol() !== Symbol()")).boolean);
+    try expectEvalStr("d", "Symbol('d').description");
+    try expectEvalStr("symbol", "typeof Symbol.iterator");
+    // Symbol-keyed property: works, but invisible to string enumeration.
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn(
+        \\var s = Symbol(); var o = { a: 1 }; o[s] = 5;
+        \\o[s]
+    )).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn(
+        \\var s = Symbol(); var o = { a: 1 }; o[s] = 5;
+        \\Object.keys(o).length
+    )).number);
+    // User iterator via Symbol.iterator drives for-of.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn(
+        \\var obj = {};
+        \\obj[Symbol.iterator] = function () {
+        \\  var i = 0;
+        \\  return { next: function () { return i < 3 ? { value: i++, done: false } : { value: undefined, done: true }; } };
+        \\};
+        \\var s = 0; for (var x of obj) { s += x; } s
+    )).number);
+}
+
 test "array literal elision (holes)" {
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("var a = [1, , 3]; a.length")).number);
     try std.testing.expectEqual(@as(f64, 4), (try evalIn("var a = [, , 4]; a[2]")).number);

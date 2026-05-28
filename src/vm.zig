@@ -61,6 +61,14 @@ pub const Generator = struct {
     running: bool = false,
 };
 
+/// Property-key string for a computed index: a Symbol uses its unique internal
+/// encoding (matching the tree-walker's `memberKey`); everything else coerces
+/// to string.
+fn propKey(vm: *Interpreter, key: Value) EvalError![]const u8 {
+    if (key == .object and key.object.is_symbol) return key.object.sym_key;
+    return key.toString(vm.arena);
+}
+
 /// Run `chunk` to completion, returning the program's accumulator (for a
 /// top-level chunk, `frame == null`) or the function's return value. `frame`
 /// is the current activation for `load_local`/`load_upval`.
@@ -177,7 +185,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const key = stack.pop().?;
                 const v = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
-                try vm.setMember(obj, try key.toString(vm.arena), v);
+                try vm.setMember(obj, try propKey(vm, key), v);
             },
             .array_append => {
                 const v = stack.pop().?;
@@ -217,7 +225,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .get_index => {
                 const key = stack.pop().?;
                 const obj = stack.pop().?;
-                try stack.append(vm.arena, try vm.getProperty(obj, try key.toString(vm.arena)));
+                try stack.append(vm.arena, try vm.getProperty(obj, try propKey(vm, key)));
             },
             .set_prop => {
                 const v = stack.pop().?;
@@ -252,7 +260,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const v = stack.pop().?;
                 const key = stack.pop().?;
                 const obj = stack.pop().?;
-                try vm.setMember(obj, try key.toString(vm.arena), v);
+                try vm.setMember(obj, try propKey(vm, key), v);
                 try stack.append(vm.arena, v);
             },
             .instance_of => {

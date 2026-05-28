@@ -53,6 +53,11 @@ pub const Object = struct {
     /// When false (set by `Object.preventExtensions`/`seal`/`freeze`), new own
     /// properties can't be added.
     extensible: bool = true,
+    /// A Symbol (a tagged object so identity `===` and storage reuse the object
+    /// machinery; `typeof` reports "symbol"). `sym_key` is its unique property-key
+    /// encoding (used when a symbol is an object property key).
+    is_symbol: bool = false,
+    sym_key: []const u8 = "",
     is_array: bool = false,
     callback: ?HostCallback = null,
     native: ?NativeFn = null,
@@ -131,6 +136,7 @@ pub const Object = struct {
     pub fn enumerableKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         for (try self.ownKeys(arena)) |k| {
+            if (isSymbolKey(k)) continue; // symbol-keyed props are never string-enumerable
             if (self.getAttr(k).enumerable) try list.append(arena, k);
         }
         return list.items;
@@ -185,6 +191,13 @@ pub const Object = struct {
 
 /// An accessor property: getter and/or setter functions.
 pub const Accessor = struct { get: ?Value = null, set: ?Value = null };
+
+/// A symbol's internal property-key encoding is a NUL-led string, which can't
+/// be produced by user code — so symbol-keyed properties never collide with
+/// string keys and are excluded from string enumeration.
+pub fn isSymbolKey(k: []const u8) bool {
+    return k.len > 0 and k[0] == 0;
+}
 
 /// A property's [[Writable]]/[[Enumerable]]/[[Configurable]] attributes. The
 /// default (all true) matches a property created by plain assignment, so only
@@ -257,7 +270,7 @@ pub const Value = union(enum) {
             .boolean => "boolean",
             .number => "number",
             .string => "string",
-            .object => |o| if (o.isCallableObject()) "function" else "object",
+            .object => |o| if (o.is_symbol) "symbol" else if (o.isCallableObject()) "function" else "object",
         };
     }
 
