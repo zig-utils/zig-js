@@ -181,6 +181,123 @@ pub fn mathMin(ctx: *anyopaque, this: Value, args: []const Value) HostError!Valu
     return .{ .number = m };
 }
 
+/// Build a `Math` native from a plain `f64 -> f64` function (the trig / log /
+/// exp family). Keeps registration to one line each.
+pub fn unaryMath(comptime f: fn (f64) f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = ctx;
+            _ = this;
+            return .{ .number = f(arg(args, 0).toNumber()) };
+        }
+    }.call;
+}
+
+/// f64 wrappers for the unary Math functions (Zig builtins where available,
+/// std.math otherwise).
+pub const mfns = struct {
+    pub fn sin(x: f64) f64 {
+        return @sin(x);
+    }
+    pub fn cos(x: f64) f64 {
+        return @cos(x);
+    }
+    pub fn tan(x: f64) f64 {
+        return std.math.tan(x);
+    }
+    pub fn asin(x: f64) f64 {
+        return std.math.asin(x);
+    }
+    pub fn acos(x: f64) f64 {
+        return std.math.acos(x);
+    }
+    pub fn atan(x: f64) f64 {
+        return std.math.atan(x);
+    }
+    pub fn sinh(x: f64) f64 {
+        return std.math.sinh(x);
+    }
+    pub fn cosh(x: f64) f64 {
+        return std.math.cosh(x);
+    }
+    pub fn tanh(x: f64) f64 {
+        return std.math.tanh(x);
+    }
+    pub fn asinh(x: f64) f64 {
+        return std.math.asinh(x);
+    }
+    pub fn acosh(x: f64) f64 {
+        return std.math.acosh(x);
+    }
+    pub fn atanh(x: f64) f64 {
+        return std.math.atanh(x);
+    }
+    pub fn exp(x: f64) f64 {
+        return @exp(x);
+    }
+    pub fn expm1(x: f64) f64 {
+        return std.math.expm1(x);
+    }
+    pub fn log(x: f64) f64 {
+        return @log(x);
+    }
+    pub fn log2(x: f64) f64 {
+        return @log2(x);
+    }
+    pub fn log10(x: f64) f64 {
+        return @log10(x);
+    }
+    pub fn log1p(x: f64) f64 {
+        return std.math.log1p(x);
+    }
+    pub fn cbrt(x: f64) f64 {
+        return std.math.cbrt(x);
+    }
+    pub fn fround(x: f64) f64 {
+        return @floatCast(@as(f32, @floatCast(x))); // round to nearest float32
+    }
+};
+
+pub fn mathAtan2(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    return .{ .number = std.math.atan2(arg(args, 0).toNumber(), arg(args, 1).toNumber()) };
+}
+
+pub fn mathHypot(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    var sum: f64 = 0;
+    for (args) |v| {
+        const n = v.toNumber();
+        sum += n * n;
+    }
+    return .{ .number = @sqrt(sum) };
+}
+
+pub fn mathClz32(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    return .{ .number = @floatFromInt(@clz(arg(args, 0).toUint32())) };
+}
+
+pub fn mathImul(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const a: i32 = arg(args, 0).toInt32();
+    const b: i32 = arg(args, 1).toInt32();
+    return .{ .number = @floatFromInt(a *% b) };
+}
+
+var math_prng = std.Random.DefaultPrng.init(0x2545F4914F6CDD1D);
+
+pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return .{ .number = math_prng.random().float(f64) };
+}
+
 // ---- Object / Array ----------------------------------------------------
 
 pub fn objectKeys(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
