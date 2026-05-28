@@ -28,6 +28,12 @@ pub const Parser = struct {
     /// Strictness of the most recently parsed function body, read by the caller
     /// to stamp `FunctionNode.is_strict` (since `parseFnBody` restores `strict`).
     last_fn_strict: bool = false,
+    /// Syntactic-context depths for early errors: `return` requires a function,
+    /// unlabeled `break` a loop/switch, unlabeled `continue` a loop. A function
+    /// boundary resets the loop/switch depths (you can't break across it).
+    fn_depth: u32 = 0,
+    iter_depth: u32 = 0,
+    switch_depth: u32 = 0,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
         var lx = lex.Lexer.init(arena, source);
@@ -185,12 +191,16 @@ pub const Parser = struct {
                 _ = self.advance();
                 const label = self.optionalLabel();
                 _ = self.match(.semicolon);
+                // Unlabeled `break` requires an enclosing loop or switch.
+                if (label == null and self.iter_depth == 0 and self.switch_depth == 0) return ParseError.UnexpectedToken;
                 return self.alloc(.{ .break_stmt = label });
             }
             if (std.mem.eql(u8, t.text, "continue")) {
                 _ = self.advance();
                 const label = self.optionalLabel();
                 _ = self.match(.semicolon);
+                // `continue` requires an enclosing loop (labeled or not).
+                if (self.iter_depth == 0) return ParseError.UnexpectedToken;
                 return self.alloc(.{ .continue_stmt = label });
             }
             // Labeled statement: `label: stmt` (identifier directly followed by `:`).
@@ -376,18 +386,25 @@ pub const Parser = struct {
         return self.alloc(.{ .if_stmt = .{ .cond = cond, .consequent = cons, .alternate = alt } });
     }
 
+    /// Parse a loop body, tracking that `break`/`continue` are now legal.
+    fn parseLoopBody(self: *Parser) ParseError!*Node {
+        self.iter_depth += 1;
+        defer self.iter_depth -= 1;
+        return self.parseStatement();
+    }
+
     fn parseWhile(self: *Parser) ParseError!*Node {
         _ = self.advance(); // while
         try self.expect(.lparen);
         const cond = try self.parseExpression();
         try self.expect(.rparen);
-        const body = try self.parseStatement();
+        const body = try self.parseLoopBody();
         return self.alloc(.{ .while_stmt = .{ .cond = cond, .body = body } });
     }
 
     fn parseDoWhile(self: *Parser) ParseError!*Node {
         _ = self.advance(); // do
-        const body = try self.parseStatement();
+        const body = try self.parseLoopBody();
         if (!isKeyword(self.cur(), "while")) return ParseError.ExpectedToken;
         _ = self.advance(); // while
         try self.expect(.lparen);
@@ -429,7 +446,7 @@ pub const Parser = struct {
                 // `for-in` takes an Expression, `for-of` an AssignmentExpression.
                 const iterable = if (is_of) try self.parseAssignment() else try self.parseExpression();
                 try self.expect(.rparen);
-                const body = try self.parseStatement();
+                const body = try self.parseLoopBody();
                 return self.alloc(.{ .for_in = .{
                     .decl_kind = decl_kind,
                     .target = target,
@@ -460,7 +477,7 @@ pub const Parser = struct {
         var update: ?*Node = null;
         if (!self.check(.rparen)) update = try self.parseExpression();
         try self.expect(.rparen);
-        const body = try self.parseStatement();
+        const body = try self.parseLoopBody();
         return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
     }
 
@@ -489,6 +506,9 @@ pub const Parser = struct {
         const disc = try self.parseExpression();
         try self.expect(.rparen);
         try self.expect(.lbrace);
+        // Inside a switch, unlabeled `break` is legal (but not `continue`).
+        self.switch_depth += 1;
+        defer self.switch_depth -= 1;
         var cases: std.ArrayListUnmanaged(ast.SwitchCase) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             var test_expr: ?*Node = null;
@@ -513,6 +533,8 @@ pub const Parser = struct {
     }
 
     fn parseReturn(self: *Parser) ParseError!*Node {
+        // `return` is only valid inside a function body.
+        if (self.fn_depth == 0) return ParseError.UnexpectedToken;
         _ = self.advance(); // return
         var arg: ?*Node = null;
         if (!self.check(.semicolon) and !self.check(.rbrace) and !self.check(.eof)) {
@@ -619,8 +641,15 @@ pub const Parser = struct {
         const saved_gen = self.in_generator;
         const saved_async = self.in_async;
         const saved_strict = self.strict;
+        const saved_iter = self.iter_depth;
+        const saved_switch = self.switch_depth;
         self.in_generator = is_gen;
         self.in_async = is_async;
+        // A function body opens a fresh control-flow context: `return` is now
+        // legal and `break`/`continue` can't target an outer loop/switch.
+        self.fn_depth += 1;
+        self.iter_depth = 0;
+        self.switch_depth = 0;
         // A function is strict if it lexically inherits strictness or its own
         // body opens with a `"use strict"` directive prologue. Detect it up
         // front so nested functions parsed within inherit correctly.
@@ -630,6 +659,9 @@ pub const Parser = struct {
             self.in_generator = saved_gen;
             self.in_async = saved_async;
             self.strict = saved_strict;
+            self.fn_depth -= 1;
+            self.iter_depth = saved_iter;
+            self.switch_depth = saved_switch;
         }
         return self.parseBlock();
     }
@@ -828,10 +860,18 @@ pub const Parser = struct {
         // `async () => …` is recognized), restored on exit.
         const saved_async = self.in_async;
         const saved_strict = self.strict;
+        const saved_iter = self.iter_depth;
+        const saved_switch = self.switch_depth;
         self.in_async = is_async;
+        self.fn_depth += 1;
+        self.iter_depth = 0;
+        self.switch_depth = 0;
         defer {
             self.in_async = saved_async;
             self.strict = saved_strict;
+            self.fn_depth -= 1;
+            self.iter_depth = saved_iter;
+            self.switch_depth = saved_switch;
         }
         if (self.check(.lbrace)) {
             self.strict = saved_strict or self.peekUseStrict();
