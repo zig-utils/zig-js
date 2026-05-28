@@ -1633,6 +1633,97 @@ pub const Interpreter = struct {
             }
             return Value{ .object = o };
         }
+        if (eq(name, "splice")) {
+            const len = items.len;
+            const start = relIndex(arg0(args), len, 0);
+            const del: usize = if (args.len <= 1) len - start else blk: {
+                const d = arg(args, 1).toNumber();
+                if (std.math.isNan(d) or d <= 0) break :blk 0;
+                const du: usize = if (d > @as(f64, @floatFromInt(len))) len else @intFromFloat(@trunc(d));
+                break :blk if (start + du > len) len - start else du;
+            };
+            const removed = try self.newArray();
+            var i: usize = 0;
+            while (i < del) : (i += 1) try removed.object.elements.append(self.arena, items[start + i]);
+            i = 0;
+            while (i < del) : (i += 1) _ = o.elements.orderedRemove(start);
+            const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
+            var j: usize = inserts.len;
+            while (j > 0) : (j -= 1) try o.elements.insert(self.arena, start, inserts[j - 1]);
+            return removed;
+        }
+        if (eq(name, "copyWithin")) {
+            const len = items.len;
+            const target = relIndex(arg0(args), len, 0);
+            const start = relIndex(arg(args, 1), len, 0);
+            const end = relIndex(arg(args, 2), len, @floatFromInt(len));
+            const count = @min(if (end > start) end - start else 0, len - target);
+            const tmp = try self.arena.alloc(Value, count);
+            var i: usize = 0;
+            while (i < count) : (i += 1) tmp[i] = items[start + i];
+            i = 0;
+            while (i < count) : (i += 1) items[target + i] = tmp[i];
+            return Value{ .object = o };
+        }
+        if (eq(name, "reduceRight")) {
+            const cb = arg0(args);
+            var acc: Value = if (args.len > 1) args[1] else .undefined;
+            var has_acc = args.len > 1;
+            var i: usize = items.len;
+            while (i > 0) {
+                i -= 1;
+                if (!has_acc) {
+                    acc = items[i];
+                    has_acc = true;
+                    continue;
+                }
+                acc = try self.callValue(cb, &.{ acc, items[i], .{ .number = @floatFromInt(i) }, .{ .object = o } });
+            }
+            if (!has_acc) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+            return acc;
+        }
+        if (eq(name, "flatMap")) {
+            const cb = arg0(args);
+            const result = try self.newArray();
+            for (items, 0..) |el, i| {
+                const m = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
+                if (m == .object and m.object.is_array) {
+                    for (m.object.elements.items) |e2| try result.object.elements.append(self.arena, e2);
+                } else try result.object.elements.append(self.arena, m);
+            }
+            return result;
+        }
+        if (eq(name, "findLast") or eq(name, "findLastIndex")) {
+            const want_index = eq(name, "findLastIndex");
+            const cb = arg0(args);
+            var i: usize = items.len;
+            while (i > 0) {
+                i -= 1;
+                if ((try self.callValue(cb, &.{ items[i], .{ .number = @floatFromInt(i) }, .{ .object = o } })).toBoolean())
+                    return if (want_index) Value{ .number = @floatFromInt(i) } else items[i];
+            }
+            return if (want_index) Value{ .number = -1 } else .undefined;
+        }
+        if (eq(name, "values")) return try self.iteratorOf(.{ .object = o });
+        if (eq(name, "keys")) {
+            const arr = try self.newArray();
+            for (0..items.len) |i| try arr.object.elements.append(self.arena, .{ .number = @floatFromInt(i) });
+            return try self.iteratorOf(arr);
+        }
+        if (eq(name, "entries")) {
+            const arr = try self.newArray();
+            for (items, 0..) |el, i| {
+                const pair = try self.newArray();
+                try pair.object.elements.append(self.arena, .{ .number = @floatFromInt(i) });
+                try pair.object.elements.append(self.arena, el);
+                try arr.object.elements.append(self.arena, pair);
+            }
+            return try self.iteratorOf(arr);
+        }
+        if (eq(name, "toString")) {
+            // Array.prototype.toString delegates to join with ",".
+            return try self.arrayMethod(o, "join", &.{});
+        }
         return null;
     }
 
