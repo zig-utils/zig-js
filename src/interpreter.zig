@@ -1545,10 +1545,45 @@ pub const Interpreter = struct {
     fn destructureArray(self: *Interpreter, elems: []ast.ArrPatElem, rest: ?*Node, val: Value, declare: bool) EvalError!void {
         if (val == .undefined or val == .null)
             return self.throwError("TypeError", "cannot destructure null or undefined");
-        var idx: usize = 0;
+
+        // Fast path: a real array or a string — index directly, no iterator
+        // object churn.
+        if ((val == .object and val.object.is_array) or val == .string) {
+            var idx: usize = 0;
+            for (elems) |elem| {
+                var v = try self.elementAt(val, idx);
+                idx += 1;
+                if (elem.target) |t| {
+                    if (v == .undefined) {
+                        if (elem.default) |d| v = try self.eval(d);
+                    }
+                    try self.bindPattern(t, v, declare);
+                }
+            }
+            if (rest) |rest_target| {
+                const rest_arr = try self.newArray();
+                const len = iterableLen(val);
+                while (idx < len) : (idx += 1) {
+                    try rest_arr.object.elements.append(self.arena, try self.elementAt(val, idx));
+                }
+                try self.bindPattern(rest_target, rest_arr, declare);
+            }
+            return;
+        }
+
+        // General path: drive the iterator protocol, so array destructuring
+        // works over generators, Set/Map, the `arguments` object, and any user
+        // value with `[Symbol.iterator]`. `iteratorOf` throws the spec's
+        // TypeError for a genuinely non-iterable value (e.g. a number or a
+        // plain object), so destructuring those still fails the right way.
+        const iter_obj = try self.iteratorOf(val);
+        var done = false;
         for (elems) |elem| {
-            var v = try self.elementAt(val, idx);
-            idx += 1;
+            var v: Value = .undefined;
+            if (!done) {
+                const res = try self.callMethod(iter_obj, "next", &.{});
+                if ((try self.getProperty(res, "done")).toBoolean()) done = true else v = try self.getProperty(res, "value");
+            }
             if (elem.target) |t| {
                 if (v == .undefined) {
                     if (elem.default) |d| v = try self.eval(d);
@@ -1558,9 +1593,10 @@ pub const Interpreter = struct {
         }
         if (rest) |rest_target| {
             const rest_arr = try self.newArray();
-            const len = iterableLen(val);
-            while (idx < len) : (idx += 1) {
-                try rest_arr.object.elements.append(self.arena, try self.elementAt(val, idx));
+            while (!done) {
+                const res = try self.callMethod(iter_obj, "next", &.{});
+                if ((try self.getProperty(res, "done")).toBoolean()) break;
+                try rest_arr.object.elements.append(self.arena, try self.getProperty(res, "value"));
             }
             try self.bindPattern(rest_target, rest_arr, declare);
         }
@@ -1743,7 +1779,9 @@ pub const Interpreter = struct {
                     }
                 }
                 if (hasProperty(o, "next")) return v; // already an iterator (manual or generator-like)
-                if (o.is_array) return self.makeCursorIterator(v);
+                // Arrays, Sets (element = value) and Maps (element = [k,v] pair)
+                // all iterate their dense `elements` store via an index cursor.
+                if (o.is_array or o.is_set or o.is_map) return self.makeCursorIterator(v);
                 return self.throwError("TypeError", "value is not iterable");
             },
             .string => return self.makeCursorIterator(v),
@@ -1758,7 +1796,8 @@ pub const Interpreter = struct {
         switch (v) {
             .string => return true,
             .object => |o| {
-                if (o.is_array or o.gen != null) return true;
+                if (o.is_array or o.is_set or o.is_map or o.gen != null) return true;
+                if (hasProperty(o, "next")) return true; // a manual iterator object
                 if (self.symbolIteratorKey()) |ik| return hasProperty(o, ik);
                 return false;
             },
@@ -2966,7 +3005,8 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     var done = true;
     var val: Value = .undefined;
     switch (src) {
-        .object => |so| if (so.is_array and i < so.elements.items.len) {
+        // Arrays/Sets yield each element; Maps yield each stored `[k,v]` pair.
+        .object => |so| if ((so.is_array or so.is_set or so.is_map) and i < so.elements.items.len) {
             val = so.elements.items[i];
             done = false;
         },

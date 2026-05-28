@@ -822,6 +822,50 @@ test "async: calling an async function throws (runtime not yet implemented)" {
     )).boolean);
 }
 
+test "array destructuring over the iterator protocol (generator, Set, string, rest)" {
+    // Generator.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn(
+        \\function* g() { yield 1; yield 2; }
+        \\var [a, b] = g(); a + b
+    )).number);
+    // Set (iterable, not array).
+    try std.testing.expectEqual(@as(f64, 30), (try evalIn(
+        \\var [a, b] = new Set([10, 20]); a + b
+    )).number);
+    // Rest collects the tail of a generator.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\function* g() { yield 1; yield 2; yield 3; }
+        \\var [first, ...rest] = g(); rest.length
+    )).number);
+    // Default applies when the iterator runs dry.
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn(
+        \\function* g() { yield 1; }
+        \\var [a, b = 9] = g(); b
+    )).number);
+    // Destructuring a non-iterable still throws a TypeError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { var [x] = 5; } catch (e) { t = e instanceof TypeError; }
+        \\t
+    )).boolean);
+}
+
+test "Set/Map are iterable: for-of, spread, Array.from, destructuring" {
+    // for-of over a Set.
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\var s = 0; for (var x of new Set([1, 2, 3])) s += x; s
+    )).number);
+    // Spread a Set into an array.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("[...new Set([1, 2, 2, 3])].length")).number);
+    // Map yields [k, v] pairs; destructure them in a for-of head.
+    try std.testing.expectEqual(@as(f64, 33), (try evalIn(
+        \\var m = new Map(); m.set('a', 11); m.set('b', 22);
+        \\var t = 0; for (var [k, v] of m) t += v; t
+    )).number);
+    // Array.from over a Set.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array.from(new Set([5, 5, 9])).length")).number);
+}
+
 test "eval: direct eval runs in the caller's scope" {
     // Returns the completion value of the program.
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("eval('1 + 2')")).number);
