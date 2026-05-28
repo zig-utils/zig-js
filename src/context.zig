@@ -938,6 +938,34 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "array index property attributes (defineProperty honors writable/enumerable)" {
+    // Default array element descriptor is all-true.
+    try std.testing.expect((try evalIn(
+        \\var a = [10];
+        \\var d = Object.getOwnPropertyDescriptor(a, 0);
+        \\d.value === 10 && d.writable && d.enumerable && d.configurable
+    )).boolean);
+    // defineProperty can make an element non-writable; a sloppy write is a no-op.
+    try std.testing.expectEqual(@as(f64, 10), (try evalIn(
+        \\var a = [10];
+        \\Object.defineProperty(a, 0, { writable: false });
+        \\a[0] = 99; a[0]
+    )).number);
+    // The recorded descriptor is reflected.
+    try std.testing.expect((try evalIn(
+        \\var a = [10];
+        \\Object.defineProperty(a, 0, { writable: false, enumerable: false });
+        \\var d = Object.getOwnPropertyDescriptor(a, 0);
+        \\!d.writable && !d.enumerable
+    )).boolean);
+    // defineProperty can set a new value on a configurable element.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\var a = [1];
+        \\Object.defineProperty(a, 0, { value: 7 });
+        \\a[0]
+    )).number);
+}
+
 test "sloppy-mode property set on a primitive is a no-op; null/undefined throws" {
     // No-op on a primitive: doesn't throw, doesn't store.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("var n = 5; n.foo = 1; n.foo === undefined ? 1 : 0")).number);

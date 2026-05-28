@@ -575,6 +575,35 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
 fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d: *value.Object) HostError!void {
     const get = d.getOwn("get");
     const set = d.getOwn("set");
+    // Array index with a data descriptor: keep the value in the dense element
+    // store and record its attributes in the string-keyed `attrs` map (so
+    // reads/writes/getOwnPropertyDescriptor agree), rather than splitting it
+    // into the named-property store. Accessor descriptors on an index, huge or
+    // gappy indices, and `length` fall through to the generic path below.
+    if (target.is_array and get == null and set == null and !std.mem.eql(u8, key, "length")) {
+        if (arrayIndexOf(key)) |i| {
+            if (i <= target.elements.items.len + 1024 and i < (1 << 24)) {
+                const within = i < target.elements.items.len;
+                const cur_attr = target.getAttr(key);
+                if (within and !cur_attr.configurable) {
+                    try rejectIncompatibleRedefine(self, cur_attr, target.elements.items[i], null, d);
+                } else if (!within and !target.extensible) {
+                    return self.throwError("TypeError", "Cannot define property, object is not extensible");
+                }
+                while (target.elements.items.len <= i) try target.elements.append(self.arena, .undefined);
+                if (d.getOwn("value")) |val| target.elements.items[i] = val;
+                // Omitted fields keep the current value when redefining an
+                // existing element (implicitly all-true), else default to false.
+                var attr: value.PropAttr = if (within) cur_attr else .{ .writable = false, .enumerable = false, .configurable = false };
+                if (d.getOwn("writable")) |w| attr.writable = w.toBoolean();
+                if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
+                if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
+                try target.setAttr(self.arena, key, attr);
+                if (i >= target.array_len) target.array_len = i + 1;
+                return;
+            }
+        }
+    }
     const cur_data = target.getOwn(key);
     const cur_acc = target.getAccessor(key);
     const exists = cur_data != null or cur_acc != null;
@@ -837,8 +866,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         if (std.mem.eql(u8, key, "length"))
             return dataDescriptor(self, .{ .number = @floatFromInt(o.elements.items.len) }, .{ .writable = true, .enumerable = false, .configurable = false });
         if (arrayIndexOf(key)) |i| {
+            // Per-index attributes recorded by `defineProperty` override the
+            // all-true default for a dense element.
             if (i < o.elements.items.len)
-                return dataDescriptor(self, o.elements.items[i], .{ .writable = true, .enumerable = true, .configurable = true });
+                return dataDescriptor(self, o.elements.items[i], o.getAttr(key));
         }
     }
     return .undefined;

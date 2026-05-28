@@ -1757,6 +1757,9 @@ pub const Interpreter = struct {
                 return;
             }
             if (arrayIndex(key)) |i| {
+                // A per-index descriptor (recorded in `attrs`) may mark the
+                // element non-writable; in sloppy mode the write is a no-op.
+                if (o.attrs != null and !o.getAttr(key).writable) return;
                 if (i < o.elements.items.len) {
                     o.elements.items[i] = v;
                     return;
