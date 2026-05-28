@@ -372,6 +372,34 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "Object.create applies its properties (second) argument" {
+    // Data descriptor on the new object.
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn(
+        \\var o = Object.create({}, { x: { value: 42, enumerable: true } });
+        \\o.x
+    )).number);
+    // Accessor descriptor.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\var o = Object.create(null, { a: { get: function () { return 7; }, enumerable: true } });
+        \\o.a
+    )).number);
+    // Descriptor attributes are honored (non-enumerable stays off Object.keys).
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn(
+        \\var o = Object.create({}, { a: { value: 1, enumerable: false } });
+        \\Object.keys(o).length
+    )).number);
+    // The prototype argument still wires up the chain; omitted props is a no-op.
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn(
+        \\var p = { v: 5 }; var o = Object.create(p); o.v
+    )).number);
+    // A non-object descriptor value throws TypeError, like defineProperties.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { Object.create({}, { x: 1 }); } catch (e) { t = e.name === "TypeError"; }
+        \\t
+    )).boolean);
+}
+
 test "new on a non-constructor built-in throws TypeError" {
     // Methods, statics, globals and Symbol are not constructors.
     for ([_][]const u8{

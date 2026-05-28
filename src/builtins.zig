@@ -500,6 +500,9 @@ pub fn objectCreate(ctx: *anyopaque, this: Value, args: []const Value) HostError
         .null => obj.proto = null,
         else => return self.throwError("TypeError", "Object prototype may only be an Object or null"),
     }
+    // The optional second argument is a Properties object processed exactly like
+    // `Object.defineProperties` (skipped only when undefined).
+    if (arg(args, 1) != .undefined) try applyProperties(self, obj, arg(args, 1));
     return .{ .object = obj };
 }
 
@@ -540,15 +543,20 @@ pub fn objectDefineProperties(ctx: *anyopaque, this: Value, args: []const Value)
     const self = interp(ctx);
     const target = arg(args, 0);
     if (target != .object) return self.throwError("TypeError", "Object.defineProperties called on non-object");
-    const props = arg(args, 1);
-    if (props == .object) {
-        for (try props.object.enumerableKeys(self.arena)) |k| {
-            const d = props.object.getOwn(k) orelse continue;
-            if (d != .object) return self.throwError("TypeError", "Property description must be an object");
-            try defineOne(self, target.object, k, d.object);
-        }
-    }
+    try applyProperties(self, target.object, arg(args, 1));
     return target;
+}
+
+/// Apply each enumerable own property of `props` to `target` as a descriptor —
+/// the shared core of `Object.defineProperties` and `Object.create`'s second
+/// argument. Each value must itself be an object (a property descriptor).
+fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) HostError!void {
+    if (props != .object) return;
+    for (try props.object.enumerableKeys(self.arena)) |k| {
+        const d = props.object.getOwn(k) orelse continue;
+        if (d != .object) return self.throwError("TypeError", "Property description must be an object");
+        try defineOne(self, target, k, d.object);
+    }
 }
 
 pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
