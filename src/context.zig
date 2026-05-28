@@ -372,6 +372,30 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "new on a non-constructor built-in throws TypeError" {
+    // Methods, statics, globals and Symbol are not constructors.
+    for ([_][]const u8{
+        "new Object.keys({})",
+        "new Math.max(1)",
+        "new parseInt('1')",
+        "new Array.from([])",
+        "new Symbol()",
+        "new [].push",
+    }) |src| {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        try std.testing.expectError(error.Throw, ctx.evaluate(src));
+        try std.testing.expect(ctx.exception.?.object.is_error);
+        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.object.error_name);
+    }
+    // The real constructors still build instances.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(0).getTime()")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Map().size")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("new Number(5).valueOf()")).number);
+    try std.testing.expect((try evalIn("typeof new Object() === 'object'")).boolean);
+}
+
 test "Function.prototype: call / apply / bind" {
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\function add(a, b) { return a + b; }

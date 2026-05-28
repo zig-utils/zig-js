@@ -64,6 +64,12 @@ pub const Object = struct {
     is_array: bool = false,
     callback: ?HostCallback = null,
     native: ?NativeFn = null,
+    /// For a `native` function, whether it implements [[Construct]] — i.e. is
+    /// `new`-able. Most built-ins are *not* constructors (methods, `Math.*`,
+    /// `parseInt`, `Symbol`, …); only the handful that the spec defines as
+    /// constructors (`Array`, `Object`, `Map`, `RegExp`, …) set this, so
+    /// `new Object.keys()` / `new Symbol()` throw a TypeError as required.
+    native_ctor: bool = false,
     /// `*Interpreter.Function`, type-erased to break the value↔interpreter
     /// import cycle. The interpreter casts it back when calling.
     js_func: ?*anyopaque = null,

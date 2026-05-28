@@ -904,7 +904,11 @@ pub const Interpreter = struct {
             return self.construct(bf.target, try self.concatArgs(bf.args, args));
         }
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
-        if (obj.native) |nf| return nf(@ptrCast(self), .undefined, args); // native ctor (RegExp, ...)
+        if (obj.native) |nf| {
+            // Most built-ins aren't constructors; only flagged ones are `new`-able.
+            if (!obj.native_ctor) return self.throwError("TypeError", "value is not a constructor");
+            return nf(@ptrCast(self), .undefined, args); // native ctor (Array, Map, RegExp, ...)
+        }
         if (obj.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             const this_val = try self.newInstance(obj);
@@ -2482,23 +2486,23 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
     try defineGlobalFn(env, root_shape, "isNaN", 1, builtins.isNaNFn);
     try defineGlobalFn(env, root_shape, "isFinite", 1, builtins.isFiniteFn);
-    try defineGlobalFn(env, root_shape, "RegExp", 2, builtins.regExpFn);
-    try defineGlobalFn(env, root_shape, "Map", 0, builtins.mapFn);
-    try defineGlobalFn(env, root_shape, "Set", 0, builtins.setFn);
-    try defineGlobalFn(env, root_shape, "WeakMap", 0, builtins.mapFn);
-    try defineGlobalFn(env, root_shape, "WeakSet", 0, builtins.setFn);
-    try defineGlobalFn(env, root_shape, "Boolean", 1, builtins.booleanFn);
+    try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
+    try defineGlobalFnC(env, root_shape, "Map", 0, true, builtins.mapFn);
+    try defineGlobalFnC(env, root_shape, "Set", 0, true, builtins.setFn);
+    try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.mapFn);
+    try defineGlobalFnC(env, root_shape, "WeakSet", 0, true, builtins.setFn);
+    try defineGlobalFnC(env, root_shape, "Boolean", 1, true, builtins.booleanFn);
 
     // String — callable, with statics.
     const string_ns = try a.create(value.Object);
-    string_ns.* = .{ .native = builtins.stringFn };
+    string_ns.* = .{ .native = builtins.stringFn, .native_ctor = true };
     try installNativeProps(a, root_shape, string_ns, "String", 1);
     try setNative(a, root_shape, string_ns, "fromCharCode", 1, builtins.stringFromCharCode);
     try env.put("String", .{ .object = string_ns });
 
     // Number — callable, with statics and constants.
     const number_ns = try a.create(value.Object);
-    number_ns.* = .{ .native = builtins.numberFn };
+    number_ns.* = .{ .native = builtins.numberFn, .native_ctor = true };
     try installNativeProps(a, root_shape, number_ns, "Number", 1);
     try setNative(a, root_shape, number_ns, "isInteger", 1, builtins.numberIsInteger);
     try setNative(a, root_shape, number_ns, "isSafeInteger", 1, builtins.numberIsSafeInteger);
@@ -2573,7 +2577,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 
     // Object namespace.
     const object_ns = try a.create(value.Object);
-    object_ns.* = .{ .native = builtins.objectConstructor };
+    object_ns.* = .{ .native = builtins.objectConstructor, .native_ctor = true };
     try installNativeProps(a, root_shape, object_ns, "Object", 1);
     try setNative(a, root_shape, object_ns, "keys", 1, builtins.objectKeys);
     try setNative(a, root_shape, object_ns, "values", 1, builtins.objectValues);
@@ -2600,7 +2604,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 
     // Array namespace (callable constructor + isArray/of/from).
     const array_ns = try a.create(value.Object);
-    array_ns.* = .{ .native = builtins.arrayConstructor };
+    array_ns.* = .{ .native = builtins.arrayConstructor, .native_ctor = true };
     try installNativeProps(a, root_shape, array_ns, "Array", 1);
     try setNative(a, root_shape, array_ns, "isArray", 1, builtins.arrayIsArray);
     try setNative(a, root_shape, array_ns, "of", 0, builtins.arrayOf);
@@ -2678,7 +2682,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 
     // Date — callable + constructable, with Date.now and a prototype.
     const date_ns = try a.create(value.Object);
-    date_ns.* = .{ .native = dateConstructor };
+    date_ns.* = .{ .native = dateConstructor, .native_ctor = true };
     try installNativeProps(a, root_shape, date_ns, "Date", 7);
     try setNative(a, root_shape, date_ns, "now", 0, dateNow);
     const date_proto = try a.create(value.Object);
@@ -2764,8 +2768,12 @@ fn installNativeProps(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, name
 }
 
 fn defineGlobalFn(env: *Environment, rs: *Shape, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
+    try defineGlobalFnC(env, rs, name, len, false, f);
+}
+
+fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, is_ctor: bool, f: value.NativeFn) EvalError!void {
     const o = try env.arena.create(value.Object);
-    o.* = .{ .native = f };
+    o.* = .{ .native = f, .native_ctor = is_ctor };
     try installNativeProps(env.arena, rs, o, name, len);
     try env.put(name, .{ .object = o });
 }
