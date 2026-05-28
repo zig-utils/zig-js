@@ -961,6 +961,9 @@ test "ToPrimitive: own valueOf/toString in arithmetic, string, relational" {
     try expectEvalStr("1,2,3", "'' + [1, 2, 3]");
     try expectEvalStr("[object Object]x", "({}) + 'x'");
     try std.testing.expect((try evalIn("var o = { valueOf: function () { return 5; } }; o < 6")).boolean);
+    // A class's prototype valueOf/toString is honored too.
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn("class C { valueOf() { return 5; } } new C() + 1")).number);
+    try expectEvalStr("C!", "class C { toString() { return 'C'; } } new C() + '!'");
 }
 
 test "class methods/accessors/constructor are non-enumerable" {

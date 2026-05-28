@@ -2823,21 +2823,37 @@ pub const Interpreter = struct {
     pub fn toPrimitive(self: *Interpreter, v: Value, hint: enum { default, number, string }) EvalError!Value {
         if (v != .object or v.object.is_symbol) return v;
         const o = v.object;
-        // Honor a user-supplied (own) valueOf/toString — the common
-        // `{ valueOf() { … } }` case — in the hint's order; the first primitive
-        // result wins.
+        // Honor a *user-defined* valueOf/toString (a JS function found on the
+        // object or its prototype chain — e.g. `{ valueOf() {…} }` or a class
+        // method) in the hint's order; the first primitive result wins. The
+        // engine's built-in `valueOf`/`toString` (native prototype thunks) are
+        // skipped here — falling through to the built-in coercion below — which
+        // also avoids looping back through method dispatch.
         const names: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
         for (names) |m| {
-            if (o.getOwn(m)) |fnv| {
-                if (fnv == .object and fnv.object.isCallableObject()) {
-                    const res = try self.callValueWithThis(fnv, &.{}, v);
-                    if (res != .object) return res;
-                }
+            if (userMethodOf(o, m)) |fnv| {
+                const res = try self.callValueWithThis(fnv, &.{}, v);
+                if (res != .object) return res;
             }
         }
-        // No own override → the engine's built-in coercion: arrays join, errors
+        // No user override → the engine's built-in coercion: arrays join, errors
         // render "Name: message", plain objects "[object Object]", etc.
         return .{ .string = try v.toString(self.arena) };
+    }
+
+    /// A *user-defined* `name` method on `o`'s own properties or prototype chain
+    /// — a JS function (`js_func`), not one of the engine's native built-in
+    /// prototype thunks (calling those would loop back through dispatch). The
+    /// nearest definition shadows: if it's a native thunk we stop and report
+    /// none, so ToPrimitive uses the built-in coercion instead.
+    fn userMethodOf(o: *value.Object, name: []const u8) ?Value {
+        var cur: ?*value.Object = o;
+        while (cur) |c| : (cur = c.proto) {
+            if (c.getOwn(name)) |fv| {
+                return if (fv == .object and fv.object.js_func != null) fv else null;
+            }
+        }
+        return null;
     }
 
     pub fn applyBinary(self: *Interpreter, op_in: ast.BinaryOp, l_in: Value, r_in: Value) EvalError!Value {
