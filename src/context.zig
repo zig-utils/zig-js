@@ -42,12 +42,22 @@ pub const Context = struct {
             .root_shape = try Shape.createRoot(a),
         };
         try interp.installGlobals(&self.env, self.root_shape);
+        // `globalThis` names the global object itself.
+        try self.env.put("globalThis", .{ .object = global_obj });
         return self;
     }
 
     /// An interpreter bound to this context's arena, globals, and shape tree.
+    /// Top-level `this` is the global object (so `this`/`globalThis` are real
+    /// objects and reflection over the global works).
     pub fn interpreter(self: *Context) interp.Interpreter {
-        return .{ .arena = self.arena(), .env = &self.env, .root_shape = self.root_shape };
+        return .{
+            .arena = self.arena(),
+            .env = &self.env,
+            .global_object = self.global_object,
+            .this_value = .{ .object = self.global_object },
+            .root_shape = self.root_shape,
+        };
     }
 
     pub fn destroy(self: *Context) void {

@@ -118,6 +118,10 @@ const Signal = enum { none, ret, brk, cont };
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     env: *Environment,
+    /// The context's global object — the value of `globalThis` and of top-level
+    /// `this`. Global `var`/function bindings also surface as its properties, so
+    /// `this.x`, `"x" in globalThis`, and reflection over the global all work.
+    global_object: ?*value.Object = null,
     /// The Context's empty root shape — the origin of every object's shape
     /// transition chain (see shape.zig).
     root_shape: *Shape,
@@ -1514,6 +1518,24 @@ pub const Interpreter = struct {
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         switch (recv) {
             .object => |o| {
+                // A (non-arrow) function's `.prototype` is an own data property,
+                // materialized lazily on first access — every [[Construct]]-able
+                // function has one, with a `constructor` back-reference. Without
+                // this a plain `Test262Error.prototype.toString = …` (and any
+                // `f.prototype.x = …`) read undefined and threw.
+                if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null) {
+                    if (funcOf(recv)) |f| {
+                        if (!f.is_arrow) {
+                            const proto = try self.protoObject(o);
+                            // `Ctor.prototype` is { writable, !enumerable, !configurable };
+                            // its `constructor` back-link is { writable, !enumerable, configurable }.
+                            try o.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
+                            try self.setProp(proto, "constructor", recv);
+                            try proto.setAttr(self.arena, "constructor", .{ .writable = true, .enumerable = false, .configurable = true });
+                            return .{ .object = proto };
+                        }
+                    }
+                }
                 if (o.is_array) {
                     if (std.mem.eql(u8, key, "length"))
                         return .{ .number = @floatFromInt(@max(o.elements.items.len, o.array_len)) };
@@ -1531,6 +1553,12 @@ pub const Interpreter = struct {
                     }
                     if (c.getOwn(key)) |v| return v;
                     cur = c.proto;
+                }
+                // On the global object, an absent own property falls back to the
+                // global lexical bindings, so `globalThis.Math`, `this.parseInt`,
+                // etc. resolve to the installed globals.
+                if (self.global_object != null and o == self.global_object.?) {
+                    if (rootEnv(self.env).get(key)) |v| return v;
                 }
                 // `.constructor` falls back to the kind's global constructor
                 // (we don't wire instance prototypes yet).
@@ -2927,11 +2955,13 @@ pub const Interpreter = struct {
         if (r != .object) return self.throwError("TypeError", "cannot use 'in' on a non-object");
         const o = r.object;
         const key = try l.toString(self.arena);
-        if (o.getOwn(key) != null) return true;
+        if (hasProperty(o, key)) return true;
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) return true;
             if (arrayIndex(key)) |i| return i < o.elements.items.len;
         }
+        // The global object carries the installed globals as properties.
+        if (self.global_object != null and o == self.global_object.? and rootEnv(self.env).get(key) != null) return true;
         return false;
     }
 
@@ -3591,6 +3621,14 @@ fn lessThan(a: Value, b: Value) EvalError!bool {
 
 /// Does `o` (own or via its prototype chain) have a data or accessor property
 /// named `name`? Used by `with`-scope identifier resolution.
+/// The root (global) lexical environment — where the installed globals and
+/// top-level `var`/function bindings live.
+fn rootEnv(env: *Environment) *Environment {
+    var root = env;
+    while (root.parent) |p| root = p;
+    return root;
+}
+
 fn hasProperty(o: *value.Object, name: []const u8) bool {
     var cur: ?*value.Object = o;
     while (cur) |c| {
