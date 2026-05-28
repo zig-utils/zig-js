@@ -2082,6 +2082,7 @@ pub const Interpreter = struct {
             "join",      "indexOf", "lastIndexOf", "includes", "slice", "concat", "map",  "filter",
             "forEach",   "reduce",  "reduceRight", "some",     "every", "find",   "findIndex", "findLast",
             "findLastIndex", "at",  "flat",        "flatMap",  "keys",  "values", "entries",
+            "toReversed",    "toSorted", "toSpliced", "with",
         };
         // NB: `toString` is intentionally NOT generic here — a plain object's
         // `.toString()` must reach `Object.prototype.toString` (the `[object
@@ -2163,6 +2164,58 @@ pub const Interpreter = struct {
         if (eq(name, "reverse")) {
             std.mem.reverse(Value, o.elements.items);
             return Value{ .object = o };
+        }
+        // ES2023 "change array by copy": return a new array, leaving `this`
+        // untouched. They read `items` so they also work generically on an
+        // array-like `this` (via `.call`).
+        if (eq(name, "toReversed")) {
+            const result = try self.newArray();
+            var i = items.len;
+            while (i > 0) : (i -= 1) try result.object.elements.append(self.arena, items[i - 1]);
+            return result;
+        }
+        if (eq(name, "toSorted")) {
+            const cmp = arg0(args);
+            const result = try self.newArray();
+            try result.object.elements.appendSlice(self.arena, items);
+            const ri = result.object.elements.items;
+            var i: usize = 1;
+            while (i < ri.len) : (i += 1) {
+                const key = ri[i];
+                var j = i;
+                while (j > 0 and (try self.sortCompare(ri[j - 1], key, cmp)) > 0) : (j -= 1) ri[j] = ri[j - 1];
+                ri[j] = key;
+            }
+            return result;
+        }
+        if (eq(name, "with")) {
+            const len = items.len;
+            const raw = arg0(args).toNumber();
+            const rel: f64 = if (std.math.isNan(raw)) 0 else @trunc(raw);
+            const actual: f64 = if (rel < 0) @as(f64, @floatFromInt(len)) + rel else rel;
+            if (actual < 0 or actual >= @as(f64, @floatFromInt(len))) return self.throwError("RangeError", "Invalid index");
+            const result = try self.newArray();
+            try result.object.elements.appendSlice(self.arena, items);
+            result.object.elements.items[@intFromFloat(actual)] = arg(args, 1);
+            return result;
+        }
+        if (eq(name, "toSpliced")) {
+            const len = items.len;
+            const start = relIndex(arg0(args), len, 0);
+            const del: usize = if (args.len <= 1) len - start else blk: {
+                const d = arg(args, 1).toNumber();
+                if (std.math.isNan(d) or d <= 0) break :blk 0;
+                const du: usize = if (d > @as(f64, @floatFromInt(len))) len else @intFromFloat(@trunc(d));
+                break :blk if (start + du > len) len - start else du;
+            };
+            const result = try self.newArray();
+            const ra = result.object;
+            var i: usize = 0;
+            while (i < start) : (i += 1) try ra.elements.append(self.arena, items[i]);
+            if (args.len > 2) for (args[2..]) |v| try ra.elements.append(self.arena, v);
+            i = start + del;
+            while (i < len) : (i += 1) try ra.elements.append(self.arena, items[i]);
+            return result;
         }
         if (eq(name, "map")) {
             const cb = arg0(args);
@@ -3189,7 +3242,8 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "findIndex", 1 },  .{ "findLast", 1 },     .{ "findLastIndex", 1 }, .{ "fill", 1 },
         .{ "flat", 0 },       .{ "flatMap", 1 },      .{ "sort", 1 },       .{ "keys", 0 },
         .{ "values", 0 },     .{ "entries", 0 },      .{ "copyWithin", 2 }, .{ "at", 1 },
-        .{ "toString", 0 },
+        .{ "toString", 0 },   .{ "toReversed", 0 },   .{ "toSorted", 1 },   .{ "toSpliced", 2 },
+        .{ "with", 2 },
     });
     try array_ns.setOwn(a, root_shape, "prototype", .{ .object = array_proto });
     try setConstructor(a, root_shape, array_proto, array_ns);

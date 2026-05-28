@@ -954,6 +954,22 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "Array change-by-copy methods (toReversed/toSorted/toSpliced/with)" {
+    // toReversed: new array, original untouched.
+    try expectEvalStr("3,2,1", "[1,2,3].toReversed().join(',')");
+    try std.testing.expect((try evalIn("var a=[1,2,3]; a.toReversed(); a.join(',') === '1,2,3'")).boolean);
+    // toSorted with a comparator.
+    try expectEvalStr("1,2,3,10", "[10,2,1,3].toSorted(function(a,b){return a-b;}).join(',')");
+    try std.testing.expect((try evalIn("var a=[3,1,2]; a.toSorted(); a.join(',') === '3,1,2'")).boolean);
+    // with: replaces one index, returns a new array; negative index; RangeError.
+    try expectEvalStr("1,9,3", "[1,2,3].with(1,9).join(',')");
+    try expectEvalStr("1,2,9", "[1,2,3].with(-1,9).join(',')");
+    try std.testing.expect((try evalIn("var t=false; try{[1,2].with(5,0);}catch(e){t=e instanceof RangeError;} t")).boolean);
+    // toSpliced: delete + insert into a copy.
+    try expectEvalStr("1,9,9,3", "[1,2,3].toSpliced(1,1,9,9).join(',')");
+    try std.testing.expect((try evalIn("var a=[1,2,3]; a.toSpliced(0,2); a.length === 3")).boolean);
+}
+
 test "defineProperty descriptor validation (accessor+data mix, non-callable get/set)" {
     // Mixing a data field with an accessor field throws TypeError.
     try std.testing.expect((try evalIn(
