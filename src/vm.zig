@@ -325,6 +325,10 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const v = stack.pop().?;
                 try stack.append(vm.arena, try vm.iteratorOf(v));
             },
+            .throw_op => {
+                vm.exception = stack.pop().?;
+                return error.Throw;
+            },
 
             .halt => return acc,
         }

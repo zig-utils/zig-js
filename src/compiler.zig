@@ -222,7 +222,11 @@ pub const Compiler = struct {
                 const j = try self.chunk.emit(.jump, 0);
                 try loop.continues.append(self.arena, j);
             },
-            // throw / try are not lowered yet → whole-program fallback.
+            .throw_stmt => |e| {
+                try self.compileExpr(e);
+                _ = try self.chunk.emit(.throw_op, 0);
+            },
+            // try/catch/finally is not lowered yet → whole-program fallback.
             else => return error.Unsupported,
         }
     }
