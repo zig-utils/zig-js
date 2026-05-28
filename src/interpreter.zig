@@ -891,25 +891,34 @@ pub const Interpreter = struct {
         }
 
         // Bind parameters in `call_env` (so a default can reference earlier
-        // params). A rest parameter collects the remaining args into an array.
-        for (func.params, 0..) |p, i| {
+        // params).
+        try self.bindParams(func.params, args);
+
+        if (func.is_expr_body) return self.eval(func.body);
+        _ = try self.eval(func.body);
+        return if (self.signal == .ret) self.ret_value else .undefined;
+    }
+
+    /// Bind a function's parameters to `args` in the current environment
+    /// (`self.env`): a rest param (`...r`) collects the remaining args into an
+    /// array; an absent/undefined arg falls back to the param's default; a
+    /// destructuring pattern is bound via `bindPattern`. Shared by ordinary
+    /// calls and generators (which bind into the generator's own environment).
+    pub fn bindParams(self: *Interpreter, params: []const ast.Param, args: []const Value) EvalError!void {
+        for (params, 0..) |p, i| {
             if (p.is_rest) {
                 const rest = try self.newArray();
                 var j = i;
                 while (j < args.len) : (j += 1) try rest.object.elements.append(self.arena, args[j]);
-                try call_env.put(p.name, rest);
+                try self.env.put(p.name, rest);
                 break;
             }
             var v: Value = if (i < args.len) args[i] else .undefined;
             if (v == .undefined) {
                 if (p.default) |d| v = try self.eval(d);
             }
-            if (p.pattern) |pat| try self.bindPattern(pat, v, true) else try call_env.put(p.name, v);
+            if (p.pattern) |pat| try self.bindPattern(pat, v, true) else try self.env.put(p.name, v);
         }
-
-        if (func.is_expr_body) return self.eval(func.body);
-        _ = try self.eval(func.body);
-        return if (self.signal == .ret) self.ret_value else .undefined;
     }
 
     /// `new Callee(args)`: builtin error constructors mint an error instance;

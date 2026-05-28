@@ -92,10 +92,10 @@ pub const Compiler = struct {
     /// outside the VM's lowered subset, so the generator is reported unsupported
     /// rather than run incorrectly.
     pub fn compileGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!*Chunk {
-        // Default/rest/pattern params need a runtime prologue we don't emit here.
-        for (fnode.params) |p| {
-            if (p.default != null or p.is_rest or p.pattern != null) return error.Unsupported;
-        }
+        // Parameters (including default/rest/destructuring) are bound at runtime
+        // by `makeGenerator` into the generator's environment — env-mode name
+        // resolution means the body's references resolve there — so the param
+        // shape never blocks compilation; only the body must lower.
         if (fnode.is_expr_body) return error.Unsupported; // generators always have a block body
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);

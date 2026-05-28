@@ -874,6 +874,34 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "generators with destructuring / default / rest parameters" {
+    // Array-pattern parameter.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn(
+        \\function* g([a, b]) { yield a + b; }
+        \\g([1, 2]).next().value
+    )).number);
+    // Object-pattern parameter.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\function* g({ x, y }) { yield x + y; }
+        \\g({ x: 3, y: 4 }).next().value
+    )).number);
+    // Default parameter (evaluated at generator creation).
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn(
+        \\function* g(a = 5) { yield a; }
+        \\g().next().value
+    )).number);
+    // Rest parameter.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn(
+        \\function* g(first, ...rest) { yield rest.length; }
+        \\g(0, 1, 2, 3).next().value
+    )).number);
+    // Generator method with a destructuring parameter (the class/dstr family).
+    try std.testing.expectEqual(@as(f64, 30), (try evalIn(
+        \\var o = { *m([a, b]) { yield a + b; } };
+        \\o.m([10, 20]).next().value
+    )).number);
+}
+
 test "Set/Map are iterable: for-of, spread, Array.from, destructuring" {
     // for-of over a Set.
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(

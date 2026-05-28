@@ -358,10 +358,14 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     for (args) |av| try args_obj.object.elements.append(vm.arena, av);
     try genv.put("arguments", args_obj);
 
-    // Bind simple-identifier params (compileGenerator rejected default/rest/pattern).
-    for (func.params, 0..) |p, i| {
-        try genv.put(p.name, if (i < args.len) args[i] else .undefined);
-    }
+    // Bind params into the generator's environment (handles default/rest/
+    // destructuring). `bindParams` binds into `vm.env`, so point it at `genv`
+    // for the duration — defaults are evaluated now, at generator creation,
+    // per spec. Restore the caller's env afterward.
+    const saved_env = vm.env;
+    vm.env = genv;
+    defer vm.env = saved_env;
+    try vm.bindParams(func.params, args);
 
     const g = try vm.arena.create(Generator);
     g.* = .{
