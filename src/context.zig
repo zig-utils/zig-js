@@ -91,6 +91,14 @@ pub const Context = struct {
     }
 };
 
+test "array literal elision (holes)" {
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var a = [1, , 3]; a.length")).number);
+    try std.testing.expectEqual(@as(f64, 4), (try evalIn("var a = [, , 4]; a[2]")).number);
+    // Elision in array destructuring assignment.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("var a, b; [, a, , b] = [1, 2, 3, 4]; a")).number);
+    try std.testing.expectEqual(@as(f64, 4), (try evalIn("var a, b; [, a, , b] = [1, 2, 3, 4]; b")).number);
+}
+
 test "new.target" {
     // undefined in a plain call, the constructor under `new`.
     try std.testing.expect((try evalIn(

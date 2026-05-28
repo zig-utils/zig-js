@@ -171,7 +171,9 @@ pub const Parser = struct {
                 var out: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
                 var rest: ?*Node = null;
                 for (elems) |e| {
-                    if (e.* == .spread) {
+                    if (e.* == .undefined_lit) {
+                        try out.append(self.arena, .{}); // elision / hole in `[ , a ] = …`
+                    } else if (e.* == .spread) {
                         rest = try self.exprToTarget(e.spread);
                     } else if (e.* == .assign) {
                         try out.append(self.arena, .{ .target = try self.exprToTarget(e.assign.target), .default = e.assign.value });
@@ -1122,6 +1124,13 @@ pub const Parser = struct {
         try self.expect(.lbracket);
         var elems: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.rbracket) and !self.check(.eof)) {
+            // Elision / hole: a bare `,` yields an empty slot (v1: undefined, as
+            // arrays are dense). `[ , x ]`, `[1, , 3]`, `[,]`.
+            if (self.check(.comma)) {
+                try elems.append(self.arena, try self.alloc(.undefined_lit));
+                _ = self.advance();
+                continue;
+            }
             try elems.append(self.arena, try self.parseSpreadable());
             if (!self.match(.comma)) break;
         }
