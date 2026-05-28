@@ -635,6 +635,34 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
         if (s != .undefined and !(s == .object and s.object.isCallableObject()))
             return self.throwError("TypeError", "Setter must be a function");
     }
+    // Array `length` is a data property { writable, !enumerable, !configurable }.
+    // Redefining it can change the value (ToUint32, truncating/extending) and
+    // toggle writability, but not make it configurable/enumerable or an accessor.
+    if (target.is_array and std.mem.eql(u8, key, "length")) {
+        if (get != null or set != null) return self.throwError("TypeError", "Cannot redefine 'length' as an accessor");
+        if (d.getOwn("configurable")) |c| {
+            if (c.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: length");
+        }
+        if (d.getOwn("enumerable")) |e| {
+            if (e.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: length");
+        }
+        const cur_writable = if (target.attrs != null) target.getAttr("length").writable else true;
+        if (d.getOwn("value")) |val| {
+            const n = val.toNumber();
+            const u = val.toUint32();
+            if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
+            if (!cur_writable and u != @max(target.elements.items.len, target.array_len))
+                return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+            if (u < target.elements.items.len) {
+                target.elements.shrinkRetainingCapacity(u);
+                target.array_len = 0;
+            } else target.array_len = u;
+        }
+        var lattr: value.PropAttr = .{ .writable = cur_writable, .enumerable = false, .configurable = false };
+        if (d.getOwn("writable")) |w| lattr.writable = w.toBoolean();
+        try target.setAttr(self.arena, "length", lattr);
+        return;
+    }
     // Array index with a data descriptor: keep the value in the dense element
     // store and record its attributes in the string-keyed `attrs` map (so
     // reads/writes/getOwnPropertyDescriptor agree), rather than splitting it
@@ -923,8 +951,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         return dataDescriptor(self, v, a);
     }
     if (o.is_array) {
-        if (std.mem.eql(u8, key, "length"))
-            return dataDescriptor(self, .{ .number = @floatFromInt(o.elements.items.len) }, .{ .writable = true, .enumerable = false, .configurable = false });
+        if (std.mem.eql(u8, key, "length")) {
+            const w = if (o.attrs != null) o.getAttr("length").writable else true;
+            return dataDescriptor(self, .{ .number = @floatFromInt(@max(o.elements.items.len, o.array_len)) }, .{ .writable = w, .enumerable = false, .configurable = false });
+        }
         if (arrayIndexOf(key)) |i| {
             // Per-index attributes recorded by `defineProperty` override the
             // all-true default for a dense element.
