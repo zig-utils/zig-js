@@ -159,6 +159,9 @@ const Meta = struct {
     unsupported_flag: bool = false,
     negative: bool = false,
     negative_parse: bool = false,
+    /// `flags: [onlyStrict]` — the test must run as strict-mode code, so a
+    /// `"use strict"` directive is prepended to the assembled source.
+    only_strict: bool = false,
     /// `includes:` harness file names. Slices point into the source frontmatter,
     /// which outlives `runOne`.
     includes: [8][]const u8 = undefined,
@@ -176,6 +179,7 @@ fn parseMeta(src: []const u8) Meta {
         const line_end = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
         const flags = front[fi..line_end];
         if (std.mem.indexOf(u8, flags, "raw")) |_| meta.raw = true;
+        if (std.mem.indexOf(u8, flags, "onlyStrict")) |_| meta.only_strict = true;
         if (std.mem.indexOf(u8, flags, "module") != null or
             std.mem.indexOf(u8, flags, "async") != null or
             std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
@@ -244,6 +248,10 @@ fn runOne(gpa: std.mem.Allocator, harness: *Harness, src: []const u8) Outcome {
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
+    // `onlyStrict` tests carry no directive of their own — the harness supplies
+    // it. Prepended before everything so the whole program (harness included)
+    // is strict-mode code, as the spec requires.
+    if (meta.only_strict and !meta.raw) buf.appendSlice(gpa, "\"use strict\";\n") catch return .skip;
     if (!meta.raw) {
         // Prefer the *real* upstream harness (`sta.js` + `assert.js`) — it now
         // carries `assert.compareArray`, `isPrimitive`, the precise error
