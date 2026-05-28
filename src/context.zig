@@ -372,6 +372,41 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "defineProperty rejects incompatible redefinition of non-configurable props" {
+    // A non-configurable property can't be made configurable, re-typed, or (when
+    // non-writable) have its value/writability changed — each throws TypeError.
+    const cases = [_][]const u8{
+        \\var o = {}; Object.defineProperty(o, "p", { value: 1, configurable: false });
+        \\Object.defineProperty(o, "p", { value: 2 });
+        ,
+        \\var o = {}; Object.defineProperty(o, "p", { value: 1, configurable: false });
+        \\Object.defineProperty(o, "p", { configurable: true });
+        ,
+        \\var o = {}; Object.defineProperty(o, "p", { value: 1, configurable: false });
+        \\Object.defineProperty(o, "p", { enumerable: true });
+        ,
+        \\var a = []; Object.defineProperty(a, "0", { value: -0 });
+        \\Object.defineProperties(a, { "0": { value: 0 } });
+        ,
+        \\var o = Object.freeze({}); Object.defineProperty(o, "x", { value: 1 });
+    };
+    for (cases) |src| {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        try std.testing.expectError(error.Throw, ctx.evaluate(src));
+        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.object.error_name);
+    }
+    // Compatible redefinitions are still allowed.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\var o = {}; Object.defineProperty(o, "p", { value: 1, configurable: true });
+        \\Object.defineProperty(o, "p", { value: 2 }); o.p
+    )).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\var o = {}; Object.defineProperty(o, "p", { value: 1, writable: true, configurable: false });
+        \\Object.defineProperty(o, "p", { value: 2 }); o.p
+    )).number);
+}
+
 test "Object.create applies its properties (second) argument" {
     // Data descriptor on the new object.
     try std.testing.expectEqual(@as(f64, 42), (try evalIn(

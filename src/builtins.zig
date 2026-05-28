@@ -523,9 +523,20 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
 fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d: *value.Object) HostError!void {
     const get = d.getOwn("get");
     const set = d.getOwn("set");
+    const cur_data = target.getOwn(key);
+    const cur_acc = target.getAccessor(key);
+    const exists = cur_data != null or cur_acc != null;
+    // ValidateAndApplyPropertyDescriptor: reject (TypeError) any change that the
+    // current state forbids — adding to a non-extensible object, or altering a
+    // non-configurable property in an incompatible way.
+    if (!exists) {
+        if (!target.extensible)
+            return self.throwError("TypeError", "Cannot define property, object is not extensible");
+    } else if (!target.getAttr(key).configurable) {
+        try rejectIncompatibleRedefine(self, target.getAttr(key), cur_data, cur_acc, d);
+    }
     // Redefining keeps the current attributes for any omitted field; a new
     // property defaults omitted fields to false.
-    const exists = target.getOwn(key) != null or target.getAccessor(key) != null;
     var attr: value.PropAttr = if (exists) target.getAttr(key) else .{ .writable = false, .enumerable = false, .configurable = false };
     if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
     if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
@@ -536,6 +547,53 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d: *val
         try target.setOwn(self.arena, self.root_shape, key, d.getOwn("value") orelse .undefined);
     }
     try target.setAttr(self.arena, key, attr);
+}
+
+/// The rejection half of ValidateAndApplyPropertyDescriptor, for an existing
+/// *non-configurable* property: throw a TypeError if descriptor `d` tries to
+/// flip configurable on, change enumerable, switch between data/accessor, or —
+/// for a non-writable data property — change writability or value. A generic
+/// descriptor (no value/writable/get/set) only constrains config/enumerable.
+fn rejectIncompatibleRedefine(
+    self: *Interpreter,
+    cur_attr: value.PropAttr,
+    cur_data: ?Value,
+    cur_acc: ?value.Accessor,
+    d: *value.Object,
+) HostError!void {
+    if (d.getOwn("configurable")) |c| {
+        if (c.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+    }
+    if (d.getOwn("enumerable")) |e| {
+        if (e.toBoolean() != cur_attr.enumerable)
+            return self.throwError("TypeError", "Cannot redefine property: not configurable");
+    }
+    const d_get = d.getOwn("get");
+    const d_set = d.getOwn("set");
+    const d_is_accessor = d_get != null or d_set != null;
+    const d_is_data = d.getOwn("value") != null or d.getOwn("writable") != null;
+    if (!d_is_accessor and !d_is_data) return; // generic descriptor: nothing more to check
+
+    const cur_is_accessor = cur_acc != null;
+    if (d_is_accessor != cur_is_accessor)
+        return self.throwError("TypeError", "Cannot redefine property: not configurable");
+
+    if (cur_is_accessor) {
+        const acc = cur_acc.?;
+        if (d_get) |g| {
+            if (!sameValue(g, acc.get orelse .undefined)) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+        }
+        if (d_set) |s| {
+            if (!sameValue(s, acc.set orelse .undefined)) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+        }
+    } else if (!cur_attr.writable) {
+        if (d.getOwn("writable")) |w| {
+            if (w.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+        }
+        if (d.getOwn("value")) |v| {
+            if (!sameValue(v, cur_data orelse .undefined)) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+        }
+    }
 }
 
 pub fn objectDefineProperties(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
