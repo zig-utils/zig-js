@@ -44,6 +44,22 @@ pub const Context = struct {
         try interp.installGlobals(&self.env, self.root_shape);
         // `globalThis` names the global object itself.
         try self.env.put("globalThis", .{ .object = global_obj });
+        // Mirror the installed globals onto the global object as real own
+        // properties (with spec attributes), so `Object.getOwnPropertyDescriptor
+        // (globalThis, "Math")`, `Object.keys`, `hasOwnProperty`, etc. see them.
+        // `undefined`/`NaN`/`Infinity` are non-writable/-enumerable/-configurable;
+        // the rest are writable, non-enumerable, configurable.
+        var it = self.env.vars.iterator();
+        while (it.next()) |e| {
+            const name = e.key_ptr.*;
+            try global_obj.setOwn(a, self.root_shape, name, e.value_ptr.*);
+            const frozen = std.mem.eql(u8, name, "undefined") or
+                std.mem.eql(u8, name, "NaN") or std.mem.eql(u8, name, "Infinity");
+            try global_obj.setAttr(a, name, if (frozen)
+                .{ .writable = false, .enumerable = false, .configurable = false }
+            else
+                .{ .writable = true, .enumerable = false, .configurable = true });
+        }
         return self;
     }
 
