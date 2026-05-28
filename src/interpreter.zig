@@ -2837,6 +2837,28 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     return .{ .string = try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }) };
 }
 
+/// Give `proto` a `constructor` own property pointing back to `ctor`
+/// (non-enumerable, writable, configurable — the spec default for built-ins).
+fn setConstructor(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, ctor: *value.Object) EvalError!void {
+    try proto.setOwn(a, rs, "constructor", .{ .object = ctor });
+    try proto.setAttr(a, "constructor", .{ .enumerable = false, .configurable = true, .writable = true });
+}
+
+/// `Boolean.prototype.toString` / `valueOf` for a primitive boolean `this`.
+fn booleanProtoFn(comptime to_string: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const b: bool = switch (this) {
+                .boolean => |x| x,
+                else => return self.throwError("TypeError", "Boolean.prototype method requires that 'this' be a Boolean"),
+            };
+            return if (to_string) .{ .string = if (b) "true" else "false" } else .{ .boolean = b };
+        }
+    }.call;
+}
+
 /// `Symbol.prototype.toString` → `"Symbol(description)"`. Requires a Symbol `this`.
 fn symbolToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
@@ -3058,7 +3080,22 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     function_ns.* = .{ .native = builtins.functionConstructor, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, function_ns, "Function", 1);
     try function_ns.setOwn(a, root_shape, "prototype", .{ .object = func_proto });
+    try setConstructor(a, root_shape, func_proto, function_ns);
     try env.put("Function", .{ .object = function_ns });
+
+    // Boolean.prototype (Boolean wrapper objects aren't modeled, but the prototype
+    // and its `constructor`/`toString`/`valueOf` are still observable).
+    if (env.get("Boolean")) |bv| {
+        if (bv == .object) {
+            const boolean_proto = try a.create(value.Object);
+            boolean_proto.* = .{ .proto = object_proto };
+            try setNative(a, root_shape, boolean_proto, "toString", 0, booleanProtoFn(true));
+            try setNative(a, root_shape, boolean_proto, "valueOf", 0, booleanProtoFn(false));
+            try setConstructor(a, root_shape, boolean_proto, bv.object);
+            try bv.object.setOwn(a, root_shape, "prototype", .{ .object = boolean_proto });
+            try bv.object.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
+        }
+    }
 
     const array_proto = try a.create(value.Object);
     array_proto.* = .{ .proto = object_proto };
@@ -3074,6 +3111,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "toString", 0 },
     });
     try array_ns.setOwn(a, root_shape, "prototype", .{ .object = array_proto });
+    try setConstructor(a, root_shape, array_proto, array_ns);
 
     const string_proto = try a.create(value.Object);
     string_proto.* = .{ .proto = object_proto };
@@ -3087,6 +3125,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "localeCompare", 1 }, .{ "toString", 0 },  .{ "valueOf", 0 },
     });
     try string_ns.setOwn(a, root_shape, "prototype", .{ .object = string_proto });
+    try setConstructor(a, root_shape, string_proto, string_ns);
 
     const number_proto = try a.create(value.Object);
     number_proto.* = .{ .proto = object_proto };
@@ -3094,6 +3133,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "toString", 1 }, .{ "toFixed", 1 }, .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
     });
     try number_ns.setOwn(a, root_shape, "prototype", .{ .object = number_proto });
+    try setConstructor(a, root_shape, number_proto, number_ns);
 
     // Symbol — callable (returns a fresh symbol) with the well-known symbols.
     const symbol_ns = try a.create(value.Object);
@@ -3135,6 +3175,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "toLocaleString", 0 }, .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
     });
     try date_ns.setOwn(a, root_shape, "prototype", .{ .object = date_proto });
+    try setConstructor(a, root_shape, date_proto, date_ns);
     try env.put("Date", .{ .object = date_ns });
 }
 

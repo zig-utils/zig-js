@@ -374,6 +374,22 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "built-in prototypes carry constructor; Boolean.prototype exists" {
+    // Every built-in prototype links back to its constructor (non-enumerable).
+    try std.testing.expect((try evalIn("Array.prototype.constructor === Array")).boolean);
+    try std.testing.expect((try evalIn("String.prototype.constructor === String")).boolean);
+    try std.testing.expect((try evalIn("Number.prototype.constructor === Number")).boolean);
+    try std.testing.expect((try evalIn("Function.prototype.constructor === Function")).boolean);
+    try std.testing.expect((try evalIn("Date.prototype.constructor === Date")).boolean);
+    // `constructor` is non-enumerable.
+    try std.testing.expect((try evalIn("Object.keys(Array.prototype).indexOf('constructor') === -1")).boolean);
+    // Boolean.prototype now exists with constructor + generic toString/valueOf.
+    try expectEvalStr("object", "typeof Boolean.prototype");
+    try std.testing.expect((try evalIn("Boolean.prototype.constructor === Boolean")).boolean);
+    try expectEvalStr("true", "Boolean.prototype.toString.call(true)");
+    try std.testing.expect(!(try evalIn("Boolean.prototype.valueOf.call(false)")).boolean);
+}
+
 test "Symbol.prototype: toString / valueOf / chain" {
     try expectEvalStr("object", "typeof Symbol.prototype");
     try std.testing.expect((try evalIn("Symbol.prototype.constructor === Symbol")).boolean);
