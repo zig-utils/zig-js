@@ -226,6 +226,10 @@ pub const Compiler = struct {
                 try self.compileExpr(e);
                 _ = try self.chunk.emit(.throw_op, 0);
             },
+            .for_in => |f| {
+                if (!f.is_of) return error.Unsupported; // for-in (key enum) → tree-walk
+                try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body);
+            },
             // try/catch/finally is not lowered yet → whole-program fallback.
             else => return error.Unsupported,
         }
@@ -301,6 +305,49 @@ pub const Compiler = struct {
         if (to_end) |t| self.chunk.patchToHere(t);
         // `continue` runs the update clause, then re-tests.
         for (loop.continues.items) |j| self.chunk.patchTo(j, update_at);
+        for (loop.breaks.items) |j| self.chunk.patchToHere(j);
+        self.popLoop();
+    }
+
+    /// `for (x of iterable) body` — drive the iterator protocol via `iter_of` +
+    /// a `.next()` loop (mirroring `compileYieldStar`). Only a plain identifier
+    /// target is lowered; destructuring targets and `for-in` fall back to the
+    /// tree-walker. Works inside generators (where `for-of` is common).
+    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node) CompileError!void {
+        if (target.* != .identifier) return error.Unsupported; // patterns → tree-walk
+        const var_name = target.identifier;
+        const it_name = try self.freshTemp();
+        const r_name = try self.freshTemp();
+
+        try self.compileExpr(iterable);
+        _ = try self.chunk.emit(.iter_of, 0);
+        try self.emitDefine(it_name);
+
+        const loop = try self.pushLoop();
+        const top = self.chunk.here();
+        // r = it.next()
+        try self.emitLoad(it_name);
+        _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+        try self.emitDefine(r_name);
+        // if (r.done) break  — `not` then jump_if_false exits exactly when done.
+        try self.emitLoad(r_name);
+        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
+        _ = try self.chunk.emit(.not, 0);
+        const to_end = try self.chunk.emit(.jump_if_false, 0);
+        // bind r.value to the loop variable
+        try self.emitLoad(r_name);
+        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+        if (decl_kind != null) {
+            try self.emitDefine(var_name);
+        } else {
+            try self.emitStore(var_name);
+            _ = try self.chunk.emit(.pop, 0);
+        }
+        try self.compileStmt(body);
+        _ = try self.chunk.emit(.jump, @intCast(top));
+        self.chunk.patchToHere(to_end);
+        // `continue` re-enters the loop at the top (next .next()).
+        for (loop.continues.items) |j| self.chunk.patchTo(j, top);
         for (loop.breaks.items) |j| self.chunk.patchToHere(j);
         self.popLoop();
     }
