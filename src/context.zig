@@ -98,6 +98,9 @@ pub const Context = struct {
         var parser = try Parser.init(a, source);
         const prog = try parser.parseProgram();
         var machine = self.interpreter();
+        // Top-level strictness from the program's directive prologue (the parser
+        // leaves `strict` set if it saw a leading `"use strict"`).
+        machine.strict = parser.strict;
         self.exception = null;
 
         if (compiler.Compiler.compileProgram(a, prog)) |chunk| {

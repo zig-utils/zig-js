@@ -540,13 +540,18 @@ fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const 
     };
 
     const saved_this = vm.this_value;
+    const saved_strict = vm.strict;
+    vm.strict = func.is_strict;
     // Sloppy-mode this-substitution (matches the tree-walker): a non-strict,
     // non-arrow function called with null/undefined `this` sees the global object.
     vm.this_value = if (!func.is_strict and !func.is_arrow and (this_val == .null or this_val == .undefined))
         (if (vm.global_object) |g| Value{ .object = g } else this_val)
     else
         this_val;
-    defer vm.this_value = saved_this;
+    defer {
+        vm.this_value = saved_this;
+        vm.strict = saved_strict;
+    }
     return run(vm, fchunk, frame);
 }
 

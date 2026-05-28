@@ -134,6 +134,11 @@ pub const Interpreter = struct {
     /// top level / in plain calls; the receiver in method calls; the new object
     /// in constructor calls).
     this_value: Value = .undefined,
+    /// Whether the currently-executing code is strict mode (set from the
+    /// program's directive prologue and each function's `is_strict`). Gates
+    /// strict runtime errors: assignment to an undeclared binding or a
+    /// non-writable/​non-extensible property throws instead of silently failing.
+    strict: bool = false,
     /// The in-flight thrown value while `error.Throw` propagates. Read by
     /// `catch` and by the Context/C-API boundary.
     exception: Value = .undefined,
@@ -939,8 +944,10 @@ pub const Interpreter = struct {
         const saved_home = self.home_object;
         const saved_super = self.super_ctor;
         const saved_nt = self.new_target;
+        const saved_strict = self.strict;
         self.env = call_env;
         self.signal = .none;
+        self.strict = func.is_strict;
         // Sloppy-mode this-substitution: a non-strict, non-arrow function called
         // with a null/undefined `this` (`fn()`, `fn.call(undefined)`) sees the
         // global object. Strict functions keep the undefined `this`; arrows
@@ -960,6 +967,7 @@ pub const Interpreter = struct {
             self.home_object = saved_home;
             self.super_ctor = saved_super;
             self.new_target = saved_nt;
+            self.strict = saved_strict;
         }
 
         // Non-arrow functions get an `arguments` array-like over the call args.
@@ -1804,6 +1812,10 @@ pub const Interpreter = struct {
                         if (hasProperty(o, name)) return self.setMember(.{ .object = o }, name, v);
                     }
                 }
+                // Strict mode forbids creating a global by assigning to an
+                // undeclared binding (sloppy mode silently creates one).
+                if (self.strict and self.env.get(name) == null and self.globalProp(name) == null)
+                    return self.throwError("ReferenceError", name);
                 try self.env.assign(name, v);
             },
             .member => |m| {
@@ -1823,11 +1835,11 @@ pub const Interpreter = struct {
     pub fn setMember(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
         if (recv != .object) {
             // Setting a property on null/undefined always throws; on any other
-            // primitive (number/string/boolean) it is a silent no-op in sloppy
-            // mode — the only mode this engine runs.
+            // primitive (number/string/boolean) sloppy mode is a silent no-op
+            // while strict mode throws a TypeError.
             if (recv == .null or recv == .undefined)
                 return self.throwError("TypeError", "Cannot set property of null or undefined");
-            return;
+            return if (self.strict) self.throwError("TypeError", "Cannot create property on a primitive") else {};
         }
         const o = recv.object;
         if (o.is_array) {
@@ -1849,8 +1861,9 @@ pub const Interpreter = struct {
                 // fall through to the setter walk
             } else if (arrayIndex(key)) |i| {
                 // A per-index descriptor (recorded in `attrs`) may mark the
-                // element non-writable; in sloppy mode the write is a no-op.
-                if (o.attrs != null and !o.getAttr(key).writable) return;
+                // element non-writable: sloppy ignores the write, strict throws.
+                if (o.attrs != null and !o.getAttr(key).writable)
+                    return if (self.strict) self.throwError("TypeError", "Cannot assign to read only property") else {};
                 if (i < o.elements.items.len) {
                     o.elements.items[i] = v;
                     return;
@@ -1873,16 +1886,21 @@ pub const Interpreter = struct {
         var cur: ?*value.Object = o;
         while (cur) |c| {
             if (c.getAccessor(key)) |acc| {
-                if (acc.set) |s| _ = try self.callValueWithThis(s, &.{v}, recv);
-                return; // setter-less accessor: ignore (sloppy mode)
+                if (acc.set) |s| {
+                    _ = try self.callValueWithThis(s, &.{v}, recv);
+                    return;
+                }
+                // Accessor with no setter: sloppy ignores, strict throws.
+                return if (self.strict) self.throwError("TypeError", "Cannot set property which has only a getter") else {};
             }
             cur = c.proto;
         }
-        // [[Set]] attribute checks (sloppy mode: silently ignore on rejection).
+        // [[Set]] attribute checks: sloppy silently ignores rejection, strict throws.
         if (o.getOwn(key)) |_| {
-            if (!o.getAttr(key).writable) return; // non-writable own data property
+            if (!o.getAttr(key).writable)
+                return if (self.strict) self.throwError("TypeError", "Cannot assign to read only property") else {};
         } else if (!o.extensible) {
-            return; // can't add a new property to a non-extensible object
+            return if (self.strict) self.throwError("TypeError", "Cannot add property, object is not extensible") else {};
         }
         try self.setProp(o, key, v);
     }
