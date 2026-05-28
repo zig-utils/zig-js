@@ -13,7 +13,7 @@ const Value = value.Value;
 
 /// Robustness limits so adversarial input throws a catchable error instead of
 /// crashing the process (stack overflow / runaway loop).
-pub const max_call_depth: u32 = 2000;
+pub const max_call_depth: u32 = 1000;
 pub const max_steps: u64 = 100_000_000;
 
 /// Coerce a JS number to a length/index, clamping NaN/negative to 0 and huge
@@ -294,6 +294,7 @@ pub const Interpreter = struct {
             },
 
             .call => |c| try self.evalCall(c.callee, c.args, c.optional),
+            .tagged_template => |t| try self.evalTaggedTemplate(t.tag, t.cooked, t.raw, t.exprs),
             .new_expr => |n| try self.evalNew(n.callee, n.args),
             .member => |m| blk: {
                 const obj = try self.eval(m.object);
@@ -854,6 +855,33 @@ pub const Interpreter = struct {
         if (optional and (callee == .null or callee == .undefined)) return error.OptShortCircuit;
         const args = try self.evalArgs(arg_nodes);
         return self.callValue(callee, args);
+    }
+
+    /// `tag`a${x}b`` → `tag(strings, x)` where `strings` is the frozen cooked
+    /// array carrying a frozen `raw` array. The tag's `this` is the member
+    /// receiver for `obj.tag`...`` (e.g. `String.raw`...``), else undefined.
+    fn evalTaggedTemplate(self: *Interpreter, tag_node: *Node, cooked: [][]const u8, raw: [][]const u8, expr_nodes: []*Node) EvalError!Value {
+        // The "strings" template object: an array of the cooked strings with an
+        // own `raw` array of the unescaped strings.
+        const strings = (try self.newArray()).object;
+        for (cooked) |s| try strings.elements.append(self.arena, .{ .string = s });
+        const raw_arr = (try self.newArray()).object;
+        for (raw) |s| try raw_arr.elements.append(self.arena, .{ .string = s });
+        try self.setProp(strings, "raw", .{ .object = raw_arr });
+
+        // Build the argument list: strings, then each substitution value.
+        var args: std.ArrayListUnmanaged(Value) = .empty;
+        try args.append(self.arena, .{ .object = strings });
+        for (expr_nodes) |en| try args.append(self.arena, try self.eval(en));
+
+        // Resolve the tag and its `this` (member receiver, else undefined).
+        if (tag_node.* == .member) {
+            const m = tag_node.member;
+            const recv = try self.eval(m.object);
+            const key = try self.memberKey(m.property, m.computed);
+            return self.callMethod(recv, key, args.items);
+        }
+        return self.callValue(try self.eval(tag_node), args.items);
     }
 
     /// Invoke a callable value with `this = undefined`.

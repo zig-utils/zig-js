@@ -988,6 +988,11 @@ pub const Parser = struct {
             } else if (self.check(.lparen)) {
                 const args = try self.parseArgs();
                 e = try self.alloc(.{ .call = .{ .callee = e, .args = args } });
+            } else if (self.check(.template)) {
+                // Tagged template: `tag`...`` — call `tag` with the cooked-string
+                // array (carrying `raw`) and the substitution values.
+                const tmpl = self.advance();
+                e = try self.parseTaggedTemplate(e, tmpl.text);
             } else break;
         }
         if (has_optional) e = try self.alloc(.{ .optional_chain = e });
@@ -1067,6 +1072,42 @@ pub const Parser = struct {
             }
         }
         return self.concatStr(node, lit.items);
+    }
+
+    /// Split a template's raw inner text into the cooked quasis (escapes
+    /// decoded), the raw quasis (text verbatim), and the substitution
+    /// expressions, then build a `tagged_template` node. There is always one
+    /// more quasi than substitution.
+    fn parseTaggedTemplate(self: *Parser, tag: *Node, raw: []const u8) ParseError!*Node {
+        var cooked: std.ArrayListUnmanaged([]const u8) = .empty;
+        var raws: std.ArrayListUnmanaged([]const u8) = .empty;
+        var exprs: std.ArrayListUnmanaged(*Node) = .empty;
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var raw_start: usize = 0;
+        var i: usize = 0;
+        while (i < raw.len) {
+            const c = raw[i];
+            if (c == '\\' and i + 1 < raw.len) {
+                try buf.append(self.arena, decodeTemplateEscape(raw[i + 1]));
+                i += 2;
+            } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
+                try cooked.append(self.arena, try buf.toOwnedSlice(self.arena));
+                try raws.append(self.arena, raw[raw_start..i]);
+                buf = .empty;
+                const expr_start = i + 2;
+                const expr_end = substEnd(raw, expr_start);
+                var sub = try Parser.init(self.arena, raw[expr_start..expr_end]);
+                try exprs.append(self.arena, try sub.parseExpression());
+                i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
+                raw_start = i;
+            } else {
+                try buf.append(self.arena, c);
+                i += 1;
+            }
+        }
+        try cooked.append(self.arena, try buf.toOwnedSlice(self.arena));
+        try raws.append(self.arena, raw[raw_start..]);
+        return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked.items, .raw = raws.items, .exprs = exprs.items } });
     }
 
     fn concatStr(self: *Parser, node: ?*Node, bytes: []const u8) ParseError!*Node {

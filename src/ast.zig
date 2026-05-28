@@ -178,6 +178,10 @@ pub const Node = union(enum) {
     super_member: struct { property: []const u8 = "", computed: ?*Node = null },
     call: struct { callee: *Node, args: []*Node, optional: bool = false },
     new_expr: struct { callee: *Node, args: []*Node },
+    /// A tagged template `tag`a${x}b`` — calls `tag(strings, ...exprs)` where
+    /// `strings` is the cooked-string array (with a `raw` array of the
+    /// unescaped text). `cooked`/`raw` have one more element than `exprs`.
+    tagged_template: struct { tag: *Node, cooked: [][]const u8, raw: [][]const u8, exprs: []*Node },
     /// `object.property` (computed == null) or `object[computed]`. `optional`
     /// marks `?.` access (short-circuits the chain when the object is nullish).
     member: struct { object: *Node, property: []const u8 = "", computed: ?*Node = null, optional: bool = false },
