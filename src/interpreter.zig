@@ -694,6 +694,8 @@ pub const Interpreter = struct {
         const class_val = try self.makeFunction(fnode, self.env);
         const class_obj = class_val.object;
         const proto = try self.protoObject(class_obj);
+        // A class's `prototype` is non-writable, non-enumerable, non-configurable.
+        try class_obj.setAttr(self.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
 
         // Link the prototype chains for inheritance.
         if (super_obj) |so| {
@@ -738,8 +740,12 @@ pub const Interpreter = struct {
                 .get => try self.defineAccessor(home, key, fv, null),
                 .set => try self.defineAccessor(home, key, null, fv),
             }
+            // Class methods/accessors are non-enumerable (writable + configurable),
+            // unlike object-literal properties.
+            try home.setAttr(self.arena, key, .{ .writable = true, .enumerable = false, .configurable = true });
         }
         try self.setProp(proto, "constructor", class_val);
+        try proto.setAttr(self.arena, "constructor", .{ .writable = true, .enumerable = false, .configurable = true });
         return class_val;
     }
 

@@ -954,6 +954,30 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "class methods/accessors/constructor are non-enumerable" {
+    // Prototype methods are non-enumerable (Object.keys sees only own enumerable).
+    try expectEvalStr("", "class C { m() {} n() {} } Object.keys(C.prototype).join(',')");
+    try std.testing.expect((try evalIn(
+        \\class C { m() {} }
+        \\var d = Object.getOwnPropertyDescriptor(C.prototype, 'm');
+        \\!d.enumerable && d.writable && d.configurable
+    )).boolean);
+    // Accessors too.
+    try std.testing.expect((try evalIn(
+        \\class C { get x() { return 1; } }
+        \\!Object.getOwnPropertyDescriptor(C.prototype, 'x').enumerable
+    )).boolean);
+    // Static methods.
+    try expectEvalStr("", "class C { static s() {} } Object.keys(C).join(',')");
+    // `constructor` is non-enumerable.
+    try std.testing.expect((try evalIn(
+        \\class C {}
+        \\!Object.getOwnPropertyDescriptor(C.prototype, 'constructor').enumerable
+    )).boolean);
+    // Instance fields ARE enumerable.
+    try expectEvalStr("f", "class C { f = 1; m() {} } Object.keys(new C()).join(',')");
+}
+
 test "Array change-by-copy methods (toReversed/toSorted/toSpliced/with)" {
     // toReversed: new array, original untouched.
     try expectEvalStr("3,2,1", "[1,2,3].toReversed().join(',')");
