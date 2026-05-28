@@ -954,6 +954,15 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "ToPrimitive: own valueOf/toString in arithmetic, string, relational" {
+    try std.testing.expectEqual(@as(f64, 11), (try evalIn("var o = { valueOf: function () { return 10; } }; o + 1")).number);
+    try std.testing.expectEqual(@as(f64, 20), (try evalIn("var o = { valueOf: function () { return 10; } }; o * 2")).number);
+    try expectEvalStr("hi!", "var o = { toString: function () { return 'hi'; } }; o + '!'");
+    try expectEvalStr("1,2,3", "'' + [1, 2, 3]");
+    try expectEvalStr("[object Object]x", "({}) + 'x'");
+    try std.testing.expect((try evalIn("var o = { valueOf: function () { return 5; } }; o < 6")).boolean);
+}
+
 test "class methods/accessors/constructor are non-enumerable" {
     // Prototype methods are non-enumerable (Object.keys sees only own enumerable).
     try expectEvalStr("", "class C { m() {} n() {} } Object.keys(C.prototype).join(',')");

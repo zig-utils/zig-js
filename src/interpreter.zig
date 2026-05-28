@@ -2815,7 +2815,49 @@ pub const Interpreter = struct {
 
     /// Apply a binary operator to two already-evaluated operands. Shared by the
     /// tree-walker and the bytecode VM.
-    pub fn applyBinary(self: *Interpreter, op: ast.BinaryOp, l: Value, r: Value) EvalError!Value {
+    /// ToPrimitive: coerce a value to a primitive. Non-objects pass through; a
+    /// Symbol is returned as-is. For an object, try `valueOf` then `toString`
+    /// (order flipped for a string hint) via `callMethod` — so the universal
+    /// `valueOf`/`toString` apply even to proto-less plain objects — and the
+    /// first primitive result wins.
+    pub fn toPrimitive(self: *Interpreter, v: Value, hint: enum { default, number, string }) EvalError!Value {
+        if (v != .object or v.object.is_symbol) return v;
+        const o = v.object;
+        // Honor a user-supplied (own) valueOf/toString — the common
+        // `{ valueOf() { … } }` case — in the hint's order; the first primitive
+        // result wins.
+        const names: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
+        for (names) |m| {
+            if (o.getOwn(m)) |fnv| {
+                if (fnv == .object and fnv.object.isCallableObject()) {
+                    const res = try self.callValueWithThis(fnv, &.{}, v);
+                    if (res != .object) return res;
+                }
+            }
+        }
+        // No own override → the engine's built-in coercion: arrays join, errors
+        // render "Name: message", plain objects "[object Object]", etc.
+        return .{ .string = try v.toString(self.arena) };
+    }
+
+    pub fn applyBinary(self: *Interpreter, op_in: ast.BinaryOp, l_in: Value, r_in: Value) EvalError!Value {
+        const op = op_in;
+        var l = l_in;
+        var r = r_in;
+        // Coerce object operands to primitives first (ToPrimitive). `+` uses the
+        // "default" hint; the other arithmetic / relational / bitwise ops use
+        // "number". Equality and instanceof/in handle objects themselves.
+        switch (op) {
+            .add => {
+                l = try self.toPrimitive(l, .default);
+                r = try self.toPrimitive(r, .default);
+            },
+            .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
+                l = try self.toPrimitive(l, .number);
+                r = try self.toPrimitive(r, .number);
+            },
+            else => {},
+        }
         return switch (op) {
             .add => blk: {
                 // String concatenation if either operand is a string.
