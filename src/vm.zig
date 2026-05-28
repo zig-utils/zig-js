@@ -215,10 +215,10 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                                 break :fast;
                             }
                         }
-                        result = .undefined; // own-property miss on a plain object
-                        break :fast;
+                        // own miss → fall through to full [[Get]] (prototype walk
+                        // + `.constructor` fallback), not a bare undefined.
                     }
-                    result = try vm.getProperty(obj, name); // arrays, strings, null/undefined
+                    result = try vm.getProperty(obj, name); // arrays, strings, proto chain, null/undefined
                 }
                 try stack.append(vm.arena, result);
             },

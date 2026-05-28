@@ -91,6 +91,22 @@ pub const Context = struct {
     }
 };
 
+test "String generics + .constructor + match/search" {
+    // String.prototype method on a non-string this (coerced).
+    try expectEvalStr("123", "String.prototype.trim.call(123)");
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("String.prototype.indexOf.call(12345, '3')")).number);
+    // .constructor falls back to the kind's global.
+    try std.testing.expect((try evalIn("[].constructor === Array")).boolean);
+    try std.testing.expect((try evalIn("({}).constructor === Object")).boolean);
+    try std.testing.expect((try evalIn("'x'.constructor === String")).boolean);
+    try std.testing.expect((try evalIn("(5).constructor === Number")).boolean);
+    // search / match.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("'abcd'.search(/cd/)")).number);
+    try std.testing.expect((try evalIn("'hello'.match(/l+/)[0] === 'll'")).boolean);
+    try expectEvalStr("abc", "'abc'.normalize()");
+}
+
+
 test "Array.prototype generics on array-likes" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\var o = { length: 3, 0: 1, 1: 2, 2: 3 };

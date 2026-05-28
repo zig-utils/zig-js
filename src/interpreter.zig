@@ -1192,6 +1192,11 @@ pub const Interpreter = struct {
                     if (c.getOwn(key)) |v| return v;
                     cur = c.proto;
                 }
+                // `.constructor` falls back to the kind's global constructor
+                // (we don't wire instance prototypes yet).
+                if (std.mem.eql(u8, key, "constructor")) {
+                    if (self.constructorOf(recv)) |ctor| return ctor;
+                }
                 return .undefined;
             },
             .string => |s| {
@@ -1200,11 +1205,33 @@ pub const Interpreter = struct {
                     if (i < s.len) return .{ .string = try self.arena.dupe(u8, s[i .. i + 1]) };
                     return .undefined;
                 }
+                if (std.mem.eql(u8, key, "constructor")) {
+                    if (self.constructorOf(recv)) |ctor| return ctor;
+                }
                 return .undefined;
             },
             .undefined, .null => return self.throwError("TypeError", "cannot read property of null or undefined"),
-            else => return .undefined,
+            else => {
+                if (std.mem.eql(u8, key, "constructor")) {
+                    if (self.constructorOf(recv)) |ctor| return ctor;
+                }
+                return .undefined;
+            },
         }
+    }
+
+    /// The global constructor for a value's kind (`[].constructor === Array`).
+    /// A fallback used when the prototype chain doesn't supply `constructor`
+    /// (instance prototypes aren't wired yet).
+    fn constructorOf(self: *Interpreter, recv: Value) ?Value {
+        const name: []const u8 = switch (recv) {
+            .string => "String",
+            .number => "Number",
+            .boolean => "Boolean",
+            .object => |o| if (o.is_array) "Array" else if (o.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.is_error) (if (o.error_name.len > 0) o.error_name else "Error") else "Object",
+            else => return null,
+        };
+        return self.env.get(name);
     }
 
     // ---- destructuring ----------------------------------------------------
@@ -1549,13 +1576,38 @@ pub const Interpreter = struct {
                 if (o.getOwn(name) == null and isArrayGeneric(name)) {
                     if (try self.arrayMethod(o, name, args)) |r| return r;
                 }
+                // Generic String.prototype methods coerce `this` to string
+                // (`String.prototype.split.call(obj)`).
+                if (o.getOwn(name) == null and isStringGeneric(name)) {
+                    return try self.stringMethod(try recv.toString(self.arena), name, args);
+                }
             },
             .string => |s| return try self.stringMethod(s, name, args),
-            .number => |n| return try self.numberMethod(n, name, args),
-            .boolean => |b| return try self.booleanMethod(b, name, args),
+            .number => |n| {
+                if (try self.numberMethod(n, name, args)) |r| return r;
+                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args);
+            },
+            .boolean => |b| {
+                if (try self.booleanMethod(b, name, args)) |r| return r;
+                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args);
+            },
             else => {},
         }
         return null;
+    }
+
+    /// String.prototype methods that coerce `this` to a string (so e.g.
+    /// `String.prototype.trim.call(42)` works). Excludes toString/valueOf.
+    fn isStringGeneric(name: []const u8) bool {
+        const names = [_][]const u8{
+            "charAt",      "charCodeAt", "codePointAt", "indexOf",  "lastIndexOf", "includes",
+            "startsWith",  "endsWith",   "slice",       "substring", "substr",     "toUpperCase",
+            "toLowerCase", "trim",       "trimStart",   "trimEnd",  "repeat",      "concat",
+            "split",       "at",         "padStart",    "padEnd",   "replace",     "replaceAll",
+            "localeCompare", "normalize", "search",     "match",
+        };
+        for (names) |n| if (eq(name, n)) return true;
+        return false;
     }
 
     fn eq(a: []const u8, b: []const u8) bool {
@@ -2096,7 +2148,51 @@ pub const Interpreter = struct {
                 .gt => 1,
             } };
         }
+        if (eq(name, "normalize")) {
+            // v1: ASCII-only engine, so normalization is the identity.
+            return Value{ .string = try self.arena.dupe(u8, s) };
+        }
+        if (eq(name, "search")) {
+            const re_obj = try self.toRegexObject(arg0(args));
+            var re = try self.compileRegex(re_obj);
+            if (re.find(s) catch null) |m| return Value{ .number = @floatFromInt(m.start) };
+            return Value{ .number = -1 };
+        }
+        if (eq(name, "match")) {
+            const re_obj = try self.toRegexObject(arg0(args));
+            const global = (re_obj.getOwn("global") orelse Value{ .boolean = false }).toBoolean();
+            var re = try self.compileRegex(re_obj);
+            if (global) {
+                // Global match: an array of all matched substrings (or null).
+                const arr = try self.newArray();
+                var rest = s;
+                while (re.find(rest) catch null) |m| {
+                    try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
+                    if (m.end <= m.start) break; // avoid an infinite loop on empty matches
+                    rest = rest[m.end..];
+                }
+                return if (arr.object.elements.items.len == 0) Value.null else arr;
+            }
+            // Non-global: [full, ...captures] with index/input (like RegExp.exec).
+            if (re.find(s) catch null) |m| {
+                const arr = try self.newArray();
+                try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
+                for (m.captures) |c| try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, c) });
+                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(m.start) });
+                try self.setProp(arr.object, "input", .{ .string = try self.arena.dupe(u8, s) });
+                return arr;
+            }
+            return Value.null;
+        }
         return null;
+    }
+
+    /// Coerce a value to a RegExp object: a regex stays as-is; anything else
+    /// becomes `new RegExp(String(v))`.
+    fn toRegexObject(self: *Interpreter, v: Value) EvalError!*value.Object {
+        if (v == .object and v.object.is_regex) return v.object;
+        const pat = if (v == .undefined) "" else try v.toString(self.arena);
+        return (try self.makeRegex(pat, "")).object;
     }
 
     // ---- try / catch / finally --------------------------------------------
