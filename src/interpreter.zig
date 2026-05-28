@@ -2082,9 +2082,11 @@ pub const Interpreter = struct {
                 self.exception = .undefined;
                 const catch_env = try self.arena.create(Environment);
                 catch_env.* = .{ .arena = self.arena, .parent = self.env };
-                if (t.catch_param) |p| try catch_env.put(p, exc);
                 const saved = self.env;
                 self.env = catch_env;
+                // Bind the catch target (identifier or destructuring pattern)
+                // into the catch scope.
+                if (t.catch_param) |p| try self.bindPattern(p, exc, true);
                 const catch_result = self.eval(t.catch_block.?);
                 self.env = saved;
                 if (catch_result) |v| {

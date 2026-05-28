@@ -91,6 +91,19 @@ pub const Context = struct {
     }
 };
 
+test "destructuring catch parameter" {
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn(
+        \\var r = 0;
+        \\try { throw { a: 1, b: 2 }; } catch ({ a, b }) { r = a + b; }
+        \\r
+    )).number);
+    try std.testing.expectEqual(@as(f64, 30), (try evalIn(
+        \\var r = 0;
+        \\try { throw [10, 20]; } catch ([x, y]) { r = x + y; }
+        \\r
+    )).number);
+}
+
 test "Array.from with iterables + map fn" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\function* g() { yield 1; yield 2; yield 3; }

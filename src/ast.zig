@@ -123,7 +123,9 @@ pub const SwitchCase = struct {
 /// `finally_block` are independently optional (at least one is present).
 pub const TryNode = struct {
     block: *Node,
-    catch_param: ?[]const u8,
+    /// The `catch (binding)` target — an identifier or destructuring pattern.
+    /// Null for the optional-binding form (`catch { ... }`).
+    catch_param: ?*Node,
     catch_block: ?*Node,
     finally_block: ?*Node,
 };

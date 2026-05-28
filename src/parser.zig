@@ -480,15 +480,13 @@ pub const Parser = struct {
     fn parseTry(self: *Parser) ParseError!*Node {
         _ = self.advance(); // try
         const block = try self.parseBlock();
-        var catch_param: ?[]const u8 = null;
+        var catch_param: ?*Node = null;
         var catch_block: ?*Node = null;
         var finally_block: ?*Node = null;
         if (isKeyword(self.cur(), "catch")) {
             _ = self.advance();
             if (self.match(.lparen)) {
-                const p = self.advance();
-                if (p.kind != .identifier) return ParseError.UnexpectedToken;
-                catch_param = p.text;
+                catch_param = try self.parseBindingTarget(); // identifier or destructuring pattern
                 try self.expect(.rparen);
             }
             catch_block = try self.parseBlock();
