@@ -273,16 +273,20 @@ fn runOne(gpa: std.mem.Allocator, harness: *Harness, src: []const u8) Outcome {
     }
 }
 
-// `language/` plus the built-ins subtrees. With subprocess isolation a panic in
-// any subdir no longer aborts the run, so the full set is scorable.
+// The full `language` tree plus the built-ins areas the engine implements.
+// With subprocess isolation a panic no longer aborts the run, so this scores
+// broadly and credits every area already handled (Boolean/Number/Error/JSON/
+// Map/Set/Symbol/Function/Date/… were previously unscored). The giant, mostly-
+// unimplemented dirs (TypedArray/ArrayBuffer/Atomics/Proxy/Reflect-heavy/
+// Temporal) are left out to keep `zig build test262` to a few minutes; add
+// `"test/built-ins"` for a full (slow) audit.
 const subtrees = [_][]const u8{
-    "test/language/types",
-    "test/language/expressions",
-    "test/language/statements",
-    "test/built-ins/Math",
-    "test/built-ins/String",
-    "test/built-ins/Array",
-    "test/built-ins/Object",
+    "test/language",
+    "test/built-ins/Math",     "test/built-ins/String",  "test/built-ins/Array",
+    "test/built-ins/Object",   "test/built-ins/Boolean", "test/built-ins/Number",
+    "test/built-ins/Error",    "test/built-ins/JSON",    "test/built-ins/Map",
+    "test/built-ins/Set",      "test/built-ins/WeakMap", "test/built-ins/WeakSet",
+    "test/built-ins/Symbol",   "test/built-ins/Function", "test/built-ins/Date",
 };
 
 pub fn main(init: std.process.Init) !void {
