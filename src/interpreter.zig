@@ -3243,6 +3243,8 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
 fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    // `Promise(...)` without `new` is a TypeError (only [[Construct]] sets new.target).
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Promise constructor cannot be invoked without 'new'");
     const executor = if (args.len > 0) args[0] else .undefined;
     if (!executor.isCallable()) return self.throwError("TypeError", "Promise resolver is not a function");
     const pobj = try promise.newPromise(self);
@@ -3251,6 +3253,9 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     res_fn.* = .{ .native = promiseResolveClosure, .private_data = pp };
     const rej_fn = try self.arena.create(value.Object);
     rej_fn.* = .{ .native = promiseRejectClosure, .private_data = pp };
+    // The resolve/reject functions are anonymous, length 1 (spec).
+    try installNativeProps(self.arena, self.root_shape, res_fn, "", 1);
+    try installNativeProps(self.arena, self.root_shape, rej_fn, "", 1);
     if (self.callValueWithThis(executor, &.{ .{ .object = res_fn }, .{ .object = rej_fn } }, .undefined)) |_| {} else |err| {
         if (err == error.Throw) {
             const reason = self.exception;
