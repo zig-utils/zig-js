@@ -91,6 +91,25 @@ pub const Parser = struct {
         return p;
     }
 
+    /// NamedEvaluation (applied at parse time): an *anonymous* function/class
+    /// literal bound to a name takes that name (`var f = function(){}` ⇒
+    /// `f.name === "f"`). Doing it on the AST means it holds whether the program
+    /// runs on the VM or the tree-walker. A named function expression keeps its
+    /// own name. (Runtime sites — destructuring/param defaults — name anon
+    /// values too, for the dynamic cases this can't see.)
+    fn nameAnon(node: *Node, name: []const u8) void {
+        if (name.len == 0) return;
+        switch (node.*) {
+            .function => |f| {
+                if (f.name.len == 0) f.name = name;
+            },
+            .class_expr => {
+                if (node.class_expr.name.len == 0) node.class_expr.name = name;
+            },
+            else => {},
+        }
+    }
+
     // ----- program / statements -------------------------------------------
 
     pub fn parseProgram(self: *Parser) ParseError!*Node {
@@ -300,7 +319,10 @@ pub const Parser = struct {
             const name_tok = self.advance();
             if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
             var init_expr: ?*Node = null;
-            if (self.match(.assign)) init_expr = try self.parseAssignment();
+            if (self.match(.assign)) {
+                init_expr = try self.parseAssignment();
+                nameAnon(init_expr.?, name_tok.text);
+            }
             try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr } }));
             if (!self.match(.comma)) break;
         }
@@ -660,6 +682,7 @@ pub const Parser = struct {
             };
             _ = self.advance();
             const value = try self.parseAssignment();
+            if (target.* == .identifier) nameAnon(value, target.identifier); // `f = function(){}`
             return self.alloc(.{ .assign = .{ .target = target, .value = value } });
         }
         // Compound assignment `a op= b` desugars to `a = a op b`.
@@ -1062,6 +1085,7 @@ pub const Parser = struct {
                 val = try self.parseMethodTail(key, gen_method, async_method);
             } else if (self.match(.colon)) {
                 val = try self.parseAssignment();
+                nameAnon(val, key); // `{ m: function(){} }` ⇒ name "m"
             } else if (key_tok.kind == .identifier) {
                 const ident = try self.alloc(.{ .identifier = key });
                 // Shorthand `{ a }`, or `{ a = default }` (a destructuring

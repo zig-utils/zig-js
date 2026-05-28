@@ -331,8 +331,10 @@ test "function name + length own properties" {
     // `length` counts params before the first default / rest.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("function f(a, b = 1, c) {} f.length")).number);
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("function f(a, ...r) {} f.length")).number);
-    // Anonymous function expression has the empty name.
-    try expectEvalStr("", "var f = function (x) {}; f.name");
+    // An anonymous function expression *not* in a naming position has the
+    // empty name; assigned to a binding it takes that name (NamedEvaluation).
+    try expectEvalStr("", "(function (x) {}).name");
+    try expectEvalStr("f", "var f = function (x) {}; f.name");
     // Descriptor attributes: { writable:false, enumerable:false, configurable:true }.
     try std.testing.expect((try evalIn(
         \\function f() {}
@@ -891,6 +893,26 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
         \\try { var [x] = 5; } catch (e) { t = e instanceof TypeError; }
         \\t
     )).boolean);
+}
+
+test "NamedEvaluation: anonymous function/class takes its binding name" {
+    // Variable declaration.
+    try expectEvalStr("f", "var f = function () {}; f.name");
+    try expectEvalStr("g", "var g = () => {}; g.name");
+    try expectEvalStr("C", "var C = class {}; C.name");
+    // Assignment to an identifier.
+    try expectEvalStr("h", "var h; h = function () {}; h.name");
+    // Object property.
+    try expectEvalStr("m", "var o = { m: function () {} }; o.m.name");
+    // Destructuring default.
+    try expectEvalStr("d", "var { d = function () {} } = {}; d.name");
+    try expectEvalStr("e", "var [e = () => {}] = []; e.name");
+    // Parameter default.
+    try expectEvalStr("p", "function fn(p = function () {}) { return p.name; } fn()");
+    // A *named* function expression keeps its own name (not the binding's).
+    try expectEvalStr("real", "var x = function real() {}; x.name");
+    // A non-anonymous RHS (identifier) is unaffected.
+    try expectEvalStr("real", "function real() {} var y = real; y.name");
 }
 
 test "generators with destructuring / default / rest parameters" {

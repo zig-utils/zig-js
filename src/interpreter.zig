@@ -230,6 +230,9 @@ pub const Interpreter = struct {
 
             .assign => |a| blk: {
                 const v = try self.eval(a.value);
+                // NamedEvaluation: `f = function(){}` names the function "f"
+                // (only a bare identifier target, per spec).
+                if (a.target.* == .identifier) try self.maybeNameAnon(v, a.value, a.target.identifier);
                 try self.assignTo(a.target, v);
                 break :blk v;
             },
@@ -284,7 +287,11 @@ pub const Interpreter = struct {
                 try self.eval(c.alternate),
 
             .var_decl => |d| blk: {
-                const v: Value = if (d.init) |init_node| try self.eval(init_node) else .undefined;
+                var v: Value = .undefined;
+                if (d.init) |init_node| {
+                    v = try self.eval(init_node);
+                    try self.maybeNameAnon(v, init_node, d.name); // `var f = function(){}` ⇒ name "f"
+                }
                 try self.env.put(d.name, v);
                 break :blk .undefined;
             },
@@ -573,6 +580,35 @@ pub const Interpreter = struct {
             if (v.object.js_func) |e| return @ptrCast(@alignCast(e));
         }
         return null;
+    }
+
+    /// True if `node` is an *anonymous* function/class definition — the
+    /// syntactic predicate `IsAnonymousFunctionDefinition` that drives
+    /// NamedEvaluation (`var f = function(){}` ⇒ `f.name === "f"`).
+    fn isAnonFnDef(node: *Node) bool {
+        return switch (node.*) {
+            .function => |f| f.name.len == 0,
+            .class_expr => |c| c.name.len == 0,
+            else => false,
+        };
+    }
+
+    /// NamedEvaluation: when an anonymous function/class produced by `init_node`
+    /// is bound to the name `name` (a declaration, assignment, property, or
+    /// destructuring default), give the still-unnamed function that name. The
+    /// `name` own property is { writable:false, enumerable:false,
+    /// configurable:true }, like every function name.
+    fn maybeNameAnon(self: *Interpreter, val: Value, init_node: *Node, name: []const u8) EvalError!void {
+        if (name.len == 0) return;
+        if (!isAnonFnDef(init_node)) return;
+        if (val != .object or !val.object.isCallableObject()) return;
+        const o = val.object;
+        if (o.getOwn("name")) |c| {
+            if (c == .string and c.string.len != 0) return; // already named
+        }
+        try o.setOwn(self.arena, self.root_shape, "name", .{ .string = name });
+        try o.setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+        if (funcOf(val)) |f| f.name = name; // keep Function.name in sync
     }
 
     /// Evaluate a `class` to a constructor function value: methods go on its
@@ -915,7 +951,10 @@ pub const Interpreter = struct {
             }
             var v: Value = if (i < args.len) args[i] else .undefined;
             if (v == .undefined) {
-                if (p.default) |d| v = try self.eval(d);
+                if (p.default) |d| {
+                    v = try self.eval(d);
+                    if (p.pattern == null) try self.maybeNameAnon(v, d, p.name); // `function f(x = () => {})` ⇒ name "x"
+                }
             }
             if (p.pattern) |pat| try self.bindPattern(pat, v, true) else try self.env.put(p.name, v);
         }
@@ -1031,7 +1070,11 @@ pub const Interpreter = struct {
             }
             const key = if (p.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else p.key;
             switch (p.accessor) {
-                .none => try self.setProp(v.object, key, try self.eval(p.value)),
+                .none => {
+                    const pv = try self.eval(p.value);
+                    try self.maybeNameAnon(pv, p.value, key); // `{ x: function(){} }` ⇒ name "x"
+                    try self.setProp(v.object, key, pv);
+                },
                 .get => try self.defineAccessor(v.object, key, try self.eval(p.value), null),
                 .set => try self.defineAccessor(v.object, key, null, try self.eval(p.value)),
             }
@@ -1545,7 +1588,10 @@ pub const Interpreter = struct {
             try consumed.append(self.arena, key);
             var v = try self.getProperty(val, key);
             if (v == .undefined) {
-                if (prop.default) |d| v = try self.eval(d);
+                if (prop.default) |d| {
+                    v = try self.eval(d);
+                    if (prop.target.* == .identifier) try self.maybeNameAnon(v, d, prop.target.identifier);
+                }
             }
             try self.bindPattern(prop.target, v, declare);
         }
@@ -1577,7 +1623,10 @@ pub const Interpreter = struct {
                 idx += 1;
                 if (elem.target) |t| {
                     if (v == .undefined) {
-                        if (elem.default) |d| v = try self.eval(d);
+                        if (elem.default) |d| {
+                            v = try self.eval(d);
+                            if (t.* == .identifier) try self.maybeNameAnon(v, d, t.identifier);
+                        }
                     }
                     try self.bindPattern(t, v, declare);
                 }
