@@ -1808,10 +1808,12 @@ pub const Interpreter = struct {
                 return true;
             }
         }
-        // Dense array element → leave a hole (undefined), length unchanged.
+        // Dense array element → leave a hole (undefined), length unchanged. A
+        // per-index descriptor may mark it non-configurable (delete fails).
         if (o.is_array) {
             if (arrayIndex(key)) |i| {
                 if (i < o.elements.items.len) {
+                    if (o.attrs != null and !o.getAttr(key).configurable) return false;
                     o.elements.items[i] = .undefined;
                     return true;
                 }

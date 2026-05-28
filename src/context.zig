@@ -964,6 +964,22 @@ test "array index property attributes (defineProperty honors writable/enumerable
         \\Object.defineProperty(a, 0, { value: 7 });
         \\a[0]
     )).number);
+    // A non-configurable element cannot be deleted (sloppy: delete returns false).
+    try std.testing.expect((try evalIn(
+        \\var a = [1];
+        \\Object.defineProperty(a, 0, { configurable: false });
+        \\var ok = delete a[0];
+        \\!ok && a[0] === 1
+    )).boolean);
+}
+
+test "Object.keys/values/entries enumerate array indices" {
+    try expectEvalStr("0,1,2", "Object.keys([10, 20, 30]).join(',')");
+    try std.testing.expectEqual(@as(f64, 60), (try evalIn("Object.values([10, 20, 30]).reduce(function(a,b){return a+b;}, 0)")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Object.entries([7, 8]).length")).number);
+    try expectEvalStr("0,7", "Object.entries([7, 8])[0].join(',')");
+    // A non-enumerable index is skipped.
+    try expectEvalStr("1", "var a = [10, 20]; Object.defineProperty(a, 0, { enumerable: false }); Object.keys(a).join(',')");
 }
 
 test "sloppy-mode property set on a primitive is a no-op; null/undefined throws" {

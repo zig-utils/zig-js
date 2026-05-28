@@ -327,12 +327,39 @@ pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 
 // ---- Object / Array ----------------------------------------------------
 
+/// Own enumerable string keys of `o`, in spec order: integer array indices
+/// ascending first, then named keys in insertion order. Array element indices
+/// live in the dense `elements` store (not the shape), so they're added here;
+/// a per-index `enumerable:false` (from defineProperty) hides one.
+fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (o.is_array) {
+        var i: usize = 0;
+        while (i < o.elements.items.len) : (i += 1) {
+            const k = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+            if (o.getAttr(k).enumerable) try list.append(self.arena, k);
+        }
+    }
+    for (try o.enumerableKeys(self.arena)) |k| try list.append(self.arena, k);
+    return list.items;
+}
+
+/// Own value of `key` on `o`, resolving an array index to its dense element.
+fn ownValueOf(o: *value.Object, key: []const u8) Value {
+    if (o.is_array) {
+        if (arrayIndexOf(key)) |i| {
+            if (i < o.elements.items.len) return o.elements.items[i];
+        }
+    }
+    return o.getOwn(key) orelse .undefined;
+}
+
 pub fn objectKeys(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
     const result = try self.newArray();
     if (arg(args, 0) == .object) {
-        const keys = try arg(args, 0).object.enumerableKeys(self.arena);
+        const keys = try ownEnumerableKeys(self, arg(args, 0).object);
         for (keys) |k| try result.object.elements.append(self.arena, .{ .string = k });
     }
     return result;
@@ -344,8 +371,8 @@ pub fn objectValues(ctx: *anyopaque, this: Value, args: []const Value) HostError
     const result = try self.newArray();
     if (arg(args, 0) == .object) {
         const o = arg(args, 0).object;
-        const keys = try o.enumerableKeys(self.arena);
-        for (keys) |k| try result.object.elements.append(self.arena, o.getOwn(k) orelse .undefined);
+        const keys = try ownEnumerableKeys(self, o);
+        for (keys) |k| try result.object.elements.append(self.arena, ownValueOf(o, k));
     }
     return result;
 }
@@ -389,11 +416,11 @@ pub fn objectEntries(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     const result = try self.newArray();
     if (arg(args, 0) == .object) {
         const o = arg(args, 0).object;
-        const keys = try o.enumerableKeys(self.arena);
+        const keys = try ownEnumerableKeys(self, o);
         for (keys) |k| {
             const pair = try self.newArray();
             try pair.object.elements.append(self.arena, .{ .string = k });
-            try pair.object.elements.append(self.arena, o.getOwn(k) orelse .undefined);
+            try pair.object.elements.append(self.arena, ownValueOf(o, k));
             try result.object.elements.append(self.arena, pair);
         }
     }
