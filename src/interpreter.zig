@@ -1926,6 +1926,34 @@ pub const Interpreter = struct {
             try buf.appendSlice(self.arena, rest);
             return Value{ .string = try buf.toOwnedSlice(self.arena) };
         }
+        if (eq(name, "codePointAt")) {
+            const i = toLen(arg0(args).toNumber());
+            return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value.undefined;
+        }
+        if (eq(name, "lastIndexOf")) {
+            const sub = try arg0(args).toString(self.arena);
+            return Value{ .number = if (std.mem.lastIndexOf(u8, s, sub)) |idx| @floatFromInt(idx) else -1 };
+        }
+        if (eq(name, "substr")) {
+            // `substr(start, length)`: start may count from the end.
+            const start = relIndex(arg0(args), s.len, 0);
+            const remaining = s.len - start;
+            const len: usize = if (args.len > 1 and arg(args, 1) != .undefined) blk: {
+                const l = arg(args, 1).toNumber();
+                if (std.math.isNan(l) or l <= 0) break :blk 0;
+                const lu: usize = @intFromFloat(@trunc(l));
+                break :blk @min(lu, remaining);
+            } else remaining;
+            return Value{ .string = try self.arena.dupe(u8, s[start .. start + len]) };
+        }
+        if (eq(name, "localeCompare")) {
+            const other = try arg0(args).toString(self.arena);
+            return Value{ .number = switch (std.mem.order(u8, s, other)) {
+                .lt => -1,
+                .eq => 0,
+                .gt => 1,
+            } };
+        }
         return null;
     }
 
