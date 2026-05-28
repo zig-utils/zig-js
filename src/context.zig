@@ -372,6 +372,25 @@ test "native functions carry name + length own properties" {
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
 }
 
+test "Symbol.prototype: toString / valueOf / chain" {
+    try expectEvalStr("object", "typeof Symbol.prototype");
+    try std.testing.expect((try evalIn("Symbol.prototype.constructor === Symbol")).boolean);
+    try expectEvalStr("function", "typeof Symbol.prototype.toString");
+    // toString renders the description; valueOf returns the symbol itself.
+    try expectEvalStr("Symbol(f)", "Symbol('f').toString()");
+    try expectEvalStr("Symbol()", "Symbol().toString()");
+    try std.testing.expect((try evalIn("var s = Symbol('q'); s.valueOf() === s")).boolean);
+    // Instances are linked to Symbol.prototype; the methods are generic via .call.
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Symbol()) === Symbol.prototype")).boolean);
+    try expectEvalStr("Symbol(z)", "Symbol.prototype.toString.call(Symbol('z'))");
+    // A non-symbol receiver throws TypeError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { Symbol.prototype.toString.call({}); } catch (e) { t = e.name === "TypeError"; }
+        \\t
+    )).boolean);
+}
+
 test "Error prototypes: chain, name/message inheritance, toString" {
     // Each constructor has a real prototype with name/message/constructor.
     try expectEvalStr("object", "typeof Error.prototype");

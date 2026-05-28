@@ -1928,6 +1928,8 @@ pub const Interpreter = struct {
                     // Error.prototype.toString — before the generic Array `toString`
                     // (join) fallback below would wrongly intercept error objects.
                     if (o.is_error and eq(name, "toString")) return try errorToStringFn(@ptrCast(self), recv, args);
+                    if (o.is_symbol and eq(name, "toString")) return try symbolToStringFn(@ptrCast(self), recv, args);
+                    if (o.is_symbol and eq(name, "valueOf")) return recv;
                 }
                 if (o.is_regex) return try self.regexMethod(o, name, args);
                 if (o.is_date) return try self.dateMethod(o, name, args);
@@ -2786,6 +2788,24 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     return .{ .string = try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }) };
 }
 
+/// `Symbol.prototype.toString` → `"Symbol(description)"`. Requires a Symbol `this`.
+fn symbolToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or !this.object.is_symbol) return self.throwError("TypeError", "Symbol.prototype.toString requires that 'this' be a Symbol");
+    const d = this.object.getOwn("description");
+    const ds = if (d) |dv| (if (dv == .string) dv.string else "") else "";
+    return .{ .string = try std.mem.concat(self.arena, u8, &.{ "Symbol(", ds, ")" }) };
+}
+
+/// `Symbol.prototype.valueOf` → the Symbol itself. Requires a Symbol `this`.
+fn symbolValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or !this.object.is_symbol) return self.throwError("TypeError", "Symbol.prototype.valueOf requires that 'this' be a Symbol");
+    return this;
+}
+
 /// Install the engine's global bindings into `env`: the `Error`-family
 /// constructors, `NaN`/`Infinity`/`undefined`, the `Math` and `Object`/`Array`
 /// namespaces, and the common global functions. `root_shape` backs the property
@@ -3030,8 +3050,17 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     const symbol_ns = try a.create(value.Object);
     symbol_ns.* = .{ .native = symbolFn };
     try installNativeProps(a, root_shape, symbol_ns, "Symbol", 0);
+    // Symbol.prototype: toString/valueOf/constructor, protoing to Object.prototype.
+    const symbol_proto = try a.create(value.Object);
+    symbol_proto.* = .{ .proto = object_proto };
+    try setNative(a, root_shape, symbol_proto, "toString", 0, symbolToStringFn);
+    try setNative(a, root_shape, symbol_proto, "valueOf", 0, symbolValueOfFn);
+    try symbol_proto.setOwn(a, root_shape, "constructor", .{ .object = symbol_ns });
+    try symbol_proto.setAttr(a, "constructor", .{ .enumerable = false, .configurable = true, .writable = true });
+    try symbol_ns.setOwn(a, root_shape, "prototype", .{ .object = symbol_proto });
+    try symbol_ns.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
     inline for (.{ "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables" }) |name| {
-        try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name));
+        try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name, symbol_proto));
     }
     try env.put("Symbol", .{ .object = symbol_ns });
 
@@ -3173,13 +3202,22 @@ var symbol_counter: usize = 0;
 
 /// Create a Symbol object: a tagged object with a unique `sym_key` (a NUL-led
 /// string that can't collide with user property names) and a `description`.
-fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8) EvalError!Value {
+fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*value.Object) EvalError!Value {
     const o = try a.create(value.Object);
-    o.* = .{ .is_symbol = true };
+    o.* = .{ .is_symbol = true, .proto = proto };
     symbol_counter += 1;
     o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{symbol_counter});
     try o.setOwn(a, rs, "description", if (desc) |d| .{ .string = d } else .undefined);
     return .{ .object = o };
+}
+
+/// `Symbol.prototype`, resolved from the live `Symbol` binding (for linking
+/// runtime-created symbols to it). Null only before globals are installed.
+fn symbolProto(self: *Interpreter) ?*value.Object {
+    const sym = self.env.get("Symbol") orelse return null;
+    if (sym != .object) return null;
+    const p = sym.object.getOwn("prototype") orelse return null;
+    return if (p == .object) p.object else null;
 }
 
 /// `Date(...)` / `new Date(...)` → a Date object for the computed time.
@@ -3202,7 +3240,7 @@ fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const desc: ?[]const u8 = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else null;
-    return makeSymbolObj(self.arena, self.root_shape, desc);
+    return makeSymbolObj(self.arena, self.root_shape, desc, symbolProto(self));
 }
 
 /// Abstract Relational Comparison (subset): string<string is lexicographic,
