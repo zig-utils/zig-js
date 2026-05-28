@@ -2345,7 +2345,10 @@ pub const Interpreter = struct {
         // (via `.call`) materializes its `length`/indexed properties into a
         // temporary slice so the read-only methods below work unchanged.
         const items: []Value = if (o.is_array) o.elements.items else blk: {
-            const len = toLen((try self.getProperty(.{ .object = o }, "length")).toNumber());
+            // ToLength(ToNumber(obj.length)) — coerce via toPrimitive so an
+            // object `length` with a `valueOf`/`toString` is honored.
+            const len_val = try self.toPrimitive(try self.getProperty(.{ .object = o }, "length"), .number);
+            const len = toLen(len_val.toNumber());
             if (len > (1 << 22)) return null; // guard against pathological array-like lengths (OOM)
             const buf = try self.arena.alloc(Value, len);
             for (buf, 0..) |*slot, i| {
@@ -2357,6 +2360,17 @@ pub const Interpreter = struct {
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
         // reduceRight take an initial value here instead and ignore it.
         const cb_this = arg(args, 1);
+        // The callback-driven methods require a callable first argument, checked
+        // up front (so `[].map(undefined)` throws even on an empty array).
+        const cb_methods = [_][]const u8{
+            "forEach", "map",      "filter",        "some",  "every",
+            "find",    "findIndex", "findLast",     "findLastIndex",
+            "reduce",  "reduceRight", "flatMap",
+        };
+        for (cb_methods) |m| {
+            if (eq(name, m) and !arg0(args).isCallable())
+                return self.throwError("TypeError", "Array.prototype callback is not a function");
+        }
         if (eq(name, "push")) {
             for (args) |a| try o.elements.append(self.arena, a);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
