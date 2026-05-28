@@ -1449,6 +1449,21 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Whether `v` is iterable: a string, array, generator, or an object with a
+    /// `[Symbol.iterator]` method. (Used by `Array.from` to choose the iterator
+    /// path vs the array-like/length path.)
+    pub fn isIterable(self: *Interpreter, v: Value) bool {
+        switch (v) {
+            .string => return true,
+            .object => |o| {
+                if (o.is_array or o.gen != null) return true;
+                if (self.symbolIteratorKey()) |ik| return hasProperty(o, ik);
+                return false;
+            },
+            else => return false,
+        }
+    }
+
     /// The internal key of the well-known `Symbol.iterator` (from the `Symbol`
     /// global), for resolving `obj[Symbol.iterator]`.
     fn symbolIteratorKey(self: *Interpreter) ?[]const u8 {

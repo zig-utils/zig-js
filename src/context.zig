@@ -91,6 +91,16 @@ pub const Context = struct {
     }
 };
 
+test "Array.from with iterables + map fn" {
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\function* g() { yield 1; yield 2; yield 3; }
+        \\Array.from(g()).length + 3
+    )).number);
+    try std.testing.expectEqual(@as(f64, 12), (try evalIn("Array.from([1,2,3], function(x){return x*2;}).reduce(function(a,b){return a+b;},0)")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Array.from('abc').length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array.from({length: 2}).length")).number);
+}
+
 test "spread of iterables (generator, string, user iterator)" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\function* g() { yield 1; yield 2; yield 3; }

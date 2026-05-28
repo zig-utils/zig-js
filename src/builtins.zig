@@ -384,24 +384,33 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const self = interp(ctx);
     const result = try self.newArray();
     const src = arg(args, 0);
-    switch (src) {
-        .object => |o| {
-            if (o.is_array) {
-                for (o.elements.items) |v| try result.object.elements.append(self.arena, v);
-            } else if (o.getOwn("length")) |len_v| {
-                // Array-like: copy indices 0..length-1.
-                const n: usize = @intFromFloat(@max(@trunc(len_v.toNumber()), 0));
-                var i: usize = 0;
-                while (i < n) : (i += 1) {
-                    const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-                    try result.object.elements.append(self.arena, o.getOwn(key) orelse .undefined);
-                }
+    const map_fn = arg(args, 1);
+    const has_map = map_fn == .object and map_fn.object.isCallableObject();
+
+    if (self.isIterable(src)) {
+        // Iterator path: strings, arrays, generators, user `[Symbol.iterator]`.
+        const it = try self.iteratorOf(src);
+        var idx: f64 = 0;
+        while (true) {
+            const res = try self.callMethod(it, "next", &.{});
+            if ((try self.getProperty(res, "done")).toBoolean()) break;
+            var v = try self.getProperty(res, "value");
+            if (has_map) v = try self.callValue(map_fn, &.{ v, .{ .number = idx } });
+            try result.object.elements.append(self.arena, v);
+            idx += 1;
+        }
+    } else if (src == .object) {
+        // Array-like: copy indices 0..length-1.
+        if (src.object.getOwn("length")) |len_v| {
+            const n: usize = @intFromFloat(@max(@trunc(len_v.toNumber()), 0));
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                var v = src.object.getOwn(key) orelse .undefined;
+                if (has_map) v = try self.callValue(map_fn, &.{ v, .{ .number = @floatFromInt(i) } });
+                try result.object.elements.append(self.arena, v);
             }
-        },
-        .string => |s| {
-            for (s) |c| try result.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, &.{c}) });
-        },
-        else => {},
+        }
     }
     return result;
 }
