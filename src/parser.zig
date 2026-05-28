@@ -1055,8 +1055,7 @@ pub const Parser = struct {
         while (i < raw.len) {
             const c = raw[i];
             if (c == '\\' and i + 1 < raw.len) {
-                try lit.append(self.arena, decodeTemplateEscape(raw[i + 1]));
-                i += 2;
+                i = try lex.appendEscape(self.arena, &lit, raw, i + 1);
             } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
                 // Flush the literal run so far, then parse the substitution.
                 node = try self.concatStr(node, lit.items);
@@ -1088,8 +1087,7 @@ pub const Parser = struct {
         while (i < raw.len) {
             const c = raw[i];
             if (c == '\\' and i + 1 < raw.len) {
-                try buf.append(self.arena, decodeTemplateEscape(raw[i + 1]));
-                i += 2;
+                i = try lex.appendEscape(self.arena, &buf, raw, i + 1);
             } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
                 try cooked.append(self.arena, try buf.toOwnedSlice(self.arena));
                 try raws.append(self.arena, raw[raw_start..i]);
@@ -1365,16 +1363,6 @@ pub const Parser = struct {
 };
 
 /// Decode one escape char in a template literal's literal text.
-fn decodeTemplateEscape(e: u8) u8 {
-    return switch (e) {
-        'n' => '\n',
-        't' => '\t',
-        'r' => '\r',
-        '0' => 0,
-        else => e, // \\ \` \$ \" \' → the char itself
-    };
-}
-
 /// Given the raw template text and the index just past a `${`, return the index
 /// of the matching `}` (or `raw.len` if unterminated). Brace- and string-aware.
 fn substEnd(raw: []const u8, start: usize) usize {

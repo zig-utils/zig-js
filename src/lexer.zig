@@ -563,22 +563,8 @@ pub const Lexer = struct {
                 return .{ .kind = .string, .text = try buf.toOwnedSlice(self.arena), .pos = start };
             }
             if (ch == '\\') {
-                self.i += 1;
-                if (self.i >= self.src.len) return LexError.UnterminatedString;
-                const esc = self.src[self.i];
-                const decoded: u8 = switch (esc) {
-                    'n' => '\n',
-                    't' => '\t',
-                    'r' => '\r',
-                    '0' => 0,
-                    '\\' => '\\',
-                    '\'' => '\'',
-                    '"' => '"',
-                    '`' => '`',
-                    else => esc,
-                };
-                try buf.append(self.arena, decoded);
-                self.i += 1;
+                if (self.i + 1 >= self.src.len) return LexError.UnterminatedString;
+                self.i = try appendEscape(self.arena, &buf, self.src, self.i + 1);
             } else {
                 try buf.append(self.arena, ch);
                 self.i += 1;
@@ -680,6 +666,123 @@ pub const Lexer = struct {
 
 fn tok(kind: TokenKind, text: []const u8, pos: usize) Token {
     return .{ .kind = kind, .text = text, .pos = pos };
+}
+
+fn hexVal(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Append a UTF-8-encoded code point to `buf` (lone surrogates and out-of-range
+/// values fall back to a single raw byte so decoding never fails).
+fn appendCodePoint(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u21) std.mem.Allocator.Error!void {
+    var tmp: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &tmp) catch {
+        try buf.append(arena, @truncate(cp));
+        return;
+    };
+    try buf.appendSlice(arena, tmp[0..n]);
+}
+
+/// Decode one escape sequence and append its bytes to `buf`. `src[i]` is the
+/// character immediately after the backslash; returns the index just past the
+/// escape. Handles `\n \t \r \b \f \v \0`, `\xHH`, `\uHHHH`, `\u{...}`, line
+/// continuations, and (per spec) any other character as itself. Shared by the
+/// string lexer and the template-literal parser. Malformed hex/unicode escapes
+/// degrade to the literal character rather than erroring.
+pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), src: []const u8, i: usize) std.mem.Allocator.Error!usize {
+    const e = src[i];
+    switch (e) {
+        'n' => {
+            try buf.append(arena, '\n');
+            return i + 1;
+        },
+        't' => {
+            try buf.append(arena, '\t');
+            return i + 1;
+        },
+        'r' => {
+            try buf.append(arena, '\r');
+            return i + 1;
+        },
+        'b' => {
+            try buf.append(arena, 8);
+            return i + 1;
+        },
+        'f' => {
+            try buf.append(arena, 12);
+            return i + 1;
+        },
+        'v' => {
+            try buf.append(arena, 11);
+            return i + 1;
+        },
+        '0'...'7' => {
+            // `\0` (not followed by a digit) is NUL; legacy octal escapes are
+            // out of scope, so any other digit is taken literally below.
+            if (e == '0' and (i + 1 >= src.len or !std.ascii.isDigit(src[i + 1]))) {
+                try buf.append(arena, 0);
+                return i + 1;
+            }
+            try buf.append(arena, e);
+            return i + 1;
+        },
+        'x' => {
+            if (i + 2 < src.len) {
+                if (hexVal(src[i + 1])) |hi| if (hexVal(src[i + 2])) |lo| {
+                    try appendCodePoint(arena, buf, @as(u21, hi) * 16 + lo);
+                    return i + 3;
+                };
+            }
+            try buf.append(arena, 'x');
+            return i + 1;
+        },
+        'u' => {
+            if (i + 1 < src.len and src[i + 1] == '{') {
+                // `\u{ HHHH }` — variable-length, up to 0x10FFFF.
+                var j = i + 2;
+                var cp: u21 = 0;
+                var any = false;
+                while (j < src.len and src[j] != '}') : (j += 1) {
+                    const h = hexVal(src[j]) orelse break;
+                    cp = @truncate(@as(u32, cp) * 16 + h);
+                    any = true;
+                }
+                if (any and j < src.len and src[j] == '}') {
+                    try appendCodePoint(arena, buf, cp);
+                    return j + 1;
+                }
+            } else if (i + 4 < src.len) {
+                // `\uHHHH` — exactly four hex digits.
+                const a = hexVal(src[i + 1]);
+                const b = hexVal(src[i + 2]);
+                const c = hexVal(src[i + 3]);
+                const d = hexVal(src[i + 4]);
+                if (a != null and b != null and c != null and d != null) {
+                    const cp = (@as(u21, a.?) << 12) | (@as(u21, b.?) << 8) | (@as(u21, c.?) << 4) | d.?;
+                    try appendCodePoint(arena, buf, cp);
+                    return i + 5;
+                }
+            }
+            try buf.append(arena, 'u');
+            return i + 1;
+        },
+        '\r' => {
+            // Line continuation: `\` + CR or CRLF produces nothing.
+            if (i + 1 < src.len and src[i + 1] == '\n') return i + 2;
+            return i + 1;
+        },
+        '\n' => return i + 1, // line continuation
+        else => {
+            // `\\ \` \$ \" \'` and any NonEscapeCharacter → the character itself.
+            try buf.append(arena, e);
+            return i + 1;
+        },
+    }
 }
 
 fn isRadixDigit(c: u8, radix: u8) bool {
