@@ -3148,6 +3148,8 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try symbol_proto.setAttr(a, "constructor", .{ .enumerable = false, .configurable = true, .writable = true });
     try symbol_ns.setOwn(a, root_shape, "prototype", .{ .object = symbol_proto });
     try symbol_ns.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
+    try setNative(a, root_shape, symbol_ns, "for", 1, symbolForFn);
+    try setNative(a, root_shape, symbol_ns, "keyFor", 1, symbolKeyForFn);
     inline for (.{ "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables" }) |name| {
         try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name, symbol_proto));
     }
@@ -3331,6 +3333,46 @@ fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const desc: ?[]const u8 = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else null;
     return makeSymbolObj(self.arena, self.root_shape, desc, symbolProto(self));
+}
+
+/// The cross-realm GlobalSymbolRegistry, kept as a hidden object on the `Symbol`
+/// constructor (key → symbol). The Context's `Symbol` binding persists across
+/// `evaluate` calls, so the registry does too. NUL-prefixed so it never shows
+/// up in enumeration.
+fn symbolRegistry(self: *Interpreter) EvalError!?*value.Object {
+    const sym = self.env.get("Symbol") orelse return null;
+    if (sym != .object) return null;
+    if (sym.object.getOwn("\x00registry")) |r| {
+        if (r == .object) return r.object;
+    }
+    const reg = (try self.newObject()).object;
+    try sym.object.setOwn(self.arena, self.root_shape, "\x00registry", .{ .object = reg });
+    return reg;
+}
+
+/// `Symbol.for(key)` — return the registered symbol for the string `key`,
+/// creating and registering it on first use so equal keys yield the *same*
+/// symbol. The registration key is stashed on the symbol (hidden) for `keyFor`.
+fn symbolForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const key = if (args.len > 0) try args[0].toString(self.arena) else "undefined";
+    const reg = (try symbolRegistry(self)) orelse return self.throwError("TypeError", "Symbol registry unavailable");
+    if (reg.getOwn(key)) |existing| return existing;
+    const sym = try makeSymbolObj(self.arena, self.root_shape, key, symbolProto(self));
+    try sym.object.setOwn(self.arena, self.root_shape, "\x00forKey", .{ .string = key });
+    try reg.setOwn(self.arena, self.root_shape, key, sym);
+    return sym;
+}
+
+/// `Symbol.keyFor(sym)` — the registry key a symbol was registered under via
+/// `Symbol.for`, or undefined if it isn't a registered symbol.
+fn symbolKeyForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len == 0 or args[0] != .object or !args[0].object.is_symbol)
+        return self.throwError("TypeError", "Symbol.keyFor requires a symbol argument");
+    return args[0].object.getOwn("\x00forKey") orelse .undefined;
 }
 
 /// Abstract Relational Comparison (subset): string<string is lexicographic,

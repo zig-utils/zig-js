@@ -911,6 +911,25 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     )).boolean);
 }
 
+test "Symbol.for / Symbol.keyFor (global symbol registry)" {
+    // Same key returns the same (===) registered symbol.
+    try std.testing.expect((try evalIn("Symbol.for('x') === Symbol.for('x')")).boolean);
+    // A registry symbol is distinct from a plain Symbol() of the same desc.
+    try std.testing.expect((try evalIn("Symbol.for('y') !== Symbol('y')")).boolean);
+    // keyFor returns the registration key.
+    try expectEvalStr("z", "Symbol.keyFor(Symbol.for('z'))");
+    // keyFor on an unregistered symbol is undefined.
+    try expectEvalStr("undefined", "typeof Symbol.keyFor(Symbol('q'))");
+    // The registry symbol's description is the key.
+    try expectEvalStr("k", "Symbol.for('k').description");
+    // keyFor on a non-symbol throws a TypeError.
+    try std.testing.expect((try evalIn(
+        \\var t = false;
+        \\try { Symbol.keyFor('not a symbol'); } catch (e) { t = e instanceof TypeError; }
+        \\t
+    )).boolean);
+}
+
 test "NamedEvaluation: anonymous function/class takes its binding name" {
     // Variable declaration.
     try expectEvalStr("f", "var f = function () {}; f.name");
