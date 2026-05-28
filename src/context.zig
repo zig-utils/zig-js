@@ -91,6 +91,22 @@ pub const Context = struct {
     }
 };
 
+test "empty statements + class-declaration sequencing" {
+    // A `;` after a class declaration (and stray `;`) no longer breaks the
+    // following statements.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\class C { m() { return 2; } };
+        \\var c = new C();
+        \\c.m()
+    )).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn(";;; var x = 5;;; x")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\class C { [1.1]() { return 2; } static [1.1]() { return 2; } };
+        \\var c = new C();
+        \\c[1.1]()
+    )).number);
+}
+
 test "context persists globals across evaluations" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

@@ -99,6 +99,12 @@ pub const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) ParseError!*Node {
+        // Empty statement: a bare `;` (also the trailing `;` after a class /
+        // function declaration). Evaluates to a no-op (empty block).
+        if (self.check(.semicolon)) {
+            _ = self.advance();
+            return self.alloc(.{ .block = &[_]*Node{} });
+        }
         const t = self.cur();
         if (t.kind == .identifier) {
             if (std.mem.eql(u8, t.text, "var")) return self.parseVarDecl(.@"var");
