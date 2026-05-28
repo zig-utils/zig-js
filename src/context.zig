@@ -91,6 +91,23 @@ pub const Context = struct {
     }
 };
 
+test "for-of / for-in with destructuring + member targets" {
+    try std.testing.expectEqual(@as(f64, 10), (try evalIn(
+        \\var s = 0; for (const [a, b] of [[1, 2], [3, 4]]) { s += a + b; } s
+    )).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn(
+        \\var s = 0; for (const { x } of [{ x: 1 }, { x: 2 }]) { s += x; } s
+    )).number);
+    // Assignment form with a member target.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\var o = {}; for (o.k of [5, 6, 7]) {} o.k
+    )).number);
+    // Plain identifier (regression) + for-in still work.
+    try expectEvalStr("ab",
+        \\var r = ""; for (var k in { a: 1, b: 2 }) { r += k; } r
+    );
+}
+
 test "empty statements + class-declaration sequencing" {
     // A `;` after a class declaration (and stray `;`) no longer breaks the
     // following statements.

@@ -365,17 +365,20 @@ pub const Parser = struct {
             decl_kind = .@"const";
             _ = self.advance();
         }
-        if (self.check(.identifier)) {
-            const next = self.tokens[@min(self.pos + 1, self.tokens.len - 1)];
-            if (isKeyword(next, "in") or isKeyword(next, "of")) {
-                const name = self.advance().text;
+        // Iteration form `for ([decl] target in/of iterable)`, where `target`
+        // is an identifier, a destructuring pattern, or (assignment form) a
+        // member expression. Parse a target, then require `in`/`of`; otherwise
+        // rewind to `save` and parse a classic `for(;;)`.
+        if (self.tryForTarget(decl_kind) catch null) |target| {
+            if (isKeyword(self.cur(), "in") or isKeyword(self.cur(), "of")) {
                 const is_of = isKeyword(self.advance(), "of"); // consume in/of
-                const iterable = try self.parseAssignment();
+                // `for-in` takes an Expression, `for-of` an AssignmentExpression.
+                const iterable = if (is_of) try self.parseAssignment() else try self.parseExpression();
                 try self.expect(.rparen);
                 const body = try self.parseStatement();
                 return self.alloc(.{ .for_in = .{
                     .decl_kind = decl_kind,
-                    .name = name,
+                    .target = target,
                     .iterable = iterable,
                     .body = body,
                     .is_of = is_of,
@@ -405,6 +408,25 @@ pub const Parser = struct {
         try self.expect(.rparen);
         const body = try self.parseStatement();
         return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
+    }
+
+    /// Parse a `for-in`/`for-of` loop target (the part between the optional
+    /// declaration keyword and `in`/`of`): an identifier, a destructuring
+    /// pattern, or — in the assignment form (no `decl_kind`) — a member
+    /// expression. Returns null when the head clearly isn't an iteration target
+    /// (so the caller falls back to a classic `for(;;)`).
+    fn tryForTarget(self: *Parser, decl_kind: ?ast.DeclKind) ParseError!?*Node {
+        if (self.check(.lbrace) or self.check(.lbracket)) {
+            if (decl_kind != null) return try self.parseBindingTarget();
+            // Assignment form: an array/object literal cover → destructuring pattern.
+            return try self.litToPattern(try self.parsePrimary());
+        }
+        if (self.check(.identifier) and !isReservedWord(self.cur().text)) {
+            if (decl_kind != null) return try self.alloc(.{ .identifier = self.advance().text });
+            // Assignment LHS: an identifier or member chain (`obj.x`, `a[i]`).
+            return try self.parsePostfix();
+        }
+        return null;
     }
 
     fn parseSwitch(self: *Parser) ParseError!*Node {

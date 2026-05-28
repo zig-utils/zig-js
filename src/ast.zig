@@ -193,10 +193,12 @@ pub const Node = union(enum) {
     while_stmt: struct { cond: *Node, body: *Node },
     do_while_stmt: struct { body: *Node, cond: *Node },
     for_stmt: struct { init: ?*Node, cond: ?*Node, update: ?*Node, body: *Node },
-    /// `for (decl_kind name of/in iterable) body`. `decl_kind` null means the
-    /// binding is an existing variable (assigned, not declared). `is_of` picks
-    /// `for-of` (values) vs `for-in` (keys).
-    for_in: struct { decl_kind: ?DeclKind, name: []const u8, iterable: *Node, body: *Node, is_of: bool },
+    /// `for (decl_kind target of/in iterable) body`. `decl_kind` null means the
+    /// binding `target` is an existing variable/member (assigned, not declared);
+    /// `target` may be an identifier, a destructuring pattern, or (for the
+    /// assignment form) a member expression. `is_of` picks `for-of` (values) vs
+    /// `for-in` (keys).
+    for_in: struct { decl_kind: ?DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool },
     switch_stmt: struct { disc: *Node, cases: []SwitchCase },
     with_stmt: struct { obj: *Node, body: *Node },
     program: []*Node,

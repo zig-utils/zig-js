@@ -330,14 +330,14 @@ pub const Interpreter = struct {
             },
             .for_stmt => |f| try self.evalFor(f.init, f.cond, f.update, f.body),
             .switch_stmt => |s| try self.evalSwitch(s.disc, s.cases),
-            .for_in => |f| try self.evalForInOf(f.decl_kind, f.name, f.iterable, f.body, f.is_of),
+            .for_in => |f| try self.evalForInOf(f.decl_kind, f.target, f.iterable, f.body, f.is_of),
         };
     }
 
     /// `for-of` (values of arrays/strings) and `for-in` (own keys of objects /
     /// indices of arrays). Each iteration binds the loop variable then runs the
     /// body, honoring break/continue/return.
-    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, name: []const u8, iterable: *Node, body: *Node, is_of: bool) EvalError!Value {
+    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool) EvalError!Value {
         const my_label = self.takeLabel();
         const iter = try self.eval(iterable);
         var last: Value = .undefined;
@@ -350,14 +350,14 @@ pub const Interpreter = struct {
                         while (true) {
                             const res = try vm.genNext(self, o, .undefined);
                             if ((try self.getProperty(res, "done")).toBoolean()) break;
-                            try self.bindLoopVar(decl_kind, name, try self.getProperty(res, "value"));
+                            try self.bindLoopTarget(decl_kind, target, try self.getProperty(res, "value"));
                             last = try self.eval(body);
                             if (self.loopSignal(my_label)) |stop| if (stop) break;
                         }
                     } else if (o.is_array) {
                         var i: usize = 0;
                         while (i < o.elements.items.len) : (i += 1) {
-                            try self.bindLoopVar(decl_kind, name, o.elements.items[i]);
+                            try self.bindLoopTarget(decl_kind, target, o.elements.items[i]);
                             last = try self.eval(body);
                             if (self.loopSignal(my_label)) |stop| if (stop) break;
                         }
@@ -366,7 +366,7 @@ pub const Interpreter = struct {
                 .string => |s| {
                     for (s) |ch| {
                         const one = try self.arena.dupe(u8, &.{ch});
-                        try self.bindLoopVar(decl_kind, name, .{ .string = one });
+                        try self.bindLoopTarget(decl_kind, target, .{ .string = one });
                         last = try self.eval(body);
                         if (self.loopSignal(my_label)) |stop| if (stop) break;
                     }
@@ -381,14 +381,14 @@ pub const Interpreter = struct {
                         var i: usize = 0;
                         while (i < o.elements.items.len) : (i += 1) {
                             const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-                            try self.bindLoopVar(decl_kind, name, .{ .string = key });
+                            try self.bindLoopTarget(decl_kind, target, .{ .string = key });
                             last = try self.eval(body);
                             if (self.loopSignal(my_label)) |stop| if (stop) break;
                         }
                     } else {
                         const keys = try o.enumerableKeys(self.arena); // for-in skips non-enumerable
                         for (keys) |k| {
-                            try self.bindLoopVar(decl_kind, name, .{ .string = k });
+                            try self.bindLoopTarget(decl_kind, target, .{ .string = k });
                             last = try self.eval(body);
                             if (self.loopSignal(my_label)) |stop| if (stop) break;
                         }
@@ -401,8 +401,11 @@ pub const Interpreter = struct {
         return last;
     }
 
-    fn bindLoopVar(self: *Interpreter, decl_kind: ?ast.DeclKind, name: []const u8, v: Value) EvalError!void {
-        if (decl_kind != null) try self.env.put(name, v) else try self.env.assign(name, v);
+    /// Bind one iteration's value to the loop target: a declaration declares
+    /// (identifier or destructuring pattern), an assignment form assigns to an
+    /// existing identifier / member / pattern.
+    fn bindLoopTarget(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, v: Value) EvalError!void {
+        if (decl_kind != null) try self.bindPattern(target, v, true) else try self.assignTo(target, v);
     }
 
     /// `switch`: evaluate the discriminant, find the first strictly-equal `case`
