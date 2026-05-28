@@ -756,6 +756,10 @@ pub const Interpreter = struct {
     pub fn callValueWithThis(self: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
         if (callee != .object) return self.throwError("TypeError", "value is not a function");
         const obj = callee.object;
+        if (obj.bound) |erased| {
+            const bf: *BoundFn = @ptrCast(@alignCast(erased));
+            return self.callValueWithThis(bf.target, try self.concatArgs(bf.args, args), bf.this);
+        }
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
         if (obj.native) |nf| return nf(@ptrCast(self), this_val, args);
         if (obj.js_func) |erased| {
@@ -763,6 +767,28 @@ pub const Interpreter = struct {
             return self.callFunction(func, args, this_val);
         }
         return self.throwError("TypeError", "value is not a function");
+    }
+
+    /// A bound function: target + the `this`/leading args fixed by `fn.bind`.
+    pub const BoundFn = struct { target: Value, this: Value, args: []const Value };
+
+    /// `fn.bind(this, ...bound)`: a new callable that prepends `bound` to its args.
+    fn makeBound(self: *Interpreter, target: *value.Object, this: Value, bound_args: []const Value) EvalError!Value {
+        const bf = try self.arena.create(BoundFn);
+        bf.* = .{ .target = .{ .object = target }, .this = this, .args = try self.arena.dupe(Value, bound_args) };
+        const obj = try self.arena.create(value.Object);
+        obj.* = .{ .bound = @ptrCast(bf) };
+        return .{ .object = obj };
+    }
+
+    /// Concatenate bound args with call args (for invoking a bound function).
+    fn concatArgs(self: *Interpreter, a: []const Value, b: []const Value) EvalError![]const Value {
+        if (a.len == 0) return b;
+        if (b.len == 0) return a;
+        const out = try self.arena.alloc(Value, a.len + b.len);
+        @memcpy(out[0..a.len], a);
+        @memcpy(out[a.len..], b);
+        return out;
     }
 
     fn makeErrorWithArgs(self: *Interpreter, name: []const u8, args: []const Value) EvalError!Value {
@@ -844,6 +870,12 @@ pub const Interpreter = struct {
     pub fn construct(self: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
         if (callee != .object) return self.throwError("TypeError", "value is not a constructor");
         const obj = callee.object;
+        if (obj.bound) |erased| {
+            // `new (fn.bind(...))(...)`: construct the target with bound args
+            // prepended (the bound `this` is ignored by `new`, per spec).
+            const bf: *BoundFn = @ptrCast(@alignCast(erased));
+            return self.construct(bf.target, try self.concatArgs(bf.args, args));
+        }
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
         if (obj.native) |nf| return nf(@ptrCast(self), .undefined, args); // native ctor (RegExp, ...)
         if (obj.js_func) |erased| {
@@ -1345,6 +1377,48 @@ pub const Interpreter = struct {
                     if (eq(name, "next")) return try vm.genNext(self, o, sent);
                     if (eq(name, "return")) return try vm.genReturn(self, o, sent);
                     if (eq(name, "throw")) return try vm.genThrow(self, o, sent);
+                }
+                // Universal prototype methods (Function.prototype +
+                // Object.prototype), checked before the array/regex/map/set
+                // builtins so they reach every object kind. Own properties of
+                // the same name shadow them.
+                if (o.getOwn(name) == null) {
+                    if (o.isCallableObject()) {
+                        if (eq(name, "call")) {
+                            const t: Value = if (args.len > 0) args[0] else .undefined;
+                            return try self.callValueWithThis(recv, if (args.len > 1) args[1..] else &.{}, t);
+                        }
+                        if (eq(name, "apply")) {
+                            const t: Value = if (args.len > 0) args[0] else .undefined;
+                            const list: []const Value = if (args.len > 1 and args[1] == .object and args[1].object.is_array)
+                                args[1].object.elements.items
+                            else
+                                &.{};
+                            return try self.callValueWithThis(recv, list, t);
+                        }
+                        if (eq(name, "bind")) {
+                            return try self.makeBound(o, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1..] else &.{});
+                        }
+                    }
+                    if (eq(name, "hasOwnProperty")) {
+                        const k = if (args.len > 0) try args[0].toString(self.arena) else "undefined";
+                        return Value{ .boolean = objectHasOwn(o, k) };
+                    }
+                    if (eq(name, "propertyIsEnumerable")) {
+                        const k = if (args.len > 0) try args[0].toString(self.arena) else "undefined";
+                        // Own props are enumerable by default (attributes not yet
+                        // modeled); array `length` is the notable non-enumerable.
+                        const enumerable = objectHasOwn(o, k) and !(o.is_array and std.mem.eql(u8, k, "length"));
+                        return Value{ .boolean = enumerable };
+                    }
+                    if (eq(name, "isPrototypeOf")) {
+                        var cur: ?*value.Object = if (args.len > 0 and args[0] == .object) args[0].object.proto else null;
+                        while (cur) |c| {
+                            if (c == o) return Value{ .boolean = true };
+                            cur = c.proto;
+                        }
+                        return Value{ .boolean = false };
+                    }
                 }
                 if (o.is_regex) return try self.regexMethod(o, name, args);
                 if (o.is_map) return try self.mapMethod(o, name, args);
@@ -2069,6 +2143,17 @@ fn hasProperty(o: *value.Object, name: []const u8) bool {
     while (cur) |c| {
         if (c.getOwn(name) != null or c.getAccessor(name) != null) return true;
         cur = c.proto;
+    }
+    return false;
+}
+
+/// Does `o` have `name` as an *own* property (data, accessor, array index, or
+/// array `length`)? Backs `hasOwnProperty` / `propertyIsEnumerable`.
+fn objectHasOwn(o: *value.Object, name: []const u8) bool {
+    if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
+    if (o.is_array) {
+        if (std.mem.eql(u8, name, "length")) return true;
+        if (Interpreter.arrayIndex(name)) |i| return i < o.elements.items.len;
     }
     return false;
 }

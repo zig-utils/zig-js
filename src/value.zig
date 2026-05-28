@@ -57,6 +57,10 @@ pub const Object = struct {
     /// marks a generator *object* — the iterator returned by calling a
     /// `function*`; its `.next()`/`.return()`/`.throw()` drive the suspendable VM.
     gen: ?*anyopaque = null,
+    /// `*Interpreter.BoundFn`, type-erased. Non-null marks a bound function
+    /// (`fn.bind(this, ...args)`): calling it invokes the target with the bound
+    /// `this` and the bound args prepended.
+    bound: ?*anyopaque = null,
     /// Opaque `data` pointer carried for `JSObjectMake(ctx, class, data)` and
     /// surfaced to host callbacks via private-data accessors later.
     private_data: ?*anyopaque = null,
@@ -82,7 +86,7 @@ pub const Object = struct {
 
     pub fn isCallableObject(self: *const Object) bool {
         return self.callback != null or self.native != null or
-            self.js_func != null or self.error_ctor != null;
+            self.js_func != null or self.error_ctor != null or self.bound != null;
     }
 
     /// Own named property keys in insertion order (for `for-in` / enumeration).

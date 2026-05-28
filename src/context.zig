@@ -117,6 +117,45 @@ fn expectEvalStr(expected: []const u8, src: []const u8) !void {
     try std.testing.expectEqualStrings(expected, v.string);
 }
 
+test "Function.prototype: call / apply / bind" {
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\function add(a, b) { return a + b; }
+        \\add.call(null, 3, 4)
+    )).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\function add(a, b) { return a + b; }
+        \\add.apply(null, [3, 4])
+    )).number);
+    // `this` binding via call.
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn(
+        \\function getX() { return this.x; }
+        \\getX.call({ x: 42 })
+    )).number);
+    // bind fixes `this` and leading args.
+    try std.testing.expectEqual(@as(f64, 15), (try evalIn(
+        \\function add3(a, b, c) { return a + b + c; }
+        \\var f = add3.bind(null, 1, 2);
+        \\f(12)
+    )).number);
+    try std.testing.expectEqual(@as(f64, 100), (try evalIn(
+        \\var o = { v: 100, get: function () { return this.v; } };
+        \\var g = o.get.bind(o);
+        \\g()
+    )).number);
+}
+
+test "Object.prototype: hasOwnProperty / isPrototypeOf" {
+    try std.testing.expect((try evalIn(
+        \\var o = { a: 1 }; o.hasOwnProperty("a")
+    )).boolean);
+    try std.testing.expect(!(try evalIn(
+        \\var o = { a: 1 }; o.hasOwnProperty("b")
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var a = [1, 2, 3]; a.hasOwnProperty("length") && a.hasOwnProperty(0) && !a.hasOwnProperty(9)
+    )).boolean);
+}
+
 test "generators: manual next() yields values then done" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\function* g() { yield 1; yield 2; yield 3; }
