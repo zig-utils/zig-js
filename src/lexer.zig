@@ -107,7 +107,8 @@ pub const Lexer = struct {
     fn skipTrivia(self: *Lexer) void {
         while (self.i < self.src.len) {
             const c = self.src[self.i];
-            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+            // ASCII whitespace incl. vertical tab (0x0B) and form feed (0x0C).
+            if (c == ' ' or c == '\t' or c == '\r' or c == '\n' or c == 0x0B or c == 0x0C) {
                 self.i += 1;
             } else if (c == '/' and self.peek2() == '/') {
                 while (self.i < self.src.len and self.src[self.i] != '\n') self.i += 1;
@@ -115,6 +116,15 @@ pub const Lexer = struct {
                 self.i += 2;
                 while (self.i + 1 < self.src.len and !(self.src[self.i] == '*' and self.src[self.i + 1] == '/')) self.i += 1;
                 self.i = @min(self.i + 2, self.src.len);
+            } else if (c >= 0x80) {
+                // Unicode whitespace (NBSP, U+2000–200A, …) or line terminators
+                // (U+2028/U+2029) and the BOM are all trivia between tokens.
+                const len = std.unicode.utf8ByteSequenceLength(c) catch break;
+                if (self.i + len > self.src.len) break;
+                const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
+                if (isSpaceCp(cp) or isLineTermCp(cp)) {
+                    self.i += len;
+                } else break;
             } else break;
         }
     }
@@ -125,6 +135,137 @@ pub const Lexer = struct {
 
     fn isIdentPart(c: u8) bool {
         return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+    }
+
+    /// ECMAScript WhiteSpace code points (TAB/VT/FF/SP handled as ASCII above)
+    /// plus the BOM, which the spec treats as white space.
+    fn isSpaceCp(cp: u21) bool {
+        return switch (cp) {
+            0x0009, 0x000B, 0x000C, 0x0020, 0x00A0, 0x1680, 0x2000...0x200A, 0x202F, 0x205F, 0x3000, 0xFEFF => true,
+            else => false,
+        };
+    }
+
+    /// ECMAScript LineTerminator code points.
+    fn isLineTermCp(cp: u21) bool {
+        return cp == 0x000A or cp == 0x000D or cp == 0x2028 or cp == 0x2029;
+    }
+
+    /// IdentifierStart test for a decoded code point. Exact for ASCII; for
+    /// non-ASCII it admits any code point that is not white space, a line
+    /// terminator, a zero-width joiner (those are continue-only), or the BOM —
+    /// which covers every Unicode letter test262's positive identifier tests
+    /// use. (Full ID_Start property tables are a later refinement and only
+    /// matter for rejecting invalid identifiers — the negative/strictness axis.)
+    fn isIdStartCp(cp: u21) bool {
+        if (cp < 0x80) return isIdentStart(@intCast(cp));
+        if (isSpaceCp(cp) or isLineTermCp(cp)) return false;
+        if (cp == 0x200C or cp == 0x200D) return false; // ZWNJ/ZWJ: continue-only
+        return true;
+    }
+
+    /// IdentifierPart test for a decoded code point. Like `isIdStartCp` but also
+    /// admits ZWNJ/ZWJ (U+200C/U+200D), which are valid in IdentifierPart.
+    fn isIdContinueCp(cp: u21) bool {
+        if (cp < 0x80) return isIdentPart(@intCast(cp));
+        if (isSpaceCp(cp) or isLineTermCp(cp)) return false;
+        return true;
+    }
+
+    /// True when an IdentifierStart begins at `self.i`: an ASCII ident-start, a
+    /// `\u` escape, or a non-ASCII Unicode ID-start code point.
+    fn identStartHere(self: *Lexer) bool {
+        const c = self.src[self.i];
+        if (isIdentStart(c)) return true;
+        if (c == '\\' and self.peek2() == 'u') return true;
+        if (c < 0x80) return false;
+        const len = std.unicode.utf8ByteSequenceLength(c) catch return false;
+        if (self.i + len > self.src.len) return false;
+        const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch return false;
+        return isIdStartCp(cp);
+    }
+
+    /// Scan an IdentifierName from `self.i`, returning its *decoded* text: `\u`
+    /// escapes resolved to UTF-8 and raw Unicode letters copied through. Fast
+    /// path — a pure-ASCII name with no escape — returns a zero-copy source
+    /// slice, so the common case allocates nothing.
+    fn lexIdentName(self: *Lexer) LexError![]const u8 {
+        const start = self.i;
+        var needs_decode = false;
+        var first = true;
+        while (self.i < self.src.len) {
+            const c = self.src[self.i];
+            if (c == '\\') {
+                needs_decode = true;
+                self.i += 1;
+                if (self.peek() != 'u') return LexError.UnexpectedCharacter;
+                self.i += 1; // 'u'
+                try self.skipUnicodeEscape();
+                first = false;
+                continue;
+            }
+            if (c < 0x80) {
+                if (!(if (first) isIdentStart(c) else isIdentPart(c))) break;
+                self.i += 1;
+            } else {
+                const len = std.unicode.utf8ByteSequenceLength(c) catch break;
+                if (self.i + len > self.src.len) break;
+                const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
+                if (!(if (first) isIdStartCp(cp) else isIdContinueCp(cp))) break;
+                self.i += len;
+            }
+            first = false;
+        }
+        const raw = self.src[start..self.i];
+        return if (needs_decode) self.decodeIdent(raw) else raw;
+    }
+
+    /// Advance past a `\u` escape's digits (`\u{XXXX}` or exactly four hex
+    /// digits). `self.i` points just past the `u`.
+    fn skipUnicodeEscape(self: *Lexer) LexError!void {
+        if (self.peek() == '{') {
+            self.i += 1;
+            const ds = self.i;
+            while (self.i < self.src.len and self.src[self.i] != '}') self.i += 1;
+            if (self.i >= self.src.len or self.i == ds) return LexError.UnexpectedCharacter;
+            self.i += 1; // '}'
+        } else {
+            var k: usize = 0;
+            while (k < 4) : (k += 1) {
+                if (self.i >= self.src.len or !std.ascii.isHex(self.src[self.i])) return LexError.UnexpectedCharacter;
+                self.i += 1;
+            }
+        }
+    }
+
+    /// Decode an identifier slice containing `\u` escapes into a fresh UTF-8
+    /// buffer (literal bytes copied through, escapes resolved + re-encoded).
+    fn decodeIdent(self: *Lexer, raw: []const u8) LexError![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var j: usize = 0;
+        while (j < raw.len) {
+            if (raw[j] != '\\') {
+                try buf.append(self.arena, raw[j]);
+                j += 1;
+                continue;
+            }
+            j += 2; // skip "\u"
+            var cp: u21 = undefined;
+            if (j < raw.len and raw[j] == '{') {
+                j += 1;
+                const s = j;
+                while (j < raw.len and raw[j] != '}') j += 1;
+                cp = std.fmt.parseInt(u21, raw[s..j], 16) catch return LexError.UnexpectedCharacter;
+                j += 1; // '}'
+            } else {
+                cp = std.fmt.parseInt(u21, raw[j .. j + 4], 16) catch return LexError.UnexpectedCharacter;
+                j += 4;
+            }
+            var ub: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &ub) catch return LexError.UnexpectedCharacter;
+            try buf.appendSlice(self.arena, ub[0..n]);
+        }
+        return buf.toOwnedSlice(self.arena);
     }
 
     pub fn next(self: *Lexer) LexError!Token {
@@ -151,21 +292,26 @@ pub const Lexer = struct {
 
         const c = self.src[self.i];
 
+        // HashbangComment (`#!...`) — only valid at the very start of the source.
+        if (c == '#' and self.peek2() == '!' and start == 0) {
+            while (self.i < self.src.len and self.src[self.i] != '\n') self.i += 1;
+            return self.nextRaw();
+        }
         // Numbers
         if (std.ascii.isDigit(c) or (c == '.' and std.ascii.isDigit(self.peek2()))) {
             return self.lexNumber();
         }
-        // Identifiers / keywords
-        if (isIdentStart(c)) {
-            self.i += 1;
-            while (self.i < self.src.len and isIdentPart(self.src[self.i])) self.i += 1;
-            return .{ .kind = .identifier, .text = self.src[start..self.i], .pos = start };
+        // Identifiers / keywords — ASCII, Unicode letters, or `\u` escapes.
+        if (self.identStartHere()) {
+            return .{ .kind = .identifier, .text = try self.lexIdentName(), .pos = start };
         }
-        // Private names (#ident) for class private members.
-        if (c == '#' and isIdentStart(self.peek2())) {
+        // Private names (#ident) for class private members; the name after the
+        // `#` may itself use Unicode letters or `\u` escapes.
+        if (c == '#') {
             self.i += 1; // '#'
-            while (self.i < self.src.len and isIdentPart(self.src[self.i])) self.i += 1;
-            return .{ .kind = .private_name, .text = self.src[start..self.i], .pos = start };
+            if (!self.identStartHere()) return LexError.UnexpectedCharacter;
+            const name = try self.lexIdentName();
+            return .{ .kind = .private_name, .text = try std.fmt.allocPrint(self.arena, "#{s}", .{name}), .pos = start };
         }
         // Strings
         if (c == '"' or c == '\'') return self.lexString();

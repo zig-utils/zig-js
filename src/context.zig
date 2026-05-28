@@ -751,3 +751,26 @@ test "generators: locals persist across yields, closures captured" {
         \\var it = g(); it.next(); it.next().value + base
     )).number);
 }
+
+test "identifiers: unicode escapes decode to the canonical name" {
+    // \uXXXX in an identifier resolves to the same name written literally.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var \\u0061 = 1; a")).number);
+    // \u{...} code-point escape form.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("var \\u{62} = 2; b")).number);
+    // Escape in a non-leading position: `fo` is the identifier `fo`.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var f\\u006f = 3; fo")).number);
+}
+
+test "identifiers: raw non-ASCII Unicode letters" {
+    // Greek + a letter-like symbol used as identifiers.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var \u{03C0} = 7; \u{03C0}")).number);
+    try std.testing.expectEqual(@as(f64, 8), (try evalIn("var caf\u{00E9} = 8; caf\u{00E9}")).number);
+}
+
+test "whitespace: vertical tab, form feed, NBSP, and U+2028 separate tokens" {
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var\u{0B}x\u{0C}=\u{00A0}1\u{2028}x + 2")).number);
+}
+
+test "hashbang comment at start of source is ignored" {
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("#!/usr/bin/env node\nvar x = 5; x")).number);
+}
