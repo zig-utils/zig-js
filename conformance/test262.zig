@@ -245,7 +245,22 @@ fn runOne(gpa: std.mem.Allocator, harness: *Harness, src: []const u8) Outcome {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
     if (!meta.raw) {
-        buf.appendSlice(gpa, harness_shim) catch return .skip;
+        // Prefer the *real* upstream harness (`sta.js` + `assert.js`) — it now
+        // carries `assert.compareArray`, `isPrimitive`, the precise error
+        // messages, and a constructor-checking `assert.throws` the hand-written
+        // shim lacked. Fall back to the shim only if the corpus harness can't be
+        // read (e.g. submodule not checked out), so the runner still works
+        // standalone.
+        const sta = harness.get("sta.js");
+        const ass = harness.get("assert.js");
+        if (sta != null and ass != null) {
+            buf.appendSlice(gpa, sta.?) catch return .skip;
+            buf.append(gpa, '\n') catch return .skip;
+            buf.appendSlice(gpa, ass.?) catch return .skip;
+            buf.append(gpa, '\n') catch return .skip;
+        } else {
+            buf.appendSlice(gpa, harness_shim) catch return .skip;
+        }
         var i: usize = 0;
         while (i < meta.includes_n) : (i += 1) {
             const inc = harness.get(meta.includes[i]) orelse return .skip; // can't load → skip
