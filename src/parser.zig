@@ -20,6 +20,14 @@ pub const Parser = struct {
     /// True while parsing an async function body, so `await` is recognized as an
     /// await expression rather than an identifier. Saved/restored per function.
     in_async: bool = false,
+    /// True while parsing strict-mode code: the program (or an enclosing
+    /// function) had a `"use strict"` directive prologue, a function body has
+    /// its own such directive, or we're inside a class (always strict). Inherited
+    /// by nested functions. Recorded on each `FunctionNode.is_strict`.
+    strict: bool = false,
+    /// Strictness of the most recently parsed function body, read by the caller
+    /// to stamp `FunctionNode.is_strict` (since `parseFnBody` restores `strict`).
+    last_fn_strict: bool = false,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
         var lx = lex.Lexer.init(arena, source);
@@ -113,6 +121,17 @@ pub const Parser = struct {
     // ----- program / statements -------------------------------------------
 
     pub fn parseProgram(self: *Parser) ParseError!*Node {
+        // A top-level `"use strict"` directive prologue makes the whole program
+        // (and every function in it, by inheritance) strict.
+        var i: usize = self.pos;
+        while (i < self.tokens.len and self.tokens[i].kind == .string) {
+            if (std.mem.eql(u8, self.tokens[i].text, "use strict")) {
+                self.strict = true;
+                break;
+            }
+            i += 1;
+            if (i < self.tokens.len and self.tokens[i].kind == .semicolon) i += 1;
+        }
         var stmts: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.eof)) {
             try stmts.append(self.arena, try self.parseStatement());
@@ -569,7 +588,7 @@ pub const Parser = struct {
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async };
+        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .func_decl = fnode });
     }
 
@@ -588,7 +607,7 @@ pub const Parser = struct {
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async };
+        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -599,13 +618,36 @@ pub const Parser = struct {
     fn parseFnBody(self: *Parser, is_gen: bool, is_async: bool) ParseError!*Node {
         const saved_gen = self.in_generator;
         const saved_async = self.in_async;
+        const saved_strict = self.strict;
         self.in_generator = is_gen;
         self.in_async = is_async;
+        // A function is strict if it lexically inherits strictness or its own
+        // body opens with a `"use strict"` directive prologue. Detect it up
+        // front so nested functions parsed within inherit correctly.
+        self.strict = saved_strict or self.peekUseStrict();
+        self.last_fn_strict = self.strict;
         defer {
             self.in_generator = saved_gen;
             self.in_async = saved_async;
+            self.strict = saved_strict;
         }
         return self.parseBlock();
+    }
+
+    /// Does a `"use strict"` directive lead the body about to be parsed? The
+    /// current token is the opening `{`; a directive prologue is a leading run of
+    /// string-literal expression statements, so scan those (skipping the `{` and
+    /// statement-separating `;`) and stop at the first non-directive token.
+    fn peekUseStrict(self: *Parser) bool {
+        var i = self.pos;
+        if (i >= self.tokens.len or self.tokens[i].kind != .lbrace) return false;
+        i += 1;
+        while (i < self.tokens.len and self.tokens[i].kind == .string) {
+            if (std.mem.eql(u8, self.tokens[i].text, "use strict")) return true;
+            i += 1;
+            if (i < self.tokens.len and self.tokens[i].kind == .semicolon) i += 1;
+        }
+        return false;
     }
 
     /// `yield [expr]` / `yield* expr`. Only reached inside a generator body.
@@ -785,12 +827,17 @@ pub const Parser = struct {
         // An arrow's body opens its own async context (so `await` inside an
         // `async () => …` is recognized), restored on exit.
         const saved_async = self.in_async;
+        const saved_strict = self.strict;
         self.in_async = is_async;
-        defer self.in_async = saved_async;
+        defer {
+            self.in_async = saved_async;
+            self.strict = saved_strict;
+        }
         if (self.check(.lbrace)) {
-            fnode.* = .{ .params = params, .body = try self.parseBlock(), .is_expr_body = false, .is_arrow = true, .is_async = is_async };
+            self.strict = saved_strict or self.peekUseStrict();
+            fnode.* = .{ .params = params, .body = try self.parseBlock(), .is_expr_body = false, .is_arrow = true, .is_async = is_async, .is_strict = self.strict };
         } else {
-            fnode.* = .{ .params = params, .body = try self.parseAssignment(), .is_expr_body = true, .is_arrow = true, .is_async = is_async };
+            fnode.* = .{ .params = params, .body = try self.parseAssignment(), .is_expr_body = true, .is_arrow = true, .is_async = is_async, .is_strict = saved_strict };
         }
         return self.alloc(.{ .function = fnode });
     }
@@ -1164,6 +1211,10 @@ pub const Parser = struct {
             superclass = try self.parseUnary();
         }
         try self.expect(.lbrace);
+        // Class bodies are always strict mode; members inherit it via `self.strict`.
+        const saved_strict = self.strict;
+        self.strict = true;
+        defer self.strict = saved_strict;
         var members: std.ArrayListUnmanaged(ast.ClassMember) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             if (self.match(.semicolon)) continue; // stray semicolons allowed
@@ -1215,7 +1266,7 @@ pub const Parser = struct {
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async };
+        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
     }
 

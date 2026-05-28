@@ -75,6 +75,10 @@ pub const FunctionNode = struct {
     /// `async function` / `async () => …` / `async method()` — and, combined
     /// with `is_generator`, an async generator (`async function*`).
     is_async: bool = false,
+    /// Strict-mode code: a `"use strict"` directive prologue, lexically inside
+    /// strict code, or a class member (always strict). Gates sloppy-only
+    /// behaviors like `this`-substitution.
+    is_strict: bool = false,
 };
 
 /// A `class` member: a method (`func` is a `.function` node) or a field

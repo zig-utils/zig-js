@@ -107,6 +107,9 @@ pub const Function = struct {
     /// *calling* an async function throws; it parses and binds like any other
     /// function (a never-called async function is fully valid).
     is_async: bool = false,
+    /// Strict-mode function (see `ast.FunctionNode.is_strict`). Gates sloppy-only
+    /// behaviors — currently `this`-substitution on a null/undefined receiver.
+    is_strict: bool = false,
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:
@@ -585,6 +588,7 @@ pub const Interpreter = struct {
             .name = fnode.name,
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
+            .is_strict = fnode.is_strict,
         };
         // Compile a generator body up front for the suspendable VM. Bodies
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
@@ -937,7 +941,14 @@ pub const Interpreter = struct {
         const saved_nt = self.new_target;
         self.env = call_env;
         self.signal = .none;
-        self.this_value = this_val;
+        // Sloppy-mode this-substitution: a non-strict, non-arrow function called
+        // with a null/undefined `this` (`fn()`, `fn.call(undefined)`) sees the
+        // global object. Strict functions keep the undefined `this`; arrows
+        // inherit `this` lexically, so both are exempt.
+        self.this_value = if (!func.is_strict and !func.is_arrow and (this_val == .null or this_val == .undefined))
+            (if (self.global_object) |g| Value{ .object = g } else this_val)
+        else
+            this_val;
         self.home_object = func.home_object;
         self.super_ctor = func.super_ctor;
         self.new_target = if (func.is_arrow) saved_nt else new_target; // arrows inherit lexically
