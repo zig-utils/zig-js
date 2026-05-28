@@ -774,3 +774,34 @@ test "whitespace: vertical tab, form feed, NBSP, and U+2028 separate tokens" {
 test "hashbang comment at start of source is ignored" {
     try std.testing.expectEqual(@as(f64, 5), (try evalIn("#!/usr/bin/env node\nvar x = 5; x")).number);
 }
+
+test "async: declarations/expressions/arrows/methods parse; never-called is valid" {
+    // A never-called async function is fully valid (parses + binds).
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function f() { await 1; return 2; } 1")).number);
+    // async function expression, async arrow, async method — all parse.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async function () { return await g(); }; 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async (a, b) => await a + b; 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async x => await x; 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var o = { async m() { return await 1; } }; 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("class C { async m() { await this.x; } static async s() {} } 1")).number);
+    // async generator parses.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function* ag() { yield await 1; } 1")).number);
+}
+
+test "async: calling an async function throws (runtime not yet implemented)" {
+    try std.testing.expect((try evalIn(
+        \\var threw = false;
+        \\async function f() { return 1; }
+        \\try { f(); } catch (e) { threw = e instanceof TypeError; }
+        \\threw
+    )).boolean);
+}
+
+test "async: `async` remains usable as an ordinary identifier" {
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var async = 1; async + 2")).number);
+    // `async` as a property name / shorthand / method name (not a modifier).
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var o = { async: 7 }; o.async")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("var o = { async() { return 5; } }; o.async()")).number);
+    // `async` called as a function.
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn("function async(x) { return x; } async(9)")).number);
+}

@@ -450,6 +450,9 @@ pub const Compiler = struct {
                     _ = try self.chunk.emit(.gen_yield, 0);
                 }
             },
+            // `await` isn't lowered; async bodies run via the tree-walker (which
+            // currently reports them as not-yet-executable).
+            .await_expr => return error.Unsupported,
             // Statement-only nodes never appear in expression position.
             else => return error.Unsupported,
         }
@@ -519,6 +522,9 @@ pub const Compiler = struct {
     }
 
     fn compileFunction(self: *Compiler, fnode: *const ast.FunctionNode) CompileError!u32 {
+        // Async functions tree-walk (the Promise runtime isn't lowered yet), so
+        // bail here to force the fallback for any program that defines one.
+        if (fnode.is_async) return error.Unsupported;
         const sub = try self.arena.create(Chunk);
         sub.* = Chunk.init(self.arena);
 

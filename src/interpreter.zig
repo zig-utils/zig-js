@@ -102,6 +102,11 @@ pub const Function = struct {
     /// the body falls outside the VM's lowered subset — then calling it throws).
     is_generator: bool = false,
     gen_chunk: ?*bc.Chunk = null,
+    /// `async function` / `async () => …` (and, with `is_generator`, an async
+    /// generator). The Promise + microtask runtime is not yet implemented, so
+    /// *calling* an async function throws; it parses and binds like any other
+    /// function (a never-called async function is fully valid).
+    is_async: bool = false,
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:
@@ -224,6 +229,11 @@ pub const Interpreter = struct {
             // body fell outside the VM's lowered subset — report it clearly
             // rather than producing a wrong value.
             .yield_expr => return self.throwError("SyntaxError", "yield is only supported in VM-compiled generator bodies"),
+
+            // `await` only appears inside an async function body, and calling an
+            // async function already throws above — so this is effectively
+            // unreachable, but reported clearly for safety.
+            .await_expr => return self.throwError("TypeError", "await is not yet executable (parsing only)"),
 
             .super_call => |sc| blk: {
                 const sup = self.super_ctor orelse return self.throwError("SyntaxError", "'super' keyword unexpected here");
@@ -528,6 +538,7 @@ pub const Interpreter = struct {
             .closure = closure,
             .name = fnode.name,
             .is_generator = fnode.is_generator,
+            .is_async = fnode.is_async,
         };
         // Compile a generator body up front for the suspendable VM. Bodies
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
@@ -821,6 +832,11 @@ pub const Interpreter = struct {
     /// `callFunction` with an explicit `new.target` (set by `construct`; a plain
     /// call passes undefined). Arrow functions inherit the enclosing new.target.
     fn callFunctionNT(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+        // Async functions parse and bind, but the Promise + microtask runtime
+        // that would run their bodies isn't implemented yet — calling one throws
+        // (checked before the generator branch so async generators don't run as
+        // plain generators). A *never-called* async function is fully valid.
+        if (func.is_async) return self.throwError("TypeError", "async functions are not yet executable (parsing only)");
         // Calling a `function*` builds a generator object (its body runs lazily,
         // on the suspendable VM, via `.next()`).
         if (func.is_generator) return vm.makeGenerator(self, func, args, this_val);

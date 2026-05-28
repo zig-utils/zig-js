@@ -72,6 +72,9 @@ pub const FunctionNode = struct {
     /// `function*` / `*method()` — calling it returns a generator object whose
     /// body runs lazily on the suspendable VM.
     is_generator: bool = false,
+    /// `async function` / `async () => …` / `async method()` — and, combined
+    /// with `is_generator`, an async generator (`async function*`).
+    is_async: bool = false,
 };
 
 /// A `class` member: a method (`func` is a `.function` node) or a field
@@ -162,6 +165,8 @@ pub const Node = union(enum) {
     /// `delegate` marks `yield*`. Evaluates to the value passed to the next
     /// `.next(v)` resume.
     yield_expr: struct { argument: ?*Node = null, delegate: bool = false },
+    /// `await expr` — only valid inside an async function body.
+    await_expr: struct { argument: *Node },
     class_expr: struct { name: []const u8, superclass: ?*Node, members: []ClassMember },
     /// `super(args)` — call the superclass constructor on the current `this`.
     super_call: []*Node,
