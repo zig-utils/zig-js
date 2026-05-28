@@ -65,6 +65,8 @@ pub const Compiler = struct {
     loops: std.ArrayListUnmanaged(*Loop) = .empty,
     /// True while lowering a generator body, so `yield` may emit `gen_yield`.
     in_generator: bool = false,
+    /// Counter for synthesized temp names (`yield*` iterator/result holders).
+    tmp_counter: u32 = 0,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
@@ -438,11 +440,13 @@ pub const Compiler = struct {
             },
             .update => |u| try self.compileUpdate(u.inc, u.prefix, u.target),
             .yield_expr => |y| {
-                // `yield*` (delegation) needs an iterator-driving loop we don't
-                // lower yet → report the generator unsupported.
-                if (!self.in_generator or y.delegate) return error.Unsupported;
-                if (y.argument) |arg| try self.compileExpr(arg) else _ = try self.chunk.emit(.load_undefined, 0);
-                _ = try self.chunk.emit(.gen_yield, 0);
+                if (!self.in_generator) return error.Unsupported;
+                if (y.delegate) {
+                    try self.compileYieldStar(y.argument.?);
+                } else {
+                    if (y.argument) |arg| try self.compileExpr(arg) else _ = try self.chunk.emit(.load_undefined, 0);
+                    _ = try self.chunk.emit(.gen_yield, 0);
+                }
             },
             // Statement-only nodes never appear in expression position.
             else => return error.Unsupported,
@@ -469,6 +473,47 @@ pub const Compiler = struct {
             try self.emitStore(name);
             _ = try self.chunk.emit(.pop, 0); // discard the new value, leave the old
         }
+    }
+
+    /// `yield* X`: drive `X`'s iterator, yielding each value, then evaluate to
+    /// the iterator's final value. Desugared to a bytecode loop over the
+    /// iterator obtained via `iter_of` (the iterator protocol). The sent value
+    /// is not forwarded into the inner iterator yet (a v1 simplification).
+    fn compileYieldStar(self: *Compiler, arg: *Node) CompileError!void {
+        const it_name = try self.freshTemp(); // the iterator
+        const r_name = try self.freshTemp(); // the last `{value, done}` result
+
+        try self.compileExpr(arg);
+        _ = try self.chunk.emit(.iter_of, 0);
+        try self.emitDefine(it_name);
+
+        const top = self.chunk.here();
+        // r = it.next()
+        try self.emitLoad(it_name);
+        _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+        try self.emitDefine(r_name);
+        // if (r.done) break  — `not` then jump_if_false exits exactly when done.
+        try self.emitLoad(r_name);
+        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
+        _ = try self.chunk.emit(.not, 0);
+        const to_end = try self.chunk.emit(.jump_if_false, 0);
+        // yield r.value (discard the resume-sent value: not forwarded in v1)
+        try self.emitLoad(r_name);
+        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+        _ = try self.chunk.emit(.gen_yield, 0);
+        _ = try self.chunk.emit(.pop, 0);
+        _ = try self.chunk.emit(.jump, @intCast(top));
+        self.chunk.patchToHere(to_end);
+        // yield* evaluates to the iterator's final value (`r.value`).
+        try self.emitLoad(r_name);
+        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+    }
+
+    /// A unique, user-unreferenceable temp name (contains a NUL byte).
+    fn freshTemp(self: *Compiler) CompileError![]const u8 {
+        const n = self.tmp_counter;
+        self.tmp_counter += 1;
+        return std.fmt.allocPrint(self.arena, "\x00ys{d}", .{n});
     }
 
     fn compileFunction(self: *Compiler, fnode: *const ast.FunctionNode) CompileError!u32 {

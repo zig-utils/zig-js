@@ -305,6 +305,10 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 }
                 return vm.throwError("SyntaxError", "yield outside a generator");
             },
+            .iter_of => {
+                const v = stack.pop().?;
+                try stack.append(vm.arena, try vm.iteratorOf(v));
+            },
 
             .halt => return acc,
         }

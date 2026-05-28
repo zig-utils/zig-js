@@ -99,11 +99,22 @@ test "context persists globals across evaluations" {
     try std.testing.expectEqual(@as(f64, 42), v.number);
 }
 
-/// Evaluate `src` in a fresh context and return its completion value.
+/// Evaluate `src` in a fresh context and return its completion value. Only safe
+/// for by-value results (numbers/booleans); a returned `.string` points into the
+/// context arena, so use `expectEvalStr` for those (it compares before teardown).
 fn evalIn(src: []const u8) !value.Value {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
     return ctx.evaluate(src);
+}
+
+/// Evaluate `src` and assert its string completion value, while the context (and
+/// thus the string's backing arena) is still alive.
+fn expectEvalStr(expected: []const u8, src: []const u8) !void {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const v = try ctx.evaluate(src);
+    try std.testing.expectEqualStrings(expected, v.string);
 }
 
 test "generators: manual next() yields values then done" {
@@ -139,6 +150,31 @@ test "generators: infinite generator bounded by the consumer" {
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
         \\function* nat() { var i = 0; while (true) { yield i; i = i + 1; } }
         \\var it = nat(); it.next(); it.next(); it.next().value
+    )).number);
+}
+
+test "generators: yield* delegates to arrays, strings, and generators" {
+    // Delegate to an array.
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\function* g() { yield* [1, 2, 3]; }
+        \\var s = 0; for (var x of g()) { s += x; } s
+    )).number);
+    // Delegate to another generator, interleaved with own yields.
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
+        \\function* inner() { yield 1; yield 2; }
+        \\function* outer() { yield 0; yield* inner(); yield 3; }
+        \\var s = 0; for (var x of outer()) { s += x; } s
+    )).number);
+    // Delegate to a string (yields each character).
+    try expectEvalStr("ab",
+        \\function* g() { yield* "ab"; }
+        \\var it = g(); it.next().value + it.next().value
+    );
+    // `yield*` evaluates to the delegated generator's return value.
+    try std.testing.expectEqual(@as(f64, 99), (try evalIn(
+        \\function* inner() { yield 1; return 99; }
+        \\function* outer() { var r = yield* inner(); yield r; }
+        \\var it = outer(); it.next(); it.next().value
     )).number);
 }
 

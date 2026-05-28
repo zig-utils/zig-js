@@ -1305,6 +1305,35 @@ pub const Interpreter = struct {
         return self.callValueWithThis(method, args, recv);
     }
 
+    /// Obtain an iterator (an object with a `.next()` returning `{value, done}`)
+    /// for `v` — the iterator-protocol entry point used by `yield*` (and, later,
+    /// spread / `Array.from` / VM `for-of`). Generators are their own iterator;
+    /// an object that already has a `next` method is returned as-is; arrays and
+    /// strings are wrapped in an index cursor.
+    pub fn iteratorOf(self: *Interpreter, v: Value) EvalError!Value {
+        switch (v) {
+            .object => |o| {
+                if (o.gen != null) return v;
+                if (hasProperty(o, "next")) return v; // already an iterator (manual or generator-like)
+                if (o.is_array) return self.makeCursorIterator(v);
+                return self.throwError("TypeError", "value is not iterable");
+            },
+            .string => return self.makeCursorIterator(v),
+            else => return self.throwError("TypeError", "value is not iterable"),
+        }
+    }
+
+    /// Wrap an array/string in an iterator object: `__src` + `__i` own properties
+    /// plus a shared native `next` that reads/advances them.
+    fn makeCursorIterator(self: *Interpreter, src: Value) EvalError!Value {
+        const it = try self.arena.create(value.Object);
+        it.* = .{};
+        try self.setProp(it, "__src", src);
+        try self.setProp(it, "__i", .{ .number = 0 });
+        try setNative(self.arena, self.root_shape, it, "next", cursorIterNext);
+        return .{ .object = it };
+    }
+
     /// Dispatch `Array.prototype` / `String.prototype` methods (which aren't
     /// stored as own properties). Returns null when `name` isn't a recognized
     /// builtin for `recv`, so the caller falls back to a property lookup + call.
@@ -1978,6 +2007,35 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, array_ns, "of", builtins.arrayOf);
     try setNative(a, root_shape, array_ns, "from", builtins.arrayFrom);
     try env.put("Array", .{ .object = array_ns });
+}
+
+/// `next()` for a `makeCursorIterator` object: yields successive elements of the
+/// captured array/string, then `{ done: true }`.
+fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "next called on non-object");
+    const o = this.object;
+    const src = o.getOwn("__src") orelse Value.undefined;
+    const i = toLen((o.getOwn("__i") orelse Value{ .number = 0 }).number);
+    var done = true;
+    var val: Value = .undefined;
+    switch (src) {
+        .object => |so| if (so.is_array and i < so.elements.items.len) {
+            val = so.elements.items[i];
+            done = false;
+        },
+        .string => |s| if (i < s.len) {
+            val = .{ .string = try self.arena.dupe(u8, s[i .. i + 1]) };
+            done = false;
+        },
+        else => {},
+    }
+    if (!done) try self.setProp(o, "__i", .{ .number = @floatFromInt(i + 1) });
+    const res = try self.newObject();
+    try self.setMember(res, "value", val);
+    try self.setMember(res, "done", .{ .boolean = done });
+    return res;
 }
 
 fn defineGlobalFn(env: *Environment, name: []const u8, f: value.NativeFn) EvalError!void {
