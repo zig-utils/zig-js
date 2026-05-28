@@ -479,6 +479,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
     };
     const obj = try vm.arena.create(value.Object);
     obj.* = .{ .js_func = @ptrCast(func) };
+    try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
     return .{ .object = obj };
 }
 

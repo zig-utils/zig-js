@@ -320,6 +320,35 @@ fn expectEvalStr(expected: []const u8, src: []const u8) !void {
     try std.testing.expectEqualStrings(expected, v.string);
 }
 
+test "function name + length own properties" {
+    // `name` and `length` are own, non-enumerable, configurable, non-writable.
+    try expectEvalStr("foo", "function foo(a, b) {} foo.name");
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function foo(a, b) {} foo.length")).number);
+    try std.testing.expect((try evalIn(
+        \\function foo(a, b) {}
+        \\foo.hasOwnProperty("name") && foo.hasOwnProperty("length")
+    )).boolean);
+    // `length` counts params before the first default / rest.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("function f(a, b = 1, c) {} f.length")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("function f(a, ...r) {} f.length")).number);
+    // Anonymous function expression has the empty name.
+    try expectEvalStr("", "var f = function (x) {}; f.name");
+    // Descriptor attributes: { writable:false, enumerable:false, configurable:true }.
+    try std.testing.expect((try evalIn(
+        \\function f() {}
+        \\var d = Object.getOwnPropertyDescriptor(f, "length");
+        \\!d.writable && !d.enumerable && d.configurable
+    )).boolean);
+    // name/length are not enumerable (skipped by Object.keys / for-in).
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("function f(a) {} Object.keys(f).length")).number);
+    // Class constructor carries name + constructor arity.
+    try expectEvalStr("C", "class C { constructor(a, b) {} } C.name");
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("class C { constructor(a, b) {} } C.length")).number);
+    // Bound function: name is "bound <target>", length is reduced by bound args.
+    try expectEvalStr("bound f", "function f(a, b, c) {} f.bind(null, 1).name");
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f(a, b, c) {} f.bind(null, 1).length")).number);
+}
+
 test "Function.prototype: call / apply / bind" {
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\function add(a, b) { return a + b; }

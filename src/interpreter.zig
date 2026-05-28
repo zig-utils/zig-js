@@ -540,6 +540,7 @@ pub const Interpreter = struct {
         }
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .js_func = @ptrCast(func) };
+        try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return .{ .object = obj };
     }
 
@@ -779,6 +780,22 @@ pub const Interpreter = struct {
         bf.* = .{ .target = .{ .object = target }, .this = this, .args = try self.arena.dupe(Value, bound_args) };
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .bound = @ptrCast(bf) };
+        // Per spec: a bound function's `length` is max(0, target.length - args)
+        // and its `name` is "bound " + target.name. Both are
+        // { writable: false, enumerable: false, configurable: true }.
+        const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
+        const tgt_len = (try self.getProperty(.{ .object = target }, "length")).toNumber();
+        const bound_len = if (std.math.isNan(tgt_len)) 0 else blk: {
+            const n = @as(i64, @intFromFloat(@trunc(tgt_len))) - @as(i64, @intCast(bound_args.len));
+            break :blk if (n < 0) @as(i64, 0) else n;
+        };
+        try obj.setOwn(self.arena, self.root_shape, "length", .{ .number = @floatFromInt(bound_len) });
+        try obj.setAttr(self.arena, "length", ro_attr);
+        const tgt_name = try self.getProperty(.{ .object = target }, "name");
+        const base_name = if (tgt_name == .string) tgt_name.string else "";
+        const bound_name = try std.fmt.allocPrint(self.arena, "bound {s}", .{base_name});
+        try obj.setOwn(self.arena, self.root_shape, "name", .{ .string = bound_name });
+        try obj.setAttr(self.arena, "name", ro_attr);
         return .{ .object = obj };
     }
 
@@ -2671,6 +2688,31 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     try self.setMember(res, "value", val);
     try self.setMember(res, "done", .{ .boolean = done });
     return res;
+}
+
+/// Install the `length` and `name` own properties on a function object, per the
+/// spec: both are `{ writable: false, enumerable: false, configurable: true }`.
+/// `length` is the count of parameters before the first one that has a default
+/// value or is a rest (`...`) parameter; `name` is the function's name ("" for an
+/// anonymous function expression). test262's propertyHelper + countless
+/// `fn.name`/`fn.length` assertions depend on these existing as own properties.
+pub fn installFunctionProps(
+    arena: std.mem.Allocator,
+    root_shape: *Shape,
+    obj: *value.Object,
+    params: []const ast.Param,
+    name: []const u8,
+) EvalError!void {
+    var len: usize = 0;
+    for (params) |p| {
+        if (p.is_rest or p.default != null) break;
+        len += 1;
+    }
+    const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
+    try obj.setOwn(arena, root_shape, "length", .{ .number = @floatFromInt(len) });
+    try obj.setAttr(arena, "length", ro_attr);
+    try obj.setOwn(arena, root_shape, "name", .{ .string = name });
+    try obj.setAttr(arena, "name", ro_attr);
 }
 
 fn defineGlobalFn(env: *Environment, name: []const u8, f: value.NativeFn) EvalError!void {
