@@ -611,6 +611,17 @@ pub const Parser = struct {
         return std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
     }
 
+    /// A getter takes no parameters; a setter takes exactly one (non-rest)
+    /// parameter. Otherwise it's a SyntaxError. `func` is a `.function` node.
+    fn validateAccessor(func: *Node, kind: ast.AccessorKind) ParseError!void {
+        const params = func.function.params;
+        switch (kind) {
+            .get => if (params.len != 0) return ParseError.UnexpectedToken,
+            .set => if (params.len != 1 or params[0].is_rest) return ParseError.UnexpectedToken,
+            .none => {},
+        }
+    }
+
     /// Strict-mode early errors on a formal parameter list: a parameter named
     /// `eval`/`arguments`, or any duplicate parameter name, is a SyntaxError.
     fn validateStrictParams(params: []const ast.Param) ParseError!void {
@@ -1228,6 +1239,7 @@ pub const Parser = struct {
                 _ = self.advance(); // get/set
                 const pn = try self.parsePropertyName();
                 const func = try self.parseMethodTail(pn.key, false, false);
+                try validateAccessor(func, kind);
                 try props.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .value = func, .accessor = kind });
                 if (!self.match(.comma)) break;
                 continue;
@@ -1352,6 +1364,7 @@ pub const Parser = struct {
                 _ = self.advance(); // get/set
                 const apn = try self.parsePropertyName();
                 const func = try self.parseMethodTail(apn.key, false, false);
+                try validateAccessor(func, kind);
                 try members.append(self.arena, .{ .key = apn.key, .key_expr = apn.expr, .func = func, .is_static = is_static, .accessor = kind });
                 continue;
             }
