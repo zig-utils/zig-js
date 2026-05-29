@@ -1642,6 +1642,15 @@ pub const Interpreter = struct {
     pub fn makeMap(self: *Interpreter, init_v: Value) EvalError!Value {
         const o = (try self.newObject()).object;
         o.is_map = true;
+        if (self.new_target == .object and self.new_target.object.getOwn("prototype") != null) {
+            o.proto = self.new_target.object.getOwn("prototype").?.object;
+        } else if (self.env.get("Map")) |ctor| {
+            if (ctor == .object) {
+                if (ctor.object.getOwn("prototype")) |p| {
+                    if (p == .object) o.proto = p.object;
+                }
+            }
+        }
         try self.setProp(o, "size", .{ .number = 0 });
         if (init_v == .object and init_v.object.is_array) {
             for (init_v.object.elements.items) |entry| {
@@ -3909,6 +3918,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     if (env.get("Map")) |m| {
         if (m == .object) try setNative(a, root_shape, m.object, "groupBy", 2, mapGroupByFn);
     }
+    try installMapProto(env, root_shape);
     try defineGlobalFnC(env, root_shape, "Set", 0, true, builtins.setFn);
     try installSetProto(env, root_shape);
     try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.mapFn);
@@ -4384,6 +4394,33 @@ fn setProtoMethod(comptime name: []const u8) value.NativeFn {
             return (try self.setMethod(this.object, name, args)) orelse .undefined;
         }
     }.call;
+}
+
+/// A brand-checked `Map.prototype` method dispatching to `mapMethod`.
+fn mapProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or !this.object.is_map)
+                return self.throwError("TypeError", "Map.prototype method called on a non-Map");
+            return (try self.mapMethod(this.object, name, args)) orelse .undefined;
+        }
+    }.call;
+}
+
+fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {
+    const a = env.arena;
+    const ctor = env.get("Map") orelse return;
+    if (ctor != .object) return;
+    const proto_v = ctor.object.getOwn("prototype") orelse return;
+    if (proto_v != .object) return;
+    const p = proto_v.object;
+    const specs = .{
+        .{ "set", 2 },     .{ "get", 1 },     .{ "has", 1 },      .{ "delete", 1 },
+        .{ "clear", 0 },   .{ "forEach", 1 }, .{ "keys", 0 },     .{ "values", 0 },
+        .{ "entries", 0 }, .{ "getOrInsert", 2 }, .{ "getOrInsertComputed", 2 },
+    };
+    inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], mapProtoMethod(s[0]));
 }
 
 /// Install the Set.prototype methods (real, brand-checked own properties) on
