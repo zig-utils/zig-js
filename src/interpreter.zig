@@ -2090,12 +2090,15 @@ pub const Interpreter = struct {
         if (rest) |rest_name| {
             const rest_obj = try self.newObject();
             if (val == .object) {
-                const keys = try val.object.ownKeys(self.arena);
+                // Object rest copies only the *enumerable* own properties.
+                const keys = try val.object.enumerableKeys(self.arena);
                 outer: for (keys) |k| {
                     for (consumed.items) |c| {
                         if (std.mem.eql(u8, c, k)) continue :outer;
                     }
-                    try self.setProp(rest_obj.object, k, val.object.getOwn(k) orelse .undefined);
+                    // Copy via [[Get]] so an accessor's getter runs (and a data
+                    // property's value is read), landing as a plain data prop.
+                    try self.setProp(rest_obj.object, k, try self.getProperty(val, k));
                 }
             }
             if (declare) try self.env.put(rest_name, rest_obj) else try self.env.assign(rest_name, rest_obj);
