@@ -3019,7 +3019,7 @@ pub const Interpreter = struct {
             "startsWith",  "endsWith",   "slice",       "substring", "substr",     "toUpperCase",
             "toLowerCase", "trim",       "trimStart",   "trimEnd",  "repeat",      "concat",
             "split",       "at",         "padStart",    "padEnd",   "replace",     "replaceAll",
-            "localeCompare", "normalize", "search",     "match",
+            "localeCompare", "normalize", "search",     "match",     "toLocaleUpperCase", "toLocaleLowerCase",
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
@@ -3730,12 +3730,14 @@ pub const Interpreter = struct {
             }
             return Value{ .string = try self.arena.dupe(u8, s[a0..b0]) };
         }
-        if (eq(name, "toUpperCase")) {
+        if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
+            // toLocaleUpperCase delegates to the locale-independent mapping here
+            // (the engine has no ICU data); for the default locale they agree.
             const out = try self.arena.dupe(u8, s);
             for (out) |*c| c.* = std.ascii.toUpper(c.*);
             return Value{ .string = out };
         }
-        if (eq(name, "toLowerCase")) {
+        if (eq(name, "toLowerCase") or eq(name, "toLocaleLowerCase")) {
             const out = try self.arena.dupe(u8, s);
             for (out) |*c| c.* = std.ascii.toLower(c.*);
             return Value{ .string = out };
@@ -4892,6 +4894,8 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     string_ns.* = .{ .native = builtins.stringFn, .native_ctor = true };
     try installNativeProps(a, root_shape, string_ns, "String", 1);
     try setNative(a, root_shape, string_ns, "fromCharCode", 1, builtins.stringFromCharCode);
+    try setNative(a, root_shape, string_ns, "fromCodePoint", 1, builtins.stringFromCodePoint);
+    try setNative(a, root_shape, string_ns, "raw", 1, builtins.stringRaw);
     try env.put("String", .{ .object = string_ns });
 
     // Number — callable, with statics and constants.
@@ -5147,6 +5151,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "repeat", 1 },     .{ "concat", 1 },       .{ "split", 2 },      .{ "at", 1 },
         .{ "padStart", 1 },   .{ "padEnd", 1 },       .{ "replace", 2 },    .{ "replaceAll", 2 },
         .{ "localeCompare", 1 }, .{ "toString", 0 },  .{ "valueOf", 0 },
+        .{ "toLocaleUpperCase", 0 }, .{ "toLocaleLowerCase", 0 },
     });
     try string_ns.setOwn(a, root_shape, "prototype", .{ .object = string_proto });
     try string_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });

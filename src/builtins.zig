@@ -1083,6 +1083,52 @@ pub fn stringFromCharCode(ctx: *anyopaque, this: Value, args: []const Value) Hos
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
+/// `String.fromCodePoint(...cps)` — like fromCharCode but validates that each
+/// argument is an integer code point in [0, 0x10FFFF] (else RangeError). In
+/// this byte-string engine a code point is emitted as its UTF-8 encoding.
+pub fn stringFromCodePoint(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (args) |c| {
+        const n = c.toNumber();
+        if (std.math.isNan(n) or @trunc(n) != n or n < 0 or n > 0x10FFFF)
+            return self.throwError("RangeError", "Invalid code point");
+        const cp: u21 = @intFromFloat(n);
+        var tmp: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cp, &tmp) catch return self.throwError("RangeError", "Invalid code point");
+        try buf.appendSlice(self.arena, tmp[0..len]);
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+/// `String.raw(template, ...subs)` — reassemble a template literal from its
+/// `raw` strings interleaved with the substitutions (ToString'd). Generic over
+/// any array-like with a `raw` whose `length` and indices it reads via [[Get]].
+pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const cooked = arg(args, 0);
+    if (cooked == .null or cooked == .undefined)
+        return self.throwError("TypeError", "Cannot convert undefined or null to object");
+    const raw = try self.getProperty(cooked, "raw");
+    if (raw == .null or raw == .undefined)
+        return self.throwError("TypeError", "Cannot convert undefined or null to object");
+    const len_v = try self.toPrimitive(try self.getProperty(raw, "length"), .number);
+    const segs = interpreter.toLen(len_v.toNumber());
+    if (segs == 0) return .{ .string = "" };
+    const subs: []const Value = if (args.len > 1) args[1..] else &.{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < segs) : (i += 1) {
+        const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        try buf.appendSlice(self.arena, try (try self.getProperty(raw, key)).toString(self.arena));
+        if (i + 1 == segs) break;
+        if (i < subs.len) try buf.appendSlice(self.arena, try subs[i].toString(self.arena));
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
 // ---- JSON --------------------------------------------------------------
 
 pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
