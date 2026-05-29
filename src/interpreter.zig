@@ -1403,6 +1403,10 @@ pub const Interpreter = struct {
         // give up. We fall through to the normal scope-setup + bindParams path and
         // return an inert async-generator stub once binding succeeds.
         if (func.is_generator and !func.is_async) return vm.makeGenerator(self, func, args, this_val);
+        // An async generator whose body the VM lowered runs as a real async
+        // generator; an unlowerable body falls through to the inert stub below.
+        if (func.is_generator and func.is_async and func.gen_chunk != null)
+            return vm.makeAsyncGenerator(self, func, args, this_val);
         if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
         self.depth += 1;
         defer self.depth -= 1;

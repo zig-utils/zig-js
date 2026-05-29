@@ -85,6 +85,23 @@ pub const Generator = struct {
     /// and `result` is the promise the call returned, settled on completion.
     is_async: bool = false,
     result: ?*value.Object = null,
+    /// Whether the last suspension was an `await` (resume on promise settlement)
+    /// or a `yield` (resume on the next request) — set by the suspend opcode so
+    /// the async-generator driver can tell them apart.
+    suspend_kind: enum { yield, await } = .yield,
+    /// `async function*` activation: each `.next()`/`.return()`/`.throw()`
+    /// enqueues a request (a result promise + an action) that the driver pumps.
+    is_async_gen: bool = false,
+    requests: std.ArrayListUnmanaged(AsyncGenRequest) = .empty,
+    pumping: bool = false,
+};
+
+/// A queued async-generator request: how to resume the body and the promise to
+/// settle with the resulting `{ value, done }` (or rejection).
+pub const AsyncGenRequest = struct {
+    kind: ResumeKind,
+    value: Value,
+    result: *value.Object,
 };
 
 /// Property-key string for a computed index: a Symbol uses its unique internal
@@ -383,17 +400,18 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .ret => return stack.pop().?,
             .ret_undef => return .undefined,
 
-            .gen_yield => {
+            .gen_yield, .await_op => {
                 const v = stack.pop().?;
                 if (gen) |g| {
-                    // Snapshot the resumable state and hand the yielded value
-                    // back to `genNext`. The next resume pushes the sent value
-                    // (becoming this expression's result) and continues at `ip`.
+                    // Snapshot the resumable state and hand the yielded/awaited
+                    // value back to the driver. The next resume pushes the sent
+                    // value (this expression's result) and continues at `ip`.
                     // `stack`/`handlers` already live in `exec` (operated on by
                     // pointer), so only `acc`/`ip` need writing back here.
                     exec.acc = acc;
                     exec.ip = ip;
                     g.suspended = true;
+                    g.suspend_kind = if (inst.op == .await_op) .await else .yield;
                     return v;
                 }
                 return vm.throwError("SyntaxError", "yield outside a generator");
@@ -608,14 +626,22 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     return makeIterResult(vm, v, true); // `v` is the body's return value
 }
 
+fn asyncGenObj(gen_obj: *value.Object) bool {
+    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    return g.is_async_gen;
+}
+
 /// `gen.next(sent)`: resume the body, `sent` becoming the value of the resumed
-/// `yield` (ignored on the first call, which starts at the top).
+/// `yield` (ignored on the first call, which starts at the top). An async
+/// generator instead enqueues the request and returns a promise.
 pub fn genNext(vm: *Interpreter, gen_obj: *value.Object, sent: Value) EvalError!Value {
+    if (asyncGenObj(gen_obj)) return asyncGenRequest(vm, gen_obj, .send, sent);
     return genResume(vm, gen_obj, .send, sent);
 }
 
 /// `gen.return(v)`: finish the generator, yielding `{ value: v, done: true }`.
 pub fn genReturn(vm: *Interpreter, gen_obj: *value.Object, v: Value) EvalError!Value {
+    if (asyncGenObj(gen_obj)) return asyncGenRequest(vm, gen_obj, .return_, v);
     return genResume(vm, gen_obj, .return_, v);
 }
 
@@ -623,6 +649,7 @@ pub fn genReturn(vm: *Interpreter, gen_obj: *value.Object, v: Value) EvalError!V
 /// in the generator can handle it; otherwise the generator finishes and `e`
 /// propagates to the caller.
 pub fn genThrow(vm: *Interpreter, gen_obj: *value.Object, e: Value) EvalError!Value {
+    if (asyncGenObj(gen_obj)) return asyncGenRequest(vm, gen_obj, .throw_, e);
     return genResume(vm, gen_obj, .throw_, e);
 }
 
@@ -761,6 +788,185 @@ fn asyncOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
     try asyncDrive(vm, g, .throw_, if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Async generators: `async function*` — a generator whose body may both `yield`
+// and `await`, and whose `.next()`/`.return()`/`.throw()` each return a promise.
+// Requests are queued and pumped one at a time; a `yield` settles the current
+// request's promise with `{ value, done:false }`, an `await` suspends until the
+// awaited value settles (then the same request continues), and completion
+// settles with `{ value, done:true }`.
+// ---------------------------------------------------------------------------
+
+/// Build the async-generator object produced by calling an `async function*`.
+pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
+    const chunk = func.gen_chunk orelse
+        return vm.throwError("TypeError", "async generator body uses syntax not yet supported by the VM");
+    const genv = try vm.arena.create(Environment);
+    genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
+    const args_obj = try vm.newArray();
+    for (args) |av| try args_obj.object.elements.append(vm.arena, av);
+    try genv.put("arguments", args_obj);
+    const saved_env = vm.env;
+    vm.env = genv;
+    defer vm.env = saved_env;
+    try vm.bindParams(func.params, args);
+
+    const g = try vm.arena.create(Generator);
+    g.* = .{
+        .chunk = chunk,
+        .env = genv,
+        .this_value = this_val,
+        .home_object = func.home_object,
+        .super_ctor = func.super_ctor,
+        .is_async_gen = true,
+    };
+    const obj = try vm.arena.create(value.Object);
+    obj.* = .{ .gen = @ptrCast(g) };
+    return .{ .object = obj };
+}
+
+/// `asyncGen.next/return/throw(v)` — enqueue a request and return a promise for
+/// its `{ value, done }`. Pumping starts if no request is already in flight.
+pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Value) EvalError!Value {
+    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    const rp = try promise.newPromise(vm);
+    const was_idle = g.requests.items.len == 0;
+    try g.requests.append(vm.arena, .{ .kind = kind, .value = val, .result = rp });
+    if (was_idle) try agStep(vm, g, kind, val);
+    return .{ .object = rp };
+}
+
+const AgStep = union(enum) { awaited: Value, yielded: Value, returned: Value, threw: Value };
+
+/// Resume the async-generator body once and report why it stopped.
+fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!AgStep {
+    if (g.started) {
+        switch (kind) {
+            .send => try g.exec.stack.append(vm.arena, val),
+            .throw_ => if (!try injectThrowAt(vm, g, val)) return .{ .threw = val },
+            .return_ => {
+                // Run an enclosing finally if any; else the generator returns.
+                var fin: ?u32 = null;
+                while (g.exec.handlers.items.len > 0) {
+                    const h = g.exec.handlers.pop().?;
+                    if (h.finally_pc != Handler.none) {
+                        g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
+                        fin = h.finally_pc;
+                        break;
+                    }
+                }
+                if (fin) |fpc| {
+                    try g.exec.stack.append(vm.arena, val);
+                    try g.exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
+                    g.exec.ip = fpc;
+                } else return .{ .returned = val };
+            },
+        }
+    }
+    g.started = true;
+    g.suspended = false;
+    const s_env = vm.env;
+    const s_this = vm.this_value;
+    const s_home = vm.home_object;
+    const s_super = vm.super_ctor;
+    vm.env = g.env;
+    vm.this_value = g.this_value;
+    vm.home_object = g.home_object;
+    vm.super_ctor = g.super_ctor;
+    defer {
+        vm.env = s_env;
+        vm.this_value = s_this;
+        vm.home_object = s_home;
+        vm.super_ctor = s_super;
+    }
+    if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
+    vm.depth += 1;
+    defer vm.depth -= 1;
+
+    const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
+        if (e != error.Throw) return e;
+        const reason = vm.exception;
+        vm.exception = .undefined;
+        return .{ .threw = reason };
+    };
+    if (g.suspended) {
+        g.suspended = false;
+        return if (g.suspend_kind == .await) .{ .awaited = v } else .{ .yielded = v };
+    }
+    return .{ .returned = v };
+}
+
+/// Drive the front request to its next stop, settling its promise (yield/
+/// return/throw) or wiring an await continuation.
+fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!void {
+    const step = try agResume(vm, g, kind, val);
+    const front = g.requests.items[0].result;
+    switch (step) {
+        .awaited => |awaited| {
+            const ap = try promise.newPromise(vm);
+            try promise.resolve(vm, @ptrCast(@alignCast(ap.promise.?)), awaited);
+            const onf = try vm.arena.create(value.Object);
+            onf.* = .{ .native = agOnFulfill, .private_data = @ptrCast(g) };
+            const onr = try vm.arena.create(value.Object);
+            onr.* = .{ .native = agOnReject, .private_data = @ptrCast(g) };
+            _ = try promise.then(vm, @ptrCast(@alignCast(ap.promise.?)), .{ .object = onf }, .{ .object = onr });
+        },
+        .yielded => |v| {
+            try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, false));
+            _ = g.requests.orderedRemove(0);
+            try agPumpNext(vm, g);
+        },
+        .returned => |v| {
+            g.done = true;
+            try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, true));
+            _ = g.requests.orderedRemove(0);
+            try agDrainDone(vm, g);
+        },
+        .threw => |e| {
+            g.done = true;
+            try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), e);
+            _ = g.requests.orderedRemove(0);
+            try agDrainDone(vm, g);
+        },
+    }
+}
+
+fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
+    if (g.done) return agDrainDone(vm, g);
+    if (g.requests.items.len == 0) return;
+    const req = g.requests.items[0];
+    try agStep(vm, g, req.kind, req.value);
+}
+
+/// Once the generator is done, settle every still-queued request: a `next`
+/// yields `{ undefined, done:true }`, a `return` its value, a `throw` rejects.
+fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
+    while (g.requests.items.len > 0) {
+        const req = g.requests.orderedRemove(0);
+        switch (req.kind) {
+            .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promise.?)), req.value),
+            .return_ => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promise.?)), try makeIterResult(vm, req.value, true)),
+            .send => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promise.?)), try makeIterResult(vm, .undefined, true)),
+        }
+    }
+}
+
+fn agOnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try agStep(vm, g, .send, if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
+fn agOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try agStep(vm, g, .throw_, if (args.len > 0) args[0] else .undefined);
     return .undefined;
 }
 

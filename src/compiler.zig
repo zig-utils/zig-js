@@ -109,7 +109,8 @@ pub const Compiler = struct {
         if (fnode.is_expr_body) return error.Unsupported; // generators always have a block body
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true };
+        // An async generator body may also `await` (in_async enables await_op).
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true, .in_async = fnode.is_async };
         try c.compileStmt(fnode.body); // body is a block
         _ = try chunk.emit(.ret_undef, 0);
         try chunk.finalize();
@@ -467,7 +468,7 @@ pub const Compiler = struct {
         // r = it.next()  (for-await: r = await it.next())
         try self.emitLoad(it_name);
         _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
-        if (await_each) _ = try self.chunk.emit(.gen_yield, 0); // await the next() result
+        if (await_each) _ = try self.chunk.emit(.await_op, 0); // await the next() result
         try self.emitDefine(r_name);
         // if (r.done) break  — `not` then jump_if_false exits exactly when done.
         try self.emitLoad(r_name);
@@ -696,7 +697,7 @@ pub const Compiler = struct {
             .await_expr => |a| {
                 if (!self.in_async) return error.Unsupported;
                 try self.compileExpr(a.argument);
-                _ = try self.chunk.emit(.gen_yield, 0);
+                _ = try self.chunk.emit(.await_op, 0);
             },
             // Statement-only nodes never appear in expression position.
             else => return error.Unsupported,
