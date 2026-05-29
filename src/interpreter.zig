@@ -999,7 +999,7 @@ pub const Interpreter = struct {
                 self.this_value = saved_this;
                 continue;
             }
-            const key = if (m.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else m.key;
+            const key = if (m.key_expr) |ke| try self.keyOf(try self.eval(ke)) else m.key;
             if (m.is_field) {
                 if (m.is_static) {
                     const v = if (m.field_init) |init_node| try self.eval(init_node) else .undefined;
@@ -1382,7 +1382,7 @@ pub const Interpreter = struct {
     /// ToPropertyKey: a Symbol key uses its unique internal encoding (so
     /// symbol-keyed properties don't collide with string keys and stay out of
     /// string enumeration); other keys coerce to string.
-    fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
+    pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
         if (k == .object and k.object.is_symbol) return k.object.sym_key;
         return k.toString(self.arena);
     }
@@ -1499,7 +1499,7 @@ pub const Interpreter = struct {
                 }
                 continue;
             }
-            const key = if (p.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else p.key;
+            const key = if (p.key_expr) |ke| try self.keyOf(try self.eval(ke)) else p.key;
             switch (p.accessor) {
                 .none => {
                     const pv = try self.eval(p.value);
@@ -2208,7 +2208,7 @@ pub const Interpreter = struct {
             return self.throwError("TypeError", "cannot destructure null or undefined");
         var consumed: std.ArrayListUnmanaged([]const u8) = .empty;
         for (props) |prop| {
-            const key = if (prop.key_expr) |ke| try (try self.eval(ke)).toString(self.arena) else prop.key;
+            const key = if (prop.key_expr) |ke| try self.keyOf(try self.eval(ke)) else prop.key;
             try consumed.append(self.arena, key);
             var v = try self.getProperty(val, key);
             if (v == .undefined) {
@@ -2615,11 +2615,11 @@ pub const Interpreter = struct {
                         }
                     }
                     if (eq(name, "hasOwnProperty")) {
-                        const k = if (args.len > 0) try args[0].toString(self.arena) else "undefined";
+                        const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
                         return Value{ .boolean = objectHasOwn(o, k) };
                     }
                     if (eq(name, "propertyIsEnumerable")) {
-                        const k = if (args.len > 0) try args[0].toString(self.arena) else "undefined";
+                        const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
                         // Own + enumerable per its attributes; array `length` is
                         // the notable non-enumerable.
                         const enumerable = objectHasOwn(o, k) and o.getAttr(k).enumerable and

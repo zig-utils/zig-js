@@ -387,7 +387,7 @@ pub fn objectValues(ctx: *anyopaque, this: Value, args: []const Value) HostError
 pub fn objectHasOwn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const key = try arg(args, 1).toString(self.arena);
+    const key = try self.keyOf(arg(args, 1));
     switch (arg(args, 0)) {
         .undefined, .null => return self.throwError("TypeError", "Cannot convert undefined or null to object"),
         .object => |o| return .{ .boolean = interpreter.objectHasOwn(o, key) },
@@ -595,7 +595,7 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
     const self = interp(ctx);
     const target = arg(args, 0);
     if (target != .object) return self.throwError("TypeError", "Object.defineProperty called on non-object");
-    const key = try arg(args, 1).toString(self.arena);
+    const key = try self.keyOf(arg(args, 1));
     const desc = arg(args, 2);
     if (desc != .object) return self.throwError("TypeError", "Property description must be an object");
     try defineOne(self, target.object, key, desc.object);
@@ -940,7 +940,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     const ov = arg(args, 0);
     if (ov != .object) return .undefined;
     const o = ov.object;
-    const key = try arg(args, 1).toString(self.arena);
+    const key = try self.keyOf(arg(args, 1));
     // Private members are internal slots — invisible to reflection.
     if (value.isPrivateKey(key)) return .undefined;
 
