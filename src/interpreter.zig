@@ -4188,9 +4188,10 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 
     const number_proto = try a.create(value.Object);
     number_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, number_proto, .{
-        .{ "toString", 1 }, .{ "toFixed", 1 }, .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
-    });
+    inline for (.{
+        .{ "toString", 1 },     .{ "toFixed", 1 },        .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
+        .{ "toExponential", 1 }, .{ "toPrecision", 1 },
+    }) |s| try setNative(a, root_shape, number_proto, s[0], s[1], numberProtoMethod(s[0]));
     try number_ns.setOwn(a, root_shape, "prototype", .{ .object = number_proto });
     try number_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, number_proto, number_ns);
@@ -4392,6 +4393,24 @@ fn setProtoMethod(comptime name: []const u8) value.NativeFn {
             if (this != .object or !this.object.is_set)
                 return self.throwError("TypeError", "Set.prototype method called on a non-Set");
             return (try self.setMethod(this.object, name, args)) orelse .undefined;
+        }
+    }.call;
+}
+
+/// A `Number.prototype` method: extracts the number from `this` (a number
+/// primitive or a Number wrapper), throws TypeError otherwise, then dispatches
+/// to `numberMethod`. Makes the methods real own properties (reflection) and
+/// brand-checks the receiver.
+fn numberProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const n: f64 = switch (this) {
+                .number => |x| x,
+                .object => |o| if (o.prim != null and o.prim.? == .number) o.prim.?.number else return self.throwError("TypeError", "Number.prototype method called on a non-Number"),
+                else => return self.throwError("TypeError", "Number.prototype method called on a non-Number"),
+            };
+            return (try self.numberMethod(n, name, args)) orelse .undefined;
         }
     }.call;
 }
