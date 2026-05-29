@@ -10,6 +10,6 @@
     "docs:data": "bun scripts/gen-test262-data.ts"
   },
   "devDependencies": {
-    "@stacksjs/bunpress": "^0.1.7"
+    "@stacksjs/bunpress": "^0.1.8"
   }
 }

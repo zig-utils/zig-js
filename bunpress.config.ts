@@ -19,6 +19,26 @@ const css = /* css */ `
   --bp-magenta: #ff5c8a;
   --bp-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
   --bp-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+
+  /* Recolour the bun theme to our dark brand (the theme ships light by default).
+     These drive the doc layout: sidebar, TOC, content, code, containers. */
+  --bp-c-bg: #05070a;
+  --bp-c-bg-alt: #0b0f15;
+  --bp-c-bg-soft: #0e141c;
+  --bp-c-bg-elv: #0e141c;
+  --bp-c-border: #1a2430;
+  --bp-c-divider: #141c26;
+  --bp-c-gutter: #0b0f15;
+  --bp-c-text-1: #c7d3e0;
+  --bp-c-text-2: #8a9bab;
+  --bp-c-text-3: #5c6b7a;
+  --bp-c-brand-1: #2bd576;
+  --bp-c-brand-2: #41ffa3;
+  --bp-c-brand-3: #34e7e4;
+  --bp-c-brand-soft: rgba(43, 213, 118, 0.14);
+  --bp-c-default-soft: rgba(140, 150, 170, 0.12);
+  --bp-code-bg: #0e141c;
+  --bp-code-block-bg: #0b0f15;
 }
 
 html, body {
@@ -136,6 +156,15 @@ html, body {
 .suites td { padding: 10px 12px; border-bottom: 1px solid var(--bp-border); }
 .suites .mini { display: inline-block; width: 90px; height: 8px; border-radius: 999px; background: #060a0e; overflow: hidden; vertical-align: middle; margin-left: 8px; }
 .suites .mini > i { display: block; height: 100%; background: linear-gradient(90deg, var(--bp-green), var(--bp-cyan)); }
+
+/* ---- doc layout: keep the chrome on-brand dark (backstops for theme vars) ---- */
+.BPSidebar { background: var(--bp-c-bg-alt); border-right: 1px solid var(--bp-c-border); }
+.BPDocAside, .BPContent--doc, .BPContent--page { background: var(--bp-c-bg); }
+.BPNavBarSearch-input { background: var(--bp-c-bg-soft); border: 1px solid var(--bp-c-border); color: var(--bp-text); }
+.BPSidebarItem-link.is-active { color: var(--bp-amber); }
+.BPDoc h1, .BPDoc h2, .BPDoc h3 { font-family: var(--bp-mono); letter-spacing: -0.02em; }
+.BPDoc a { color: var(--bp-cyan); }
+.BPDoc code:not(pre code) { background: var(--bp-c-bg-soft); border: 1px solid var(--bp-border); border-radius: 5px; padding: 0.15em 0.4em; font-family: var(--bp-mono); }
 `
 
 export default {
