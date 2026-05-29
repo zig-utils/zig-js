@@ -1658,6 +1658,17 @@ pub const Interpreter = struct {
     pub fn makeSet(self: *Interpreter, init_v: Value) EvalError!Value {
         const o = (try self.newObject()).object;
         o.is_set = true;
+        // Proto from the in-flight constructor (`new Set`/`new WeakSet`), so a
+        // WeakSet doesn't inherit Set.prototype; internal results default to Set.
+        if (self.new_target == .object and self.new_target.object.getOwn("prototype") != null) {
+            o.proto = self.new_target.object.getOwn("prototype").?.object;
+        } else if (self.env.get("Set")) |ctor| {
+            if (ctor == .object) {
+                if (ctor.object.getOwn("prototype")) |p| {
+                    if (p == .object) o.proto = p.object;
+                }
+            }
+        }
         try self.setProp(o, "size", .{ .number = 0 });
         if (init_v == .object and init_v.object.is_array) {
             for (init_v.object.elements.items) |v| _ = try self.setMethod(o, "add", &.{v});
@@ -3899,6 +3910,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         if (m == .object) try setNative(a, root_shape, m.object, "groupBy", 2, mapGroupByFn);
     }
     try defineGlobalFnC(env, root_shape, "Set", 0, true, builtins.setFn);
+    try installSetProto(env, root_shape);
     try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.mapFn);
     try defineGlobalFnC(env, root_shape, "WeakSet", 0, true, builtins.setFn);
     try defineGlobalFnC(env, root_shape, "Boolean", 1, true, builtins.booleanFn);
@@ -4357,6 +4369,39 @@ fn dateProtoMethod(comptime name: []const u8) value.NativeFn {
 
 fn setDateProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
     inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], dateProtoMethod(s[0]));
+}
+
+/// A `Set.prototype` method that brand-checks `this` then dispatches to
+/// `setMethod` — making the methods real own properties of `Set.prototype` (so
+/// reflection and `Set.prototype.m.call(...)` work) on top of the existing
+/// instance dispatch.
+fn setProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or !this.object.is_set)
+                return self.throwError("TypeError", "Set.prototype method called on a non-Set");
+            return (try self.setMethod(this.object, name, args)) orelse .undefined;
+        }
+    }.call;
+}
+
+/// Install the Set.prototype methods (real, brand-checked own properties) on
+/// the prototype of the `Set` constructor in `env`.
+fn installSetProto(env: *Environment, rs: *Shape) EvalError!void {
+    const a = env.arena;
+    const ctor = env.get("Set") orelse return;
+    if (ctor != .object) return;
+    const proto_v = ctor.object.getOwn("prototype") orelse return;
+    if (proto_v != .object) return;
+    const p = proto_v.object;
+    const specs = .{
+        .{ "add", 1 },       .{ "has", 1 },          .{ "delete", 1 },     .{ "clear", 0 },
+        .{ "forEach", 1 },   .{ "values", 0 },       .{ "keys", 0 },       .{ "entries", 0 },
+        .{ "union", 1 },     .{ "intersection", 1 }, .{ "difference", 1 }, .{ "symmetricDifference", 1 },
+        .{ "isSubsetOf", 1 }, .{ "isSupersetOf", 1 }, .{ "isDisjointFrom", 1 },
+    };
+    inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], setProtoMethod(s[0]));
 }
 
 /// Monotonic id for unique Symbol property-key encodings (single-threaded;
