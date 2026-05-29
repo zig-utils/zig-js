@@ -14,6 +14,9 @@ pub const Parser = struct {
     tokens: []Token,
     pos: usize = 0,
     arena: std.mem.Allocator,
+    /// The original source text, so function definitions can capture their exact
+    /// source span for `Function.prototype.toString`.
+    source: []const u8 = "",
     /// True while parsing a generator body, so `yield` is recognized as a yield
     /// expression rather than an identifier. Saved/restored around each function.
     in_generator: bool = false,
@@ -43,7 +46,18 @@ pub const Parser = struct {
             try list.append(arena, t);
             if (t.kind == .eof) break;
         }
-        return .{ .tokens = list.items, .arena = arena };
+        return .{ .tokens = list.items, .arena = arena, .source = source };
+    }
+
+    /// Source slice from the start position of the token at `start_pos` through
+    /// the end of the most recently consumed token (`self.pos - 1`). Used to
+    /// capture a function's exact definition text for `Function.prototype.toString`.
+    fn sourceFrom(self: *Parser, start_pos: usize) []const u8 {
+        if (self.source.len == 0 or self.pos == 0) return "";
+        const lo = self.tokens[start_pos].pos;
+        const hi = self.tokens[self.pos - 1].end;
+        if (lo > hi or hi > self.source.len) return "";
+        return self.source[lo..hi];
     }
 
     fn cur(self: *Parser) Token {
@@ -636,6 +650,7 @@ pub const Parser = struct {
     }
 
     fn parseFunctionDecl(self: *Parser, is_async: bool) ParseError!*Node {
+        const start = self.pos;
         if (is_async) _ = self.advance(); // async
         _ = self.advance(); // function
         const is_gen = self.match(.star); // `function*` / `async function*`
@@ -645,12 +660,13 @@ pub const Parser = struct {
         const body = try self.parseFnBody(is_gen, is_async);
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
+        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .func_decl = fnode });
     }
 
     /// `function [name](params) { body }` in expression position.
     fn parseFunctionExpr(self: *Parser, is_async: bool) ParseError!*Node {
+        const start = self.pos;
         if (is_async) _ = self.advance(); // async
         _ = self.advance(); // function
         const is_gen = self.match(.star); // `function*` / `async function*`
@@ -665,7 +681,7 @@ pub const Parser = struct {
         const body = try self.parseFnBody(is_gen, is_async);
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -759,27 +775,30 @@ pub const Parser = struct {
         // Async arrows: `async x => ...` and `async (a, b) => ...`. (`async` here
         // is a contextual keyword; a `=>` must follow its parameter list.)
         if (isKeyword(self.cur(), "async")) {
+            const start = self.pos;
             if (self.peekKind(1) == .identifier and self.peekKind(2) == .arrow and !isReservedWord(self.tokens[self.pos + 1].text)) {
                 _ = self.advance(); // async
                 const param = self.advance().text;
                 const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
-                return self.parseArrowBody(params, true);
+                return self.parseArrowBody(params, true, start);
             }
             if (self.peekKind(1) == .lparen and self.arrowAheadAt(self.pos + 1)) {
                 _ = self.advance(); // async
                 const params = try self.parseParamList();
-                return self.parseArrowBody(params, true);
+                return self.parseArrowBody(params, true, start);
             }
         }
         // Arrow functions: `x => ...` and `(a, b) => ...`.
         if (self.check(.identifier) and self.peekKind(1) == .arrow) {
+            const start = self.pos;
             const param = self.advance().text;
             const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
-            return self.parseArrowBody(params, false);
+            return self.parseArrowBody(params, false, start);
         }
         if (self.check(.lparen) and self.arrowAhead()) {
+            const start = self.pos;
             const params = try self.parseParamList();
-            return self.parseArrowBody(params, false);
+            return self.parseArrowBody(params, false, start);
         }
 
         const left = try self.parseConditional();
@@ -894,7 +913,7 @@ pub const Parser = struct {
         return false;
     }
 
-    fn parseArrowBody(self: *Parser, params: []const ast.Param, is_async: bool) ParseError!*Node {
+    fn parseArrowBody(self: *Parser, params: []const ast.Param, is_async: bool, start: usize) ParseError!*Node {
         try self.expect(.arrow);
         const fnode = try self.arena.create(ast.FunctionNode);
         // An arrow's body opens its own async context (so `await` inside an
@@ -920,6 +939,7 @@ pub const Parser = struct {
         } else {
             fnode.* = .{ .params = params, .body = try self.parseAssignment(), .is_expr_body = true, .is_arrow = true, .is_async = is_async, .is_strict = saved_strict };
         }
+        fnode.source = self.sourceFrom(start);
         return self.alloc(.{ .function = fnode });
     }
 
@@ -1214,6 +1234,9 @@ pub const Parser = struct {
                 if (!self.match(.comma)) break;
                 continue;
             }
+            // The first token of this member, so a method/accessor can capture its
+            // exact source span for `Function.prototype.toString`.
+            const member_start = self.pos;
             // Async method shorthand `{ async m() {} }` / `{ async *m() {} }`.
             const async_method = self.asyncMethodAhead();
             if (async_method) _ = self.advance(); // async
@@ -1224,7 +1247,7 @@ pub const Parser = struct {
                 const key_expr = try self.parseAssignment();
                 try self.expect(.rbracket);
                 if (self.check(.lparen)) {
-                    const fnode = try self.parseMethodTail("", gen_method, async_method);
+                    const fnode = try self.parseMethodTail("", gen_method, async_method, member_start);
                     try props.append(self.arena, .{ .key_expr = key_expr, .value = fnode });
                 } else {
                     try self.expect(.colon);
@@ -1238,7 +1261,7 @@ pub const Parser = struct {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
                 const pn = try self.parsePropertyName();
-                const func = try self.parseMethodTail(pn.key, false, false);
+                const func = try self.parseMethodTail(pn.key, false, false, member_start);
                 try validateAccessor(func, kind);
                 try props.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .value = func, .accessor = kind });
                 if (!self.match(.comma)) break;
@@ -1253,7 +1276,7 @@ pub const Parser = struct {
             var val: *Node = undefined;
             if (self.check(.lparen)) {
                 // Method shorthand `{ m(args) { ... } }` -> a function value.
-                val = try self.parseMethodTail(key, gen_method, async_method);
+                val = try self.parseMethodTail(key, gen_method, async_method, member_start);
             } else if (self.match(.colon)) {
                 val = try self.parseAssignment();
                 nameAnon(val, key); // `{ m: function(){} }` ⇒ name "m"
@@ -1355,6 +1378,10 @@ pub const Parser = struct {
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
                 continue;
             }
+            // The method's source span for `Function.prototype.toString` starts at
+            // its name/`get`/`set`/`async`/`*` — *after* any `static` (which is part
+            // of the ClassElement, not the MethodDefinition's [[SourceText]]).
+            const member_start = self.pos;
             // Async method: `async m() {}` / `static async m() {}` / `async *m() {}`.
             const async_method = self.asyncMethodAhead();
             if (async_method) _ = self.advance(); // async
@@ -1365,7 +1392,7 @@ pub const Parser = struct {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
                 const apn = try self.parsePropertyName();
-                const func = try self.parseMethodTail(apn.key, false, false);
+                const func = try self.parseMethodTail(apn.key, false, false, member_start);
                 try validateAccessor(func, kind);
                 try members.append(self.arena, .{ .key = apn.key, .key_expr = apn.expr, .func = func, .is_static = is_static, .accessor = kind });
                 continue;
@@ -1373,7 +1400,7 @@ pub const Parser = struct {
             const pn = try self.parsePropertyName();
             if (self.check(.lparen)) {
                 // Method.
-                const func = try self.parseMethodTail(pn.key, gen_method, async_method);
+                const func = try self.parseMethodTail(pn.key, gen_method, async_method, member_start);
                 const is_ctor = !is_static and !gen_method and !async_method and pn.expr == null and std.mem.eql(u8, pn.key, "constructor");
                 try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .func = func, .is_static = is_static, .is_ctor = is_ctor });
             } else {
@@ -1411,12 +1438,12 @@ pub const Parser = struct {
 
     /// Parse `(params) { body }` after a method name, returning a function node.
     /// `is_gen` marks a generator method (`*m() {}`).
-    fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool) ParseError!*Node {
+    fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
     }
 

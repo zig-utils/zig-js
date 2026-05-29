@@ -77,6 +77,10 @@ pub const Token = struct {
     /// Regex flag characters (only for `.regex` tokens).
     flags: []const u8 = "",
     pos: usize,
+    /// Byte offset just past the token's raw lexeme (the lexer cursor after the
+    /// scan). Unlike `pos + text.len`, this is exact for decoded strings, so it
+    /// lets callers slice the original source (e.g. `Function.prototype.toString`).
+    end: usize = 0,
     /// A legacy octal (`0123`) or non-octal-decimal (`08`) integer literal —
     /// a SyntaxError in strict mode (the parser checks).
     legacy_octal: bool = false,
@@ -272,7 +276,8 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) LexError!Token {
-        const t = try self.nextRaw();
+        var t = try self.nextRaw();
+        t.end = self.i;
         self.prev_kind = t.kind;
         self.prev_text = t.text;
         return t;

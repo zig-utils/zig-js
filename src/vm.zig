@@ -485,6 +485,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .is_expr_body = tmpl.is_expr_body,
         .closure = vm.env,
         .name = tmpl.name,
+        .source = tmpl.source,
         .chunk = tmpl.chunk,
         .frame = frame,
         .local_count = tmpl.local_count,

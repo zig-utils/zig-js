@@ -118,6 +118,10 @@ pub const Function = struct {
     is_arrow: bool = false,
     closure: *Environment,
     name: []const u8 = "",
+    /// Exact source text of the function definition, for `Function.prototype.
+    /// toString`. Empty when the parser didn't capture it (then toString falls
+    /// back to native-function syntax).
+    source: []const u8 = "",
     /// Compiled body for the bytecode VM. Set when the function was created by
     /// the VM (`make_closure`); null for tree-walk-created closures, which are
     /// invoked via `callFunction`.
@@ -870,6 +874,7 @@ pub const Interpreter = struct {
             .is_arrow = fnode.is_arrow,
             .closure = closure,
             .name = fnode.name,
+            .source = fnode.source,
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
@@ -901,6 +906,17 @@ pub const Interpreter = struct {
             if (v.object.js_func) |e| return @ptrCast(@alignCast(e));
         }
         return null;
+    }
+
+    /// `Function.prototype.toString`. A user function returns its exact captured
+    /// source; a native, bound, or not-yet-captured function returns the spec's
+    /// NativeFunction syntax `function NAME() { [native code] }`.
+    fn functionToString(self: *Interpreter, o: *value.Object) EvalError!Value {
+        if (funcOf(.{ .object = o })) |func| {
+            if (func.source.len > 0) return .{ .string = func.source };
+        }
+        const nm: []const u8 = if (o.getOwn("name")) |n| (if (n == .string) n.string else "") else "";
+        return .{ .string = try std.mem.concat(self.arena, u8, &.{ "function ", nm, "() { [native code] }" }) };
     }
 
     /// True if `node` is an *anonymous* function/class definition — the
@@ -2883,6 +2899,7 @@ pub const Interpreter = struct {
                         if (eq(name, "bind")) {
                             return try self.makeBound(o, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1..] else &.{});
                         }
+                        if (eq(name, "toString")) return try self.functionToString(o);
                     }
                     if (eq(name, "hasOwnProperty")) {
                         const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
@@ -3855,6 +3872,10 @@ pub const Interpreter = struct {
                 if (res != .object) return res;
             }
         }
+        // A callable object with no user-defined valueOf/toString stringifies via
+        // Function.prototype.toString (its source text / native syntax). `valueOf`
+        // returns the object itself, so `toString` always wins regardless of hint.
+        if (o.isCallableObject()) return try self.functionToString(o);
         // A primitive-wrapper object (`new Number/String/Boolean`) with no user
         // override unwraps to its boxed primitive — except for a string hint,
         // where it stringifies (so `new Number(5) + 1 === 6` but `String hint`

@@ -828,6 +828,51 @@ test "Function.prototype: call / apply / bind" {
     )).number);
 }
 
+test "Function.prototype.toString returns source (decl/expr) or native syntax" {
+    // A function declaration toStrings to its exact source, comments and all.
+    try expectEvalStr("function /* a */ f /* b */ ( /* c */ x /* d */ ) /* e */ { return x; }",
+        \\function /* a */ f /* b */ ( /* c */ x /* d */ ) /* e */ { return x; }
+        \\f.toString()
+    );
+    // A function expression keeps the leading `function` keyword and name.
+    try expectEvalStr("function g(a,b){return a+b}",
+        \\var g = function g(a,b){return a+b};
+        \\g.toString()
+    );
+    // A generator expression includes the `*`.
+    try expectEvalStr("function* gen() { yield 1; }",
+        \\var gen = function* gen() { yield 1; };
+        \\gen.toString()
+    );
+    // A native function uses the NativeFunction syntax.
+    try expectEvalStr("function valueOf() { [native code] }", "Object.prototype.valueOf.toString()");
+    // String coercion (`"" + fn`) goes through ToPrimitive, which must also use
+    // Function.prototype.toString — not the generic "[object Object]".
+    try expectEvalStr("function h() { return 1; }",
+        \\function h() { return 1; }
+        \\"" + h
+    );
+    // Arrow functions: concise and block bodies, including a leading `async`.
+    try expectEvalStr("x => x + 1", "var a = x => x + 1; a.toString()");
+    try expectEvalStr("(a, b) => { return a + b; }", "var a = (a, b) => { return a + b; }; a.toString()");
+    try expectEvalStr("async x => x", "var a = async x => x; a.toString()");
+    // Object-literal methods, getters, setters keep their exact definition source.
+    try expectEvalStr("m(a, b) { return a + b; }",
+        \\var o = { m(a, b) { return a + b; } };
+        \\o.m.toString()
+    );
+    try expectEvalStr("get x() { return 1; }",
+        \\var o = { get x() { return 1; } };
+        \\Object.getOwnPropertyDescriptor(o, "x").get.toString()
+    );
+    // Class methods exclude the `static` keyword (it's not part of the method's
+    // source text); the method body source is what toString returns.
+    try expectEvalStr("sm() { return 2; }",
+        \\class C { static sm() { return 2; } }
+        \\C.sm.toString()
+    );
+}
+
 test "prototype objects: Function.prototype.call.bind + X.prototype methods" {
     // The propertyHelper pattern: borrow a prototype method via call.bind.
     try expectEvalStr("1-2-3",

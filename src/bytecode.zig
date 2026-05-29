@@ -133,6 +133,9 @@ pub const FnTemplate = struct {
     params: []const ast.Param,
     is_expr_body: bool,
     body: *ast.Node,
+    /// Exact source text of the function definition, for `Function.prototype.
+    /// toString` (empty when the parser didn't capture it).
+    source: []const u8 = "",
     chunk: *Chunk,
     /// Number of frame slots (params + function-scoped declarations) the VM
     /// allocates per call.

@@ -66,6 +66,10 @@ pub const FunctionNode = struct {
     name: []const u8 = "",
     params: []const Param,
     body: *Node,
+    /// Exact source text of the function definition (first token through its
+    /// closing `}` / concise-body expression), for `Function.prototype.toString`.
+    /// Empty when not captured (toString then falls back to native syntax).
+    source: []const u8 = "",
     is_expr_body: bool = false,
     /// Arrow functions don't get their own `arguments` (or `this`).
     is_arrow: bool = false,

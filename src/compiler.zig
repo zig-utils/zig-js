@@ -634,6 +634,7 @@ pub const Compiler = struct {
             .params = fnode.params,
             .is_expr_body = fnode.is_expr_body,
             .body = fnode.body,
+            .source = fnode.source,
             .chunk = sub,
             .local_count = scope.count,
         };
