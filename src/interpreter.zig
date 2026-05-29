@@ -373,7 +373,18 @@ pub const Interpreter = struct {
             .member => |m| blk: {
                 const obj = try self.eval(m.object);
                 if (m.optional and (obj == .null or obj == .undefined)) return error.OptShortCircuit;
-                break :blk try self.getProperty(obj, try self.memberKey(m.property, m.computed));
+                if (m.computed) |ce| {
+                    // Spec order: GetValue of the key expression first (its side
+                    // effects run), THEN the null/undefined base check, THEN
+                    // ToPropertyKey — so `base[prop()]` with a throwing `prop()`
+                    // surfaces that throw, while `null[obj]` is a TypeError before
+                    // the key's `toString` is ever called.
+                    const kv = try self.eval(ce);
+                    if (obj == .null or obj == .undefined)
+                        return self.throwError("TypeError", "cannot read property of null or undefined");
+                    break :blk try self.getProperty(obj, try self.keyOf(kv));
+                }
+                break :blk try self.getProperty(obj, m.property);
             },
             .optional_chain => |inner| self.eval(inner) catch |e|
                 if (e == error.OptShortCircuit) Value.undefined else return e,
@@ -1257,15 +1268,16 @@ pub const Interpreter = struct {
     // ---- objects, arrays, members -----------------------------------------
 
     fn memberKey(self: *Interpreter, static: []const u8, computed: ?*Node) EvalError![]const u8 {
-        if (computed) |ce| {
-            const k = try self.eval(ce);
-            // A Symbol key uses its unique internal encoding (so symbol-keyed
-            // properties don't collide with string keys and stay out of string
-            // enumeration); other keys coerce to string.
-            if (k == .object and k.object.is_symbol) return k.object.sym_key;
-            return k.toString(self.arena);
-        }
+        if (computed) |ce| return self.keyOf(try self.eval(ce));
         return static;
+    }
+
+    /// ToPropertyKey: a Symbol key uses its unique internal encoding (so
+    /// symbol-keyed properties don't collide with string keys and stay out of
+    /// string enumeration); other keys coerce to string.
+    fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
+        if (k == .object and k.object.is_symbol) return k.object.sym_key;
+        return k.toString(self.arena);
     }
 
     /// Allocate a fresh plain object. The single creation point so later tiers
@@ -1284,6 +1296,12 @@ pub const Interpreter = struct {
         }
         const proto = (try self.newObject()).object;
         try self.setProp(ctor, "prototype", .{ .object = proto });
+        // `F.prototype.constructor === F` (writable, non-enumerable,
+        // configurable), so an instance's `.constructor` resolves through the
+        // prototype chain to F — not the `Object` fallback. Matches the lazy
+        // materialization in `getProperty`.
+        try self.setProp(proto, "constructor", .{ .object = ctor });
+        try proto.setAttr(self.arena, "constructor", .{ .writable = true, .enumerable = false, .configurable = true });
         return proto;
     }
 
@@ -2238,8 +2256,15 @@ pub const Interpreter = struct {
             },
             .member => |m| {
                 const recv = try self.eval(m.object);
-                const key = try self.memberKey(m.property, m.computed);
-                try self.setMember(recv, key, v);
+                if (m.computed) |ce| {
+                    // Same spec order as a member read: key expression first, then
+                    // the null/undefined base check, then ToPropertyKey.
+                    const kv = try self.eval(ce);
+                    if (recv == .null or recv == .undefined)
+                        return self.throwError("TypeError", "cannot set property of null or undefined");
+                    return self.setMember(recv, try self.keyOf(kv), v);
+                }
+                try self.setMember(recv, m.property, v);
             },
             // Assignment destructuring: `[a, b] = x` / `({a} = o)`.
             .obj_pattern, .arr_pattern => try self.bindPattern(target, v, false),
