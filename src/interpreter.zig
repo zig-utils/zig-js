@@ -4387,7 +4387,25 @@ fn symbolProto(self: *Interpreter) ?*value.Object {
 fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return self.makeDate(Interpreter.dateTimeFromArgs(args));
+    if (args.len >= 2) {
+        // Multi-component form: ToNumber each component once (invoking valueOf),
+        // with years 0–99 mapped to 1900–1999.
+        const buf = try self.arena.alloc(Value, args.len);
+        for (args, 0..) |av, i| buf[i] = .{ .number = (try self.toPrimitive(av, .number)).toNumber() };
+        const yi = @trunc(buf[0].number);
+        if (yi >= 0 and yi <= 99) buf[0] = .{ .number = yi + 1900 };
+        return self.makeDate(Interpreter.dateTimeFromArgs(buf));
+    }
+    if (args.len == 1) {
+        // `new Date(dateObject)` copies its time value; otherwise ToPrimitive
+        // (a string would be parsed — not yet — else ToNumber).
+        if (args[0] == .object and args[0].object.is_date)
+            return self.makeDate((args[0].object.getOwn("__t") orelse Value{ .number = 0 }).number);
+        const prim = try self.toPrimitive(args[0], .default);
+        if (prim == .string) return self.makeDate(Interpreter.dateTimeFromArgs(&.{prim}));
+        return self.makeDate(prim.toNumber());
+    }
+    return self.makeDate(0);
 }
 
 /// `Date.UTC(year [, month, day, hours, min, sec, ms])` — the time value for
