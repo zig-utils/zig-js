@@ -41,7 +41,7 @@ pub const Context = struct {
         self.* = .{
             .gpa = gpa,
             .arena_state = arena_state,
-            .env = .{ .arena = a },
+            .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
             .global_object = global_obj,
             .root_shape = try Shape.createRoot(a),
         };

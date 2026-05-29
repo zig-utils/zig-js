@@ -206,6 +206,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(if (self.mode == .program) .set_acc else .pop, 0);
             },
             .block => |stmts| try self.compileStmtList(stmts),
+            .decl_group => |stmts| try self.compileStmtList(stmts),
             .if_stmt => |s| try self.compileIf(s.cond, s.consequent, s.alternate),
             .while_stmt => |s| try self.compileWhile(s.cond, s.body),
             .do_while_stmt => |s| try self.compileDoWhile(s.body, s.cond),
@@ -279,9 +280,9 @@ pub const Compiler = struct {
 
     fn compileFor(self: *Compiler, init_node: ?*Node, cond: ?*Node, update: ?*Node, body: *Node) CompileError!void {
         if (init_node) |ini| {
-            // The init clause is a declaration statement (var_decl, or a block of
+            // The init clause is a declaration statement (var_decl, or a group of
             // them for multiple declarators) or a bare expression.
-            if (ini.* == .var_decl or ini.* == .block) {
+            if (ini.* == .var_decl or ini.* == .block or ini.* == .decl_group) {
                 try self.compileStmt(ini);
             } else {
                 try self.compileExpr(ini);
@@ -668,6 +669,7 @@ fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) Compile
         .var_decl => |d| _ = try scope.addLocal(arena, d.name),
         .func_decl => |f| _ = try scope.addLocal(arena, f.name),
         .block => |stmts| for (stmts) |s| try collectLocals(arena, scope, s),
+        .decl_group => |stmts| for (stmts) |s| try collectLocals(arena, scope, s),
         .if_stmt => |s| {
             try collectLocals(arena, scope, s.consequent);
             if (s.alternate) |alt| try collectLocals(arena, scope, alt);

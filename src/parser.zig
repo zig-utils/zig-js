@@ -357,9 +357,9 @@ pub const Parser = struct {
         }
         _ = self.match(.semicolon);
         // A single declarator stays a bare var_decl; multiples become a
-        // (transparent) block so every consumer handles them uniformly.
+        // transparent declaration group (NOT a block — no new scope).
         if (decls.items.len == 1) return decls.items[0];
-        return self.alloc(.{ .block = decls.items });
+        return self.alloc(.{ .decl_group = decls.items });
     }
 
     fn parseBlock(self: *Parser) ParseError!*Node {

@@ -360,7 +360,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     // The generator's scope: a child of the closure, so free variables resolve
     // outward while params/locals live here and persist across yields.
     const genv = try vm.arena.create(Environment);
-    genv.* = .{ .arena = vm.arena, .parent = func.closure };
+    genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
 
     const args_obj = try vm.newArray(); // generators are never arrow functions
     for (args) |av| try args_obj.object.elements.append(vm.arena, av);
@@ -573,7 +573,7 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     var parser = try Parser.init(arena, src);
     const prog = try parser.parseProgram();
     const chunk = try Compiler.compileProgram(arena, prog);
-    var env = Environment{ .arena = arena };
+    var env = Environment{ .arena = arena, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(arena);
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape };

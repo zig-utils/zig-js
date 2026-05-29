@@ -211,6 +211,9 @@ pub const Node = union(enum) {
     labeled_stmt: struct { label: []const u8, body: *Node },
     expr_stmt: *Node,
     block: []*Node,
+    /// A transparent group of statements that does NOT open a new scope — used
+    /// for multi-declarator declarations (`let a = 1, b = 2`), unlike `block`.
+    decl_group: []*Node,
     if_stmt: struct { cond: *Node, consequent: *Node, alternate: ?*Node },
     while_stmt: struct { cond: *Node, body: *Node },
     do_while_stmt: struct { body: *Node, cond: *Node },

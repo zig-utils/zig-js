@@ -40,12 +40,26 @@ pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
     arena: std.mem.Allocator,
     parent: ?*Environment = null,
+    /// True for a function or the global scope (a *variable* environment); false
+    /// for a block `{…}` scope. `var`/function declarations hoist to the nearest
+    /// variable environment, while `let`/`const`/`class` bind in the block.
+    fn_scope: bool = false,
 
-    /// Define (or overwrite) a binding in *this* scope (used by var/let/const).
+    /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
         const gop = try self.vars.getOrPut(self.arena, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, name);
         gop.value_ptr.* = v;
+    }
+
+    /// The nearest enclosing variable environment (function or global), where
+    /// `var`/function declarations live.
+    pub fn varScope(self: *Environment) *Environment {
+        var e = self;
+        while (!e.fn_scope) {
+            e = e.parent orelse return e;
+        }
+        return e;
     }
 
     /// Assign to the nearest existing binding (used by `=`); if none exists,
@@ -132,6 +146,9 @@ pub const Interpreter = struct {
     /// Context-owned buffer the global `print` appends to (the async harness's
     /// `$DONE` reports completion through `print`).
     print_buffer: ?*std.ArrayListUnmanaged(u8) = null,
+    /// While binding a destructuring declaration, whether it's a `var` (leaves
+    /// hoist to the variable scope) vs `let`/`const` (block-scoped).
+    binding_hoisted: bool = false,
     /// The context's global object — the value of `globalThis` and of top-level
     /// `this`. Global `var`/function bindings also surface as its properties, so
     /// `this.x`, `"x" in globalThis`, and reflection over the global all work.
@@ -184,8 +201,9 @@ pub const Interpreter = struct {
     /// ({ writable, enumerable, !configurable }), so `hasOwnProperty(globalThis,
     /// name)` and reflection see them (the test262 async harness relies on this).
     pub fn globalDefine(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
-        try self.env.put(name, v);
-        if (self.env.parent == null) {
+        const vs = self.env.varScope(); // `var`/function declarations hoist here
+        try vs.put(name, v);
+        if (vs.parent == null) {
             if (self.global_object) |g| {
                 const existed = g.getOwn(name) != null;
                 try self.setProp(g, name, v);
@@ -346,7 +364,9 @@ pub const Interpreter = struct {
                     v = try self.eval(init_node);
                     try self.maybeNameAnon(v, init_node, d.name); // `var f = function(){}` ⇒ name "f"
                 }
-                try self.globalDefine(d.name, v);
+                // `var` hoists to the variable scope (and mirrors onto the global
+                // object); `let`/`const` bind in the current (possibly block) scope.
+                if (d.kind == .@"var") try self.globalDefine(d.name, v) else try self.env.put(d.name, v);
                 break :blk .undefined;
             },
 
@@ -358,6 +378,9 @@ pub const Interpreter = struct {
 
             .destructure_decl => |d| blk: {
                 const v = try self.eval(d.init);
+                const saved = self.binding_hoisted;
+                self.binding_hoisted = (d.kind == .@"var");
+                defer self.binding_hoisted = saved;
                 try self.bindPattern(d.pattern, v, true);
                 break :blk .undefined;
             },
@@ -399,7 +422,18 @@ pub const Interpreter = struct {
 
             .expr_stmt => |e| try self.eval(e),
 
-            .block => |stmts| try self.evalStatements(stmts),
+            .block => |stmts| blk: {
+                // A `{…}` block is its own lexical scope: `let`/`const`/`class`
+                // and block function declarations live here, `var` hoists past it.
+                const block_env = try self.arena.create(Environment);
+                block_env.* = .{ .arena = self.arena, .parent = self.env };
+                const saved_env = self.env;
+                self.env = block_env;
+                defer self.env = saved_env;
+                break :blk try self.evalStatements(stmts);
+            },
+            // A multi-declarator group runs in the current scope (no new block).
+            .decl_group => |stmts| try self.evalStatements(stmts),
             .program => |stmts| try self.evalStatements(stmts),
 
             .if_stmt => |s| if ((try self.eval(s.cond)).toBoolean())
@@ -1026,7 +1060,7 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
 
         const call_env = try self.arena.create(Environment);
-        call_env.* = .{ .arena = self.arena, .parent = func.closure };
+        call_env.* = .{ .arena = self.arena, .parent = func.closure, .fn_scope = true };
 
         const saved_env = self.env;
         const saved_signal = self.signal;
@@ -1806,7 +1840,10 @@ pub const Interpreter = struct {
     /// declare).
     fn bindPattern(self: *Interpreter, target: *Node, val: Value, declare: bool) EvalError!void {
         switch (target.*) {
-            .identifier => |name| if (declare) try self.env.put(name, val) else try self.env.assign(name, val),
+            .identifier => |name| if (declare)
+                (if (self.binding_hoisted) try self.globalDefine(name, val) else try self.env.put(name, val))
+            else
+                try self.env.assign(name, val),
             .member => |m| { // assignment destructuring into obj.prop / arr[i]
                 const recv = try self.eval(m.object);
                 const key = try self.memberKey(m.property, m.computed);
