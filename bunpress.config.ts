@@ -175,6 +175,15 @@ export default {
   outDir: './dist',
   theme: 'bun',
 
+  // Load the brand fonts (referenced by --bp-sans / --bp-mono in the CSS above).
+  fonts: {
+    google: [
+      'Inter:wght@400;500;600;700;800',
+      'JetBrains Mono:wght@400;500;600;700;800',
+    ],
+    display: 'swap',
+  },
+
   nav: [
     { text: 'Guide', link: '/guide/' },
     { text: 'Architecture', link: '/architecture' },
