@@ -3064,6 +3064,12 @@ pub const Interpreter = struct {
     /// sparse named, or inherited) — the HasProperty the iteration methods use to
     /// skip holes.
     fn arrIndexPresent(self: *Interpreter, o: *value.Object, i: usize) bool {
+        // Dense fast path: a real (non-hole) in-range element of a plain array
+        // is definitely present — no per-index string allocation. A *hole*
+        // falls through, because an index property inherited from the prototype
+        // chain can still make it present (HasProperty walks the chain).
+        if (o.is_array and o.accessors == null and i < o.elements.items.len and !o.isHole(i))
+            return true;
         const ks = std.fmt.allocPrint(self.arena, "{d}", .{i}) catch return false;
         return objectHasOwn(o, ks) or hasProperty(o, ks);
     }
@@ -3071,8 +3077,44 @@ pub const Interpreter = struct {
     /// `o[i]` via [[Get]] (so an accessor index runs its getter, and inherited
     /// indices resolve) — used by the iteration methods.
     fn arrIndexGet(self: *Interpreter, o: *value.Object, i: usize) EvalError!Value {
+        // Dense fast path mirrors `arrIndexPresent`; a hole goes through [[Get]]
+        // so an inherited index (accessor or value) on the prototype resolves.
+        if (o.is_array and o.accessors == null and i < o.elements.items.len and !o.isHole(i))
+            return o.elements.items[i];
         const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
         return self.getProperty(.{ .object = o }, ks);
+    }
+
+    /// ToIntegerOrInfinity-based start index for the forward searches
+    /// (indexOf/includes): a negative `fromIndex` counts from the end, `+∞`
+    /// (or any value ≥ len) yields `len` (no iterations), NaN/undefined → 0.
+    fn fromIndexForward(v: Value, len: usize) usize {
+        const n = v.toNumber();
+        if (std.math.isNan(n)) return 0;
+        const flen: f64 = @floatFromInt(len);
+        const fl = @trunc(n);
+        if (fl >= flen) return len;
+        if (fl < 0) {
+            const from_end = flen + fl;
+            return if (from_end < 0) 0 else @intFromFloat(from_end);
+        }
+        return @intFromFloat(fl);
+    }
+
+    /// The real array's *sparse* own integer-index keys lying in `[lo, hi)`,
+    /// returned in ascending order. These are indices stored as named
+    /// properties (past the dense `elements` store, e.g. `a[2**31]=x`), so the
+    /// search methods can visit them without walking the whole logical length.
+    fn arrSparseIndices(self: *Interpreter, o: *value.Object, lo: usize, hi: usize) EvalError![]usize {
+        var list: std.ArrayListUnmanaged(usize) = .empty;
+        const keys = try o.ownKeys(self.arena);
+        for (keys) |k| {
+            if (arrayIndex(k)) |idx| {
+                if (idx >= lo and idx < hi) try list.append(self.arena, idx);
+            }
+        }
+        std.mem.sort(usize, list.items, {}, std.sort.asc(usize));
+        return list.items;
     }
 
     fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
@@ -3127,12 +3169,49 @@ pub const Interpreter = struct {
         }
         if (eq(name, "indexOf")) {
             const target = arg0(args);
-            for (items, 0..) |el, i| if (value.strictEquals(el, target)) return Value{ .number = @floatFromInt(i) };
+            if (ilen == 0) return Value{ .number = -1 };
+            // `fromIndex` (2nd arg): a clamped start index. Beyond it (e.g.
+            // +Infinity on a 2**32-length array) means no iterations — which is
+            // also what keeps a huge sparse array from being walked element by
+            // element.
+            const k = if (args.len > 1) fromIndexForward(args[1], ilen) else 0;
+            // Dense scan: indexOf skips holes (HasProperty check).
+            const dense_hi = @min(o.elements.items.len, ilen);
+            var i = k;
+            while (i < dense_hi) : (i += 1) {
+                if (self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                    return Value{ .number = @floatFromInt(i) };
+            }
+            // Sparse scan: named integer-index properties in ascending order, so
+            // the first (lowest) match wins — without touching the hole tail.
+            const sparse = try self.arrSparseIndices(o, @max(k, dense_hi), ilen);
+            for (sparse) |idx| {
+                if (value.strictEquals(try self.arrIndexGet(o, idx), target))
+                    return Value{ .number = @floatFromInt(idx) };
+            }
             return Value{ .number = -1 };
         }
         if (eq(name, "includes")) {
             const target = arg0(args);
-            for (items) |el| if (value.strictEquals(el, target)) return Value{ .boolean = true };
+            if (ilen == 0) return Value{ .boolean = false };
+            const k = if (args.len > 1) fromIndexForward(args[1], ilen) else 0;
+            // includes treats holes as `undefined` and uses SameValueZero (so
+            // NaN matches NaN). Dense scan visits every in-range index.
+            const dense_hi = @min(o.elements.items.len, ilen);
+            var i = k;
+            while (i < dense_hi) : (i += 1) {
+                if (value.sameValueZero(try self.arrIndexGet(o, i), target)) return Value{ .boolean = true };
+            }
+            // Tail [max(k,dense_hi), ilen): named sparse indices checked
+            // directly; the remaining indices are pure holes reading as
+            // undefined, so a `target` of undefined matches if any such hole
+            // exists (rather than iterating billions of them).
+            const tail_lo = @max(k, dense_hi);
+            const sparse = try self.arrSparseIndices(o, tail_lo, ilen);
+            for (sparse) |idx| {
+                if (value.sameValueZero(try self.arrIndexGet(o, idx), target)) return Value{ .boolean = true };
+            }
+            if (target == .undefined and (ilen - tail_lo) > sparse.len) return Value{ .boolean = true };
             return Value{ .boolean = false };
         }
         if (eq(name, "join")) {
@@ -3339,16 +3418,46 @@ pub const Interpreter = struct {
         }
         if (eq(name, "lastIndexOf")) {
             const target = arg0(args);
-            var i = items.len;
+            if (ilen == 0) return Value{ .number = -1 };
+            // `fromIndex` (2nd arg): the highest index to search, default len-1.
+            // Negative counts from the end; below 0 means no search.
+            var start: usize = ilen - 1;
+            if (args.len > 1) {
+                const n = args[1].toNumber();
+                const fl = if (std.math.isNan(n)) 0 else @trunc(n);
+                if (fl < 0) {
+                    const s = @as(f64, @floatFromInt(ilen)) + fl;
+                    if (s < 0) return Value{ .number = -1 };
+                    start = @intFromFloat(s);
+                } else {
+                    const flen_1: f64 = @floatFromInt(ilen - 1);
+                    start = if (fl > flen_1) ilen - 1 else @intFromFloat(fl);
+                }
+            }
+            const dense_hi = @min(o.elements.items.len, ilen);
+            // Sparse indices (above the dense store) are the highest, so search
+            // them first, descending — the first match is the answer.
+            const sparse = try self.arrSparseIndices(o, dense_hi, start + 1);
+            var si = sparse.len;
+            while (si > 0) {
+                si -= 1;
+                if (value.strictEquals(try self.arrIndexGet(o, sparse[si]), target))
+                    return Value{ .number = @floatFromInt(sparse[si]) };
+            }
+            // Dense scan descending; lastIndexOf skips holes.
+            var i = @min(start + 1, dense_hi);
             while (i > 0) {
                 i -= 1;
-                if (value.strictEquals(items[i], target)) return Value{ .number = @floatFromInt(i) };
+                if (self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                    return Value{ .number = @floatFromInt(i) };
             }
             return Value{ .number = -1 };
         }
         if (eq(name, "findIndex")) {
             const cb = arg0(args);
-            for (items, 0..) |el, i| {
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) { // findIndex visits holes (value undefined)
+                const el = try self.arrIndexGet(o, i);
                 if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return Value{ .number = @floatFromInt(i) };
             }
@@ -3428,11 +3537,12 @@ pub const Interpreter = struct {
         if (eq(name, "findLast") or eq(name, "findLastIndex")) {
             const want_index = eq(name, "findLastIndex");
             const cb = arg0(args);
-            var i: usize = items.len;
+            var i: usize = ilen;
             while (i > 0) {
                 i -= 1;
-                if ((try self.callValueWithThis(cb, &.{ items[i], .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
-                    return if (want_index) Value{ .number = @floatFromInt(i) } else items[i];
+                const el = try self.arrIndexGet(o, i); // visits holes (undefined)
+                if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
+                    return if (want_index) Value{ .number = @floatFromInt(i) } else el;
             }
             return if (want_index) Value{ .number = -1 } else .undefined;
         }

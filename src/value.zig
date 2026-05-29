@@ -437,6 +437,16 @@ pub fn strictEquals(a: Value, b: Value) bool {
     };
 }
 
+/// SameValueZero: strict equality except NaN equals NaN (and +0 equals -0).
+/// Used by `Array.prototype.includes` and Map/Set key comparison.
+pub fn sameValueZero(a: Value, b: Value) bool {
+    if (a == .number and b == .number) {
+        if (std.math.isNan(a.number) and std.math.isNan(b.number)) return true;
+        return a.number == b.number;
+    }
+    return strictEquals(a, b);
+}
+
 /// Abstract Equality Comparison (==), simplified for the v1 value set.
 pub fn looseEquals(a: Value, b: Value) bool {
     if (@as(std.meta.Tag(Value), a) == @as(std.meta.Tag(Value), b)) {
