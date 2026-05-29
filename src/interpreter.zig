@@ -1024,15 +1024,19 @@ pub const Interpreter = struct {
         }
 
         for (members) |m| {
-            // `static { ... }` block: run with `this` = the class object.
+            // `static { ... }` block: run with `this` = the class object and the
+            // class as its home object, so `super.x` resolves on the superclass
+            // (the class object's prototype is the parent class for statics).
             if (m.static_block) |block| {
                 const saved_this = self.this_value;
+                const saved_home = self.home_object;
                 self.this_value = class_val;
-                _ = self.eval(block) catch |e| {
+                self.home_object = class_obj;
+                defer {
                     self.this_value = saved_this;
-                    return e;
-                };
-                self.this_value = saved_this;
+                    self.home_object = saved_home;
+                }
+                _ = try self.eval(block);
                 continue;
             }
             const key = if (m.key_expr) |ke| try self.keyOf(try self.eval(ke)) else m.key;
