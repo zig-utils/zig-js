@@ -601,6 +601,19 @@ pub const Parser = struct {
         return params.items;
     }
 
+    /// Strict-mode early errors on a formal parameter list: a parameter named
+    /// `eval`/`arguments`, or any duplicate parameter name, is a SyntaxError.
+    fn validateStrictParams(params: []const ast.Param) ParseError!void {
+        for (params, 0..) |p, i| {
+            if (p.pattern != null) continue;
+            if (std.mem.eql(u8, p.name, "eval") or std.mem.eql(u8, p.name, "arguments"))
+                return ParseError.UnexpectedToken;
+            for (params[0..i]) |q| {
+                if (q.pattern == null and std.mem.eql(u8, q.name, p.name)) return ParseError.UnexpectedToken;
+            }
+        }
+    }
+
     fn parseFunctionDecl(self: *Parser, is_async: bool) ParseError!*Node {
         if (is_async) _ = self.advance(); // async
         _ = self.advance(); // function
@@ -609,6 +622,7 @@ pub const Parser = struct {
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
+        if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .func_decl = fnode });
@@ -628,6 +642,7 @@ pub const Parser = struct {
         }
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
+        if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
@@ -1344,6 +1359,7 @@ pub const Parser = struct {
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool) ParseError!*Node {
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
+        if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
