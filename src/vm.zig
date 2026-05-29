@@ -48,13 +48,22 @@ pub const Exec = struct {
     handlers: std.ArrayListUnmanaged(Handler) = .empty,
 };
 
-/// A live try/catch handler: where to resume on a throw (`catch_pc`) and the
-/// operand-stack depth to unwind to first (everything pushed inside the `try`
-/// is discarded). The caught exception is then pushed for the catch binding.
+/// A live try handler: where to resume on a throw and the operand-stack depth
+/// to unwind to first (everything pushed inside the `try` is discarded). A
+/// throw goes to `catch_pc` if present (pushing the exception for the binding);
+/// otherwise, if there's a `finally_pc`, it runs the finally carrying a "throw"
+/// completion that is re-thrown after. `none` (u32 max) means that arm is absent.
 pub const Handler = struct {
     catch_pc: u32,
+    finally_pc: u32 = none,
     stack_depth: u32,
+
+    pub const none: u32 = std.math.maxInt(u32);
 };
+
+/// A finally block's completion kind (the `kind` half of the record left on the
+/// stack for `end_finally`): fall through, re-throw, or return.
+const Completion = enum(u8) { normal = 0, throw = 1, ret = 2 };
 
 /// A suspended `function*` activation: its compiled body, persistent execution
 /// state, and the `Environment` its body resolves names against (a child of the
@@ -101,8 +110,16 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             if (e == error.Throw and exec.handlers.items.len > 0) {
                 const h = exec.handlers.pop().?;
                 exec.stack.shrinkRetainingCapacity(h.stack_depth);
-                try exec.stack.append(vm.arena, vm.exception); // bind target for the catch
-                exec.ip = h.catch_pc;
+                if (h.catch_pc != Handler.none) {
+                    try exec.stack.append(vm.arena, vm.exception); // bind target for the catch
+                    exec.ip = h.catch_pc;
+                } else {
+                    // No catch: run the finally carrying a "throw" completion,
+                    // which `end_finally` re-throws once the finally completes.
+                    try exec.stack.append(vm.arena, vm.exception);
+                    try exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.throw)) });
+                    exec.ip = h.finally_pc;
+                }
                 continue;
             }
             return e;
@@ -395,9 +412,27 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .push_handler => try exec.handlers.append(vm.arena, .{
                 .catch_pc = inst.a,
+                .finally_pc = inst.b,
                 .stack_depth = @intCast(stack.items.len),
             }),
             .pop_handler => _ = exec.handlers.pop(),
+            .push_completion => {
+                // [value, kind] — value is undefined for a normal completion.
+                try stack.append(vm.arena, .undefined);
+                try stack.append(vm.arena, .{ .number = @floatFromInt(inst.a) });
+            },
+            .end_finally => {
+                const kind: Completion = @enumFromInt(@as(u8, @intFromFloat(stack.pop().?.number)));
+                const cval = stack.pop().?;
+                switch (kind) {
+                    .normal => {}, // fall through past the finally
+                    .throw => {
+                        vm.exception = cval;
+                        return error.Throw; // re-thrown to the next handler
+                    },
+                    .ret => return cval, // the finally completes the abrupt return
+                }
+            },
 
             .halt => return acc,
         }
@@ -496,10 +531,27 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
         switch (kind) {
             .send => try g.exec.stack.append(vm.arena, val), // becomes the yield's value
             .return_ => {
-                // No `finally` lowering yet, so there is nothing to run on the
-                // way out — the generator simply completes.
-                g.done = true;
-                return makeIterResult(vm, val, true);
+                // If the suspend point is inside a `try` with a `finally`, run
+                // that finally (carrying a "return" completion) before the
+                // generator completes; otherwise complete immediately.
+                var fin: ?u32 = null;
+                while (g.exec.handlers.items.len > 0) {
+                    const h = g.exec.handlers.pop().?;
+                    if (h.finally_pc != Handler.none) {
+                        g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
+                        fin = h.finally_pc;
+                        break;
+                    }
+                }
+                if (fin) |fpc| {
+                    try g.exec.stack.append(vm.arena, val); // completion value
+                    try g.exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
+                    g.exec.ip = fpc;
+                    // fall through to run the finally via execLoop
+                } else {
+                    g.done = true;
+                    return makeIterResult(vm, val, true);
+                }
             },
             .throw_ => {
                 // Inject the exception at the suspend point: unwind to the

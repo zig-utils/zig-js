@@ -70,6 +70,10 @@ pub const Compiler = struct {
     in_generator: bool = false,
     /// Counter for synthesized temp names (`yield*` iterator/result holders).
     tmp_counter: u32 = 0,
+    /// >0 while compiling inside a `try` that has a `finally`. Abrupt control
+    /// flow (return/break/continue) that would cross the finally isn't lowered
+    /// yet, so it falls back rather than skipping the finally.
+    finally_depth: u32 = 0,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
@@ -197,6 +201,7 @@ pub const Compiler = struct {
                 try self.emitDefine(fnode.name);
             },
             .return_stmt => |maybe| {
+                if (self.finally_depth > 0) return error.Unsupported; // return across finally → tree-walk
                 if (maybe) |e| {
                     try self.compileExpr(e);
                     _ = try self.chunk.emit(.ret, 0);
@@ -216,12 +221,14 @@ pub const Compiler = struct {
             .for_stmt => |f| try self.compileFor(f.init, f.cond, f.update, f.body),
             .break_stmt => |label| {
                 if (label != null) return error.Unsupported; // labeled break → tree-walk
+                if (self.finally_depth > 0) return error.Unsupported; // break across finally → tree-walk
                 const loop = self.currentLoop() orelse return error.Unsupported;
                 const j = try self.chunk.emit(.jump, 0);
                 try loop.breaks.append(self.arena, j);
             },
             .continue_stmt => |label| {
                 if (label != null) return error.Unsupported; // labeled continue → tree-walk
+                if (self.finally_depth > 0) return error.Unsupported; // continue across finally → tree-walk
                 const loop = self.currentContinueLoop() orelse return error.Unsupported;
                 const j = try self.chunk.emit(.jump, 0);
                 try loop.continues.append(self.arena, j);
@@ -242,34 +249,60 @@ pub const Compiler = struct {
         }
     }
 
-    /// `try { B } catch (e) { C }` for the generator VM. Lowers to a handler that
-    /// the VM unwinds to on a throw (pushing the exception for the binding). Only
-    /// the identifier/elided catch binding without `finally` is lowered — anything
-    /// else stays unsupported (the generator is reported unsupported, as before),
-    /// and non-generator code keeps using the tree-walker's try/catch.
+    /// `try { B } [catch (e) { C }] [finally { F }]` for the generator VM. A
+    /// handler records the catch and/or finally targets; the VM unwinds to it
+    /// on a throw. Only an identifier/elided catch binding is lowered.
     fn compileTry(self: *Compiler, t: *const ast.TryNode) CompileError!void {
         if (!self.in_generator) return error.Unsupported;
-        if (t.finally_block != null) return error.Unsupported; // finally not lowered yet
-        const catch_block = t.catch_block orelse return error.Unsupported;
         if (t.catch_param) |p| {
             if (p.* != .identifier) return error.Unsupported; // destructuring catch → unsupported
         }
+        const none = std.math.maxInt(u32);
 
-        const ph = try self.chunk.emit(.push_handler, 0); // catch PC patched below
-        try self.compileStmt(t.block);
-        _ = try self.chunk.emit(.pop_handler, 0); // try completed normally
-        const skip = try self.chunk.emit(.jump, 0);
-
-        // Catch entry: the VM has unwound the operand stack and pushed the
-        // thrown value, so the binding consumes it.
-        self.chunk.patchToHere(ph);
-        if (t.catch_param) |p| {
-            try self.emitDefine(p.identifier);
-        } else {
-            _ = try self.chunk.emit(.pop, 0); // `catch { }` — discard the exception
+        if (t.finally_block == null) {
+            // try/catch (no finally) — handler with a catch arm only.
+            const catch_block = t.catch_block orelse return error.Unsupported;
+            const ph = try self.chunk.emitAB(.push_handler, none, none);
+            try self.compileStmt(t.block);
+            _ = try self.chunk.emit(.pop_handler, 0);
+            const skip = try self.chunk.emit(.jump, 0);
+            self.chunk.code.items[ph].a = @intCast(self.chunk.here());
+            if (t.catch_param) |p| try self.emitDefine(p.identifier) else _ = try self.chunk.emit(.pop, 0);
+            try self.compileStmt(catch_block);
+            self.chunk.patchToHere(skip);
+            return;
         }
-        try self.compileStmt(catch_block);
-        self.chunk.patchToHere(skip);
+
+        // A finally is present. Abrupt control flow (return/break/continue) that
+        // would cross the finally isn't lowered yet, so reject it inside.
+        self.finally_depth += 1;
+        defer self.finally_depth -= 1;
+
+        const ph = try self.chunk.emitAB(.push_handler, none, none); // catch/finally patched below
+        try self.compileStmt(t.block);
+        _ = try self.chunk.emit(.pop_handler, 0);
+        _ = try self.chunk.emit(.push_completion, 0); // normal completion of the try body
+        const to_fin_normal = try self.chunk.emit(.jump, 0);
+
+        var catch_start: ?usize = null;
+        var ph2: ?usize = null;
+        if (t.catch_block) |cb| {
+            catch_start = self.chunk.here();
+            // A throw inside the catch must still run the finally.
+            ph2 = try self.chunk.emitAB(.push_handler, none, none);
+            if (t.catch_param) |p| try self.emitDefine(p.identifier) else _ = try self.chunk.emit(.pop, 0);
+            try self.compileStmt(cb);
+            _ = try self.chunk.emit(.pop_handler, 0);
+            _ = try self.chunk.emit(.push_completion, 0); // normal completion of the catch body
+        }
+
+        const fin = self.chunk.here();
+        self.chunk.patchTo(to_fin_normal, fin);
+        self.chunk.code.items[ph].a = if (catch_start) |cs| @intCast(cs) else none; // throw → catch, else finally
+        self.chunk.code.items[ph].b = @intCast(fin);
+        if (ph2) |p2| self.chunk.code.items[p2].b = @intCast(fin);
+        try self.compileStmt(t.finally_block.?);
+        _ = try self.chunk.emit(.end_finally, 0);
     }
 
     /// `switch (disc) { case t: ... default: ... }` — evaluate the discriminant
