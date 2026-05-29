@@ -2740,6 +2740,25 @@ pub const Interpreter = struct {
         if (eq(name, "toFixed")) {
             return Value{ .string = try toFixed(self.arena, n, @min(toLen(arg0(args).toNumber()), 18)) };
         }
+        if (eq(name, "toExponential")) {
+            if (std.math.isNan(n)) return Value{ .string = "NaN" };
+            if (std.math.isInf(n)) return Value{ .string = if (n < 0) "-Infinity" else "Infinity" };
+            var frac: ?usize = null;
+            if (args.len > 0 and args[0] != .undefined) {
+                const f = arg0(args).toNumber();
+                if (std.math.isNan(f) or f < 0 or f > 100) return self.throwError("RangeError", "toExponential() argument must be between 0 and 100");
+                frac = @intFromFloat(@trunc(f));
+            }
+            return Value{ .string = try toExponentialStr(self.arena, n, frac) };
+        }
+        if (eq(name, "toPrecision")) {
+            if (args.len == 0 or args[0] == .undefined) return Value{ .string = try value.numberToString(self.arena, n) };
+            if (std.math.isNan(n)) return Value{ .string = "NaN" };
+            if (std.math.isInf(n)) return Value{ .string = if (n < 0) "-Infinity" else "Infinity" };
+            const pf = arg0(args).toNumber();
+            if (std.math.isNan(pf) or pf < 1 or pf > 100) return self.throwError("RangeError", "toPrecision() argument must be between 1 and 100");
+            return Value{ .string = try toPrecisionStr(self.arena, n, @intFromFloat(@trunc(pf))) };
+        }
         return null;
     }
 
@@ -4254,6 +4273,76 @@ fn toFixed(arena: std.mem.Allocator, n: f64, d: usize) ![]const u8 {
         try buf.print(arena, ".{d:0>[1]}", .{ scaled % scale_u, d });
     }
     return buf.items;
+}
+
+/// Reformat Zig's scientific output (`1.234e1`, `-9.99e-40`) to JS form, where
+/// the exponent always carries a sign (`1.234e+1`, `-9.99e-40`).
+fn jsExpFix(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
+    const ei = std.mem.indexOfScalar(u8, s, 'e') orelse return arena.dupe(u8, s);
+    const mant = s[0..ei];
+    const exp = s[ei + 1 ..];
+    const sign: []const u8 = if (exp.len > 0 and exp[0] == '-') "" else "+";
+    return std.fmt.allocPrint(arena, "{s}e{s}{s}", .{ mant, sign, exp });
+}
+
+/// `Number.prototype.toExponential` — scientific notation with `frac` fraction
+/// digits (or shortest when null), exponent always signed.
+fn toExponentialStr(arena: std.mem.Allocator, n: f64, frac: ?usize) ![]const u8 {
+    var buf: [512]u8 = undefined;
+    const s = std.fmt.float.render(&buf, n, .{ .mode = .scientific, .precision = frac }) catch return error.OutOfMemory;
+    return jsExpFix(arena, s);
+}
+
+/// `Number.prototype.toPrecision` — `p` significant digits, choosing fixed or
+/// exponential notation per spec (exponential when the decimal exponent is
+/// < -6 or >= p).
+fn toPrecisionStr(arena: std.mem.Allocator, n: f64, p: usize) ![]const u8 {
+    if (n == 0) {
+        if (p == 1) return "0";
+        var z: std.ArrayListUnmanaged(u8) = .empty;
+        try z.appendSlice(arena, "0.");
+        try z.appendNTimes(arena, '0', p - 1);
+        return z.items;
+    }
+    const neg = n < 0;
+    var buf: [512]u8 = undefined;
+    // Scientific with p-1 fraction digits yields exactly p significant digits.
+    const s = std.fmt.float.render(&buf, @abs(n), .{ .mode = .scientific, .precision = p - 1 }) catch return error.OutOfMemory;
+    // Parse "d.ddd...eX": collect the significant digits and the decimal exponent.
+    const ei = std.mem.indexOfScalar(u8, s, 'e').?;
+    var digits: std.ArrayListUnmanaged(u8) = .empty;
+    for (s[0..ei]) |c| if (c != '.') try digits.append(arena, c);
+    const exp = std.fmt.parseInt(i32, s[ei + 1 ..], 10) catch 0;
+    const nd: i32 = @intCast(digits.items.len);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (neg) try out.append(arena, '-');
+    if (exp < -6 or exp >= @as(i32, @intCast(p))) {
+        // Exponential form: d.ddd e±X
+        try out.append(arena, digits.items[0]);
+        if (digits.items.len > 1) {
+            try out.append(arena, '.');
+            try out.appendSlice(arena, digits.items[1..]);
+        }
+        try out.appendSlice(arena, try jsExpFix(arena, try std.fmt.allocPrint(arena, "e{d}", .{exp})));
+    } else if (exp >= 0) {
+        const ip: usize = @intCast(exp + 1); // digits before the decimal point
+        if (ip >= digits.items.len) {
+            try out.appendSlice(arena, digits.items);
+            try out.appendNTimes(arena, '0', ip - digits.items.len);
+        } else {
+            try out.appendSlice(arena, digits.items[0..ip]);
+            try out.append(arena, '.');
+            try out.appendSlice(arena, digits.items[ip..]);
+        }
+    } else {
+        // exp in [-6, -1]: 0.00…digits
+        try out.appendSlice(arena, "0.");
+        try out.appendNTimes(arena, '0', @intCast(-exp - 1));
+        try out.appendSlice(arena, digits.items);
+    }
+    _ = nd;
+    return out.items;
 }
 
 fn arg(args: []const Value, i: usize) Value {
