@@ -450,9 +450,33 @@ pub const Compiler = struct {
     /// a `.next()` loop (mirroring `compileYieldStar`). Only a plain identifier
     /// target is lowered; destructuring targets and `for-in` fall back to the
     /// tree-walker. Works inside generators (where `for-of` is common).
+    /// Bind the current loop value (on the stack) to a loop target — an
+    /// identifier (fast path) or a destructuring pattern / member target (via
+    /// `bind_pattern`, reusing the tree-walker's destructuring).
+    fn compileLoopBind(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node) CompileError!void {
+        if (target.* == .identifier) {
+            if (decl_kind != null) {
+                try self.emitDefine(target.identifier);
+            } else {
+                try self.emitStore(target.identifier);
+                _ = try self.chunk.emit(.pop, 0);
+            }
+            return;
+        }
+        // `bind_pattern` destructures into the live environment, which is the
+        // binding scope only in env-mode (generators/async). A slot-allocated
+        // (frame-mode) function keeps falling back to the tree-walker.
+        if (self.scope != null) return error.Unsupported;
+        const pi = try self.chunk.addPattern(target);
+        const mode: u32 = if (decl_kind) |k| switch (k) {
+            .@"var" => 0,
+            .let => 1,
+            .@"const" => 2,
+        } else 3;
+        _ = try self.chunk.emitAB(.bind_pattern, pi, mode);
+    }
+
     fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool) CompileError!void {
-        if (target.* != .identifier) return error.Unsupported; // patterns → tree-walk
-        const var_name = target.identifier;
         const it_name = try self.freshTemp();
         const r_name = try self.freshTemp();
 
@@ -475,15 +499,10 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
         _ = try self.chunk.emit(.not, 0);
         const to_end = try self.chunk.emit(.jump_if_false, 0);
-        // bind r.value to the loop variable
+        // bind r.value to the loop target (identifier or destructuring pattern)
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
-        if (decl_kind != null) {
-            try self.emitDefine(var_name);
-        } else {
-            try self.emitStore(var_name);
-            _ = try self.chunk.emit(.pop, 0);
-        }
+        try self.compileLoopBind(decl_kind, target);
         try self.compileStmt(body);
         _ = try self.chunk.emit(.jump, @intCast(top));
         self.chunk.patchToHere(to_end);

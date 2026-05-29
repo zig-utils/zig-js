@@ -2537,6 +2537,20 @@ pub const Interpreter = struct {
     /// identifiers are declared in the current scope (`let {a}=…`) or assigned
     /// to an existing binding / member (`({a}=…)` and parameter binding uses
     /// declare).
+    /// VM entry for `bind_pattern`: destructure `val` into `target` with the
+    /// given mode (0 var, 1 let, 2 const, 3 assignment), reusing `bindPattern`.
+    pub fn bindPatternVM(self: *Interpreter, target: *Node, val: Value, mode: u32) EvalError!void {
+        const saved_const = self.binding_const;
+        const saved_hoist = self.binding_hoisted;
+        self.binding_const = (mode == 2);
+        self.binding_hoisted = false;
+        defer {
+            self.binding_const = saved_const;
+            self.binding_hoisted = saved_hoist;
+        }
+        try self.bindPattern(target, val, mode != 3);
+    }
+
     fn bindPattern(self: *Interpreter, target: *Node, val: Value, declare: bool) EvalError!void {
         switch (target.*) {
             .identifier => |name| if (declare)

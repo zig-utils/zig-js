@@ -191,6 +191,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const name = chunk.names.items[inst.a];
                 try vm.globalDefine(name, stack.pop().?);
             },
+            .bind_pattern => {
+                // Reuse the tree-walker's destructuring over the live env (a=pattern
+                // index, b=mode: 0 var, 1 let, 2 const, 3 assign).
+                const pat = chunk.patterns.items[inst.a];
+                const v = stack.pop().?;
+                try vm.bindPatternVM(pat, v, inst.b);
+            },
 
             .load_local => try stack.append(vm.arena, frame.?.slots[inst.a]),
             .store_local => frame.?.slots[inst.a] = stack.items[stack.items.len - 1], // leaves value

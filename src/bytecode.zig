@@ -42,6 +42,7 @@ pub const Op = enum(u8) {
     load_var_or_undef, // operand a: name index; push value, or undefined if unbound (for `typeof`)
     store_var, // operand a: name index; assign global, leave value on stack
     def_var, // operand a: name index; pop value, define global
+    bind_pattern, // operand a: pattern index, b: mode (0 var, 1 let, 2 const, 3 assign); pop value, destructure into the pattern
 
     // --- locals & upvalues (resolved to frame slots at compile time) ---
     load_local, // operand a: slot in the current frame
@@ -165,6 +166,9 @@ pub const Chunk = struct {
     consts: std.ArrayListUnmanaged(Value) = .empty,
     names: std.ArrayListUnmanaged([]const u8) = .empty,
     fns: std.ArrayListUnmanaged(*FnTemplate) = .empty,
+    /// Destructuring-pattern AST nodes referenced by `bind_pattern` (the VM
+    /// reuses the tree-walker's `bindPattern` over the live environment).
+    patterns: std.ArrayListUnmanaged(*ast.Node) = .empty,
     /// One inline cache per instruction, allocated by `finalize` once the code
     /// stream is complete. Warm across runs of the same chunk.
     ics: []InlineCache = &.{},
@@ -208,6 +212,12 @@ pub const Chunk = struct {
     pub fn addFn(self: *Chunk, tmpl: *FnTemplate) std.mem.Allocator.Error!u32 {
         const idx: u32 = @intCast(self.fns.items.len);
         try self.fns.append(self.arena, tmpl);
+        return idx;
+    }
+
+    pub fn addPattern(self: *Chunk, node: *ast.Node) std.mem.Allocator.Error!u32 {
+        const idx: u32 = @intCast(self.patterns.items.len);
+        try self.patterns.append(self.arena, node);
         return idx;
     }
 
