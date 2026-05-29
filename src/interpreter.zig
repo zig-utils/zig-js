@@ -4201,7 +4201,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, date_ns, "UTC", 7, dateUTCFn);
     const date_proto = try a.create(value.Object);
     date_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, date_proto, .{
+    try setDateProtoMethods(a, root_shape, date_proto, .{
         .{ "getTime", 0 },      .{ "valueOf", 0 },      .{ "setTime", 1 },      .{ "toISOString", 0 },
         .{ "toJSON", 1 },       .{ "toUTCString", 0 },  .{ "getFullYear", 0 },  .{ "getUTCFullYear", 0 },
         .{ "getMonth", 0 },     .{ "getUTCMonth", 0 },  .{ "getDate", 0 },      .{ "getUTCDate", 0 },
@@ -4340,6 +4340,23 @@ fn protoMethod(comptime name: []const u8) value.NativeFn {
 /// different arity on different prototypes — e.g. `toString`).
 fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
     inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], protoMethod(s[0]));
+}
+
+/// A `Date.prototype` method that brand-checks `this` (a TypeError otherwise),
+/// then dispatches to `dateMethod`.
+fn dateProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or !this.object.is_date)
+                return self.throwError("TypeError", "Date.prototype method called on a non-Date");
+            return (try self.dateMethod(this.object, name, args)) orelse .undefined;
+        }
+    }.call;
+}
+
+fn setDateProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
+    inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], dateProtoMethod(s[0]));
 }
 
 /// Monotonic id for unique Symbol property-key encodings (single-threaded;
