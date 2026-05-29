@@ -1693,22 +1693,43 @@ pub const Interpreter = struct {
 
     fn regexMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         if (eq(name, "test")) {
-            const input = try arg0(args).toString(self.arena);
-            var re = try self.compileRegex(o);
-            return Value{ .boolean = re.isMatch(input) catch false };
+            const r = (try self.regexMethod(o, "exec", args)).?;
+            return Value{ .boolean = r != .null };
         }
         if (eq(name, "exec")) {
             const input = try arg0(args).toString(self.arena);
+            const flags = (o.getOwn("flags") orelse Value{ .string = "" }).string;
+            const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
+            const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
+            // `lastIndex` is the search start only for global/sticky regexps.
+            const li: usize = if (global or sticky)
+                toLen((o.getOwn("lastIndex") orelse Value{ .number = 0 }).toNumber())
+            else
+                0;
+            if (li > input.len) {
+                if (global or sticky) try self.setProp(o, "lastIndex", .{ .number = 0 });
+                return Value.null;
+            }
             var re = try self.compileRegex(o);
-            const found = re.find(input) catch null;
+            const found = re.find(input[li..]) catch null;
             if (found) |m| {
+                // Sticky matches must begin exactly at lastIndex.
+                if (sticky and m.start != 0) {
+                    try self.setProp(o, "lastIndex", .{ .number = 0 });
+                    return Value.null;
+                }
+                const mstart = li + m.start;
+                if (global or sticky) try self.setProp(o, "lastIndex", .{ .number = @floatFromInt(li + m.end) });
                 const arr = try self.newArray();
                 try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
                 for (m.captures) |c| try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, c) });
-                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(m.start) });
+                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(mstart) });
                 try self.setProp(arr.object, "input", .{ .string = input });
+                const groups = try self.regexGroups(&re, m.captures);
+                try self.setProp(arr.object, "groups", if (groups) |g| .{ .object = g } else .undefined);
                 return arr;
             }
+            if (global or sticky) try self.setProp(o, "lastIndex", .{ .number = 0 });
             return Value.null;
         }
         if (eq(name, "toString")) {
@@ -3073,6 +3094,7 @@ pub const Interpreter = struct {
             "toLowerCase", "trim",       "trimStart",   "trimEnd",  "repeat",      "concat",
             "split",       "at",         "padStart",    "padEnd",   "replace",     "replaceAll",
             "localeCompare", "normalize", "search",     "match",     "toLocaleUpperCase", "toLocaleLowerCase",
+            "matchAll",
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
@@ -3960,38 +3982,66 @@ pub const Interpreter = struct {
         }
         if (eq(name, "replace") or eq(name, "replaceAll")) {
             const all = eq(name, "replaceAll");
-            const repl = try arg(args, 1).toString(self.arena);
-            // Regex pattern: use zig-regex; honor the `g` flag (and replaceAll).
+            const repl_val = arg(args, 1);
+            const is_func = repl_val.isCallable();
+            const template: []const u8 = if (is_func) "" else try repl_val.toString(self.arena);
+            const a = self.arena;
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+
+            // Regex pattern: replace each match (all matches when global/replaceAll),
+            // expanding `$` substitutions or invoking a function replacer.
             if (arg0(args) == .object and arg0(args).object.is_regex) {
                 const ro = arg0(args).object;
                 const g = all or ((ro.getOwn("global") orelse Value{ .boolean = false }).boolean);
                 var re = try self.compileRegex(ro);
-                var buf: std.ArrayListUnmanaged(u8) = .empty;
-                var rest = s;
-                while (re.find(rest) catch null) |m| {
-                    try buf.appendSlice(self.arena, rest[0..m.start]);
-                    try buf.appendSlice(self.arena, repl);
-                    const adv = if (m.end > m.start) m.end else m.start + 1;
-                    if (adv > rest.len) break;
-                    if (m.end == m.start and m.start < rest.len) try buf.append(self.arena, rest[m.start]);
-                    rest = rest[adv..];
+                var last: usize = 0; // end of the last copied region
+                var search: usize = 0; // absolute scan cursor
+                while (search <= s.len) {
+                    const m = re.find(s[search..]) catch null orelse break;
+                    const mstart = search + m.start;
+                    const mend = search + m.end;
+                    try buf.appendSlice(a, s[last..mstart]);
+                    if (is_func) {
+                        var call_args: std.ArrayListUnmanaged(Value) = .empty;
+                        try call_args.append(a, .{ .string = try a.dupe(u8, m.slice) });
+                        for (m.captures) |c| try call_args.append(a, .{ .string = try a.dupe(u8, c) });
+                        try call_args.append(a, .{ .number = @floatFromInt(mstart) });
+                        try call_args.append(a, .{ .string = s });
+                        const r = try self.callValue(repl_val, call_args.items);
+                        try buf.appendSlice(a, try r.toString(a));
+                    } else {
+                        const groups = try self.regexGroups(&re, m.captures);
+                        try self.getSubstitution(&buf, template, m.slice, s, mstart, m.captures, groups);
+                    }
+                    last = mend;
+                    search = if (mend > mstart) mend else mend + 1; // step past an empty match
                     if (!g) break;
                 }
-                try buf.appendSlice(self.arena, rest);
-                return Value{ .string = try buf.toOwnedSlice(self.arena) };
+                try buf.appendSlice(a, s[last..]);
+                return Value{ .string = try buf.toOwnedSlice(a) };
             }
-            const pat = try arg0(args).toString(self.arena);
-            if (pat.len == 0) return Value{ .string = try self.arena.dupe(u8, s) };
-            var buf: std.ArrayListUnmanaged(u8) = .empty;
-            var rest = s;
-            while (std.mem.indexOf(u8, rest, pat)) |idx| {
-                try buf.appendSlice(self.arena, rest[0..idx]);
-                try buf.appendSlice(self.arena, repl);
-                rest = rest[idx + pat.len ..];
+
+            // String pattern: replace the first occurrence (or all for replaceAll).
+            const pat = try arg0(args).toString(a);
+            var from: usize = 0;
+            while (from <= s.len) { // `from` stays in-bounds so the search never reads past the end
+                const idx = std.mem.indexOfPos(u8, s, from, pat) orelse break;
+                try buf.appendSlice(a, s[from..idx]);
+                if (is_func) {
+                    const r = try self.callValue(repl_val, &.{ .{ .string = pat }, .{ .number = @floatFromInt(idx) }, .{ .string = s } });
+                    try buf.appendSlice(a, try r.toString(a));
+                } else {
+                    try self.getSubstitution(&buf, template, pat, s, idx, &.{}, null);
+                }
+                from = idx + pat.len;
+                if (pat.len == 0) { // empty pattern: copy one char and step past it
+                    if (from < s.len) try buf.append(a, s[from]);
+                    from += 1;
+                }
                 if (!all) break;
             }
-            try buf.appendSlice(self.arena, rest);
-            return Value{ .string = try buf.toOwnedSlice(self.arena) };
+            if (from <= s.len) try buf.appendSlice(a, s[from..]);
+            return Value{ .string = try buf.toOwnedSlice(a) };
         }
         if (eq(name, "codePointAt")) {
             const i = toLen(arg0(args).toNumber());
@@ -4046,16 +4096,30 @@ pub const Interpreter = struct {
                 }
                 return if (arr.object.elements.items.len == 0) Value.null else arr;
             }
-            // Non-global: [full, ...captures] with index/input (like RegExp.exec).
-            if (re.find(s) catch null) |m| {
-                const arr = try self.newArray();
-                try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
-                for (m.captures) |c| try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, c) });
-                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(m.start) });
-                try self.setProp(arr.object, "input", .{ .string = try self.arena.dupe(u8, s) });
-                return arr;
+            // Non-global: defer to RegExp.prototype.exec (full result shape).
+            return (try self.regexMethod(re_obj, "exec", &.{.{ .string = s }})).?;
+        }
+        if (eq(name, "matchAll")) {
+            const re_obj = try self.toRegexObject(arg0(args));
+            // Snapshot every match (each as an exec-style result) and return an
+            // iterator over them. A global/sticky exec advances lastIndex; use a
+            // fresh regex so the caller's object isn't mutated.
+            const flags = (re_obj.getOwn("flags") orelse Value{ .string = "" }).string;
+            const has_g = std.mem.indexOfScalar(u8, flags, 'g') != null;
+            const gflags = if (has_g) flags else try std.mem.concat(self.arena, u8, &.{ flags, "g" });
+            const iter_re = (try self.makeRegex((re_obj.getOwn("source") orelse Value{ .string = "" }).string, gflags)).object;
+            const results = try self.newArray();
+            while (true) {
+                const r = (try self.regexMethod(iter_re, "exec", &.{.{ .string = s }})).?;
+                if (r == .null) break;
+                try results.object.elements.append(self.arena, r);
+                // Guard against an empty match stalling lastIndex.
+                if (r.object.elements.items.len > 0 and r.object.elements.items[0].string.len == 0) {
+                    const li = toLen((iter_re.getOwn("lastIndex") orelse Value{ .number = 0 }).toNumber());
+                    try self.setProp(iter_re, "lastIndex", .{ .number = @floatFromInt(li + 1) });
+                }
             }
-            return Value.null;
+            return try self.iteratorOf(results);
         }
         return null;
     }
@@ -4066,6 +4130,98 @@ pub const Interpreter = struct {
         if (v == .object and v.object.is_regex) return v.object;
         const pat = if (v == .undefined) "" else try v.toString(self.arena);
         return (try self.makeRegex(pat, "")).object;
+    }
+
+    /// The `groups` object for a match — `{ name: capture }` for each named
+    /// group — or null when the pattern has no named groups (then `groups` is
+    /// `undefined`).
+    fn regexGroups(self: *Interpreter, re: *regex.Regex, captures: []const []const u8) EvalError!?*value.Object {
+        if (re.named_captures.count() == 0) return null;
+        const o = (try self.newObject()).object;
+        var it = re.named_captures.iterator();
+        while (it.next()) |e| {
+            const idx = e.value_ptr.*; // 1-based capture index
+            const v: Value = if (idx >= 1 and idx <= captures.len)
+                .{ .string = try self.arena.dupe(u8, captures[idx - 1]) }
+            else
+                .undefined;
+            try self.setProp(o, e.key_ptr.*, v);
+        }
+        return o;
+    }
+
+    /// GetSubstitution: append `template` to `buf`, expanding the `$` forms —
+    /// `$$`, `$&` (matched), `` $` `` (prefix), `$'` (suffix), `$n`/`$nn`
+    /// (capture groups, 1-based), and `$<name>` (named groups).
+    fn getSubstitution(
+        self: *Interpreter,
+        buf: *std.ArrayListUnmanaged(u8),
+        template: []const u8,
+        matched: []const u8,
+        str: []const u8,
+        position: usize,
+        captures: []const []const u8,
+        groups: ?*value.Object,
+    ) EvalError!void {
+        const a = self.arena;
+        var i: usize = 0;
+        while (i < template.len) : (i += 1) {
+            if (template[i] != '$' or i + 1 >= template.len) {
+                try buf.append(a, template[i]);
+                continue;
+            }
+            switch (template[i + 1]) {
+                '$' => {
+                    try buf.append(a, '$');
+                    i += 1;
+                },
+                '&' => {
+                    try buf.appendSlice(a, matched);
+                    i += 1;
+                },
+                '`' => {
+                    try buf.appendSlice(a, str[0..position]);
+                    i += 1;
+                },
+                '\'' => {
+                    const end = position + matched.len;
+                    try buf.appendSlice(a, if (end <= str.len) str[end..] else "");
+                    i += 1;
+                },
+                '<' => {
+                    // `$<name>` — only when the pattern had named groups.
+                    if (groups == null) {
+                        try buf.append(a, '$');
+                        continue;
+                    }
+                    const close = std.mem.indexOfScalarPos(u8, template, i + 2, '>') orelse {
+                        try buf.append(a, '$');
+                        continue;
+                    };
+                    const gv = groups.?.getOwn(template[i + 2 .. close]) orelse Value.undefined;
+                    if (gv == .string) try buf.appendSlice(a, gv.string);
+                    i = close;
+                },
+                '0'...'9' => {
+                    var idx: usize = template[i + 1] - '0';
+                    var consumed: usize = 1;
+                    if (i + 2 < template.len and template[i + 2] >= '0' and template[i + 2] <= '9') {
+                        const two = idx * 10 + (template[i + 2] - '0');
+                        if (two >= 1 and two <= captures.len) {
+                            idx = two;
+                            consumed = 2;
+                        }
+                    }
+                    if (idx >= 1 and idx <= captures.len) {
+                        try buf.appendSlice(a, captures[idx - 1]);
+                        i += consumed;
+                    } else {
+                        try buf.append(a, '$'); // not a valid group reference → literal `$`
+                    }
+                },
+                else => try buf.append(a, '$'),
+            }
+        }
     }
 
     // ---- try / catch / finally --------------------------------------------
