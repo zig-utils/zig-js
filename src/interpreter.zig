@@ -1248,14 +1248,31 @@ pub const Interpreter = struct {
     }
 
     fn makeErrorWithArgs(self: *Interpreter, name: []const u8, args: []const Value) EvalError!Value {
-        const msg = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else "";
+        // AggregateError(errors, message, options) shifts message/options by one
+        // and carries an own `errors` array built from the first (iterable) arg.
+        const aggregate = std.mem.eql(u8, name, "AggregateError");
+        const msg_i: usize = if (aggregate) 1 else 0;
+        const opt_i: usize = if (aggregate) 2 else 1;
+
+        const msg = if (args.len > msg_i and args[msg_i] != .undefined) try args[msg_i].toString(self.arena) else "";
         const err = try self.makeError(name, msg);
+
+        if (aggregate) {
+            // `errors` is a fresh Array built from the (iterable) first argument.
+            const errs = if (args.len > 0)
+                try builtins.arrayFrom(@ptrCast(self), .undefined, args[0..1])
+            else
+                try self.newArray();
+            try self.setProp(err.object, "errors", errs);
+            try err.object.setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
+        }
+
         // ES2022 `cause` option: `new Error(msg, { cause })` installs a
         // non-enumerable `cause` own property when the options object has one.
-        if (args.len > 1 and args[1] == .object) {
-            const opts = args[1].object;
+        if (args.len > opt_i and args[opt_i] == .object) {
+            const opts = args[opt_i].object;
             if (opts.getOwn("cause") != null or opts.getAccessor("cause") != null) {
-                const cause = try self.getProperty(args[1], "cause");
+                const cause = try self.getProperty(args[opt_i], "cause");
                 try self.setProp(err.object, "cause", cause);
                 try err.object.setAttr(self.arena, "cause", .{ .enumerable = false, .configurable = true, .writable = true });
             }
@@ -4539,13 +4556,14 @@ fn isConstructorValue(v: Value) bool {
 pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
-        "Error",      "TypeError",  "RangeError", "ReferenceError",
-        "SyntaxError", "EvalError", "URIError",
+        "Error",       "TypeError", "RangeError", "ReferenceError",
+        "SyntaxError", "EvalError",  "URIError",   "AggregateError",
     };
     for (error_names) |name| {
         const o = try a.create(value.Object);
         o.* = .{ .error_ctor = name };
-        try installNativeProps(a, root_shape, o, name, 1);
+        // AggregateError(errors, message) has arity 2; the others (message) 1.
+        try installNativeProps(a, root_shape, o, name, if (std.mem.eql(u8, name, "AggregateError")) 2 else 1);
         try env.put(name, .{ .object = o });
     }
     try env.put("NaN", .{ .number = std.math.nan(f64) });

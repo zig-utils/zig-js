@@ -498,6 +498,21 @@ test "Symbol.prototype: toString / valueOf / chain" {
     )).boolean);
 }
 
+test "AggregateError" {
+    try expectEvalStr("function", "typeof AggregateError");
+    // errors comes from the (iterable) first arg; message is the second.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new AggregateError([1, 2, 3]).errors.length")).number);
+    try expectEvalStr("boom", "new AggregateError([], 'boom').message");
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("new AggregateError(new Set([1, 2])).errors.length")).number);
+    // Prototype chain + name, and the cause option (third arg).
+    try std.testing.expect((try evalIn("new AggregateError([]) instanceof Error")).boolean);
+    try std.testing.expect((try evalIn("new AggregateError([]) instanceof AggregateError")).boolean);
+    try expectEvalStr("AggregateError", "AggregateError.prototype.name");
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("new AggregateError([], 'm', { cause: 5 }).cause")).number);
+    // `errors` is a non-enumerable own property.
+    try std.testing.expect((try evalIn("new AggregateError([1]).hasOwnProperty('errors') && Object.keys(new AggregateError([1])).indexOf('errors') === -1")).boolean);
+}
+
 test "Error cause option (ES2022)" {
     // `new Error(msg, { cause })` installs a non-enumerable own `cause`.
     try std.testing.expectEqual(@as(f64, 42), (try evalIn("new Error('m', { cause: 42 }).cause")).number);
