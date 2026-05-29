@@ -1411,7 +1411,11 @@ pub const Parser = struct {
         if (self.check(.lbracket)) return self.parseArrayLiteral();
         const t = self.advance();
         switch (t.kind) {
-            .number => return self.alloc(.{ .number = t.number }),
+            .number => {
+                // Legacy octal / non-octal-decimal literals are SyntaxErrors in strict mode.
+                if (self.strict and t.legacy_octal) return ParseError.UnexpectedToken;
+                return self.alloc(.{ .number = t.number });
+            },
             .string => return self.alloc(.{ .string = t.text }),
             .template => return self.parseTemplate(t.text),
             .regex => return self.alloc(.{ .regex_literal = .{ .pattern = t.text, .flags = t.flags } }),

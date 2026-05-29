@@ -77,6 +77,9 @@ pub const Token = struct {
     /// Regex flag characters (only for `.regex` tokens).
     flags: []const u8 = "",
     pos: usize,
+    /// A legacy octal (`0123`) or non-octal-decimal (`08`) integer literal —
+    /// a SyntaxError in strict mode (the parser checks).
+    legacy_octal: bool = false,
 };
 
 pub const LexError = error{ UnexpectedCharacter, UnterminatedString, InvalidNumber, OutOfMemory };
@@ -548,7 +551,10 @@ pub const Lexer = struct {
         if (self.peek() == 'n') self.i += 1; // BigInt suffix → number for v1
         const cleaned = try stripSeparators(self.arena, self.src[start..self.i]);
         const n = std.fmt.parseFloat(f64, cleaned) catch return LexError.InvalidNumber;
-        return .{ .kind = .number, .text = self.src[start..self.i], .number = n, .pos = start };
+        // A leading `0` immediately followed by another digit is a legacy octal
+        // (`0123`) or non-octal-decimal (`08`) literal — flagged for strict mode.
+        const legacy = self.src[start] == '0' and start + 1 < self.src.len and std.ascii.isDigit(self.src[start + 1]);
+        return .{ .kind = .number, .text = self.src[start..self.i], .number = n, .pos = start, .legacy_octal = legacy };
     }
 
     fn lexString(self: *Lexer) LexError!Token {
