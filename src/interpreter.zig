@@ -649,6 +649,28 @@ pub const Interpreter = struct {
         return last;
     }
 
+    /// The for-in key list of `v` as a fresh array — array indices then own
+    /// enumerable string keys (matching the tree-walker's for-in). Null/undefined
+    /// (and primitives) yield an empty array. Used by the generator VM's
+    /// `enum_keys` opcode to drive for-in via the for-of machinery.
+    pub fn forInKeysArray(self: *Interpreter, v: Value) EvalError!Value {
+        const arr = (try self.newArray()).object;
+        if (v == .object) {
+            const o = v.object;
+            if (o.is_array) {
+                var i: usize = 0;
+                while (i < o.elements.items.len) : (i += 1) {
+                    if (o.isHole(i)) continue;
+                    try arr.elements.append(self.arena, .{ .string = try std.fmt.allocPrint(self.arena, "{d}", .{i}) });
+                }
+            }
+            for (try o.enumerableKeys(self.arena)) |k| {
+                try arr.elements.append(self.arena, .{ .string = k });
+            }
+        }
+        return .{ .object = arr };
+    }
+
     /// Bind one iteration's value to the loop target: a declaration declares
     /// (identifier or destructuring pattern), an assignment form assigns to an
     /// existing identifier / member / pattern.

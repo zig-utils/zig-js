@@ -31,6 +31,9 @@ const Mode = enum { program, function };
 const Loop = struct {
     breaks: std.ArrayListUnmanaged(usize) = .empty,
     continues: std.ArrayListUnmanaged(usize) = .empty,
+    /// A `switch` is breakable but not continuable: `break` targets it, but
+    /// `continue` skips past it to the nearest enclosing loop.
+    is_switch: bool = false,
 };
 
 /// A function's local namespace: name → frame slot. Built once, up front, from
@@ -219,17 +222,20 @@ pub const Compiler = struct {
             },
             .continue_stmt => |label| {
                 if (label != null) return error.Unsupported; // labeled continue → tree-walk
-                const loop = self.currentLoop() orelse return error.Unsupported;
+                const loop = self.currentContinueLoop() orelse return error.Unsupported;
                 const j = try self.chunk.emit(.jump, 0);
                 try loop.continues.append(self.arena, j);
             },
+            .switch_stmt => |sw| try self.compileSwitch(sw.disc, sw.cases),
             .throw_stmt => |e| {
                 try self.compileExpr(e);
                 _ = try self.chunk.emit(.throw_op, 0);
             },
             .for_in => |f| {
-                if (!f.is_of) return error.Unsupported; // for-in (key enum) → tree-walk
-                try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body);
+                // for-of works everywhere it's lowered; for-in is lowered only in
+                // generators (via `enum_keys`), else it falls back to the tree-walker.
+                if (!f.is_of and !self.in_generator) return error.Unsupported;
+                try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body, !f.is_of);
             },
             .try_stmt => |t| try self.compileTry(t),
             else => return error.Unsupported,
@@ -264,6 +270,48 @@ pub const Compiler = struct {
         }
         try self.compileStmt(catch_block);
         self.chunk.patchToHere(skip);
+    }
+
+    /// `switch (disc) { case t: ... default: ... }` — evaluate the discriminant
+    /// once, then a chain of strict-equality tests jumping to each clause body
+    /// (fall-through preserved). `break` exits via the switch's break list;
+    /// `default` is taken only after every case test fails.
+    fn compileSwitch(self: *Compiler, disc: *Node, cases: []const ast.SwitchCase) CompileError!void {
+        if (!self.in_generator) return error.Unsupported; // non-generator switch keeps tree-walking
+        try self.compileExpr(disc);
+        const d = try self.freshTemp();
+        try self.emitDefine(d); // d = the discriminant value
+
+        const sw = try self.pushLoop();
+        sw.is_switch = true;
+        const body_jumps = try self.arena.alloc(usize, cases.len);
+        const default_marker = std.math.maxInt(usize);
+        for (cases, 0..) |c, i| {
+            if (c.@"test") |t| {
+                try self.emitLoad(d);
+                try self.compileExpr(t);
+                _ = try self.chunk.emit(.eq_strict, 0);
+                _ = try self.chunk.emit(.not, 0); // jump_if_false jumps when equal
+                body_jumps[i] = try self.chunk.emit(.jump_if_false, 0);
+            } else {
+                body_jumps[i] = default_marker; // the `default:` clause
+            }
+        }
+        // No case matched: jump to the default clause (if any) or past the end.
+        const to_default = try self.chunk.emit(.jump, 0);
+        var default_target: ?usize = null;
+        for (cases, 0..) |c, i| {
+            if (body_jumps[i] == default_marker) {
+                default_target = self.chunk.here();
+            } else {
+                self.chunk.patchToHere(body_jumps[i]);
+            }
+            try self.compileStmtList(c.body);
+        }
+        const end = self.chunk.here();
+        self.chunk.patchTo(to_default, default_target orelse end);
+        for (sw.breaks.items) |j| self.chunk.patchTo(j, end);
+        self.popLoop();
     }
 
     fn compileIf(self: *Compiler, cond: *Node, consequent: *Node, alternate: ?*Node) CompileError!void {
@@ -344,13 +392,14 @@ pub const Compiler = struct {
     /// a `.next()` loop (mirroring `compileYieldStar`). Only a plain identifier
     /// target is lowered; destructuring targets and `for-in` fall back to the
     /// tree-walker. Works inside generators (where `for-of` is common).
-    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node) CompileError!void {
+    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, keys_first: bool) CompileError!void {
         if (target.* != .identifier) return error.Unsupported; // patterns → tree-walk
         const var_name = target.identifier;
         const it_name = try self.freshTemp();
         const r_name = try self.freshTemp();
 
         try self.compileExpr(iterable);
+        if (keys_first) _ = try self.chunk.emit(.enum_keys, 0); // for-in: iterate the key array
         _ = try self.chunk.emit(.iter_of, 0);
         try self.emitDefine(it_name);
 
@@ -687,6 +736,17 @@ pub const Compiler = struct {
     fn currentLoop(self: *Compiler) ?*Loop {
         if (self.loops.items.len == 0) return null;
         return self.loops.items[self.loops.items.len - 1];
+    }
+
+    /// The nearest loop a `continue` applies to — skipping any enclosing
+    /// `switch` (which is breakable but not continuable).
+    fn currentContinueLoop(self: *Compiler) ?*Loop {
+        var i = self.loops.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (!self.loops.items[i].is_switch) return self.loops.items[i];
+        }
+        return null;
     }
 };
 
