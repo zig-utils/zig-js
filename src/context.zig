@@ -185,6 +185,24 @@ test "Array.prototype generics on array-likes" {
     )).boolean);
 }
 
+test "array instances inherit from Array.prototype (incl. holes)" {
+    try std.testing.expect((try evalIn("Object.getPrototypeOf([]) === Array.prototype")).boolean);
+    try std.testing.expect((try evalIn("[].map === Array.prototype.map")).boolean);
+    // A hole reads through the prototype chain (inherited index), so an
+    // accessor installed on Array.prototype is seen by index access + iteration.
+    try std.testing.expectEqual(@as(f64, 11), (try evalIn(
+        \\Object.defineProperty(Array.prototype, "0", { get: function () { return 11; }, configurable: true });
+        \\[, , ,][0]
+    )).number);
+    try std.testing.expect((try evalIn(
+        \\Object.defineProperty(Array.prototype, "0", { get: function () { return 11; }, configurable: true });
+        \\var r = false; [, , ,].forEach(function (v, i) { if (i === 0) r = (v === 11); }); r
+    )).boolean);
+    // Ordinary arrays are unaffected: a real hole with no inherited index is undefined.
+    try std.testing.expect((try evalIn("[1, , 3][1] === undefined")).boolean);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("[1, 2, 3][1]")).number);
+}
+
 test "Array / Object constructors" {
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).number);
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array(1, 2).length")).number);

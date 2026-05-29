@@ -1560,8 +1560,18 @@ pub const Interpreter = struct {
     /// Allocate a fresh array object.
     pub fn newArray(self: *Interpreter) EvalError!Value {
         const obj = try self.arena.create(value.Object);
-        obj.* = .{ .is_array = true };
+        obj.* = .{ .is_array = true, .proto = self.arrayProto() };
         return .{ .object = obj };
+    }
+
+    /// `Array.prototype`, resolved from the live `Array` binding, so array
+    /// instances inherit from it (inherited index access, `in`, iteration over
+    /// inherited indices). Null only before globals are installed.
+    fn arrayProto(self: *Interpreter) ?*value.Object {
+        const av = self.env.get("Array") orelse return null;
+        if (av != .object) return null;
+        const p = av.object.getOwn("prototype") orelse return null;
+        return if (p == .object) p.object else null;
     }
 
     fn evalObjectLit(self: *Interpreter, props: []ast.Property) EvalError!Value {
@@ -2280,8 +2290,12 @@ pub const Interpreter = struct {
                     // An accessor defined on an index (via defineProperty) wins
                     // over the dense element store, so the getter is invoked.
                     if (arrayIndex(key)) |i| {
-                        if (o.getAccessor(key) == null and i < o.elements.items.len) return o.elements.items[i];
-                        // else fall through: accessor, or a sparse named property.
+                        // A present (non-hole) dense element with no index accessor
+                        // is returned directly; a hole falls through to the proto
+                        // chain so an inherited index (e.g. `Array.prototype[0]`) is
+                        // seen, and an accessor likewise wins over the store.
+                        if (o.getAccessor(key) == null and i < o.elements.items.len and !o.isHole(i)) return o.elements.items[i];
+                        // else fall through: hole, accessor, or a sparse named property.
                     }
                 }
                 // A String-wrapper object exposes `length` and indexed chars as
