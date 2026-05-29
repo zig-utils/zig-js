@@ -58,6 +58,12 @@ pub const Object = struct {
     /// encoding (used when a symbol is an object property key).
     is_symbol: bool = false,
     sym_key: []const u8 = "",
+    /// A Symbol's `[[Description]]`: `null` = no description (reads as
+    /// `undefined`), else the string. Held in this dedicated slot rather than an
+    /// own `description` property so it stays invisible to reflection
+    /// (`Object.getOwnPropertyDescriptor(sym, "description")` is undefined) —
+    /// `Symbol.prototype.description` is a prototype accessor instead.
+    sym_desc: ?[]const u8 = null,
     /// A `Date` instance — its time (ms since the Unix epoch) is the own `__t`
     /// property; methods are dispatched in `dateMethod`.
     is_date: bool = false,

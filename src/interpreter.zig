@@ -4627,9 +4627,8 @@ fn booleanProtoFn(comptime to_string: bool) value.NativeFn {
 fn symbolToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object or !this.object.is_symbol) return self.throwError("TypeError", "Symbol.prototype.toString requires that 'this' be a Symbol");
-    const d = this.object.getOwn("description");
-    const ds = if (d) |dv| (if (dv == .string) dv.string else "") else "";
+    const sym = try thisSymbol(self, this, "Symbol.prototype.toString");
+    const ds = sym.sym_desc orelse "";
     return .{ .string = try std.mem.concat(self.arena, u8, &.{ "Symbol(", ds, ")" }) };
 }
 
@@ -4637,8 +4636,49 @@ fn symbolToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 fn symbolValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object or !this.object.is_symbol) return self.throwError("TypeError", "Symbol.prototype.valueOf requires that 'this' be a Symbol");
+    _ = try thisSymbol(self, this, "Symbol.prototype.valueOf");
+    return symbolThisValue(this);
+}
+
+/// `get Symbol.prototype.description` → the symbol's `[[Description]]` (a string
+/// or `undefined`). Accepts a Symbol or a boxed Symbol wrapper as `this`.
+fn symbolDescriptionGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const sym = try thisSymbol(self, this, "Symbol.prototype.description");
+    return if (sym.sym_desc) |d| .{ .string = d } else .undefined;
+}
+
+/// `Symbol.prototype[@@toPrimitive]` → the symbol itself (any hint). Lets
+/// `String(sym)`/`` `${sym}` `` route through it (and still throw on string
+/// coercion via the normal ToString path, not here).
+fn symbolToPrimitiveFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    _ = try thisSymbol(self, this, "Symbol.prototype[Symbol.toPrimitive]");
+    return symbolThisValue(this);
+}
+
+/// The underlying Symbol value of `this` — the symbol itself, or the boxed
+/// symbol of an `Object(sym)` wrapper.
+fn symbolThisValue(this: Value) Value {
+    if (this == .object) {
+        if (this.object.is_symbol) return this;
+        if (this.object.prim) |p| return p;
+    }
     return this;
+}
+
+/// Brand-check helper: returns the Symbol object backing `this` (unwrapping an
+/// `Object(sym)` wrapper), else throws a TypeError naming `method`.
+fn thisSymbol(self: *Interpreter, this: Value, method: []const u8) EvalError!*value.Object {
+    if (this == .object) {
+        if (this.object.is_symbol) return this.object;
+        if (this.object.prim) |p| {
+            if (p == .object and p.object.is_symbol) return p.object;
+        }
+    }
+    return self.throwError("TypeError", try std.fmt.allocPrint(self.arena, "{s} requires that 'this' be a Symbol", .{method}));
 }
 
 // ---- Proxy / Reflect natives ----------------------------------------------
@@ -5133,13 +5173,36 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setNative(a, root_shape, symbol_proto, "valueOf", 0, symbolValueOfFn);
     try symbol_proto.setOwn(a, root_shape, "constructor", .{ .object = symbol_ns });
     try symbol_proto.setAttr(a, "constructor", .{ .enumerable = false, .configurable = true, .writable = true });
+    // `Symbol.prototype.description` — a configurable getter-only accessor.
+    {
+        const get = try a.create(value.Object);
+        get.* = .{ .native = symbolDescriptionGetFn };
+        try installNativeProps(a, root_shape, get, "get description", 0);
+        try symbol_proto.setAccessor(a, "description", .{ .object = get }, null);
+        try symbol_proto.setAttr(a, "description", .{ .enumerable = false, .configurable = true });
+    }
     try symbol_ns.setOwn(a, root_shape, "prototype", .{ .object = symbol_proto });
     try symbol_ns.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
     try setNative(a, root_shape, symbol_ns, "for", 1, symbolForFn);
     try setNative(a, root_shape, symbol_ns, "keyFor", 1, symbolKeyForFn);
-    inline for (.{ "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables" }) |name| {
+    // Well-known symbols are own props of `Symbol` with attributes
+    // {writable:false, enumerable:false, configurable:false}.
+    inline for (.{ "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables", "dispose", "asyncDispose" }) |name| {
         try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name, symbol_proto));
+        try symbol_ns.setAttr(a, name, .{ .writable = false, .enumerable = false, .configurable = false });
     }
+    // Symbol.prototype[@@toPrimitive] (a method) and [@@toStringTag] ("Symbol").
+    if (symbol_ns.getOwn("toPrimitive")) |tp| if (tp == .object) {
+        const fnobj = try a.create(value.Object);
+        fnobj.* = .{ .native = symbolToPrimitiveFn };
+        try installNativeProps(a, root_shape, fnobj, "[Symbol.toPrimitive]", 1);
+        try symbol_proto.setOwn(a, root_shape, tp.object.sym_key, .{ .object = fnobj });
+        try symbol_proto.setAttr(a, tp.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+    };
+    if (symbol_ns.getOwn("toStringTag")) |tst| if (tst == .object) {
+        try symbol_proto.setOwn(a, root_shape, tst.object.sym_key, .{ .string = "Symbol" });
+        try symbol_proto.setAttr(a, tst.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+    };
     try env.put("Symbol", .{ .object = symbol_ns });
 
     // Proxy (constructor) + Proxy.revocable.
@@ -5456,11 +5519,11 @@ var symbol_counter: usize = 0;
 /// Create a Symbol object: a tagged object with a unique `sym_key` (a NUL-led
 /// string that can't collide with user property names) and a `description`.
 fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*value.Object) EvalError!Value {
+    _ = rs;
     const o = try a.create(value.Object);
-    o.* = .{ .is_symbol = true, .proto = proto };
+    o.* = .{ .is_symbol = true, .proto = proto, .sym_desc = desc };
     symbol_counter += 1;
     o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{symbol_counter});
-    try o.setOwn(a, rs, "description", if (desc) |d| .{ .string = d } else .undefined);
     return .{ .object = o };
 }
 
@@ -5535,7 +5598,12 @@ fn dateNow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
 fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const desc: ?[]const u8 = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else null;
+    // `description` is ToString'd (via ToPrimitive with the string hint, so a
+    // `{toString}`/`{valueOf}` object is honored); `undefined` means none.
+    const desc: ?[]const u8 = if (args.len > 0 and args[0] != .undefined)
+        try (try self.toPrimitive(args[0], .string)).toString(self.arena)
+    else
+        null;
     return makeSymbolObj(self.arena, self.root_shape, desc, symbolProto(self));
 }
 
