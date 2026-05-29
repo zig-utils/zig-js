@@ -4196,6 +4196,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     date_ns.* = .{ .native = dateConstructor, .native_ctor = true };
     try installNativeProps(a, root_shape, date_ns, "Date", 7);
     try setNative(a, root_shape, date_ns, "now", 0, dateNow);
+    try setNative(a, root_shape, date_ns, "UTC", 7, dateUTCFn);
     const date_proto = try a.create(value.Object);
     date_proto.* = .{ .proto = object_proto };
     try setProtoMethods(a, root_shape, date_proto, .{
@@ -4368,6 +4369,31 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     return self.makeDate(Interpreter.dateTimeFromArgs(args));
+}
+
+/// `Date.UTC(year [, month, day, hours, min, sec, ms])` — the time value for
+/// the given UTC date components (NaN if any component is NaN; years 0–99 map
+/// to 1900–1999).
+fn dateUTCFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    if (args.len == 0) return .{ .number = std.math.nan(f64) };
+    const n = @min(args.len, 7);
+    var buf: [7]Value = undefined;
+    for (0..n) |i| {
+        const num = args[i].toNumber();
+        if (std.math.isNan(num)) return .{ .number = std.math.nan(f64) };
+        buf[i] = .{ .number = num };
+    }
+    // Years 0–99 are offset to 1900–1999.
+    const yi = @trunc(buf[0].number);
+    if (yi >= 0 and yi <= 99) buf[0] = .{ .number = yi + 1900 };
+    var len = n;
+    if (len == 1) {
+        buf[1] = .{ .number = 0 };
+        len = 2;
+    }
+    return .{ .number = Interpreter.dateTimeFromArgs(buf[0..len]) };
 }
 
 /// `Date.now()` — v1 uses a deterministic epoch (no wall clock wired).
