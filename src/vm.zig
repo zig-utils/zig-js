@@ -43,6 +43,17 @@ pub const Exec = struct {
     stack: std.ArrayListUnmanaged(Value) = .empty,
     acc: Value = .undefined,
     ip: usize = 0,
+    /// Active try/catch handlers, innermost last. Lives in `Exec` so it persists
+    /// across a generator's `yield`/resume (a `yield` can sit inside a `try`).
+    handlers: std.ArrayListUnmanaged(Handler) = .empty,
+};
+
+/// A live try/catch handler: where to resume on a throw (`catch_pc`) and the
+/// operand-stack depth to unwind to first (everything pushed inside the `try`
+/// is discarded). The caught exception is then pushed for the catch binding.
+pub const Handler = struct {
+    catch_pc: u32,
+    stack_depth: u32,
 };
 
 /// A suspended `function*` activation: its compiled body, persistent execution
@@ -82,7 +93,28 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
-    var stack = exec.stack;
+    // Run the instruction stream; if a throw escapes and an active handler can
+    // catch it, unwind to that handler's catch block and resume. Otherwise the
+    // throw propagates to the caller (uncaught — the generator/function ends).
+    while (true) {
+        return runChunk(vm, exec, chunk, frame, gen) catch |e| {
+            if (e == error.Throw and exec.handlers.items.len > 0) {
+                const h = exec.handlers.pop().?;
+                exec.stack.shrinkRetainingCapacity(h.stack_depth);
+                try exec.stack.append(vm.arena, vm.exception); // bind target for the catch
+                exec.ip = h.catch_pc;
+                continue;
+            }
+            return e;
+        };
+    }
+}
+
+/// The instruction loop proper. Operates on `exec.stack` directly so the
+/// operand stack is always current when a throw unwinds (and persists across a
+/// generator's yield/resume). Returns the completion value or propagates a throw.
+fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    const stack = &exec.stack;
     var acc: Value = exec.acc;
     var ip: usize = exec.ip;
     const code = chunk.code.items;
@@ -313,7 +345,8 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // Snapshot the resumable state and hand the yielded value
                     // back to `genNext`. The next resume pushes the sent value
                     // (becoming this expression's result) and continues at `ip`.
-                    exec.stack = stack;
+                    // `stack`/`handlers` already live in `exec` (operated on by
+                    // pointer), so only `acc`/`ip` need writing back here.
                     exec.acc = acc;
                     exec.ip = ip;
                     g.suspended = true;
@@ -329,6 +362,11 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 vm.exception = stack.pop().?;
                 return error.Throw;
             },
+            .push_handler => try exec.handlers.append(vm.arena, .{
+                .catch_pc = inst.a,
+                .stack_depth = @intCast(stack.items.len),
+            }),
+            .pop_handler => _ = exec.handlers.pop(),
 
             .halt => return acc,
         }
@@ -388,16 +426,68 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     return .{ .object = obj };
 }
 
-/// `gen.next(sent)`: resume the body. On the first call execution starts at the
-/// top; on later calls `sent` becomes the value of the `yield` it's resuming.
-pub fn genNext(vm: *Interpreter, gen_obj: *value.Object, sent: Value) EvalError!Value {
+/// How a generator is being resumed: a normal `.next(v)`, a `.throw(e)` that
+/// injects an exception at the suspend point, or a `.return(v)` that completes it.
+const ResumeKind = enum { send, throw_, return_ };
+
+/// Shared driver for `.next`/`.throw`/`.return`. Restores the generator's
+/// context, applies the resume action at the suspend point, runs the VM to the
+/// next `yield` (or completion), then restores the caller's context.
+fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Value) EvalError!Value {
     const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
-    if (g.done) return makeIterResult(vm, .undefined, true);
     if (g.running) return vm.throwError("TypeError", "generator is already running");
+
+    // A completed (or not-yet-started) generator handles each kind without
+    // re-entering the body.
+    if (g.done) return switch (kind) {
+        .send => makeIterResult(vm, .undefined, true),
+        .return_ => makeIterResult(vm, val, true),
+        .throw_ => blk: {
+            vm.exception = val;
+            break :blk error.Throw;
+        },
+    };
+    if (!g.started) {
+        switch (kind) {
+            .send => {}, // fall through to start the body at the top
+            .return_ => {
+                g.done = true;
+                return makeIterResult(vm, val, true);
+            },
+            .throw_ => {
+                g.done = true;
+                vm.exception = val;
+                return error.Throw;
+            },
+        }
+    } else {
+        // Suspended at a `yield`: apply the resume action.
+        switch (kind) {
+            .send => try g.exec.stack.append(vm.arena, val), // becomes the yield's value
+            .return_ => {
+                // No `finally` lowering yet, so there is nothing to run on the
+                // way out — the generator simply completes.
+                g.done = true;
+                return makeIterResult(vm, val, true);
+            },
+            .throw_ => {
+                // Inject the exception at the suspend point: unwind to the
+                // generator's own nearest handler, or finish if there is none.
+                if (g.exec.handlers.items.len == 0) {
+                    g.done = true;
+                    vm.exception = val;
+                    return error.Throw;
+                }
+                const h = g.exec.handlers.pop().?;
+                g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
+                try g.exec.stack.append(vm.arena, val);
+                g.exec.ip = h.catch_pc;
+            },
+        }
+    }
+
     g.running = true;
     defer g.running = false;
-
-    if (g.started) try g.exec.stack.append(vm.arena, sent); // result of the resumed `yield`
     g.started = true;
     g.suspended = false;
 
@@ -429,20 +519,22 @@ pub fn genNext(vm: *Interpreter, gen_obj: *value.Object, sent: Value) EvalError!
     return makeIterResult(vm, v, true); // `v` is the body's return value
 }
 
-/// `gen.return(v)`: finish the generator, yielding `{ value: v, done: true }`.
-/// (No `finally` blocks to run — the VM doesn't lower `try` yet.)
-pub fn genReturn(vm: *Interpreter, gen_obj: *value.Object, v: Value) EvalError!Value {
-    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
-    g.done = true;
-    return makeIterResult(vm, v, true);
+/// `gen.next(sent)`: resume the body, `sent` becoming the value of the resumed
+/// `yield` (ignored on the first call, which starts at the top).
+pub fn genNext(vm: *Interpreter, gen_obj: *value.Object, sent: Value) EvalError!Value {
+    return genResume(vm, gen_obj, .send, sent);
 }
 
-/// `gen.throw(e)`: finish the generator by propagating `e` to the caller.
+/// `gen.return(v)`: finish the generator, yielding `{ value: v, done: true }`.
+pub fn genReturn(vm: *Interpreter, gen_obj: *value.Object, v: Value) EvalError!Value {
+    return genResume(vm, gen_obj, .return_, v);
+}
+
+/// `gen.throw(e)`: inject `e` at the suspend point so an enclosing `try`/`catch`
+/// in the generator can handle it; otherwise the generator finishes and `e`
+/// propagates to the caller.
 pub fn genThrow(vm: *Interpreter, gen_obj: *value.Object, e: Value) EvalError!Value {
-    const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
-    g.done = true;
-    vm.exception = e;
-    return error.Throw;
+    return genResume(vm, gen_obj, .throw_, e);
 }
 
 /// Map a binary opcode back to the shared `ast.BinaryOp`. The opcode set mirrors

@@ -113,6 +113,10 @@ pub const Op = enum(u8) {
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)
 
+    // --- exception handling (generator VM) ---
+    push_handler, // operand a: catch-block PC; record a try/catch handler at the current stack depth
+    pop_handler, // discard the topmost handler (on normal exit from a try block)
+
     halt, // end program; result is the accumulator
 };
 

@@ -231,9 +231,39 @@ pub const Compiler = struct {
                 if (!f.is_of) return error.Unsupported; // for-in (key enum) → tree-walk
                 try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body);
             },
-            // try/catch/finally is not lowered yet → whole-program fallback.
+            .try_stmt => |t| try self.compileTry(t),
             else => return error.Unsupported,
         }
+    }
+
+    /// `try { B } catch (e) { C }` for the generator VM. Lowers to a handler that
+    /// the VM unwinds to on a throw (pushing the exception for the binding). Only
+    /// the identifier/elided catch binding without `finally` is lowered — anything
+    /// else stays unsupported (the generator is reported unsupported, as before),
+    /// and non-generator code keeps using the tree-walker's try/catch.
+    fn compileTry(self: *Compiler, t: *const ast.TryNode) CompileError!void {
+        if (!self.in_generator) return error.Unsupported;
+        if (t.finally_block != null) return error.Unsupported; // finally not lowered yet
+        const catch_block = t.catch_block orelse return error.Unsupported;
+        if (t.catch_param) |p| {
+            if (p.* != .identifier) return error.Unsupported; // destructuring catch → unsupported
+        }
+
+        const ph = try self.chunk.emit(.push_handler, 0); // catch PC patched below
+        try self.compileStmt(t.block);
+        _ = try self.chunk.emit(.pop_handler, 0); // try completed normally
+        const skip = try self.chunk.emit(.jump, 0);
+
+        // Catch entry: the VM has unwound the operand stack and pushed the
+        // thrown value, so the binding consumes it.
+        self.chunk.patchToHere(ph);
+        if (t.catch_param) |p| {
+            try self.emitDefine(p.identifier);
+        } else {
+            _ = try self.chunk.emit(.pop, 0); // `catch { }` — discard the exception
+        }
+        try self.compileStmt(catch_block);
+        self.chunk.patchToHere(skip);
     }
 
     fn compileIf(self: *Compiler, cond: *Node, consequent: *Node, alternate: ?*Node) CompileError!void {
