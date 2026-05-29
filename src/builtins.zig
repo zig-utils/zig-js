@@ -926,6 +926,7 @@ pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []con
     if (arg(args, 0) == .object) {
         const o = arg(args, 0).object;
         for (try o.ownKeys(self.arena)) |k| {
+            if (value.isPrivateKey(k)) continue; // private slots aren't reflected
             const d = try objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ arg(args, 0), .{ .string = k } });
             try self.setMember(result, k, d);
         }
@@ -940,6 +941,8 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     if (ov != .object) return .undefined;
     const o = ov.object;
     const key = try arg(args, 1).toString(self.arena);
+    // Private members are internal slots — invisible to reflection.
+    if (value.isPrivateKey(key)) return .undefined;
 
     if (o.getAccessor(key)) |acc| {
         const a = o.getAttr(key);

@@ -4672,6 +4672,8 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
 /// Does `o` have `name` as an *own* property (data, accessor, array index, or
 /// array `length`)? Backs `hasOwnProperty` / `propertyIsEnumerable` / `Object.hasOwn`.
 pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
+    // Private members (`#x`) are internal slots, invisible to all reflection.
+    if (value.isPrivateKey(name)) return false;
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
     if (o.is_array) {
         if (std.mem.eql(u8, name, "length")) return true;
