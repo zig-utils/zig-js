@@ -668,7 +668,7 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
     // reads/writes/getOwnPropertyDescriptor agree), rather than splitting it
     // into the named-property store. Accessor descriptors on an index, huge or
     // gappy indices, and `length` fall through to the generic path below.
-    if (target.is_array and get == null and set == null and !std.mem.eql(u8, key, "length")) {
+    if (target.is_array and get == null and set == null and !std.mem.eql(u8, key, "length") and target.getAccessor(key) == null) {
         if (arrayIndexOf(key)) |i| {
             if (i <= target.elements.items.len + 1024 and i < (1 << 24)) {
                 const within = i < target.elements.items.len;
