@@ -2700,7 +2700,11 @@ pub const Interpreter = struct {
         var saved: std.ArrayListUnmanaged(Entry) = .empty;
         for (keys) |k| {
             if (std.mem.eql(u8, k, key)) continue;
-            try saved.append(self.arena, .{ .k = k, .v = o.getOwn(k).?, .a = o.getAttr(k) });
+            // Accessor-only keys have no data slot (they live in `o.accessors`,
+            // which this shape/slots rebuild leaves untouched) — skip them rather
+            // than unwrapping a null slot.
+            const v = o.getOwn(k) orelse continue;
+            try saved.append(self.arena, .{ .k = k, .v = v, .a = o.getAttr(k) });
         }
         o.shape = self.root_shape;
         o.slots = .empty;
