@@ -1751,7 +1751,97 @@ pub const Interpreter = struct {
             for (o.elements.items) |e| _ = try self.callValueWithThis(cb, &.{ e, e, self_v }, arg(args, 1));
             return Value.undefined;
         }
+        // ES2024 set-operation methods. They take a set-like argument (the
+        // set-record protocol: `size`, `has`, `keys`) and either return a new
+        // Set (union/intersection/difference/symmetricDifference) or a boolean.
+        const is_setop = eq(name, "union") or eq(name, "intersection") or eq(name, "difference") or
+            eq(name, "symmetricDifference") or eq(name, "isSubsetOf") or eq(name, "isSupersetOf") or
+            eq(name, "isDisjointFrom");
+        if (is_setop) {
+            const rec = try self.getSetRecord(arg0(args));
+            if (eq(name, "union")) {
+                const result = (try self.makeSet(.undefined)).object;
+                for (o.elements.items) |e| _ = try self.setMethod(result, "add", &.{e});
+                for (try self.collectSetKeys(rec)) |k| _ = try self.setMethod(result, "add", &.{k});
+                return .{ .object = result };
+            }
+            if (eq(name, "intersection")) {
+                const result = (try self.makeSet(.undefined)).object;
+                for (o.elements.items) |e| {
+                    if ((try self.callValueWithThis(rec.has, &.{e}, .{ .object = rec.obj })).toBoolean())
+                        _ = try self.setMethod(result, "add", &.{e});
+                }
+                return .{ .object = result };
+            }
+            if (eq(name, "difference")) {
+                const result = (try self.makeSet(.undefined)).object;
+                for (o.elements.items) |e| {
+                    if (!(try self.callValueWithThis(rec.has, &.{e}, .{ .object = rec.obj })).toBoolean())
+                        _ = try self.setMethod(result, "add", &.{e});
+                }
+                return .{ .object = result };
+            }
+            if (eq(name, "symmetricDifference")) {
+                const result = (try self.makeSet(.undefined)).object;
+                for (o.elements.items) |e| _ = try self.setMethod(result, "add", &.{e});
+                for (try self.collectSetKeys(rec)) |k| {
+                    if ((try self.setMethod(o, "has", &.{k})).?.boolean)
+                        _ = try self.setMethod(result, "delete", &.{k})
+                    else
+                        _ = try self.setMethod(result, "add", &.{k});
+                }
+                return .{ .object = result };
+            }
+            if (eq(name, "isSubsetOf")) {
+                for (o.elements.items) |e| {
+                    if (!(try self.callValueWithThis(rec.has, &.{e}, .{ .object = rec.obj })).toBoolean())
+                        return Value{ .boolean = false };
+                }
+                return Value{ .boolean = true };
+            }
+            if (eq(name, "isSupersetOf")) {
+                for (try self.collectSetKeys(rec)) |k| {
+                    if (!(try self.setMethod(o, "has", &.{k})).?.boolean) return Value{ .boolean = false };
+                }
+                return Value{ .boolean = true };
+            }
+            if (eq(name, "isDisjointFrom")) {
+                for (o.elements.items) |e| {
+                    if ((try self.callValueWithThis(rec.has, &.{e}, .{ .object = rec.obj })).toBoolean())
+                        return Value{ .boolean = false };
+                }
+                return Value{ .boolean = true };
+            }
+        }
         return null;
+    }
+
+    const SetRecord = struct { obj: *value.Object, has: Value, keys: Value, size: f64 };
+
+    /// GetSetRecord: a set-like argument must be an object exposing a numeric
+    /// `size` and callable `has`/`keys`.
+    fn getSetRecord(self: *Interpreter, v: Value) EvalError!SetRecord {
+        if (v != .object) return self.throwError("TypeError", "argument is not an object");
+        const size = (try self.toPrimitive(try self.getProperty(v, "size"), .number)).toNumber();
+        if (std.math.isNan(size)) return self.throwError("TypeError", "set-like 'size' is NaN");
+        const has = try self.getProperty(v, "has");
+        if (!has.isCallable()) return self.throwError("TypeError", "set-like 'has' is not callable");
+        const keys = try self.getProperty(v, "keys");
+        if (!keys.isCallable()) return self.throwError("TypeError", "set-like 'keys' is not callable");
+        return .{ .obj = v.object, .has = has, .keys = keys, .size = size };
+    }
+
+    /// Drive `record.keys()` to collect the set-like's elements.
+    fn collectSetKeys(self: *Interpreter, rec: SetRecord) EvalError![]Value {
+        const iter = try self.callValueWithThis(rec.keys, &.{}, .{ .object = rec.obj });
+        var list: std.ArrayListUnmanaged(Value) = .empty;
+        while (true) {
+            const r = try self.callMethod(iter, "next", &.{});
+            if (r != .object) return self.throwError("TypeError", "iterator.next() did not return an object");
+            if ((try self.getProperty(r, "done")).toBoolean()) break;
+            try list.append(self.arena, try self.getProperty(r, "value"));
+        }
+        return list.items;
     }
 
     fn evalArrayLit(self: *Interpreter, elems: []*Node) EvalError!Value {
