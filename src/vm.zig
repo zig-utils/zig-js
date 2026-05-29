@@ -335,6 +335,27 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(vm.arena, result);
             },
+            .call_spread => {
+                const args_arr = stack.pop().?;
+                const callee = stack.pop().?;
+                try stack.append(vm.arena, try callValue(vm, callee, args_arr.object.elements.items, .undefined));
+            },
+            .call_method_spread => {
+                const args_arr = stack.pop().?;
+                const recv = stack.pop().?;
+                const name = chunk.names.items[inst.a];
+                const args = args_arr.object.elements.items;
+                const result = if (try vm.builtinMethod(recv, name, args)) |r|
+                    r
+                else
+                    try callValue(vm, try vm.getProperty(recv, name), args, recv);
+                try stack.append(vm.arena, result);
+            },
+            .new_spread => {
+                const args_arr = stack.pop().?;
+                const callee = stack.pop().?;
+                try stack.append(vm.arena, try construct(vm, callee, args_arr.object.elements.items));
+            },
 
             .ret => return stack.pop().?,
             .ret_undef => return .undefined,
@@ -361,6 +382,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .enum_keys => {
                 const v = stack.pop().?;
                 try stack.append(vm.arena, try vm.forInKeysArray(v));
+            },
+            .array_spread => {
+                const iterable = stack.pop().?;
+                // The array stays on the stack (peeked); append the iterable's
+                // elements into it.
+                try vm.spreadInto(&stack.items[stack.items.len - 1].object.elements, iterable);
             },
             .throw_op => {
                 vm.exception = stack.pop().?;

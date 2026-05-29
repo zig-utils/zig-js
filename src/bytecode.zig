@@ -93,6 +93,7 @@ pub const Op = enum(u8) {
     init_prop, // operand a: name index; pop value, set on object at top, leave object
     init_prop_computed, // pop key, pop value, set on object at top, leave object
     array_append, // pop value, append to the array at top, leave array
+    array_spread, // pop iterable, spread its elements into the array now at top, leave array
     get_prop, // operand a: name index; pop object -> push object[name]
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
@@ -104,6 +105,11 @@ pub const Op = enum(u8) {
     call, // operand a: argc; stack: callee, arg0..argN-1 -> push result
     call_method, // operand a: name index, b: argc; stack: recv, args... -> push result
     new_call, // operand a: argc; stack: callee, args... -> push constructed object
+    // Spread-argument variants: the arguments are pre-collected into one array
+    // (built with new_array/array_append/array_spread), so the call is variadic.
+    call_spread, // stack: callee, args_array -> push result (this = undefined)
+    call_method_spread, // operand a: name index; stack: recv, args_array -> push result (this = recv)
+    new_spread, // stack: callee, args_array -> push constructed object
     ret, // pop -> return value, end frame
     ret_undef, // return undefined, end frame
 

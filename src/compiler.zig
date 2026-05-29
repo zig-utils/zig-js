@@ -544,19 +544,31 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.make_closure, fi);
             },
             .call => |c| {
+                const spread = hasSpread(c.args);
+                if (spread and !self.in_generator) return error.Unsupported; // non-generator spread → tree-walk
                 if (c.callee.* == .member and c.callee.member.computed == null) {
-                    // `recv.name(args)`: bind `this = recv` at the call_method site.
+                    // `recv.name(args)`: bind `this = recv` at the call site.
                     const m = c.callee.member;
                     try self.compileExpr(m.object);
-                    for (c.args) |arg| try self.compileExpr(arg);
                     const ni = try self.chunk.addName(m.property);
-                    _ = try self.chunk.emitAB(.call_method, ni, @intCast(c.args.len));
+                    if (spread) {
+                        try self.compileArgsArray(c.args);
+                        _ = try self.chunk.emit(.call_method_spread, ni);
+                    } else {
+                        for (c.args) |arg| try self.compileExpr(arg);
+                        _ = try self.chunk.emitAB(.call_method, ni, @intCast(c.args.len));
+                    }
                 } else if (c.callee.* == .member) {
                     return error.Unsupported; // computed method call → fallback
                 } else {
                     try self.compileExpr(c.callee);
-                    for (c.args) |arg| try self.compileExpr(arg);
-                    _ = try self.chunk.emit(.call, @intCast(c.args.len));
+                    if (spread) {
+                        try self.compileArgsArray(c.args);
+                        _ = try self.chunk.emit(.call_spread, 0);
+                    } else {
+                        for (c.args) |arg| try self.compileExpr(arg);
+                        _ = try self.chunk.emit(.call, @intCast(c.args.len));
+                    }
                 }
             },
             .this_expr => _ = try self.chunk.emit(.load_this, 0),
@@ -571,9 +583,15 @@ pub const Compiler = struct {
                 }
             },
             .new_expr => |n| {
+                if (hasSpread(n.args) and !self.in_generator) return error.Unsupported;
                 try self.compileExpr(n.callee);
-                for (n.args) |arg| try self.compileExpr(arg);
-                _ = try self.chunk.emit(.new_call, @intCast(n.args.len));
+                if (hasSpread(n.args)) {
+                    try self.compileArgsArray(n.args);
+                    _ = try self.chunk.emit(.new_spread, 0);
+                } else {
+                    for (n.args) |arg| try self.compileExpr(arg);
+                    _ = try self.chunk.emit(.new_call, @intCast(n.args.len));
+                }
             },
             .object_lit => |props| {
                 _ = try self.chunk.emit(.new_object, 0);
@@ -592,9 +610,15 @@ pub const Compiler = struct {
             .array_lit => |elems| {
                 _ = try self.chunk.emit(.new_array, 0);
                 for (elems) |e| {
-                    if (e.* == .spread) return error.Unsupported; // dynamic length → fallback
-                    try self.compileExpr(e);
-                    _ = try self.chunk.emit(.array_append, 0);
+                    if (e.* == .elision) return error.Unsupported; // array holes → tree-walk
+                    if (e.* == .spread) {
+                        if (!self.in_generator) return error.Unsupported; // non-generator spread → tree-walk
+                        try self.compileExpr(e.spread);
+                        _ = try self.chunk.emit(.array_spread, 0);
+                    } else {
+                        try self.compileExpr(e);
+                        _ = try self.chunk.emit(.array_append, 0);
+                    }
                 }
             },
             .update => |u| try self.compileUpdate(u.inc, u.prefix, u.target),
@@ -676,6 +700,26 @@ pub const Compiler = struct {
         const n = self.tmp_counter;
         self.tmp_counter += 1;
         return std.fmt.allocPrint(self.arena, "\x00ys{d}", .{n});
+    }
+
+    fn hasSpread(args: []const *Node) bool {
+        for (args) |a| if (a.* == .spread) return true;
+        return false;
+    }
+
+    /// Build a fresh array holding a call/new's argument list, expanding any
+    /// `...spread` element — for the variadic `*_spread` call opcodes.
+    fn compileArgsArray(self: *Compiler, args: []const *Node) CompileError!void {
+        _ = try self.chunk.emit(.new_array, 0);
+        for (args) |a| {
+            if (a.* == .spread) {
+                try self.compileExpr(a.spread);
+                _ = try self.chunk.emit(.array_spread, 0);
+            } else {
+                try self.compileExpr(a);
+                _ = try self.chunk.emit(.array_append, 0);
+            }
+        }
     }
 
     fn compileFunction(self: *Compiler, fnode: *const ast.FunctionNode) CompileError!u32 {

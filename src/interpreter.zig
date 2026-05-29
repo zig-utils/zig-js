@@ -1133,7 +1133,7 @@ pub const Interpreter = struct {
     /// Expand an iterable into `list` — for `...spread`. Arrays take a fast
     /// path; everything else (strings, generators, Sets/Maps, user objects with
     /// `[Symbol.iterator]`) goes through the iterator protocol.
-    fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
+    pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
         if (v == .object and v.object.is_array and self.arrayIterIntact()) {
             for (v.object.elements.items) |e| try list.append(self.arena, e);
             return;
