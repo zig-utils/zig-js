@@ -2714,7 +2714,7 @@ pub const Interpreter = struct {
     /// `delete obj[key]`: remove an own property, returning whether the object
     /// no longer has it. Non-configurable own properties can't be deleted
     /// (returns false); a missing property "deletes" successfully (true).
-    fn deleteOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+    pub fn deleteOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyDelete(o, key);
         // Accessor property.
         if (o.accessors) |m| {

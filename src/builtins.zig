@@ -1134,68 +1134,176 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const a = self.arena;
+    var st = Stringifier{ .self = self };
+
+    // arg 1 — replacer: a callable (transform) or an array (property allowlist).
+    const replacer = arg(args, 1);
+    if (replacer == .object) {
+        if (replacer.object.isCallableObject()) {
+            st.replacer_fn = replacer;
+        } else if (replacer.object.is_array) {
+            var allow: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (replacer.object.elements.items) |item| {
+                // Items are property keys: strings as-is, numbers ToString'd,
+                // String/Number wrappers unwrapped; anything else is ignored.
+                var k: ?[]const u8 = null;
+                switch (item) {
+                    .string => |s| k = s,
+                    .number => |n| k = try value.numberToString(a, n),
+                    .object => |o| if (o.prim) |p| switch (p) {
+                        .string => |s| k = s,
+                        .number => |n| k = try value.numberToString(a, n),
+                        else => {},
+                    },
+                    else => {},
+                }
+                if (k) |key| {
+                    var dup = false;
+                    for (allow.items) |e| if (std.mem.eql(u8, e, key)) {
+                        dup = true;
+                        break;
+                    };
+                    if (!dup) try allow.append(a, key);
+                }
+            }
+            st.allow = allow.items;
+        }
+    }
+
+    // arg 2 — space: up to 10 spaces (number) or the first 10 chars (string);
+    // a Number/String wrapper is unwrapped first.
+    var space = arg(args, 2);
+    if (space == .object) if (space.object.prim) |p| {
+        space = p;
+    };
+    switch (space) {
+        .number => |n| {
+            const cnt: usize = if (std.math.isNan(n) or n < 1) 0 else @intFromFloat(@min(@trunc(n), 10));
+            const sp = try a.alloc(u8, cnt);
+            @memset(sp, ' ');
+            st.gap = sp;
+        },
+        .string => |s| st.gap = s[0..@min(s.len, 10)],
+        else => {},
+    }
+
+    // Wrap the value in a holder { "": value } so toJSON/replacer apply to it.
+    const holder = (try self.newObject()).object;
+    try self.setMember(.{ .object = holder }, "", arg(args, 0));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const present = try stringifyValue(self, &buf, arg(args, 0));
-    if (!present) return .undefined;
-    return .{ .string = try buf.toOwnedSlice(self.arena) };
+    if (!try st.serialize(&buf, .{ .object = holder }, "")) return .undefined;
+    return .{ .string = try buf.toOwnedSlice(a) };
 }
 
-/// Serialize `v` into `buf`. Returns false when the value is omitted
-/// (undefined / function), per `JSON.stringify`.
-fn stringifyValue(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), v: Value) HostError!bool {
-    const a = self.arena;
-    switch (v) {
-        .undefined => return false,
-        .null => {
-            try buf.appendSlice(a, "null");
-            return true;
-        },
-        .boolean => |b| {
-            try buf.appendSlice(a, if (b) "true" else "false");
-            return true;
-        },
-        .number => |n| {
-            if (std.math.isNan(n) or std.math.isInf(n)) {
-                try buf.appendSlice(a, "null");
-            } else {
-                try buf.appendSlice(a, try value.numberToString(a, n));
-            }
-            return true;
-        },
-        .string => |s| {
-            try writeJsonString(a, buf, s);
-            return true;
-        },
-        .object => |o| {
-            if (o.isCallableObject()) return false;
-            if (o.is_array) {
-                try buf.append(a, '[');
-                for (o.elements.items, 0..) |el, i| {
-                    if (i != 0) try buf.append(a, ',');
-                    if (!try stringifyValue(self, buf, el)) try buf.appendSlice(a, "null");
-                }
-                try buf.append(a, ']');
-            } else {
-                try buf.append(a, '{');
-                const keys = try o.enumerableKeys(a); // JSON serializes only enumerable own props
-                var first = true;
-                for (keys) |k| {
-                    const pv = try self.getProperty(v, k);
-                    // Probe whether the property is omitted before writing the key.
-                    var tmp: std.ArrayListUnmanaged(u8) = .empty;
-                    if (!try stringifyValue(self, &tmp, pv)) continue;
-                    if (!first) try buf.append(a, ',');
-                    first = false;
-                    try writeJsonString(a, buf, k);
-                    try buf.append(a, ':');
-                    try buf.appendSlice(a, tmp.items);
-                }
-                try buf.append(a, '}');
-            }
-            return true;
-        },
+/// Carries the `JSON.stringify` options (replacer / allowlist / indent gap)
+/// and the cycle-detection stack across the recursive serialization.
+const Stringifier = struct {
+    self: *Interpreter,
+    replacer_fn: ?Value = null,
+    allow: ?[]const []const u8 = null,
+    gap: []const u8 = "",
+    indent: std.ArrayListUnmanaged(u8) = .empty,
+    stack: std.ArrayListUnmanaged(*value.Object) = .empty,
+
+    /// SerializeJSONProperty: write `holder[key]` (after toJSON + replacer +
+    /// wrapper unwrapping) into `buf`. Returns false when the value is omitted.
+    fn serialize(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, key: []const u8) HostError!bool {
+        const self = st.self;
+        const a = self.arena;
+        var v = try self.getProperty(holder, key);
+        if (v == .object and !v.object.is_symbol) {
+            const tj = try self.getProperty(v, "toJSON");
+            if (tj == .object and tj.object.isCallableObject())
+                v = try self.callValueWithThis(tj, &.{.{ .string = key }}, v);
+        }
+        if (st.replacer_fn) |rf|
+            v = try self.callValueWithThis(rf, &.{ .{ .string = key }, v }, holder);
+        if (v == .object) if (v.object.prim) |p| {
+            v = p;
+        };
+        switch (v) {
+            .undefined => return false,
+            .null => try buf.appendSlice(a, "null"),
+            .boolean => |b| try buf.appendSlice(a, if (b) "true" else "false"),
+            .number => |n| try buf.appendSlice(a, if (std.math.isNan(n) or std.math.isInf(n)) "null" else try value.numberToString(a, n)),
+            .string => |s| try writeJsonString(a, buf, s),
+            .object => |o| {
+                if (o.isCallableObject() or o.is_symbol) return false; // functions/symbols omitted
+                for (st.stack.items) |s| if (s == o)
+                    return self.throwError("TypeError", "Converting circular structure to JSON");
+                try st.stack.append(a, o);
+                defer _ = st.stack.pop();
+                if (o.is_array) try st.serializeArray(buf, o) else try st.serializeObject(buf, .{ .object = o });
+            },
+        }
+        return true;
     }
-}
+
+    fn serializeArray(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), o: *value.Object) HostError!void {
+        const a = st.self.arena;
+        const len: usize = @max(o.elements.items.len, o.array_len);
+        if (len == 0) {
+            try buf.appendSlice(a, "[]");
+            return;
+        }
+        const outer = st.indent.items.len;
+        try st.indent.appendSlice(a, st.gap);
+        try buf.append(a, '[');
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            if (i != 0) try buf.append(a, ',');
+            try st.newlineIndent(buf);
+            const key = try std.fmt.allocPrint(a, "{d}", .{i});
+            if (!try st.serialize(buf, .{ .object = o }, key)) try buf.appendSlice(a, "null");
+        }
+        st.indent.shrinkRetainingCapacity(outer);
+        try st.newlineIndent(buf);
+        try buf.append(a, ']');
+    }
+
+    fn serializeObject(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), v: Value) HostError!void {
+        const self = st.self;
+        const a = self.arena;
+        const o = v.object;
+        const keys = if (st.allow) |al| al else try o.enumerableKeys(a);
+        const outer = st.indent.items.len;
+        try st.indent.appendSlice(a, st.gap);
+        var tmp: std.ArrayListUnmanaged(u8) = .empty;
+        var count: usize = 0;
+        for (keys) |k| {
+            var member: std.ArrayListUnmanaged(u8) = .empty;
+            if (!try st.serialize(&member, v, k)) continue; // omitted property
+            if (count != 0) try tmp.append(a, ',');
+            try st.newlineIndentTo(&tmp, st.indent.items);
+            try writeJsonString(a, &tmp, k);
+            try tmp.append(a, ':');
+            if (st.gap.len != 0) try tmp.append(a, ' ');
+            try tmp.appendSlice(a, member.items);
+            count += 1;
+        }
+        st.indent.shrinkRetainingCapacity(outer);
+        if (count == 0) {
+            try buf.appendSlice(a, "{}");
+            return;
+        }
+        try buf.append(a, '{');
+        try buf.appendSlice(a, tmp.items);
+        try st.newlineIndent(buf);
+        try buf.append(a, '}');
+    }
+
+    /// Emit a newline + the current indent when pretty-printing (no-op for the
+    /// compact form).
+    fn newlineIndent(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8)) HostError!void {
+        try st.newlineIndentTo(buf, st.indent.items);
+    }
+    fn newlineIndentTo(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), ind: []const u8) HostError!void {
+        if (st.gap.len == 0) return;
+        try buf.append(st.self.arena, '\n');
+        try buf.appendSlice(st.self.arena, ind);
+    }
+};
 
 fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) HostError!void {
     try buf.append(a, '"');
@@ -1206,6 +1314,10 @@ fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []
             '\n' => try buf.appendSlice(a, "\\n"),
             '\t' => try buf.appendSlice(a, "\\t"),
             '\r' => try buf.appendSlice(a, "\\r"),
+            8 => try buf.appendSlice(a, "\\b"),
+            12 => try buf.appendSlice(a, "\\f"),
+            // Other control characters are emitted as \u00XX escapes.
+            0...7, 11, 14...31 => try buf.print(a, "\\u{x:0>4}", .{c}),
             else => try buf.append(a, c),
         }
     }
@@ -1221,7 +1333,41 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const v = p.parseValue() catch return self.throwError("SyntaxError", "JSON.parse: invalid JSON");
     p.skipWs();
     if (p.i != text.len) return self.throwError("SyntaxError", "JSON.parse: trailing characters");
+
+    // Optional reviver: walk the result bottom-up, replacing (or deleting, when
+    // the reviver returns undefined) each property by the reviver's return.
+    const reviver = arg(args, 1);
+    if (reviver == .object and reviver.object.isCallableObject()) {
+        const holder = (try self.newObject()).object;
+        try self.setMember(.{ .object = holder }, "", v);
+        return internalizeJson(self, .{ .object = holder }, "", reviver);
+    }
     return v;
+}
+
+/// InternalizeJSONProperty: recursively apply `reviver` to `holder[key]` and its
+/// nested elements/properties (children first), returning the reviver's result.
+fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: Value) HostError!Value {
+    const a = self.arena;
+    const val = try self.getProperty(holder, key);
+    if (val == .object and !val.object.isCallableObject()) {
+        const o = val.object;
+        if (o.is_array) {
+            var i: usize = 0;
+            const len = @max(o.elements.items.len, o.array_len);
+            while (i < len) : (i += 1) {
+                const k = try std.fmt.allocPrint(a, "{d}", .{i});
+                const nv = try internalizeJson(self, val, k, reviver);
+                if (nv == .undefined) _ = try self.deleteOwn(o, k) else try self.setMember(val, k, nv);
+            }
+        } else {
+            for (try o.enumerableKeys(a)) |k| {
+                const nv = try internalizeJson(self, val, k, reviver);
+                if (nv == .undefined) _ = try self.deleteOwn(o, k) else try self.setMember(val, k, nv);
+            }
+        }
+    }
+    return self.callValueWithThis(reviver, &.{ .{ .string = key }, val }, holder);
 }
 
 /// Explicit error set so the mutually-recursive parser methods don't form an
@@ -1260,13 +1406,28 @@ const JsonParser = struct {
 
     fn parseNumber(p: *JsonParser) JErr!Value {
         const start = p.i;
-        while (p.i < p.s.len) : (p.i += 1) {
-            switch (p.s[p.i]) {
-                '0'...'9', '-', '+', '.', 'e', 'E' => {},
-                else => break,
-            }
+        const digit = std.ascii.isDigit;
+        if (p.i < p.s.len and p.s[p.i] == '-') p.i += 1; // optional minus (no leading '+')
+        // Integer part: a lone '0', or [1-9] followed by digits (no leading zeros).
+        if (p.i >= p.s.len) return error.Invalid;
+        if (p.s[p.i] == '0') {
+            p.i += 1;
+        } else if (p.s[p.i] >= '1' and p.s[p.i] <= '9') {
+            while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
+        } else return error.Invalid;
+        // Fraction: a '.' must be followed by at least one digit.
+        if (p.i < p.s.len and p.s[p.i] == '.') {
+            p.i += 1;
+            if (p.i >= p.s.len or !digit(p.s[p.i])) return error.Invalid;
+            while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
         }
-        if (p.i == start) return error.Invalid;
+        // Exponent: e/E, optional sign, at least one digit.
+        if (p.i < p.s.len and (p.s[p.i] == 'e' or p.s[p.i] == 'E')) {
+            p.i += 1;
+            if (p.i < p.s.len and (p.s[p.i] == '+' or p.s[p.i] == '-')) p.i += 1;
+            if (p.i >= p.s.len or !digit(p.s[p.i])) return error.Invalid;
+            while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
+        }
         const n = std.fmt.parseFloat(f64, p.s[start..p.i]) catch return error.Invalid;
         return .{ .number = n };
     }
@@ -1303,9 +1464,11 @@ const JsonParser = struct {
                         p.i += 1;
                         continue;
                     },
-                    else => e,
+                    else => return error.Invalid, // unknown escape
                 });
                 p.i += 1;
+            } else if (c < 0x20) {
+                return error.Invalid; // raw control characters are not allowed in JSON strings
             } else {
                 try buf.append(a, c);
                 p.i += 1;
