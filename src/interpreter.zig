@@ -3217,29 +3217,58 @@ pub const Interpreter = struct {
         if (eq(name, "join")) {
             const sep = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else ",";
             var buf: std.ArrayListUnmanaged(u8) = .empty;
-            for (items, 0..) |el, i| {
+            // Walk the logical length: a hole reads as `undefined` (via [[Get]])
+            // and — like `undefined`/`null` — renders as the empty string.
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
                 if (i != 0) try buf.appendSlice(self.arena, sep);
-                switch (el) {
+                switch (try self.arrIndexGet(o, i)) {
                     .undefined, .null => {},
-                    else => try buf.appendSlice(self.arena, try el.toString(self.arena)),
+                    else => |el| try buf.appendSlice(self.arena, try el.toString(self.arena)),
                 }
             }
             return Value{ .string = try buf.toOwnedSlice(self.arena) };
         }
         if (eq(name, "slice")) {
-            const start = relIndex(arg0(args), items.len, 0);
-            const end = relIndex(arg(args, 1), items.len, @floatFromInt(items.len));
+            const start = relIndex(arg0(args), ilen, 0);
+            const end = relIndex(arg(args, 1), ilen, @floatFromInt(ilen));
             const result = try self.newArray();
             var i = start;
-            while (i < end and i < items.len) : (i += 1) try result.object.elements.append(self.arena, items[i]);
+            var k: usize = 0; // result index, for hole preservation
+            while (i < end) : (i += 1) {
+                if (self.arrIndexPresent(o, i)) {
+                    try result.object.elements.append(self.arena, try self.arrIndexGet(o, i));
+                } else { // slice preserves holes
+                    try result.object.elements.append(self.arena, .undefined);
+                    try result.object.markHole(self.arena, k);
+                }
+                k += 1;
+            }
             return result;
         }
         if (eq(name, "concat")) {
             const result = try self.newArray();
-            for (items) |el| try result.object.elements.append(self.arena, el);
+            // Append the elements of a spreadable array-ish source, preserving
+            // its holes; a non-spreadable value is appended as a single element.
+            const appendFrom = struct {
+                fn run(self2: *Interpreter, dst: *value.Object, src: *value.Object) EvalError!void {
+                    const slen: usize = @max(src.elements.items.len, src.array_len);
+                    var j: usize = 0;
+                    while (j < slen) : (j += 1) {
+                        const base = dst.elements.items.len;
+                        if (self2.arrIndexPresent(src, j)) {
+                            try dst.elements.append(self2.arena, try self2.arrIndexGet(src, j));
+                        } else {
+                            try dst.elements.append(self2.arena, .undefined);
+                            try dst.markHole(self2.arena, base);
+                        }
+                    }
+                }
+            }.run;
+            try appendFrom(self, result.object, o);
             for (args) |a| {
                 if (a == .object and a.object.is_array) {
-                    for (a.object.elements.items) |el| try result.object.elements.append(self.arena, el);
+                    try appendFrom(self, result.object, a.object);
                 } else try result.object.elements.append(self.arena, a);
             }
             return result;
@@ -3412,9 +3441,9 @@ pub const Interpreter = struct {
         }
         if (eq(name, "at")) {
             const fl = @trunc(arg0(args).toNumber());
-            const idx: i64 = if (fl < 0) @as(i64, @intCast(items.len)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
-            if (idx < 0 or idx >= items.len) return Value.undefined;
-            return items[@intCast(idx)];
+            const idx: i64 = if (fl < 0) @as(i64, @intCast(ilen)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
+            if (idx < 0 or idx >= ilen) return Value.undefined;
+            return try self.arrIndexGet(o, @intCast(idx)); // a hole reads as undefined
         }
         if (eq(name, "lastIndexOf")) {
             const target = arg0(args);
@@ -3465,16 +3494,20 @@ pub const Interpreter = struct {
         }
         if (eq(name, "fill")) {
             const v = arg0(args);
-            const start = relIndex(arg(args, 1), items.len, 0);
-            const end = relIndex(arg(args, 2), items.len, @floatFromInt(items.len));
+            const start = relIndex(arg(args, 1), ilen, 0);
+            const end = relIndex(arg(args, 2), ilen, @floatFromInt(ilen));
+            // fill writes through [[Set]] over the full length, so it also fills
+            // holes (and creates indexed properties on an array-like `this`).
             var i = start;
-            while (i < end and i < items.len) : (i += 1) items[i] = v;
+            while (i < end) : (i += 1) {
+                try self.setMember(.{ .object = o }, try std.fmt.allocPrint(self.arena, "{d}", .{i}), v);
+            }
             return Value{ .object = o };
         }
         if (eq(name, "flat")) {
             const depth: f64 = if (args.len > 0 and args[0] != .undefined) arg0(args).toNumber() else 1;
             const result = try self.newArray();
-            try self.flattenInto(result.object, items, depth);
+            try self.flattenInto(result.object, o, depth);
             return result;
         }
         if (eq(name, "sort")) {
@@ -3526,7 +3559,10 @@ pub const Interpreter = struct {
         if (eq(name, "flatMap")) {
             const cb = arg0(args);
             const result = try self.newArray();
-            for (items, 0..) |el, i| {
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                if (!self.arrIndexPresent(o, i)) continue; // skip holes
+                const el = try self.arrIndexGet(o, i);
                 const m = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
                 if (m == .object and m.object.is_array) {
                     for (m.object.elements.items) |e2| try result.object.elements.append(self.arena, e2);
@@ -3548,16 +3584,18 @@ pub const Interpreter = struct {
         }
         if (eq(name, "values")) return try self.iteratorOf(.{ .object = o });
         if (eq(name, "keys")) {
+            // The Array Iterator yields every index 0..length, holes included.
             const arr = try self.newArray();
-            for (0..items.len) |i| try arr.object.elements.append(self.arena, .{ .number = @floatFromInt(i) });
+            for (0..ilen) |i| try arr.object.elements.append(self.arena, .{ .number = @floatFromInt(i) });
             return try self.iteratorOf(arr);
         }
         if (eq(name, "entries")) {
             const arr = try self.newArray();
-            for (items, 0..) |el, i| {
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
                 const pair = try self.newArray();
                 try pair.object.elements.append(self.arena, .{ .number = @floatFromInt(i) });
-                try pair.object.elements.append(self.arena, el);
+                try pair.object.elements.append(self.arena, try self.arrIndexGet(o, i)); // hole -> undefined
                 try arr.object.elements.append(self.arena, pair);
             }
             return try self.iteratorOf(arr);
@@ -3569,10 +3607,20 @@ pub const Interpreter = struct {
         return null;
     }
 
-    fn flattenInto(self: *Interpreter, dst: *value.Object, items: []const Value, depth: f64) EvalError!void {
-        for (items) |el| {
+    /// FlattenIntoArray: walk `src`'s logical length, *skipping holes*
+    /// (HasProperty) and recursing into nested arrays up to `depth`. The result
+    /// is packed — flat does not preserve holes.
+    fn flattenInto(self: *Interpreter, dst: *value.Object, src: *value.Object, depth: f64) EvalError!void {
+        const len: usize = if (src.is_array) @max(src.elements.items.len, src.array_len) else blk: {
+            const lv = try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number);
+            break :blk toLen(lv.toNumber());
+        };
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            if (!self.arrIndexPresent(src, i)) continue; // flat skips holes
+            const el = try self.arrIndexGet(src, i);
             if (depth > 0 and el == .object and el.object.is_array) {
-                try self.flattenInto(dst, el.object.elements.items, depth - 1);
+                try self.flattenInto(dst, el.object, depth - 1);
             } else {
                 try dst.elements.append(self.arena, el);
             }
@@ -5183,8 +5231,15 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     var done = true;
     var val: Value = .undefined;
     switch (src) {
-        // Arrays/Sets yield each element; Maps yield each stored `[k,v]` pair.
-        .object => |so| if ((so.is_array or so.is_set or so.is_map) and i < so.elements.items.len) {
+        .object => |so| if (so.is_array) {
+            // Arrays iterate the *logical* length, reading via [[Get]] so a hole
+            // (or the sparse tail) yields `undefined` and accessor indices run.
+            if (i < @max(so.elements.items.len, so.array_len)) {
+                val = try self.arrIndexGet(so, i);
+                done = false;
+            }
+        } else if ((so.is_set or so.is_map) and i < so.elements.items.len) {
+            // Sets yield each element; Maps yield each stored `[k,v]` pair.
             val = so.elements.items[i];
             done = false;
         },
