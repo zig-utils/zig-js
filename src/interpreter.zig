@@ -1423,6 +1423,9 @@ pub const Interpreter = struct {
         }
         if (obj.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
+            // Arrow / async / generator functions are not constructors.
+            if (func.is_arrow or func.is_async or func.is_generator)
+                return self.throwError("TypeError", "value is not a constructor");
             const this_val = try self.newInstance(obj);
             const ret = try self.callFunctionNT(func, args, this_val, callee); // new.target = the constructor
             return if (ret == .object) ret else this_val;
