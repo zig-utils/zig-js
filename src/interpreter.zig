@@ -1712,6 +1712,21 @@ pub const Interpreter = struct {
             for (o.elements.items) |e| _ = try self.callValueWithThis(cb, &.{ e.object.elements.items[1], e.object.elements.items[0], self_v }, arg(args, 1));
             return Value.undefined;
         }
+        // Upsert proposal: return the existing value for `key`, else insert and
+        // return a default (`getOrInsert`) or a computed value (`getOrInsertComputed`).
+        if (eq(name, "getOrInsert") or eq(name, "getOrInsertComputed")) {
+            const k = arg0(args);
+            for (o.elements.items) |e| {
+                if (value.strictEquals(e.object.elements.items[0], k)) return e.object.elements.items[1];
+            }
+            const v = if (eq(name, "getOrInsertComputed")) blk: {
+                const cb = arg(args, 1);
+                if (!cb.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed: callback is not a function");
+                break :blk try self.callValue(cb, &.{k});
+            } else arg(args, 1);
+            _ = try self.mapMethod(o, "set", &.{ k, v });
+            return v;
+        }
         return null;
     }
 
@@ -3582,6 +3597,29 @@ fn objectGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     return .{ .object = obj };
 }
 
+/// `Map.groupBy(items, callback)` — like Object.groupBy but the result is a Map
+/// keyed by the (SameValueZero) callback result, each value an array.
+fn mapGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cb = if (args.len > 1) args[1] else .undefined;
+    if (!cb.isCallable()) return self.throwError("TypeError", "Map.groupBy: callback is not a function");
+    const elems = try collectIterable(self, if (args.len > 0) args[0] else .undefined);
+    const map = (try self.makeMap(.undefined)).object;
+    for (elems, 0..) |el, i| {
+        const key = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) } });
+        if ((try self.mapMethod(map, "has", &.{key})).?.boolean) {
+            const bucket = (try self.mapMethod(map, "get", &.{key})).?;
+            try bucket.object.elements.append(self.arena, el);
+        } else {
+            const arr = try self.newArray();
+            try arr.object.elements.append(self.arena, el);
+            _ = try self.mapMethod(map, "set", &.{ key, arr });
+        }
+    }
+    return .{ .object = map };
+}
+
 /// Collect an iterable's elements into a slice: arrays use their dense store
 /// directly; anything else is driven through the iterator protocol.
 fn collectIterable(self: *Interpreter, v: Value) EvalError![]Value {
@@ -3855,6 +3893,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try defineGlobalFn(env, root_shape, "isFinite", 1, builtins.isFiniteFn);
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
     try defineGlobalFnC(env, root_shape, "Map", 0, true, builtins.mapFn);
+    if (env.get("Map")) |m| {
+        if (m == .object) try setNative(a, root_shape, m.object, "groupBy", 2, mapGroupByFn);
+    }
     try defineGlobalFnC(env, root_shape, "Set", 0, true, builtins.setFn);
     try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.mapFn);
     try defineGlobalFnC(env, root_shape, "WeakSet", 0, true, builtins.setFn);
