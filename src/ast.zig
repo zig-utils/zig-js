@@ -148,6 +148,8 @@ pub const Node = union(enum) {
     boolean: bool,
     null_lit,
     undefined_lit,
+    /// An array-literal elision (`[1, , 3]`) — a hole, not an `undefined` value.
+    elision,
     identifier: []const u8,
     this_expr,
     /// `new.target` — the constructor when invoked via `new`, else undefined.

@@ -125,6 +125,31 @@ pub const Object = struct {
     proxy_target: ?*Object = null,
     proxy_handler: ?*Object = null,
     proxy_revoked: bool = false,
+    /// For arrays: the set of dense-index *holes* (gaps that read as absent — a
+    /// deleted element, an elision in `[1,,3]`, or a gap created by a sparse
+    /// assignment). The `elements` slot for a hole still exists (holds undefined),
+    /// but `HasProperty`/iteration treat the index as not present. Lazily allocated.
+    holes: ?*std.AutoHashMapUnmanaged(usize, void) = null,
+
+    /// Whether dense array index `i` is a hole (absent).
+    pub fn isHole(self: *const Object, i: usize) bool {
+        const h = self.holes orelse return false;
+        return h.contains(i);
+    }
+
+    /// Mark dense index `i` as a hole.
+    pub fn markHole(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
+        if (self.holes == null) {
+            self.holes = try arena.create(std.AutoHashMapUnmanaged(usize, void));
+            self.holes.?.* = .{};
+        }
+        try self.holes.?.put(arena, i, {});
+    }
+
+    /// Clear the hole at index `i` (an assignment fills it).
+    pub fn clearHole(self: *Object, i: usize) void {
+        if (self.holes) |h| _ = h.remove(i);
+    }
 
     pub fn isCallableObject(self: *const Object) bool {
         // A proxy is callable iff its target is; walk iteratively (bounded) so a

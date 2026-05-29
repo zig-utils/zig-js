@@ -84,6 +84,22 @@ pub fn build(b: *std.Build) void {
     const test262_step = b.step("test262", "Run the real test262 corpus and report pass rate");
     test262_step.dependOn(&run_test262.step);
 
+    // THROWAWAY parse-failure diagnostic.
+    const diag = b.addExecutable(.{
+        .name = "diag",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/diag.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    diag.root_module.addOptions("build_options", t262_options);
+    const run_diag = b.addRunArtifact(diag);
+    if (b.args) |args| run_diag.addArgs(args);
+    const diag_step = b.step("diag", "Throwaway parse-failure diagnostic");
+    diag_step.dependOn(&run_diag.step);
+
     // Benchmarks: `zig build bench` times the VM against the tree-walker.
     // ReleaseFast so the numbers reflect real performance, not Debug overhead.
     const bench = b.addExecutable(.{

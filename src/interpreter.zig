@@ -309,6 +309,7 @@ pub const Interpreter = struct {
             .boolean => |b| .{ .boolean = b },
             .null_lit => .null,
             .undefined_lit => .undefined,
+            .elision => .undefined, // only meaningful inside an array literal
             .this_expr => self.this_value,
             .new_target_expr => self.new_target,
             .identifier => |name| blk: {
@@ -2115,6 +2116,10 @@ pub const Interpreter = struct {
         for (elems) |en| {
             if (en.* == .spread) {
                 try self.spreadInto(&v.object.elements, try self.eval(en.spread));
+            } else if (en.* == .elision) {
+                // A hole: a slot that reads as absent (skipped by iteration).
+                try v.object.markHole(self.arena, v.object.elements.items.len);
+                try v.object.elements.append(self.arena, .undefined);
             } else {
                 try v.object.elements.append(self.arena, try self.eval(en));
             }
@@ -2581,14 +2586,20 @@ pub const Interpreter = struct {
                     return if (self.strict) self.throwError("TypeError", "Cannot assign to read only property") else {};
                 if (i < o.elements.items.len) {
                     o.elements.items[i] = v;
+                    o.clearHole(i); // an assignment fills a hole
                     return;
                 }
                 // Grow densely only for near-contiguous, bounded indices; large
                 // or gappy indices become sparse named properties (no giant alloc).
                 const dense_cap: usize = 1 << 24;
                 if (i < dense_cap and i <= o.elements.items.len + 1024) {
+                    const gap_start = o.elements.items.len;
                     while (o.elements.items.len <= i) try o.elements.append(self.arena, .undefined);
                     o.elements.items[i] = v;
+                    o.clearHole(i);
+                    // Indices skipped over by a sparse assignment are holes.
+                    var g = gap_start;
+                    while (g < i) : (g += 1) try o.markHole(self.arena, g);
                     return;
                 }
                 // A large/gappy index becomes a sparse named property; the array's
@@ -2633,16 +2644,21 @@ pub const Interpreter = struct {
             if (m.getPtr(key) != null) {
                 if (!o.getAttr(key).configurable) return false;
                 _ = m.remove(key);
+                // An accessor on an array index leaves a hole behind.
+                if (o.is_array) {
+                    if (arrayIndex(key)) |i| if (i < o.elements.items.len) try o.markHole(self.arena, i);
+                }
                 return true;
             }
         }
-        // Dense array element → leave a hole (undefined), length unchanged. A
-        // per-index descriptor may mark it non-configurable (delete fails).
+        // Dense array element → leave a hole (reads as absent), length unchanged.
+        // A per-index descriptor may mark it non-configurable (delete fails).
         if (o.is_array) {
             if (arrayIndex(key)) |i| {
                 if (i < o.elements.items.len) {
                     if (o.attrs != null and !o.getAttr(key).configurable) return false;
                     o.elements.items[i] = .undefined;
+                    try o.markHole(self.arena, i);
                     return true;
                 }
             }
@@ -2970,6 +2986,21 @@ pub const Interpreter = struct {
         return false;
     }
 
+    /// Whether array/array-like index `i` is present (own dense non-hole, own
+    /// sparse named, or inherited) — the HasProperty the iteration methods use to
+    /// skip holes.
+    fn arrIndexPresent(self: *Interpreter, o: *value.Object, i: usize) bool {
+        const ks = std.fmt.allocPrint(self.arena, "{d}", .{i}) catch return false;
+        return objectHasOwn(o, ks) or hasProperty(o, ks);
+    }
+
+    /// `o[i]` via [[Get]] (so an accessor index runs its getter, and inherited
+    /// indices resolve) — used by the iteration methods.
+    fn arrIndexGet(self: *Interpreter, o: *value.Object, i: usize) EvalError!Value {
+        const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        return self.getProperty(.{ .object = o }, ks);
+    }
+
     fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         // Real arrays use the dense element store directly; an array-like `this`
         // (via `.call`) materializes its `length`/indexed properties into a
@@ -3001,6 +3032,9 @@ pub const Interpreter = struct {
             if (eq(name, m) and !arg0(args).isCallable())
                 return self.throwError("TypeError", "Array.prototype callback is not a function");
         }
+        // The logical length for index iteration: a real array's includes any
+        // sparse tail (`array_len`); an array-like uses its materialized slice.
+        const ilen: usize = if (o.is_array) @max(o.elements.items.len, o.array_len) else items.len;
         if (eq(name, "push")) {
             for (args) |a| try o.elements.append(self.arena, a);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
@@ -3116,7 +3150,14 @@ pub const Interpreter = struct {
         if (eq(name, "map")) {
             const cb = arg0(args);
             const result = try self.newArray();
-            for (items, 0..) |el, i| {
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                if (!self.arrIndexPresent(o, i)) {
+                    try result.object.elements.append(self.arena, .undefined);
+                    try result.object.markHole(self.arena, i); // map preserves holes
+                    continue;
+                }
+                const el = try self.arrIndexGet(o, i);
                 const r = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
                 try result.object.elements.append(self.arena, r);
             }
@@ -3125,7 +3166,10 @@ pub const Interpreter = struct {
         if (eq(name, "filter")) {
             const cb = arg0(args);
             const result = try self.newArray();
-            for (items, 0..) |el, i| {
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                if (!self.arrIndexPresent(o, i)) continue; // skip holes
+                const el = try self.arrIndexGet(o, i);
                 if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     try result.object.elements.append(self.arena, el);
             }
@@ -3133,12 +3177,20 @@ pub const Interpreter = struct {
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
-            for (items, 0..) |el, i| _ = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                if (!self.arrIndexPresent(o, i)) continue; // skip holes
+                const el = try self.arrIndexGet(o, i);
+                _ = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
+            }
             return Value.undefined;
         }
         if (eq(name, "some")) {
             const cb = arg0(args);
-            for (items, 0..) |el, i| {
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                if (!self.arrIndexPresent(o, i)) continue;
+                const el = try self.arrIndexGet(o, i);
                 if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return Value{ .boolean = true };
             }
@@ -3146,7 +3198,10 @@ pub const Interpreter = struct {
         }
         if (eq(name, "every")) {
             const cb = arg0(args);
-            for (items, 0..) |el, i| {
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                if (!self.arrIndexPresent(o, i)) continue;
+                const el = try self.arrIndexGet(o, i);
                 if (!(try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return Value{ .boolean = false };
             }
@@ -3154,7 +3209,10 @@ pub const Interpreter = struct {
         }
         if (eq(name, "find")) {
             const cb = arg0(args);
-            for (items, 0..) |el, i| {
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                // `find` visits holes (value undefined), unlike forEach/map.
+                const el = try self.arrIndexGet(o, i);
                 if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean()) return el;
             }
             return Value.undefined;
@@ -3162,17 +3220,40 @@ pub const Interpreter = struct {
         if (eq(name, "reduce")) {
             const cb = arg0(args);
             var acc: Value = undefined;
-            var start: usize = 0;
+            var i: usize = 0;
             if (args.len >= 2) {
                 acc = args[1];
             } else {
-                if (items.len == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
-                acc = items[0];
-                start = 1;
+                // Seed with the first *present* element; empty (all-hole) → throw.
+                while (i < ilen and !self.arrIndexPresent(o, i)) i += 1;
+                if (i >= ilen) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                acc = try self.arrIndexGet(o, i);
+                i += 1;
             }
-            var i = start;
-            while (i < items.len) : (i += 1) {
-                acc = try self.callValue(cb, &.{ acc, items[i], .{ .number = @floatFromInt(i) }, .{ .object = o } });
+            while (i < ilen) : (i += 1) {
+                if (!self.arrIndexPresent(o, i)) continue; // skip holes
+                const el = try self.arrIndexGet(o, i);
+                acc = try self.callValue(cb, &.{ acc, el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
+            }
+            return acc;
+        }
+        if (eq(name, "reduceRight")) {
+            const cb = arg0(args);
+            var acc: Value = undefined;
+            var i: usize = ilen;
+            if (args.len >= 2) {
+                acc = args[1];
+            } else {
+                while (i > 0 and !self.arrIndexPresent(o, i - 1)) i -= 1;
+                if (i == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                i -= 1;
+                acc = try self.arrIndexGet(o, i);
+            }
+            while (i > 0) {
+                i -= 1;
+                if (!self.arrIndexPresent(o, i)) continue;
+                const el = try self.arrIndexGet(o, i);
+                acc = try self.callValue(cb, &.{ acc, el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
             }
             return acc;
         }
@@ -3258,23 +3339,6 @@ pub const Interpreter = struct {
             i = 0;
             while (i < count) : (i += 1) items[target + i] = tmp[i];
             return Value{ .object = o };
-        }
-        if (eq(name, "reduceRight")) {
-            const cb = arg0(args);
-            var acc: Value = if (args.len > 1) args[1] else .undefined;
-            var has_acc = args.len > 1;
-            var i: usize = items.len;
-            while (i > 0) {
-                i -= 1;
-                if (!has_acc) {
-                    acc = items[i];
-                    has_acc = true;
-                    continue;
-                }
-                acc = try self.callValue(cb, &.{ acc, items[i], .{ .number = @floatFromInt(i) }, .{ .object = o } });
-            }
-            if (!has_acc) return self.throwError("TypeError", "Reduce of empty array with no initial value");
-            return acc;
         }
         if (eq(name, "flatMap")) {
             const cb = arg0(args);
@@ -3848,7 +3912,7 @@ pub const Interpreter = struct {
         if (hasProperty(o, key)) return true;
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) return true;
-            if (arrayIndex(key)) |i| return i < o.elements.items.len;
+            if (arrayIndex(key)) |i| return i < o.elements.items.len and !o.isHole(i);
         }
         // The global object carries the installed globals as properties.
         if (self.global_object != null and o == self.global_object.? and rootEnv(self.env).get(key) != null) return true;
@@ -5267,7 +5331,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
     if (o.is_array) {
         if (std.mem.eql(u8, name, "length")) return true;
-        if (Interpreter.arrayIndex(name)) |i| return i < o.elements.items.len;
+        if (Interpreter.arrayIndex(name)) |i| return i < o.elements.items.len and !o.isHole(i);
     }
     return false;
 }

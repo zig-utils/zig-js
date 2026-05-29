@@ -227,7 +227,7 @@ pub const Parser = struct {
                 var out: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
                 var rest: ?*Node = null;
                 for (elems) |e| {
-                    if (e.* == .undefined_lit) {
+                    if (e.* == .elision) {
                         try out.append(self.arena, .{}); // elision / hole in `[ , a ] = …`
                     } else if (e.* == .spread) {
                         rest = try self.exprToTarget(e.spread);
@@ -1427,7 +1427,7 @@ pub const Parser = struct {
             // Elision / hole: a bare `,` yields an empty slot (v1: undefined, as
             // arrays are dense). `[ , x ]`, `[1, , 3]`, `[,]`.
             if (self.check(.comma)) {
-                try elems.append(self.arena, try self.alloc(.undefined_lit));
+                try elems.append(self.arena, try self.alloc(.elision));
                 _ = self.advance();
                 continue;
             }
