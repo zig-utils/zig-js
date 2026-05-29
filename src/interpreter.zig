@@ -2140,7 +2140,23 @@ pub const Interpreter = struct {
                 try rest_arr.object.elements.append(self.arena, try self.getProperty(res, "value"));
             }
             try self.bindPattern(rest_target, rest_arr, declare);
+            return; // a rest element always exhausts the iterator (no close)
         }
+        // IteratorClose: if destructuring finished before the iterator was
+        // exhausted, call its `return()` to let it clean up.
+        if (!done) try self.iteratorClose(iter_obj);
+    }
+
+    /// IteratorClose: invoke `iterator.return()` if present (generators are
+    /// closed through their dispatched `return`). The result is discarded; a
+    /// throw propagates (normal-completion close).
+    fn iteratorClose(self: *Interpreter, iter: Value) EvalError!void {
+        if (iter == .object and iter.object.gen != null) {
+            _ = try self.callMethod(iter, "return", &.{});
+            return;
+        }
+        const ret = try self.getProperty(iter, "return");
+        if (ret.isCallable()) _ = try self.callValueWithThis(ret, &.{}, iter);
     }
 
     /// Element `i` of an array/string for array destructuring (undefined if out
