@@ -1249,7 +1249,18 @@ pub const Interpreter = struct {
 
     fn makeErrorWithArgs(self: *Interpreter, name: []const u8, args: []const Value) EvalError!Value {
         const msg = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else "";
-        return self.makeError(name, msg);
+        const err = try self.makeError(name, msg);
+        // ES2022 `cause` option: `new Error(msg, { cause })` installs a
+        // non-enumerable `cause` own property when the options object has one.
+        if (args.len > 1 and args[1] == .object) {
+            const opts = args[1].object;
+            if (opts.getOwn("cause") != null or opts.getAccessor("cause") != null) {
+                const cause = try self.getProperty(args[1], "cause");
+                try self.setProp(err.object, "cause", cause);
+                try err.object.setAttr(self.arena, "cause", .{ .enumerable = false, .configurable = true, .writable = true });
+            }
+        }
+        return err;
     }
 
     fn callFunction(self: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {

@@ -498,6 +498,21 @@ test "Symbol.prototype: toString / valueOf / chain" {
     )).boolean);
 }
 
+test "Error cause option (ES2022)" {
+    // `new Error(msg, { cause })` installs a non-enumerable own `cause`.
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn("new Error('m', { cause: 42 }).cause")).number);
+    try std.testing.expect((try evalIn("new TypeError('t', { cause: 'x' }).cause === 'x'")).boolean);
+    // Present-but-undefined cause is still an own property; absent options is not.
+    try std.testing.expect((try evalIn("new Error('m', { cause: undefined }).hasOwnProperty('cause')")).boolean);
+    try std.testing.expect(!(try evalIn("new Error('m').hasOwnProperty('cause')")).boolean);
+    try std.testing.expect(!(try evalIn("new Error('m', {}).hasOwnProperty('cause')")).boolean);
+    // cause is non-enumerable, writable, configurable.
+    try std.testing.expect((try evalIn(
+        \\var d = Object.getOwnPropertyDescriptor(new Error('m', { cause: 1 }), 'cause');
+        \\!d.enumerable && d.writable && d.configurable
+    )).boolean);
+}
+
 test "Error prototypes: chain, name/message inheritance, toString" {
     // Each constructor has a real prototype with name/message/constructor.
     try expectEvalStr("object", "typeof Error.prototype");
