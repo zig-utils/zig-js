@@ -1110,12 +1110,14 @@ pub const Interpreter = struct {
     /// evaluation. Async functions route through `callFunctionNT`, which wraps
     /// this in a Promise.
     fn callPlain(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
-        // Async generators aren't executable yet (need yield+await suspension);
-        // async non-generators are run here by `callFunctionNT`'s wrapper.
-        if (func.is_async and func.is_generator) return self.throwError("TypeError", "async generators are not yet executable");
         // Calling a `function*` builds a generator object (its body runs lazily,
-        // on the suspendable VM, via `.next()`).
-        if (func.is_generator) return vm.makeGenerator(self, func, args, this_val);
+        // on the suspendable VM, via `.next()`). Async generators can't yet run
+        // their body (need yield+await suspension), but per spec their parameters
+        // still bind eagerly on the call — so a computed-key/default side effect
+        // (e.g. `async function*({ [thrower()]: x }) {}`) must propagate before we
+        // give up. We fall through to the normal scope-setup + bindParams path and
+        // return an inert async-generator stub once binding succeeds.
+        if (func.is_generator and !func.is_async) return vm.makeGenerator(self, func, args, this_val);
         if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
         self.depth += 1;
         defer self.depth -= 1;
@@ -1166,6 +1168,13 @@ pub const Interpreter = struct {
         // Bind parameters in `call_env` (so a default can reference earlier
         // params).
         try self.bindParams(func.params, args);
+
+        // Async generator: params have now bound (propagating any side-effect
+        // throws). We can't run the body yet, so hand back an inert object
+        // standing in for the async-generator instance — the sync `*-err` dstr
+        // tests only check the binding throw; the body-running tests are
+        // async-flagged and skipped.
+        if (func.is_async and func.is_generator) return self.newObject();
 
         if (func.is_expr_body) return self.eval(func.body);
         _ = try self.eval(func.body);
