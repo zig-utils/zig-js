@@ -1979,7 +1979,7 @@ pub const Interpreter = struct {
         if (eq(name, "set")) {
             const k = arg0(args);
             for (o.elements.items) |e| {
-                if (value.strictEquals(e.object.elements.items[0], k)) {
+                if (value.sameValueZero(e.object.elements.items[0], k)) {
                     e.object.elements.items[1] = arg(args, 1);
                     return self_v;
                 }
@@ -1993,19 +1993,19 @@ pub const Interpreter = struct {
         }
         if (eq(name, "get")) {
             for (o.elements.items) |e| {
-                if (value.strictEquals(e.object.elements.items[0], arg0(args))) return e.object.elements.items[1];
+                if (value.sameValueZero(e.object.elements.items[0], arg0(args))) return e.object.elements.items[1];
             }
             return Value.undefined;
         }
         if (eq(name, "has")) {
             for (o.elements.items) |e| {
-                if (value.strictEquals(e.object.elements.items[0], arg0(args))) return Value{ .boolean = true };
+                if (value.sameValueZero(e.object.elements.items[0], arg0(args))) return Value{ .boolean = true };
             }
             return Value{ .boolean = false };
         }
         if (eq(name, "delete")) {
             for (o.elements.items, 0..) |e, i| {
-                if (value.strictEquals(e.object.elements.items[0], arg0(args))) {
+                if (value.sameValueZero(e.object.elements.items[0], arg0(args))) {
                     _ = o.elements.orderedRemove(i);
                     try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
                     return Value{ .boolean = true };
@@ -2028,7 +2028,7 @@ pub const Interpreter = struct {
         if (eq(name, "getOrInsert") or eq(name, "getOrInsertComputed")) {
             const k = arg0(args);
             for (o.elements.items) |e| {
-                if (value.strictEquals(e.object.elements.items[0], k)) return e.object.elements.items[1];
+                if (value.sameValueZero(e.object.elements.items[0], k)) return e.object.elements.items[1];
             }
             const v = if (eq(name, "getOrInsertComputed")) blk: {
                 const cb = arg(args, 1);
@@ -2038,6 +2038,23 @@ pub const Interpreter = struct {
             _ = try self.mapMethod(o, "set", &.{ k, v });
             return v;
         }
+        if (eq(name, "keys") or eq(name, "values") or eq(name, "entries")) {
+            // Snapshot the current entries into an array and hand back its
+            // iterator (keys → key, values → value, entries → [key, value]).
+            const arr = (try self.newArray()).object;
+            for (o.elements.items) |e| {
+                const k = e.object.elements.items[0];
+                const v = e.object.elements.items[1];
+                const item: Value = if (eq(name, "keys")) k else if (eq(name, "values")) v else blk: {
+                    const pair = (try self.newArray()).object;
+                    try pair.elements.append(self.arena, k);
+                    try pair.elements.append(self.arena, v);
+                    break :blk .{ .object = pair };
+                };
+                try arr.elements.append(self.arena, item);
+            }
+            return try self.iteratorOf(.{ .object = arr });
+        }
         return null;
     }
 
@@ -2045,7 +2062,7 @@ pub const Interpreter = struct {
         const self_v = Value{ .object = o };
         if (eq(name, "add")) {
             for (o.elements.items) |e| {
-                if (value.strictEquals(e, arg0(args))) return self_v;
+                if (value.sameValueZero(e, arg0(args))) return self_v;
             }
             try o.elements.append(self.arena, arg0(args));
             try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
@@ -2053,13 +2070,13 @@ pub const Interpreter = struct {
         }
         if (eq(name, "has")) {
             for (o.elements.items) |e| {
-                if (value.strictEquals(e, arg0(args))) return Value{ .boolean = true };
+                if (value.sameValueZero(e, arg0(args))) return Value{ .boolean = true };
             }
             return Value{ .boolean = false };
         }
         if (eq(name, "delete")) {
             for (o.elements.items, 0..) |e, i| {
-                if (value.strictEquals(e, arg0(args))) {
+                if (value.sameValueZero(e, arg0(args))) {
                     _ = o.elements.orderedRemove(i);
                     try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
                     return Value{ .boolean = true };
@@ -2139,6 +2156,20 @@ pub const Interpreter = struct {
                 return Value{ .boolean = true };
             }
         }
+        if (eq(name, "keys") or eq(name, "values") or eq(name, "entries")) {
+            // Set keys/values both yield the element; entries yields [v, v].
+            const arr = (try self.newArray()).object;
+            for (o.elements.items) |e| {
+                const item: Value = if (eq(name, "entries")) blk: {
+                    const pair = (try self.newArray()).object;
+                    try pair.elements.append(self.arena, e);
+                    try pair.elements.append(self.arena, e);
+                    break :blk .{ .object = pair };
+                } else e;
+                try arr.elements.append(self.arena, item);
+            }
+            return try self.iteratorOf(.{ .object = arr });
+        }
         return null;
     }
 
@@ -2164,7 +2195,7 @@ pub const Interpreter = struct {
     /// set-like calls its `has`).
     fn recordHas(self: *Interpreter, rec: SetRecord, elem: Value) EvalError!bool {
         if (rec.is_set) {
-            for (rec.obj.elements.items) |e| if (value.strictEquals(e, elem)) return true;
+            for (rec.obj.elements.items) |e| if (value.sameValueZero(e, elem)) return true;
             return false;
         }
         return (try self.callValueWithThis(rec.has, &.{elem}, .{ .object = rec.obj })).toBoolean();
