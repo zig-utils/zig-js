@@ -708,6 +708,9 @@ pub const Compiler = struct {
                     try self.compileYieldStar(y.argument.?);
                 } else {
                     if (y.argument) |arg| try self.compileExpr(arg) else _ = try self.chunk.emit(.load_undefined, 0);
+                    // AsyncGeneratorYield first `Await`s the operand, so e.g.
+                    // `yield Promise.reject(e)` rejects the pending `next()`.
+                    if (self.in_async) _ = try self.chunk.emit(.await_op, 0);
                     _ = try self.chunk.emit(.gen_yield, 0);
                 }
             },
@@ -780,6 +783,7 @@ pub const Compiler = struct {
         // IteratorNext, so a delegating generator relays `.next(v)` arguments.
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+        if (async_d) _ = try self.chunk.emit(.await_op, 0); // AsyncGeneratorYield awaits before yielding
         _ = try self.chunk.emit(.gen_yield, 0);
         try self.emitStore(sent_name);
         _ = try self.chunk.emit(.pop, 0);
