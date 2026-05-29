@@ -1179,6 +1179,15 @@ pub const Interpreter = struct {
     pub fn callValueWithThis(self: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
         if (callee != .object) return self.throwError("TypeError", "value is not a function");
         const obj = callee.object;
+        if (obj.proxy_handler != null or obj.proxy_revoked) {
+            const target = obj.proxy_target.?;
+            if (try self.proxyTrap(obj, "apply")) |trap| {
+                const arr = try self.newArray();
+                for (args) |a| try arr.object.elements.append(self.arena, a);
+                return self.callValueWithThis(trap, &.{ .{ .object = target }, this_val, arr }, .{ .object = obj.proxy_handler.? });
+            }
+            return self.callValueWithThis(.{ .object = target }, args, this_val);
+        }
         if (obj.bound) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             return self.callValueWithThis(bf.target, try self.concatArgs(bf.args, args), bf.this);
@@ -1385,6 +1394,15 @@ pub const Interpreter = struct {
     pub fn construct(self: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
         if (callee != .object) return self.throwError("TypeError", "value is not a constructor");
         const obj = callee.object;
+        if (obj.proxy_handler != null or obj.proxy_revoked) {
+            const target = obj.proxy_target.?;
+            if (try self.proxyTrap(obj, "construct")) |trap| {
+                const arr = try self.newArray();
+                for (args) |a| try arr.object.elements.append(self.arena, a);
+                return self.callValueWithThis(trap, &.{ .{ .object = target }, arr, callee }, .{ .object = obj.proxy_handler.? });
+            }
+            return self.construct(.{ .object = target }, args);
+        }
         if (obj.bound) |erased| {
             // `new (fn.bind(...))(...)`: construct the target with bound args
             // prepended (the bound `this` is ignored by `new`, per spec).
@@ -2108,9 +2126,100 @@ pub const Interpreter = struct {
         return std.fmt.parseInt(usize, key, 10) catch null;
     }
 
+    // ---- Proxy ------------------------------------------------------------
+
+    /// Fetch trap `name` from a proxy's handler. Returns null when the trap is
+    /// absent/undefined (the caller forwards to the target). Throws if the proxy
+    /// is revoked or the trap isn't callable.
+    fn proxyTrap(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!?Value {
+        if (o.proxy_revoked or o.proxy_handler == null)
+            return self.throwError("TypeError", "Cannot perform 'get' on a proxy that has been revoked");
+        const trap = try self.getProperty(.{ .object = o.proxy_handler.? }, name);
+        if (trap == .undefined or trap == .null) return null;
+        if (!trap.isCallable()) return self.throwError("TypeError", "proxy trap is not a function");
+        return trap;
+    }
+
+    /// A property key as a JS value for passing to a trap. (String keys only for
+    /// now; symbol-keyed trap arguments aren't reconstructed yet.)
+    fn keyToValue(self: *Interpreter, key: []const u8) Value {
+        _ = self;
+        return .{ .string = key };
+    }
+
+    /// Guard against unbounded proxy→target→proxy forwarding (which recurses
+    /// without a JS call frame, so the normal call-depth limit wouldn't catch it).
+    fn proxyDepth(self: *Interpreter) EvalError!void {
+        if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
+    }
+
+    fn proxyGet(self: *Interpreter, o: *value.Object, key: []const u8, receiver: Value) EvalError!Value {
+        try self.proxyDepth();
+        self.depth += 1;
+        defer self.depth -= 1;
+        const target = o.proxy_target.?;
+        if (try self.proxyTrap(o, "get")) |trap| {
+            return self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key), receiver }, .{ .object = o.proxy_handler.? });
+        }
+        return self.getProperty(.{ .object = target }, key);
+    }
+
+    fn proxySet(self: *Interpreter, o: *value.Object, key: []const u8, v: Value, receiver: Value) EvalError!void {
+        try self.proxyDepth();
+        self.depth += 1;
+        defer self.depth -= 1;
+        const target = o.proxy_target.?;
+        if (try self.proxyTrap(o, "set")) |trap| {
+            _ = try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key), v, receiver }, .{ .object = o.proxy_handler.? });
+            return;
+        }
+        return self.setMember(.{ .object = target }, key, v);
+    }
+
+    fn proxyHas(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        try self.proxyDepth();
+        self.depth += 1;
+        defer self.depth -= 1;
+        const target = o.proxy_target.?;
+        if (try self.proxyTrap(o, "has")) |trap| {
+            return (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key) }, .{ .object = o.proxy_handler.? })).toBoolean();
+        }
+        if (target.proxy_handler != null) return self.proxyHas(target, key);
+        return hasProperty(target, key);
+    }
+
+    fn proxyDelete(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        try self.proxyDepth();
+        self.depth += 1;
+        defer self.depth -= 1;
+        const target = o.proxy_target.?;
+        if (try self.proxyTrap(o, "deleteProperty")) |trap| {
+            return (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key) }, .{ .object = o.proxy_handler.? })).toBoolean();
+        }
+        return self.deleteOwn(target, key);
+    }
+
+    /// `ownKeys` trap → an array of keys (string values). Falls back to the
+    /// target's own string keys.
+    fn proxyOwnKeys(self: *Interpreter, o: *value.Object) EvalError![]const []const u8 {
+        try self.proxyDepth();
+        self.depth += 1;
+        defer self.depth -= 1;
+        const target = o.proxy_target.?;
+        if (try self.proxyTrap(o, "ownKeys")) |trap| {
+            const res = try self.callValueWithThis(trap, &.{.{ .object = target }}, .{ .object = o.proxy_handler.? });
+            if (res != .object or !res.object.is_array) return self.throwError("TypeError", "ownKeys trap must return an array");
+            var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (res.object.elements.items) |k| try list.append(self.arena, try self.keyOf(k));
+            return list.items;
+        }
+        return target.ownKeys(self.arena);
+    }
+
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         switch (recv) {
             .object => |o| {
+                if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, recv);
                 // A (non-arrow) function's `.prototype` is an own data property,
                 // materialized lazily on first access — every [[Construct]]-able
                 // function has one, with a `constructor` back-reference. Without
@@ -2444,6 +2553,7 @@ pub const Interpreter = struct {
             return if (self.strict) self.throwError("TypeError", "Cannot create property on a primitive") else {};
         }
         const o = recv.object;
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxySet(o, key, v, recv);
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) {
                 const n = v.toNumber();
@@ -2514,6 +2624,7 @@ pub const Interpreter = struct {
     /// no longer has it. Non-configurable own properties can't be deleted
     /// (returns false); a missing property "deletes" successfully (true).
     fn deleteOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxyDelete(o, key);
         // Accessor property.
         if (o.accessors) |m| {
             if (m.getPtr(key) != null) {
@@ -3729,7 +3840,8 @@ pub const Interpreter = struct {
     pub fn inOperator(self: *Interpreter, l: Value, r: Value) EvalError!bool {
         if (r != .object) return self.throwError("TypeError", "cannot use 'in' on a non-object");
         const o = r.object;
-        const key = try l.toString(self.arena);
+        const key = try self.keyOf(l);
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxyHas(o, key);
         if (hasProperty(o, key)) return true;
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) return true;
@@ -4196,6 +4308,152 @@ fn symbolValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     return this;
 }
 
+// ---- Proxy / Reflect natives ----------------------------------------------
+
+fn proxyConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined)
+        return self.throwError("TypeError", "Constructor Proxy requires 'new'");
+    const target = if (args.len > 0) args[0] else .undefined;
+    const handler = if (args.len > 1) args[1] else .undefined;
+    if (target != .object or handler != .object)
+        return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
+    const o = try self.arena.create(value.Object);
+    o.* = .{ .proxy_target = target.object, .proxy_handler = handler.object };
+    return .{ .object = o };
+}
+
+/// `Proxy.revocable(target, handler)` → `{ proxy, revoke }`.
+fn proxyRevocableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const saved_nt = self.new_target;
+    self.new_target = .undefined; // proxyConstructorFn requires new; emulate it
+    defer self.new_target = saved_nt;
+    const target = if (args.len > 0) args[0] else .undefined;
+    const handler = if (args.len > 1) args[1] else .undefined;
+    if (target != .object or handler != .object)
+        return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
+    const p = try self.arena.create(value.Object);
+    p.* = .{ .proxy_target = target.object, .proxy_handler = handler.object };
+    const revoke = try self.arena.create(value.Object);
+    revoke.* = .{ .native = proxyRevokeFn, .private_data = @ptrCast(p) };
+    const result = (try self.newObject()).object;
+    try self.setProp(result, "proxy", .{ .object = p });
+    try self.setProp(result, "revoke", .{ .object = revoke });
+    return .{ .object = result };
+}
+
+fn proxyRevokeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.active_native) |nf| {
+        if (nf.private_data) |pd| {
+            const p: *value.Object = @ptrCast(@alignCast(pd));
+            p.proxy_revoked = true;
+            p.proxy_target = null;
+            p.proxy_handler = null;
+        }
+    }
+    return .undefined;
+}
+
+fn reflectGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (target != .object) return self.throwError("TypeError", "Reflect.get called on non-object");
+    return self.getProperty(target, try self.keyOf(if (args.len > 1) args[1] else .undefined));
+}
+
+fn reflectSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (target != .object) return self.throwError("TypeError", "Reflect.set called on non-object");
+    try self.setMember(target, try self.keyOf(if (args.len > 1) args[1] else .undefined), if (args.len > 2) args[2] else .undefined);
+    return .{ .boolean = true };
+}
+
+fn reflectHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (target != .object) return self.throwError("TypeError", "Reflect.has called on non-object");
+    return .{ .boolean = try self.inOperator(if (args.len > 1) args[1] else .undefined, target) };
+}
+
+fn reflectDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (target != .object) return self.throwError("TypeError", "Reflect.deleteProperty called on non-object");
+    return .{ .boolean = try self.deleteOwn(target.object, try self.keyOf(if (args.len > 1) args[1] else .undefined)) };
+}
+
+fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (target != .object) return self.throwError("TypeError", "Reflect.ownKeys called on non-object");
+    const keys = if (target.object.proxy_handler != null) try self.proxyOwnKeys(target.object) else try target.object.ownKeys(self.arena);
+    const arr = try self.newArray();
+    for (keys) |k| try arr.object.elements.append(self.arena, self.keyToValue(k));
+    return arr;
+}
+
+fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (target != .object) return self.throwError("TypeError", "Reflect.getPrototypeOf called on non-object");
+    return if (target.object.proto) |p| .{ .object = p } else .null;
+}
+
+fn reflectApplyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    const this_arg = if (args.len > 1) args[1] else .undefined;
+    const list: []const Value = if (args.len > 2 and args[2] == .object and args[2].object.is_array) args[2].object.elements.items else &.{};
+    return self.callValueWithThis(target, list, this_arg);
+}
+
+fn reflectConstructFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (!isConstructorValue(target)) return self.throwError("TypeError", "Reflect.construct target is not a constructor");
+    // A new.target (3rd arg) must itself be a constructor — this is what the
+    // `isConstructor` harness probes via `Reflect.construct(fn, [], target)`.
+    if (args.len > 2 and !isConstructorValue(args[2]))
+        return self.throwError("TypeError", "Reflect.construct newTarget is not a constructor");
+    const list: []const Value = if (args.len > 1 and args[1] == .object and args[1].object.is_array) args[1].object.elements.items else &.{};
+    return self.construct(target, list);
+}
+
+/// Best-effort [[Construct]]-ability test: a native flagged `native_ctor`, an
+/// error constructor, a non-arrow/non-generator/non-async JS function, a bound
+/// function over a constructor, or a proxy whose target is a constructor.
+fn isConstructorValue(v: Value) bool {
+    if (v != .object) return false;
+    const o = v.object;
+    if (o.proxy_handler != null) return if (o.proxy_target) |t| isConstructorValue(.{ .object = t }) else false;
+    if (o.bound) |erased| {
+        const bf: *Interpreter.BoundFn = @ptrCast(@alignCast(erased));
+        return isConstructorValue(bf.target);
+    }
+    if (o.error_ctor != null) return true;
+    if (o.native != null) return o.native_ctor;
+    if (o.js_func) |erased| {
+        const f: *Function = @ptrCast(@alignCast(erased));
+        return !f.is_arrow and !f.is_async and !f.is_generator;
+    }
+    return false;
+}
+
 /// Install the engine's global bindings into `env`: the `Error`-family
 /// constructors, `NaN`/`Infinity`/`undefined`, the `Math` and `Object`/`Array`
 /// namespaces, and the common global functions. `root_shape` backs the property
@@ -4536,6 +4794,31 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name, symbol_proto));
     }
     try env.put("Symbol", .{ .object = symbol_ns });
+
+    // Proxy (constructor) + Proxy.revocable.
+    const proxy_ns = try a.create(value.Object);
+    proxy_ns.* = .{ .native = proxyConstructorFn, .native_ctor = true };
+    try installNativeProps(a, root_shape, proxy_ns, "Proxy", 2);
+    try setNative(a, root_shape, proxy_ns, "revocable", 2, proxyRevocableFn);
+    try env.put("Proxy", .{ .object = proxy_ns });
+
+    // Reflect — the static reflection namespace.
+    const reflect_ns = try a.create(value.Object);
+    reflect_ns.* = .{};
+    try setNative(a, root_shape, reflect_ns, "get", 2, reflectGetFn);
+    try setNative(a, root_shape, reflect_ns, "set", 3, reflectSetFn);
+    try setNative(a, root_shape, reflect_ns, "has", 2, reflectHasFn);
+    try setNative(a, root_shape, reflect_ns, "deleteProperty", 2, reflectDeleteFn);
+    try setNative(a, root_shape, reflect_ns, "ownKeys", 1, reflectOwnKeysFn);
+    try setNative(a, root_shape, reflect_ns, "getPrototypeOf", 1, reflectGetProtoFn);
+    try setNative(a, root_shape, reflect_ns, "setPrototypeOf", 2, builtins.objectSetPrototypeOf);
+    try setNative(a, root_shape, reflect_ns, "apply", 3, reflectApplyFn);
+    try setNative(a, root_shape, reflect_ns, "construct", 2, reflectConstructFn);
+    try setNative(a, root_shape, reflect_ns, "defineProperty", 3, builtins.objectDefineProperty);
+    try setNative(a, root_shape, reflect_ns, "getOwnPropertyDescriptor", 2, builtins.objectGetOwnPropertyDescriptor);
+    try setNative(a, root_shape, reflect_ns, "isExtensible", 1, builtins.objectIsExtensible);
+    try setNative(a, root_shape, reflect_ns, "preventExtensions", 1, builtins.objectPreventExtensions);
+    try env.put("Reflect", .{ .object = reflect_ns });
 
     // `Array.prototype[Symbol.iterator]` as a real, deletable/overridable own
     // property (the native array-values iterator). The iteration paths consult

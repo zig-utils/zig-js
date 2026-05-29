@@ -118,10 +118,26 @@ pub const Object = struct {
     /// "object", but `valueOf`/ToPrimitive unwrap it and `Object.prototype.
     /// toString` reports `[object Number|String|Boolean]`.
     prim: ?Value = null,
+    /// `Proxy` exotic object: the wrapped target and the handler object. Both
+    /// non-null marks a proxy — property operations route through the handler's
+    /// traps (falling back to the target). A revoked proxy has both set to a
+    /// sentinel `revoked` flag.
+    proxy_target: ?*Object = null,
+    proxy_handler: ?*Object = null,
+    proxy_revoked: bool = false,
 
     pub fn isCallableObject(self: *const Object) bool {
-        return self.callback != null or self.native != null or
-            self.js_func != null or self.error_ctor != null or self.bound != null;
+        // A proxy is callable iff its target is; walk iteratively (bounded) so a
+        // pathological proxy→target cycle can't blow the stack.
+        var o = self;
+        var guard: u32 = 0;
+        while (o.proxy_target) |t| {
+            guard += 1;
+            if (guard > 10000) return false;
+            o = t;
+        }
+        return o.callback != null or o.native != null or
+            o.js_func != null or o.error_ctor != null or o.bound != null;
     }
 
     /// Own named property keys in insertion order (for `for-in` / enumeration).
