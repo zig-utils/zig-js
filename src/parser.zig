@@ -348,6 +348,8 @@ pub const Parser = struct {
         while (true) {
             const name_tok = self.advance();
             if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
+            // Strict mode forbids `eval`/`arguments` as binding names.
+            if (self.strict and isEvalOrArguments(name_tok.text)) return ParseError.UnexpectedToken;
             var init_expr: ?*Node = null;
             if (self.match(.assign)) {
                 init_expr = try self.parseAssignment();
@@ -990,7 +992,10 @@ pub const Parser = struct {
         const t = self.cur();
         if (isKeyword(t, "delete")) {
             _ = self.advance();
-            return self.alloc(.{ .delete_expr = try self.parseUnary() });
+            const operand = try self.parseUnary();
+            // Strict mode: `delete` of an unqualified identifier is a SyntaxError.
+            if (self.strict and operand.* == .identifier) return ParseError.UnexpectedToken;
+            return self.alloc(.{ .delete_expr = operand });
         }
         const op: ?ast.UnaryOp = switch (t.kind) {
             .minus => .neg,
