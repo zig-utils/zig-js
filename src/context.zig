@@ -884,6 +884,19 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "function objects inherit from Function.prototype" {
+    // A user function links to `Function.prototype`, so instanceof, the
+    // prototype identity, and inherited methods all resolve through the chain.
+    try std.testing.expect((try evalIn("function f() {} f instanceof Function")).boolean);
+    try std.testing.expect((try evalIn("var g = () => {}; g instanceof Function")).boolean);
+    try std.testing.expect((try evalIn(
+        \\function f() {}
+        \\Object.getPrototypeOf(f) === Function.prototype
+    )).boolean);
+    // The inherited `call` is the same function object reached via the chain.
+    try std.testing.expect((try evalIn("function f() {} f.call === Function.prototype.call")).boolean);
+}
+
 test "prototype objects: Function.prototype.call.bind + X.prototype methods" {
     // The propertyHelper pattern: borrow a prototype method via call.bind.
     try expectEvalStr("1-2-3",

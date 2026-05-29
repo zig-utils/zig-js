@@ -896,7 +896,7 @@ pub const Interpreter = struct {
             };
         }
         const obj = try self.arena.create(value.Object);
-        obj.* = .{ .js_func = @ptrCast(func) };
+        obj.* = .{ .js_func = @ptrCast(func), .proto = self.functionProto() };
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return .{ .object = obj };
     }
@@ -1588,6 +1588,16 @@ pub const Interpreter = struct {
         const av = self.env.get("Array") orelse return null;
         if (av != .object) return null;
         const p = av.object.getOwn("prototype") orelse return null;
+        return if (p == .object) p.object else null;
+    }
+
+    /// `Function.prototype`, the [[Prototype]] of every function object — so
+    /// `fn instanceof Function`, `Object.getPrototypeOf(fn)`, and inherited
+    /// `call`/`apply`/`bind`/`toString` all resolve through the chain.
+    pub fn functionProto(self: *Interpreter) ?*value.Object {
+        const fv = self.env.get("Function") orelse return null;
+        if (fv != .object) return null;
+        const p = fv.object.getOwn("prototype") orelse return null;
         return if (p == .object) p.object else null;
     }
 
