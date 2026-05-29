@@ -1299,7 +1299,9 @@ pub const Parser = struct {
     /// accessor (`get x`) from a method/property literally named `get`.
     fn propNameAhead(self: *Parser) bool {
         return switch (self.peekKind(1)) {
-            .identifier, .string, .number, .lbracket => true,
+            // `private_name` lets `get #x()`/`set #x()` parse as accessors rather
+            // than a method literally named `get`/`set`.
+            .identifier, .string, .number, .lbracket, .private_name => true,
             else => false,
         };
     }
@@ -1382,7 +1384,29 @@ pub const Parser = struct {
             }
         }
         try self.expect(.rbrace);
+        try self.checkPrivateNames(members.items);
         return self.alloc(.{ .class_expr = .{ .name = name, .superclass = superclass, .members = members.items } });
+    }
+
+    /// Early error: a class may not declare the same private name twice, except
+    /// for a single `get`/`set` pair at the same placement (both static or both
+    /// instance). Any other repeat — get/get, set/set, method/method,
+    /// field/anything, or a get+set split across static and instance — is a
+    /// SyntaxError.
+    fn checkPrivateNames(self: *Parser, members: []const ast.ClassMember) ParseError!void {
+        for (members, 0..) |m, i| {
+            if (m.key_expr != null or m.key.len == 0 or m.key[0] != '#') continue;
+            for (members[0..i]) |prev| {
+                if (prev.key_expr != null or !std.mem.eql(u8, prev.key, m.key)) continue;
+                // A complementary get/set pair at the same placement is the only
+                // allowed repeat.
+                const pair = ((m.accessor == .get and prev.accessor == .set) or
+                    (m.accessor == .set and prev.accessor == .get)) and
+                    m.is_static == prev.is_static and !m.is_field and !prev.is_field;
+                if (!pair) return ParseError.UnexpectedToken;
+            }
+        }
+        _ = self;
     }
 
     /// Parse `(params) { body }` after a method name, returning a function node.
