@@ -498,6 +498,19 @@ test "Symbol.prototype: toString / valueOf / chain" {
     )).boolean);
 }
 
+test "Error.prototype.stack accessor" {
+    // An accessor on Error.prototype with get/set named "get stack"/"set stack".
+    try expectEvalStr("function", "typeof Object.getOwnPropertyDescriptor(Error.prototype, 'stack').get");
+    try expectEvalStr("get stack", "Object.getOwnPropertyDescriptor(Error.prototype, 'stack').get.name");
+    try expectEvalStr("set stack", "Object.getOwnPropertyDescriptor(Error.prototype, 'stack').set.name");
+    // The getter returns a string for an Error receiver, undefined otherwise.
+    try expectEvalStr("string", "typeof new Error('x').stack");
+    try std.testing.expect((try evalIn("({ __proto__: new Error('y') }).stack === undefined")).boolean);
+    // The setter installs an own data property shadowing the accessor (any value).
+    try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 'custom'; e.stack === 'custom'")).boolean);
+    try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 42; e.stack === 42")).boolean);
+}
+
 test "AggregateError" {
     try expectEvalStr("function", "typeof AggregateError");
     // errors comes from the (iterable) first arg; message is the second.

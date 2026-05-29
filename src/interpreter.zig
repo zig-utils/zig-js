@@ -4361,6 +4361,36 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     return .{ .string = try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }) };
 }
 
+/// `Error.prototype.stack` getter (V8-style): a string for a receiver that has
+/// `[[ErrorData]]` (an Error instance), otherwise undefined. The trace content
+/// is implementation-defined; we return `"name: message"`.
+fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    _ = ctx;
+    if (this != .object or !this.object.is_error) return .undefined;
+    // Implementation-defined trace string. Read the class name directly off
+    // `[[ErrorData]]` rather than via [[Get]], so a hostile/recursive receiver
+    // (proxy traps, getters) can't re-enter and blow the stack.
+    const name = this.object.error_name;
+    return .{ .string = if (name.len == 0) "Error" else name };
+}
+
+/// `Error.prototype.stack` setter: installs an own data property `stack` on the
+/// receiver (any value, not just strings), shadowing the accessor — matching the
+/// V8 behavior test262 checks. A no-op for a non-object receiver.
+fn errorStackSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this == .object) {
+        const v = if (args.len > 0) args[0] else .undefined;
+        // Define an *own* data property directly (CreateDataProperty), NOT via
+        // [[Set]] — going through setProp would re-find this very setter on the
+        // prototype and recurse infinitely.
+        try this.object.setOwn(self.arena, self.root_shape, "stack", v);
+        try this.object.setAttr(self.arena, "stack", .{ .enumerable = false, .configurable = true, .writable = true });
+    }
+    return .undefined;
+}
+
 /// Give `proto` a `constructor` own property pointing back to `ctor`
 /// (non-enumerable, writable, configurable — the spec default for built-ins).
 fn setConstructor(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, ctor: *value.Object) EvalError!void {
@@ -4790,7 +4820,20 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         try proto.setAttr(a, "message", ro);
         try proto.setOwn(a, root_shape, "constructor", ctor_v);
         try proto.setAttr(a, "constructor", ro);
-        if (is_base) try setNative(a, root_shape, proto, "toString", 0, errorToStringFn);
+        if (is_base) {
+            try setNative(a, root_shape, proto, "toString", 0, errorToStringFn);
+            // `Error.prototype.stack` is a V8-style accessor (get brand-checks an
+            // Error receiver; set installs an own data property), inherited by all
+            // error subclasses.
+            const stack_get = try a.create(value.Object);
+            stack_get.* = .{ .native = errorStackGet };
+            try installNativeProps(a, root_shape, stack_get, "get stack", 0);
+            const stack_set = try a.create(value.Object);
+            stack_set.* = .{ .native = errorStackSet };
+            try installNativeProps(a, root_shape, stack_set, "set stack", 1);
+            try proto.setAccessor(a, "stack", .{ .object = stack_get }, .{ .object = stack_set });
+            try proto.setAttr(a, "stack", .{ .enumerable = false, .configurable = true });
+        }
         try ctor.setOwn(a, root_shape, "prototype", .{ .object = proto });
         try ctor.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
     }
