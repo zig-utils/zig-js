@@ -38,6 +38,8 @@ pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 /// outlive the source buffer of any single evaluation.
 pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
+    /// Names in `vars` declared `const` — assigning to them is a TypeError.
+    consts: std.StringHashMapUnmanaged(void) = .{},
     arena: std.mem.Allocator,
     parent: ?*Environment = null,
     /// True for a function or the global scope (a *variable* environment); false
@@ -50,6 +52,24 @@ pub const Environment = struct {
         const gop = try self.vars.getOrPut(self.arena, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, name);
         gop.value_ptr.* = v;
+    }
+
+    /// Define a `const` binding in this scope (marks it immutable for `assign`).
+    pub fn putConst(self: *Environment, name: []const u8, v: Value) EvalError!void {
+        try self.put(name, v);
+        const gop = try self.consts.getOrPut(self.arena, name);
+        if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, name);
+    }
+
+    /// Whether the nearest binding named `name` is `const` (null if no binding).
+    /// Matches where `assign` would write, so shadowing is handled correctly.
+    pub fn isConst(self: *Environment, name: []const u8) ?bool {
+        var env: ?*Environment = self;
+        while (env) |e| {
+            if (e.vars.contains(name)) return e.consts.contains(name);
+            env = e.parent;
+        }
+        return null;
     }
 
     /// The nearest enclosing variable environment (function or global), where
@@ -149,6 +169,9 @@ pub const Interpreter = struct {
     /// While binding a destructuring declaration, whether it's a `var` (leaves
     /// hoist to the variable scope) vs `let`/`const` (block-scoped).
     binding_hoisted: bool = false,
+    /// While binding a declaration, whether it's `const` (so the bound names are
+    /// marked immutable and later assignment throws a TypeError).
+    binding_const: bool = false,
     /// Sentinel object for a `let`/`const` binding in its temporal dead zone
     /// (hoisted into scope but not yet initialized). Reading it throws.
     tdz_marker: ?*value.Object = null,
@@ -409,7 +432,12 @@ pub const Interpreter = struct {
                 }
                 // `var` hoists to the variable scope (and mirrors onto the global
                 // object); `let`/`const` bind in the current (possibly block) scope.
-                if (d.kind == .@"var") try self.globalDefine(d.name, v) else try self.env.put(d.name, v);
+                if (d.kind == .@"var")
+                    try self.globalDefine(d.name, v)
+                else if (d.kind == .@"const")
+                    try self.env.putConst(d.name, v)
+                else
+                    try self.env.put(d.name, v);
                 break :blk .undefined;
             },
 
@@ -422,8 +450,11 @@ pub const Interpreter = struct {
             .destructure_decl => |d| blk: {
                 const v = try self.eval(d.init);
                 const saved = self.binding_hoisted;
+                const saved_c = self.binding_const;
                 self.binding_hoisted = (d.kind == .@"var");
+                self.binding_const = (d.kind == .@"const");
                 defer self.binding_hoisted = saved;
+                defer self.binding_const = saved_c;
                 try self.bindPattern(d.pattern, v, true);
                 break :blk .undefined;
             },
@@ -617,7 +648,12 @@ pub const Interpreter = struct {
     /// (identifier or destructuring pattern), an assignment form assigns to an
     /// existing identifier / member / pattern.
     fn bindLoopTarget(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, v: Value) EvalError!void {
-        if (decl_kind != null) try self.bindPattern(target, v, true) else try self.assignTo(target, v);
+        if (decl_kind) |k| {
+            const saved = self.binding_const;
+            self.binding_const = (k == .@"const");
+            defer self.binding_const = saved;
+            try self.bindPattern(target, v, true);
+        } else try self.assignTo(target, v);
     }
 
     /// `switch`: evaluate the discriminant, find the first strictly-equal `case`
@@ -2189,9 +2225,16 @@ pub const Interpreter = struct {
     fn bindPattern(self: *Interpreter, target: *Node, val: Value, declare: bool) EvalError!void {
         switch (target.*) {
             .identifier => |name| if (declare)
-                (if (self.binding_hoisted) try self.globalDefine(name, val) else try self.env.put(name, val))
+                (if (self.binding_hoisted)
+                    try self.globalDefine(name, val)
+                else if (self.binding_const)
+                    try self.env.putConst(name, val)
+                else
+                    try self.env.put(name, val))
             else
-                try self.env.assign(name, val),
+                // Assignment-form target: route through `assignTo` so const/TDZ/
+                // strict/with checks apply (e.g. `[c] = …` with const `c`).
+                try self.assignTo(target, val),
             .member => |m| { // assignment destructuring into obj.prop / arr[i]
                 const recv = try self.eval(m.object);
                 const key = try self.memberKey(m.property, m.computed);
@@ -2355,6 +2398,10 @@ pub const Interpreter = struct {
                 // Assigning to a binding still in its TDZ is a ReferenceError.
                 if (self.env.get(name)) |cur| {
                     if (self.isTdz(cur)) return self.throwError("ReferenceError", name);
+                }
+                // Assigning to a `const` binding is a TypeError.
+                if (self.env.isConst(name)) |c| {
+                    if (c) return self.throwError("TypeError", "Assignment to constant variable.");
                 }
                 // Strict mode forbids creating a global by assigning to an
                 // undeclared binding (sloppy mode silently creates one).
