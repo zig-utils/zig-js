@@ -516,7 +516,28 @@ pub const Interpreter = struct {
     /// body, honoring break/continue/return.
     fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool) EvalError!Value {
         const my_label = self.takeLabel();
-        const iter = try self.eval(iterable);
+        // A `let`/`const` loop binding gets a fresh declarative environment per
+        // iteration, so a closure created in the head or body captures *that*
+        // iteration's binding (`var` is function-scoped, so it doesn't).
+        const lexical = decl_kind != null and decl_kind.? != .@"var";
+        const outer_env = self.env;
+        // Head evaluation: per spec the loop bindings are declared (in their TDZ)
+        // in a fresh environment while the iterable expression runs, so a closure
+        // captured there sees them uninitialized (`typeof x` throws).
+        var iter: Value = undefined;
+        if (lexical and self.tdz_marker != null) {
+            const head_env = try self.arena.create(Environment);
+            head_env.* = .{ .arena = self.arena, .parent = outer_env };
+            self.env = head_env;
+            self.tdzBindPattern(target, self.tdzVal());
+            iter = self.eval(iterable) catch |e| {
+                self.env = outer_env;
+                return e;
+            };
+            self.env = outer_env;
+        } else {
+            iter = try self.eval(iterable);
+        }
         var last: Value = .undefined;
         if (is_of) {
             // Generic iterator protocol: obtain the iterator (generators are
@@ -526,6 +547,13 @@ pub const Interpreter = struct {
             while (true) {
                 const res = try self.callMethod(iter_obj, "next", &.{});
                 if ((try self.getProperty(res, "done")).toBoolean()) break; // exhausted — no close
+                const saved_env = self.env;
+                defer self.env = saved_env;
+                if (lexical) {
+                    const iter_env = try self.arena.create(Environment);
+                    iter_env.* = .{ .arena = self.arena, .parent = saved_env };
+                    self.env = iter_env;
+                }
                 try self.bindLoopTarget(decl_kind, target, try self.getProperty(res, "value"));
                 // A throw in the body closes the iterator before propagating.
                 last = self.eval(body) catch |e| {
@@ -551,6 +579,13 @@ pub const Interpreter = struct {
                         var i: usize = 0;
                         while (i < o.elements.items.len) : (i += 1) {
                             const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                            const saved_env = self.env;
+                            defer self.env = saved_env;
+                            if (lexical) {
+                                const ie = try self.arena.create(Environment);
+                                ie.* = .{ .arena = self.arena, .parent = saved_env };
+                                self.env = ie;
+                            }
                             try self.bindLoopTarget(decl_kind, target, .{ .string = key });
                             last = try self.eval(body);
                             if (self.loopSignal(my_label)) |stop| if (stop) break;
@@ -558,6 +593,13 @@ pub const Interpreter = struct {
                     } else {
                         const keys = try o.enumerableKeys(self.arena); // for-in skips non-enumerable
                         for (keys) |k| {
+                            const saved_env = self.env;
+                            defer self.env = saved_env;
+                            if (lexical) {
+                                const ie = try self.arena.create(Environment);
+                                ie.* = .{ .arena = self.arena, .parent = saved_env };
+                                self.env = ie;
+                            }
                             try self.bindLoopTarget(decl_kind, target, .{ .string = k });
                             last = try self.eval(body);
                             if (self.loopSignal(my_label)) |stop| if (stop) break;
