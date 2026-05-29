@@ -1271,7 +1271,14 @@ pub const Interpreter = struct {
         const msg_i: usize = if (aggregate) 1 else 0;
         const opt_i: usize = if (aggregate) 2 else 1;
 
-        const msg = if (args.len > msg_i and args[msg_i] != .undefined) try args[msg_i].toString(self.arena) else "";
+        // The message is ToString'd (via ToPrimitive(string), so an object's
+        // toString/valueOf runs); a Symbol message throws a TypeError.
+        const msg = if (args.len > msg_i and args[msg_i] != .undefined) blk: {
+            const prim = try self.toPrimitive(args[msg_i], .string);
+            if (prim == .object and prim.object.is_symbol)
+                return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+            break :blk try prim.toString(self.arena);
+        } else "";
         const err = try self.makeError(name, msg);
 
         if (aggregate) {
@@ -1285,10 +1292,11 @@ pub const Interpreter = struct {
         }
 
         // ES2022 `cause` option: `new Error(msg, { cause })` installs a
-        // non-enumerable `cause` own property when the options object has one.
+        // non-enumerable `cause` own property when the options object HAS one —
+        // a real HasProperty (walks the prototype chain and fires a Proxy `has`
+        // trap), then [[Get]] reads the value.
         if (args.len > opt_i and args[opt_i] == .object) {
-            const opts = args[opt_i].object;
-            if (opts.getOwn("cause") != null or opts.getAccessor("cause") != null) {
+            if (try self.inOperator(.{ .string = "cause" }, args[opt_i])) {
                 const cause = try self.getProperty(args[opt_i], "cause");
                 try self.setProp(err.object, "cause", cause);
                 try err.object.setAttr(self.arena, "cause", .{ .enumerable = false, .configurable = true, .writable = true });
@@ -3645,19 +3653,27 @@ pub const Interpreter = struct {
 
     fn numberMethod(self: *Interpreter, n: f64, name: []const u8, args: []const Value) EvalError!?Value {
         if (eq(name, "valueOf")) return Value{ .number = n };
-        if (eq(name, "toString") or eq(name, "toLocaleString")) {
+        // toLocaleString ignores any radix argument (no Intl data → default form).
+        if (eq(name, "toLocaleString")) return Value{ .string = try value.numberToString(self.arena, n) };
+        if (eq(name, "toString")) {
             var radix: usize = 10;
             if (args.len > 0 and args[0] != .undefined) {
-                const r = args[0].toNumber();
-                if (r >= 2 and r <= 36) radix = @intFromFloat(r);
+                const r = @trunc(args[0].toNumber());
+                if (std.math.isNan(r) or r < 2 or r > 36)
+                    return self.throwError("RangeError", "toString() radix must be an integer between 2 and 36");
+                radix = @intFromFloat(r);
             }
-            if (radix != 10 and @floor(n) == n and !std.math.isNan(n) and !std.math.isInf(n)) {
-                return Value{ .string = try intToRadix(self.arena, n, radix) };
-            }
-            return Value{ .string = try value.numberToString(self.arena, n) };
+            if (radix == 10) return Value{ .string = try value.numberToString(self.arena, n) };
+            if (std.math.isNan(n)) return Value{ .string = "NaN" };
+            if (std.math.isInf(n)) return Value{ .string = if (n < 0) "-Infinity" else "Infinity" };
+            return Value{ .string = try numberToRadix(self.arena, n, radix) };
         }
         if (eq(name, "toFixed")) {
-            return Value{ .string = try toFixed(self.arena, n, @min(toLen(arg0(args).toNumber()), 18)) };
+            const f = arg0(args).toNumber();
+            const fi = @trunc(f);
+            if (std.math.isNan(f) or fi < 0 or fi > 100)
+                return self.throwError("RangeError", "toFixed() digits must be between 0 and 100");
+            return Value{ .string = try toFixed(self.arena, n, @intFromFloat(fi)) };
         }
         if (eq(name, "toExponential")) {
             if (std.math.isNan(n)) return Value{ .string = "NaN" };
@@ -4555,6 +4571,20 @@ fn symbolToStringTagKey(self: *Interpreter) ?[]const u8 {
     return tt.object.sym_key;
 }
 
+/// `Error.isError(v)` — true iff `v` is an object with [[ErrorData]], looking
+/// through a Proxy to its target (and false for a revoked proxy).
+fn errorIsErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    const v = if (args.len > 0) args[0] else .undefined;
+    if (v != .object) return .{ .boolean = false };
+    var o = v.object;
+    while (o.proxy_handler != null) {
+        if (o.proxy_target) |t| o = t else break;
+    }
+    return .{ .boolean = o.is_error };
+}
+
 /// `Error.prototype.toString`: `"name: message"`, or just one when the other is
 /// empty. Generic — reads `name`/`message` off `this` (so the prototype chain and
 /// `.call(errorLike)` both work).
@@ -5085,6 +5115,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
             try installNativeProps(a, root_shape, stack_set, "set stack", 1);
             try proto.setAccessor(a, "stack", .{ .object = stack_get }, .{ .object = stack_set });
             try proto.setAttr(a, "stack", .{ .enumerable = false, .configurable = true });
+            // ES2025 `Error.isError(v)` — a brand check for [[ErrorData]] (seeing
+            // through a Proxy to its target), independent of the prototype chain.
+            try setNative(a, root_shape, ctor, "isError", 1, errorIsErrorFn);
         }
         try ctor.setOwn(a, root_shape, "prototype", .{ .object = proto });
         try ctor.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
@@ -5701,19 +5734,40 @@ fn arg0(args: []const Value) Value {
 }
 
 /// Integer `n` formatted in `radix` (2–36), e.g. `(255).toString(16)` → "ff".
-fn intToRadix(arena: std.mem.Allocator, n: f64, radix: usize) ![]const u8 {
+/// `n.toString(radix)` for radix ≠ 10 — converts both the integer and (up to a
+/// bounded number of digits) the fractional part of a finite number. Works in
+/// f64 throughout so it isn't limited to u64-range integers.
+fn numberToRadix(arena: std.mem.Allocator, n: f64, radix: usize) ![]const u8 {
     if (n == 0) return "0";
     const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const rf: f64 = @floatFromInt(radix);
     const neg = n < 0;
-    const an = @abs(n);
-    var v: u64 = if (an > 18446744073709551615.0) std.math.maxInt(u64) else @intFromFloat(an);
-    while (v > 0) {
-        try buf.append(arena, digits[@intCast(v % radix)]);
-        v /= radix;
-    }
+    var int_part = @floor(@abs(n));
+    var frac = @abs(n) - int_part;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (neg) try buf.append(arena, '-');
-    std.mem.reverse(u8, buf.items);
+    // Integer part (built least-significant-digit first, then reversed).
+    var int_digits: std.ArrayListUnmanaged(u8) = .empty;
+    if (int_part == 0) {
+        try int_digits.append(arena, '0');
+    } else while (int_part >= 1) {
+        const d = @mod(int_part, rf);
+        try int_digits.append(arena, digits[@intFromFloat(d)]);
+        int_part = @floor(int_part / rf);
+    }
+    std.mem.reverse(u8, int_digits.items);
+    try buf.appendSlice(arena, int_digits.items);
+    // Fractional part, bounded so an inexact binary fraction terminates.
+    if (frac > 0) {
+        try buf.append(arena, '.');
+        var count: usize = 0;
+        while (frac > 0 and count < 52) : (count += 1) {
+            frac *= rf;
+            const d = @floor(frac);
+            try buf.append(arena, digits[@intFromFloat(d)]);
+            frac -= d;
+        }
+    }
     return buf.items;
 }
 
