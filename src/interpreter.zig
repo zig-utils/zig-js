@@ -514,10 +514,23 @@ pub const Interpreter = struct {
             const iter_obj = try self.iteratorOf(iter);
             while (true) {
                 const res = try self.callMethod(iter_obj, "next", &.{});
-                if ((try self.getProperty(res, "done")).toBoolean()) break;
+                if ((try self.getProperty(res, "done")).toBoolean()) break; // exhausted — no close
                 try self.bindLoopTarget(decl_kind, target, try self.getProperty(res, "value"));
-                last = try self.eval(body);
-                if (self.loopSignal(my_label)) |stop| if (stop) break;
+                // A throw in the body closes the iterator before propagating.
+                last = self.eval(body) catch |e| {
+                    self.iteratorClose(iter_obj) catch {};
+                    return e;
+                };
+                // `break`/`return` (an abrupt loop exit) also closes the iterator.
+                if (self.loopSignal(my_label)) |stop| if (stop) {
+                    const ss = self.signal;
+                    const sr = self.ret_value;
+                    self.signal = .none;
+                    self.iteratorClose(iter_obj) catch {};
+                    self.signal = ss;
+                    self.ret_value = sr;
+                    break;
+                };
             }
         } else {
             // for-in: enumerate keys (skip null/undefined per spec).
