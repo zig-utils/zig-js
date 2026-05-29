@@ -1054,7 +1054,7 @@ pub const Interpreter = struct {
     /// path; everything else (strings, generators, Sets/Maps, user objects with
     /// `[Symbol.iterator]`) goes through the iterator protocol.
     fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
-        if (v == .object and v.object.is_array) {
+        if (v == .object and v.object.is_array and self.arrayIterIntact()) {
             for (v.object.elements.items) |e| try list.append(self.arena, e);
             return;
         }
@@ -2241,9 +2241,10 @@ pub const Interpreter = struct {
         if (val == .undefined or val == .null)
             return self.throwError("TypeError", "cannot destructure null or undefined");
 
-        // Fast path: a real array or a string — index directly, no iterator
-        // object churn.
-        if ((val == .object and val.object.is_array) or val == .string) {
+        // Fast path: a real array (whose `Array.prototype[Symbol.iterator]` is
+        // still the native one) or a string — index directly, no iterator object
+        // churn. A deleted/overridden array iterator falls to the general path.
+        if ((val == .object and val.object.is_array and self.arrayIterIntact()) or val == .string) {
             var idx: usize = 0;
             for (elems) |elem| {
                 var v = try self.elementAt(val, idx);
@@ -2532,10 +2533,21 @@ pub const Interpreter = struct {
                             return try self.callValueWithThis(itfn, &.{}, v);
                     }
                 }
+                // An array honors a deleted/overridden `Array.prototype[Symbol.iterator]`.
+                if (o.is_array) {
+                    switch (self.arrayIterState()) {
+                        .intact => return self.makeCursorIterator(v),
+                        .deleted => return self.throwError("TypeError", "value is not iterable"),
+                        .custom => |m| {
+                            if (!m.isCallable()) return self.throwError("TypeError", "value is not iterable");
+                            return try self.callValueWithThis(m, &.{}, v);
+                        },
+                    }
+                }
                 if (hasProperty(o, "next")) return v; // already an iterator (manual or generator-like)
-                // Arrays, Sets (element = value) and Maps (element = [k,v] pair)
-                // all iterate their dense `elements` store via an index cursor.
-                if (o.is_array or o.is_set or o.is_map) return self.makeCursorIterator(v);
+                // Sets (element = value) and Maps (element = [k,v] pair) iterate
+                // their dense `elements` store via an index cursor.
+                if (o.is_set or o.is_map) return self.makeCursorIterator(v);
                 return self.throwError("TypeError", "value is not iterable");
             },
             .string => return self.makeCursorIterator(v),
@@ -2578,6 +2590,37 @@ pub const Interpreter = struct {
         try self.setProp(it, "__i", .{ .number = 0 });
         try setNative(self.arena, self.root_shape, it, "next", 0, cursorIterNext);
         return .{ .object = it };
+    }
+
+    /// `Array.prototype` (the global), for consulting/observing its
+    /// `[Symbol.iterator]` slot. Arrays don't carry a `proto` pointer, so this
+    /// resolves it through the `Array` global instead.
+    fn arrayProtoObj(self: *Interpreter) ?*value.Object {
+        const av = self.env.get("Array") orelse return null;
+        if (av != .object) return null;
+        const p = av.object.getOwn("prototype") orelse return null;
+        return if (p == .object) p.object else null;
+    }
+
+    /// The current `Array.prototype[Symbol.iterator]` slot: `.intact` (still the
+    /// native array-values iterator → fast index cursor is valid), `.deleted`
+    /// (no iterator → not iterable), or `.custom` (a user replacement to call).
+    const ArrayIter = union(enum) { intact, deleted, custom: Value };
+    fn arrayIterState(self: *Interpreter) ArrayIter {
+        const ap = self.arrayProtoObj() orelse return .intact;
+        const ik = self.symbolIteratorKey() orelse return .intact;
+        const slot = ap.getOwn(ik) orelse return .deleted;
+        if (slot == .object and slot.object.native == arrayValuesIterFn) return .intact;
+        return .{ .custom = slot };
+    }
+
+    /// Whether `Array.prototype[Symbol.iterator]` is still the native iterator,
+    /// so the array index fast paths are valid.
+    fn arrayIterIntact(self: *Interpreter) bool {
+        return switch (self.arrayIterState()) {
+            .intact => true,
+            else => false,
+        };
     }
 
     /// Dispatch `Array.prototype` / `String.prototype` methods (which aren't
@@ -4403,6 +4446,20 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     }
     try env.put("Symbol", .{ .object = symbol_ns });
 
+    // `Array.prototype[Symbol.iterator]` as a real, deletable/overridable own
+    // property (the native array-values iterator). The iteration paths consult
+    // this slot, so `delete`/reassigning it changes how arrays destructure /
+    // spread / `for-of`. (Symbol must already exist, hence after its setup.)
+    if (symbol_ns.getOwn("iterator")) |it_sym| {
+        if (it_sym == .object and it_sym.object.is_symbol) {
+            const it_fn = try a.create(value.Object);
+            it_fn.* = .{ .native = arrayValuesIterFn };
+            try installFunctionProps(a, root_shape, it_fn, &.{}, "[Symbol.iterator]");
+            try array_proto.setOwn(a, root_shape, it_sym.object.sym_key, .{ .object = it_fn });
+            try array_proto.setAttr(a, it_sym.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
+        }
+    }
+
     // Date — callable + constructable, with Date.now and a prototype.
     const date_ns = try a.create(value.Object);
     date_ns.* = .{ .native = dateConstructor, .native_ctor = true };
@@ -4433,6 +4490,16 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the
 /// captured array/string, then `{ done: true }`.
+/// `Array.prototype[Symbol.iterator]` / `Array.prototype.values`: returns a
+/// fresh index cursor over `this`. Installed as a real own property so it can be
+/// deleted or replaced; the iteration paths recognize this exact native to take
+/// their fast index path.
+fn arrayValuesIterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.makeCursorIterator(this);
+}
+
 fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
