@@ -1722,10 +1722,10 @@ pub const Interpreter = struct {
                 if (global or sticky) try self.setProp(o, "lastIndex", .{ .number = @floatFromInt(li + m.end) });
                 const arr = try self.newArray();
                 try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
-                for (m.captures) |c| try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, c) });
+                for (0..m.captures.len) |i| try arr.object.elements.append(self.arena, try self.captureVal(m, i));
                 try self.setProp(arr.object, "index", .{ .number = @floatFromInt(mstart) });
                 try self.setProp(arr.object, "input", .{ .string = input });
-                const groups = try self.regexGroups(&re, m.captures);
+                const groups = try self.regexGroups(&re, m);
                 try self.setProp(arr.object, "groups", if (groups) |g| .{ .object = g } else .undefined);
                 return arr;
             }
@@ -3926,8 +3926,8 @@ pub const Interpreter = struct {
                     }
                     try out.append(self.arena, .{ .string = try self.arena.dupe(u8, s[p..m_start]) });
                     if (out.items.len >= lim) return result;
-                    for (m.captures) |c| {
-                        try out.append(self.arena, .{ .string = try self.arena.dupe(u8, c) });
+                    for (0..m.captures.len) |ci| {
+                        try out.append(self.arena, try self.captureVal(m, ci));
                         if (out.items.len >= lim) return result;
                     }
                     p = m_end;
@@ -4004,13 +4004,13 @@ pub const Interpreter = struct {
                     if (is_func) {
                         var call_args: std.ArrayListUnmanaged(Value) = .empty;
                         try call_args.append(a, .{ .string = try a.dupe(u8, m.slice) });
-                        for (m.captures) |c| try call_args.append(a, .{ .string = try a.dupe(u8, c) });
+                        for (0..m.captures.len) |i| try call_args.append(a, try self.captureVal(m, i));
                         try call_args.append(a, .{ .number = @floatFromInt(mstart) });
                         try call_args.append(a, .{ .string = s });
                         const r = try self.callValue(repl_val, call_args.items);
                         try buf.appendSlice(a, try r.toString(a));
                     } else {
-                        const groups = try self.regexGroups(&re, m.captures);
+                        const groups = try self.regexGroups(&re, m);
                         try self.getSubstitution(&buf, template, m.slice, s, mstart, m.captures, groups);
                     }
                     last = mend;
@@ -4132,17 +4132,24 @@ pub const Interpreter = struct {
         return (try self.makeRegex(pat, "")).object;
     }
 
+    /// A capture group's value: `undefined` when the group did not participate
+    /// in the match (an unmatched optional), else its matched substring.
+    fn captureVal(self: *Interpreter, m: regex.Match, i: usize) EvalError!Value {
+        if (i < m.captures_present.len and !m.captures_present[i]) return .undefined;
+        return .{ .string = try self.arena.dupe(u8, m.captures[i]) };
+    }
+
     /// The `groups` object for a match — `{ name: capture }` for each named
     /// group — or null when the pattern has no named groups (then `groups` is
     /// `undefined`).
-    fn regexGroups(self: *Interpreter, re: *regex.Regex, captures: []const []const u8) EvalError!?*value.Object {
+    fn regexGroups(self: *Interpreter, re: *regex.Regex, m: regex.Match) EvalError!?*value.Object {
         if (re.named_captures.count() == 0) return null;
         const o = (try self.newObject()).object;
         var it = re.named_captures.iterator();
         while (it.next()) |e| {
             const idx = e.value_ptr.*; // 1-based capture index
-            const v: Value = if (idx >= 1 and idx <= captures.len)
-                .{ .string = try self.arena.dupe(u8, captures[idx - 1]) }
+            const v: Value = if (idx >= 1 and idx <= m.captures.len)
+                try self.captureVal(m, idx - 1)
             else
                 .undefined;
             try self.setProp(o, e.key_ptr.*, v);
