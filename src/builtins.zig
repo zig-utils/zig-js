@@ -778,6 +778,10 @@ pub fn objectDefineProperties(ctx: *anyopaque, this: Value, args: []const Value)
 /// the shared core of `Object.defineProperties` and `Object.create`'s second
 /// argument. Each value must itself be an object (a property descriptor).
 fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) HostError!void {
+    // ToObject(Properties): null/undefined throw; other primitives box to an
+    // object with no own enumerable properties (a no-op).
+    if (props == .null or props == .undefined)
+        return self.throwError("TypeError", "Cannot convert undefined or null to object");
     if (props != .object) return;
     for (try props.object.enumerableKeys(self.arena)) |k| {
         const d = props.object.getOwn(k) orelse continue;
