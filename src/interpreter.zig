@@ -669,7 +669,29 @@ pub const Interpreter = struct {
 
     fn evalFor(self: *Interpreter, init_node: ?*Node, cond: ?*Node, update: ?*Node, body: *Node) EvalError!Value {
         const my_label = self.takeLabel();
-        if (init_node) |ini| _ = try self.eval(ini);
+        // Collect the lexical (`let`/`const`) binding names declared in the init,
+        // if any. They get a fresh, value-copied environment each iteration so a
+        // closure created in the body captures that iteration's binding.
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        if (init_node) |ini| collectForLexNames(ini, &names, self.arena);
+        const lexical = names.items.len > 0;
+
+        const outer = self.env;
+        defer if (lexical) {
+            self.env = outer;
+        };
+        if (init_node) |ini| {
+            if (lexical) {
+                // The loop's lexical declaration lives in its own environment.
+                const loop_env = try self.arena.create(Environment);
+                loop_env.* = .{ .arena = self.arena, .parent = outer };
+                self.env = loop_env;
+            }
+            _ = try self.eval(ini);
+        }
+        // CreatePerIterationEnvironment (initial copy, before the first test).
+        if (lexical) self.env = try self.perIterEnv(outer, names.items, self.env);
+
         var last: Value = .undefined;
         while (true) {
             if (cond) |c| {
@@ -677,9 +699,52 @@ pub const Interpreter = struct {
             }
             last = try self.eval(body);
             if (self.loopSignal(my_label)) |stop| if (stop) break;
+            // CreatePerIterationEnvironment: copy this iteration's bindings into a
+            // fresh env, then run the update against it.
+            if (lexical) self.env = try self.perIterEnv(outer, names.items, self.env);
             if (update) |u| _ = try self.eval(u);
         }
         return last;
+    }
+
+    /// A fresh per-iteration environment for a `for (let …; …; …)` loop: a child
+    /// of `outer` holding each lexical binding, value-copied from `prev`.
+    fn perIterEnv(self: *Interpreter, outer: *Environment, names: []const []const u8, prev: *Environment) EvalError!*Environment {
+        const e = try self.arena.create(Environment);
+        e.* = .{ .arena = self.arena, .parent = outer };
+        for (names) |n| try e.put(n, prev.get(n) orelse .undefined);
+        return e;
+    }
+
+    /// Collect the names bound by a `for` loop's lexical (`let`/`const`) init.
+    /// Returns nothing for a `var`/expression init (no per-iteration scope).
+    fn collectForLexNames(node: *Node, out: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator) void {
+        switch (node.*) {
+            .var_decl => |d| if (d.kind != .@"var") {
+                out.append(arena, d.name) catch {};
+            },
+            .destructure_decl => |d| if (d.kind != .@"var") {
+                collectPatternNames(d.pattern, out, arena);
+            },
+            .decl_group => |group| for (group) |n| collectForLexNames(n, out, arena),
+            else => {},
+        }
+    }
+
+    /// Append every identifier bound by a destructuring pattern.
+    fn collectPatternNames(target: *Node, out: *std.ArrayListUnmanaged([]const u8), arena: std.mem.Allocator) void {
+        switch (target.*) {
+            .identifier => |name| out.append(arena, name) catch {},
+            .obj_pattern => |p| {
+                for (p.props) |pr| collectPatternNames(pr.target, out, arena);
+                if (p.rest) |r| out.append(arena, r) catch {};
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |e| if (e.target) |t| collectPatternNames(t, out, arena);
+                if (p.rest) |r| collectPatternNames(r, out, arena);
+            },
+            else => {},
+        }
     }
 
     /// Consume the label of the enclosing `labeled_stmt`, if any. A loop calls
