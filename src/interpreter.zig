@@ -4274,10 +4274,17 @@ pub const Interpreter = struct {
     pub fn instanceOf(self: *Interpreter, l: Value, r: Value) EvalError!bool {
         if (r != .object or !r.object.isCallableObject())
             return self.throwError("TypeError", "Right-hand side of 'instanceof' is not callable");
+        return self.ordinaryHasInstance(r.object, l);
+    }
+
+    /// OrdinaryHasInstance(C=`rc`, O=`l`): is `rc.prototype` in `l`'s prototype
+    /// chain? Plus the engine's constructor-identity shortcuts. Assumes `rc` is
+    /// already known callable (false otherwise).
+    pub fn ordinaryHasInstance(self: *Interpreter, rc: *value.Object, l: Value) EvalError!bool {
+        _ = self;
+        if (!rc.isCallableObject()) return false;
         if (l != .object) return false;
         const lo = l.object;
-        const rc = r.object;
-        // Prototype-chain check: is `rc.prototype` anywhere in `lo`'s proto chain?
         if (rc.getOwn("prototype")) |p| {
             if (p == .object) {
                 var cur: ?*value.Object = lo.proto;
@@ -4295,6 +4302,14 @@ pub const Interpreter = struct {
         return false;
     }
 };
+
+/// `Function.prototype[Symbol.hasInstance](O)` — OrdinaryHasInstance with the
+/// bound function `this` as the constructor (false when `this` isn't callable).
+fn functionHasInstanceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return .{ .boolean = false };
+    return .{ .boolean = try self.ordinaryHasInstance(this.object, if (args.len > 0) args[0] else .undefined) };
+}
 
 /// The global `eval`. Direct eval: the program text is parsed and run in the
 /// *current* lexical environment (`self.env` at the call site — natives don't
@@ -5340,6 +5355,18 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         try symbol_proto.setAttr(a, tst.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
     };
     try env.put("Symbol", .{ .object = symbol_ns });
+
+    // Function.prototype[Symbol.hasInstance] — a {!w,!e,!c} method backing the
+    // ordinary `instanceof` (installed now that the well-known symbol exists).
+    if (symbol_ns.getOwn("hasInstance")) |hi| if (hi == .object) {
+        if (func_proto.getOwn(hi.object.sym_key) == null) {
+            const m = try a.create(value.Object);
+            m.* = .{ .native = functionHasInstanceFn };
+            try installNativeProps(a, root_shape, m, "[Symbol.hasInstance]", 1);
+            try func_proto.setOwn(a, root_shape, hi.object.sym_key, .{ .object = m });
+            try func_proto.setAttr(a, hi.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
+        }
+    };
 
     // Proxy (constructor) + Proxy.revocable.
     const proxy_ns = try a.create(value.Object);
