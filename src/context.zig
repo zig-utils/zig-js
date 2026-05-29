@@ -1093,39 +1093,27 @@ test "async: declarations/expressions/arrows/methods parse; never-called is vali
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function* ag() { yield await 1; } 1")).number);
 }
 
-test "async/await: synchronous-settling runtime" {
+test "async/await: suspendable runtime with spec ordering" {
     // An async function returns a Promise.
     try std.testing.expect((try evalIn("(async function () { return 1; })() instanceof Promise")).boolean);
-    // await settles inline (the body runs eagerly), so a value written inside the
-    // async function before it returns is observable synchronously.
-    try std.testing.expectEqual(@as(f64, 42), (try evalIn(
+    // The body runs synchronously up to the first `await` (no await here), so a
+    // write before any suspension is observable synchronously.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\var x = 0;
+        \\async function f() { x = 7; return 1; }
+        \\f();
+        \\x
+    )).number);
+    // A continuation *after* an `await` runs in a microtask, so it is NOT visible
+    // synchronously (it was, incorrectly, under the old synchronous-settling
+    // model). The value is verified end-to-end by the test262 async suite.
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn(
         \\var result = 0;
         \\async function f() { result = await Promise.resolve(41) + 1; }
         \\f();
         \\result
     )).number);
-    // await of a rejected promise throws inside the async body (catchable).
-    try std.testing.expectEqual(@as(f64, 9), (try evalIn(
-        \\var out = 0;
-        \\async function g() { try { await Promise.reject(5); } catch (e) { out = e + 4; } }
-        \\g();
-        \\out
-    )).number);
     try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).boolean);
-    // Promise.all aggregates in order; observed inside an async awaiter.
-    try std.testing.expectEqual(@as(f64, 6), (try evalIn(
-        \\var sum = 0;
-        \\async function f() { var a = await Promise.all([1, 2, 3]); sum = a[0] + a[1] + a[2]; }
-        \\f();
-        \\sum
-    )).number);
-    // Promise.race settles with the first (already-resolved) input.
-    try std.testing.expectEqual(@as(f64, 10), (try evalIn(
-        \\var r = 0;
-        \\async function f() { r = await Promise.race([Promise.resolve(10), 20]); }
-        \\f();
-        \\r
-    )).number);
 }
 
 test "array destructuring over the iterator protocol (generator, Set, string, rest)" {

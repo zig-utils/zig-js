@@ -16,6 +16,7 @@ const std = @import("std");
 const bc = @import("bytecode.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
+const promise = @import("promise.zig");
 
 const Value = value.Value;
 const Chunk = bc.Chunk;
@@ -79,6 +80,11 @@ pub const Generator = struct {
     done: bool = false,
     suspended: bool = false,
     running: bool = false,
+    /// An async function activation (vs a `function*`). It is driven by promise
+    /// settlement rather than `.next()`: each `await` suspends like a `yield`,
+    /// and `result` is the promise the call returned, settled on completion.
+    is_async: bool = false,
+    result: ?*value.Object = null,
 };
 
 /// Property-key string for a computed index: a Symbol uses its unique internal
@@ -556,15 +562,11 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
             .throw_ => {
                 // Inject the exception at the suspend point: unwind to the
                 // generator's own nearest handler, or finish if there is none.
-                if (g.exec.handlers.items.len == 0) {
+                if (!try injectThrowAt(vm, g, val)) {
                     g.done = true;
                     vm.exception = val;
                     return error.Throw;
                 }
-                const h = g.exec.handlers.pop().?;
-                g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
-                try g.exec.stack.append(vm.arena, val);
-                g.exec.ip = h.catch_pc;
             },
         }
     }
@@ -618,6 +620,144 @@ pub fn genReturn(vm: *Interpreter, gen_obj: *value.Object, v: Value) EvalError!V
 /// propagates to the caller.
 pub fn genThrow(vm: *Interpreter, gen_obj: *value.Object, e: Value) EvalError!Value {
     return genResume(vm, gen_obj, .throw_, e);
+}
+
+/// Route a thrown value `e` to the suspended activation's nearest handler:
+/// jump to its catch block (pushing `e`), or run its finally with a "throw"
+/// completion. Returns false when there's no handler (the caller propagates).
+fn injectThrowAt(vm: *Interpreter, g: *Generator, e: Value) EvalError!bool {
+    if (g.exec.handlers.items.len == 0) return false;
+    const h = g.exec.handlers.pop().?;
+    g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
+    if (h.catch_pc != Handler.none) {
+        try g.exec.stack.append(vm.arena, e); // catch binding
+        g.exec.ip = h.catch_pc;
+    } else {
+        try g.exec.stack.append(vm.arena, e); // finally completion value
+        try g.exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.throw)) });
+        g.exec.ip = h.finally_pc;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Async functions: a plain `async function` compiled to a suspendable body is
+// run as an activation driven by promise settlement. Calling it builds the
+// activation and a result promise, runs to the first `await` (or completion),
+// and returns the promise; each awaited value's settlement resumes the body.
+// ---------------------------------------------------------------------------
+
+/// Call a VM-compiled async function: build the activation, start it, and
+/// return its result promise.
+pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
+    const chunk = func.async_chunk.?;
+    const genv = try vm.arena.create(Environment);
+    genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
+    const args_obj = try vm.newArray();
+    for (args) |av| try args_obj.object.elements.append(vm.arena, av);
+    try genv.put("arguments", args_obj);
+    const saved_env = vm.env;
+    vm.env = genv;
+    defer vm.env = saved_env;
+    try vm.bindParams(func.params, args);
+
+    const g = try vm.arena.create(Generator);
+    g.* = .{
+        .chunk = chunk,
+        .env = genv,
+        .this_value = this_val,
+        .home_object = func.home_object,
+        .super_ctor = func.super_ctor,
+        .is_async = true,
+        .result = try promise.newPromise(vm),
+    };
+    try asyncDrive(vm, g, .send, .undefined);
+    return .{ .object = g.result.? };
+}
+
+fn resultPromise(g: *Generator) *promise.Promise {
+    return @ptrCast(@alignCast(g.result.?.promise.?));
+}
+
+/// Run the async activation until its next `await` or completion, then settle
+/// its result promise (on return/throw) or wire resume reactions (on await).
+fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!void {
+    if (g.done or g.running) return;
+    if (g.started) {
+        switch (kind) {
+            .send => try g.exec.stack.append(vm.arena, val), // the awaited value
+            .throw_ => {
+                // An awaited rejection: route to a handler, else reject the result.
+                if (!try injectThrowAt(vm, g, val)) {
+                    g.done = true;
+                    try promise.reject(vm, resultPromise(g), val);
+                    return;
+                }
+            },
+            .return_ => {},
+        }
+    }
+    g.started = true;
+    g.running = true;
+    defer g.running = false;
+    g.suspended = false;
+
+    const s_env = vm.env;
+    const s_this = vm.this_value;
+    const s_home = vm.home_object;
+    const s_super = vm.super_ctor;
+    vm.env = g.env;
+    vm.this_value = g.this_value;
+    vm.home_object = g.home_object;
+    vm.super_ctor = g.super_ctor;
+    defer {
+        vm.env = s_env;
+        vm.this_value = s_this;
+        vm.home_object = s_home;
+        vm.super_ctor = s_super;
+    }
+    if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
+    vm.depth += 1;
+    defer vm.depth -= 1;
+
+    const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
+        if (e != error.Throw) return e;
+        g.done = true;
+        const reason = vm.exception;
+        vm.exception = .undefined;
+        try promise.reject(vm, resultPromise(g), reason);
+        return;
+    };
+    if (g.suspended) {
+        // `await v`: resume when `Promise.resolve(v)` settles.
+        g.suspended = false;
+        const awaited = try promise.newPromise(vm);
+        try promise.resolve(vm, @ptrCast(@alignCast(awaited.promise.?)), v);
+        const onf = try vm.arena.create(value.Object);
+        onf.* = .{ .native = asyncOnFulfill, .private_data = @ptrCast(g) };
+        const onr = try vm.arena.create(value.Object);
+        onr.* = .{ .native = asyncOnReject, .private_data = @ptrCast(g) };
+        _ = try promise.then(vm, @ptrCast(@alignCast(awaited.promise.?)), .{ .object = onf }, .{ .object = onr });
+        return;
+    }
+    g.done = true;
+    try promise.resolve(vm, resultPromise(g), v);
+}
+
+fn asyncOnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try asyncDrive(vm, g, .send, if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
+fn asyncOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try asyncDrive(vm, g, .throw_, if (args.len > 0) args[0] else .undefined);
+    return .undefined;
 }
 
 /// Map a binary opcode back to the shared `ast.BinaryOp`. The opcode set mirrors

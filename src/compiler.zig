@@ -68,6 +68,9 @@ pub const Compiler = struct {
     loops: std.ArrayListUnmanaged(*Loop) = .empty,
     /// True while lowering a generator body, so `yield` may emit `gen_yield`.
     in_generator: bool = false,
+    /// True while lowering an async function body, so `await` may suspend (it
+    /// reuses `gen_yield`; the async driver resumes it on promise settlement).
+    in_async: bool = false,
     /// Counter for synthesized temp names (`yield*` iterator/result holders).
     tmp_counter: u32 = 0,
     /// >0 while compiling inside a `try` that has a `finally`. Abrupt control
@@ -109,6 +112,26 @@ pub const Compiler = struct {
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true };
         try c.compileStmt(fnode.body); // body is a block
         _ = try chunk.emit(.ret_undef, 0);
+        try chunk.finalize();
+        return chunk;
+    }
+
+    /// Compile a plain `async function` body for the suspendable VM (env-mode,
+    /// like a generator). `await` lowers to a suspend (`gen_yield`); the async
+    /// driver promisifies the suspended value, resumes on settlement, and
+    /// settles the function's result promise on completion.
+    pub fn compileAsync(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!*Chunk {
+        if (fnode.is_generator) return error.Unsupported; // async generators not lowered yet
+        const chunk = try arena.create(Chunk);
+        chunk.* = Chunk.init(arena);
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_async = true };
+        if (fnode.is_expr_body) {
+            try c.compileExpr(fnode.body);
+            _ = try chunk.emit(.ret, 0);
+        } else {
+            try c.compileStmt(fnode.body);
+            _ = try chunk.emit(.ret_undef, 0);
+        }
         try chunk.finalize();
         return chunk;
     }
@@ -664,9 +687,13 @@ pub const Compiler = struct {
                     _ = try self.chunk.emit(.gen_yield, 0);
                 }
             },
-            // `await` isn't lowered; async bodies run via the tree-walker (which
-            // currently reports them as not-yet-executable).
-            .await_expr => return error.Unsupported,
+            // `await e` suspends like a yield; the async driver promisifies the
+            // value and resumes with the settled result (or injects a throw).
+            .await_expr => |a| {
+                if (!self.in_async) return error.Unsupported;
+                try self.compileExpr(a.argument);
+                _ = try self.chunk.emit(.gen_yield, 0);
+            },
             // Statement-only nodes never appear in expression position.
             else => return error.Unsupported,
         }

@@ -146,6 +146,10 @@ pub const Function = struct {
     /// *calling* an async function throws; it parses and binds like any other
     /// function (a never-called async function is fully valid).
     is_async: bool = false,
+    /// A plain async function's body compiled for the suspendable VM, where
+    /// `await` is a suspend point driven by promise settlement (null if the body
+    /// falls outside the VM's lowered subset → the tree-walker handles it).
+    async_chunk: ?*bc.Chunk = null,
     /// Strict-mode function (see `ast.FunctionNode.is_strict`). Gates sloppy-only
     /// behaviors — currently `this`-substitution on a null/undefined receiver.
     is_strict: bool = false,
@@ -916,6 +920,13 @@ pub const Interpreter = struct {
                 error.Unsupported => null,
                 error.OutOfMemory => return error.OutOfMemory,
             };
+        } else if (fnode.is_async) {
+            // A plain async function compiles to a suspendable body (await is a
+            // suspend point); null on unsupported syntax → tree-walk fallback.
+            func.async_chunk = Compiler.compileAsync(self.arena, fnode) catch |e| switch (e) {
+                error.Unsupported => null,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
         }
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .js_func = @ptrCast(func), .proto = self.functionProto() };
@@ -1357,6 +1368,10 @@ pub const Interpreter = struct {
         // awaited promise settles (the synchronous-settling model). Async
         // generators still need the suspendable VM, so they fall through.
         if (func.is_async and !func.is_generator) {
+            // A body the VM could lower runs as a suspendable activation driven
+            // by promise settlement (spec-correct await ordering). Otherwise fall
+            // back to the synchronous-settling tree-walk model below.
+            if (func.async_chunk) |_| return vm.runAsync(self, func, args, this_val);
             const result = try promise.newPromise(self);
             const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
             if (self.callPlain(func, args, this_val, new_target)) |rv| {
