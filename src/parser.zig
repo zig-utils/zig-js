@@ -354,6 +354,9 @@ pub const Parser = struct {
             if (self.match(.assign)) {
                 init_expr = try self.parseAssignment();
                 nameAnon(init_expr.?, name_tok.text);
+            } else if (kind == .@"const") {
+                // A `const` declaration (in statement position) requires an initializer.
+                return ParseError.UnexpectedToken;
             }
             try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr } }));
             if (!self.match(.comma)) break;
