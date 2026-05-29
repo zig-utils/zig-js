@@ -402,6 +402,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const v = stack.pop().?;
                 try stack.append(vm.arena, try vm.iteratorOf(v));
             },
+            .async_iter_of => {
+                const v = stack.pop().?;
+                try stack.append(vm.arena, try vm.asyncIteratorOf(v));
+            },
             .enum_keys => {
                 const v = stack.pop().?;
                 try stack.append(vm.arena, try vm.forInKeysArray(v));

@@ -436,10 +436,12 @@ pub const Parser = struct {
 
     fn parseFor(self: *Parser) ParseError!*Node {
         _ = self.advance(); // for
-        // `for await (x of asyncIterable)` — only inside an async function. We
-        // parse it like a `for-of` (the async iteration semantics are part of
-        // the not-yet-executable async runtime); this lets the syntax parse.
-        if (self.in_async and isKeyword(self.cur(), "await")) _ = self.advance();
+        // `for await (x of asyncIterable)` — only inside an async function.
+        var is_await = false;
+        if (self.in_async and isKeyword(self.cur(), "await")) {
+            _ = self.advance();
+            is_await = true;
+        }
         try self.expect(.lparen);
 
         // Detect `for (... in/of ...)`. Save position so we can fall back to a
@@ -473,6 +475,7 @@ pub const Parser = struct {
                     .iterable = iterable,
                     .body = body,
                     .is_of = is_of,
+                    .is_await = is_await,
                 } });
             }
         }

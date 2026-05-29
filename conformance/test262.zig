@@ -189,7 +189,6 @@ fn parseMeta(src: []const u8) Meta {
         // combinators, exact ordering), so it stays skipped like modules; the
         // runtime is exercised by the unit tests and the Promise built-ins.
         if (std.mem.indexOf(u8, flags, "module") != null or
-            std.mem.indexOf(u8, flags, "async") != null or
             std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
             meta.unsupported_flag = true;
     }
@@ -282,6 +281,15 @@ fn runOne(gpa: std.mem.Allocator, harness: *Harness, src: []const u8) Outcome {
             const inc = harness.get(meta.includes[i]) orelse return .skip; // can't load → skip
             buf.appendSlice(gpa, inc) catch return .skip;
             buf.append(gpa, '\n') catch return .skip;
+        }
+        // Async tests signal completion via `$DONE`, defined in
+        // doneprintHandle.js — which the harness auto-provides for the `async`
+        // flag rather than listing in `includes:`.
+        if (meta.is_async) {
+            if (harness.get("doneprintHandle.js")) |dph| {
+                buf.appendSlice(gpa, dph) catch return .skip;
+                buf.append(gpa, '\n') catch return .skip;
+            }
         }
     }
     buf.appendSlice(gpa, src) catch return .skip;

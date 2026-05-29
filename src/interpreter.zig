@@ -547,14 +547,14 @@ pub const Interpreter = struct {
             },
             .for_stmt => |f| try self.evalFor(f.init, f.cond, f.update, f.body),
             .switch_stmt => |s| try self.evalSwitch(s.disc, s.cases),
-            .for_in => |f| try self.evalForInOf(f.decl_kind, f.target, f.iterable, f.body, f.is_of),
+            .for_in => |f| try self.evalForInOf(f.decl_kind, f.target, f.iterable, f.body, f.is_of, f.is_await),
         };
     }
 
     /// `for-of` (values of arrays/strings) and `for-in` (own keys of objects /
     /// indices of arrays). Each iteration binds the loop variable then runs the
     /// body, honoring break/continue/return.
-    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool) EvalError!Value {
+    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool) EvalError!Value {
         const my_label = self.takeLabel();
         // A `let`/`const` loop binding gets a fresh declarative environment per
         // iteration, so a closure created in the head or body captures *that*
@@ -583,9 +583,12 @@ pub const Interpreter = struct {
             // Generic iterator protocol: obtain the iterator (generators are
             // their own; arrays/strings get an index cursor; a user object's
             // `[Symbol.iterator]()` is honored), then pull `.next()` until done.
-            const iter_obj = try self.iteratorOf(iter);
+            // `for await`: the async iterator (Symbol.asyncIterator, else a sync
+            // iterator) and each `next()` result is awaited.
+            const iter_obj = if (is_await) try self.asyncIteratorOf(iter) else try self.iteratorOf(iter);
             while (true) {
-                const res = try self.callMethod(iter_obj, "next", &.{});
+                const res0 = try self.callMethod(iter_obj, "next", &.{});
+                const res = if (is_await) try self.awaitValue(res0) else res0;
                 if ((try self.getProperty(res, "done")).toBoolean()) break; // exhausted — no close
                 const saved_env = self.env;
                 defer self.env = saved_env;
@@ -1597,10 +1600,14 @@ pub const Interpreter = struct {
     /// throw its rejection). A non-promise (or thenable-free value) is returned
     /// as-is. Not spec-faithful on ordering, but correct on values.
     fn evalAwait(self: *Interpreter, arg_node: *Node) EvalError!Value {
-        const v = try self.eval(arg_node);
+        return self.awaitValue(try self.eval(arg_node));
+    }
+
+    /// `await v` on an already-evaluated value (synchronous-settling): if `v` is
+    /// a promise, drive the microtask queue until it settles, then return its
+    /// value (or throw its rejection). A non-promise is returned as-is.
+    pub fn awaitValue(self: *Interpreter, v: Value) EvalError!Value {
         const p = promise.promiseOf(v) orelse return v;
-        // Pump microtasks until the awaited promise leaves the pending state
-        // (the step budget bounds a promise that never settles synchronously).
         const q = self.microtasks;
         while (p.state == .pending) {
             const queue = q orelse break;
@@ -2947,6 +2954,28 @@ pub const Interpreter = struct {
         const it = sym.object.getOwn("iterator") orelse return null;
         if (it != .object or !it.object.is_symbol) return null;
         return it.object.sym_key;
+    }
+
+    fn symbolAsyncIteratorKey(self: *Interpreter) ?[]const u8 {
+        const sym = self.env.get("Symbol") orelse return null;
+        if (sym != .object) return null;
+        const it = sym.object.getOwn("asyncIterator") orelse return null;
+        if (it != .object or !it.object.is_symbol) return null;
+        return it.object.sym_key;
+    }
+
+    /// The async iterator for `for await`: `obj[Symbol.asyncIterator]()` if
+    /// present, else the sync iterator (whose `{value,done}` results `await`
+    /// trivially resolves).
+    pub fn asyncIteratorOf(self: *Interpreter, v: Value) EvalError!Value {
+        if (self.symbolAsyncIteratorKey()) |ik| {
+            if (v == .object and hasProperty(v.object, ik)) {
+                const m = try self.getProperty(v, ik);
+                if (m == .object and m.object.isCallableObject())
+                    return try self.callValueWithThis(m, &.{}, v);
+            }
+        }
+        return self.iteratorOf(v);
     }
 
     /// Wrap an array/string in an iterator object: `__src` + `__i` own properties

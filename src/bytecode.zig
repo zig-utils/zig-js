@@ -116,6 +116,7 @@ pub const Op = enum(u8) {
     // --- generators / iteration ---
     gen_yield, // pop -> yielded value, suspend the frame; resume pushes the sent value
     iter_of, // pop iterable -> push an iterator object (has a `.next()`); for `yield*`
+    async_iter_of, // pop iterable -> push its async iterator (Symbol.asyncIterator, else a sync iterator); for `for await`
     enum_keys, // pop object -> push an array of its for-in keys (own enumerable + array indices)
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)

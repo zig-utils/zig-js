@@ -229,7 +229,7 @@ pub const Node = union(enum) {
     /// `target` may be an identifier, a destructuring pattern, or (for the
     /// assignment form) a member expression. `is_of` picks `for-of` (values) vs
     /// `for-in` (keys).
-    for_in: struct { decl_kind: ?DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool },
+    for_in: struct { decl_kind: ?DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool = false },
     switch_stmt: struct { disc: *Node, cases: []SwitchCase },
     with_stmt: struct { obj: *Node, body: *Node },
     program: []*Node,

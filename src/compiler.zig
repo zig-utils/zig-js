@@ -263,9 +263,10 @@ pub const Compiler = struct {
             },
             .for_in => |f| {
                 // for-of works everywhere it's lowered; for-in is lowered only in
-                // generators (via `enum_keys`), else it falls back to the tree-walker.
+                // generators (via `enum_keys`); for-await only in async bodies.
                 if (!f.is_of and !self.in_generator) return error.Unsupported;
-                try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body, !f.is_of);
+                if (f.is_await and !self.in_async) return error.Unsupported;
+                try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body, !f.is_of, f.is_await);
             },
             .try_stmt => |t| try self.compileTry(t),
             else => return error.Unsupported,
@@ -448,7 +449,7 @@ pub const Compiler = struct {
     /// a `.next()` loop (mirroring `compileYieldStar`). Only a plain identifier
     /// target is lowered; destructuring targets and `for-in` fall back to the
     /// tree-walker. Works inside generators (where `for-of` is common).
-    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, keys_first: bool) CompileError!void {
+    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool) CompileError!void {
         if (target.* != .identifier) return error.Unsupported; // patterns → tree-walk
         const var_name = target.identifier;
         const it_name = try self.freshTemp();
@@ -456,14 +457,17 @@ pub const Compiler = struct {
 
         try self.compileExpr(iterable);
         if (keys_first) _ = try self.chunk.emit(.enum_keys, 0); // for-in: iterate the key array
-        _ = try self.chunk.emit(.iter_of, 0);
+        // for-await uses the async-iterator protocol (Symbol.asyncIterator, else
+        // a wrapped sync iterator) and awaits each `next()` result.
+        _ = try self.chunk.emit(if (await_each) .async_iter_of else .iter_of, 0);
         try self.emitDefine(it_name);
 
         const loop = try self.pushLoop();
         const top = self.chunk.here();
-        // r = it.next()
+        // r = it.next()  (for-await: r = await it.next())
         try self.emitLoad(it_name);
         _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+        if (await_each) _ = try self.chunk.emit(.gen_yield, 0); // await the next() result
         try self.emitDefine(r_name);
         // if (r.done) break  — `not` then jump_if_false exits exactly when done.
         try self.emitLoad(r_name);
