@@ -1507,7 +1507,7 @@ pub const Interpreter = struct {
         const nan = std.math.nan(f64);
         if (eq(name, "getTime") or eq(name, "valueOf")) return Value{ .number = t };
         if (eq(name, "setTime")) {
-            var nt = arg0(args).toNumber();
+            var nt = (try self.toPrimitive(arg0(args), .number)).toNumber();
             if (@abs(nt) > 8.64e15) nt = nan;
             try self.setProp(o, "__t", .{ .number = nt });
             return Value{ .number = nt };
@@ -1527,7 +1527,9 @@ pub const Interpreter = struct {
             var mi: f64 = @floatFromInt(c.mi);
             var s: f64 = @floatFromInt(c.s);
             var ms: f64 = @floatFromInt(c.ms);
-            const a = args;
+            // ToNumber each argument once (object args invoke valueOf exactly once).
+            const a = try self.arena.alloc(Value, args.len);
+            for (args, 0..) |av, idx| a[idx] = .{ .number = (try self.toPrimitive(av, .number)).toNumber() };
             if (fy) {
                 y = arg0(a).toNumber();
                 if (a.len > 1) mo = a[1].toNumber();
