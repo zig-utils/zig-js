@@ -926,13 +926,27 @@ fn sameValue(a: Value, b: Value) bool {
 }
 
 pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
+    const self = interp(ctx);
     const o = arg(args, 0);
-    if (o == .object) {
-        const p = arg(args, 1);
-        o.object.proto = if (p == .object) p.object else null;
+    // RequireObjectCoercible; the new prototype must be an Object or null.
+    if (o == .null or o == .undefined)
+        return self.throwError("TypeError", "Object.setPrototypeOf called on null or undefined");
+    const p = arg(args, 1);
+    if (p != .object and p != .null)
+        return self.throwError("TypeError", "Object prototype may only be an Object or null");
+    if (o != .object) return o; // a primitive `this` has no own [[Prototype]] to set
+    const new_proto: ?*value.Object = if (p == .object) p.object else null;
+    if (o.object.proto == new_proto) return o; // no-op when unchanged
+    if (!o.object.extensible)
+        return self.throwError("TypeError", "Cannot set prototype of a non-extensible object");
+    // Reject a cycle (a non-proxy chain that loops back to the target).
+    var cur = new_proto;
+    while (cur) |c| {
+        if (c == o.object) return self.throwError("TypeError", "Cyclic __proto__ value");
+        cur = c.proto;
     }
+    o.object.proto = new_proto;
     return o;
 }
 

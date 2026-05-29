@@ -1230,6 +1230,23 @@ pub const Interpreter = struct {
     pub const BoundFn = struct { target: Value, this: Value, args: []const Value };
 
     /// `fn.bind(this, ...bound)`: a new callable that prepends `bound` to its args.
+    /// CreateListFromArrayLike: the argument list for `Function.prototype.apply`
+    /// (and Reflect.apply). `undefined`/`null` → empty; a non-object throws; an
+    /// object is read by `length` (ToLength) and indices 0..length via [[Get]],
+    /// so a real array-like (e.g. `arguments`) works, not only a dense array.
+    fn argListFromArrayLike(self: *Interpreter, v: Value) EvalError![]const Value {
+        if (v == .undefined or v == .null) return &.{};
+        if (v != .object) return self.throwError("TypeError", "CreateListFromArrayLike called on non-object");
+        const o = v.object;
+        const len = toLen((try self.toPrimitive(try self.getProperty(v, "length"), .number)).toNumber());
+        if (len > (1 << 24)) return self.throwError("RangeError", "argument list too large");
+        // Dense fast path for a plain array with no accessors.
+        if (o.is_array and o.accessors == null and len <= o.elements.items.len) return o.elements.items[0..len];
+        const buf = try self.arena.alloc(Value, len);
+        for (buf, 0..) |*slot, i| slot.* = try self.getProperty(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+        return buf;
+    }
+
     fn makeBound(self: *Interpreter, target: *value.Object, this: Value, bound_args: []const Value) EvalError!Value {
         const bf = try self.arena.create(BoundFn);
         bf.* = .{ .target = .{ .object = target }, .this = this, .args = try self.arena.dupe(Value, bound_args) };
@@ -2940,10 +2957,7 @@ pub const Interpreter = struct {
                         }
                         if (eq(name, "apply")) {
                             const t: Value = if (args.len > 0) args[0] else .undefined;
-                            const list: []const Value = if (args.len > 1 and args[1] == .object and args[1].object.is_array)
-                                args[1].object.elements.items
-                            else
-                                &.{};
+                            const list = try self.argListFromArrayLike(if (args.len > 1) args[1] else .undefined);
                             return try self.callValueWithThis(recv, list, t);
                         }
                         if (eq(name, "bind")) {
