@@ -173,13 +173,13 @@ pub const Object = struct {
 
     /// Own named property keys in insertion order (for `for-in` / enumeration).
     pub fn ownKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var insertion: std.ArrayListUnmanaged([]const u8) = .empty;
         var s = self.shape;
         while (s) |sh| {
-            if (sh.name) |n| try list.append(arena, n);
+            if (sh.name) |n| try insertion.append(arena, n);
             s = sh.parent;
         }
-        std.mem.reverse([]const u8, list.items); // chain is newest-first → insertion order
+        std.mem.reverse([]const u8, insertion.items); // chain is newest-first → insertion order
         // Accessor-only properties live in a separate map (not the data-slot
         // shape); include any whose key isn't already a data slot, so getters/
         // setters appear in Object.keys / for-in / JSON / spread / rest.
@@ -187,11 +187,26 @@ pub const Object = struct {
             var it = m.iterator();
             next: while (it.next()) |entry| {
                 const k = entry.key_ptr.*;
-                for (list.items) |existing| if (std.mem.eql(u8, existing, k)) continue :next;
-                try list.append(arena, k);
+                for (insertion.items) |existing| if (std.mem.eql(u8, existing, k)) continue :next;
+                try insertion.append(arena, k);
             }
         }
-        return list.items;
+        // OrdinaryOwnPropertyKeys order: canonical array-index keys ascending
+        // first, then every other key in insertion order.
+        var indices: std.ArrayListUnmanaged([]const u8) = .empty;
+        var rest: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (insertion.items) |k| {
+            if (canonicalIndex(k) != null) try indices.append(arena, k) else try rest.append(arena, k);
+        }
+        std.mem.sort([]const u8, indices.items, {}, struct {
+            fn lt(_: void, x: []const u8, y: []const u8) bool {
+                return canonicalIndex(x).? < canonicalIndex(y).?;
+            }
+        }.lt);
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        try out.appendSlice(arena, indices.items);
+        try out.appendSlice(arena, rest.items);
+        return out.items;
     }
 
     /// The attributes of own property `name` (all-true default if no override).
@@ -279,6 +294,18 @@ pub const Accessor = struct { get: ?Value = null, set: ?Value = null };
 /// string keys and are excluded from string enumeration.
 pub fn isSymbolKey(k: []const u8) bool {
     return k.len > 0 and k[0] == 0;
+}
+
+/// If `k` is a canonical array-index string — a non-negative integer below
+/// 2**32-1 with no leading zeros or sign — return its numeric value, for the
+/// spec's integer-keys-ascending property ordering. Otherwise null.
+pub fn canonicalIndex(k: []const u8) ?u32 {
+    if (k.len == 0) return null;
+    if (k.len > 1 and k[0] == '0') return null; // leading zero → not canonical
+    for (k) |c| if (c < '0' or c > '9') return null;
+    const n = std.fmt.parseInt(u64, k, 10) catch return null;
+    if (n >= 0xFFFFFFFF) return null; // not an array index
+    return @intCast(n);
 }
 
 /// A class private member (`#x`). Stored under its `#`-prefixed name but hidden
