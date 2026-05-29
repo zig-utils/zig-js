@@ -1,0 +1,15 @@
+{
+  "name": "zig-js-docs",
+  "private": true,
+  "type": "module",
+  "description": "Documentation site for zig-js — a JavaScript engine in pure Zig.",
+  "scripts": {
+    "docs:dev": "bunpress dev",
+    "docs:build": "bunpress build --outdir ./dist",
+    "docs:preview": "bunpress preview --outdir ./dist",
+    "docs:data": "bun scripts/gen-test262-data.ts"
+  },
+  "devDependencies": {
+    "@stacksjs/bunpress": "^0.1.7"
+  }
+}

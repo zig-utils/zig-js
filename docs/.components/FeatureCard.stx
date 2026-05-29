@@ -1,0 +1,5 @@
+<div class="card">
+  <div class="ico">{{ tag }}</div>
+  <h3>{{ title }}</h3>
+  <p>{!! slot !!}</p>
+</div>

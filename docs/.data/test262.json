@@ -1,0 +1,21 @@
+{
+  "valid": {
+    "passing": 19582,
+    "total": 24750,
+    "percentage": 79.1,
+    "parseFail": 3898,
+    "runtimeFail": 1218,
+    "hostFail": 52
+  },
+  "negative": {
+    "passing": 1651,
+    "total": 4215,
+    "percentage": 39.2
+  },
+  "skipped": 5623,
+  "generatedAt": "2026-05-29",
+  "harness": "real (WebKit JSTests/test262 corpus)",
+  "suites": [
+    { "name": "language", "passing": 11476, "total": 13839, "percentage": 82.9, "parseFail": 1747, "runtimeFail": 616, "hostFail": 0 }
+  ]
+}

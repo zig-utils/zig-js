@@ -1,0 +1,19 @@
+<div class="t262">
+  <div class="t262-head">
+    <span class="t262-label">test262 · valid — can we run it?</span>
+    <span class="t262-pct">{{ stats.valid.percentage }}%</span>
+  </div>
+  <div class="t262-track">
+    <div class="t262-fill" style="width: {{ stats.valid.percentage }}%"></div>
+  </div>
+  <div class="t262-sub">
+    <b>{{ stats.valid.passing }}</b> / {{ stats.valid.total }} valid tests passing · {{ stats.harness }} · updated {{ stats.generatedAt }}
+  </div>
+  <div class="t262-stats">
+    <div class="t262-stat"><div class="n good">{{ stats.valid.passing }}</div><div class="k">passing</div></div>
+    <div class="t262-stat"><div class="n bad">{{ stats.valid.parseFail }}</div><div class="k">parse-fail</div></div>
+    <div class="t262-stat"><div class="n bad">{{ stats.valid.runtimeFail }}</div><div class="k">runtime-fail</div></div>
+    <div class="t262-stat"><div class="n">{{ stats.negative.percentage }}%</div><div class="k">negative (strictness)</div></div>
+    <div class="t262-stat"><div class="n">{{ stats.skipped }}</div><div class="k">skipped</div></div>
+  </div>
+</div>

@@ -1,3 +1,10 @@
 .DS_Store
 /.zig-cache
 /zig-out
+
+# docs (bunpress)
+/dist
+/.stx
+node_modules
+bun.lock
+bun.lockb

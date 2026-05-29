@@ -1,0 +1,7 @@
+<div class="term">
+  <div class="term-bar">
+    <span class="term-dot r"></span><span class="term-dot y"></span><span class="term-dot g"></span>
+    <span class="term-title">{{ title }}</span>
+  </div>
+  <div class="term-body">{!! slot !!}</div>
+</div>
