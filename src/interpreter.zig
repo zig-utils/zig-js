@@ -719,6 +719,13 @@ pub const Interpreter = struct {
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
         };
+        // Arrows capture `super` (home object + super constructor) lexically from
+        // the enclosing method, just as they capture `this`/`new.target`. A
+        // non-arrow gets its home object later (e.g. when installed as a method).
+        if (fnode.is_arrow) {
+            func.home_object = self.home_object;
+            func.super_ctor = self.super_ctor;
+        }
         // Compile a generator body up front for the suspendable VM. Bodies
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
         // generator throws a clear TypeError rather than running incorrectly.
