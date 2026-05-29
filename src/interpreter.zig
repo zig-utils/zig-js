@@ -4784,10 +4784,35 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 /// Shared setup for `Promise.all`/`allSettled`/`any`: build the combined promise
 /// and wire a per-element reaction onto each input (coerced via the source's
 /// `then`). An empty input settles immediately.
-fn setupCombinator(self: *Interpreter, iterable: Value, kind: @TypeOf(@as(promise.Combine, undefined).kind)) value.HostError!Value {
-    const elems = try collectIterable(self, iterable);
+/// `GetPromiseResolve(C)` — `Get(C, "resolve")`, which must be callable. The
+/// combinators call this once per element (observably, so a replaced
+/// `Promise.resolve` is honored), passing `C` as the receiver.
+fn getPromiseResolve(self: *Interpreter, c: Value) EvalError!Value {
+    const r = try self.getProperty(c, "resolve");
+    if (!r.isCallable()) return self.throwError("TypeError", "Promise resolve is not a function");
+    return r;
+}
+
+/// Resolve one combinator element through the constructor's `resolve` (spec:
+/// `Call(promiseResolve, C, « nextValue »)`), yielding a promise to attach to.
+fn elementPromise(self: *Interpreter, promise_resolve: Value, c: Value, el: Value) EvalError!*promise.Promise {
+    const p = try self.callValueWithThis(promise_resolve, &.{el}, c);
+    if (promise.promiseOf(p)) |pp| return pp;
+    // A non-promise `resolve` result is adopted into a fresh native promise.
+    const wrapped = try promiseResolveStaticFn(@ptrCast(self), .undefined, &.{p});
+    return promise.promiseOf(wrapped).?;
+}
+
+fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @TypeOf(@as(promise.Combine, undefined).kind)) value.HostError!Value {
+    // NewPromiseCapability(C): C (the `this` value) must be a constructor.
+    if (!isConstructorValue(this)) return self.throwError("TypeError", "Promise combinator called on a non-constructor");
     const result = try promise.newPromise(self);
     const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    // GetPromiseResolve + GetIterator are abrupt-rejected: a failure rejects the
+    // returned promise (IfAbruptRejectPromise) rather than throwing out of the call.
+    const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, rp, result, err);
+    const elems = collectIterable(self, iterable) catch |err| return rejectAbrupt(self, rp, result, err);
+
     const values = (try self.newArray()).object;
     for (elems) |_| try values.elements.append(self.arena, .undefined);
     const combine = try self.arena.create(promise.Combine);
@@ -4800,8 +4825,7 @@ fn setupCombinator(self: *Interpreter, iterable: Value, kind: @TypeOf(@as(promis
         return .{ .object = result };
     }
     for (elems, 0..) |el, i| {
-        const p = try promiseResolveStaticFn(@ptrCast(self), .undefined, &.{el});
-        const pp = promise.promiseOf(p).?;
+        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return rejectAbrupt(self, rp, result, err);
         const f = try self.arena.create(value.Object);
         const fe = try self.arena.create(promise.Elem);
         fe.* = .{ .combine = combine, .index = i, .is_reject = false };
@@ -4815,34 +4839,41 @@ fn setupCombinator(self: *Interpreter, iterable: Value, kind: @TypeOf(@as(promis
     return .{ .object = result };
 }
 
+/// IfAbruptRejectPromise: a thrown completion rejects `rp` and returns its
+/// promise; any non-throw (host) error propagates unchanged.
+fn rejectAbrupt(self: *Interpreter, rp: *promise.Promise, result: *value.Object, err: value.HostError) value.HostError!Value {
+    if (err != error.Throw) return err;
+    const reason = self.exception;
+    self.exception = .undefined;
+    try promise.reject(self, rp, reason);
+    return .{ .object = result };
+}
+
 fn promiseAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return setupCombinator(self, if (args.len > 0) args[0] else .undefined, .all);
+    return setupCombinator(self, this, if (args.len > 0) args[0] else .undefined, .all);
 }
 
 fn promiseAllSettledFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return setupCombinator(self, if (args.len > 0) args[0] else .undefined, .all_settled);
+    return setupCombinator(self, this, if (args.len > 0) args[0] else .undefined, .all_settled);
 }
 
 fn promiseAnyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return setupCombinator(self, if (args.len > 0) args[0] else .undefined, .any);
+    return setupCombinator(self, this, if (args.len > 0) args[0] else .undefined, .any);
 }
 
 /// `Promise.race(iterable)` — settle with the first input to settle.
 fn promiseRaceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const elems = try collectIterable(self, if (args.len > 0) args[0] else .undefined);
+    if (!isConstructorValue(this)) return self.throwError("TypeError", "Promise.race called on a non-constructor");
     const result = try promise.newPromise(self);
     const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, rp, result, err);
+    const elems = collectIterable(self, if (args.len > 0) args[0] else .undefined) catch |err| return rejectAbrupt(self, rp, result, err);
     for (elems) |el| {
-        const p = try promiseResolveStaticFn(@ptrCast(self), .undefined, &.{el});
-        const pp = promise.promiseOf(p).?;
+        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return rejectAbrupt(self, rp, result, err);
         // resolve/reject the shared result; the first to fire wins (later no-op).
         const f = try self.arena.create(value.Object);
         f.* = .{ .native = promiseResolveClosure, .private_data = @ptrCast(rp) };
