@@ -2015,7 +2015,12 @@ pub const Interpreter = struct {
             .string => "String",
             .number => "Number",
             .boolean => "Boolean",
-            .object => |o| if (o.is_array) "Array" else if (o.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.is_error) (if (o.error_name.len > 0) o.error_name else "Error") else "Object",
+            .object => |o| if (o.is_array) "Array" else if (o.is_regex) "RegExp" else if (o.is_symbol) "Symbol" else if (o.is_error) (if (o.error_name.len > 0) o.error_name else "Error") else if (o.is_map) "Map" else if (o.is_set) "Set" else if (o.is_date) "Date" else if (o.prim) |p| (switch (p) {
+                .number => "Number",
+                .string => "String",
+                .boolean => "Boolean",
+                else => "Object",
+            }) else if (o.isCallableObject()) "Function" else "Object",
             else => return null,
         };
         return self.env.get(name);
@@ -3862,6 +3867,8 @@ fn booleanProtoFn(comptime to_string: bool) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const b: bool = switch (this) {
                 .boolean => |x| x,
+                // A Boolean wrapper object (`new Boolean(x)`) unwraps to its boxed value.
+                .object => |o| if (o.prim != null and o.prim.? == .boolean) o.prim.?.boolean else return self.throwError("TypeError", "Boolean.prototype method requires that 'this' be a Boolean"),
                 else => return self.throwError("TypeError", "Boolean.prototype method requires that 'this' be a Boolean"),
             };
             return if (to_string) .{ .string = if (b) "true" else "false" } else .{ .boolean = b };
