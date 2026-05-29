@@ -750,27 +750,38 @@ pub const Compiler = struct {
     /// iterator obtained via `iter_of` (the iterator protocol). The sent value
     /// is not forwarded into the inner iterator yet (a v1 simplification).
     fn compileYieldStar(self: *Compiler, arg: *Node) CompileError!void {
+        const async_d = self.in_async; // delegate to an async iterator?
         const it_name = try self.freshTemp(); // the iterator
         const r_name = try self.freshTemp(); // the last `{value, done}` result
+        const sent_name = try self.freshTemp(); // the value sent back into this yield*
+        const next_name = try self.chunk.addName("next");
 
+        // iterator = GetIterator(arg, async ? async : sync)
         try self.compileExpr(arg);
-        _ = try self.chunk.emit(.iter_of, 0);
+        _ = try self.chunk.emit(if (async_d) .async_iter_of else .iter_of, 0);
         try self.emitDefine(it_name);
+        // The first IteratorNext receives undefined.
+        _ = try self.chunk.emit(.load_undefined, 0);
+        try self.emitDefine(sent_name);
 
         const top = self.chunk.here();
-        // r = it.next()
+        // r = it.next(sent)  — and, for async delegation, Await(r).
         try self.emitLoad(it_name);
-        _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+        try self.emitLoad(sent_name);
+        _ = try self.chunk.emitAB(.call_method, next_name, 1);
+        if (async_d) _ = try self.chunk.emit(.await_op, 0);
         try self.emitDefine(r_name);
         // if (r.done) break  — `not` then jump_if_false exits exactly when done.
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
         _ = try self.chunk.emit(.not, 0);
         const to_end = try self.chunk.emit(.jump_if_false, 0);
-        // yield r.value (discard the resume-sent value: not forwarded in v1)
+        // sent = yield r.value  — forward the resume-sent value into the next
+        // IteratorNext, so a delegating generator relays `.next(v)` arguments.
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
         _ = try self.chunk.emit(.gen_yield, 0);
+        try self.emitStore(sent_name);
         _ = try self.chunk.emit(.pop, 0);
         _ = try self.chunk.emit(.jump, @intCast(top));
         self.chunk.patchToHere(to_end);

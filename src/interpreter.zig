@@ -2989,8 +2989,13 @@ pub const Interpreter = struct {
         if (self.symbolAsyncIteratorKey()) |ik| {
             if (v == .object and hasProperty(v.object, ik)) {
                 const m = try self.getProperty(v, ik);
-                if (m == .object and m.object.isCallableObject())
-                    return try self.callValueWithThis(m, &.{}, v);
+                // GetMethod: undefined/null → method absent (fall back to sync);
+                // present but not callable → TypeError.
+                if (m != .undefined and m != .null) {
+                    if (m == .object and m.object.isCallableObject())
+                        return try self.callValueWithThis(m, &.{}, v);
+                    return self.throwError("TypeError", "[Symbol.asyncIterator] is not a function");
+                }
             }
         }
         return self.iteratorOf(v);

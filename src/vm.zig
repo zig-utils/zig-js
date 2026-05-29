@@ -842,7 +842,12 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
     const rp = try promise.newPromise(vm);
     const was_idle = g.requests.items.len == 0;
     try g.requests.append(vm.arena, .{ .kind = kind, .value = val, .result = rp });
-    if (was_idle) try agStep(vm, g, kind, val);
+    // A completed generator never resumes: each new request settles immediately
+    // (next/return → `{done:true}`, throw → reject) rather than re-running the
+    // body from its final instruction pointer.
+    if (g.done) {
+        if (was_idle) try agDrainDone(vm, g);
+    } else if (was_idle) try agStep(vm, g, kind, val);
     return .{ .object = rp };
 }
 
