@@ -871,6 +871,17 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
         \\class C { static sm() { return 2; } }
         \\C.sm.toString()
     );
+    // A class's own toString is its exact source (`class … { … }`), including an
+    // `extends` heritage clause.
+    try expectEvalStr("class A { m() {} }",
+        \\class A { m() {} }
+        \\A.toString()
+    );
+    try expectEvalStr("class B extends A { constructor() { super(); } }",
+        \\class A {}
+        \\class B extends A { constructor() { super(); } }
+        \\B.toString()
+    );
 }
 
 test "prototype objects: Function.prototype.call.bind + X.prototype methods" {

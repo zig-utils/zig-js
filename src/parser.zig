@@ -1350,6 +1350,7 @@ pub const Parser = struct {
     /// methods, computed method names. `extends`/`super`/accessors are deferred
     /// (return a parse error, so such tests simply stay unparsed for now).
     fn parseClassExpr(self: *Parser) ParseError!*Node {
+        const start = self.pos;
         _ = self.advance(); // class
         var name: []const u8 = "";
         if (self.check(.identifier) and !isKeyword(self.cur(), "extends")) name = self.advance().text;
@@ -1412,7 +1413,7 @@ pub const Parser = struct {
         }
         try self.expect(.rbrace);
         try self.checkPrivateNames(members.items);
-        return self.alloc(.{ .class_expr = .{ .name = name, .superclass = superclass, .members = members.items } });
+        return self.alloc(.{ .class_expr = .{ .name = name, .superclass = superclass, .members = members.items, .source = self.sourceFrom(start) } });
     }
 
     /// Early error: a class may not declare the same private name twice, except

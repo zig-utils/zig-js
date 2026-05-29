@@ -372,7 +372,7 @@ pub const Interpreter = struct {
             },
 
             .function => |fnode| try self.makeFunction(fnode, self.env),
-            .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members),
+            .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members, c.source),
 
             // `yield` only executes inside a compiled generator body (on the
             // suspendable VM). Reaching it in the tree-walker means a generator
@@ -957,7 +957,7 @@ pub const Interpreter = struct {
     /// fields are desugared into the constructor (`this.f = init`). With
     /// `extends`, the prototypes are linked and methods get a home object so
     /// `super.x` / `super(...)` resolve. (Accessors are still deferred.)
-    fn evalClass(self: *Interpreter, name: []const u8, superclass: ?*Node, members: []ast.ClassMember) EvalError!Value {
+    fn evalClass(self: *Interpreter, name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8) EvalError!Value {
         var super_obj: ?*value.Object = null;
         var super_proto: ?*value.Object = null;
         if (superclass) |sc| {
@@ -966,10 +966,10 @@ pub const Interpreter = struct {
             super_obj = sv.object;
             super_proto = try self.protoObject(sv.object);
         }
-        return self.buildClass(name, members, super_obj, super_proto);
+        return self.buildClass(name, members, super_obj, super_proto, source);
     }
 
-    fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object) EvalError!Value {
+    fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8) EvalError!Value {
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
         for (members) |m| {
@@ -1021,6 +1021,7 @@ pub const Interpreter = struct {
             .name = name,
             .params = if (ctor_node) |cf| cf.params else default_params,
             .body = body,
+            .source = source,
             .is_expr_body = false,
         };
         const class_val = try self.makeFunction(fnode, self.env);
