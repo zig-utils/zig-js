@@ -732,6 +732,13 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
         try target.setOwn(self.arena, self.root_shape, key, d.getOwn("value") orelse .undefined);
     }
     try target.setAttr(self.arena, key, attr);
+    // Defining an own property at an array index at or past the current length
+    // extends the array's length (so iteration sees it).
+    if (target.is_array) {
+        if (arrayIndexOf(key)) |i| {
+            if (i + 1 > target.array_len and i + 1 > target.elements.items.len) target.array_len = i + 1;
+        }
+    }
 }
 
 /// The rejection half of ValidateAndApplyPropertyDescriptor, for an existing
