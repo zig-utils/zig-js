@@ -1768,7 +1768,7 @@ pub const Interpreter = struct {
             if (eq(name, "intersection")) {
                 const result = (try self.makeSet(.undefined)).object;
                 for (o.elements.items) |e| {
-                    if ((try self.callValueWithThis(rec.has, &.{e}, .{ .object = rec.obj })).toBoolean())
+                    if ((try self.recordHas(rec, e)))
                         _ = try self.setMethod(result, "add", &.{e});
                 }
                 return .{ .object = result };
@@ -1776,7 +1776,7 @@ pub const Interpreter = struct {
             if (eq(name, "difference")) {
                 const result = (try self.makeSet(.undefined)).object;
                 for (o.elements.items) |e| {
-                    if (!(try self.callValueWithThis(rec.has, &.{e}, .{ .object = rec.obj })).toBoolean())
+                    if (!(try self.recordHas(rec, e)))
                         _ = try self.setMethod(result, "add", &.{e});
                 }
                 return .{ .object = result };
@@ -1794,7 +1794,7 @@ pub const Interpreter = struct {
             }
             if (eq(name, "isSubsetOf")) {
                 for (o.elements.items) |e| {
-                    if (!(try self.callValueWithThis(rec.has, &.{e}, .{ .object = rec.obj })).toBoolean())
+                    if (!(try self.recordHas(rec, e)))
                         return Value{ .boolean = false };
                 }
                 return Value{ .boolean = true };
@@ -1807,7 +1807,7 @@ pub const Interpreter = struct {
             }
             if (eq(name, "isDisjointFrom")) {
                 for (o.elements.items) |e| {
-                    if ((try self.callValueWithThis(rec.has, &.{e}, .{ .object = rec.obj })).toBoolean())
+                    if ((try self.recordHas(rec, e)))
                         return Value{ .boolean = false };
                 }
                 return Value{ .boolean = true };
@@ -1816,23 +1816,37 @@ pub const Interpreter = struct {
         return null;
     }
 
-    const SetRecord = struct { obj: *value.Object, has: Value, keys: Value, size: f64 };
+    const SetRecord = struct { obj: *value.Object, has: Value, keys: Value, size: f64, is_set: bool };
 
-    /// GetSetRecord: a set-like argument must be an object exposing a numeric
-    /// `size` and callable `has`/`keys`.
+    /// GetSetRecord: a set-like argument must be an object with a numeric `size`
+    /// and callable `has`/`keys`. A native Set is recognized directly (its
+    /// `has`/`keys` are dispatched, not stored properties), so it's served from
+    /// its own elements rather than the protocol.
     fn getSetRecord(self: *Interpreter, v: Value) EvalError!SetRecord {
         if (v != .object) return self.throwError("TypeError", "argument is not an object");
         const size = (try self.toPrimitive(try self.getProperty(v, "size"), .number)).toNumber();
         if (std.math.isNan(size)) return self.throwError("TypeError", "set-like 'size' is NaN");
+        if (v.object.is_set) return .{ .obj = v.object, .has = .undefined, .keys = .undefined, .size = size, .is_set = true };
         const has = try self.getProperty(v, "has");
         if (!has.isCallable()) return self.throwError("TypeError", "set-like 'has' is not callable");
         const keys = try self.getProperty(v, "keys");
         if (!keys.isCallable()) return self.throwError("TypeError", "set-like 'keys' is not callable");
-        return .{ .obj = v.object, .has = has, .keys = keys, .size = size };
+        return .{ .obj = v.object, .has = has, .keys = keys, .size = size, .is_set = false };
     }
 
-    /// Drive `record.keys()` to collect the set-like's elements.
+    /// Whether the set-like contains `elem` (a native Set scans its elements; a
+    /// set-like calls its `has`).
+    fn recordHas(self: *Interpreter, rec: SetRecord, elem: Value) EvalError!bool {
+        if (rec.is_set) {
+            for (rec.obj.elements.items) |e| if (value.strictEquals(e, elem)) return true;
+            return false;
+        }
+        return (try self.callValueWithThis(rec.has, &.{elem}, .{ .object = rec.obj })).toBoolean();
+    }
+
+    /// The set-like's elements (a native Set's `elements`, else its `keys()`).
     fn collectSetKeys(self: *Interpreter, rec: SetRecord) EvalError![]Value {
+        if (rec.is_set) return rec.obj.elements.items;
         const iter = try self.callValueWithThis(rec.keys, &.{}, .{ .object = rec.obj });
         var list: std.ArrayListUnmanaged(Value) = .empty;
         while (true) {
