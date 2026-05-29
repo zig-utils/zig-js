@@ -163,6 +163,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "for")) return self.parseFor();
             if (std.mem.eql(u8, t.text, "switch")) return self.parseSwitch();
             if (std.mem.eql(u8, t.text, "with")) {
+                if (self.strict) return ParseError.UnexpectedToken; // `with` is forbidden in strict mode
                 _ = self.advance();
                 try self.expect(.lparen);
                 const obj = try self.parseExpression();
@@ -601,6 +602,10 @@ pub const Parser = struct {
         return params.items;
     }
 
+    fn isEvalOrArguments(name: []const u8) bool {
+        return std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
+    }
+
     /// Strict-mode early errors on a formal parameter list: a parameter named
     /// `eval`/`arguments`, or any duplicate parameter name, is a SyntaxError.
     fn validateStrictParams(params: []const ast.Param) ParseError!void {
@@ -769,6 +774,9 @@ pub const Parser = struct {
                 .array_lit, .object_lit => try self.litToPattern(left),
                 else => return ParseError.InvalidAssignmentTarget,
             };
+            // Strict mode forbids assigning to `eval`/`arguments`.
+            if (self.strict and target.* == .identifier and isEvalOrArguments(target.identifier))
+                return ParseError.UnexpectedToken;
             _ = self.advance();
             const value = try self.parseAssignment();
             if (target.* == .identifier) nameAnon(value, target.identifier); // `f = function(){}`
@@ -792,6 +800,8 @@ pub const Parser = struct {
         };
         if (compound) |op| {
             if (left.* != .identifier and left.* != .member) return ParseError.InvalidAssignmentTarget;
+            if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
+                return ParseError.UnexpectedToken;
             _ = self.advance();
             const rhs = try self.parseAssignment();
             const bin = try self.alloc(.{ .binary = .{ .op = op, .left = left, .right = rhs } });
