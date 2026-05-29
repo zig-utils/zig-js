@@ -149,6 +149,9 @@ pub const Interpreter = struct {
     /// While binding a destructuring declaration, whether it's a `var` (leaves
     /// hoist to the variable scope) vs `let`/`const` (block-scoped).
     binding_hoisted: bool = false,
+    /// Sentinel object for a `let`/`const` binding in its temporal dead zone
+    /// (hoisted into scope but not yet initialized). Reading it throws.
+    tdz_marker: ?*value.Object = null,
     /// The context's global object — the value of `globalThis` and of top-level
     /// `this`. Global `var`/function bindings also surface as its properties, so
     /// `this.x`, `"x" in globalThis`, and reflection over the global all work.
@@ -212,6 +215,32 @@ pub const Interpreter = struct {
         }
     }
 
+    /// The TDZ sentinel as a Value.
+    fn tdzVal(self: *Interpreter) Value {
+        return .{ .object = self.tdz_marker.? };
+    }
+
+    /// Whether `v` is the TDZ sentinel (an uninitialized let/const binding).
+    fn isTdz(self: *Interpreter, v: Value) bool {
+        return v == .object and self.tdz_marker != null and v.object == self.tdz_marker.?;
+    }
+
+    /// Pre-bind every identifier in a destructuring pattern to the TDZ sentinel.
+    fn tdzBindPattern(self: *Interpreter, target: *Node, tdz: Value) void {
+        switch (target.*) {
+            .identifier => |name| self.env.put(name, tdz) catch {},
+            .obj_pattern => |p| {
+                for (p.props) |pr| self.tdzBindPattern(pr.target, tdz);
+                if (p.rest) |r| self.env.put(r, tdz) catch {}; // object rest is a name
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |e| if (e.target) |t| self.tdzBindPattern(t, tdz);
+                if (p.rest) |r| self.tdzBindPattern(r, tdz);
+            },
+            else => {},
+        }
+    }
+
     /// An own data property of the global object, used as the fallback for a
     /// bare global reference (`this.x = 1` at top level → bare `x`).
     pub fn globalProp(self: *Interpreter, name: []const u8) ?Value {
@@ -268,7 +297,10 @@ pub const Interpreter = struct {
                         if (hasProperty(o, name)) break :blk try self.getProperty(.{ .object = o }, name);
                     }
                 }
-                if (self.env.get(name)) |v| break :blk v;
+                if (self.env.get(name)) |v| {
+                    if (self.isTdz(v)) return self.throwError("ReferenceError", name); // accessed in its TDZ
+                    break :blk v;
+                }
                 // A property added to the global object (e.g. `this.x = 1` at top
                 // level) is reachable as a bare global reference.
                 if (self.global_object) |g| {
@@ -636,6 +668,22 @@ pub const Interpreter = struct {
             .func_decl => |fnode| try self.globalDefine(fnode.name, try self.makeFunction(fnode, self.env)),
             else => {},
         };
+        // Temporal dead zone: `let`/`const` (and `class`) declarations are
+        // hoisted into this scope as uninitialized bindings; reading one before
+        // its declaration runs throws a ReferenceError.
+        if (self.tdz_marker) |_| {
+            const tdz = self.tdzVal();
+            for (stmts) |s| switch (s.*) {
+                .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
+                .decl_group => |group| for (group) |gs| switch (gs.*) {
+                    .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
+                    else => {},
+                },
+                .destructure_decl => |d| if (d.kind != .@"var") self.tdzBindPattern(d.pattern, tdz),
+                .class_expr => |c| if (c.name.len > 0) try self.env.put(c.name, tdz),
+                else => {},
+            };
+        }
         var last: Value = .undefined;
         for (stmts) |s| {
             if (s.* == .func_decl) continue; // already hoisted above
@@ -1983,6 +2031,10 @@ pub const Interpreter = struct {
                         const o = self.with_stack.items[i - 1];
                         if (hasProperty(o, name)) return self.setMember(.{ .object = o }, name, v);
                     }
+                }
+                // Assigning to a binding still in its TDZ is a ReferenceError.
+                if (self.env.get(name)) |cur| {
+                    if (self.isTdz(cur)) return self.throwError("ReferenceError", name);
                 }
                 // Strict mode forbids creating a global by assigning to an
                 // undeclared binding (sloppy mode silently creates one).

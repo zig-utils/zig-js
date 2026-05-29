@@ -24,6 +24,8 @@ pub const Context = struct {
     /// persistent across `evaluate` calls, shared with each `Interpreter`.
     microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty,
     print_buffer: std.ArrayListUnmanaged(u8) = .empty,
+    /// TDZ sentinel for uninitialized let/const bindings.
+    tdz_marker: *value.Object,
 
     pub fn create(gpa: std.mem.Allocator) !*Context {
         const arena_state = try gpa.create(std.heap.ArenaAllocator);
@@ -37,6 +39,11 @@ pub const Context = struct {
         const global_obj = try a.create(value.Object);
         global_obj.* = .{};
 
+        // A unique sentinel object marking a `let`/`const` binding in its
+        // temporal dead zone (declared but not yet initialized).
+        const tdz = try a.create(value.Object);
+        tdz.* = .{};
+
         const self = try gpa.create(Context);
         self.* = .{
             .gpa = gpa,
@@ -44,6 +51,7 @@ pub const Context = struct {
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
             .global_object = global_obj,
             .root_shape = try Shape.createRoot(a),
+            .tdz_marker = tdz,
         };
         try interp.installGlobals(&self.env, self.root_shape);
         // `globalThis` names the global object itself.
@@ -79,6 +87,7 @@ pub const Context = struct {
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
             .print_buffer = &self.print_buffer,
+            .tdz_marker = self.tdz_marker,
         };
     }
 
