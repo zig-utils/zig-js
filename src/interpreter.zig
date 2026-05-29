@@ -4658,6 +4658,13 @@ fn protoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            // Every Object/Array/String prototype method routed here begins with
+            // RequireObjectCoercible/ToObject(this), so a null or undefined
+            // receiver is a TypeError (e.g. `Array.prototype.map.call(undefined)`).
+            // `Object.prototype.toString` — the one method that tolerates them —
+            // is installed separately, not through here.
+            if (this == .null or this == .undefined)
+                return self.throwError("TypeError", "Cannot convert undefined or null to object");
             return (try self.builtinMethod(this, name, args)) orelse .undefined;
         }
     }.call;
