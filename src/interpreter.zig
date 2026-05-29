@@ -3565,15 +3565,39 @@ pub const Interpreter = struct {
         }
         if (eq(name, "sort")) {
             const cmp = arg0(args);
-            // Insertion sort so the comparator (which may throw) is `try`-able.
-            var i: usize = 1;
-            while (i < items.len) : (i += 1) {
-                const key = items[i];
-                var j = i;
-                while (j > 0 and (try self.sortCompare(items[j - 1], key, cmp)) > 0) : (j -= 1) {
-                    items[j] = items[j - 1];
+            if (cmp != .undefined and !cmp.isCallable())
+                return self.throwError("TypeError", "Array.prototype.sort comparator is not a function");
+            // Gather the *present* elements (holes excluded), sort them — with
+            // `undefined` ordered last and never passed to the comparator — then
+            // write them back, leaving holes at the tail.
+            var present: std.ArrayListUnmanaged(Value) = .empty;
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                if (self.arrIndexPresent(o, i)) try present.append(self.arena, try self.arrIndexGet(o, i));
+            }
+            const ps = present.items;
+            var a_i: usize = 1;
+            while (a_i < ps.len) : (a_i += 1) { // insertion sort (comparator may throw)
+                const key = ps[a_i];
+                var j = a_i;
+                while (j > 0 and (try self.sortCompareSpec(ps[j - 1], key, cmp)) > 0) : (j -= 1) ps[j] = ps[j - 1];
+                ps[j] = key;
+            }
+            if (o.is_array) {
+                // Drop any sparse named-index props (their values are in `ps`).
+                for (try o.ownKeys(self.arena)) |k| if (value.canonicalIndex(k) != null) {
+                    _ = try self.deleteOwn(o, k);
+                };
+                o.elements.clearRetainingCapacity();
+                try o.elements.appendSlice(self.arena, ps);
+                if (o.holes) |h| h.clearRetainingCapacity();
+                o.array_len = ilen; // indices past the sorted run read as holes
+            } else {
+                var k: usize = 0;
+                while (k < ilen) : (k += 1) {
+                    const ks = try std.fmt.allocPrint(self.arena, "{d}", .{k});
+                    if (k < ps.len) try self.setMember(.{ .object = o }, ks, ps[k]) else _ = try self.deleteOwn(o, ks);
                 }
-                items[j] = key;
             }
             return Value{ .object = o };
         }
@@ -3597,16 +3621,36 @@ pub const Interpreter = struct {
             return removed;
         }
         if (eq(name, "copyWithin")) {
-            const len = items.len;
+            const len = ilen;
             const target = relIndex(arg0(args), len, 0);
             const start = relIndex(arg(args, 1), len, 0);
             const end = relIndex(arg(args, 2), len, @floatFromInt(len));
-            const count = @min(if (end > start) end - start else 0, len - target);
-            const tmp = try self.arena.alloc(Value, count);
-            var i: usize = 0;
-            while (i < count) : (i += 1) tmp[i] = items[start + i];
-            i = 0;
-            while (i < count) : (i += 1) items[target + i] = tmp[i];
+            var count = @min(if (end > start) end - start else 0, len - target);
+            // Copy through [[Get]]/[[Set]] over the full length; a hole at the
+            // source deletes the target (so holes move correctly). Walk backward
+            // when the ranges overlap with target after source.
+            var from = start;
+            var to = target;
+            var backward = false;
+            if (from < to and to < from + count) {
+                backward = true;
+                from += count - 1;
+                to += count - 1;
+            }
+            while (count > 0) : (count -= 1) {
+                const tk = try std.fmt.allocPrint(self.arena, "{d}", .{to});
+                if (self.arrIndexPresent(o, from))
+                    try self.setMember(.{ .object = o }, tk, try self.arrIndexGet(o, from))
+                else
+                    _ = try self.deleteOwn(o, tk);
+                if (backward) {
+                    from -= 1;
+                    to -= 1;
+                } else {
+                    from += 1;
+                    to += 1;
+                }
+            }
             return Value{ .object = o };
         }
         if (eq(name, "flatMap")) {
@@ -3678,6 +3722,15 @@ pub const Interpreter = struct {
                 try dst.elements.append(self.arena, el);
             }
         }
+    }
+
+    /// SortCompare: `undefined` always sorts after everything else and is never
+    /// handed to the comparator; otherwise defer to `sortCompare`.
+    fn sortCompareSpec(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f64 {
+        const a_u = a == .undefined;
+        const b_u = b == .undefined;
+        if (a_u or b_u) return if (a_u and b_u) 0 else if (a_u) 1 else -1;
+        return self.sortCompare(a, b, cmp);
     }
 
     /// Comparator for Array.prototype.sort: >0 if `a` sorts after `b`.
