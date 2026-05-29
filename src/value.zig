@@ -133,6 +133,17 @@ pub const Object = struct {
             s = sh.parent;
         }
         std.mem.reverse([]const u8, list.items); // chain is newest-first → insertion order
+        // Accessor-only properties live in a separate map (not the data-slot
+        // shape); include any whose key isn't already a data slot, so getters/
+        // setters appear in Object.keys / for-in / JSON / spread / rest.
+        if (self.accessors) |m| {
+            var it = m.iterator();
+            next: while (it.next()) |entry| {
+                const k = entry.key_ptr.*;
+                for (list.items) |existing| if (std.mem.eql(u8, existing, k)) continue :next;
+                try list.append(arena, k);
+            }
+        }
         return list.items;
     }
 
