@@ -4074,6 +4074,34 @@ fn printFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
 /// "Object"), but an own/inherited `Symbol.toStringTag` *string* overrides it
 /// (per spec). Distinct from the kind-specific `toString`s (e.g.
 /// `[1,2].toString()` still joins) — this is the one on `Object.prototype`.
+/// `Object.prototype.toLocaleString()` — by default just invokes `this.toString()`.
+fn objectProtoToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.callMethod(this, "toString", &.{});
+}
+
+/// Getter for `Object.prototype.__proto__` — `[[GetPrototypeOf]]` of ToObject(this).
+fn protoGetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return switch (this) {
+        .object => |o| if (o.proto) |p| .{ .object = p } else .null,
+        .undefined, .null => self.throwError("TypeError", "Cannot convert undefined or null to object"),
+        else => .null, // primitives box to a wrapper whose proto we don't track here
+    };
+}
+
+/// Setter for `Object.prototype.__proto__` — sets the prototype to an object or
+/// null; any other value is silently ignored (per spec).
+fn protoSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    if (this != .object) return .undefined;
+    const v = if (args.len > 0) args[0] else .undefined;
+    if (v == .object) this.object.proto = v.object else if (v == .null) this.object.proto = null;
+    return .undefined;
+}
+
 fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -4371,7 +4399,19 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     // `Object.prototype.toString` is the dedicated `[object Tag]` native (not the
     // kind-dispatched `toString`, so `Object.prototype.toString.call([])` gives
     // "[object Array]" while `[].toString()` still joins).
+    try setNative(a, root_shape, object_proto, "toLocaleString", 0, objectProtoToLocaleStringFn);
     try setNative(a, root_shape, object_proto, "toString", 0, objectProtoToStringFn);
+    // `Object.prototype.__proto__` accessor (the legacy prototype get/set).
+    {
+        const getter = try a.create(value.Object);
+        getter.* = .{ .native = protoGetterFn };
+        try installFunctionProps(a, root_shape, getter, &.{}, "get __proto__");
+        const setter = try a.create(value.Object);
+        setter.* = .{ .native = protoSetterFn };
+        try installFunctionProps(a, root_shape, setter, &.{}, "set __proto__");
+        try object_proto.setAccessor(a, "__proto__", .{ .object = getter }, .{ .object = setter });
+        try object_proto.setAttr(a, "__proto__", .{ .enumerable = false, .configurable = true });
+    }
     try object_ns.setOwn(a, root_shape, "prototype", .{ .object = object_proto });
     try object_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
 
