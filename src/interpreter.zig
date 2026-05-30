@@ -4471,7 +4471,7 @@ pub const Interpreter = struct {
         if (eq(name, "toString")) {
             var radix: usize = 10;
             if (args.len > 0 and args[0] != .undefined) {
-                const r = @trunc(args[0].toNumber());
+                const r = @trunc(try self.toNumberV(args[0]));
                 if (std.math.isNan(r) or r < 2 or r > 36)
                     return self.throwError("RangeError", "toString() radix must be an integer between 2 and 36");
                 radix = @intFromFloat(r);
@@ -4482,30 +4482,43 @@ pub const Interpreter = struct {
             return Value{ .string = try numberToRadix(self.arena, n, radix) };
         }
         if (eq(name, "toFixed")) {
-            const f = arg0(args).toNumber();
-            const fi = @trunc(f);
-            if (std.math.isNan(f) or fi < 0 or fi > 100)
+            // ToIntegerOrInfinity(fractionDigits) runs first (can throw TypeError
+            // on a Symbol/BigInt or a throwing valueOf) — BEFORE the range check
+            // and the not-finite return, per spec step order.
+            const f = try self.toNumberV(arg0(args));
+            const fi = if (std.math.isNan(f)) @as(f64, 0) else @trunc(f);
+            if (fi < 0 or fi > 100)
                 return self.throwError("RangeError", "toFixed() digits must be between 0 and 100");
+            if (std.math.isNan(n) or std.math.isInf(n))
+                return Value{ .string = try value.numberToString(self.arena, n) };
             return Value{ .string = try toFixed(self.arena, n, @intFromFloat(fi)) };
         }
         if (eq(name, "toExponential")) {
+            const has_arg = args.len > 0 and args[0] != .undefined;
+            // Coerce the argument first (observable + can throw), then handle a
+            // non-finite receiver.
+            const f = try self.toNumberV(arg0(args));
             if (std.math.isNan(n)) return Value{ .string = "NaN" };
             if (std.math.isInf(n)) return Value{ .string = if (n < 0) "-Infinity" else "Infinity" };
             var frac: ?usize = null;
-            if (args.len > 0 and args[0] != .undefined) {
-                const f = arg0(args).toNumber();
-                if (std.math.isNan(f) or f < 0 or f > 100) return self.throwError("RangeError", "toExponential() argument must be between 0 and 100");
-                frac = @intFromFloat(@trunc(f));
+            if (has_arg) {
+                const fi = if (std.math.isNan(f)) @as(f64, 0) else @trunc(f);
+                if (fi < 0 or fi > 100) return self.throwError("RangeError", "toExponential() argument must be between 0 and 100");
+                frac = @intFromFloat(fi);
             }
             return Value{ .string = try toExponentialStr(self.arena, n, frac) };
         }
         if (eq(name, "toPrecision")) {
+            // `precision === undefined` returns ToString(x) without coercion;
+            // otherwise ToIntegerOrInfinity(precision) runs before the not-finite
+            // return.
             if (args.len == 0 or args[0] == .undefined) return Value{ .string = try value.numberToString(self.arena, n) };
+            const p = try self.toNumberV(args[0]);
             if (std.math.isNan(n)) return Value{ .string = "NaN" };
             if (std.math.isInf(n)) return Value{ .string = if (n < 0) "-Infinity" else "Infinity" };
-            const pf = arg0(args).toNumber();
-            if (std.math.isNan(pf) or pf < 1 or pf > 100) return self.throwError("RangeError", "toPrecision() argument must be between 1 and 100");
-            return Value{ .string = try toPrecisionStr(self.arena, n, @intFromFloat(@trunc(pf))) };
+            const pf = if (std.math.isNan(p)) @as(f64, 0) else @trunc(p);
+            if (pf < 1 or pf > 100) return self.throwError("RangeError", "toPrecision() argument must be between 1 and 100");
+            return Value{ .string = try toPrecisionStr(self.arena, n, @intFromFloat(pf)) };
         }
         return null;
     }
@@ -5849,19 +5862,37 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     return .{ .string = if (name.len == 0) "Error" else name };
 }
 
-/// `Error.prototype.stack` setter: installs an own data property `stack` on the
-/// receiver (any value, not just strings), shadowing the accessor — matching the
-/// V8 behavior test262 checks. A no-op for a non-object receiver.
+/// `Error.prototype.stack` setter — SetterThatIgnoresPrototypeProperties(this,
+/// %Error.prototype%, "stack", v): a TypeError if `this` is not an Object or `v`
+/// is not a String, a TypeError if `this` is the home object (%Error.prototype%),
+/// otherwise an own { writable, enumerable, configurable } data property `stack`
+/// is created on the receiver (any object, no [[ErrorData]] check), shadowing the
+/// accessor. The home pointer is the setter's `private_data`.
 fn errorStackSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this == .object) {
-        const v = if (args.len > 0) args[0] else .undefined;
-        // Define an *own* data property directly (CreateDataProperty), NOT via
-        // [[Set]] — going through setProp would re-find this very setter on the
-        // prototype and recurse infinitely.
-        try this.object.setOwn(self.arena, self.root_shape, "stack", v);
-        try this.object.setAttr(self.arena, "stack", .{ .enumerable = false, .configurable = true, .writable = true });
+    if (this != .object)
+        return self.throwError("TypeError", "Error.prototype.stack setter called on a non-object");
+    const v = if (args.len > 0) args[0] else .undefined;
+    if (v != .string)
+        return self.throwError("TypeError", "Error.prototype.stack setter requires a string value");
+    // Assignment to the home object itself (%Error.prototype%) throws, mirroring
+    // a write to a non-writable own data property in strict mode.
+    if (self.active_native) |nat| {
+        if (nat.private_data) |hd| {
+            const home: *value.Object = @ptrCast(@alignCast(hd));
+            if (this.object == home)
+                return self.throwError("TypeError", "Error.prototype.stack setter called on %Error.prototype%");
+        }
     }
+    const o = this.object;
+    // Define an *own* data property directly (CreateDataProperty), NOT via
+    // [[Set]] — going through setProp would re-find this very setter on the
+    // prototype and recurse infinitely. A fresh property is writable/enumerable/
+    // configurable; an existing own one just takes the new value.
+    const had_own = o.getOwn("stack") != null;
+    try o.setOwn(self.arena, self.root_shape, "stack", v);
+    if (!had_own)
+        try o.setAttr(self.arena, "stack", .{ .enumerable = true, .configurable = true, .writable = true });
     return .undefined;
 }
 
@@ -6779,7 +6810,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
             stack_get.* = .{ .native = errorStackGet };
             try installNativeProps(a, root_shape, stack_get, "get stack", 0);
             const stack_set = try a.create(value.Object);
-            stack_set.* = .{ .native = errorStackSet };
+            // private_data = the home object (%Error.prototype%) for the
+            // SetterThatIgnoresPrototypeProperties same-as-home TypeError check.
+            stack_set.* = .{ .native = errorStackSet, .private_data = @ptrCast(proto) };
             try installNativeProps(a, root_shape, stack_set, "set stack", 1);
             try proto.setAccessor(a, "stack", .{ .object = stack_get }, .{ .object = stack_set });
             try proto.setAttr(a, "stack", .{ .enumerable = false, .configurable = true });

@@ -807,9 +807,13 @@ test "Error.prototype.stack accessor" {
     // The getter returns a string for an Error receiver, undefined otherwise.
     try expectEvalStr("string", "typeof new Error('x').stack");
     try std.testing.expect((try evalIn("({ __proto__: new Error('y') }).stack === undefined")).boolean);
-    // The setter installs an own data property shadowing the accessor (any value).
+    // The setter installs an own { writable, enumerable, configurable } data
+    // property shadowing the accessor (SetterThatIgnoresPrototypeProperties).
     try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 'custom'; e.stack === 'custom'")).boolean);
-    try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 42; e.stack === 42")).boolean);
+    try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 's'; Object.getOwnPropertyDescriptor(e, 'stack').enumerable")).boolean);
+    // A non-String value throws a TypeError; assigning to %Error.prototype% throws.
+    try std.testing.expect((try evalIn("var e = new Error('x'); try { e.stack = 42; false } catch (x) { x instanceof TypeError }")).boolean);
+    try std.testing.expect((try evalIn("try { Error.prototype.stack = 's'; false } catch (x) { x instanceof TypeError }")).boolean);
 }
 
 test "AggregateError" {
