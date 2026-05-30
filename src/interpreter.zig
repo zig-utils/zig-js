@@ -1815,6 +1815,20 @@ pub const Interpreter = struct {
         return v.toString(self.arena);
     }
 
+    /// ToNumber(v): runs `[Symbol.toPrimitive]`/`valueOf`/`toString` for an
+    /// object (propagating throws), and a TypeError for a Symbol.
+    pub fn toNumberV(self: *Interpreter, v: Value) EvalError!f64 {
+        if (v == .object and v.object.is_symbol)
+            return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+        if (v == .object) {
+            const prim = try self.toPrimitive(v, .number);
+            if (prim == .object and prim.object.is_symbol)
+                return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+            return prim.toNumber();
+        }
+        return v.toNumber();
+    }
+
     pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
         if (k == .object and k.object.is_symbol) return k.object.sym_key;
         // ToPropertyKey: an object key is first ToPrimitive(key, string) — running
@@ -2711,6 +2725,22 @@ pub const Interpreter = struct {
                         }
                     }
                 }
+                if (o.array_buffer) |ab| {
+                    if (std.mem.eql(u8, key, "byteLength")) return .{ .number = @floatFromInt(if (ab.detached) 0 else ab.data.len) };
+                }
+                if (o.typed_array) |ta| {
+                    const detached = ta.buffer.array_buffer.?.detached;
+                    if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(if (detached) 0 else ta.length) };
+                    if (std.mem.eql(u8, key, "byteLength")) return .{ .number = @floatFromInt(if (detached) 0 else ta.length * ta.kind.byteSize()) };
+                    if (std.mem.eql(u8, key, "byteOffset")) return .{ .number = @floatFromInt(if (detached) 0 else ta.byte_offset) };
+                    if (std.mem.eql(u8, key, "buffer")) return .{ .object = ta.buffer };
+                    if (std.mem.eql(u8, key, "BYTES_PER_ELEMENT")) return .{ .number = @floatFromInt(ta.kind.byteSize()) };
+                    if (arrayIndex(key)) |i| {
+                        if (detached or i >= ta.length) return .undefined;
+                        return value.taRead(ta, i);
+                    }
+                    // other keys (methods, constructor, @@toStringTag) fall through.
+                }
                 if (o.is_array) {
                     if (std.mem.eql(u8, key, "length"))
                         return .{ .number = @floatFromInt(@max(o.elements.items.len, o.array_len)) };
@@ -3071,6 +3101,17 @@ pub const Interpreter = struct {
         }
         const o = recv.object;
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxySet(o, key, v, recv);
+        if (o.typed_array) |ta| {
+            // An integer-keyed write coerces the value to a number and stores it
+            // in the buffer; out-of-bounds / detached writes are silently ignored
+            // (a canonical numeric index never falls through to a named property).
+            if (arrayIndex(key)) |i| {
+                const num = (try self.toNumberV(v));
+                if (!ta.buffer.array_buffer.?.detached and i < ta.length) value.taWrite(ta, i, num);
+                return;
+            }
+            // non-index keys fall through to ordinary [[Set]].
+        }
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) {
                 const n = v.toNumber();
@@ -3333,6 +3374,104 @@ pub const Interpreter = struct {
         return self.construct(ctor, &.{.{ .number = @floatFromInt(len) }});
     }
 
+    /// Create a zero-filled `ArrayBuffer` object of `len` bytes.
+    pub fn makeArrayBuffer(self: *Interpreter, len: usize) EvalError!*value.Object {
+        const o = (try self.newObject()).object;
+        const data = try self.arena.alloc(u8, len);
+        @memset(data, 0);
+        const ab = try self.arena.create(value.ArrayBufferData);
+        ab.* = .{ .data = data };
+        o.array_buffer = ab;
+        if (self.env.get("ArrayBuffer")) |c| {
+            if (c == .object) o.proto = try self.protoObject(c.object);
+        }
+        return o;
+    }
+
+    /// Construct a typed array of `kind` from the constructor arguments: a
+    /// length, an `(buffer, byteOffset?, length?)` view, or a copy of a typed
+    /// array / array-like / iterable.
+    pub fn makeTypedArray(self: *Interpreter, kind: value.TAKind, args: []const Value) EvalError!Value {
+        const size = kind.byteSize();
+        const a0 = if (args.len > 0) args[0] else Value.undefined;
+        const o = (try self.newObject()).object;
+        // Prototype from the in-flight new.target, else the kind's constructor.
+        if (self.new_target == .object) {
+            o.proto = try self.protoObject(self.new_target.object);
+        } else if (self.env.get(kind.ctorName())) |c| {
+            if (c == .object) o.proto = try self.protoObject(c.object);
+        }
+        const ta = try self.arena.create(value.TypedArrayData);
+        o.typed_array = ta;
+
+        if (a0 == .object and a0.object.array_buffer != null) {
+            // new TA(buffer, byteOffset?, length?)
+            const buffer = a0.object;
+            const buflen = buffer.array_buffer.?.data.len;
+            const bo_f = if (args.len > 1) try self.toNumberV(args[1]) else 0;
+            const byte_offset: usize = @intFromFloat(@trunc(@max(0, bo_f)));
+            if (byte_offset % size != 0 or byte_offset > buflen) return self.throwError("RangeError", "invalid typed array offset");
+            var length: usize = undefined;
+            if (args.len > 2 and args[2] != .undefined) {
+                length = @intFromFloat(@trunc(@max(0, try self.toNumberV(args[2]))));
+            } else {
+                if ((buflen - byte_offset) % size != 0) return self.throwError("RangeError", "byte length not a multiple of element size");
+                length = (buflen - byte_offset) / size;
+            }
+            if (byte_offset + length * size > buflen) return self.throwError("RangeError", "invalid typed array length");
+            ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind };
+            return .{ .object = o };
+        }
+        if (a0 == .object and a0.object.typed_array != null) {
+            // new TA(typedArray): copy elements (converting numeric types).
+            const src = a0.object.typed_array.?;
+            const length = src.length;
+            ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
+            var i: usize = 0;
+            while (i < length) : (i += 1) value.taWrite(ta, i, value.taRead(src, i).number);
+            return .{ .object = o };
+        }
+        if (a0 == .object) {
+            // new TA(arrayLike | iterable): collect the values, then copy.
+            const list = try self.iterableOrArrayLikeToList(a0);
+            ta.* = .{ .buffer = try self.makeArrayBuffer(list.len * size), .byte_offset = 0, .length = list.len, .kind = kind };
+            var i: usize = 0;
+            while (i < list.len) : (i += 1) value.taWrite(ta, i, try self.toNumberV(list[i]));
+            return .{ .object = o };
+        }
+        // new TA(length)
+        const len_f = if (a0 == .undefined) 0 else try self.toNumberV(a0);
+        if (len_f < 0 or @trunc(len_f) != len_f) return self.throwError("RangeError", "invalid typed array length");
+        const length: usize = @intFromFloat(len_f);
+        ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
+        return .{ .object = o };
+    }
+
+    /// Collect an iterable's values (via `Symbol.iterator`) or an array-like's
+    /// `0..length` elements into a freshly-allocated slice.
+    fn iterableOrArrayLikeToList(self: *Interpreter, v: Value) EvalError![]Value {
+        var out: std.ArrayListUnmanaged(Value) = .empty;
+        const itk = self.symbolIteratorKey();
+        if (v == .object and itk != null and hasProperty(v.object, itk.?)) {
+            const it = try self.iteratorOf(v);
+            while (true) {
+                const r = try self.callMethod(it, "next", &.{});
+                if ((try self.getProperty(r, "done")).toBoolean()) break;
+                try out.append(self.arena, try self.getProperty(r, "value"));
+            }
+            return out.items;
+        }
+        // Array-like: read 0..ToLength(length).
+        const len = toLen((try self.toNumberV(try self.getProperty(v, "length"))));
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            var kb: [24]u8 = undefined;
+            const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+            try out.append(self.arena, try self.getProperty(v, k));
+        }
+        return out.items;
+    }
+
     /// Append `v` as the next element of a method's result (an array uses its
     /// dense store; a custom species object gets a `[[Set]]` at `idx`).
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
@@ -3491,6 +3630,11 @@ pub const Interpreter = struct {
                 if (o.is_date) return try self.dateMethod(o, name, args);
                 if (o.is_map) return try self.mapMethod(o, name, args);
                 if (o.is_set) return try self.setMethod(o, name, args);
+                // A typed array's own methods take precedence over the Array-like
+                // coercion path (slice/indexOf/map/… are shared names).
+                if (o.typed_array != null and o.getOwn(name) == null) {
+                    if (try typedArrayMethod(self, o, name, args)) |r| return r;
+                }
                 // A String wrapper object (`new String("…")`): its String.prototype
                 // methods take precedence over the generic Array-like coercion for
                 // names both share (slice/indexOf/lastIndexOf/includes/concat/at).
@@ -3556,23 +3700,6 @@ pub const Interpreter = struct {
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
-    }
-
-    fn eq(a: []const u8, b: []const u8) bool {
-        return std.mem.eql(u8, a, b);
-    }
-
-    /// Normalize a relative index (negative counts from the end) into [0, len].
-    fn relIndex(v: Value, len: usize, default: f64) usize {
-        const n = if (v == .undefined) default else v.toNumber();
-        if (std.math.isNan(n)) return 0;
-        const fl = @trunc(n);
-        if (fl < 0) {
-            const from_end = @as(f64, @floatFromInt(len)) + fl;
-            return if (from_end < 0) 0 else @intFromFloat(from_end);
-        }
-        const flen: f64 = @floatFromInt(len);
-        return if (fl > flen) len else @intFromFloat(fl);
     }
 
     /// Generic read-only Array.prototype methods that work on any array-like
@@ -5856,6 +5983,267 @@ fn isConstructorValue(v: Value) bool {
 /// constructors, `NaN`/`Infinity`/`undefined`, the `Math` and `Object`/`Array`
 /// namespaces, and the common global functions. `root_shape` backs the property
 /// stores of the namespace objects. Called once per Context, before user code.
+fn eq(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+/// Normalize a relative index (negative counts from the end) into [0, len].
+fn relIndex(v: Value, len: usize, default: f64) usize {
+    const n = if (v == .undefined) default else v.toNumber();
+    if (std.math.isNan(n)) return 0;
+    const fl = @trunc(n);
+    if (fl < 0) {
+        const from_end = @as(f64, @floatFromInt(len)) + fl;
+        return if (from_end < 0) 0 else @intFromFloat(from_end);
+    }
+    const flen: f64 = @floatFromInt(len);
+    return if (fl > flen) len else @intFromFloat(fl);
+}
+
+/// `ArrayBuffer.prototype.slice(begin, end)` — a copy of the byte range.
+fn arrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.slice called on a non-ArrayBuffer");
+    const ab = this.object.array_buffer.?;
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const blen = ab.data.len;
+    const start = relIndex(if (args.len > 0) args[0] else .undefined, blen, 0);
+    const end = relIndex(if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
+    const count = if (end > start) end - start else 0;
+    const out = try self.makeArrayBuffer(count);
+    @memcpy(out.array_buffer.?.data[0..count], ab.data[start .. start + count]);
+    return .{ .object = out };
+}
+
+/// Build a fresh typed array of `kind` with `len` zero-initialized elements.
+fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*value.Object {
+    const o = (try self.newObject()).object;
+    const ta = try self.arena.create(value.TypedArrayData);
+    ta.* = .{ .buffer = try self.makeArrayBuffer(len * kind.byteSize()), .byte_offset = 0, .length = len, .kind = kind };
+    o.typed_array = ta;
+    if (self.env.get(kind.ctorName())) |c| {
+        if (c == .object) o.proto = try self.protoObject(c.object);
+    }
+    return o;
+}
+
+/// %TypedArray%.prototype methods. The receiver is a typed array; element reads
+/// go through the buffer (`taRead`), writes coerce via ToNumber + `taWrite`.
+fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
+    const ta = o.typed_array.?;
+    const len = if (ta.buffer.array_buffer.?.detached) 0 else ta.length;
+    const recv = Value{ .object = o };
+    const cb_this: Value = if (args.len > 1) args[1] else .undefined;
+    if (eq(name, "at")) {
+        var idx = if (args.len > 0) @as(i64, @intFromFloat(@trunc((try self.toNumberV(args[0]))))) else 0;
+        if (idx < 0) idx += @as(i64, @intCast(len));
+        if (idx < 0 or idx >= len) return Value.undefined;
+        return value.taRead(ta, @intCast(idx));
+    }
+    if (eq(name, "join")) {
+        const sep = if (args.len > 0 and args[0] != .undefined) try self.toStringV(args[0]) else ",";
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            if (i > 0) try buf.appendSlice(self.arena, sep);
+            try buf.appendSlice(self.arena, try value.numberToString(self.arena, value.taRead(ta, i).number));
+        }
+        return Value{ .string = try buf.toOwnedSlice(self.arena) };
+    }
+    if (eq(name, "forEach")) {
+        const cb = if (args.len > 0) args[0] else Value.undefined;
+        var i: usize = 0;
+        while (i < len) : (i += 1) _ = try self.callValueWithThis(cb, &.{ value.taRead(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
+        return Value.undefined;
+    }
+    if (eq(name, "map")) {
+        const cb = if (args.len > 0) args[0] else Value.undefined;
+        const result = try newTypedArray(self, ta.kind, len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const r = try self.callValueWithThis(cb, &.{ value.taRead(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
+            value.taWrite(result.typed_array.?, i, try self.toNumberV(r));
+        }
+        return .{ .object = result };
+    }
+    if (eq(name, "filter")) {
+        const cb = if (args.len > 0) args[0] else Value.undefined;
+        var kept: std.ArrayListUnmanaged(f64) = .empty;
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const el = value.taRead(ta, i);
+            if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean())
+                try kept.append(self.arena, el.number);
+        }
+        const result = try newTypedArray(self, ta.kind, kept.items.len);
+        for (kept.items, 0..) |x, k| value.taWrite(result.typed_array.?, k, x);
+        return .{ .object = result };
+    }
+    if (eq(name, "some") or eq(name, "every")) {
+        const every = eq(name, "every");
+        const cb = if (args.len > 0) args[0] else Value.undefined;
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const t = (try self.callValueWithThis(cb, &.{ value.taRead(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean();
+            if (every and !t) return Value{ .boolean = false };
+            if (!every and t) return Value{ .boolean = true };
+        }
+        return Value{ .boolean = every };
+    }
+    if (eq(name, "find") or eq(name, "findIndex")) {
+        const want_idx = eq(name, "findIndex");
+        const cb = if (args.len > 0) args[0] else Value.undefined;
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const el = value.taRead(ta, i);
+            if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean())
+                return if (want_idx) Value{ .number = @floatFromInt(i) } else el;
+        }
+        return if (want_idx) Value{ .number = -1 } else Value.undefined;
+    }
+    if (eq(name, "reduce")) {
+        const cb = if (args.len > 0) args[0] else Value.undefined;
+        var acc: Value = undefined;
+        var i: usize = 0;
+        if (args.len > 1) {
+            acc = args[1];
+        } else {
+            if (len == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+            acc = value.taRead(ta, 0);
+            i = 1;
+        }
+        while (i < len) : (i += 1) acc = try self.callValueWithThis(cb, &.{ acc, value.taRead(ta, i), .{ .number = @floatFromInt(i) }, recv }, .undefined);
+        return acc;
+    }
+    if (eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes")) {
+        const target = if (args.len > 0) try self.toNumberV(args[0]) else std.math.nan(f64);
+        const incl = eq(name, "includes");
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const e = value.taRead(ta, i).number;
+            if (e == target or (incl and std.math.isNan(e) and std.math.isNan(target)))
+                return if (incl) Value{ .boolean = true } else Value{ .number = @floatFromInt(i) };
+        }
+        return if (incl) Value{ .boolean = false } else Value{ .number = -1 };
+    }
+    if (eq(name, "fill")) {
+        const v = if (args.len > 0) try self.toNumberV(args[0]) else std.math.nan(f64);
+        const start = relIndex(if (args.len > 1) args[1] else .undefined, len, 0);
+        const end = relIndex(if (args.len > 2) args[2] else .undefined, len, @floatFromInt(len));
+        var i = start;
+        while (i < end) : (i += 1) value.taWrite(ta, i, v);
+        return recv;
+    }
+    if (eq(name, "reverse")) {
+        var i: usize = 0;
+        while (i < len / 2) : (i += 1) {
+            const tmp = value.taRead(ta, i).number;
+            value.taWrite(ta, i, value.taRead(ta, len - 1 - i).number);
+            value.taWrite(ta, len - 1 - i, tmp);
+        }
+        return recv;
+    }
+    if (eq(name, "slice") or eq(name, "subarray")) {
+        const start = relIndex(if (args.len > 0) args[0] else .undefined, len, 0);
+        const end = relIndex(if (args.len > 1) args[1] else .undefined, len, @floatFromInt(len));
+        const count = if (end > start) end - start else 0;
+        if (eq(name, "subarray")) {
+            // A view onto the same buffer (no copy).
+            const o2 = (try self.newObject()).object;
+            const ta2 = try self.arena.create(value.TypedArrayData);
+            ta2.* = .{ .buffer = ta.buffer, .byte_offset = ta.byte_offset + start * ta.kind.byteSize(), .length = count, .kind = ta.kind };
+            o2.typed_array = ta2;
+            o2.proto = o.proto;
+            return .{ .object = o2 };
+        }
+        const result = try newTypedArray(self, ta.kind, count);
+        var i: usize = 0;
+        while (i < count) : (i += 1) value.taWrite(result.typed_array.?, i, value.taRead(ta, start + i).number);
+        return .{ .object = result };
+    }
+    if (eq(name, "set")) {
+        const src = if (args.len > 0) args[0] else Value.undefined;
+        const offset: usize = if (args.len > 1) @intFromFloat(@trunc(@max(0, try self.toNumberV(args[1])))) else 0;
+        if (src == .object and src.object.typed_array != null) {
+            const s = src.object.typed_array.?;
+            if (offset + s.length > len) return self.throwError("RangeError", "offset is out of bounds");
+            var i: usize = 0;
+            while (i < s.length) : (i += 1) value.taWrite(ta, offset + i, value.taRead(s, i).number);
+        } else if (src == .object) {
+            const list = try self.iterableOrArrayLikeToList(src);
+            if (offset + list.len > len) return self.throwError("RangeError", "offset is out of bounds");
+            for (list, 0..) |x, i| value.taWrite(ta, offset + i, try self.toNumberV(x));
+        }
+        return Value.undefined;
+    }
+    if (eq(name, "toString")) {
+        return try typedArrayMethod(self, o, "join", &.{});
+    }
+    if (eq(name, "keys") or eq(name, "values") or eq(name, "entries")) {
+        // Materialize a plain array and return its iterator (good enough for
+        // for-of / spread over a typed array).
+        const arr = (try self.newArray()).object;
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            if (eq(name, "keys")) {
+                try arr.elements.append(self.arena, .{ .number = @floatFromInt(i) });
+            } else if (eq(name, "values")) {
+                try arr.elements.append(self.arena, value.taRead(ta, i));
+            } else {
+                const pair = (try self.newArray()).object;
+                try pair.elements.append(self.arena, .{ .number = @floatFromInt(i) });
+                try pair.elements.append(self.arena, value.taRead(ta, i));
+                try arr.elements.append(self.arena, .{ .object = pair });
+            }
+        }
+        return try self.iteratorOf(.{ .object = arr });
+    }
+    return null;
+}
+
+/// A %TypedArray%.prototype method thunk: brand-checks `this` is a typed array,
+/// then dispatches to `typedArrayMethod`.
+fn taProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.typed_array == null)
+                return self.throwError("TypeError", "TypedArray.prototype method called on a non-TypedArray");
+            return (try typedArrayMethod(self, this.object, name, args)) orelse .undefined;
+        }
+    }.call;
+}
+
+/// `new ArrayBuffer(byteLength)`.
+fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor ArrayBuffer requires 'new'");
+    const len_f = if (args.len > 0) try self.toNumberV(args[0]) else 0;
+    if (len_f < 0 or @trunc(len_f) != len_f or len_f > 0x7fffffff) return self.throwError("RangeError", "Invalid ArrayBuffer length");
+    return .{ .object = try self.makeArrayBuffer(@intFromFloat(len_f)) };
+}
+
+/// `ArrayBuffer.isView(v)` — true for a typed-array (or DataView) view.
+fn arrayBufferIsViewFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    const v = if (args.len > 0) args[0] else Value.undefined;
+    return .{ .boolean = v == .object and v.object.typed_array != null };
+}
+
+/// A typed-array constructor for `kind` (`new Int8Array(...)`, …).
+fn typedArrayCtorFn(comptime kind: value.TAKind) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = this;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor TypedArray requires 'new'");
+            return self.makeTypedArray(kind, args);
+        }
+    }.call;
+}
+
 pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
@@ -6343,6 +6731,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try date_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, date_proto, date_ns);
     try env.put("Date", .{ .object = date_ns });
+
+    // ArrayBuffer + typed arrays last, after Object.prototype exists.
+    try installTypedArrays(env, root_shape);
 }
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the
@@ -6604,6 +6995,62 @@ fn mapProtoMethod(comptime name: []const u8) value.NativeFn {
             return (try self.mapMethod(this.object, name, args)) orelse .undefined;
         }
     }.call;
+}
+
+/// Install `ArrayBuffer` and the typed-array constructors (`Int8Array` …
+/// `Float64Array`), sharing one `%TypedArray%.prototype` for the methods.
+fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
+    const a = env.arena;
+    const obj_ctor = env.get("Object") orelse return;
+    if (obj_ctor != .object) return;
+    const op = obj_ctor.object.getOwn("prototype") orelse return;
+    if (op != .object) return;
+    const object_proto = op.object;
+
+    // ArrayBuffer.
+    const ab_proto = try a.create(value.Object);
+    ab_proto.* = .{ .proto = object_proto };
+    try setNative(a, rs, ab_proto, "slice", 2, arrayBufferSliceFn);
+    const ab_ctor = try a.create(value.Object);
+    ab_ctor.* = .{ .native = arrayBufferConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ab_ctor, "ArrayBuffer", 1);
+    try setNative(a, rs, ab_ctor, "isView", 1, arrayBufferIsViewFn);
+    try ab_ctor.setOwn(a, rs, "prototype", .{ .object = ab_proto });
+    try ab_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, ab_proto, ab_ctor);
+    try env.put("ArrayBuffer", .{ .object = ab_ctor });
+
+    // %TypedArray%.prototype — shared methods for every view kind.
+    const ta_proto = try a.create(value.Object);
+    ta_proto.* = .{ .proto = object_proto };
+    inline for (.{
+        .{ "at", 1 },      .{ "join", 1 },    .{ "forEach", 1 }, .{ "map", 1 },
+        .{ "filter", 1 },  .{ "some", 1 },    .{ "every", 1 },   .{ "find", 1 },
+        .{ "findIndex", 1 }, .{ "reduce", 1 }, .{ "indexOf", 1 }, .{ "lastIndexOf", 1 },
+        .{ "includes", 1 }, .{ "fill", 1 },   .{ "reverse", 0 }, .{ "slice", 2 },
+        .{ "subarray", 2 }, .{ "set", 1 },    .{ "toString", 0 }, .{ "keys", 0 },
+        .{ "values", 0 },   .{ "entries", 0 },
+    }) |s| try setNative(a, rs, ta_proto, s[0], s[1], taProtoMethod(s[0]));
+
+    inline for (.{
+        value.TAKind.i8,  value.TAKind.u8,  value.TAKind.u8c,
+        value.TAKind.i16, value.TAKind.u16, value.TAKind.i32,
+        value.TAKind.u32, value.TAKind.f32, value.TAKind.f64,
+    }) |kind| {
+        const proto = try a.create(value.Object);
+        proto.* = .{ .proto = ta_proto };
+        try proto.setOwn(a, rs, "BYTES_PER_ELEMENT", .{ .number = @floatFromInt(kind.byteSize()) });
+        try proto.setAttr(a, "BYTES_PER_ELEMENT", .{ .writable = false, .enumerable = false, .configurable = false });
+        const ctor = try a.create(value.Object);
+        ctor.* = .{ .native = typedArrayCtorFn(kind), .native_ctor = true };
+        try installNativeProps(a, rs, ctor, kind.ctorName(), 3);
+        try ctor.setOwn(a, rs, "BYTES_PER_ELEMENT", .{ .number = @floatFromInt(kind.byteSize()) });
+        try ctor.setAttr(a, "BYTES_PER_ELEMENT", .{ .writable = false, .enumerable = false, .configurable = false });
+        try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, rs, proto, ctor);
+        try env.put(kind.ctorName(), .{ .object = ctor });
+    }
 }
 
 fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {

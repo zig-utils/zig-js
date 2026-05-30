@@ -28,6 +28,128 @@ pub const HostError = error{ OutOfMemory, Throw, OptShortCircuit };
 /// engine builtins and the conformance harness's `assert`.
 pub const NativeFn = *const fn (ctx: *anyopaque, this: Value, args: []const Value) HostError!Value;
 
+/// The element type of a typed array (no BigInt variants — those need a BigInt
+/// value type). Each carries its byte width and how to read/write a value.
+pub const TAKind = enum {
+    i8,
+    u8,
+    u8c, // Uint8ClampedArray
+    i16,
+    u16,
+    i32,
+    u32,
+    f32,
+    f64,
+
+    pub fn byteSize(self: TAKind) usize {
+        return switch (self) {
+            .i8, .u8, .u8c => 1,
+            .i16, .u16 => 2,
+            .i32, .u32, .f32 => 4,
+            .f64 => 8,
+        };
+    }
+
+    /// The constructor/`Symbol.toStringTag` name (`"Int8Array"`, …).
+    pub fn ctorName(self: TAKind) []const u8 {
+        return switch (self) {
+            .i8 => "Int8Array",
+            .u8 => "Uint8Array",
+            .u8c => "Uint8ClampedArray",
+            .i16 => "Int16Array",
+            .u16 => "Uint16Array",
+            .i32 => "Int32Array",
+            .u32 => "Uint32Array",
+            .f32 => "Float32Array",
+            .f64 => "Float64Array",
+        };
+    }
+
+    pub fn fromName(name: []const u8) ?TAKind {
+        inline for (.{ .i8, .u8, .u8c, .i16, .u16, .i32, .u32, .f32, .f64 }) |k| {
+            if (std.mem.eql(u8, name, (@as(TAKind, k)).ctorName())) return k;
+        }
+        return null;
+    }
+};
+
+/// An `ArrayBuffer`'s backing bytes. `detached` is set by `$262.detachArrayBuffer`
+/// / transfer; a detached buffer's views read undefined / throw on length checks.
+pub const ArrayBufferData = struct {
+    data: []u8,
+    detached: bool = false,
+};
+
+/// Read typed-array element `i` (within bounds, buffer attached) as a Number.
+pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
+    const bytes = ta.buffer.array_buffer.?.data;
+    const off = ta.byte_offset + i * ta.kind.byteSize();
+    const n: f64 = switch (ta.kind) {
+        .i8 => @floatFromInt(@as(i8, @bitCast(bytes[off]))),
+        .u8, .u8c => @floatFromInt(bytes[off]),
+        .i16 => @floatFromInt(std.mem.readInt(i16, bytes[off..][0..2], .little)),
+        .u16 => @floatFromInt(std.mem.readInt(u16, bytes[off..][0..2], .little)),
+        .i32 => @floatFromInt(std.mem.readInt(i32, bytes[off..][0..4], .little)),
+        .u32 => @floatFromInt(std.mem.readInt(u32, bytes[off..][0..4], .little)),
+        .f32 => @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[off..][0..4], .little)))),
+        .f64 => @bitCast(std.mem.readInt(u64, bytes[off..][0..8], .little)),
+    };
+    return .{ .number = n };
+}
+
+/// ToInt of `num` truncated to a wrapping integer width (NaN/±Inf → 0).
+fn taToInt(comptime T: type, num: f64) T {
+    if (std.math.isNan(num) or std.math.isInf(num)) return 0;
+    const bits = @bitSizeOf(T);
+    const two_pow: f64 = std.math.pow(f64, 2, @floatFromInt(bits));
+    var m = @mod(@trunc(num), two_pow); // wrap into [0, 2^bits)
+    if (m < 0) m += two_pow;
+    // For a signed target, map the upper half [2^(bits-1), 2^bits) to negatives.
+    if (@typeInfo(T).int.signedness == .signed and m >= two_pow / 2) m -= two_pow;
+    return @intFromFloat(m);
+}
+
+/// Write Number `num` into typed-array element `i`, coercing to the element type
+/// (integer wrap, Uint8Clamped rounding/clamping, float narrowing).
+pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
+    const bytes = ta.buffer.array_buffer.?.data;
+    const off = ta.byte_offset + i * ta.kind.byteSize();
+    switch (ta.kind) {
+        .i8 => bytes[off] = @bitCast(taToInt(i8, num)),
+        .u8 => bytes[off] = taToInt(u8, num),
+        .u8c => {
+            // ToUint8Clamp: NaN→0, round-half-to-even, clamp [0,255].
+            if (std.math.isNan(num) or num <= 0) {
+                bytes[off] = 0;
+            } else if (num >= 255) {
+                bytes[off] = 255;
+            } else {
+                const f = @floor(num);
+                const rounded: f64 = if (num - f == 0.5)
+                    (if (@mod(f, 2) == 0) f else f + 1)
+                else
+                    @round(num);
+                bytes[off] = @intFromFloat(rounded);
+            }
+        },
+        .i16 => std.mem.writeInt(i16, bytes[off..][0..2], taToInt(i16, num), .little),
+        .u16 => std.mem.writeInt(u16, bytes[off..][0..2], taToInt(u16, num), .little),
+        .i32 => std.mem.writeInt(i32, bytes[off..][0..4], taToInt(i32, num), .little),
+        .u32 => std.mem.writeInt(u32, bytes[off..][0..4], taToInt(u32, num), .little),
+        .f32 => std.mem.writeInt(u32, bytes[off..][0..4], @bitCast(@as(f32, @floatCast(num))), .little),
+        .f64 => std.mem.writeInt(u64, bytes[off..][0..8], @bitCast(num), .little),
+    }
+}
+
+/// A typed-array view: `length` elements of `kind`, starting at `byte_offset`
+/// into `buffer`'s bytes.
+pub const TypedArrayData = struct {
+    buffer: *Object,
+    byte_offset: usize,
+    length: usize,
+    kind: TAKind,
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -136,6 +258,13 @@ pub const Object = struct {
     /// assignment). The `elements` slot for a hole still exists (holds undefined),
     /// but `HasProperty`/iteration treat the index as not present. Lazily allocated.
     holes: ?*std.AutoHashMapUnmanaged(usize, void) = null,
+
+    /// `ArrayBuffer` backing store (non-null marks an ArrayBuffer object).
+    array_buffer: ?*ArrayBufferData = null,
+    /// Typed-array view (non-null marks a `Int8Array`/…/`Float64Array`): an
+    /// integer-indexed view over `buffer`'s bytes. Index get/set read/write the
+    /// underlying bytes coerced to/from the element type.
+    typed_array: ?*TypedArrayData = null,
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {
