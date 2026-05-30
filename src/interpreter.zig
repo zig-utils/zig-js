@@ -6088,6 +6088,112 @@ fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 
+/// Mirror a global environment's bindings onto its global object as own
+/// properties (matching `Context.create`), so `globalThis.X` / reflection work.
+pub fn mirrorGlobalsOnto(env: *Environment, gobj: *value.Object, rs: *Shape) EvalError!void {
+    var it = env.vars.iterator();
+    while (it.next()) |e| {
+        const name = e.key_ptr.*;
+        if (gobj.getOwn(name) != null) continue;
+        try gobj.setOwn(env.arena, rs, name, e.value_ptr.*);
+        const frozen = eq(name, "undefined") or eq(name, "NaN") or eq(name, "Infinity");
+        try gobj.setAttr(env.arena, name, if (frozen)
+            .{ .writable = false, .enumerable = false, .configurable = false }
+        else
+            .{ .writable = true, .enumerable = false, .configurable = true });
+    }
+}
+
+/// `$262.gc()` — a no-op (the engine uses an arena, no explicit GC).
+fn host262GcFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return .undefined;
+}
+
+/// `$262.detachArrayBuffer(buffer)` — detach an ArrayBuffer's backing store.
+fn host262DetachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = ctx;
+    const v = if (args.len > 0) args[0] else Value.undefined;
+    if (v == .object) if (v.object.array_buffer) |ab| {
+        ab.detached = true;
+    };
+    return .undefined;
+}
+
+/// `$262.evalScript(src)` / a realm's evalScript — parse + evaluate `src` as a
+/// global script in the realm captured in this native's `private_data`.
+fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return .undefined));
+    if (args.len == 0 or args[0] != .string) return if (args.len > 0) args[0] else .undefined;
+    var parser = Parser.init(self.arena, args[0].string) catch return self.throwError("SyntaxError", "evalScript: invalid source");
+    const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "evalScript: parse error");
+    const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g == .object) g.object else null) else null;
+    const s_env = self.env;
+    const s_this = self.this_value;
+    const s_glob = self.global_object;
+    self.env = genv;
+    if (gobj) |go| {
+        self.this_value = .{ .object = go };
+        self.global_object = go;
+    }
+    defer {
+        self.env = s_env;
+        self.this_value = s_this;
+        self.global_object = s_glob;
+    }
+    return self.eval(prog);
+}
+
+/// `$262.createRealm()` — a fresh realm (its own global environment, intrinsics,
+/// and global object), returned as `{ global, evalScript }`.
+fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const a = self.arena;
+    const genv = try a.create(Environment);
+    genv.* = .{ .arena = a, .fn_scope = true };
+    const gobj = try a.create(value.Object);
+    gobj.* = .{};
+    try installGlobals(genv, self.root_shape);
+    try genv.put("globalThis", .{ .object = gobj });
+    try mirrorGlobalsOnto(genv, gobj, self.root_shape);
+    // Point the new realm's own `$262.global` at its global object.
+    if (genv.get("$262")) |d| {
+        if (d == .object) try self.setProp(d.object, "global", .{ .object = gobj });
+    }
+    // The realm record handed back to the caller (in the caller's realm).
+    const realm = (try self.newObject()).object;
+    try self.setProp(realm, "global", .{ .object = gobj });
+    const es = try a.create(value.Object);
+    es.* = .{ .native = host262EvalScriptFn, .private_data = @ptrCast(genv) };
+    try installNativeProps(a, self.root_shape, es, "evalScript", 1);
+    try self.setProp(realm, "evalScript", .{ .object = es });
+    return .{ .object = realm };
+}
+
+/// Install the test262 `$262` host object into `env` (its `global` is wired up
+/// by the caller once the realm's global object exists).
+pub fn install262(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const d = try a.create(value.Object);
+    d.* = .{ .proto = object_proto };
+    try setNative(a, rs, d, "gc", 0, host262GcFn);
+    try setNative(a, rs, d, "detachArrayBuffer", 1, host262DetachFn);
+    try setNative(a, rs, d, "createRealm", 0, host262CreateRealmFn);
+    const es = try a.create(value.Object);
+    es.* = .{ .native = host262EvalScriptFn, .private_data = @ptrCast(env) };
+    try installNativeProps(a, rs, es, "evalScript", 1);
+    try d.setOwn(a, rs, "evalScript", .{ .object = es });
+    try env.put("$262", .{ .object = d });
+}
+
 /// Render an `i128` in `radix` (2..36).
 fn formatBigIntRadix(arena: std.mem.Allocator, val: i128, radix: u8) error{OutOfMemory}![]const u8 {
     if (val == 0) return "0";
@@ -6919,6 +7025,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         try setConstructor(a, root_shape, bi_proto, bi_ns);
         try env.put("BigInt", .{ .object = bi_ns });
     }
+
+    // The test262 `$262` host object (its `global` is set by the realm owner).
+    try install262(env, root_shape, object_proto);
 }
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the

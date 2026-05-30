@@ -73,6 +73,10 @@ pub const Context = struct {
             else
                 .{ .writable = true, .enumerable = false, .configurable = true });
         }
+        // `$262.global` is this realm's global object.
+        if (self.env.get("$262")) |d| {
+            if (d == .object) try d.object.setOwn(a, self.root_shape, "global", .{ .object = global_obj });
+        }
         return self;
     }
 
