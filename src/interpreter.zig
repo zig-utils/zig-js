@@ -4641,13 +4641,59 @@ fn promiseCatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     return promise.then(self, p, .undefined, if (args.len > 0) args[0] else .undefined);
 }
 
+/// Captured state for a `finally` reaction (`then`/`catch` side) and its inner
+/// value-restoring thunk.
+const FinallyData = struct { on_finally: Value, captured: Value = .undefined, is_catch: bool };
+
+/// `thenFinally`/`catchFinally`: run `onFinally()`, then — once its result
+/// settles — re-yield the original value (or re-throw the original reason),
+/// so `finally` is transparent to the settled completion.
+fn finallyReactionFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    const d: *FinallyData = @ptrCast(@alignCast(fnobj.private_data.?));
+    const incoming = if (args.len > 0) args[0] else .undefined;
+    const result = try self.callValue(d.on_finally, &.{}); // may throw → propagates (rejects)
+    const wrapped = try promiseResolveStaticFn(@ptrCast(self), .undefined, &.{result});
+    const wp = promise.promiseOf(wrapped).?;
+    // After onFinally's result settles, a thunk that ignores its argument and
+    // reinstates the original completion.
+    const thunk = try self.arena.create(value.Object);
+    const td = try self.arena.create(FinallyData);
+    td.* = .{ .on_finally = .undefined, .captured = incoming, .is_catch = d.is_catch };
+    thunk.* = .{ .native = finallyThunkFn, .private_data = @ptrCast(td) };
+    return promise.then(self, wp, .{ .object = thunk }, .undefined);
+}
+
+fn finallyThunkFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    const d: *FinallyData = @ptrCast(@alignCast(fnobj.private_data.?));
+    if (d.is_catch) {
+        self.exception = d.captured; // re-throw the original rejection reason
+        return error.Throw;
+    }
+    return d.captured; // re-yield the original fulfillment value
+}
+
 fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.finally called on a non-Promise");
-    // Minimal `finally`: run the callback on settle; value/reason pass through
-    // (a precise implementation would re-thread the original completion).
     const cb = if (args.len > 0) args[0] else .undefined;
-    return promise.then(self, p, cb, cb);
+    // A non-callable `onFinally` is used directly for both reactions (spec).
+    if (!cb.isCallable()) return promise.then(self, p, cb, cb);
+    const onf = try self.arena.create(value.Object);
+    const ond = try self.arena.create(FinallyData);
+    ond.* = .{ .on_finally = cb, .is_catch = false };
+    onf.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ond) };
+    const onr = try self.arena.create(value.Object);
+    const ord = try self.arena.create(FinallyData);
+    ord.* = .{ .on_finally = cb, .is_catch = true };
+    onr.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ord) };
+    return promise.then(self, p, .{ .object = onf }, .{ .object = onr });
 }
 
 /// `Promise.resolve(v)` — `v` itself if already a promise, else a promise
