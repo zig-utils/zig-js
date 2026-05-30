@@ -1813,6 +1813,11 @@ pub const Interpreter = struct {
         try self.setProp(o, "global", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'g') != null });
         try self.setProp(o, "ignoreCase", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'i') != null });
         try self.setProp(o, "multiline", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'm') != null });
+        try self.setProp(o, "dotAll", .{ .boolean = std.mem.indexOfScalar(u8, flags, 's') != null });
+        try self.setProp(o, "sticky", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'y') != null });
+        try self.setProp(o, "unicode", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'u') != null });
+        try self.setProp(o, "unicodeSets", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'v') != null });
+        try self.setProp(o, "hasIndices", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'd') != null });
         return .{ .object = o };
     }
 
@@ -1822,6 +1827,11 @@ pub const Interpreter = struct {
         const cf = regex.common.CompileFlags{
             .case_insensitive = std.mem.indexOfScalar(u8, flags, 'i') != null,
             .multiline = std.mem.indexOfScalar(u8, flags, 'm') != null,
+            // `s` (dotAll): `.` also matches line terminators.
+            .dot_all = std.mem.indexOfScalar(u8, flags, 's') != null,
+            // `u`/`v` (unicode): pattern is interpreted as Unicode code points
+            // (enables `\u{...}` and code-point-aware classes in the engine).
+            .unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null,
         };
         return regex.Regex.compileWithFlags(self.arena, src, cf) catch
             return self.throwError("SyntaxError", "invalid regular expression");
