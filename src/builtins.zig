@@ -890,6 +890,25 @@ fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
             try o.setAttr(self.arena, e.key_ptr.*, a);
         }
     }
+    // An array's dense element indices live in `elements` (not the shape), so
+    // they aren't in `ownKeys` — lock each present one, plus `length` (which
+    // `freeze` additionally makes non-writable).
+    if (o.is_array) {
+        var i: usize = 0;
+        while (i < o.elements.items.len) : (i += 1) {
+            if (o.isHole(i)) continue;
+            var kb: [24]u8 = undefined;
+            const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+            var a = o.getAttr(k);
+            a.configurable = false;
+            if (freeze) a.writable = false;
+            try o.setAttr(self.arena, k, a);
+        }
+        var la = o.getAttr("length");
+        if (freeze) la.writable = false;
+        la.configurable = false;
+        try o.setAttr(self.arena, "length", la);
+    }
 }
 
 pub fn objectIsSealed(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -911,7 +930,21 @@ fn isLocked(ov: Value, frozen: bool) bool {
     if (ov != .object) return true;
     const o = ov.object;
     if (o.extensible) return false;
-    if (o.is_array and o.elements.items.len > 0) return false;
+    // An array's dense element indices must each be non-configurable (and, for
+    // frozen, non-writable). A frozen array additionally needs non-writable
+    // `length`. Holes carry no property, so they don't block.
+    if (o.is_array) {
+        var i: usize = 0;
+        while (i < o.elements.items.len) : (i += 1) {
+            if (o.isHole(i)) continue;
+            var kb: [24]u8 = undefined;
+            const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+            const a = o.getAttr(k);
+            if (a.configurable) return false;
+            if (frozen and a.writable) return false;
+        }
+        if (frozen and o.getAttr("length").writable) return false;
+    }
     var s = o.shape;
     while (s) |sh| {
         if (sh.name) |n| {
