@@ -8,6 +8,7 @@ const vm = @import("vm.zig");
 const promise = @import("promise.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
+const unicode_case = @import("unicode_case.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -4589,16 +4590,13 @@ pub const Interpreter = struct {
             return Value{ .string = try self.arena.dupe(u8, s[a0..b0]) };
         }
         if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
-            // toLocaleUpperCase delegates to the locale-independent mapping here
-            // (the engine has no ICU data); for the default locale they agree.
-            const out = try self.arena.dupe(u8, s);
-            for (out) |*c| c.* = std.ascii.toUpper(c.*);
-            return Value{ .string = out };
+            // toLocaleUpperCase delegates to the locale-independent full Unicode
+            // mapping here (the engine has no ICU data); for the default locale
+            // they agree.
+            return Value{ .string = try unicode_case.toUpper(self.arena, s) };
         }
         if (eq(name, "toLowerCase") or eq(name, "toLocaleLowerCase")) {
-            const out = try self.arena.dupe(u8, s);
-            for (out) |*c| c.* = std.ascii.toLower(c.*);
-            return Value{ .string = out };
+            return Value{ .string = try unicode_case.toLower(self.arena, s) };
         }
         if (eq(name, "trim")) return Value{ .string = jsTrim(s, true, true) };
         if (eq(name, "repeat")) {
