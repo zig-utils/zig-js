@@ -6804,6 +6804,23 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try func_proto.setAttr(a, "length", .{ .writable = false, .enumerable = false, .configurable = true });
     try func_proto.setOwn(a, root_shape, "name", .{ .string = "" });
     try func_proto.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+    // The %ThrowTypeError% poison-pill: `Function.prototype.caller` and
+    // `.arguments` are accessor properties whose get AND set are the single
+    // shared %ThrowTypeError% intrinsic ({ !enumerable, !configurable }). Reading
+    // or writing `fn.caller`/`fn.arguments` on a strict function walks the proto
+    // chain to here and throws (the "restricted properties").
+    {
+        const tte = try a.create(value.Object);
+        tte.* = .{ .native = throwTypeErrorFn };
+        try installFunctionProps(a, root_shape, tte, &.{}, "");
+        // %ThrowTypeError% is itself frozen: length/name non-writable & non-configurable.
+        try tte.setAttr(a, "length", .{ .writable = false, .enumerable = false, .configurable = false });
+        try tte.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = false });
+        for ([_][]const u8{ "caller", "arguments" }) |pname| {
+            try func_proto.setAccessor(a, pname, .{ .object = tte }, .{ .object = tte });
+            try func_proto.setAttr(a, pname, .{ .enumerable = false, .configurable = true });
+        }
+    }
     const function_ns = try a.create(value.Object);
     function_ns.* = .{ .native = builtins.functionConstructor, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, function_ns, "Function", 1);
@@ -7195,6 +7212,16 @@ fn funcProtoNoop(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = this;
     _ = args;
     return .undefined;
+}
+
+/// The `%ThrowTypeError%` intrinsic — the shared poison-pill backing the
+/// `caller`/`arguments` accessors on `Function.prototype` (and the strict /
+/// bound restricted properties). Always throws a TypeError.
+fn throwTypeErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.throwError("TypeError", "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
 }
 
 /// A generic `String.prototype` method: RequireObjectCoercible(this) then
