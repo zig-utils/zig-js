@@ -4793,7 +4793,7 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     switch (c.kind) {
         .all => {
             if (e.is_reject) {
-                try promise.reject(self, c.result, val); // first rejection wins
+                _ = try self.callValue(c.reject, &.{val}); // first rejection wins
                 return .undefined;
             }
             c.values.elements.items[e.index] = val;
@@ -4811,7 +4811,7 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         },
         .any => {
             if (!e.is_reject) {
-                try promise.resolve(self, c.result, val); // first fulfillment wins
+                _ = try self.callValue(c.resolve, &.{val}); // first fulfillment wins
                 return .undefined;
             }
             c.values.elements.items[e.index] = val; // collect the error
@@ -4819,10 +4819,12 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     }
     c.remaining -= 1;
     if (c.remaining == 0) {
-        if (c.kind == .any)
-            try promise.reject(self, c.result, .{ .object = c.values }) // all rejected
-        else
-            try promise.resolve(self, c.result, .{ .object = c.values });
+        if (c.kind == .any) {
+            // Promise.any rejects with an AggregateError whose `errors` is the
+            // collected rejection reasons (built from the values array).
+            const agg = try self.makeErrorWithArgs("AggregateError", &.{.{ .object = c.values }});
+            _ = try self.callValue(c.reject, &.{agg});
+        } else _ = try self.callValue(c.resolve, &.{.{ .object = c.values }});
     }
     return .undefined;
 }
@@ -4830,6 +4832,40 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 /// Shared setup for `Promise.all`/`allSettled`/`any`: build the combined promise
 /// and wire a per-element reaction onto each input (coerced via the source's
 /// `then`). An empty input settles immediately.
+/// A `PromiseCapability` record: the constructed promise plus the resolve/reject
+/// functions its executor handed out. Settling the combined promise goes through
+/// these functions, so a subclass constructor's promise is the actual result.
+const Capability = struct { promise: Value, resolve: Value, reject: Value };
+
+/// Captures the (resolve, reject) pair the executor is invoked with.
+const CapCapture = struct { resolve: Value = .undefined, reject: Value = .undefined };
+
+fn capabilityExecutorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    const cap: *CapCapture = @ptrCast(@alignCast(fnobj.private_data.?));
+    cap.resolve = if (args.len > 0) args[0] else .undefined;
+    cap.reject = if (args.len > 1) args[1] else .undefined;
+    return .undefined;
+}
+
+/// `NewPromiseCapability(C)`: construct `new C(executor)`, capturing the resolve
+/// and reject functions. Both must be callable. Works for the native `Promise`
+/// and for any subclass/custom constructor that forwards to a Promise executor.
+fn newPromiseCapability(self: *Interpreter, c: Value) EvalError!Capability {
+    if (!isConstructorValue(c)) return self.throwError("TypeError", "NewPromiseCapability called on a non-constructor");
+    const capture = try self.arena.create(CapCapture);
+    capture.* = .{};
+    const executor = try self.arena.create(value.Object);
+    executor.* = .{ .native = capabilityExecutorFn, .private_data = @ptrCast(capture) };
+    try installNativeProps(self.arena, self.root_shape, executor, "", 2);
+    const p = try self.construct(c, &.{.{ .object = executor }});
+    if (!capture.resolve.isCallable() or !capture.reject.isCallable())
+        return self.throwError("TypeError", "Promise capability resolve/reject is not callable");
+    return .{ .promise = p, .resolve = capture.resolve, .reject = capture.reject };
+}
+
 /// `GetPromiseResolve(C)` — `Get(C, "resolve")`, which must be callable. The
 /// combinators call this once per element (observably, so a replaced
 /// `Promise.resolve` is honored), passing `C` as the receiver.
@@ -4850,28 +4886,28 @@ fn elementPromise(self: *Interpreter, promise_resolve: Value, c: Value, el: Valu
 }
 
 fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @TypeOf(@as(promise.Combine, undefined).kind)) value.HostError!Value {
-    // NewPromiseCapability(C): C (the `this` value) must be a constructor.
-    if (!isConstructorValue(this)) return self.throwError("TypeError", "Promise combinator called on a non-constructor");
-    const result = try promise.newPromise(self);
-    const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    // NewPromiseCapability(C): C (the `this` value) must be a constructor. This
+    // throws synchronously (it is before the IfAbruptRejectPromise region).
+    const cap = try newPromiseCapability(self, this);
     // GetPromiseResolve + GetIterator are abrupt-rejected: a failure rejects the
     // returned promise (IfAbruptRejectPromise) rather than throwing out of the call.
-    const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, rp, result, err);
-    const elems = collectIterable(self, iterable) catch |err| return rejectAbrupt(self, rp, result, err);
+    const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, cap, err);
+    const elems = collectIterable(self, iterable) catch |err| return rejectAbrupt(self, cap, err);
 
     const values = (try self.newArray()).object;
     for (elems) |_| try values.elements.append(self.arena, .undefined);
     const combine = try self.arena.create(promise.Combine);
-    combine.* = .{ .result = rp, .values = values, .remaining = elems.len, .kind = kind };
+    combine.* = .{ .resolve = cap.resolve, .reject = cap.reject, .values = values, .remaining = elems.len, .kind = kind };
     if (elems.len == 0) {
-        if (kind == .any)
-            try promise.reject(self, rp, .{ .object = values })
-        else
-            try promise.resolve(self, rp, .{ .object = values });
-        return .{ .object = result };
+        if (kind == .any) {
+            // `Promise.any([])` rejects with an AggregateError carrying no errors.
+            const agg = try self.makeErrorWithArgs("AggregateError", &.{.{ .object = values }});
+            _ = try self.callValue(cap.reject, &.{agg});
+        } else _ = try self.callValue(cap.resolve, &.{.{ .object = values }});
+        return cap.promise;
     }
     for (elems, 0..) |el, i| {
-        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return rejectAbrupt(self, rp, result, err);
+        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return rejectAbrupt(self, cap, err);
         const f = try self.arena.create(value.Object);
         const fe = try self.arena.create(promise.Elem);
         fe.* = .{ .combine = combine, .index = i, .is_reject = false };
@@ -4882,17 +4918,17 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         r.* = .{ .native = combineElemFn, .private_data = @ptrCast(re) };
         _ = try promise.then(self, pp, .{ .object = f }, .{ .object = r });
     }
-    return .{ .object = result };
+    return cap.promise;
 }
 
-/// IfAbruptRejectPromise: a thrown completion rejects `rp` and returns its
-/// promise; any non-throw (host) error propagates unchanged.
-fn rejectAbrupt(self: *Interpreter, rp: *promise.Promise, result: *value.Object, err: value.HostError) value.HostError!Value {
+/// IfAbruptRejectPromise: a thrown completion rejects the capability and returns
+/// its promise; any non-throw (host) error propagates unchanged.
+fn rejectAbrupt(self: *Interpreter, cap: Capability, err: value.HostError) value.HostError!Value {
     if (err != error.Throw) return err;
     const reason = self.exception;
     self.exception = .undefined;
-    try promise.reject(self, rp, reason);
-    return .{ .object = result };
+    _ = try self.callValue(cap.reject, &.{reason});
+    return cap.promise;
 }
 
 fn promiseAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -4913,21 +4949,16 @@ fn promiseAnyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 /// `Promise.race(iterable)` — settle with the first input to settle.
 fn promiseRaceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!isConstructorValue(this)) return self.throwError("TypeError", "Promise.race called on a non-constructor");
-    const result = try promise.newPromise(self);
-    const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
-    const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, rp, result, err);
-    const elems = collectIterable(self, if (args.len > 0) args[0] else .undefined) catch |err| return rejectAbrupt(self, rp, result, err);
+    const cap = try newPromiseCapability(self, this);
+    const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, cap, err);
+    const elems = collectIterable(self, if (args.len > 0) args[0] else .undefined) catch |err| return rejectAbrupt(self, cap, err);
     for (elems) |el| {
-        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return rejectAbrupt(self, rp, result, err);
-        // resolve/reject the shared result; the first to fire wins (later no-op).
-        const f = try self.arena.create(value.Object);
-        f.* = .{ .native = promiseResolveClosure, .private_data = @ptrCast(rp) };
-        const r = try self.arena.create(value.Object);
-        r.* = .{ .native = promiseRejectClosure, .private_data = @ptrCast(rp) };
-        _ = try promise.then(self, pp, .{ .object = f }, .{ .object = r });
+        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return rejectAbrupt(self, cap, err);
+        // The capability's resolve/reject settle the result; the first input to
+        // fire wins (later settlements are no-ops on an already-settled promise).
+        _ = try promise.then(self, pp, cap.resolve, cap.reject);
     }
-    return .{ .object = result };
+    return cap.promise;
 }
 
 /// `print(...)` — appends a space-joined line to the Context's print buffer

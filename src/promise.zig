@@ -51,7 +51,10 @@ pub const Microtask = struct {
 /// array; `remaining` counts inputs not yet settled; `kind` selects how each
 /// element's outcome is recorded.
 pub const Combine = struct {
-    result: *Promise,
+    /// The combined promise's capability resolve/reject functions (so the result
+    /// can be a subclass instance, not just a native promise).
+    resolve: Value,
+    reject: Value,
     values: *Object,
     remaining: usize,
     kind: enum { all, all_settled, any },
