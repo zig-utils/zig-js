@@ -12,9 +12,9 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset *and* generators / async functions / async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js` + `assert.js` + `includes:`):
-> `zig build test262` currently passes **VALID 24,647 / 30,006 (82.1%)** across `language/` and
-> the implemented built-in subtrees, and `zig build conformance` keeps a 33/33 always-green smoke
-> suite.
+> `zig build test262` currently passes **VALID 24,932 / 30,486 (81.8%)** across `language/`
+> (including ES modules + top-level await) and the implemented built-in subtrees, and
+> `zig build conformance` keeps a 33/33 always-green smoke suite.
 >
 > Implemented language + runtime: closures, arrow functions, **classes** (fields, private members,
 > getters/setters, `static`, `super`, derived constructors), **destructuring** (array/object,
@@ -54,26 +54,25 @@ failing to parse valid code too), so they're kept apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? | **24,647 / 30,006 (82.1%)** |
-| negative | do we reject invalid input? (early errors — partial) | 1,651 / 4,215 (39.2%) |
+| **valid** | can we run the program? | **24,932 / 30,486 (81.8%)** |
+| negative | do we reject invalid input? (early errors — partial) | 1,704 / 4,455 (38.2%) |
 
 Per area (valid):
 
 | area | passing | | area | passing |
 | ---- | ------: | - | ---- | ------: |
-| `language` | 15,812 / 18,624 (84.9%) | | `Math` | 299 / 327 (91.4%) |
+| `language` (incl. modules) | 16,097 / 19,104 (84.3%) | | `Math` | 299 / 327 (91.4%) |
 | `Object` | 2,865 / 3,411 (84.0%) | | `Date` | 466 / 594 (78.5%) |
 | `Array` | 2,319 / 3,081 (75.3%) | | `Function` | 401 / 509 (78.8%) |
-| `String` | 841 / 1,223 (68.8%) | | `Promise` | 493 / 677 (72.8%) |
+| `String` | 850 / 1,223 (69.5%) | | `Promise` | 493 / 677 (72.8%) |
 | `Number` | 270 / 340 (79.4%) | | `Map`/`Set` | 75–78% |
 
 > `zig build test262` prints the per-subtree pass rate plus a `parse-fail` / `runtime-fail` split so
-> the work stays data-driven. The runtime drives the **async** corpus (the `$DONE` protocol) and
-> scores it. The biggest remaining gaps are whole subsystems: **TypedArray**/**BigInt**, the `$262`
-> host hooks (`createRealm`), advanced RegExp, full Unicode case mapping, and ES-module *scoring*
-> (the engine implements modules — parse, link, dependency-order evaluation, live bindings, live
-> namespace objects — but the runner keeps them unscored until the module pass rate clears the
-> headline). Bump the corpus with `git submodule update --remote test262`.
+> the work stays data-driven. The runtime drives the **async** corpus (the `$DONE` protocol) and the
+> **ES-module** corpus (parse → link → dependency-order evaluation, live bindings, live namespace
+> objects, top-level await), and scores both. The biggest remaining gaps are whole subsystems:
+> **TypedArray**/**BigInt**, the `$262` host hooks (`createRealm`), advanced RegExp, and full Unicode
+> case mapping. Bump the corpus with `git submodule update --remote test262`.
 
 ## Two ways to use it
 

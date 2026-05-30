@@ -165,6 +165,9 @@ const Meta = struct {
     /// `flags: [async]` — the test signals completion by calling `$DONE` (often
     /// from a Promise reaction); success/failure is read from the print buffer.
     is_async: bool = false,
+    /// `flags: [module]` — run as an ES module (harness in the global scope, the
+    /// body linked + evaluated as a module against sibling fixtures).
+    is_module: bool = false,
     /// `includes:` harness file names. Slices point into the source frontmatter,
     /// which outlives `runOne`.
     includes: [8][]const u8 = undefined,
@@ -188,8 +191,13 @@ fn parseMeta(src: []const u8) Meta {
         // synchronous-settling runtime (async generators, for-await, Promise
         // combinators, exact ordering), so it stays skipped like modules; the
         // runtime is exercised by the unit tests and the Promise built-ins.
-        if (std.mem.indexOf(u8, flags, "module") != null or
-            std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
+        // Modules run via a dedicated path (`runModule`). Async modules
+        // (module+async) additionally need top-level-await/$DONE-in-module
+        // machinery, so those stay skipped; CanBlockIsFalse needs Atomics.
+        if (std.mem.indexOf(u8, flags, "module") != null) {
+            if (meta.is_async) meta.unsupported_flag = true else meta.is_module = true;
+        }
+        if (std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
             meta.unsupported_flag = true;
     }
     if (std.mem.indexOf(u8, front, "negative:")) |ni| {
@@ -249,9 +257,10 @@ const Harness = struct {
     }
 };
 
-fn runOne(gpa: std.mem.Allocator, harness: *Harness, src: []const u8) Outcome {
+fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8) Outcome {
     const meta = parseMeta(src);
     if (meta.unsupported_flag) return .skip;
+    if (meta.is_module) return runModule(gpa, io, harness, abs_path, src, meta);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
@@ -316,6 +325,59 @@ fn runOne(gpa: std.mem.Allocator, harness: *Harness, src: []const u8) Outcome {
             error.Throw => .fail_runtime,
             error.OutOfMemory => .fail_other,
             else => .fail_parse, // lex/parse errors (UnexpectedToken, …)
+        };
+    }
+}
+
+/// Host state for the module loader: read a fixture relative to the importing
+/// module's path (resolving `.`/`..` so the same file dedups to one path).
+const ModHost = struct { gpa: std.mem.Allocator, io: std.Io };
+
+fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+    const h: *ModHost = @ptrCast(@alignCast(ctx));
+    const dir = std.fs.path.dirname(referrer) orelse ".";
+    const joined = std.fs.path.resolve(h.gpa, &.{ dir, specifier }) catch return null;
+    out_path.* = joined;
+    return std.Io.Dir.cwd().readFileAlloc(h.io, joined, h.gpa, .limited(1 << 20)) catch null;
+}
+
+/// Run a `flags: [module]` test: install the harness in the global scope, then
+/// link + evaluate the test body as a Module against its sibling fixtures.
+fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, meta: Meta) Outcome {
+    const ctx = js.Context.create(gpa) catch return .skip;
+    defer ctx.destroy();
+    if (!meta.raw) {
+        var hbuf: std.ArrayListUnmanaged(u8) = .empty;
+        defer hbuf.deinit(gpa);
+        const sta = harness.get("sta.js");
+        const ass = harness.get("assert.js");
+        if (sta != null and ass != null) {
+            hbuf.appendSlice(gpa, sta.?) catch return .skip;
+            hbuf.append(gpa, '\n') catch return .skip;
+            hbuf.appendSlice(gpa, ass.?) catch return .skip;
+            hbuf.append(gpa, '\n') catch return .skip;
+        } else hbuf.appendSlice(gpa, harness_shim) catch return .skip;
+        var i: usize = 0;
+        while (i < meta.includes_n) : (i += 1) {
+            const inc = harness.get(meta.includes[i]) orelse return .skip;
+            hbuf.appendSlice(gpa, inc) catch return .skip;
+            hbuf.append(gpa, '\n') catch return .skip;
+        }
+        _ = ctx.evaluate(hbuf.items) catch {};
+    }
+    var host = ModHost{ .gpa = gpa, .io = io };
+    const mh = js.Context.ModuleHost{ .ctx = &host, .load = modLoad };
+    if (ctx.evaluateModule(abs_path, src, mh)) |_| {
+        return if (meta.negative) .fail_negative else .pass;
+    } else |err| {
+        if (meta.negative) {
+            const ok = if (meta.negative_parse) err != error.Throw else err == error.Throw;
+            return if (ok) .pass_negative else .fail_negative;
+        }
+        return switch (err) {
+            error.Throw => .fail_runtime,
+            error.OutOfMemory => .fail_other,
+            else => .fail_parse,
         };
     }
 }
@@ -388,7 +450,8 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
             emit(out, io, &line_buf, idx, .skip);
             continue;
         };
-        const o = runOne(gpa, &harness, src);
+        const abs_path = std.fs.path.join(gpa, &.{ path, entry.path }) catch entry.basename;
+        const o = runOne(gpa, io, &harness, abs_path, src);
         gpa.free(src);
         emit(out, io, &line_buf, idx, o);
     }
