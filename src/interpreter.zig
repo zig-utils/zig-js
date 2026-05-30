@@ -2978,6 +2978,7 @@ pub const Interpreter = struct {
     /// them): a `const` reassignment throws; a function-expression name throws in
     /// strict code and is a no-op in sloppy code.
     pub fn assignVarVM(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
+        if (self.env.isAlias(name)) return self.throwError("TypeError", "Assignment to constant variable.");
         if (self.env.isConst(name)) |c| {
             if (c) return self.throwError("TypeError", "Assignment to constant variable.");
         }
@@ -3004,6 +3005,9 @@ pub const Interpreter = struct {
                 if (self.env.get(name)) |cur| {
                     if (self.isTdz(cur)) return self.throwError("ReferenceError", name);
                 }
+                // An imported binding is immutable (a module indirect binding):
+                // assigning to it is a TypeError.
+                if (self.env.isAlias(name)) return self.throwError("TypeError", "Assignment to constant variable.");
                 // Assigning to a `const` binding is a TypeError.
                 if (self.env.isConst(name)) |c| {
                     if (c) return self.throwError("TypeError", "Assignment to constant variable.");
