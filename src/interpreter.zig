@@ -257,6 +257,11 @@ pub const Function = struct {
     /// Strict-mode function (see `ast.FunctionNode.is_strict`). Gates sloppy-only
     /// behaviors — currently `this`-substitution on a null/undefined receiver.
     is_strict: bool = false,
+    /// The `with`-scope chain captured at definition (object environment records
+    /// enclosing the function). A function called from inside a `with` does NOT
+    /// see the caller's `with` object — only the ones lexically enclosing its own
+    /// definition — so the call restores this snapshot for the duration.
+    with_stack: []*value.Object = &.{},
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:
@@ -1107,6 +1112,10 @@ pub const Interpreter = struct {
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
         };
+        // Capture the enclosing `with`-scope chain lexically (empty for the vast
+        // majority of functions, defined outside any `with`).
+        if (self.with_stack.items.len > 0)
+            func.with_stack = try self.arena.dupe(*value.Object, self.with_stack.items);
         // Arrows capture `super` (home object + super constructor) lexically from
         // the enclosing method, just as they capture `this`/`new.target`. A
         // non-arrow gets its home object later (e.g. when installed as a method).
@@ -1621,6 +1630,13 @@ pub const Interpreter = struct {
         const saved_super = self.super_ctor;
         const saved_nt = self.new_target;
         const saved_strict = self.strict;
+        // The callee runs with its lexically-captured `with` chain, not the
+        // caller's — an arrow inherits the current one (it has no own snapshot).
+        const saved_with = self.with_stack;
+        if (!func.is_arrow) {
+            self.with_stack = .empty;
+            self.with_stack.appendSlice(self.arena, func.with_stack) catch {};
+        }
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
@@ -1644,6 +1660,7 @@ pub const Interpreter = struct {
             self.super_ctor = saved_super;
             self.new_target = saved_nt;
             self.strict = saved_strict;
+            if (!func.is_arrow) self.with_stack = saved_with;
         }
 
         // Non-arrow functions get an `arguments` array-like over the call args.
