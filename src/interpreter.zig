@@ -1774,6 +1774,22 @@ pub const Interpreter = struct {
     /// ToPropertyKey: a Symbol key uses its unique internal encoding (so
     /// symbol-keyed properties don't collide with string keys and stay out of
     /// string enumeration); other keys coerce to string.
+    /// ToString(v): the spec abstract operation — `ToString(ToPrimitive(v,
+    /// string))` for an object (running its `toString`/`valueOf`, propagating any
+    /// throw), and a TypeError for a Symbol. Unlike `Value.toString` (a Zig-level
+    /// rendering), this observes user methods and rejects Symbols.
+    pub fn toStringV(self: *Interpreter, v: Value) EvalError![]const u8 {
+        if (v == .object and v.object.is_symbol)
+            return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+        if (v == .object) {
+            const prim = try self.toPrimitive(v, .string);
+            if (prim == .object and prim.object.is_symbol)
+                return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+            return prim.toString(self.arena);
+        }
+        return v.toString(self.arena);
+    }
+
     pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
         if (k == .object and k.object.is_symbol) return k.object.sym_key;
         // ToPropertyKey: an object key is first ToPrimitive(key, string) — running
@@ -3422,7 +3438,7 @@ pub const Interpreter = struct {
                 // Generic String.prototype methods coerce `this` to string
                 // (`String.prototype.split.call(obj)`).
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
-                    return try self.stringMethod(try recv.toString(self.arena), name, args);
+                    return try self.stringMethod(try self.toStringV(recv), name, args);
                 }
                 // `Object.prototype.toString` ("[object Tag]") for a plain object.
                 // Plain objects don't proto-chain to Object.prototype, so the
@@ -6051,19 +6067,22 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     // so brand-checked methods accept it as a String (e.g. `String.prototype.
     // toString()` returns "" rather than throwing).
     string_proto.* = .{ .proto = object_proto, .prim = .{ .string = "" } };
-    try setProtoMethods(a, root_shape, string_proto, .{
-        .{ "charAt", 1 },     .{ "charCodeAt", 1 },   .{ "codePointAt", 1 }, .{ "indexOf", 1 },
-        .{ "lastIndexOf", 1 }, .{ "includes", 1 },    .{ "startsWith", 1 }, .{ "endsWith", 1 },
-        .{ "slice", 2 },      .{ "substring", 2 },    .{ "substr", 2 },     .{ "toUpperCase", 0 },
-        .{ "toLowerCase", 0 }, .{ "trim", 0 },        .{ "trimStart", 0 },  .{ "trimEnd", 0 },
-        .{ "repeat", 1 },     .{ "concat", 1 },       .{ "split", 2 },      .{ "at", 1 },
-        .{ "padStart", 1 },   .{ "padEnd", 1 },       .{ "replace", 2 },    .{ "replaceAll", 2 },
-        .{ "localeCompare", 1 }, .{ "toString", 0 },  .{ "valueOf", 0 },
-        .{ "toLocaleUpperCase", 0 }, .{ "toLocaleLowerCase", 0 },
-        // Regex-protocol + normalization methods (dispatched via builtinMethod,
-        // now real own properties so reflection / `.call` / `.bind` work).
-        .{ "match", 1 }, .{ "matchAll", 1 }, .{ "search", 1 }, .{ "normalize", 0 },
-    });
+    // Generic String.prototype methods coerce `this` via ToString through a
+    // String-specific thunk (so `String.prototype.m.call(x)` uses String `m`,
+    // propagates `toString`/`valueOf` throws, and rejects Symbol/null/undefined).
+    inline for (.{
+        .{ "charAt", 1 },        .{ "charCodeAt", 1 },  .{ "codePointAt", 1 }, .{ "indexOf", 1 },
+        .{ "lastIndexOf", 1 },   .{ "includes", 1 },    .{ "startsWith", 1 },  .{ "endsWith", 1 },
+        .{ "slice", 2 },         .{ "substring", 2 },   .{ "substr", 2 },      .{ "toUpperCase", 0 },
+        .{ "toLowerCase", 0 },   .{ "trim", 0 },        .{ "trimStart", 0 },   .{ "trimEnd", 0 },
+        .{ "repeat", 1 },        .{ "concat", 1 },      .{ "split", 2 },       .{ "at", 1 },
+        .{ "padStart", 1 },      .{ "padEnd", 1 },      .{ "replace", 2 },     .{ "replaceAll", 2 },
+        .{ "localeCompare", 1 }, .{ "toLocaleUpperCase", 0 }, .{ "toLocaleLowerCase", 0 },
+        .{ "match", 1 },         .{ "matchAll", 1 },    .{ "search", 1 },      .{ "normalize", 0 },
+    }) |s| try setNative(a, root_shape, string_proto, s[0], s[1], stringProtoMethod(s[0]));
+    // `toString`/`valueOf` brand-check (a String primitive or wrapper), not ToString.
+    try setNative(a, root_shape, string_proto, "toString", 0, stringValueMethod);
+    try setNative(a, root_shape, string_proto, "valueOf", 0, stringValueMethod);
     try string_ns.setOwn(a, root_shape, "prototype", .{ .object = string_proto });
     try string_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, string_proto, string_ns);
@@ -6368,6 +6387,37 @@ fn funcProtoNoop(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = this;
     _ = args;
     return .undefined;
+}
+
+/// A generic `String.prototype` method: RequireObjectCoercible(this) then
+/// `ToString(this)` (running user `toString`/`valueOf`, propagating throws, and
+/// rejecting Symbols), then dispatch to `stringMethod`. Installing these as a
+/// String-specific thunk (rather than the name-ambiguous `protoMethod`) means
+/// `String.prototype.slice.call(obj)` uses *String* slice, not Array slice.
+fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this == .null or this == .undefined)
+                return self.throwError("TypeError", "String.prototype." ++ name ++ " called on null or undefined");
+            const s = try self.toStringV(this);
+            return (try self.stringMethod(s, name, args)) orelse .undefined;
+        }
+    }.call;
+}
+
+/// `String.prototype.toString`/`valueOf`: a brand check — the receiver must be a
+/// String primitive or a String wrapper (else a TypeError), returning the
+/// underlying string (these do NOT ToString an arbitrary `this`).
+fn stringValueMethod(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const s: []const u8 = switch (this) {
+        .string => |str| str,
+        .object => |o| if (o.prim != null and o.prim.? == .string) o.prim.?.string else return self.throwError("TypeError", "String.prototype.toString/valueOf called on a non-String"),
+        else => return self.throwError("TypeError", "String.prototype.toString/valueOf called on a non-String"),
+    };
+    return .{ .string = s };
 }
 
 /// A `Function.prototype` method (`call`/`apply`/`bind`/`toString`) that first
