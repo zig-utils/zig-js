@@ -3844,7 +3844,7 @@ pub const Interpreter = struct {
             return result;
         }
         if (eq(name, "concat")) {
-            const result = try self.newArray();
+            const result = try self.arraySpeciesCreate(.{ .object = o }, 0);
             const ck = self.wellKnownSymbolKey("isConcatSpreadable");
             try self.concatProcessOne(result.object, .{ .object = o }, ck);
             for (args) |a| try self.concatProcessOne(result.object, a, ck);
@@ -4141,9 +4141,12 @@ pub const Interpreter = struct {
                 const du: usize = if (d > @as(f64, @floatFromInt(len))) len else @intFromFloat(@trunc(d));
                 break :blk if (start + du > len) len - start else du;
             };
-            const removed = try self.newArray();
+            const removed = try self.arraySpeciesCreate(.{ .object = o }, del);
+            const rra = removed.object.is_array;
             var i: usize = 0;
-            while (i < del) : (i += 1) try removed.object.elements.append(self.arena, items[start + i]);
+            while (i < del) : (i += 1) {
+                if (rra) try removed.object.elements.append(self.arena, items[start + i]) else try self.arrayResultPush(removed, i, items[start + i]);
+            }
             i = 0;
             while (i < del) : (i += 1) _ = o.elements.orderedRemove(start);
             const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
