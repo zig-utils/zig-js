@@ -1,5 +1,6 @@
 const std = @import("std");
 const interp = @import("interpreter.zig");
+const ast = @import("ast.zig");
 const value = @import("value.zig");
 const compiler = @import("compiler.zig");
 const vm = @import("vm.zig");
@@ -134,6 +135,281 @@ pub const Context = struct {
             if (err == error.Throw) self.exception = machine.exception;
             return err;
         };
+    }
+
+    // ----------------------------------------------------------------------
+    // ES Modules: load a module graph, link it (wiring `import` bindings to the
+    // exporting module's live bindings), then evaluate every module once in
+    // dependency order. The *host* resolves a specifier to a canonical path and
+    // its source text (the engine itself does no file I/O).
+    // ----------------------------------------------------------------------
+
+    /// How the host resolves a module specifier: given the importing module's
+    /// canonical path and the specifier string, return the imported module's
+    /// source text and write its canonical path into `out_path` (the dedup key),
+    /// or null when it cannot be found.
+    pub const ModuleHost = struct {
+        ctx: *anyopaque,
+        load: *const fn (ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8,
+    };
+
+    const ExportKind = union(enum) {
+        local: []const u8, // a binding name in this module's environment
+        indirect: struct { module: *Module, name: []const u8 }, // re-export
+    };
+
+    pub const Module = struct {
+        path: []const u8,
+        items: []*ast.Node,
+        env: *interp.Environment,
+        deps: std.StringHashMapUnmanaged(*Module) = .{}, // specifier -> module
+        exports: std.StringHashMapUnmanaged(ExportKind) = .{}, // exported name -> binding
+        star_sources: std.ArrayListUnmanaged(*Module) = .empty, // `export * from`
+        ns: ?*value.Object = null, // the namespace exotic object, if requested
+        linked: bool = false,
+        evaluated: bool = false,
+    };
+
+    /// Load, link, and evaluate a module graph rooted at `entry_path`. The
+    /// completion is the entry module having run; an uncaught throw leaves the
+    /// reason in `self.exception` and returns `error.Throw`.
+    pub fn evaluateModule(self: *Context, entry_path: []const u8, entry_source: []const u8, host: ModuleHost) RunError!value.Value {
+        var cache: std.StringHashMapUnmanaged(*Module) = .{};
+        const root = try self.loadModule(entry_path, entry_source, host, &cache);
+        try self.linkModule(root);
+        var machine = self.interpreter();
+        machine.strict = true;
+        // Populate any namespace objects after the whole graph has evaluated, so
+        // every exported binding holds its final value.
+        const outcome = self.evalModule(&machine, root);
+        machine.drainMicrotasks() catch {};
+        outcome catch |err| {
+            if (err == error.Throw) self.exception = machine.exception;
+            return err;
+        };
+        return .undefined;
+    }
+
+    /// Recursively load and parse a module and its dependencies into `cache`
+    /// (keyed by canonical path), collecting each module's imports and exports.
+    fn loadModule(self: *Context, path: []const u8, source: []const u8, host: ModuleHost, cache: *std.StringHashMapUnmanaged(*Module)) RunError!*Module {
+        if (cache.get(path)) |m| return m;
+        const a = self.arena();
+
+        var parser = try Parser.init(a, source);
+        const prog = try parser.parseModule();
+        const items = prog.program;
+
+        const env = try a.create(interp.Environment);
+        // A module environment is a variable scope whose parent is the global
+        // scope (so globals resolve), but its own declarations stay module-local.
+        env.* = .{ .arena = a, .parent = &self.env, .fn_scope = true };
+
+        const m = try a.create(Module);
+        m.* = .{ .path = try a.dupe(u8, path), .items = items, .env = env };
+        try cache.put(a, m.path, m);
+
+        // Load every dependency and record this module's export map.
+        for (items) |item| switch (item.*) {
+            .import_decl => |imp| {
+                _ = try self.loadDep(m, imp.specifier, host, cache);
+            },
+            .export_decl => |e| {
+                if (e.from.len > 0) _ = try self.loadDep(m, e.from, host, cache);
+                try self.collectExports(m, e);
+            },
+            else => {},
+        };
+        return m;
+    }
+
+    /// Resolve `specifier` against module `m`, load it, and record it in `m.deps`.
+    fn loadDep(self: *Context, m: *Module, specifier: []const u8, host: ModuleHost, cache: *std.StringHashMapUnmanaged(*Module)) RunError!*Module {
+        if (m.deps.get(specifier)) |d| return d;
+        var dep_path: []const u8 = "";
+        const dep_src = host.load(host.ctx, m.path, specifier, &dep_path) orelse
+            return self.moduleError("Cannot resolve module specifier");
+        const dep = try self.loadModule(dep_path, dep_src, host, cache);
+        try m.deps.put(self.arena(), specifier, dep);
+        return dep;
+    }
+
+    /// Record the export names introduced by one `export` declaration.
+    fn collectExports(self: *Context, m: *Module, e: *ast.ExportNode) RunError!void {
+        const a = self.arena();
+        if (e.declaration) |d| {
+            try declaredExportNames(self, m, d);
+        }
+        if (e.default_expr != null) {
+            try m.exports.put(a, "default", .{ .local = "*default*" });
+        }
+        for (e.entries) |entry| {
+            if (e.from.len == 0) {
+                try m.exports.put(a, entry.exported, .{ .local = entry.local });
+            } else {
+                const dep = m.deps.get(e.from).?;
+                try m.exports.put(a, entry.exported, .{ .indirect = .{ .module = dep, .name = entry.imported } });
+            }
+        }
+        if (e.star) {
+            const dep = m.deps.get(e.from).?;
+            if (e.star_as.len > 0) {
+                // `export * as ns from "m"` — a namespace re-export.
+                try m.exports.put(a, e.star_as, .{ .indirect = .{ .module = dep, .name = "*namespace*" } });
+            } else {
+                try m.star_sources.append(a, dep); // `export * from "m"`
+            }
+        }
+    }
+
+    /// Add the names bound by an exported declaration as local exports.
+    fn declaredExportNames(self: *Context, m: *Module, d: *ast.Node) RunError!void {
+        const a = self.arena();
+        switch (d.*) {
+            .func_decl => |f| try m.exports.put(a, f.name, .{ .local = f.name }),
+            .var_decl => |v| try m.exports.put(a, v.name, .{ .local = v.name }),
+            .decl_group => |group| for (group) |g| try declaredExportNames(self, m, g),
+            else => {},
+        }
+    }
+
+    fn moduleError(self: *Context, msg: []const u8) RunError {
+        var machine = self.interpreter();
+        machine.throwError("SyntaxError", msg) catch {};
+        self.exception = machine.exception; // surface to the caller (load/link run outside evalModule)
+        return error.Throw;
+    }
+
+    /// Resolve an export `name` of `module` to a concrete `(env, local)` binding,
+    /// chasing re-exports and `export *` sources. Returns null if not found.
+    fn resolveExport(module: *Module, name: []const u8, depth: u32) ?interp.Environment.Alias {
+        if (depth > 64) return null;
+        if (module.exports.get(name)) |kind| switch (kind) {
+            .local => |local| return .{ .env = module.env, .name = local },
+            .indirect => |ind| {
+                if (std.mem.eql(u8, ind.name, "*namespace*")) return null; // namespace handled separately
+                return resolveExport(ind.module, ind.name, depth + 1);
+            },
+        };
+        // `export *` sources: a name not directly exported may come from one.
+        for (module.star_sources.items) |src| {
+            if (resolveExport(src, name, depth + 1)) |r| return r;
+        }
+        return null;
+    }
+
+    /// Link a module: load-order recursion that wires every `import` binding in
+    /// the module's environment to the exporting module's live binding (or a
+    /// namespace object). Idempotent and cycle-safe via the `linked` flag.
+    fn linkModule(self: *Context, m: *Module) RunError!void {
+        if (m.linked) return;
+        m.linked = true;
+        // Link dependencies first.
+        var dit = m.deps.valueIterator();
+        while (dit.next()) |dep| try self.linkModule(dep.*);
+
+        for (m.items) |item| switch (item.*) {
+            .import_decl => |imp| {
+                const dep = m.deps.get(imp.specifier).?;
+                for (imp.entries) |entry| {
+                    if (std.mem.eql(u8, entry.imported, "*")) {
+                        try m.env.put(entry.local, .{ .object = try self.namespaceObject(dep) });
+                    } else if (resolveExport(dep, entry.imported, 0)) |res| {
+                        try m.env.putAlias(entry.local, res.env, res.name);
+                    } else {
+                        return self.moduleError("does not provide an export");
+                    }
+                }
+            },
+            .export_decl => |e| {
+                // `export * as ns from "m"` needs a namespace object for `m`.
+                if (e.star and e.star_as.len > 0) {
+                    const dep = m.deps.get(e.from).?;
+                    _ = try self.namespaceObject(dep);
+                }
+            },
+            else => {},
+        };
+    }
+
+    /// Evaluate a module (and its not-yet-evaluated dependencies first), running
+    /// its top-level items in its own environment with `this === undefined`.
+    fn evalModule(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+        if (m.evaluated) return;
+        m.evaluated = true;
+        var dit = m.deps.valueIterator();
+        while (dit.next()) |dep| try self.evalModule(machine, dep.*);
+
+        const saved_env = machine.env;
+        const saved_this = machine.this_value;
+        machine.env = m.env;
+        machine.this_value = .undefined; // module top-level `this` is undefined
+        defer {
+            machine.env = saved_env;
+            machine.this_value = saved_this;
+        }
+        _ = try machine.evalStatements(m.items);
+        // Now that bindings hold their final values, populate the namespace
+        // object's own properties (a snapshot of the live bindings).
+        if (m.ns) |ns| try self.fillNamespace(machine, m, ns);
+    }
+
+    /// Build (or return) the namespace exotic object for `module`. Created empty
+    /// at link time and filled after the module evaluates.
+    fn namespaceObject(self: *Context, module: *Module) RunError!*value.Object {
+        if (module.ns) |ns| return ns;
+        const a = self.arena();
+        const ns = try a.create(value.Object);
+        ns.* = .{};
+        module.ns = ns;
+        return ns;
+    }
+
+    /// A module namespace binding behind a live accessor: reads `name` in module
+    /// environment `env` on each property access (so mutations of the exporting
+    /// binding are observed through the namespace, per spec).
+    const NsBinding = struct { env: *interp.Environment, name: []const u8 };
+
+    fn nsGetter(ctx: *anyopaque, this: value.Value, args: []const value.Value) value.HostError!value.Value {
+        _ = this;
+        _ = args;
+        const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
+        const fnobj = machine.active_native orelse return .undefined;
+        const b: *NsBinding = @ptrCast(@alignCast(fnobj.private_data.?));
+        return b.env.get(b.name) orelse .undefined;
+    }
+
+    /// Wire a module's exported bindings onto its namespace object as live
+    /// accessor properties. The namespace exposes every export name (plus those
+    /// reachable through `export *`), with `@@toStringTag` "Module".
+    fn fillNamespace(self: *Context, machine: *interp.Interpreter, module: *Module, ns: *value.Object) interp.EvalError!void {
+        _ = machine;
+        const a = self.arena();
+        var it = module.exports.iterator();
+        while (it.next()) |e| try self.installNsBinding(ns, module, e.key_ptr.*);
+        // Names reachable via `export * from` (default excluded).
+        for (module.star_sources.items) |src| {
+            var sit = src.exports.iterator();
+            while (sit.next()) |e| {
+                const name = e.key_ptr.*;
+                if (std.mem.eql(u8, name, "default")) continue;
+                if (ns.getAccessor(name) != null or ns.getOwn(name) != null) continue;
+                try self.installNsBinding(ns, src, name);
+            }
+        }
+        try ns.setOwn(a, self.root_shape, "@@toStringTag", .{ .string = "Module" });
+        try ns.setAttr(a, "@@toStringTag", .{ .writable = false, .enumerable = false, .configurable = false });
+    }
+
+    fn installNsBinding(self: *Context, ns: *value.Object, module: *Module, name: []const u8) interp.EvalError!void {
+        const res = resolveExport(module, name, 0) orelse return;
+        const a = self.arena();
+        const binding = try a.create(NsBinding);
+        binding.* = .{ .env = res.env, .name = res.name };
+        const getter = try a.create(value.Object);
+        getter.* = .{ .native = nsGetter, .private_data = binding };
+        try ns.setAccessor(a, name, .{ .object = getter }, null);
+        try ns.setAttr(a, name, .{ .enumerable = true, .configurable = false });
     }
 };
 

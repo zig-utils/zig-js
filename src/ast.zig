@@ -232,5 +232,49 @@ pub const Node = union(enum) {
     for_in: struct { decl_kind: ?DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool = false },
     switch_stmt: struct { disc: *Node, cases: []SwitchCase },
     with_stmt: struct { obj: *Node, body: *Node },
+    /// `import ... from "spec"` / `import "spec"`. `entries` carries each binding
+    /// the import introduces (default/namespace/named); empty for a bare
+    /// side-effect import.
+    import_decl: struct { specifier: []const u8, entries: []ImportEntry },
+    /// An `export` declaration in one of its forms (see `ExportNode`).
+    export_decl: *ExportNode,
     program: []*Node,
+};
+
+/// One binding introduced by an `import` declaration.
+///   `import d from "m"`            → { imported: "default",  local: "d" }
+///   `import * as ns from "m"`      → { imported: "*",        local: "ns" }
+///   `import { a as b } from "m"`   → { imported: "a",        local: "b" }
+pub const ImportEntry = struct {
+    imported: []const u8,
+    local: []const u8,
+};
+
+/// An `export` declaration. Exactly one shape is populated:
+///   `export <var/let/const/function/class>`  → `declaration` set (also a local binding).
+///   `export default <expr|decl>`             → `default_expr` set.
+///   `export { a, b as c }`                   → `entries` set, `from` empty.
+///   `export { a as b } from "m"`             → `entries` set, `from` set (re-export).
+///   `export * from "m"`                      → `star` true, `from` set.
+///   `export * as ns from "m"`                → `star` true, `star_as` set, `from` set.
+pub const ExportNode = struct {
+    declaration: ?*Node = null,
+    default_expr: ?*Node = null,
+    /// For `export default function f(){}` / `class C{}`: the local name bound,
+    /// so the declaration is hoisted/bound in addition to the "default" export.
+    default_name: []const u8 = "",
+    entries: []ExportEntry = &.{},
+    from: []const u8 = "",
+    star: bool = false,
+    star_as: []const u8 = "",
+};
+
+/// One name exported by an `export { ... }` clause.
+///   `export { a }`              → { local: "a", exported: "a" }
+///   `export { a as b }`         → { local: "a", exported: "b" }
+///   `export { a as b } from "m"`→ { imported: "a", exported: "b" } (local empty)
+pub const ExportEntry = struct {
+    local: []const u8 = "",
+    imported: []const u8 = "",
+    exported: []const u8,
 };

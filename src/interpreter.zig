@@ -98,6 +98,10 @@ pub const Environment = struct {
     /// expression's own name. Reassignment throws in strict code but is a silent
     /// no-op in sloppy code (unlike `const`, which always throws).
     fn_names: std.StringHashMapUnmanaged(void) = .{},
+    /// Module *indirect bindings* (`import { x } from "m"`): `local` resolves
+    /// live to `name` in another module's environment, so a mutation of the
+    /// exporter's binding is visible here. Assigning to one is a TypeError.
+    aliases: std.StringHashMapUnmanaged(Alias) = .{},
     arena: std.mem.Allocator,
     parent: ?*Environment = null,
     /// True for a function or the global scope (a *variable* environment); false
@@ -174,10 +178,34 @@ pub const Environment = struct {
         try root.put(name, v);
     }
 
-    /// Look up a binding, walking outward through enclosing scopes.
+    /// An indirect (module import) binding: `name` in module environment `env`.
+    pub const Alias = struct { env: *Environment, name: []const u8 };
+
+    /// Install an indirect binding `local` → `target.name` (a module import).
+    pub fn putAlias(self: *Environment, local: []const u8, target: *Environment, name: []const u8) EvalError!void {
+        const gop = try self.aliases.getOrPut(self.arena, local);
+        if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, local);
+        gop.value_ptr.* = .{ .env = target, .name = try self.arena.dupe(u8, name) };
+    }
+
+    /// Whether `name` resolves (in the nearest scope that binds it) to a module
+    /// import — an immutable indirect binding.
+    pub fn isAlias(self: *Environment, name: []const u8) bool {
+        var env: ?*Environment = self;
+        while (env) |e| {
+            if (e.aliases.contains(name)) return true;
+            if (e.vars.contains(name)) return false;
+            env = e.parent;
+        }
+        return false;
+    }
+
+    /// Look up a binding, walking outward through enclosing scopes. A module
+    /// import (`aliases`) resolves live in its exporting module's environment.
     pub fn get(self: *Environment, name: []const u8) ?Value {
         var env: ?*Environment = self;
         while (env) |e| {
+            if (e.aliases.get(name)) |a| return a.env.get(a.name);
             if (e.vars.get(name)) |v| return v;
             env = e.parent;
         }
@@ -542,6 +570,30 @@ pub const Interpreter = struct {
                 const fnv = try self.makeFunction(fnode, self.env);
                 try self.globalDefine(fnode.name, fnv);
                 break :blk .undefined;
+            },
+
+            // Module declarations. Import bindings are wired during linking
+            // (`Context.linkModule`), so an `import` is a runtime no-op. An
+            // `export` evaluates its inner declaration/expression so the local
+            // bindings exist; the module's export map (built at link time) reads
+            // those bindings live from the module environment.
+            .import_decl => .undefined,
+            .export_decl => |e| blk: {
+                if (e.declaration) |d| break :blk try self.eval(d);
+                if (e.default_expr) |dx| {
+                    const v = switch (dx.*) {
+                        // `export default function/class` — a named or anonymous
+                        // declaration whose value binds to the synthetic "*default*"
+                        // (and its own name, when present, for self-reference).
+                        .func_decl => |fnode| try self.makeFunction(fnode, self.env),
+                        .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members, c.source),
+                        else => try self.eval(dx),
+                    };
+                    if (e.default_name.len > 0) try self.env.put(e.default_name, v);
+                    try self.env.put("*default*", v);
+                    break :blk .undefined;
+                }
+                break :blk .undefined; // `export { … }` / `export * …`: no runtime effect
             },
 
             .destructure_decl => |d| blk: {
@@ -948,13 +1000,26 @@ pub const Interpreter = struct {
         return .{ .number = if (prefix) updated else old };
     }
 
-    fn evalStatements(self: *Interpreter, stmts: []*Node) EvalError!Value {
+    pub fn evalStatements(self: *Interpreter, stmts: []*Node) EvalError!Value {
         // Hoist function declarations to the top of the scope so forward
         // references work (`bar(); function bar() {}`). Each is bound exactly
         // once here; the main loop then skips them, preserving function identity
         // (`var g = bar; function bar() {}` ⇒ `g === bar`).
         for (stmts) |s| switch (s.*) {
             .func_decl => |fnode| try self.globalDefine(fnode.name, try self.makeFunction(fnode, self.env)),
+            // `export function f(){}` / `export default function f(){}` hoist `f`
+            // just like a bare function declaration so forward references resolve.
+            .export_decl => |e| {
+                if (e.declaration) |d| {
+                    if (d.* == .func_decl) try self.globalDefine(d.func_decl.name, try self.makeFunction(d.func_decl, self.env));
+                } else if (e.default_expr) |dx| {
+                    if (dx.* == .func_decl) {
+                        const fv = try self.makeFunction(dx.func_decl, self.env);
+                        if (e.default_name.len > 0) try self.globalDefine(e.default_name, fv);
+                        try self.env.put("*default*", fv);
+                    }
+                }
+            },
             else => {},
         };
         // Temporal dead zone: `let`/`const` (and `class`) declarations are
@@ -976,6 +1041,16 @@ pub const Interpreter = struct {
         var last: Value = .undefined;
         for (stmts) |s| {
             if (s.* == .func_decl) continue; // already hoisted above
+            // An exported function declaration was hoisted above too (preserving
+            // its identity); skip it so it isn't rebuilt with a fresh identity.
+            if (s.* == .export_decl) {
+                const e = s.export_decl;
+                if (e.declaration) |d| {
+                    if (d.* == .func_decl) continue;
+                } else if (e.default_expr) |dx| {
+                    if (dx.* == .func_decl) continue;
+                }
+            }
             last = try self.eval(s);
             if (self.signal != .none) return last;
         }

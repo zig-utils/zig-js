@@ -37,6 +37,9 @@ pub const Parser = struct {
     fn_depth: u32 = 0,
     iter_depth: u32 = 0,
     switch_depth: u32 = 0,
+    /// True when parsing a Module (via `parseModule`): top-level `import` and
+    /// `export` declarations are recognized, and the body is implicitly strict.
+    module: bool = false,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
         var lx = lex.Lexer.init(arena, source);
@@ -88,6 +91,26 @@ pub const Parser = struct {
 
     fn isKeyword(t: Token, word: []const u8) bool {
         return t.kind == .identifier and std.mem.eql(u8, t.text, word);
+    }
+
+    /// The current token is the contextual keyword `word` (an identifier token).
+    fn isContextual(self: *Parser, word: []const u8) bool {
+        return isKeyword(self.cur(), word);
+    }
+    /// Alias of `isContextual` for readability at peek sites.
+    fn checkContextual(self: *Parser, word: []const u8) bool {
+        return self.isContextual(word);
+    }
+    /// Consume a contextual keyword `word` or fail.
+    fn expectContextual(self: *Parser, word: []const u8) ParseError!void {
+        if (!self.isContextual(word)) return ParseError.UnexpectedToken;
+        _ = self.advance();
+    }
+    /// The token `ahead` positions from the cursor has kind `kind`.
+    fn peekIs(self: *Parser, ahead: usize, kind: TokenKind) bool {
+        const idx = self.pos + ahead;
+        if (idx >= self.tokens.len) return false;
+        return self.tokens[idx].kind == kind;
     }
 
     /// A label after `break`/`continue` on the same logical line.
@@ -157,6 +180,159 @@ pub const Parser = struct {
             try stmts.append(self.arena, try self.parseStatement());
         }
         return self.alloc(.{ .program = stmts.items });
+    }
+
+    /// Parse the token stream as a Module: a Module is always strict, and its
+    /// top level additionally permits `import`/`export` declarations.
+    pub fn parseModule(self: *Parser) ParseError!*Node {
+        self.module = true;
+        self.strict = true;
+        var stmts: std.ArrayListUnmanaged(*Node) = .empty;
+        while (!self.check(.eof)) {
+            try stmts.append(self.arena, try self.parseModuleItem());
+        }
+        return self.alloc(.{ .program = stmts.items });
+    }
+
+    /// A ModuleItem: an `import`/`export` declaration or an ordinary statement.
+    fn parseModuleItem(self: *Parser) ParseError!*Node {
+        const t = self.cur();
+        if (t.kind == .identifier) {
+            // `import` declaration — but `import(` (dynamic) and `import.meta`
+            // are expressions, so only treat it as a declaration otherwise.
+            if (std.mem.eql(u8, t.text, "import") and !self.peekIs(1, .lparen) and !self.peekIs(1, .dot))
+                return self.parseImportDecl();
+            if (std.mem.eql(u8, t.text, "export")) return self.parseExportDecl();
+        }
+        return self.parseStatement();
+    }
+
+    /// `import "spec";` | `import default, * as ns, { a as b } from "spec";`
+    fn parseImportDecl(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // `import`
+        var entries: std.ArrayListUnmanaged(ast.ImportEntry) = .empty;
+        // Bare side-effect import: `import "spec";`
+        if (self.check(.string)) {
+            const spec = self.advance().text;
+            _ = self.match(.semicolon);
+            return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = &.{} } });
+        }
+        // Default binding: `import name ...`
+        if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "from")) {
+            const name = self.advance().text;
+            try entries.append(self.arena, .{ .imported = "default", .local = name });
+            _ = self.match(.comma);
+        }
+        // `* as ns` namespace, or `{ ... }` named bindings.
+        if (self.check(.star)) {
+            _ = self.advance();
+            try self.expectContextual("as");
+            const ns = self.advance().text;
+            try entries.append(self.arena, .{ .imported = "*", .local = ns });
+        } else if (self.check(.lbrace)) {
+            try self.parseNamedImports(&entries);
+        }
+        try self.expectContextual("from");
+        const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
+        _ = self.match(.semicolon);
+        return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items } });
+    }
+
+    /// `{ a, b as c, "str" as d }` import bindings.
+    fn parseNamedImports(self: *Parser, entries: *std.ArrayListUnmanaged(ast.ImportEntry)) ParseError!void {
+        try self.expect(.lbrace);
+        while (!self.check(.rbrace)) {
+            const imported = self.moduleExportName();
+            var local = imported;
+            if (self.checkContextual("as")) {
+                _ = self.advance();
+                local = self.advance().text;
+            }
+            try entries.append(self.arena, .{ .imported = imported, .local = local });
+            if (!self.match(.comma)) break;
+        }
+        try self.expect(.rbrace);
+    }
+
+    /// `export` in all its forms.
+    fn parseExportDecl(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // `export`
+        const node = try self.arena.create(ast.ExportNode);
+        node.* = .{};
+
+        if (self.check(.star)) {
+            // `export * from "m"` / `export * as ns from "m"`
+            _ = self.advance();
+            node.star = true;
+            if (self.checkContextual("as")) {
+                _ = self.advance();
+                node.star_as = self.moduleExportName();
+            }
+            try self.expectContextual("from");
+            node.from = self.advance().text;
+            _ = self.match(.semicolon);
+            return self.alloc(.{ .export_decl = node });
+        }
+        if (self.check(.lbrace)) {
+            // `export { a, b as c }` [from "m"]
+            var entries: std.ArrayListUnmanaged(ast.ExportEntry) = .empty;
+            _ = self.advance(); // `{`
+            while (!self.check(.rbrace)) {
+                const first = self.moduleExportName();
+                var exported = first;
+                if (self.checkContextual("as")) {
+                    _ = self.advance();
+                    exported = self.moduleExportName();
+                }
+                try entries.append(self.arena, .{ .local = first, .exported = exported });
+                if (!self.match(.comma)) break;
+            }
+            try self.expect(.rbrace);
+            if (self.checkContextual("from")) {
+                _ = self.advance();
+                node.from = self.advance().text;
+                // Re-export: the names are imported from the source module, not local.
+                for (entries.items) |*e| {
+                    e.imported = e.local;
+                    e.local = "";
+                }
+            }
+            node.entries = entries.items;
+            _ = self.match(.semicolon);
+            return self.alloc(.{ .export_decl = node });
+        }
+        if (self.isContextual("default")) {
+            _ = self.advance(); // `default`
+            // `export default function/class …` binds a (possibly anonymous) name.
+            if (self.isContextual("function") or (self.isContextual("async") and self.peekIsKeyword(1, "function"))) {
+                const is_async = self.isContextual("async");
+                if (is_async) _ = self.advance();
+                const decl = try self.parseFunctionDecl(is_async);
+                node.default_expr = decl;
+                node.default_name = decl.func_decl.name;
+                return self.alloc(.{ .export_decl = node });
+            }
+            if (self.isContextual("class")) {
+                const cls = try self.parseClassExpr();
+                node.default_expr = cls;
+                node.default_name = cls.class_expr.name;
+                return self.alloc(.{ .export_decl = node });
+            }
+            // `export default AssignmentExpression;`
+            node.default_expr = try self.parseAssignment();
+            _ = self.match(.semicolon);
+            return self.alloc(.{ .export_decl = node });
+        }
+        // `export <declaration>` — var/let/const/function/class. The declaration
+        // also binds locally; its bound names become exports.
+        const decl = try self.parseStatement();
+        node.declaration = decl;
+        return self.alloc(.{ .export_decl = node });
+    }
+
+    /// A ModuleExportName: an identifier or a string literal (ES2022).
+    fn moduleExportName(self: *Parser) []const u8 {
+        return self.advance().text;
     }
 
     fn parseStatement(self: *Parser) ParseError!*Node {
