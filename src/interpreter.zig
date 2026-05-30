@@ -3407,6 +3407,12 @@ pub const Interpreter = struct {
                 if (o.is_date) return try self.dateMethod(o, name, args);
                 if (o.is_map) return try self.mapMethod(o, name, args);
                 if (o.is_set) return try self.setMethod(o, name, args);
+                // A String wrapper object (`new String("…")`): its String.prototype
+                // methods take precedence over the generic Array-like coercion for
+                // names both share (slice/indexOf/lastIndexOf/includes/concat/at).
+                if (o.prim != null and o.prim.? == .string and o.getOwn(name) == null) {
+                    if (try self.stringMethod(o.prim.?.string, name, args)) |r| return r;
+                }
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
                 // Generic Array.prototype methods on an array-like `this`
                 // (`Array.prototype.map.call(obj, …)`).
