@@ -884,6 +884,18 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "Number/Boolean/String prototypes are Exotic Objects with their primitive" {
+    // Per spec, `Number.prototype` has [[NumberData]] = +0, `Boolean.prototype`
+    // has [[BooleanData]] = false, `String.prototype` has [[StringData]] = "" —
+    // so the brand-checked methods accept the prototype itself as the boxed value.
+    try expectEvalStr("0", "Number.prototype.toString()");
+    try expectEvalStr("0", "Number.prototype.toString(2)");
+    try expectEvalStr("false", "Boolean.prototype.toString()");
+    // Object.prototype.toString uses the primitive to determine the tag.
+    try expectEvalStr("[object Number]", "Object.prototype.toString.call(Number.prototype)");
+    try expectEvalStr("[object String]", "Object.prototype.toString.call(String.prototype)");
+}
+
 test "String.prototype.trim strips the full WhiteSpace + LineTerminator set" {
     // VT (0x0B), FF (0x0C), NBSP (0x00A0), and the ideographic space (U+3000)
     // are all spec WhiteSpace, and U+2028/U+2029 are LineTerminators — all stripped.

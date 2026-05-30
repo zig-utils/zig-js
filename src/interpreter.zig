@@ -5779,7 +5779,10 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     if (env.get("Boolean")) |bv| {
         if (bv == .object) {
             const boolean_proto = try a.create(value.Object);
-            boolean_proto.* = .{ .proto = object_proto };
+            // Boolean.prototype is a Boolean Exotic Object with [[BooleanData]]
+            // = false, so brand-checked methods (`Boolean.prototype.toString()`,
+            // `valueOf()`) accept it as a Boolean and don't throw.
+            boolean_proto.* = .{ .proto = object_proto, .prim = .{ .boolean = false } };
             try setNative(a, root_shape, boolean_proto, "toString", 0, booleanProtoFn(true));
             try setNative(a, root_shape, boolean_proto, "valueOf", 0, booleanProtoFn(false));
             try setConstructor(a, root_shape, boolean_proto, bv.object);
@@ -5807,7 +5810,10 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setConstructor(a, root_shape, array_proto, array_ns);
 
     const string_proto = try a.create(value.Object);
-    string_proto.* = .{ .proto = object_proto };
+    // String.prototype is a String Exotic Object with [[StringData]] = "",
+    // so brand-checked methods accept it as a String (e.g. `String.prototype.
+    // toString()` returns "" rather than throwing).
+    string_proto.* = .{ .proto = object_proto, .prim = .{ .string = "" } };
     try setProtoMethods(a, root_shape, string_proto, .{
         .{ "charAt", 1 },     .{ "charCodeAt", 1 },   .{ "codePointAt", 1 }, .{ "indexOf", 1 },
         .{ "lastIndexOf", 1 }, .{ "includes", 1 },    .{ "startsWith", 1 }, .{ "endsWith", 1 },
@@ -5823,7 +5829,10 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try setConstructor(a, root_shape, string_proto, string_ns);
 
     const number_proto = try a.create(value.Object);
-    number_proto.* = .{ .proto = object_proto };
+    // Number.prototype is a Number Exotic Object with [[NumberData]] = +0, so
+    // brand-checked methods (`Number.prototype.toString(radix)`, `valueOf()`,
+    // `toFixed(...)`) accept it as a Number and return "0"/0 rather than throw.
+    number_proto.* = .{ .proto = object_proto, .prim = .{ .number = 0 } };
     inline for (.{
         .{ "toString", 1 },     .{ "toFixed", 1 },        .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
         .{ "toExponential", 1 }, .{ "toPrecision", 1 },
