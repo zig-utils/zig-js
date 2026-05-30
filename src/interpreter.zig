@@ -500,6 +500,21 @@ pub const Interpreter = struct {
                     if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
                     break :blk .{ .boolean = ok };
                 }
+                // `delete <name>` inside a `with` deletes from the binding object
+                // (an object environment record); elsewhere a bare-name delete is
+                // a no-op that evaluates to true.
+                if (target.* == .identifier and self.with_stack.items.len > 0) {
+                    const name = target.identifier;
+                    var i = self.with_stack.items.len;
+                    while (i > 0) : (i -= 1) {
+                        const o = self.with_stack.items[i - 1];
+                        if (try self.withHasBinding(o, name)) {
+                            const ok = try self.deleteOwn(o, name);
+                            if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
+                            break :blk .{ .boolean = ok };
+                        }
+                    }
+                }
                 break :blk .{ .boolean = true };
             },
             .update => |u| try self.evalUpdate(u.inc, u.prefix, u.target),
