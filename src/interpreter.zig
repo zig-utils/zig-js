@@ -823,35 +823,19 @@ pub const Interpreter = struct {
             // for-in: enumerate keys (skip null/undefined per spec).
             switch (iter) {
                 .object => |o| {
-                    if (o.is_array) {
-                        var i: usize = 0;
-                        while (i < o.elements.items.len) : (i += 1) {
-                            const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-                            const saved_env = self.env;
-                            defer self.env = saved_env;
-                            if (lexical) {
-                                const ie = try self.arena.create(Environment);
-                                ie.* = .{ .arena = self.arena, .parent = saved_env };
-                                self.env = ie;
-                            }
-                            try self.bindLoopTarget(decl_kind, target, .{ .string = key });
-                            last = try self.eval(body);
-                            if (self.loopSignal(my_label)) |stop| if (stop) break;
+                    // EnumerateObjectProperties: own + inherited enumerable string
+                    // keys with prototype-chain shadowing (see forInKeyList).
+                    for (try self.forInKeyList(o)) |k| {
+                        const saved_env = self.env;
+                        defer self.env = saved_env;
+                        if (lexical) {
+                            const ie = try self.arena.create(Environment);
+                            ie.* = .{ .arena = self.arena, .parent = saved_env };
+                            self.env = ie;
                         }
-                    } else {
-                        const keys = try o.enumerableKeys(self.arena); // for-in skips non-enumerable
-                        for (keys) |k| {
-                            const saved_env = self.env;
-                            defer self.env = saved_env;
-                            if (lexical) {
-                                const ie = try self.arena.create(Environment);
-                                ie.* = .{ .arena = self.arena, .parent = saved_env };
-                                self.env = ie;
-                            }
-                            try self.bindLoopTarget(decl_kind, target, .{ .string = k });
-                            last = try self.eval(body);
-                            if (self.loopSignal(my_label)) |stop| if (stop) break;
-                        }
+                        try self.bindLoopTarget(decl_kind, target, .{ .string = k });
+                        last = try self.eval(body);
+                        if (self.loopSignal(my_label)) |stop| if (stop) break;
                     }
                 },
                 .undefined, .null => {}, // iterating null/undefined is a no-op
@@ -861,22 +845,47 @@ pub const Interpreter = struct {
         return last;
     }
 
-    /// The for-in key list of `v` as a fresh array — array indices then own
-    /// enumerable string keys (matching the tree-walker's for-in). Null/undefined
-    /// (and primitives) yield an empty array. Used by the generator VM's
-    /// `enum_keys` opcode to drive for-in via the for-of machinery.
-    pub fn forInKeysArray(self: *Interpreter, v: Value) EvalError!Value {
-        const arr = (try self.newArray()).object;
-        if (v == .object) {
-            const o = v.object;
+    /// EnumerateObjectProperties: the ordered string keys visited by `for-in`,
+    /// walking the prototype chain. A key is emitted once (the first time it is
+    /// seen on the chain); a shadowing own property — enumerable or not —
+    /// suppresses any same-named property further up. Array dense element indices
+    /// (skipping holes) are own enumerable keys outside the shape. Symbol/private
+    /// keys are excluded.
+    pub fn forInKeyList(self: *Interpreter, start: *value.Object) EvalError![]const []const u8 {
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var visited: std.StringHashMapUnmanaged(void) = .empty;
+        var cur: ?*value.Object = start;
+        while (cur) |o| {
             if (o.is_array) {
                 var i: usize = 0;
                 while (i < o.elements.items.len) : (i += 1) {
                     if (o.isHole(i)) continue;
-                    try arr.elements.append(self.arena, .{ .string = try std.fmt.allocPrint(self.arena, "{d}", .{i}) });
+                    const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                    // Accessor at this index comes from ownKeys below.
+                    if (o.getAccessor(key) != null) continue;
+                    if (visited.contains(key)) continue;
+                    try visited.put(self.arena, key, {});
+                    if (o.getAttr(key).enumerable) try out.append(self.arena, key);
                 }
             }
-            for (try o.enumerableKeys(self.arena)) |k| {
+            for (try o.ownKeys(self.arena)) |k| {
+                if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+                if (visited.contains(k)) continue;
+                try visited.put(self.arena, k, {});
+                if (o.getAttr(k).enumerable) try out.append(self.arena, k);
+            }
+            cur = o.proto;
+        }
+        return out.items;
+    }
+
+    /// The for-in key list of `v` as a fresh array. Null/undefined (and
+    /// primitives) yield an empty array. Used by the generator VM's `enum_keys`
+    /// opcode to drive for-in via the for-of machinery.
+    pub fn forInKeysArray(self: *Interpreter, v: Value) EvalError!Value {
+        const arr = (try self.newArray()).object;
+        if (v == .object) {
+            for (try self.forInKeyList(v.object)) |k| {
                 try arr.elements.append(self.arena, .{ .string = k });
             }
         }
