@@ -4257,8 +4257,38 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// The well-known Symbol whose method backs a String regex-protocol method
+    /// (`replaceAll` shares `Symbol.replace`), or null for a plain method.
+    fn stringProtocolSymbol(_: *Interpreter, name: []const u8) ?[]const u8 {
+        if (eq(name, "split")) return "split";
+        if (eq(name, "match")) return "match";
+        if (eq(name, "matchAll")) return "matchAll";
+        if (eq(name, "search")) return "search";
+        if (eq(name, "replace") or eq(name, "replaceAll")) return "replace";
+        return null;
+    }
+
     fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value) EvalError!?Value {
         if (eq(name, "valueOf") or eq(name, "toString")) return Value{ .string = s };
+        // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
+        // `replace`/`replaceAll` first check their first argument for the matching
+        // `Symbol.*` method and, if it is callable, delegate to it (with `this` =
+        // that argument and the string as the first parameter). RegExp instances
+        // keep the engine's native regex path (they carry no such own symbol).
+        if (self.stringProtocolSymbol(name)) |sym| {
+            const sep = arg0(args);
+            if (sep == .object and !sep.object.is_regex and !sep.object.is_symbol) {
+                if (self.wellKnownSymbolKey(sym)) |key| {
+                    const method = try self.getProperty(sep, key);
+                    if (method == .object and method.object.isCallableObject()) {
+                        var argv: std.ArrayListUnmanaged(Value) = .empty;
+                        try argv.append(self.arena, .{ .string = s });
+                        if (args.len > 1) try argv.appendSlice(self.arena, args[1..]);
+                        return try self.callValueWithThis(method, argv.items, sep);
+                    }
+                }
+            }
+        }
         if (eq(name, "charAt")) {
             const i = relIndex(arg0(args), s.len, 0);
             return if (i < s.len) Value{ .string = try self.arena.dupe(u8, s[i .. i + 1]) } else Value{ .string = "" };
