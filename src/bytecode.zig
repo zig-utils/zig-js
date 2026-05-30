@@ -113,10 +113,14 @@ pub const Op = enum(u8) {
     new_spread, // stack: callee, args_array -> push constructed object
     ret, // pop -> return value, end frame
     ret_undef, // return undefined, end frame
+    abrupt_return, // pop -> return value, but run any enclosing `finally` first (carrying a "return" completion); used by `yield*` return-delegation so a `finally` around the `yield*` still executes
 
     // --- generators / iteration ---
     gen_yield, // pop -> yielded value, suspend the frame; resume pushes the sent value
+    gen_yield_star, // like gen_yield but at a `yield*` delegation point: resume pushes [value, kind] (kind 0 send / 1 throw / 2 return) so the desugared loop can forward throw()/return() to the inner iterator
     await_op, // pop -> awaited value, suspend (async); the driver resumes with the settled value
+    call_with_this, // operand a: argc; stack: func, this, args... -> push func.call(this, args). Used by `yield*` so a method fetched once (GetMethod) is invoked without a second property lookup.
+    assert_iter_result, // peek top; throw a TypeError if it is not an Object (the iterator-result-not-object check shared by next/throw/return)
     iter_of, // pop iterable -> push an iterator object (has a `.next()`); for `yield*`
     async_iter_of, // pop iterable -> push its async iterator (Symbol.asyncIterator, else a sync iterator); for `for await`
     enum_keys, // pop object -> push an array of its for-in keys (own enumerable + array indices)
@@ -146,6 +150,12 @@ pub const Inst = struct {
 /// (the migration fallback) in addition to VM-callable.
 pub const FnTemplate = struct {
     name: []const u8,
+    /// A *named function expression's* own name, which binds as an immutable
+    /// binding in a fresh scope enclosing the body (so the body can recurse via
+    /// its own name and can't rebind it). Empty for declarations and anonymous
+    /// or arrow functions — only set when `make_closure` must wrap the closure
+    /// in a self-binding environment.
+    self_name: []const u8 = "",
     params: []const ast.Param,
     is_expr_body: bool,
     body: *ast.Node,

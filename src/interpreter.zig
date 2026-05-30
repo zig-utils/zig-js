@@ -94,6 +94,10 @@ pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
     /// Names in `vars` declared `const` — assigning to them is a TypeError.
     consts: std.StringHashMapUnmanaged(void) = .{},
+    /// Names that are *non-strict* immutable bindings — a named function
+    /// expression's own name. Reassignment throws in strict code but is a silent
+    /// no-op in sloppy code (unlike `const`, which always throws).
+    fn_names: std.StringHashMapUnmanaged(void) = .{},
     arena: std.mem.Allocator,
     parent: ?*Environment = null,
     /// True for a function or the global scope (a *variable* environment); false
@@ -113,6 +117,24 @@ pub const Environment = struct {
         try self.put(name, v);
         const gop = try self.consts.getOrPut(self.arena, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, name);
+    }
+
+    /// Bind a named function expression's own name (immutable, non-strict).
+    pub fn putFnName(self: *Environment, name: []const u8, v: Value) EvalError!void {
+        try self.put(name, v);
+        const gop = try self.fn_names.getOrPut(self.arena, name);
+        if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, name);
+    }
+
+    /// Whether the nearest binding named `name` is a non-strict immutable
+    /// (function-expression name) binding. Matches where `assign` would write.
+    pub fn isFnName(self: *Environment, name: []const u8) bool {
+        var env: ?*Environment = self;
+        while (env) |e| {
+            if (e.vars.contains(name)) return e.fn_names.contains(name);
+            env = e.parent;
+        }
+        return false;
     }
 
     /// Whether the nearest binding named `name` is `const` (null if no binding).
@@ -429,7 +451,19 @@ pub const Interpreter = struct {
                 break :blk v;
             },
 
-            .function => |fnode| try self.makeFunction(fnode, self.env),
+            .function => |fnode| blk: {
+                // A *named* function expression binds its own name as an
+                // immutable binding in a fresh scope enclosing the body, so the
+                // body can refer to itself (recursion) and can't rebind the name.
+                if (fnode.name.len > 0 and !fnode.is_arrow) {
+                    const fenv = try self.arena.create(Environment);
+                    fenv.* = .{ .arena = self.arena, .parent = self.env };
+                    const fv = try self.makeFunction(fnode, fenv);
+                    try fenv.putFnName(fnode.name, fv);
+                    break :blk fv;
+                }
+                break :blk try self.makeFunction(fnode, self.env);
+            },
             .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members, c.source),
 
             // `yield` only executes inside a compiled generator body (on the
@@ -2767,6 +2801,21 @@ pub const Interpreter = struct {
         };
     }
 
+    /// Assign to a named variable with the same immutability checks `assignTo`
+    /// applies, for the bytecode VM's `store_var` (which would otherwise bypass
+    /// them): a `const` reassignment throws; a function-expression name throws in
+    /// strict code and is a no-op in sloppy code.
+    pub fn assignVarVM(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
+        if (self.env.isConst(name)) |c| {
+            if (c) return self.throwError("TypeError", "Assignment to constant variable.");
+        }
+        if (self.env.isFnName(name)) {
+            if (self.strict) return self.throwError("TypeError", "Assignment to constant variable.");
+            return;
+        }
+        try self.env.assign(name, v);
+    }
+
     fn assignTo(self: *Interpreter, target: *Node, v: Value) EvalError!void {
         switch (target.*) {
             .identifier => |name| {
@@ -2785,6 +2834,12 @@ pub const Interpreter = struct {
                 // Assigning to a `const` binding is a TypeError.
                 if (self.env.isConst(name)) |c| {
                     if (c) return self.throwError("TypeError", "Assignment to constant variable.");
+                }
+                // A named function expression's own name is immutable: throw in
+                // strict code, silently ignore in sloppy code.
+                if (self.env.isFnName(name)) {
+                    if (self.strict) return self.throwError("TypeError", "Assignment to constant variable.");
+                    return;
                 }
                 // Strict mode forbids creating a global by assigning to an
                 // undeclared binding (sloppy mode silently creates one).

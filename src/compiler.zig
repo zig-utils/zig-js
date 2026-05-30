@@ -197,7 +197,7 @@ pub const Compiler = struct {
     fn compileStmtList(self: *Compiler, stmts: []*Node) CompileError!void {
         for (stmts) |s| switch (s.*) {
             .func_decl => |fnode| {
-                const fi = try self.compileFunction(fnode);
+                const fi = try self.compileFunction(fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
                 try self.emitDefine(fnode.name);
             },
@@ -220,7 +220,7 @@ pub const Compiler = struct {
                 try self.emitDefine(d.name);
             },
             .func_decl => |fnode| {
-                const fi = try self.compileFunction(fnode);
+                const fi = try self.compileFunction(fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
                 try self.emitDefine(fnode.name);
             },
@@ -620,7 +620,7 @@ pub const Compiler = struct {
                 self.chunk.patchToHere(to_end);
             },
             .function => |fnode| {
-                const fi = try self.compileFunction(fnode);
+                const fi = try self.compileFunction(fnode, true);
                 _ = try self.chunk.emit(.make_closure, fi);
             },
             .call => |c| {
@@ -748,50 +748,188 @@ pub const Compiler = struct {
         }
     }
 
-    /// `yield* X`: drive `X`'s iterator, yielding each value, then evaluate to
-    /// the iterator's final value. Desugared to a bytecode loop over the
-    /// iterator obtained via `iter_of` (the iterator protocol). The sent value
-    /// is not forwarded into the inner iterator yet (a v1 simplification).
+    /// `yield* X`: delegate to `X`'s iterator per the spec's YieldStar algorithm
+    /// (14.4.14 runtime semantics). The desugared loop dispatches on *how the
+    /// delegating generator was resumed* — a `gen_yield_star` suspend pushes a
+    /// `[value, kind]` pair on resume so the loop can forward `.throw(e)` to the
+    /// inner `throw` method and `.return(v)` to the inner `return` method, not
+    /// just relay `.next(v)`.
+    ///
+    /// Pseudocode (kind: 0 = next, 1 = throw, 2 = return):
+    ///     it = GetIterator(X); recv_v = undefined; recv_k = 0
+    ///     loop:
+    ///       if recv_k == 0:  r = it.next(recv_v)
+    ///       elif recv_k == 1:
+    ///         m = GetMethod(it, "throw")
+    ///         if m == undefined: IteratorClose(it); throw TypeError
+    ///         r = m.call(it, recv_v)
+    ///       else: // recv_k == 2
+    ///         m = GetMethod(it, "return")
+    ///         if m == undefined: return recv_v        // generator returns
+    ///         r = m.call(it, recv_v)
+    ///         if r.done: return r.value               // generator returns
+    ///         goto yield
+    ///       // (next / throw join)
+    ///       if not IsObject(r): throw TypeError
+    ///       if r.done: break with value r.value
+    ///       yield: [recv_v, recv_k] = yield* r.value
+    ///     // value of the whole expression:
+    ///     r.value
     fn compileYieldStar(self: *Compiler, arg: *Node) CompileError!void {
         const async_d = self.in_async; // delegate to an async iterator?
-        const it_name = try self.freshTemp(); // the iterator
-        const r_name = try self.freshTemp(); // the last `{value, done}` result
-        const sent_name = try self.freshTemp(); // the value sent back into this yield*
-        const next_name = try self.chunk.addName("next");
+        const it = try self.freshTemp(); // the iterator
+        const r = try self.freshTemp(); // the last `{value, done}` result
+        const recv_v = try self.freshTemp(); // value carried by the resume
+        const recv_k = try self.freshTemp(); // resume kind: 0 next / 1 throw / 2 return
+        const m = try self.freshTemp(); // a GetMethod(it, throw|return) result
+        const ch = self.chunk;
+        const done_n = try ch.addName("done");
+        const value_n = try ch.addName("value");
 
-        // iterator = GetIterator(arg, async ? async : sync)
+        // it = GetIterator(arg); recv_v = undefined; recv_k = 0 (start with `next`).
         try self.compileExpr(arg);
-        _ = try self.chunk.emit(if (async_d) .async_iter_of else .iter_of, 0);
-        try self.emitDefine(it_name);
-        // The first IteratorNext receives undefined.
-        _ = try self.chunk.emit(.load_undefined, 0);
-        try self.emitDefine(sent_name);
+        _ = try ch.emit(if (async_d) .async_iter_of else .iter_of, 0);
+        try self.emitDefine(it);
+        _ = try ch.emit(.load_undefined, 0);
+        try self.emitDefine(recv_v);
+        _ = try ch.emit(.load_const, try ch.addConst(.{ .number = 0 }));
+        try self.emitDefine(recv_k);
 
-        const top = self.chunk.here();
-        // r = it.next(sent)  — and, for async delegation, Await(r).
-        try self.emitLoad(it_name);
-        try self.emitLoad(sent_name);
-        _ = try self.chunk.emitAB(.call_method, next_name, 1);
-        if (async_d) _ = try self.chunk.emit(.await_op, 0);
-        try self.emitDefine(r_name);
-        // if (r.done) break  — `not` then jump_if_false exits exactly when done.
-        try self.emitLoad(r_name);
-        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
-        _ = try self.chunk.emit(.not, 0);
-        const to_end = try self.chunk.emit(.jump_if_false, 0);
-        // sent = yield r.value  — forward the resume-sent value into the next
-        // IteratorNext, so a delegating generator relays `.next(v)` arguments.
-        try self.emitLoad(r_name);
-        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
-        if (async_d) _ = try self.chunk.emit(.await_op, 0); // AsyncGeneratorYield awaits before yielding
-        _ = try self.chunk.emit(.gen_yield, 0);
-        try self.emitStore(sent_name);
-        _ = try self.chunk.emit(.pop, 0);
-        _ = try self.chunk.emit(.jump, @intCast(top));
-        self.chunk.patchToHere(to_end);
-        // yield* evaluates to the iterator's final value (`r.value`).
-        try self.emitLoad(r_name);
-        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+        const top = ch.here();
+        // if (recv_k == 0) fall through to the `next` branch, else jump to throw/return.
+        try self.emitLoad(recv_k);
+        _ = try ch.emit(.load_const, try ch.addConst(.{ .number = 0 }));
+        _ = try ch.emit(.eq_strict, 0);
+        const to_nonnext = try ch.emit(.jump_if_false, 0);
+
+        // --- next branch: r = it.next(recv_v) ---
+        try self.emitLoad(it);
+        try self.emitLoad(recv_v);
+        _ = try ch.emitAB(.call_method, try ch.addName("next"), 1);
+        if (async_d) _ = try ch.emit(.await_op, 0);
+        try self.emitDefine(r);
+        const to_join_a = try ch.emit(.jump, 0); // -> normal/throw join
+
+        // --- recv_k == 1 ? throw branch : return branch ---
+        ch.patchToHere(to_nonnext);
+        try self.emitLoad(recv_k);
+        _ = try ch.emit(.load_const, try ch.addConst(.{ .number = 1 }));
+        _ = try ch.emit(.eq_strict, 0);
+        const to_return = try ch.emit(.jump_if_false, 0);
+
+        // --- throw branch ---
+        // m = GetMethod(it, "throw")
+        try self.emitLoad(it);
+        _ = try ch.emit(.get_prop, try ch.addName("throw"));
+        try self.emitDefine(m);
+        try self.emitLoad(m);
+        _ = try ch.emit(.load_null, 0);
+        _ = try ch.emit(.eq, 0); // m == null  (true for undefined/null: GetMethod absent)
+        const to_has_throw = try ch.emit(.jump_if_false, 0);
+        // No `throw` method: IteratorClose(it) (call `return` if present, ignoring
+        // its result) then throw a TypeError. Closing first lets the inner
+        // iterator release resources, matching the spec.
+        try self.emitLoad(it);
+        _ = try ch.emit(.get_prop, try ch.addName("return"));
+        try self.emitDefine(m);
+        try self.emitLoad(m);
+        _ = try ch.emit(.load_null, 0);
+        _ = try ch.emit(.eq, 0);
+        const to_skip_close = try ch.emit(.jump_if_false, 0);
+        const to_after_close = try ch.emit(.jump, 0); // return absent: skip the call
+        ch.patchToHere(to_skip_close);
+        try self.emitLoad(m); // func
+        try self.emitLoad(it); // this
+        _ = try ch.emitAB(.call_with_this, 0, 0); // it.return()
+        if (async_d) _ = try ch.emit(.await_op, 0);
+        _ = try ch.emit(.pop, 0); // ignore the close result
+        ch.patchToHere(to_after_close);
+        // throw new TypeError(...)
+        _ = try ch.emit(.load_var, try ch.addName("TypeError"));
+        _ = try ch.emit(.load_const, try ch.addConst(.{ .string = "The iterator does not provide a 'throw' method" }));
+        _ = try ch.emit(.new_call, 1);
+        _ = try ch.emit(.throw_op, 0);
+        // has a `throw` method: r = m.call(it, recv_v)
+        ch.patchToHere(to_has_throw);
+        try self.emitLoad(m);
+        try self.emitLoad(it);
+        try self.emitLoad(recv_v);
+        _ = try ch.emitAB(.call_with_this, 1, 0);
+        if (async_d) _ = try ch.emit(.await_op, 0);
+        try self.emitDefine(r);
+        const to_join_b = try ch.emit(.jump, 0); // -> normal/throw join
+
+        // --- return branch ---
+        ch.patchToHere(to_return);
+        // m = GetMethod(it, "return")
+        try self.emitLoad(it);
+        _ = try ch.emit(.get_prop, try ch.addName("return"));
+        try self.emitDefine(m);
+        try self.emitLoad(m);
+        _ = try ch.emit(.load_null, 0);
+        _ = try ch.emit(.eq, 0);
+        const to_has_return = try ch.emit(.jump_if_false, 0);
+        // No `return` method: the delegating generator itself returns recv_v
+        // (Await it first in an async generator), running any enclosing finally.
+        try self.emitLoad(recv_v);
+        if (async_d) _ = try ch.emit(.await_op, 0);
+        _ = try ch.emit(.abrupt_return, 0);
+        // has a `return` method: r = m.call(it, recv_v)
+        ch.patchToHere(to_has_return);
+        try self.emitLoad(m);
+        try self.emitLoad(it);
+        try self.emitLoad(recv_v);
+        _ = try ch.emitAB(.call_with_this, 1, 0);
+        if (async_d) _ = try ch.emit(.await_op, 0);
+        try self.emitDefine(r);
+        try self.emitLoad(r);
+        _ = try ch.emit(.assert_iter_result, 0);
+        _ = try ch.emit(.pop, 0);
+        // if (r.done) the delegating generator returns r.value; else yield it.
+        try self.emitLoad(r);
+        _ = try ch.emit(.get_prop, done_n);
+        const to_return_yield = try ch.emit(.jump_if_false, 0);
+        try self.emitLoad(r);
+        _ = try ch.emit(.get_prop, value_n);
+        _ = try ch.emit(.abrupt_return, 0);
+
+        // --- normal/throw join: validate r, branch on done ---
+        ch.patchToHere(to_join_a);
+        ch.patchToHere(to_join_b);
+        try self.emitLoad(r);
+        _ = try ch.emit(.assert_iter_result, 0);
+        _ = try ch.emit(.pop, 0);
+        try self.emitLoad(r);
+        _ = try ch.emit(.get_prop, done_n);
+        const to_yield = try ch.emit(.jump_if_false, 0);
+        const to_end = try ch.emit(.jump, 0); // done -> the whole expression's value
+
+        // --- yield, then resume with [recv_v, recv_k] and loop ---
+        // A *sync* generator's `yield*` yields the inner result object itself
+        // (`GeneratorYield(innerResult)`), so its own `value`/`done` pass through
+        // to the consumer untouched. An *async* generator instead yields
+        // `Await(IteratorValue(innerResult))` (`AsyncGeneratorYield`), which the
+        // async driver re-wraps into a fresh `{ value, done:false }`.
+        ch.patchToHere(to_yield);
+        ch.patchToHere(to_return_yield);
+        if (async_d) {
+            try self.emitLoad(r);
+            _ = try ch.emit(.get_prop, value_n);
+            _ = try ch.emit(.await_op, 0); // AsyncGeneratorYield awaits before yielding
+        } else {
+            try self.emitLoad(r); // yield the inner result object as-is
+        }
+        _ = try ch.emit(.gen_yield_star, 0); // resume pushes [value, kind] (kind on top)
+        try self.emitStore(recv_k);
+        _ = try ch.emit(.pop, 0);
+        try self.emitStore(recv_v);
+        _ = try ch.emit(.pop, 0);
+        _ = try ch.emit(.jump, @intCast(top));
+
+        // yield* evaluates to the final `r.value` when the inner iterator is done.
+        ch.patchToHere(to_end);
+        try self.emitLoad(r);
+        _ = try ch.emit(.get_prop, value_n);
     }
 
     /// A unique, user-unreferenceable temp name (contains a NUL byte).
@@ -821,7 +959,7 @@ pub const Compiler = struct {
         }
     }
 
-    fn compileFunction(self: *Compiler, fnode: *const ast.FunctionNode) CompileError!u32 {
+    fn compileFunction(self: *Compiler, fnode: *const ast.FunctionNode, named_expr: bool) CompileError!u32 {
         // Async functions tree-walk (the Promise runtime isn't lowered yet), so
         // bail here to force the fallback for any program that defines one.
         if (fnode.is_async) return error.Unsupported;
@@ -853,6 +991,10 @@ pub const Compiler = struct {
         const tmpl = try self.arena.create(bc.FnTemplate);
         tmpl.* = .{
             .name = fnode.name,
+            // A *named function expression* (not a declaration, not anonymous,
+            // not an arrow) self-binds its own name in an enclosing immutable
+            // scope — recorded here so `make_closure` wraps the closure env.
+            .self_name = if (named_expr and !fnode.is_arrow) fnode.name else "",
             .params = fnode.params,
             .is_expr_body = fnode.is_expr_body,
             .body = fnode.body,

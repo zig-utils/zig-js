@@ -89,6 +89,12 @@ pub const Generator = struct {
     /// or a `yield` (resume on the next request) — set by the suspend opcode so
     /// the async-generator driver can tell them apart.
     suspend_kind: enum { yield, await } = .yield,
+    /// True while suspended at a `yield*` delegation point (`gen_yield_star`). A
+    /// `.throw(e)`/`.return(v)` resume must then be *forwarded* to the inner
+    /// iterator by the desugared loop (rather than injected/completed here), so
+    /// the resume pushes `[value, kind]` and re-enters the body. Cleared at every
+    /// plain `yield`/`await` (those resume points are not delegation points).
+    delegating: bool = false,
     /// `async function*` activation: each `.next()`/`.return()`/`.throw()`
     /// enqueues a request (a result promise + an action) that the driver pumps.
     is_async_gen: bool = false,
@@ -185,7 +191,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .store_var => {
                 const name = chunk.names.items[inst.a];
-                try vm.env.assign(name, stack.items[stack.items.len - 1]); // assignment leaves its value
+                try vm.assignVarVM(name, stack.items[stack.items.len - 1]); // assignment leaves its value
             },
             .def_var => {
                 const name = chunk.names.items[inst.a];
@@ -406,8 +412,29 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .ret => return stack.pop().?,
             .ret_undef => return .undefined,
+            .abrupt_return => {
+                // A return completion that must run enclosing `finally` blocks
+                // (mirrors `genResume`'s `.return_` unwinding). Pop handlers until
+                // a `finally` is found; run it carrying a "return" completion so
+                // `end_finally` completes the return once the finally finishes.
+                const rv = stack.pop().?;
+                var fin: ?u32 = null;
+                while (exec.handlers.items.len > 0) {
+                    const h = exec.handlers.pop().?;
+                    if (h.finally_pc != Handler.none) {
+                        stack.shrinkRetainingCapacity(h.stack_depth);
+                        fin = h.finally_pc;
+                        break;
+                    }
+                }
+                if (fin) |fpc| {
+                    try stack.append(vm.arena, rv);
+                    try stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
+                    ip = fpc;
+                } else return rv;
+            },
 
-            .gen_yield, .await_op => {
+            .gen_yield, .await_op, .gen_yield_star => {
                 const v = stack.pop().?;
                 if (gen) |g| {
                     // Snapshot the resumable state and hand the yielded/awaited
@@ -419,9 +446,27 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     exec.ip = ip;
                     g.suspended = true;
                     g.suspend_kind = if (inst.op == .await_op) .await else .yield;
+                    // A `yield*` delegation point must intercept throw()/return()
+                    // and forward them to the inner iterator; any other suspend
+                    // point handles them itself (inject / complete).
+                    g.delegating = inst.op == .gen_yield_star;
                     return v;
                 }
                 return vm.throwError("SyntaxError", "yield outside a generator");
+            },
+            .call_with_this => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const args = stack.items[base..];
+                const this_val = stack.items[base - 1];
+                const callee = stack.items[base - 2];
+                const res = try callValue(vm, callee, args, this_val);
+                stack.shrinkRetainingCapacity(base - 2);
+                try stack.append(vm.arena, res);
+            },
+            .assert_iter_result => {
+                if (stack.items[stack.items.len - 1] != .object)
+                    return vm.throwError("TypeError", "iterator result is not an object");
             },
             .iter_of => {
                 const v = stack.pop().?;
@@ -531,6 +576,17 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
 /// injects an exception at the suspend point, or a `.return(v)` that completes it.
 const ResumeKind = enum { send, throw_, return_ };
 
+/// The numeric tag a delegation resume (`gen_yield_star`) pushes alongside the
+/// resume value, so the desugared `yield*` loop can branch on how it was resumed:
+/// 0 = `.next(v)`, 1 = `.throw(e)`, 2 = `.return(v)`.
+fn resumeKindNum(kind: ResumeKind) Value {
+    return .{ .number = switch (kind) {
+        .send => 0,
+        .throw_ => 1,
+        .return_ => 2,
+    } };
+}
+
 /// Shared driver for `.next`/`.throw`/`.return`. Restores the generator's
 /// context, applies the resume action at the suspend point, runs the VM to the
 /// next `yield` (or completion), then restores the caller's context.
@@ -561,6 +617,13 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
                 return error.Throw;
             },
         }
+    } else if (g.delegating) {
+        // Suspended at a `yield*` delegation point: forward the resume to the
+        // inner iterator by handing the desugared loop `[value, kind]` and
+        // re-entering the body, whatever the resume kind.
+        g.delegating = false;
+        try g.exec.stack.append(vm.arena, val);
+        try g.exec.stack.append(vm.arena, resumeKindNum(kind));
     } else {
         // Suspended at a `yield`: apply the resume action.
         switch (kind) {
@@ -628,7 +691,13 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
         g.done = true; // a thrown generator is finished
         return e;
     };
-    if (g.suspended) return makeIterResult(vm, v, false);
+    if (g.suspended) {
+        // A `yield*` delegation point (`gen_yield_star` sets `delegating`) yields
+        // the inner iterator's result object *as-is* (`GeneratorYield(innerResult)`);
+        // a plain `yield` yields a raw value that we wrap into `{ value, done }`.
+        if (g.delegating) return v;
+        return makeIterResult(vm, v, false);
+    }
     g.done = true;
     return makeIterResult(vm, v, true); // `v` is the body's return value
 }
@@ -855,7 +924,12 @@ const AgStep = union(enum) { awaited: Value, yielded: Value, returned: Value, th
 
 /// Resume the async-generator body once and report why it stopped.
 fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!AgStep {
-    if (g.started) {
+    if (g.started and g.delegating) {
+        // `yield*` delegation point: forward the resume to the inner iterator.
+        g.delegating = false;
+        try g.exec.stack.append(vm.arena, val);
+        try g.exec.stack.append(vm.arena, resumeKindNum(kind));
+    } else if (g.started) {
         switch (kind) {
             .send => try g.exec.stack.append(vm.arena, val),
             .throw_ => if (!try injectThrowAt(vm, g, val)) return .{ .threw = val },
@@ -1016,11 +1090,20 @@ fn binOp(op: bc.Op) @import("ast.zig").BinaryOp {
 /// VM path; `closure` (the global env) is kept only to satisfy the shared type.
 fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
     const func = try vm.arena.create(Function);
+    // A named function expression binds its own name as an immutable binding in
+    // a fresh scope enclosing the body, so the body can recurse via that name and
+    // can't rebind it. `runFunction` installs `func.closure` as `vm.env` for the
+    // call, so the body's free-variable lookups resolve the self name here.
+    const closure_env = if (tmpl.self_name.len > 0) blk: {
+        const fenv = try vm.arena.create(interp.Environment);
+        fenv.* = .{ .arena = vm.arena, .parent = vm.env };
+        break :blk fenv;
+    } else vm.env;
     func.* = .{
         .params = tmpl.params,
         .body = tmpl.body,
         .is_expr_body = tmpl.is_expr_body,
-        .closure = vm.env,
+        .closure = closure_env,
         .name = tmpl.name,
         .source = tmpl.source,
         .chunk = tmpl.chunk,
@@ -1030,6 +1113,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
     const obj = try vm.arena.create(value.Object);
     obj.* = .{ .js_func = @ptrCast(func), .proto = vm.functionProto() };
     try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
+    if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, .{ .object = obj });
     return .{ .object = obj };
 }
 
@@ -1083,7 +1167,13 @@ fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const 
 
     const saved_this = vm.this_value;
     const saved_strict = vm.strict;
+    const saved_env = vm.env;
     vm.strict = func.is_strict;
+    // Free variables (globals, and a named function expression's self name)
+    // resolve through `vm.env`; install the closure's defining environment so a
+    // named function expression's own immutable binding is visible in its body.
+    // For ordinary functions `func.closure` is the global env (unchanged).
+    vm.env = func.closure;
     // Sloppy-mode this-substitution (matches the tree-walker): a non-strict,
     // non-arrow function called with null/undefined `this` sees the global object.
     vm.this_value = if (!func.is_strict and !func.is_arrow and (this_val == .null or this_val == .undefined))
@@ -1093,6 +1183,7 @@ fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const 
     defer {
         vm.this_value = saved_this;
         vm.strict = saved_strict;
+        vm.env = saved_env;
     }
     return run(vm, fchunk, frame);
 }
