@@ -3306,6 +3306,45 @@ pub const Interpreter = struct {
         return s;
     }
 
+    /// ArraySpeciesCreate(originalArray, length): the result array a method like
+    /// `map`/`filter`/`slice` produces. The default is a plain Array, but
+    /// `originalArray.constructor[Symbol.species]` can redirect it: a null/
+    /// undefined species (or the intrinsic Array) gives a plain array, a
+    /// non-constructor species throws a TypeError, and any other constructor is
+    /// `new`-ed with the length (its abrupt completion propagates).
+    pub fn arraySpeciesCreate(self: *Interpreter, original: Value, len: usize) EvalError!Value {
+        if (original != .object or !original.object.is_array) return self.newArray();
+        const c = try self.getProperty(original, "constructor");
+        var ctor: Value = c;
+        if (c == .object) {
+            const skey = self.wellKnownSymbolKey("species") orelse return self.newArray();
+            const s = try self.getProperty(c, skey);
+            if (s == .null or s == .undefined) return self.newArray();
+            ctor = s;
+        } else if (c == .undefined) {
+            return self.newArray();
+        }
+        // The intrinsic Array constructor → a plain array (fast path, matching
+        // `new Array(len)` then filling in 0..len).
+        if (self.env.get("Array")) |arr| {
+            if (ctor == .object and arr == .object and ctor.object == arr.object) return self.newArray();
+        }
+        if (!isConstructorValue(ctor)) return self.throwError("TypeError", "Array species is not a constructor");
+        return self.construct(ctor, &.{.{ .number = @floatFromInt(len) }});
+    }
+
+    /// Append `v` as the next element of a method's result (an array uses its
+    /// dense store; a custom species object gets a `[[Set]]` at `idx`).
+    fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
+        if (result == .object and result.object.is_array) {
+            try result.object.elements.append(self.arena, v);
+        } else {
+            var kb: [24]u8 = undefined;
+            const k = std.fmt.bufPrint(&kb, "{d}", .{idx}) catch return;
+            try self.setMember(result, k, v);
+        }
+    }
+
     /// The async iterator for `for await`: `obj[Symbol.asyncIterator]()` if
     /// present, else the sync iterator (whose `{value,done}` results `await`
     /// trivially resolves).
@@ -3788,13 +3827,15 @@ pub const Interpreter = struct {
         if (eq(name, "slice")) {
             const start = relIndex(arg0(args), ilen, 0);
             const end = relIndex(arg(args, 1), ilen, @floatFromInt(ilen));
-            const result = try self.newArray();
+            const count = if (end > start) end - start else 0;
+            const result = try self.arraySpeciesCreate(.{ .object = o }, count);
+            const ra = result.object.is_array;
             var i = start;
             var k: usize = 0; // result index, for hole preservation
             while (i < end) : (i += 1) {
                 if (self.arrIndexPresent(o, i)) {
-                    try result.object.elements.append(self.arena, try self.arrIndexGet(o, i));
-                } else { // slice preserves holes
+                    if (ra) try result.object.elements.append(self.arena, try self.arrIndexGet(o, i)) else try self.arrayResultPush(result, k, try self.arrIndexGet(o, i));
+                } else if (ra) { // slice preserves holes (only on a real array result)
                     try result.object.elements.append(self.arena, .undefined);
                     try result.object.markHole(self.arena, k);
                 }
@@ -3867,29 +3908,36 @@ pub const Interpreter = struct {
         }
         if (eq(name, "map")) {
             const cb = arg0(args);
-            const result = try self.newArray();
+            const result = try self.arraySpeciesCreate(.{ .object = o }, ilen);
+            const ra = result.object.is_array;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (!self.arrIndexPresent(o, i)) {
-                    try result.object.elements.append(self.arena, .undefined);
-                    try result.object.markHole(self.arena, i); // map preserves holes
+                    if (ra) {
+                        try result.object.elements.append(self.arena, .undefined);
+                        try result.object.markHole(self.arena, i); // map preserves holes
+                    }
                     continue;
                 }
                 const el = try self.arrIndexGet(o, i);
                 const r = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
-                try result.object.elements.append(self.arena, r);
+                if (ra) try result.object.elements.append(self.arena, r) else try self.arrayResultPush(result, i, r);
             }
             return result;
         }
         if (eq(name, "filter")) {
             const cb = arg0(args);
-            const result = try self.newArray();
+            const result = try self.arraySpeciesCreate(.{ .object = o }, 0);
+            const ra = result.object.is_array;
             var i: usize = 0;
+            var ridx: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (!self.arrIndexPresent(o, i)) continue; // skip holes
                 const el = try self.arrIndexGet(o, i);
-                if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
-                    try result.object.elements.append(self.arena, el);
+                if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean()) {
+                    if (ra) try result.object.elements.append(self.arena, el) else try self.arrayResultPush(result, ridx, el);
+                    ridx += 1;
+                }
             }
             return result;
         }
