@@ -12,7 +12,7 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset *and* generators / async functions / async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js` + `assert.js` + `includes:`):
-> `zig build test262` currently passes **VALID 24,638 / 30,006 (82.1%)** across `language/` and
+> `zig build test262` currently passes **VALID 24,647 / 30,006 (82.1%)** across `language/` and
 > the implemented built-in subtrees, and `zig build conformance` keeps a 33/33 always-green smoke
 > suite.
 >
@@ -54,7 +54,7 @@ failing to parse valid code too), so they're kept apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? | **24,638 / 30,006 (82.1%)** |
+| **valid** | can we run the program? | **24,647 / 30,006 (82.1%)** |
 | negative | do we reject invalid input? (early errors — partial) | 1,651 / 4,215 (39.2%) |
 
 Per area (valid):
