@@ -187,6 +187,9 @@ pub const Parser = struct {
     pub fn parseModule(self: *Parser) ParseError!*Node {
         self.module = true;
         self.strict = true;
+        // A Module is an async context for `await` at the top level (top-level
+        // await). Nested non-async functions reset this via `parseFnBody`.
+        self.in_async = true;
         var stmts: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.eof)) {
             try stmts.append(self.arena, try self.parseModuleItem());
