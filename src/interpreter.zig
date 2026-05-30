@@ -2982,6 +2982,29 @@ pub const Interpreter = struct {
         return it.object.sym_key;
     }
 
+    /// The internal property key of a well-known `Symbol.<name>` (e.g. `species`).
+    pub fn wellKnownSymbolKey(self: *Interpreter, name: []const u8) ?[]const u8 {
+        const sym = self.env.get("Symbol") orelse return null;
+        if (sym != .object) return null;
+        const it = sym.object.getOwn(name) orelse return null;
+        if (it != .object or !it.object.is_symbol) return null;
+        return it.object.sym_key;
+    }
+
+    /// SpeciesConstructor(O, defaultConstructor): `O.constructor[Symbol.species]`,
+    /// falling back to the default when `constructor` or its species slot is
+    /// undefined/null; a non-constructor species throws a TypeError.
+    pub fn speciesConstructor(self: *Interpreter, o: Value, default_ctor: Value) EvalError!Value {
+        const ctor = try self.getProperty(o, "constructor");
+        if (ctor == .undefined) return default_ctor;
+        if (ctor != .object) return self.throwError("TypeError", "constructor is not an object");
+        const skey = self.wellKnownSymbolKey("species") orelse return default_ctor;
+        const s = try self.getProperty(ctor, skey);
+        if (s == .undefined or s == .null) return default_ctor;
+        if (!isConstructorValue(s)) return self.throwError("TypeError", "Symbol.species is not a constructor");
+        return s;
+    }
+
     /// The async iterator for `for await`: `obj[Symbol.asyncIterator]()` if
     /// present, else the sync iterator (whose `{value,done}` results `await`
     /// trivially resolves).
@@ -4629,16 +4652,38 @@ fn promiseRejectClosure(ctx: *anyopaque, this: Value, args: []const Value) value
     return .undefined;
 }
 
+/// `Promise.prototype.then` — the result promise is built from
+/// `SpeciesConstructor(this, %Promise%)`, so a subclass's `.then` yields a
+/// subclass instance. The fast path (intrinsic species) skips the capability.
+fn promiseThenImpl(self: *Interpreter, this: Value, on_f: Value, on_r: Value) value.HostError!Value {
+    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.then called on a non-Promise");
+    const default_ctor = self.env.get("Promise") orelse .undefined;
+    const c = try self.speciesConstructor(this, default_ctor);
+    // Intrinsic Promise → cheap native capability; a subclass/custom → its own.
+    if (c == .object and default_ctor == .object and c.object == default_ctor.object)
+        return promise.then(self, p, on_f, on_r);
+    const cap = try newPromiseCapability(self, c);
+    try promise.performThen(self, p, on_f, on_r, cap.resolve, cap.reject);
+    return cap.promise;
+}
+
+/// A getter (or method) that simply returns its receiver — `get [@@species]() {
+/// return this; }`.
+fn returnThisFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = args;
+    return this;
+}
+
 fn promiseThenFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.then called on a non-Promise");
-    return promise.then(self, p, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    return promiseThenImpl(self, this, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
 }
 
 fn promiseCatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.catch called on a non-Promise");
-    return promise.then(self, p, .undefined, if (args.len > 0) args[0] else .undefined);
+    // `catch(f)` is `then(undefined, f)` — including its species behavior.
+    return promiseThenImpl(self, this, .undefined, if (args.len > 0) args[0] else .undefined);
 }
 
 /// Captured state for a `finally` reaction (`then`/`catch` side) and its inner
@@ -5741,6 +5786,19 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
             try func_proto.setOwn(a, root_shape, hi.object.sym_key, .{ .object = m });
             try func_proto.setAttr(a, hi.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
         }
+    };
+
+    // Promise[Symbol.species] — a getter returning the receiver, so a subclass's
+    // SpeciesConstructor is the subclass itself (installed now that the symbol
+    // and Promise both exist). {enumerable:false, configurable:true}.
+    if (symbol_ns.getOwn("species")) |sp| if (sp == .object) {
+        if (env.get("Promise")) |pc| if (pc == .object) {
+            const getter = try a.create(value.Object);
+            getter.* = .{ .native = returnThisFn };
+            try installNativeProps(a, root_shape, getter, "get [Symbol.species]", 0);
+            try pc.object.setAccessor(a, sp.object.sym_key, .{ .object = getter }, null);
+            try pc.object.setAttr(a, sp.object.sym_key, .{ .enumerable = false, .configurable = true });
+        };
     };
 
     // Proxy (constructor) + Proxy.revocable.
