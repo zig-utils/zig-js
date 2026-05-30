@@ -1776,6 +1776,14 @@ pub const Interpreter = struct {
     /// string enumeration); other keys coerce to string.
     pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
         if (k == .object and k.object.is_symbol) return k.object.sym_key;
+        // ToPropertyKey: an object key is first ToPrimitive(key, string) — running
+        // its `[Symbol.toPrimitive]`/`toString`/`valueOf` (a TypeError if none
+        // yields a primitive) — and a resulting Symbol keeps its key.
+        if (k == .object) {
+            const prim = try self.toPrimitive(k, .string);
+            if (prim == .object and prim.object.is_symbol) return prim.object.sym_key;
+            return prim.toString(self.arena);
+        }
         return k.toString(self.arena);
     }
 
@@ -4708,12 +4716,18 @@ pub const Interpreter = struct {
         // skipped here — falling through to the built-in coercion below — which
         // also avoids looping back through method dispatch.
         const names: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
+        var user_tried: u8 = 0;
         for (names) |m| {
             if (userMethodOf(o, m)) |fnv| {
+                user_tried += 1;
                 const res = try self.callValueWithThis(fnv, &.{}, v);
                 if (res != .object) return res;
             }
         }
+        // Both `toString` and `valueOf` were user-defined and each returned an
+        // object — there's no built-in to fall back to, so this is the spec's
+        // "Cannot convert object to primitive value" TypeError.
+        if (user_tried == 2) return self.throwError("TypeError", "Cannot convert object to primitive value");
         // A callable object with no user-defined valueOf/toString stringifies via
         // Function.prototype.toString (its source text / native syntax). `valueOf`
         // returns the object itself, so `toString` always wins regardless of hint.
