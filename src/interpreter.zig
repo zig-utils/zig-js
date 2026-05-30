@@ -4878,15 +4878,27 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         },
     }
     c.remaining -= 1;
-    if (c.remaining == 0) {
-        if (c.kind == .any) {
-            // Promise.any rejects with an AggregateError whose `errors` is the
-            // collected rejection reasons (built from the values array).
-            const agg = try self.makeErrorWithArgs("AggregateError", &.{.{ .object = c.values }});
-            _ = try self.callValue(c.reject, &.{agg});
-        } else _ = try self.callValue(c.resolve, &.{.{ .object = c.values }});
-    }
+    if (c.remaining == 0) try combineSettle(self, c);
     return .undefined;
+}
+
+/// Settle a combinator once its `remaining` count reaches zero: `all`/
+/// `allSettled` fulfill with the values array; `any` rejects with an
+/// AggregateError carrying the collected rejection reasons.
+fn combineSettle(self: *Interpreter, c: *promise.Combine) value.HostError!void {
+    if (c.kind == .any) {
+        const agg = try self.makeErrorWithArgs("AggregateError", &.{.{ .object = c.values }});
+        _ = try self.callValue(c.reject, &.{agg});
+    } else _ = try self.callValue(c.resolve, &.{.{ .object = c.values }});
+}
+
+/// IteratorStep + IteratorValue: advance `iter`, returning the next value or
+/// null when exhausted. A protocol violation (non-object result) throws.
+fn iterStep(self: *Interpreter, iter: Value) EvalError!?Value {
+    const r = try self.callMethod(iter, "next", &.{});
+    if (r != .object) return self.throwError("TypeError", "iterator.next() did not return an object");
+    if ((try self.getProperty(r, "done")).toBoolean()) return null;
+    return try self.getProperty(r, "value");
 }
 
 /// Shared setup for `Promise.all`/`allSettled`/`any`: build the combined promise
@@ -4952,32 +4964,38 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
     // GetPromiseResolve + GetIterator are abrupt-rejected: a failure rejects the
     // returned promise (IfAbruptRejectPromise) rather than throwing out of the call.
     const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, cap, err);
-    const elems = collectIterable(self, iterable) catch |err| return rejectAbrupt(self, cap, err);
+    const iter = self.iteratorOf(iterable) catch |err| return rejectAbrupt(self, cap, err);
 
     const values = (try self.newArray()).object;
-    for (elems) |_| try values.elements.append(self.arena, .undefined);
     const combine = try self.arena.create(promise.Combine);
-    combine.* = .{ .resolve = cap.resolve, .reject = cap.reject, .values = values, .remaining = elems.len, .kind = kind };
-    if (elems.len == 0) {
-        if (kind == .any) {
-            // `Promise.any([])` rejects with an AggregateError carrying no errors.
-            const agg = try self.makeErrorWithArgs("AggregateError", &.{.{ .object = values }});
-            _ = try self.callValue(cap.reject, &.{agg});
-        } else _ = try self.callValue(cap.resolve, &.{.{ .object = values }});
-        return cap.promise;
-    }
-    for (elems, 0..) |el, i| {
-        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return rejectAbrupt(self, cap, err);
+    // `remaining` starts at 1 for the loop itself, so a synchronously-settling
+    // input can't fire the final settle before the iteration completes; it is
+    // decremented once the iterator is exhausted (PerformPromiseAll pattern).
+    combine.* = .{ .resolve = cap.resolve, .reject = cap.reject, .values = values, .remaining = 1, .kind = kind };
+    var index: usize = 0;
+    while (true) {
+        // IteratorStep/IteratorValue errors leave the iterator done → reject
+        // without closing it.
+        const maybe = iterStep(self, iter) catch |err| return rejectAbrupt(self, cap, err);
+        const el = maybe orelse break;
+        try values.elements.append(self.arena, .undefined);
+        combine.remaining += 1;
+        // `Call(promiseResolve, C, «el»)` — an abrupt completion here closes the
+        // (still-open) iterator before rejecting.
+        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return closeAndReject(self, cap, iter, err);
         const f = try self.arena.create(value.Object);
         const fe = try self.arena.create(promise.Elem);
-        fe.* = .{ .combine = combine, .index = i, .is_reject = false };
+        fe.* = .{ .combine = combine, .index = index, .is_reject = false };
         f.* = .{ .native = combineElemFn, .private_data = @ptrCast(fe) };
         const r = try self.arena.create(value.Object);
         const re = try self.arena.create(promise.Elem);
-        re.* = .{ .combine = combine, .index = i, .is_reject = true };
+        re.* = .{ .combine = combine, .index = index, .is_reject = true };
         r.* = .{ .native = combineElemFn, .private_data = @ptrCast(re) };
         _ = try promise.then(self, pp, .{ .object = f }, .{ .object = r });
+        index += 1;
     }
+    combine.remaining -= 1; // the loop's own count
+    if (combine.remaining == 0) try combineSettle(self, combine);
     return cap.promise;
 }
 
@@ -4986,6 +5004,18 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
 fn rejectAbrupt(self: *Interpreter, cap: Capability, err: value.HostError) value.HostError!Value {
     if (err != error.Throw) return err;
     const reason = self.exception;
+    self.exception = .undefined;
+    _ = try self.callValue(cap.reject, &.{reason});
+    return cap.promise;
+}
+
+/// Abrupt completion mid-iteration: close the still-open iterator (its own
+/// errors are swallowed — the original completion wins) and reject the result.
+fn closeAndReject(self: *Interpreter, cap: Capability, iter: Value, err: value.HostError) value.HostError!Value {
+    if (err != error.Throw) return err;
+    const reason = self.exception;
+    self.exception = .undefined;
+    self.iteratorClose(iter) catch {};
     self.exception = .undefined;
     _ = try self.callValue(cap.reject, &.{reason});
     return cap.promise;
@@ -5011,9 +5041,11 @@ fn promiseRaceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const cap = try newPromiseCapability(self, this);
     const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, cap, err);
-    const elems = collectIterable(self, if (args.len > 0) args[0] else .undefined) catch |err| return rejectAbrupt(self, cap, err);
-    for (elems) |el| {
-        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return rejectAbrupt(self, cap, err);
+    const iter = self.iteratorOf(if (args.len > 0) args[0] else .undefined) catch |err| return rejectAbrupt(self, cap, err);
+    while (true) {
+        const maybe = iterStep(self, iter) catch |err| return rejectAbrupt(self, cap, err);
+        const el = maybe orelse break;
+        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return closeAndReject(self, cap, iter, err);
         // The capability's resolve/reject settle the result; the first input to
         // fire wins (later settlements are no-ops on an already-settled promise).
         _ = try promise.then(self, pp, cap.resolve, cap.reject);
