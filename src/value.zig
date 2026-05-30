@@ -493,7 +493,9 @@ pub const Value = union(enum) {
             .boolean => |b| if (b) 1 else 0,
             .number => |n| n,
             .string => |s| stringToNumber(s),
-            .object => std.math.nan(f64),
+            // A BigInt's mathematical value (explicit `Number(1n) === 1`); other
+            // objects coerce to NaN here (proper ToPrimitive is `Interpreter`-level).
+            .object => |o| if (o.is_bigint) @floatFromInt(o.bigint) else std.math.nan(f64),
         };
     }
 

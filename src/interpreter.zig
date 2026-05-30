@@ -1821,10 +1821,14 @@ pub const Interpreter = struct {
     pub fn toNumberV(self: *Interpreter, v: Value) EvalError!f64 {
         if (v == .object and v.object.is_symbol)
             return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+        if (v == .object and v.object.is_bigint)
+            return self.throwError("TypeError", "Cannot convert a BigInt value to a number");
         if (v == .object) {
             const prim = try self.toPrimitive(v, .number);
             if (prim == .object and prim.object.is_symbol)
                 return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+            if (prim == .object and prim.object.is_bigint)
+                return self.throwError("TypeError", "Cannot convert a BigInt value to a number");
             return prim.toNumber();
         }
         return v.toNumber();
@@ -1937,9 +1941,20 @@ pub const Interpreter = struct {
                 return self.makeBigInt(@intFromFloat(n));
             },
             .string => |s| {
-                const t = std.mem.trim(u8, s, " \t\r\n");
+                // StringToBigInt: trim whitespace; empty → 0n; otherwise a decimal
+                // (optional sign) or a `0x`/`0o`/`0b` literal (no sign).
+                const t = std.mem.trim(u8, s, " \t\r\n\x0b\x0c\u{00a0}\u{feff}");
                 if (t.len == 0) return self.makeBigInt(0);
-                const i = std.fmt.parseInt(i128, t, 0) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt");
+                if (t.len > 2 and t[0] == '0' and (t[1] == 'x' or t[1] == 'X')) {
+                    return self.makeBigInt(std.fmt.parseInt(i128, t[2..], 16) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
+                }
+                if (t.len > 2 and t[0] == '0' and (t[1] == 'o' or t[1] == 'O')) {
+                    return self.makeBigInt(std.fmt.parseInt(i128, t[2..], 8) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
+                }
+                if (t.len > 2 and t[0] == '0' and (t[1] == 'b' or t[1] == 'B')) {
+                    return self.makeBigInt(std.fmt.parseInt(i128, t[2..], 2) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
+                }
+                const i = std.fmt.parseInt(i128, t, 10) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt");
                 return self.makeBigInt(i);
             },
             .null, .undefined => return self.throwError("TypeError", "Cannot convert undefined or null to a BigInt"),
