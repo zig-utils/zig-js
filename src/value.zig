@@ -440,14 +440,70 @@ fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]con
 /// ECMAScript ToString for numbers (best-effort; full Number::toString comes
 /// with the test262 number slice). Integer-valued numbers print without a
 /// trailing ".0" to match JS.
+/// ToString(number) per ECMAScript Number::toString (radix 10): the shortest
+/// decimal that round-trips, formatted with the spec's fixed/exponential
+/// thresholds (n > 21 or n <= -6 use `e` notation). `1e21` → "1e+21",
+/// `1e-7` → "1e-7", `0.001` → "0.001".
 pub fn numberToString(arena: std.mem.Allocator, n: f64) ![]const u8 {
     if (std.math.isNan(n)) return "NaN";
     if (std.math.isInf(n)) return if (n < 0) "-Infinity" else "Infinity";
     if (n == 0) return "0";
+    // Fast path: an exactly-representable integer always renders without
+    // exponent (its `n` is <= 21), so plain decimal output matches the spec.
     if (@floor(n) == n and @abs(n) < 9.007199254740992e15) {
         return std.fmt.allocPrint(arena, "{d}", .{@as(i64, @intFromFloat(n))});
     }
-    return std.fmt.allocPrint(arena, "{d}", .{n});
+
+    const negative = n < 0;
+    // Shortest round-tripping scientific form "d.ddde±X" / "deX".
+    var sbuf: [512]u8 = undefined;
+    const sci = std.fmt.float.render(&sbuf, @abs(n), .{ .mode = .scientific, .precision = null }) catch return error.OutOfMemory;
+    const e_idx = std.mem.indexOfScalar(u8, sci, 'e') orelse return std.fmt.allocPrint(arena, "{d}", .{n});
+    const exp = std.fmt.parseInt(i32, sci[e_idx + 1 ..], 10) catch return error.OutOfMemory;
+
+    // Mantissa significant digits (drop the '.'), with trailing zeros trimmed.
+    var digbuf: [64]u8 = undefined;
+    var k: usize = 0;
+    for (sci[0..e_idx]) |c| {
+        if (c == '.') continue;
+        digbuf[k] = c;
+        k += 1;
+    }
+    while (k > 1 and digbuf[k - 1] == '0') k -= 1;
+    const digits = digbuf[0..k];
+    const ki: i32 = @intCast(k);
+    const np: i32 = exp + 1; // the spec's `n`: value = digits × 10^(n-k)
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (negative) try out.append(arena, '-');
+    if (np >= ki and np <= 21) {
+        // Integer: all k digits, then (n-k) trailing zeros.
+        try out.appendSlice(arena, digits);
+        try out.appendNTimes(arena, '0', @intCast(np - ki));
+    } else if (np > 0 and np <= 21) {
+        // Decimal point inside the digit run.
+        try out.appendSlice(arena, digits[0..@intCast(np)]);
+        try out.append(arena, '.');
+        try out.appendSlice(arena, digits[@intCast(np)..]);
+    } else if (np > -6 and np <= 0) {
+        // Leading "0.000…" then all the digits.
+        try out.appendSlice(arena, "0.");
+        try out.appendNTimes(arena, '0', @intCast(-np));
+        try out.appendSlice(arena, digits);
+    } else {
+        // Exponential: first digit, optional fraction, then `e±(n-1)`.
+        try out.append(arena, digits[0]);
+        if (k > 1) {
+            try out.append(arena, '.');
+            try out.appendSlice(arena, digits[1..]);
+        }
+        try out.append(arena, 'e');
+        const e2 = np - 1;
+        try out.append(arena, if (e2 >= 0) '+' else '-');
+        var ebuf: [12]u8 = undefined;
+        try out.appendSlice(arena, std.fmt.bufPrint(&ebuf, "{d}", .{@abs(e2)}) catch unreachable);
+    }
+    return out.toOwnedSlice(arena);
 }
 
 /// Parse a string to a number per a simplified ToNumber(string): trims ASCII
