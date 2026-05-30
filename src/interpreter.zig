@@ -4655,7 +4655,7 @@ fn finallyReactionFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const d: *FinallyData = @ptrCast(@alignCast(fnobj.private_data.?));
     const incoming = if (args.len > 0) args[0] else .undefined;
     const result = try self.callValue(d.on_finally, &.{}); // may throw → propagates (rejects)
-    const wrapped = try promiseResolveStaticFn(@ptrCast(self), .undefined, &.{result});
+    const wrapped = try promiseResolveValue(self, result);
     const wp = promise.promiseOf(wrapped).?;
     // After onFinally's result settles, a thunk that ignores its argument and
     // reinstates the original completion.
@@ -4696,25 +4696,40 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     return promise.then(self, p, .{ .object = onf }, .{ .object = onr });
 }
 
-/// `Promise.resolve(v)` — `v` itself if already a promise, else a promise
-/// fulfilled with `v` (adopting a thenable's state).
-fn promiseResolveStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const v = if (args.len > 0) args[0] else .undefined;
+/// Internal `PromiseResolve(%Promise%, v)`: `v` itself if already a native
+/// promise, else a fresh native promise fulfilled with `v` (adopting a
+/// thenable). Used by the combinators/`finally` where the constructor is always
+/// the intrinsic `Promise` — no observable `this` or capability involved.
+fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
     if (promise.promiseOf(v) != null) return v;
     const pobj = try promise.newPromise(self);
     try promise.resolve(self, @ptrCast(@alignCast(pobj.promise.?)), v);
     return .{ .object = pobj };
 }
 
-/// `Promise.reject(e)` — a promise rejected with `e`.
-fn promiseRejectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
+/// `Promise.resolve(v)` — uses `this` as the constructor `C`: returns `v`
+/// unchanged when it is a promise whose `constructor` is `C`, otherwise builds
+/// `C`'s capability and resolves it with `v` (so a subclass's `resolve` yields a
+/// subclass instance).
+fn promiseResolveStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const pobj = try promise.newPromise(self);
-    try promise.reject(self, @ptrCast(@alignCast(pobj.promise.?)), if (args.len > 0) args[0] else .undefined);
-    return .{ .object = pobj };
+    if (this != .object) return self.throwError("TypeError", "Promise.resolve called on a non-object");
+    const v = if (args.len > 0) args[0] else .undefined;
+    if (promise.promiseOf(v) != null) {
+        const ctor = try self.getProperty(v, "constructor");
+        if (ctor == .object and ctor.object == this.object) return v;
+    }
+    const cap = try newPromiseCapability(self, this);
+    _ = try self.callValue(cap.resolve, &.{v});
+    return cap.promise;
+}
+
+/// `Promise.reject(e)` — builds `this`'s capability and rejects it with `e`.
+fn promiseRejectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cap = try newPromiseCapability(self, this);
+    _ = try self.callValue(cap.reject, &.{if (args.len > 0) args[0] else .undefined});
+    return cap.promise;
 }
 
 /// `Object.groupBy(items, callback)` — group `items` into a null-prototype
@@ -4881,7 +4896,7 @@ fn elementPromise(self: *Interpreter, promise_resolve: Value, c: Value, el: Valu
     const p = try self.callValueWithThis(promise_resolve, &.{el}, c);
     if (promise.promiseOf(p)) |pp| return pp;
     // A non-promise `resolve` result is adopted into a fresh native promise.
-    const wrapped = try promiseResolveStaticFn(@ptrCast(self), .undefined, &.{p});
+    const wrapped = try promiseResolveValue(self, p);
     return promise.promiseOf(wrapped).?;
 }
 
