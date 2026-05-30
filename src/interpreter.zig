@@ -383,6 +383,41 @@ pub const Interpreter = struct {
         return g.getOwn(name);
     }
 
+    /// ToObject(v): an object is returned as-is, a primitive is boxed into the
+    /// matching wrapper (whose prototype is that constructor's `.prototype`), and
+    /// null/undefined throw a TypeError. Used by `with` (and anywhere the spec
+    /// says "ToObject").
+    pub fn toObject(self: *Interpreter, v: Value) EvalError!*value.Object {
+        if (v == .object) return v.object;
+        if (v == .null or v == .undefined)
+            return self.throwError("TypeError", "Cannot convert undefined or null to object");
+        const ctor_name: []const u8 = switch (v) {
+            .string => "String",
+            .number => "Number",
+            .boolean => "Boolean",
+            else => unreachable,
+        };
+        const o = try self.arena.create(value.Object);
+        o.* = .{ .prim = v };
+        if (self.env.get(ctor_name)) |ctor| {
+            if (ctor == .object) o.proto = try self.protoObject(ctor.object);
+        }
+        return o;
+    }
+
+    /// Whether a `with` binding object provides a binding for `name`: it has the
+    /// property AND `name` is not listed truthy in the object's
+    /// `[Symbol.unscopables]` (which hides selected names from `with` scope).
+    pub fn withHasBinding(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!bool {
+        if (!hasProperty(o, name)) return false;
+        const unsc_key = self.wellKnownSymbolKey("unscopables") orelse return true;
+        const unsc = try self.getProperty(.{ .object = o }, unsc_key);
+        if (unsc == .object) {
+            if ((try self.getProperty(unsc, name)).toBoolean()) return false;
+        }
+        return true;
+    }
+
     /// Build an `Error`-family instance with `name`/`message` properties.
     fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         const obj = try self.arena.create(value.Object);
@@ -430,7 +465,7 @@ pub const Interpreter = struct {
                     var i = self.with_stack.items.len;
                     while (i > 0) : (i -= 1) {
                         const o = self.with_stack.items[i - 1];
-                        if (hasProperty(o, name)) break :blk try self.getProperty(.{ .object = o }, name);
+                        if (try self.withHasBinding(o, name)) break :blk try self.getProperty(.{ .object = o }, name);
                     }
                 }
                 if (self.env.get(name)) |v| {
@@ -667,9 +702,10 @@ pub const Interpreter = struct {
                 .undefined,
 
             .with_stmt => |w| blk: {
-                const obj = try self.eval(w.obj);
-                if (obj != .object) return self.throwError("TypeError", "with(non-object)");
-                try self.with_stack.append(self.arena, obj.object);
+                // The binding object is ToObject(expr): a primitive is boxed,
+                // null/undefined throw — only those throw, not every non-object.
+                const obj = try self.toObject(try self.eval(w.obj));
+                try self.with_stack.append(self.arena, obj);
                 const result = self.eval(w.body);
                 _ = self.with_stack.pop();
                 break :blk try result;
@@ -2904,12 +2940,13 @@ pub const Interpreter = struct {
     fn assignTo(self: *Interpreter, target: *Node, v: Value) EvalError!void {
         switch (target.*) {
             .identifier => |name| {
-                // Assigning a name found on a `with` object writes to that object.
+                // Assigning a name found on a `with` object writes to that object
+                // (honoring `[Symbol.unscopables]`).
                 if (self.with_stack.items.len > 0) {
                     var i = self.with_stack.items.len;
                     while (i > 0) : (i -= 1) {
                         const o = self.with_stack.items[i - 1];
-                        if (hasProperty(o, name)) return self.setMember(.{ .object = o }, name, v);
+                        if (try self.withHasBinding(o, name)) return self.setMember(.{ .object = o }, name, v);
                     }
                 }
                 // Assigning to a binding still in its TDZ is a ReferenceError.
