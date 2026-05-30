@@ -26,6 +26,60 @@ pub fn toLen(n: f64) usize {
     return @intFromFloat(@trunc(n));
 }
 
+/// True for any ECMAScript WhiteSpace or LineTerminator code point — the exact
+/// set `String.prototype.trim`/`trimStart`/`trimEnd` strip.
+fn isJsTrimCp(cp: u21) bool {
+    return switch (cp) {
+        0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020 => true,
+        0x00A0, 0x1680 => true,
+        0x2000...0x200A => true,
+        0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF => true,
+        else => false,
+    };
+}
+
+/// Trim leading and/or trailing ECMAScript WhiteSpace+LineTerminator code points
+/// from `s`. UTF-8 aware: a non-ASCII byte at a boundary is decoded so e.g. NBSP
+/// (U+00A0) and the ideographic space (U+3000) are stripped, not just ASCII.
+fn jsTrim(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
+    var lo: usize = 0;
+    var hi: usize = s.len;
+    if (trim_start_) {
+        while (lo < hi) {
+            const c = s[lo];
+            const cp_len: usize = if (c < 0x80) 1 else (std.unicode.utf8ByteSequenceLength(c) catch break);
+            if (lo + cp_len > hi) break;
+            const cp: u21 = if (cp_len == 1) @as(u21, c) else (std.unicode.utf8Decode(s[lo .. lo + cp_len]) catch break);
+            if (!isJsTrimCp(cp)) break;
+            lo += cp_len;
+        }
+    }
+    if (trim_end_) {
+        var last_end: usize = lo;
+        var i: usize = lo;
+        while (i < hi) {
+            const c = s[i];
+            const cp_len: usize = if (c < 0x80) 1 else (std.unicode.utf8ByteSequenceLength(c) catch {
+                last_end = hi;
+                break;
+            });
+            if (i + cp_len > hi) {
+                last_end = hi;
+                break;
+            }
+            const cp: u21 = if (cp_len == 1) @as(u21, c) else (std.unicode.utf8Decode(s[i .. i + cp_len]) catch {
+                last_end = i + cp_len;
+                i += cp_len;
+                continue;
+            });
+            i += cp_len;
+            if (!isJsTrimCp(cp)) last_end = i;
+        }
+        hi = last_end;
+    }
+    return s[lo..hi];
+}
+
 /// `error.Throw` is the carrier for *any* JS exception: the thrown value lives
 /// in `Interpreter.exception`. `error.OutOfMemory` is the only genuine host
 /// failure. (ReferenceError/TypeError are no longer Zig errors — they are real,
@@ -4011,7 +4065,7 @@ pub const Interpreter = struct {
             for (out) |*c| c.* = std.ascii.toLower(c.*);
             return Value{ .string = out };
         }
-        if (eq(name, "trim")) return Value{ .string = std.mem.trim(u8, s, " \t\r\n") };
+        if (eq(name, "trim")) return Value{ .string = jsTrim(s, true, true) };
         if (eq(name, "repeat")) {
             const rn = arg0(args).toNumber();
             if (rn < 0 or std.math.isInf(rn)) return self.throwError("RangeError", "Invalid count value");
@@ -4090,16 +4144,8 @@ pub const Interpreter = struct {
             if (idx < 0 or idx >= s.len) return Value.undefined;
             return Value{ .string = try self.arena.dupe(u8, s[@intCast(idx) .. @as(usize, @intCast(idx)) + 1]) };
         }
-        if (eq(name, "trimStart")) {
-            var a: usize = 0;
-            while (a < s.len and (s[a] == ' ' or s[a] == '\t' or s[a] == '\r' or s[a] == '\n')) a += 1;
-            return Value{ .string = s[a..] };
-        }
-        if (eq(name, "trimEnd")) {
-            var e: usize = s.len;
-            while (e > 0 and (s[e - 1] == ' ' or s[e - 1] == '\t' or s[e - 1] == '\r' or s[e - 1] == '\n')) e -= 1;
-            return Value{ .string = s[0..e] };
-        }
+        if (eq(name, "trimStart")) return Value{ .string = jsTrim(s, true, false) };
+        if (eq(name, "trimEnd")) return Value{ .string = jsTrim(s, false, true) };
         if (eq(name, "padStart") or eq(name, "padEnd")) {
             const target = toLen(arg0(args).toNumber());
             if (s.len >= target) return Value{ .string = try self.arena.dupe(u8, s) };

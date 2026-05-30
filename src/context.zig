@@ -884,6 +884,16 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "String.prototype.trim strips the full WhiteSpace + LineTerminator set" {
+    // VT (0x0B), FF (0x0C), NBSP (0x00A0), and the ideographic space (U+3000)
+    // are all spec WhiteSpace, and U+2028/U+2029 are LineTerminators — all stripped.
+    try expectEvalStr("abc", "'\\x0B\\x0C\\u00A0abc\\u3000 '.trim()");
+    try expectEvalStr("abc", "'\\u2028\\u2029abc\\u00A0'.trim()");
+    // trimStart leaves trailing whitespace untouched; trimEnd leaves the leading.
+    try expectEvalStr("abc ", "'\\u00A0\\u3000abc '.trimStart()");
+    try expectEvalStr("abc", "'abc\\u00A0\\u3000\\u2028'.trimEnd()");
+}
+
 test "Array.prototype.concat honors Symbol.isConcatSpreadable" {
     // A real array spreads; a plain object is appended whole.
     try expectEvalStr("1,2,3,4", "[1, 2].concat([3, 4]).join(',')");
