@@ -884,6 +884,19 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "Array.prototype.concat honors Symbol.isConcatSpreadable" {
+    // A real array spreads; a plain object is appended whole.
+    try expectEvalStr("1,2,3,4", "[1, 2].concat([3, 4]).join(',')");
+    try expectEvalStr("1", "[].concat({ length: 2, 0: 'a' }).length.toString()");
+    // An array-like with isConcatSpreadable = true is spread by ToLength(length).
+    try expectEvalStr("a,b", "var o = { length: 2, 0: 'a', 1: 'b' }; o[Symbol.isConcatSpreadable] = true; [].concat(o).join(',')");
+    // An array with isConcatSpreadable = false is appended as a single element.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn(
+        \\var a = [1, 2, 3]; a[Symbol.isConcatSpreadable] = false;
+        \\[].concat(a).length
+    )).number);
+}
+
 test "function objects inherit from Function.prototype" {
     // A user function links to `Function.prototype`, so instanceof, the
     // prototype identity, and inherited methods all resolve through the chain.

@@ -3272,6 +3272,47 @@ pub const Interpreter = struct {
         return self.getProperty(.{ .object = o }, ks);
     }
 
+    /// Spread one concat-spreadable source into `dst`, preserving holes: a real
+    /// Array uses its sparse `length`, an array-like reads ToLength(.length).
+    /// A pathological 2**53-style length throws (instead of OOM-crashing).
+    fn concatSpreadInto(self: *Interpreter, dst: *value.Object, src: *value.Object) EvalError!void {
+        const slen: usize = if (src.is_array) @max(src.elements.items.len, src.array_len) else blk: {
+            const ln = toLen((try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number)).toNumber());
+            if (ln > (1 << 22)) return self.throwError("TypeError", "Invalid array length");
+            break :blk ln;
+        };
+        var j: usize = 0;
+        while (j < slen) : (j += 1) {
+            const base = dst.elements.items.len;
+            if (self.arrIndexPresent(src, j)) {
+                try dst.elements.append(self.arena, try self.arrIndexGet(src, j));
+            } else {
+                try dst.elements.append(self.arena, .undefined);
+                try dst.markHole(self.arena, base);
+            }
+        }
+    }
+
+    /// Process one concat operand: spread it when concat-spreadable (per the
+    /// `Symbol.isConcatSpreadable` override, else only real Arrays), else append
+    /// whole. `ck` is the cached `Symbol.isConcatSpreadable` property key.
+    fn concatProcessOne(self: *Interpreter, dst: *value.Object, v: Value, ck: ?[]const u8) EvalError!void {
+        if (v != .object) {
+            try dst.elements.append(self.arena, v);
+            return;
+        }
+        var spread: bool = v.object.is_array;
+        if (ck) |k| {
+            const flag = try self.getProperty(v, k);
+            if (flag != .undefined) spread = flag.toBoolean();
+        }
+        if (spread) {
+            try self.concatSpreadInto(dst, v.object);
+        } else {
+            try dst.elements.append(self.arena, v);
+        }
+    }
+
     /// ToIntegerOrInfinity-based start index for the forward searches
     /// (indexOf/includes): a negative `fromIndex` counts from the end, `+∞`
     /// (or any value ≥ len) yields `len` (no iterations), NaN/undefined → 0.
@@ -3435,29 +3476,9 @@ pub const Interpreter = struct {
         }
         if (eq(name, "concat")) {
             const result = try self.newArray();
-            // Append the elements of a spreadable array-ish source, preserving
-            // its holes; a non-spreadable value is appended as a single element.
-            const appendFrom = struct {
-                fn run(self2: *Interpreter, dst: *value.Object, src: *value.Object) EvalError!void {
-                    const slen: usize = @max(src.elements.items.len, src.array_len);
-                    var j: usize = 0;
-                    while (j < slen) : (j += 1) {
-                        const base = dst.elements.items.len;
-                        if (self2.arrIndexPresent(src, j)) {
-                            try dst.elements.append(self2.arena, try self2.arrIndexGet(src, j));
-                        } else {
-                            try dst.elements.append(self2.arena, .undefined);
-                            try dst.markHole(self2.arena, base);
-                        }
-                    }
-                }
-            }.run;
-            try appendFrom(self, result.object, o);
-            for (args) |a| {
-                if (a == .object and a.object.is_array) {
-                    try appendFrom(self, result.object, a.object);
-                } else try result.object.elements.append(self.arena, a);
-            }
+            const ck = self.wellKnownSymbolKey("isConcatSpreadable");
+            try self.concatProcessOne(result.object, .{ .object = o }, ck);
+            for (args) |a| try self.concatProcessOne(result.object, a, ck);
             return result;
         }
         if (eq(name, "reverse")) {
