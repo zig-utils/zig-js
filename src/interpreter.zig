@@ -3593,6 +3593,16 @@ pub const Interpreter = struct {
         return list.items;
     }
 
+    /// Whether the array's element at dense index `i` carries an explicit
+    /// non-configurable attribute (only possible after `seal`/`freeze` or a
+    /// `defineProperty`) — so deleting it (pop/shift) must throw.
+    fn arrayElemNonConfigurable(o: *value.Object, i: usize) bool {
+        if (o.attrs == null) return false;
+        var kb: [24]u8 = undefined;
+        const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch return false;
+        return !o.getAttr(k).configurable;
+    }
+
     fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         // Real arrays use the dense element store directly; an array-like `this`
         // (via `.call`) materializes its `length`/indexed properties into a
@@ -3628,17 +3638,28 @@ pub const Interpreter = struct {
         // sparse tail (`array_len`); an array-like uses its materialized slice.
         const ilen: usize = if (o.is_array) @max(o.elements.items.len, o.array_len) else items.len;
         if (eq(name, "push")) {
+            // Growing a non-extensible (sealed/frozen) array can't create the new
+            // index — a TypeError, after the length would have moved past it.
+            if (args.len > 0 and !o.extensible) return self.throwError("TypeError", "Cannot add property to a non-extensible array");
             for (args) |a| try o.elements.append(self.arena, a);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
         }
-        if (eq(name, "pop")) return if (items.len == 0) Value.undefined else (o.elements.pop() orelse Value.undefined);
+        if (eq(name, "pop")) {
+            if (items.len == 0) return Value.undefined;
+            // Removing the last element deletes it: blocked when it is
+            // non-configurable (a sealed/frozen array).
+            if (arrayElemNonConfigurable(o, items.len - 1)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+            return o.elements.pop() orelse Value.undefined;
+        }
         if (eq(name, "shift")) {
             if (items.len == 0) return Value.undefined;
+            if (arrayElemNonConfigurable(o, 0)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
             const first = items[0];
             _ = o.elements.orderedRemove(0);
             return first;
         }
         if (eq(name, "unshift")) {
+            if (args.len > 0 and !o.extensible) return self.throwError("TypeError", "Cannot add property to a non-extensible array");
             var i: usize = args.len;
             while (i > 0) : (i -= 1) try o.elements.insert(self.arena, 0, args[i - 1]);
             return Value{ .number = @floatFromInt(o.elements.items.len) };
