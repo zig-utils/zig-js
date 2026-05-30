@@ -457,6 +457,7 @@ pub const Interpreter = struct {
         if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
         return switch (node.*) {
             .number => |n| .{ .number = n },
+            .bigint_lit => |b| try self.makeBigInt(b),
             .string => |s| .{ .string = s },
             .boolean => |b| .{ .boolean = b },
             .null_lit => .null,
@@ -1906,6 +1907,43 @@ pub const Interpreter = struct {
             },
             .pending => .undefined, // never settled synchronously
         };
+    }
+
+    /// A BigInt primitive value with the given `i128` magnitude.
+    pub fn makeBigInt(self: *Interpreter, v: i128) EvalError!Value {
+        const o = try self.arena.create(value.Object);
+        o.* = .{ .is_bigint = true, .bigint = v };
+        if (self.env.get("BigInt")) |c| {
+            if (c == .object) o.proto = try self.protoObject(c.object);
+        }
+        return .{ .object = o };
+    }
+
+    /// ToBigInt(v): a boolean/number(integer)/string/BigInt converts; a
+    /// non-integer Number is a RangeError; null/undefined/Symbol a TypeError.
+    pub fn toBigIntValue(self: *Interpreter, v: Value) EvalError!Value {
+        switch (v) {
+            .object => |o| {
+                if (o.is_bigint) return v;
+                if (o.is_symbol) return self.throwError("TypeError", "Cannot convert a Symbol value to a BigInt");
+                const p = try self.toPrimitive(v, .number);
+                if (p == .object and !p.object.is_bigint) return self.throwError("TypeError", "Cannot convert object to a BigInt");
+                return self.toBigIntValue(p);
+            },
+            .boolean => |b| return self.makeBigInt(if (b) 1 else 0),
+            .number => |n| {
+                if (std.math.isNan(n) or std.math.isInf(n) or @trunc(n) != n)
+                    return self.throwError("RangeError", "The number is not a safe integer");
+                return self.makeBigInt(@intFromFloat(n));
+            },
+            .string => |s| {
+                const t = std.mem.trim(u8, s, " \t\r\n");
+                if (t.len == 0) return self.makeBigInt(0);
+                const i = std.fmt.parseInt(i128, t, 0) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt");
+                return self.makeBigInt(i);
+            },
+            .null, .undefined => return self.throwError("TypeError", "Cannot convert undefined or null to a BigInt"),
+        }
     }
 
     /// Box a primitive into a wrapper object (`new Number/String/Boolean`). Its
@@ -4933,9 +4971,19 @@ pub const Interpreter = struct {
         if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null)
             return .{ .string = "undefined" };
         const v = try self.eval(operand);
+        // BigInt unary: `-`/`~` stay BigInt; unary `+` is a TypeError; `typeof`/
+        // `!`/`void` work as for any value.
+        if (v == .object and v.object.is_bigint and (op == .neg or op == .pos or op == .bit_not)) {
+            return switch (op) {
+                .neg => try self.makeBigInt(-%v.object.bigint),
+                .bit_not => try self.makeBigInt(~v.object.bigint),
+                .pos => self.throwError("TypeError", "Cannot convert a BigInt value to a number"),
+                else => unreachable,
+            };
+        }
         return switch (op) {
-            .neg => .{ .number = -v.toNumber() },
-            .pos => .{ .number = v.toNumber() },
+            .neg => .{ .number = -(try self.toNumberV(v)) },
+            .pos => .{ .number = try self.toNumberV(v) },
             .not => .{ .boolean = !v.toBoolean() },
             .typeof => .{ .string = v.typeOf() },
             .bit_not => .{ .number = @floatFromInt(~v.toInt32()) },
@@ -4966,7 +5014,7 @@ pub const Interpreter = struct {
     /// `valueOf`/`toString` apply even to proto-less plain objects — and the
     /// first primitive result wins.
     pub fn toPrimitive(self: *Interpreter, v: Value, hint: enum { default, number, string }) EvalError!Value {
-        if (v != .object or v.object.is_symbol) return v;
+        if (v != .object or v.object.is_symbol or v.object.is_bigint) return v;
         const o = v.object;
         // Honor a *user-defined* valueOf/toString (a JS function found on the
         // object or its prototype chain — e.g. `{ valueOf() {…} }` or a class
@@ -5037,6 +5085,23 @@ pub const Interpreter = struct {
             },
             else => {},
         }
+        // BigInt operands. Arithmetic/bitwise require both to be BigInt (mixing
+        // with a Number is a TypeError); relational ops compare mathematically;
+        // `+` with a string still concatenates.
+        const l_big = l == .object and l.object.is_bigint;
+        const r_big = r == .object and r.object.is_bigint;
+        if (l_big or r_big) {
+            switch (op) {
+                .add => if (l == .string or r == .string) {} else return self.bigIntBinary(op, l, r, l_big, r_big),
+                .sub, .mul, .div, .mod, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr => return self.bigIntBinary(op, l, r, l_big, r_big),
+                .ushr => return self.throwError("TypeError", "BigInts have no unsigned right shift, use >> instead"),
+                .lt => return .{ .boolean = bigCmp(l, r) < 0 },
+                .le => return .{ .boolean = bigCmp(l, r) <= 0 },
+                .gt => return .{ .boolean = bigCmp(l, r) > 0 },
+                .ge => return .{ .boolean = bigCmp(l, r) >= 0 },
+                else => {},
+            }
+        }
         return switch (op) {
             .add => blk: {
                 // String concatenation if either operand is a string.
@@ -5078,6 +5143,42 @@ pub const Interpreter = struct {
                 break :blk .{ .number = @floatFromInt(l.toUint32() >> sh) };
             },
         };
+    }
+
+    /// A BigInt binary op (both operands must be BigInt — mixing is a TypeError).
+    fn bigIntBinary(self: *Interpreter, op: ast.BinaryOp, l: Value, r: Value, l_big: bool, r_big: bool) EvalError!Value {
+        if (!l_big or !r_big) return self.throwError("TypeError", "Cannot mix BigInt and other types, use explicit conversions");
+        const a = l.object.bigint;
+        const b = r.object.bigint;
+        const res: i128 = switch (op) {
+            .add => a +% b,
+            .sub => a -% b,
+            .mul => a *% b,
+            .div => if (b == 0) return self.throwError("RangeError", "Division by zero") else @divTrunc(a, b),
+            .mod => if (b == 0) return self.throwError("RangeError", "Division by zero") else @rem(a, b),
+            .pow => blk: {
+                if (b < 0) return self.throwError("RangeError", "Exponent must be non-negative");
+                var acc: i128 = 1;
+                var e = b;
+                while (e > 0) : (e -= 1) acc *%= a;
+                break :blk acc;
+            },
+            .bit_and => a & b,
+            .bit_or => a | b,
+            .bit_xor => a ^ b,
+            .shl => if (b >= 128 or b <= -128) 0 else if (b >= 0) a << @intCast(b) else a >> @intCast(-b),
+            .shr => if (b >= 128 or b <= -128) (if (a < 0) -1 else 0) else if (b >= 0) a >> @intCast(b) else a << @intCast(-b),
+            else => 0,
+        };
+        return self.makeBigInt(res);
+    }
+
+    /// Mathematical comparison of two BigInt/Number operands (for `< <= > >=`),
+    /// returning negative/zero/positive. (Lossy for BigInts beyond 2^53.)
+    fn bigCmp(l: Value, r: Value) f64 {
+        const lf: f64 = if (l == .object and l.object.is_bigint) @floatFromInt(l.object.bigint) else l.toNumber();
+        const rf: f64 = if (r == .object and r.object.is_bigint) @floatFromInt(r.object.bigint) else r.toNumber();
+        return lf - rf;
     }
 
     /// `x instanceof C`. v1 has a flat construction model: objects created by
@@ -5987,6 +6088,73 @@ fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 
+/// Render an `i128` in `radix` (2..36).
+fn formatBigIntRadix(arena: std.mem.Allocator, val: i128, radix: u8) error{OutOfMemory}![]const u8 {
+    if (val == 0) return "0";
+    var buf: [200]u8 = undefined;
+    var i: usize = buf.len;
+    const neg = val < 0;
+    // Magnitude in u128 (bitcast handles i128 minInt without overflow on negate).
+    var v: u128 = if (neg) @as(u128, @bitCast(-%val)) else @intCast(val);
+    const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    while (v > 0) {
+        i -= 1;
+        buf[i] = digits[@intCast(v % radix)];
+        v /= radix;
+    }
+    if (neg) {
+        i -= 1;
+        buf[i] = '-';
+    }
+    return arena.dupe(u8, buf[i..]);
+}
+
+/// `BigInt(value)` — ToBigInt; not a constructor.
+fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target != .undefined) return self.throwError("TypeError", "BigInt is not a constructor");
+    return self.toBigIntValue(if (args.len > 0) args[0] else .undefined);
+}
+
+/// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
+fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const big: i128 = if (this == .object and this.object.is_bigint) this.object.bigint else if (this == .object and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) this.object.prim.?.object.bigint else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
+    const radix: u8 = if (args.len > 0 and args[0] != .undefined) @intFromFloat(@trunc(try self.toNumberV(args[0]))) else 10;
+    if (radix < 2 or radix > 36) return self.throwError("RangeError", "toString() radix must be between 2 and 36");
+    return .{ .string = try formatBigIntRadix(self.arena, big, radix) };
+}
+
+fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this == .object and this.object.is_bigint) return this;
+    return self.throwError("TypeError", "BigInt.prototype.valueOf requires that 'this' be a BigInt");
+}
+
+/// `BigInt.asIntN(bits, x)` / `asUintN(bits, x)` — wrap into a 2's-complement
+/// signed / unsigned `bits`-bit integer.
+fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = this;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const bits_f = if (args.len > 0) try self.toNumberV(args[0]) else 0;
+            if (bits_f < 0 or @trunc(bits_f) != bits_f or bits_f > 127) return self.throwError("RangeError", "Invalid bit count for BigInt.asIntN");
+            const bits: u7 = @intFromFloat(bits_f);
+            const xv = try self.toBigIntValue(if (args.len > 1) args[1] else .undefined);
+            const x = xv.object.bigint;
+            if (bits == 0) return self.makeBigInt(0);
+            const modulus: i128 = @as(i128, 1) << bits;
+            var m = @mod(x, modulus); // [0, 2^bits)
+            if (m < 0) m += modulus;
+            if (signed and m >= (modulus >> 1)) m -= modulus;
+            return self.makeBigInt(m);
+        }
+    }.call;
+}
+
 /// Normalize a relative index (negative counts from the end) into [0, len].
 fn relIndex(v: Value, len: usize, default: f64) usize {
     const n = if (v == .undefined) default else v.toNumber();
@@ -6734,6 +6902,23 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 
     // ArrayBuffer + typed arrays last, after Object.prototype exists.
     try installTypedArrays(env, root_shape);
+
+    // BigInt (a callable, non-constructor) + its prototype/statics.
+    {
+        const bi_proto = try a.create(value.Object);
+        bi_proto.* = .{ .proto = object_proto };
+        try setNative(a, root_shape, bi_proto, "toString", 0, bigIntToStringFn);
+        try setNative(a, root_shape, bi_proto, "valueOf", 0, bigIntValueOfFn);
+        const bi_ns = try a.create(value.Object);
+        bi_ns.* = .{ .native = bigIntFn };
+        try installNativeProps(a, root_shape, bi_ns, "BigInt", 1);
+        try setNative(a, root_shape, bi_ns, "asIntN", 2, bigIntAsIntNFn(true));
+        try setNative(a, root_shape, bi_ns, "asUintN", 2, bigIntAsIntNFn(false));
+        try bi_ns.setOwn(a, root_shape, "prototype", .{ .object = bi_proto });
+        try bi_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, root_shape, bi_proto, bi_ns);
+        try env.put("BigInt", .{ .object = bi_ns });
+    }
 }
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the

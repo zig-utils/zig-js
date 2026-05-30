@@ -148,6 +148,8 @@ pub const TryNode = struct {
 pub const Node = union(enum) {
     // expressions
     number: f64,
+    /// A `123n` BigInt literal (exact `i128` value).
+    bigint_lit: i128,
     string: []const u8,
     boolean: bool,
     null_lit,

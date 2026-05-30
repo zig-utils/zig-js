@@ -180,6 +180,11 @@ pub const Object = struct {
     /// encoding (used when a symbol is an object property key).
     is_symbol: bool = false,
     sym_key: []const u8 = "",
+    /// A BigInt primitive (`typeof` reports "bigint"; treated as a primitive in
+    /// equality/arithmetic). Backed by an `i128` (the arbitrary-precision range
+    /// beyond ±2^127 is not yet modeled). `is_bigint` marks it.
+    is_bigint: bool = false,
+    bigint: i128 = 0,
     /// A Symbol's `[[Description]]`: `null` = no description (reads as
     /// `undefined`), else the string. Held in this dedicated slot rather than an
     /// own `description` property so it stays invisible to reflection
@@ -476,7 +481,7 @@ pub const Value = union(enum) {
             .boolean => |b| b,
             .number => |n| n != 0 and !std.math.isNan(n),
             .string => |s| s.len != 0,
-            .object => true,
+            .object => |o| if (o.is_bigint) o.bigint != 0 else true,
         };
     }
 
@@ -515,7 +520,7 @@ pub const Value = union(enum) {
             .boolean => "boolean",
             .number => "number",
             .string => "string",
-            .object => |o| if (o.is_symbol) "symbol" else if (o.isCallableObject()) "function" else "object",
+            .object => |o| if (o.is_symbol) "symbol" else if (o.is_bigint) "bigint" else if (o.isCallableObject()) "function" else "object",
         };
     }
 
@@ -527,7 +532,7 @@ pub const Value = union(enum) {
             .boolean => |b| if (b) "true" else "false",
             .number => |n| try numberToString(arena, n),
             .string => |s| s,
-            .object => |o| try objectToString(o, arena),
+            .object => |o| if (o.is_bigint) try std.fmt.allocPrint(arena, "{d}", .{o.bigint}) else try objectToString(o, arena),
         };
     }
 };
@@ -651,7 +656,11 @@ pub fn strictEquals(a: Value, b: Value) bool {
         .boolean => |x| b == .boolean and b.boolean == x,
         .number => |x| b == .number and b.number == x,
         .string => |x| b == .string and std.mem.eql(u8, x, b.string),
-        .object => |x| b == .object and b.object == x,
+        // BigInt is a primitive: `===` compares its value, not object identity.
+        .object => |x| if (x.is_bigint)
+            (b == .object and b.object.is_bigint and b.object.bigint == x.bigint)
+        else
+            (b == .object and b.object == x and !b.object.is_bigint),
     };
 }
 
@@ -671,6 +680,20 @@ pub fn looseEquals(a: Value, b: Value) bool {
         return strictEquals(a, b);
     }
     if ((a == .null and b == .undefined) or (a == .undefined and b == .null)) return true;
+    // BigInt == Number/Boolean/String: compare mathematically (a string is parsed
+    // to a BigInt; a non-integer/unparseable comparand is unequal).
+    const a_big = a == .object and a.object.is_bigint;
+    const b_big = b == .object and b.object.is_bigint;
+    if (a_big != b_big) {
+        const big: i128 = if (a_big) a.object.bigint else b.object.bigint;
+        const other = if (a_big) b else a;
+        return switch (other) {
+            .number => |n| @as(f64, @floatFromInt(big)) == n,
+            .boolean => |x| big == @as(i128, if (x) 1 else 0),
+            .string => |s| if (std.fmt.parseInt(i128, std.mem.trim(u8, s, " \t\r\n"), 10)) |p| p == big else |_| false,
+            else => false,
+        };
+    }
     switch (a) {
         .number, .string, .boolean => switch (b) {
             .number, .string, .boolean => return a.toNumber() == b.toNumber(),

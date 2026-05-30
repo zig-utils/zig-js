@@ -84,6 +84,9 @@ pub const Token = struct {
     /// A legacy octal (`0123`) or non-octal-decimal (`08`) integer literal —
     /// a SyntaxError in strict mode (the parser checks).
     legacy_octal: bool = false,
+    /// A `123n` BigInt literal — `bigint` holds the exact value.
+    is_bigint: bool = false,
+    bigint: i128 = 0,
 };
 
 pub const LexError = error{ UnexpectedCharacter, UnterminatedString, InvalidNumber, OutOfMemory };
@@ -539,7 +542,10 @@ pub const Lexer = struct {
                 while (self.i < self.src.len and (isRadixDigit(self.src[self.i], r) or self.src[self.i] == '_')) self.i += 1;
                 const cleaned = try stripSeparators(self.arena, self.src[ds..self.i]);
                 const n = std.fmt.parseInt(u128, cleaned, r) catch return LexError.InvalidNumber;
-                if (self.peek() == 'n') self.i += 1; // BigInt suffix: treated as a number for v1
+                if (self.peek() == 'n') {
+                    self.i += 1; // `0xFFn` — a BigInt literal.
+                    return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start, .is_bigint = true, .bigint = @intCast(n) };
+                }
                 return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start };
             }
         }
@@ -553,7 +559,13 @@ pub const Lexer = struct {
             if (self.peek() == '+' or self.peek() == '-') self.i += 1;
             while (self.i < self.src.len and (std.ascii.isDigit(self.src[self.i]) or self.src[self.i] == '_')) self.i += 1;
         }
-        if (self.peek() == 'n') self.i += 1; // BigInt suffix → number for v1
+        if (self.peek() == 'n') {
+            // `123n` — a decimal BigInt literal (no fraction/exponent allowed).
+            const digits = try stripSeparators(self.arena, self.src[start..self.i]);
+            self.i += 1;
+            const bi = std.fmt.parseInt(i128, digits, 10) catch return LexError.InvalidNumber;
+            return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(bi), .pos = start, .is_bigint = true, .bigint = bi };
+        }
         const cleaned = try stripSeparators(self.arena, self.src[start..self.i]);
         const n = std.fmt.parseFloat(f64, cleaned) catch return LexError.InvalidNumber;
         // A leading `0` immediately followed by another digit is a legacy octal
