@@ -5963,6 +5963,9 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
         .{ "padStart", 1 },   .{ "padEnd", 1 },       .{ "replace", 2 },    .{ "replaceAll", 2 },
         .{ "localeCompare", 1 }, .{ "toString", 0 },  .{ "valueOf", 0 },
         .{ "toLocaleUpperCase", 0 }, .{ "toLocaleLowerCase", 0 },
+        // Regex-protocol + normalization methods (dispatched via builtinMethod,
+        // now real own properties so reflection / `.call` / `.bind` work).
+        .{ "match", 1 }, .{ "matchAll", 1 }, .{ "search", 1 }, .{ "normalize", 0 },
     });
     try string_ns.setOwn(a, root_shape, "prototype", .{ .object = string_proto });
     try string_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });

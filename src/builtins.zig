@@ -663,20 +663,43 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
             if (e.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: length");
         }
         const cur_writable = if (target.attrs != null) target.getAttr("length").writable else true;
+        // ArraySetLength (ES 10.4.2.4): reducing `length` deletes elements from
+        // the top down; a non-configurable element blocks the deletion — `length`
+        // stops just above it and the redefinition fails (a TypeError). `length`
+        // and its (possibly new) writability are still applied before throwing.
+        var blocked = false;
         if (d.getOwn("value")) |val| {
             const n = val.toNumber();
             const u = val.toUint32();
             if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
             if (!cur_writable and u != @max(target.elements.items.len, target.array_len))
                 return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+            var new_len: usize = u;
             if (u < target.elements.items.len) {
-                target.elements.shrinkRetainingCapacity(u);
-                target.array_len = 0;
-            } else target.array_len = u;
+                // Only an array carrying per-index attributes can hold a
+                // non-configurable element; otherwise truncate straight to `u`.
+                if (target.attrs != null) {
+                    var i: usize = target.elements.items.len;
+                    while (i > u) {
+                        i -= 1;
+                        if (target.isHole(i)) continue;
+                        var kb: [24]u8 = undefined;
+                        const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+                        if (!target.getAttr(k).configurable) {
+                            new_len = i + 1;
+                            blocked = true;
+                            break;
+                        }
+                    }
+                }
+                target.elements.shrinkRetainingCapacity(new_len);
+            }
+            target.array_len = @intCast(new_len);
         }
         var lattr: value.PropAttr = .{ .writable = cur_writable, .enumerable = false, .configurable = false };
         if (d.getOwn("writable")) |w| lattr.writable = w.toBoolean();
         try target.setAttr(self.arena, "length", lattr);
+        if (blocked) return self.throwError("TypeError", "Cannot delete a non-configurable array element while reducing length");
         return;
     }
     // Array index with a data descriptor: keep the value in the dense element
