@@ -5971,10 +5971,12 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     }
 
     const func_proto = try a.create(value.Object);
-    func_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, func_proto, .{
+    // Function.prototype is a callable (noop) object, and its call/apply/bind/
+    // toString brand-check that `this` is callable (TypeError otherwise).
+    func_proto.* = .{ .proto = object_proto, .native = funcProtoNoop };
+    inline for (.{
         .{ "call", 1 }, .{ "apply", 2 }, .{ "bind", 1 }, .{ "toString", 0 },
-    });
+    }) |s| try setNative(a, root_shape, func_proto, s[0], s[1], funcProtoMethod(s[0]));
     // `Function.prototype` is itself callable-shaped, with own `length` 0 and
     // `name` "" — both { !writable, !enumerable, configurable }.
     try func_proto.setOwn(a, root_shape, "length", .{ .number = 0 });
@@ -6337,6 +6339,29 @@ fn protoMethod(comptime name: []const u8) value.NativeFn {
 /// different arity on different prototypes — e.g. `toString`).
 fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
     inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], protoMethod(s[0]));
+}
+
+/// `Function.prototype` is itself a built-in function that ignores its arguments
+/// and returns undefined (so `typeof Function.prototype === "function"`).
+fn funcProtoNoop(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return .undefined;
+}
+
+/// A `Function.prototype` method (`call`/`apply`/`bind`/`toString`) that first
+/// requires `this` to be callable (a TypeError otherwise — `IsCallable`), then
+/// dispatches to the shared `builtinMethod`.
+fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!(this == .object and this.object.isCallableObject()))
+                return self.throwError("TypeError", "Function.prototype." ++ name ++ " requires that 'this' be callable");
+            return (try self.builtinMethod(this, name, args)) orelse .undefined;
+        }
+    }.call;
 }
 
 /// A `Date.prototype` method that brand-checks `this` (a TypeError otherwise),
