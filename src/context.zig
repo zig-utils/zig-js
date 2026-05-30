@@ -383,7 +383,6 @@ pub const Context = struct {
     /// accessor properties. The namespace exposes every export name (plus those
     /// reachable through `export *`), with `@@toStringTag` "Module".
     fn fillNamespace(self: *Context, machine: *interp.Interpreter, module: *Module, ns: *value.Object) interp.EvalError!void {
-        _ = machine;
         const a = self.arena();
         var it = module.exports.iterator();
         while (it.next()) |e| try self.installNsBinding(ns, module, e.key_ptr.*);
@@ -397,8 +396,12 @@ pub const Context = struct {
                 try self.installNsBinding(ns, src, name);
             }
         }
-        try ns.setOwn(a, self.root_shape, "@@toStringTag", .{ .string = "Module" });
-        try ns.setAttr(a, "@@toStringTag", .{ .writable = false, .enumerable = false, .configurable = false });
+        // `[Symbol.toStringTag]` is "Module" — keyed by the well-known symbol's
+        // internal key so `ns[Symbol.toStringTag]` (not a string "@@toStringTag")
+        // resolves; { !writable, !enumerable, !configurable }.
+        const tag_key = machine.wellKnownSymbolKey("toStringTag") orelse "@@toStringTag";
+        try ns.setOwn(a, self.root_shape, tag_key, .{ .string = "Module" });
+        try ns.setAttr(a, tag_key, .{ .writable = false, .enumerable = false, .configurable = false });
     }
 
     fn installNsBinding(self: *Context, ns: *value.Object, module: *Module, name: []const u8) interp.EvalError!void {
