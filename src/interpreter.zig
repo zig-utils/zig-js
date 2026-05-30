@@ -629,7 +629,14 @@ pub const Interpreter = struct {
                         .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members, c.source),
                         else => try self.eval(dx),
                     };
-                    if (e.default_name.len > 0) try self.env.put(e.default_name, v);
+                    if (e.default_name.len > 0) {
+                        try self.env.put(e.default_name, v);
+                    } else if (v == .object) {
+                        // `export default function(){}` / `class{}` / arrow / other
+                        // anonymous AssignmentExpression: NamedEvaluation names it
+                        // "default".
+                        try self.maybeNameAnon(v, dx, "default");
+                    }
                     try self.env.put("*default*", v);
                     break :blk .undefined;
                 }
@@ -1169,6 +1176,9 @@ pub const Interpreter = struct {
     fn isAnonFnDef(node: *Node) bool {
         return switch (node.*) {
             .function => |f| f.name.len == 0,
+            // `export default function(){}` parses the body as a `func_decl`; an
+            // anonymous one is named "default" by NamedEvaluation.
+            .func_decl => |f| f.name.len == 0,
             .class_expr => |c| c.name.len == 0,
             else => false,
         };

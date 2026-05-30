@@ -308,11 +308,12 @@ pub const Parser = struct {
             _ = self.advance(); // `default`
             // `export default function/class …` binds a (possibly anonymous) name.
             if (self.isContextual("function") or (self.isContextual("async") and self.peekIsKeyword(1, "function"))) {
+                // `export default function …` may be anonymous, so parse it as a
+                // function *expression* (which permits no name).
                 const is_async = self.isContextual("async");
-                if (is_async) _ = self.advance();
-                const decl = try self.parseFunctionDecl(is_async);
+                const decl = try self.parseFunctionExpr(is_async);
                 node.default_expr = decl;
-                node.default_name = decl.func_decl.name;
+                node.default_name = decl.function.name;
                 return self.alloc(.{ .export_decl = node });
             }
             if (self.isContextual("class")) {
