@@ -7310,7 +7310,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     const array_proto = try a.create(value.Object);
     array_proto.* = .{ .proto = object_proto };
-    try setProtoMethods(a, root_shape, array_proto, .{
+    try setArrayProtoMethods(a, root_shape, array_proto, .{
         .{ "join", 1 },       .{ "push", 1 },         .{ "pop", 0 },        .{ "shift", 0 },
         .{ "unshift", 1 },    .{ "slice", 2 },        .{ "splice", 2 },     .{ "concat", 1 },
         .{ "reverse", 0 },    .{ "indexOf", 1 },      .{ "lastIndexOf", 1 }, .{ "includes", 1 },
@@ -7673,6 +7673,30 @@ fn protoMethod(comptime name: []const u8) value.NativeFn {
 /// different arity on different prototypes — e.g. `toString`).
 fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
     inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], protoMethod(s[0]));
+}
+
+/// Install Array.prototype methods that dispatch straight to `arrayMethod` after
+/// ToObject(this). Going direct (rather than through `builtinMethod`'s
+/// name-keyed dispatch) makes a *borrowed* generic method work — e.g. `obj.slice
+/// = Array.prototype.slice; obj.slice(0, 3)` — where `obj` has an own property of
+/// that name (which would otherwise suppress the array-generic path).
+fn setArrayProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
+    inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], arrayProtoMethod(s[0]));
+}
+
+fn arrayProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this == .null or this == .undefined)
+                return self.throwError("TypeError", "Array.prototype." ++ name ++ " called on null or undefined");
+            const o = try self.toObject(this);
+            if (try self.arrayMethod(o, name, args)) |r| return r;
+            // `toString`/`toLocaleString` aren't in `arrayMethod`; fall back to the
+            // generic dispatcher (which reaches Object.prototype.toString etc.).
+            return (try self.builtinMethod(.{ .object = o }, name, args)) orelse .undefined;
+        }
+    }.call;
 }
 
 /// `Function.prototype` is itself a built-in function that ignores its arguments
