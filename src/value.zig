@@ -333,6 +333,11 @@ pub const Object = struct {
     /// `DataView` view (non-null marks a DataView): a typed read/write window
     /// over `buffer`'s bytes with per-access endianness.
     data_view: ?*DataViewData = null,
+    /// A RegExp's [[OriginalSource]] / [[OriginalFlags]] internal slots. Held off
+    /// the property map so `source`/`flags`/`global`/… resolve through the
+    /// RegExp.prototype accessor getters (not instance own data properties).
+    regex_source: []const u8 = "",
+    regex_flags: []const u8 = "",
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {

@@ -634,12 +634,14 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
     const self = interp(ctx);
     const a0 = arg(args, 0);
     var pattern: []const u8 = "";
+    var src_flags: []const u8 = "";
     if (a0 == .object and a0.object.is_regex) {
-        pattern = (a0.object.getOwn("source") orelse Value{ .string = "" }).string;
+        pattern = a0.object.regex_source;
+        src_flags = a0.object.regex_flags; // `new RegExp(re)` inherits re's flags
     } else if (a0 != .undefined) {
         pattern = try a0.toString(self.arena);
     }
-    const flags = if (arg(args, 1) != .undefined) try arg(args, 1).toString(self.arena) else "";
+    const flags = if (arg(args, 1) != .undefined) try arg(args, 1).toString(self.arena) else src_flags;
     return self.makeRegex(pattern, flags);
 }
 

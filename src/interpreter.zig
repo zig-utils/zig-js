@@ -2223,17 +2223,16 @@ pub const Interpreter = struct {
         // An empty pattern's [[OriginalSource]] is "(?:)" (so `//`, `new RegExp()`,
         // `new RegExp("")` all match the empty string and report that source).
         const source = if (pattern.len == 0) "(?:)" else pattern;
-        try self.setProp(o, "source", .{ .string = try self.arena.dupe(u8, source) });
-        try self.setProp(o, "flags", .{ .string = try self.arena.dupe(u8, flags) });
+        // source / flags live in internal slots; `lastIndex` is the one real own
+        // data property (writable). source/flags/global/… resolve via the
+        // RegExp.prototype accessor getters.
+        o.regex_source = try self.arena.dupe(u8, source);
+        o.regex_flags = try self.arena.dupe(u8, flags);
         try self.setProp(o, "lastIndex", .{ .number = 0 });
-        try self.setProp(o, "global", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'g') != null });
-        try self.setProp(o, "ignoreCase", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'i') != null });
-        try self.setProp(o, "multiline", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'm') != null });
-        try self.setProp(o, "dotAll", .{ .boolean = std.mem.indexOfScalar(u8, flags, 's') != null });
-        try self.setProp(o, "sticky", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'y') != null });
-        try self.setProp(o, "unicode", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'u') != null });
-        try self.setProp(o, "unicodeSets", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'v') != null });
-        try self.setProp(o, "hasIndices", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'd') != null });
+        try o.setAttr(self.arena, "lastIndex", .{ .writable = true, .enumerable = false, .configurable = false });
+        if (self.env.get("RegExp")) |c| {
+            if (c == .object) o.proto = try self.protoObject(c.object);
+        }
         // Eagerly compile to validate the pattern — RegExp construction reports a
         // SyntaxError for an invalid pattern (the compiled form is discarded;
         // methods recompile on demand).
@@ -2242,8 +2241,8 @@ pub const Interpreter = struct {
     }
 
     fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!regex.Regex {
-        const src = (o.getOwn("source") orelse Value{ .string = "" }).string;
-        const flags = (o.getOwn("flags") orelse Value{ .string = "" }).string;
+        const src = o.regex_source;
+        const flags = o.regex_flags;
         const cf = regex.common.CompileFlags{
             .case_insensitive = std.mem.indexOfScalar(u8, flags, 'i') != null,
             .multiline = std.mem.indexOfScalar(u8, flags, 'm') != null,
@@ -2257,6 +2256,16 @@ pub const Interpreter = struct {
             return self.throwError("SyntaxError", "invalid regular expression");
     }
 
+    /// Whether `o` is the `%RegExp.prototype%` intrinsic (which the source/flags
+    /// accessors special-case: they return "(?:)" / "" / undefined rather than
+    /// throwing).
+    fn isRegExpProto(self: *Interpreter, o: *value.Object) bool {
+        if (self.env.get("RegExp")) |c| if (c == .object) {
+            if (c.object.getOwn("prototype")) |p| if (p == .object) return p.object == o;
+        };
+        return false;
+    }
+
     fn regexMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         if (eq(name, "test")) {
             const r = (try self.regexMethod(o, "exec", args)).?;
@@ -2264,7 +2273,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "exec")) {
             const input = try arg0(args).toString(self.arena);
-            const flags = (o.getOwn("flags") orelse Value{ .string = "" }).string;
+            const flags = o.regex_flags;
             const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
             const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
             // `lastIndex` is the search start only for global/sticky regexps.
@@ -2299,8 +2308,8 @@ pub const Interpreter = struct {
             return Value.null;
         }
         if (eq(name, "toString")) {
-            const src = (o.getOwn("source") orelse Value{ .string = "" }).string;
-            const flags = (o.getOwn("flags") orelse Value{ .string = "" }).string;
+            const src = o.regex_source;
+            const flags = o.regex_flags;
             return Value{ .string = try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }) };
         }
         return null;
@@ -5206,7 +5215,7 @@ pub const Interpreter = struct {
             // expanding `$` substitutions or invoking a function replacer.
             if (arg0(args) == .object and arg0(args).object.is_regex) {
                 const ro = arg0(args).object;
-                const g = all or ((ro.getOwn("global") orelse Value{ .boolean = false }).boolean);
+                const g = all or std.mem.indexOfScalar(u8, ro.regex_flags, 'g') != null;
                 var re = try self.compileRegex(ro);
                 var last: usize = 0; // end of the last copied region
                 var search: usize = 0; // absolute scan cursor
@@ -5308,7 +5317,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "match")) {
             const re_obj = try self.toRegexObject(arg0(args));
-            const global = (re_obj.getOwn("global") orelse Value{ .boolean = false }).toBoolean();
+            const global = std.mem.indexOfScalar(u8, re_obj.regex_flags, 'g') != null;
             var re = try self.compileRegex(re_obj);
             if (global) {
                 // Global match: an array of all matched substrings (or null).
@@ -5329,10 +5338,10 @@ pub const Interpreter = struct {
             // Snapshot every match (each as an exec-style result) and return an
             // iterator over them. A global/sticky exec advances lastIndex; use a
             // fresh regex so the caller's object isn't mutated.
-            const flags = (re_obj.getOwn("flags") orelse Value{ .string = "" }).string;
+            const flags = re_obj.regex_flags;
             const has_g = std.mem.indexOfScalar(u8, flags, 'g') != null;
             const gflags = if (has_g) flags else try std.mem.concat(self.arena, u8, &.{ flags, "g" });
-            const iter_re = (try self.makeRegex((re_obj.getOwn("source") orelse Value{ .string = "" }).string, gflags)).object;
+            const iter_re = (try self.makeRegex(re_obj.regex_source, gflags)).object;
             const results = try self.newArray();
             while (true) {
                 const r = (try self.regexMethod(iter_re, "exec", &.{.{ .string = s }})).?;
@@ -7675,6 +7684,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "isNaN", 1, builtins.isNaNFn);
     try defineGlobalFn(env, root_shape, "isFinite", 1, builtins.isFiniteFn);
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
+    try installRegExpProto(env, root_shape);
     try defineGlobalFnC(env, root_shape, "Map", 0, true, builtins.mapFn);
     if (env.get("Map")) |m| {
         if (m == .object) try setNative(a, root_shape, m.object, "groupBy", 2, mapGroupByFn);
@@ -8575,6 +8585,117 @@ fn setNativeGetter(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, comptim
 
 /// Install `ArrayBuffer` and the typed-array constructors (`Int8Array` …
 /// `Float64Array`), sharing one `%TypedArray%.prototype` for the methods.
+/// EscapeRegExpPattern: render a RegExp's source so that `/<source>/` re-parses
+/// to the same pattern — escape an unescaped `/` and the line terminators. An
+/// empty pattern is "(?:)".
+fn escapeRegexSource(a: std.mem.Allocator, src: []const u8) ![]const u8 {
+    if (src.len == 0) return "(?:)";
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var prev_bs = false;
+    for (src) |c| {
+        switch (c) {
+            '/' => {
+                if (!prev_bs) try buf.append(a, '\\');
+                try buf.append(a, '/');
+            },
+            '\n' => try buf.appendSlice(a, "\\n"),
+            '\r' => try buf.appendSlice(a, "\\r"),
+            else => try buf.append(a, c),
+        }
+        prev_bs = c == '\\' and !prev_bs;
+    }
+    return buf.toOwnedSlice(a);
+}
+
+/// A `RegExp.prototype` flag accessor (`global`/`ignoreCase`/…) — true iff the
+/// flag char is present in [[OriginalFlags]]. Off-brand on %RegExp.prototype%
+/// it returns undefined; on any other non-RegExp it throws.
+fn regexFlagGetter(comptime flag: u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object) return self.throwError("TypeError", "RegExp.prototype accessor called on a non-object");
+            const o = this.object;
+            if (!o.is_regex) {
+                if (self.isRegExpProto(o)) return .undefined;
+                return self.throwError("TypeError", "RegExp.prototype accessor called on a non-RegExp");
+            }
+            return .{ .boolean = std.mem.indexOfScalar(u8, o.regex_flags, flag) != null };
+        }
+    }.call;
+}
+
+fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "RegExp.prototype.source called on a non-object");
+    const o = this.object;
+    if (!o.is_regex) {
+        if (self.isRegExpProto(o)) return .{ .string = "(?:)" };
+        return self.throwError("TypeError", "RegExp.prototype.source called on a non-RegExp");
+    }
+    return .{ .string = try escapeRegexSource(self.arena, o.regex_source) };
+}
+
+fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-object");
+    const o = this.object;
+    if (!o.is_regex and !self.isRegExpProto(o)) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-RegExp");
+    const fl = if (o.is_regex) o.regex_flags else "";
+    var buf: [8]u8 = undefined;
+    var n: usize = 0;
+    for ("dgimsuvy") |c| {
+        if (std.mem.indexOfScalar(u8, fl, c) != null) {
+            buf[n] = c;
+            n += 1;
+        }
+    }
+    return .{ .string = try self.arena.dupe(u8, buf[0..n]) };
+}
+
+/// A `RegExp.prototype` method thunk (`exec`/`test`/`toString`) dispatching to
+/// `regexMethod`. `toString` also works on %RegExp.prototype% ("/(?:)/").
+fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or !this.object.is_regex) {
+                if (eq(name, "toString") and this == .object and self.isRegExpProto(this.object))
+                    return .{ .string = "/(?:)/" };
+                return self.throwError("TypeError", "RegExp.prototype." ++ name ++ " called on a non-RegExp");
+            }
+            return (try self.regexMethod(this.object, name, args)) orelse .undefined;
+        }
+    }.call;
+}
+
+/// Install `RegExp.prototype` accessor getters (source/flags + the eight flag
+/// getters) and the `exec`/`test`/`toString` methods on the existing prototype.
+fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
+    const a = env.arena;
+    const ctor = env.get("RegExp") orelse return;
+    if (ctor != .object) return;
+    const pv = ctor.object.getOwn("prototype") orelse return;
+    if (pv != .object) return;
+    const p = pv.object;
+    try setNativeGetter(a, rs, p, "source", regexSourceGetter);
+    try setNativeGetter(a, rs, p, "flags", regexFlagsGetter);
+    try setNativeGetter(a, rs, p, "global", regexFlagGetter('g'));
+    try setNativeGetter(a, rs, p, "ignoreCase", regexFlagGetter('i'));
+    try setNativeGetter(a, rs, p, "multiline", regexFlagGetter('m'));
+    try setNativeGetter(a, rs, p, "dotAll", regexFlagGetter('s'));
+    try setNativeGetter(a, rs, p, "sticky", regexFlagGetter('y'));
+    try setNativeGetter(a, rs, p, "unicode", regexFlagGetter('u'));
+    try setNativeGetter(a, rs, p, "unicodeSets", regexFlagGetter('v'));
+    try setNativeGetter(a, rs, p, "hasIndices", regexFlagGetter('d'));
+    try setNative(a, rs, p, "exec", 1, regexProtoMethod("exec"));
+    try setNative(a, rs, p, "test", 1, regexProtoMethod("test"));
+    try setNative(a, rs, p, "toString", 0, regexProtoMethod("toString"));
+}
+
 fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const obj_ctor = env.get("Object") orelse return;
