@@ -2452,7 +2452,9 @@ pub const Interpreter = struct {
             return Value{ .string = try self.dateISO(t) };
         }
         if (eq(name, "toJSON")) {
-            if (std.math.isNan(t)) return Value.null;
+            // The Date-receiver fast path (the generic `dateToJSONFn` native
+            // handles a borrowed/non-Date `this`): a non-finite time is null.
+            if (!std.math.isFinite(t)) return Value.null;
             return Value{ .string = try self.dateISO(t) };
         }
         if (eq(name, "toUTCString") or eq(name, "toGMTString")) {
@@ -7522,7 +7524,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     date_proto.* = .{ .proto = object_proto };
     try setDateProtoMethods(a, root_shape, date_proto, .{
         .{ "getTime", 0 },      .{ "valueOf", 0 },      .{ "setTime", 1 },      .{ "toISOString", 0 },
-        .{ "toJSON", 1 },       .{ "toUTCString", 0 },  .{ "getFullYear", 0 },  .{ "getUTCFullYear", 0 },
+        .{ "toUTCString", 0 },  .{ "getFullYear", 0 },  .{ "getUTCFullYear", 0 },
         .{ "getMonth", 0 },     .{ "getUTCMonth", 0 },  .{ "getDate", 0 },      .{ "getUTCDate", 0 },
         .{ "getDay", 0 },       .{ "getUTCDay", 0 },    .{ "getHours", 0 },     .{ "getUTCHours", 0 },
         .{ "getMinutes", 0 },   .{ "getUTCMinutes", 0 }, .{ "getSeconds", 0 },  .{ "getUTCSeconds", 0 },
@@ -7534,6 +7536,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         .{ "toString", 0 },     .{ "toDateString", 0 }, .{ "toTimeString", 0 }, .{ "toGMTString", 0 },
         .{ "toLocaleString", 0 }, .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
     });
+    // Date.prototype.toJSON is intentionally *generic* (works on any object),
+    // not brand-checked: ToObject(this), ToPrimitive(number); a non-finite value
+    // returns null, otherwise Invoke(O, "toISOString").
+    try setNative(a, root_shape, date_proto, "toJSON", 1, dateToJSONFn);
     try date_ns.setOwn(a, root_shape, "prototype", .{ .object = date_proto });
     try date_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, date_proto, date_ns);
@@ -7811,6 +7817,28 @@ fn dateProtoMethod(comptime name: []const u8) value.NativeFn {
 
 fn setDateProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime specs: anytype) EvalError!void {
     inline for (specs) |s| try setNative(a, rs, proto, s[0], s[1], dateProtoMethod(s[0]));
+}
+
+/// `Date.prototype.toJSON(key)` — generic (no [[DateValue]] brand check):
+/// ToObject(this), ToPrimitive(O, number); a non-finite primitive returns null,
+/// otherwise `Invoke(O, "toISOString")` (which need not be the built-in).
+fn dateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = try self.toObject(this); // null/undefined throw
+    // ToPrimitive(O, number); a non-finite *Number* result returns null. For a
+    // Date the numeric primitive is its [[DateValue]] (the engine's `toPrimitive`
+    // skips the native valueOf, so read it directly); other objects observe
+    // their own valueOf/toString.
+    if (o.is_date) {
+        if (!std.math.isFinite(o.date_ms)) return .null;
+    } else {
+        const tv = try self.toPrimitive(.{ .object = o }, .number);
+        if (tv == .number and !std.math.isFinite(tv.number)) return .null;
+    }
+    const iso = try self.getProperty(.{ .object = o }, "toISOString");
+    if (!iso.isCallable()) return self.throwError("TypeError", "toISOString is not callable");
+    return self.callValueWithThis(iso, &.{}, .{ .object = o });
 }
 
 /// A `Set.prototype` method that brand-checks `this` then dispatches to
