@@ -2176,7 +2176,10 @@ pub const Interpreter = struct {
     pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
         const o = (try self.newObject()).object;
         o.is_regex = true;
-        try self.setProp(o, "source", .{ .string = try self.arena.dupe(u8, pattern) });
+        // An empty pattern's [[OriginalSource]] is "(?:)" (so `//`, `new RegExp()`,
+        // `new RegExp("")` all match the empty string and report that source).
+        const source = if (pattern.len == 0) "(?:)" else pattern;
+        try self.setProp(o, "source", .{ .string = try self.arena.dupe(u8, source) });
         try self.setProp(o, "flags", .{ .string = try self.arena.dupe(u8, flags) });
         try self.setProp(o, "lastIndex", .{ .number = 0 });
         try self.setProp(o, "global", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'g') != null });
