@@ -10793,6 +10793,109 @@ fn temporalDurationAbsFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     return .{ .object = o };
 }
 
+/// True if the duration uses any calendar unit (years/months/weeks), which
+/// would require a `relativeTo` for balancing/rounding.
+fn durHasCalendar(dur: [10]f64) bool {
+    return dur[0] != 0 or dur[1] != 0 or dur[2] != 0;
+}
+
+/// Validate all nonzero components share one sign (the Duration invariant).
+fn durSignOk(dur: [10]f64) bool {
+    var s: f64 = 0;
+    for (dur) |c| {
+        if (c != 0) {
+            const cs: f64 = if (c > 0) 1 else -1;
+            if (s != 0 and s != cs) return false;
+            s = cs;
+        }
+    }
+    return true;
+}
+
+fn temporalDurationWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const bag = if (args.len > 0) args[0] else Value.undefined;
+    if (bag != .object) return self.throwError("TypeError", "Temporal.Duration.prototype.with: argument must be an object");
+    var out = this.object.temporal.?.dur;
+    var any = false;
+    for (dur_names, 0..) |nm, i| {
+        const pv = try self.getProperty(bag, nm);
+        if (pv == .undefined) continue;
+        any = true;
+        out[i] = try temporalIntArg(self, pv, nm);
+    }
+    if (!any) return self.throwError("TypeError", "Temporal.Duration.prototype.with: no recognized fields");
+    if (!durSignOk(out)) return self.throwError("RangeError", "mixed-sign duration");
+    return makeDuration(self, out);
+}
+
+fn temporalDurationAddImpl(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+            const a = this.object.temporal.?.dur;
+            const b = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            var out: [10]f64 = undefined;
+            for (0..10) |i| out[i] = a[i] + sign * b[i];
+            // Time/day-only durations balance to a normal form; calendar units
+            // (without a relativeTo) are summed component-wise.
+            if (!durHasCalendar(a) and !durHasCalendar(b)) {
+                out = balanceTimeNs(durationTimeNs(out), .day);
+            }
+            return makeDuration(self, out);
+        }
+    }.call;
+}
+
+/// Read a `total`/`round` unit from either a string or an options object's
+/// `unit`/`smallestUnit`.
+fn readUnitArg(self: *Interpreter, v: Value, key: []const u8) EvalError!?TUnit {
+    if (v == .string) return tUnitFromStr(v.string) orelse self.throwError("RangeError", "invalid unit");
+    if (v == .object) {
+        const u = try self.getProperty(v, key);
+        if (u == .string) return tUnitFromStr(u.string) orelse self.throwError("RangeError", "invalid unit");
+        return null;
+    }
+    return null;
+}
+
+fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const dur = this.object.temporal.?.dur;
+    const unit = (try readUnitArg(self, if (args.len > 0) args[0] else .undefined, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
+    if (durHasCalendar(dur) or @intFromEnum(unit) < @intFromEnum(TUnit.day))
+        return self.throwError("RangeError", "Temporal.Duration.prototype.total with calendar units requires relativeTo");
+    const total_ns: f64 = @floatFromInt(durationTimeNs(dur));
+    const per: f64 = @floatFromInt(nsPerUnit(unit));
+    return .{ .number = total_ns / per };
+}
+
+fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const dur = this.object.temporal.?.dur;
+    if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "Temporal.Duration.prototype.round requires options");
+    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    if (durHasCalendar(dur) or @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day))
+        return self.throwError("RangeError", "Temporal.Duration.prototype.round with calendar units requires relativeTo");
+    const rounded = roundNs(durationTimeNs(dur), opts.smallest, opts.increment, opts.mode);
+    return makeDuration(self, balanceTimeNs(rounded, opts.largest));
+}
+
+fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const a = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+    const b = try durationFromArg(self, if (args.len > 1) args[1] else .undefined);
+    if (durHasCalendar(a) or durHasCalendar(b)) return self.throwError("RangeError", "Temporal.Duration.compare with calendar units requires relativeTo");
+    const na = durationTimeNs(a);
+    const nb = durationTimeNs(b);
+    return .{ .number = if (na < nb) -1 else if (na > nb) 1 else 0 };
+}
+
 /// `Temporal.Duration.prototype.toString` — ISO-8601 duration (P…T…).
 fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
@@ -12639,9 +12742,17 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "blank", temporalDurationBlankGetter);
         try setNative(a, rs, p, "negated", 0, temporalDurationNegatedFn);
         try setNative(a, rs, p, "abs", 0, temporalDurationAbsFn);
+        try setNative(a, rs, p, "with", 1, temporalDurationWithFn);
+        try setNative(a, rs, p, "add", 1, temporalDurationAddImpl(1));
+        try setNative(a, rs, p, "subtract", 1, temporalDurationAddImpl(-1));
+        try setNative(a, rs, p, "total", 1, temporalDurationTotalFn);
+        try setNative(a, rs, p, "round", 1, temporalDurationRoundFn);
         try setNative(a, rs, p, "toString", 0, temporalDurationToStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalDurationToStringFn);
-        if (ns.getOwn("Duration")) |dc| if (dc == .object) try setNative(a, rs, dc.object, "from", 1, temporalDurationFromFn);
+        if (ns.getOwn("Duration")) |dc| if (dc == .object) {
+            try setNative(a, rs, dc.object, "from", 1, temporalDurationFromFn);
+            try setNative(a, rs, dc.object, "compare", 2, temporalDurationCompareFn);
+        };
     }
     // Temporal.PlainDate.
     {
