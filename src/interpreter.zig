@@ -8632,6 +8632,18 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         }
     };
 
+    // RegExp.prototype well-known-symbol methods (installed now that Symbol's
+    // @@match/@@replace/etc. exist).
+    if (env.get("RegExp")) |rc| if (rc == .object) {
+        if (rc.object.getOwn("prototype")) |rp| if (rp == .object) {
+            inline for (.{ "match", "search", "matchAll", "replace", "split" }) |op| {
+                if (symbol_ns.getOwn(op)) |sv| if (sv == .object and sv.object.is_symbol) {
+                    try setNative(a, root_shape, rp.object, sv.object.sym_key, 2, regexpSymbolMethod(op));
+                };
+            }
+        };
+    };
+
     // Proxy (constructor) + Proxy.revocable.
     const proxy_ns = try a.create(value.Object);
     proxy_ns.* = .{ .native = proxyConstructorFn, .native_ctor = true };
@@ -9176,6 +9188,25 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
 
 /// Install `RegExp.prototype` accessor getters (source/flags + the eight flag
 /// getters) and the `exec`/`test`/`toString` methods on the existing prototype.
+/// `RegExp.prototype[@@match/@@search/@@matchAll/@@replace/@@split]` — the
+/// well-known-symbol methods. For a real RegExp receiver they reuse the engine's
+/// String-method regex algorithms (`s.match(re)` == `re[@@match](s)`); the
+/// `op`-specific extra argument (replacement / limit) is forwarded.
+fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object) return self.throwError("TypeError", "RegExp.prototype[Symbol." ++ op ++ "] called on a non-object");
+            const str = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+            if (comptime (std.mem.eql(u8, op, "replace") or std.mem.eql(u8, op, "split"))) {
+                const extra: Value = if (args.len > 1) args[1] else .undefined;
+                return (try self.stringMethod(str, op, &.{ this, extra })) orelse .undefined;
+            }
+            return (try self.stringMethod(str, op, &.{this})) orelse .undefined;
+        }
+    }.call;
+}
+
 fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const ctor = env.get("RegExp") orelse return;
@@ -9196,6 +9227,8 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     try setNative(a, rs, p, "exec", 1, regexProtoMethod("exec"));
     try setNative(a, rs, p, "test", 1, regexProtoMethod("test"));
     try setNative(a, rs, p, "toString", 0, regexProtoMethod("toString"));
+    // The @@match/@@replace/@@search/@@split/@@matchAll methods are installed
+    // later (after Symbol's well-known symbols exist) in installGlobalsInner.
 }
 
 fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
