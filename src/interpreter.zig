@@ -3912,7 +3912,9 @@ pub const Interpreter = struct {
                     if (eq(name, "__defineGetter__") or eq(name, "__defineSetter__")) {
                         const f = arg(args, 1);
                         if (!f.isCallable()) return self.throwError("TypeError", "Object.prototype.__define[GS]etter__: Expecting function");
-                        const key = try arg0(args).toString(self.arena);
+                        // ToPropertyKey(P): a Symbol key is honored and a thrown
+                        // valueOf/toString propagates.
+                        const key = try self.keyOf(arg0(args));
                         if (eq(name, "__defineGetter__"))
                             try o.setAccessor(self.arena, key, f, null)
                         else
@@ -3921,7 +3923,7 @@ pub const Interpreter = struct {
                         return Value.undefined;
                     }
                     if (eq(name, "__lookupGetter__") or eq(name, "__lookupSetter__")) {
-                        const key = try arg0(args).toString(self.arena);
+                        const key = try self.keyOf(arg0(args));
                         const want_get = eq(name, "__lookupGetter__");
                         var cur: ?*value.Object = o;
                         while (cur) |c| {
