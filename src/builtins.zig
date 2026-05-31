@@ -1452,7 +1452,9 @@ fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []
 pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const text = try arg(args, 0).toString(self.arena);
+    // ToString(text) — a value object's @@toPrimitive/toString/valueOf runs (and
+    // a Symbol throws) before parsing.
+    const text = try self.toStringV(arg(args, 0));
     var p = JsonParser{ .s = text, .i = 0, .interp = self };
     p.skipWs();
     const v = p.parseValue() catch return self.throwError("SyntaxError", "JSON.parse: invalid JSON");
@@ -1479,7 +1481,9 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
         const o = val.object;
         if (o.is_array) {
             var i: usize = 0;
-            const len = @max(o.elements.items.len, o.array_len);
+            // LengthOfArrayLike: Get(val, "length") — observable, and propagates a
+            // throw if the reviver replaced `length` with a throwing accessor.
+            const len = interpreter.toLen(try self.toNumberV(try self.getProperty(val, "length")));
             while (i < len) : (i += 1) {
                 const k = try std.fmt.allocPrint(a, "{d}", .{i});
                 const nv = try internalizeJson(self, val, k, reviver);
