@@ -3822,6 +3822,19 @@ pub const Interpreter = struct {
     /// Generic read-only Array.prototype methods that work on any array-like
     /// `this` (e.g. `Array.prototype.map.call(arrayLikeObj, fn)`). Mutators stay
     /// real-array-only.
+    /// Methods that ArraySpeciesCreate (or otherwise ArrayCreate) a result whose
+    /// length comes from the source `length` — so a length above 2^32-1 is a
+    /// RangeError. Read-only / in-place methods don't create such a result.
+    fn arrayCreatesResult(name: []const u8) bool {
+        const names = [_][]const u8{
+            "map",        "filter",   "slice",     "concat",     "splice",
+            "flat",       "flatMap",  "with",      "toReversed", "toSorted",
+            "toSpliced",
+        };
+        for (names) |n| if (eq(name, n)) return true;
+        return false;
+    }
+
     fn isArrayGeneric(name: []const u8) bool {
         const names = [_][]const u8{
             "join",      "indexOf", "lastIndexOf", "includes", "slice", "concat", "map",  "filter",
@@ -3956,7 +3969,16 @@ pub const Interpreter = struct {
         const items: []Value = if (o.is_array) o.elements.items else blk: {
             // ToLength(ToNumber(obj.length)) — `toNumberV` runs valueOf/toString
             // and throws a TypeError for a Symbol/BigInt `length`.
-            const len = toLen(try self.toNumberV(try self.getProperty(.{ .object = o }, "length")));
+            const lenf = try self.toNumberV(try self.getProperty(.{ .object = o }, "length"));
+            // Result-creating methods ArraySpeciesCreate a result of ToLength(len);
+            // ArrayCreate rejects a length above 2^32-1 with a RangeError (this
+            // precedes the OOM guard, which silently bails for the read-only
+            // methods that would otherwise iterate a pathological length). Check
+            // the unclamped ToLength, since `toLen` caps at 2^32-1.
+            const real_len: f64 = if (std.math.isNan(lenf) or lenf <= 0) 0 else @min(@trunc(lenf), 9007199254740991.0);
+            if (real_len > 4294967295 and arrayCreatesResult(name))
+                return self.throwError("RangeError", "Invalid array length");
+            const len = toLen(lenf);
             if (len > (1 << 22)) return null; // guard against pathological array-like lengths (OOM)
             const buf = try self.arena.alloc(Value, len);
             for (buf, 0..) |*slot, i| {
