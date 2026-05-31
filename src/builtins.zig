@@ -20,6 +20,12 @@ fn arg(args: []const Value, i: usize) Value {
     return if (i < args.len) args[i] else .undefined;
 }
 
+/// Whether `v` is an ECMAScript Object — `.object` that is not one of the
+/// primitive values represented as objects internally (BigInt, Symbol).
+fn isRealObject(v: Value) bool {
+    return v == .object and !v.object.is_bigint and !v.object.is_symbol;
+}
+
 // ---- global functions --------------------------------------------------
 
 pub fn isNaNFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -667,10 +673,12 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
     _ = this;
     const self = interp(ctx);
     const target = arg(args, 0);
-    if (target != .object) return self.throwError("TypeError", "Object.defineProperty called on non-object");
+    if (!isRealObject(target)) return self.throwError("TypeError", "Object.defineProperty called on non-object");
     const key = try self.keyOf(arg(args, 1));
     const desc = arg(args, 2);
-    if (desc != .object) return self.throwError("TypeError", "Property description must be an object");
+    // ToPropertyDescriptor requires an Object — a BigInt or Symbol value (boxed
+    // as an object internally) is a primitive and must be rejected.
+    if (!isRealObject(desc)) return self.throwError("TypeError", "Property description must be an object");
     try defineOne(self, target.object, key, desc.object);
     return target;
 }
@@ -907,7 +915,7 @@ fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) Host
     // ObjectDefineProperties — not the raw data slot.
     for (try props.object.enumerableKeys(self.arena)) |k| {
         const d = try self.getProperty(props, k);
-        if (d != .object) return self.throwError("TypeError", "Property description must be an object");
+        if (!isRealObject(d)) return self.throwError("TypeError", "Property description must be an object");
         try defineOne(self, target, k, d.object);
     }
 }
