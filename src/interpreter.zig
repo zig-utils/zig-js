@@ -11036,6 +11036,89 @@ fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
     return .{ .y = yy, .m = m, .d = d };
 }
 
+/// Parsed ISO date-time with its epoch nanoseconds (offset/`Z` applied).
+const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128 };
+
+/// Parse "YYYY-MM-DD[T ]HH:MM[:SS[.fraction]][Z|±HH:MM]" (time optional). The
+/// epoch is computed from the local fields minus any UTC offset.
+fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
+    var s = s_in;
+    var neg = false;
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) {
+        neg = s[0] == '-';
+        s = s[1..];
+    }
+    const ylen: usize = if (neg or (s_in.len > 0 and s_in[0] == '+')) 6 else 4;
+    if (s.len < ylen + 6) return self.throwError("RangeError", "invalid ISO date-time");
+    const yraw = std.fmt.parseInt(i64, s[0..ylen], 10) catch return self.throwError("RangeError", "invalid ISO year");
+    if (s[ylen] != '-' or s[ylen + 3] != '-') return self.throwError("RangeError", "invalid ISO date-time");
+    const mo = std.fmt.parseInt(u8, s[ylen + 1 .. ylen + 3], 10) catch return self.throwError("RangeError", "invalid ISO month");
+    const d = std.fmt.parseInt(u8, s[ylen + 4 .. ylen + 6], 10) catch return self.throwError("RangeError", "invalid ISO day");
+    const y: i64 = if (neg) -yraw else yraw;
+    try checkIsoDate(self, @floatFromInt(y), @floatFromInt(mo), @floatFromInt(d));
+    var h: u8 = 0;
+    var mi: u8 = 0;
+    var sec: u8 = 0;
+    var frac_ns: u32 = 0;
+    var off_ns: i128 = 0;
+    var i: usize = ylen + 6;
+    if (i < s.len and (s[i] == 'T' or s[i] == 't' or s[i] == ' ')) {
+        i += 1;
+        if (i + 2 > s.len) return self.throwError("RangeError", "invalid ISO time");
+        h = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid ISO hour");
+        i += 2;
+        if (i < s.len and s[i] == ':') i += 1;
+        if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
+            mi = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid ISO minute");
+            i += 2;
+            if (i < s.len and s[i] == ':') i += 1;
+            if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
+                sec = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid ISO second");
+                i += 2;
+                if (i < s.len and (s[i] == '.' or s[i] == ',')) {
+                    i += 1;
+                    var fbuf: [9]u8 = .{ '0', '0', '0', '0', '0', '0', '0', '0', '0' };
+                    var k: usize = 0;
+                    while (i < s.len and std.ascii.isDigit(s[i]) and k < 9) : (i += 1) {
+                        fbuf[k] = s[i];
+                        k += 1;
+                    }
+                    while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+                    frac_ns = std.fmt.parseInt(u32, &fbuf, 10) catch 0;
+                }
+            }
+        }
+        // Offset / Z.
+        if (i < s.len and (s[i] == 'Z' or s[i] == 'z')) {
+            i += 1;
+        } else if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+            const oneg = s[i] == '-';
+            i += 1;
+            if (i + 2 > s.len) return self.throwError("RangeError", "invalid offset");
+            const oh = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid offset");
+            i += 2;
+            var om: u8 = 0;
+            if (i < s.len and s[i] == ':') i += 1;
+            if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
+                om = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch 0;
+                i += 2;
+            }
+            off_ns = (@as(i128, oh) * nsPerUnit(.hour) + @as(i128, om) * nsPerUnit(.minute)) * (if (oneg) @as(i128, -1) else 1);
+        }
+    }
+    const epoch_days = tDaysFromCivil(y, mo, d);
+    const local_ns = @as(i128, epoch_days) * 86_400_000_000_000 +
+        @as(i128, h) * nsPerUnit(.hour) + @as(i128, mi) * nsPerUnit(.minute) +
+        @as(i128, sec) * nsPerUnit(.second) + @as(i128, frac_ns);
+    return .{
+        .y = y, .mo = mo, .d = d, .h = h, .mi = mi, .s = sec,
+        .ms = @intCast(frac_ns / 1_000_000),
+        .us = @intCast((frac_ns / 1_000) % 1_000),
+        .ns = @intCast(frac_ns % 1_000),
+        .epoch_ns = local_ns - off_ns,
+    };
+}
+
 fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -11596,7 +11679,779 @@ fn temporalMonthDayToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Val
     return .{ .object = o };
 }
 
+// ---- Temporal time-unit arithmetic framework ------------------------
+// Exact nanosecond math shared by Instant / PlainTime / PlainDateTime
+// add/subtract/until/since/round and Duration round/total. Calendar units
+// (year/month/week) are handled separately by the date types.
+
+const TUnit = enum(u8) { year, month, week, day, hour, minute, second, millisecond, microsecond, nanosecond };
+
+/// Map a unit name (singular or plural) to a TUnit.
+fn tUnitFromStr(s: []const u8) ?TUnit {
+    const pairs = .{
+        .{ "year", TUnit.year },        .{ "years", TUnit.year },
+        .{ "month", TUnit.month },      .{ "months", TUnit.month },
+        .{ "week", TUnit.week },        .{ "weeks", TUnit.week },
+        .{ "day", TUnit.day },          .{ "days", TUnit.day },
+        .{ "hour", TUnit.hour },        .{ "hours", TUnit.hour },
+        .{ "minute", TUnit.minute },    .{ "minutes", TUnit.minute },
+        .{ "second", TUnit.second },    .{ "seconds", TUnit.second },
+        .{ "millisecond", TUnit.millisecond }, .{ "milliseconds", TUnit.millisecond },
+        .{ "microsecond", TUnit.microsecond }, .{ "microseconds", TUnit.microsecond },
+        .{ "nanosecond", TUnit.nanosecond },   .{ "nanoseconds", TUnit.nanosecond },
+    };
+    inline for (pairs) |p| if (std.mem.eql(u8, s, p[0])) return p[1];
+    return null;
+}
+
+/// Fixed nanoseconds per time unit (day and smaller). Returns 0 for calendar
+/// units, which have no fixed length.
+fn nsPerUnit(u: TUnit) i128 {
+    return switch (u) {
+        .day => 86_400_000_000_000,
+        .hour => 3_600_000_000_000,
+        .minute => 60_000_000_000,
+        .second => 1_000_000_000,
+        .millisecond => 1_000_000,
+        .microsecond => 1_000,
+        .nanosecond => 1,
+        else => 0, // week/month/year — variable
+    };
+}
+
+/// Total nanoseconds of a duration's time+day+week components (calendar units
+/// must be zero for time-based types — checked by callers).
+fn durationTimeNs(dur: [10]f64) i128 {
+    var ns: i128 = 0;
+    ns += @as(i128, @intFromFloat(dur[2])) * 7 * nsPerUnit(.day); // weeks
+    ns += @as(i128, @intFromFloat(dur[3])) * nsPerUnit(.day); // days
+    ns += @as(i128, @intFromFloat(dur[4])) * nsPerUnit(.hour);
+    ns += @as(i128, @intFromFloat(dur[5])) * nsPerUnit(.minute);
+    ns += @as(i128, @intFromFloat(dur[6])) * nsPerUnit(.second);
+    ns += @as(i128, @intFromFloat(dur[7])) * nsPerUnit(.millisecond);
+    ns += @as(i128, @intFromFloat(dur[8])) * nsPerUnit(.microsecond);
+    ns += @as(i128, @intFromFloat(dur[9]));
+    return ns;
+}
+
+/// Balance a signed nanosecond total into duration components, using units no
+/// larger than `largest` (which must be `day` or smaller).
+fn balanceTimeNs(total: i128, largest: TUnit) [10]f64 {
+    var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var rem = total;
+    const order = [_]struct { idx: usize, u: TUnit }{
+        .{ .idx = 3, .u = .day },    .{ .idx = 4, .u = .hour },
+        .{ .idx = 5, .u = .minute }, .{ .idx = 6, .u = .second },
+        .{ .idx = 7, .u = .millisecond }, .{ .idx = 8, .u = .microsecond },
+        .{ .idx = 9, .u = .nanosecond },
+    };
+    var started = false;
+    for (order) |o| {
+        if (!started and @intFromEnum(o.u) < @intFromEnum(largest)) continue;
+        started = true;
+        const per = nsPerUnit(o.u);
+        const q = @divTrunc(rem, per);
+        rem -= q * per;
+        out[o.idx] = @floatFromInt(q);
+    }
+    return out;
+}
+
+const RoundOpts = struct { largest: TUnit, smallest: TUnit, mode: RoundMode, increment: f64 };
+const RoundMode = enum { ceil, floor, expand, trunc, half_ceil, half_floor, half_expand, half_trunc, half_even };
+
+fn roundModeFromStr(s: []const u8) ?RoundMode {
+    const pairs = .{
+        .{ "ceil", RoundMode.ceil },   .{ "floor", RoundMode.floor },
+        .{ "expand", RoundMode.expand }, .{ "trunc", RoundMode.trunc },
+        .{ "halfCeil", RoundMode.half_ceil }, .{ "halfFloor", RoundMode.half_floor },
+        .{ "halfExpand", RoundMode.half_expand }, .{ "halfTrunc", RoundMode.half_trunc },
+        .{ "halfEven", RoundMode.half_even },
+    };
+    inline for (pairs) |p| if (std.mem.eql(u8, s, p[0])) return p[1];
+    return null;
+}
+
+/// Round a quotient `x = value/divisor` (given value and divisor) to an integer
+/// per the rounding mode, with proper sign handling.
+fn applyRounding(val: i128, divisor: i128, mode: RoundMode) i128 {
+    if (divisor == 0) return val;
+    const q = @divTrunc(val, divisor);
+    const r = val - q * divisor;
+    if (r == 0) return q;
+    const neg = (val < 0);
+    const up_away = q + (if (neg) @as(i128, -1) else @as(i128, 1)); // toward larger magnitude
+    const up_pos = if (neg) q else q + 1; // toward +inf
+    const down_pos = if (neg) q - 1 else q; // toward -inf
+    return switch (mode) {
+        .trunc => q,
+        .expand => up_away,
+        .ceil => up_pos,
+        .floor => down_pos,
+        else => blk: {
+            // half-* modes: compare 2*|r| to |divisor|.
+            const twice = @abs(r) * 2;
+            const ad = @abs(divisor);
+            if (twice < ad) break :blk q; // closer to q
+            if (twice > ad) break :blk up_away; // closer to next
+            // exactly half
+            break :blk switch (mode) {
+                .half_trunc => q,
+                .half_expand => up_away,
+                .half_ceil => up_pos,
+                .half_floor => down_pos,
+                .half_even => if (@mod(q, 2) == 0) q else up_away,
+                else => up_away,
+            };
+        },
+    };
+}
+
+/// Round a nanosecond total to a multiple of `increment` of `smallest`.
+fn roundNs(total: i128, smallest: TUnit, increment: f64, mode: RoundMode) i128 {
+    const unit = nsPerUnit(smallest);
+    if (unit == 0) return total;
+    const step = unit * @as(i128, @intFromFloat(increment));
+    if (step == 0) return total;
+    const rounded = applyRounding(total, step, mode);
+    return rounded * step;
+}
+
+/// Read `largestUnit`/`smallestUnit`/`roundingMode`/`roundingIncrement` from an
+/// options value (string shorthand = smallestUnit for round()).
+fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts) EvalError!RoundOpts {
+    var r = def;
+    if (opts == .undefined) return r;
+    if (opts == .string) {
+        r.smallest = tUnitFromStr(opts.string) orelse return self.throwError("RangeError", "invalid smallestUnit");
+        return r;
+    }
+    if (opts != .object) return self.throwError("TypeError", "options must be an object");
+    const lu = try self.getProperty(opts, "largestUnit");
+    if (lu == .string) {
+        if (std.mem.eql(u8, lu.string, "auto")) {} else r.largest = tUnitFromStr(lu.string) orelse return self.throwError("RangeError", "invalid largestUnit");
+    }
+    const su = try self.getProperty(opts, "smallestUnit");
+    if (su == .string) r.smallest = tUnitFromStr(su.string) orelse return self.throwError("RangeError", "invalid smallestUnit");
+    const rm = try self.getProperty(opts, "roundingMode");
+    if (rm == .string) r.mode = roundModeFromStr(rm.string) orelse return self.throwError("RangeError", "invalid roundingMode");
+    const ri = try self.getProperty(opts, "roundingIncrement");
+    if (ri != .undefined) {
+        const n = try self.toNumberV(ri);
+        if (std.math.isNan(n) or n < 1 or n > 1e9 or @trunc(n) != n) return self.throwError("RangeError", "invalid roundingIncrement");
+        r.increment = n;
+    }
+    return r;
+}
+
+/// Build a Temporal.Duration object from raw components.
+fn makeDuration(self: *Interpreter, dur: [10]f64) EvalError!Value {
+    const o = try makeTemporal(self, .duration, "\x00T.Duration");
+    o.temporal.?.dur = dur;
+    return .{ .object = o };
+}
+
+/// PlainTime/PlainDateTime time fields → nanoseconds-of-day.
+fn timeToNs(t: *const value.TemporalData) i128 {
+    return @as(i128, t.hour) * nsPerUnit(.hour) +
+        @as(i128, t.minute) * nsPerUnit(.minute) +
+        @as(i128, t.second) * nsPerUnit(.second) +
+        @as(i128, t.millisecond) * nsPerUnit(.millisecond) +
+        @as(i128, t.microsecond) * nsPerUnit(.microsecond) +
+        @as(i128, t.nanosecond);
+}
+
+/// Write nanoseconds-of-day (0..86_400e9) back into time fields.
+fn nsToTime(t: *value.TemporalData, ns_in: i128) void {
+    var ns = @mod(ns_in, 86_400_000_000_000);
+    if (ns < 0) ns += 86_400_000_000_000;
+    t.hour = @intCast(@divTrunc(ns, nsPerUnit(.hour)));
+    ns = @mod(ns, nsPerUnit(.hour));
+    t.minute = @intCast(@divTrunc(ns, nsPerUnit(.minute)));
+    ns = @mod(ns, nsPerUnit(.minute));
+    t.second = @intCast(@divTrunc(ns, nsPerUnit(.second)));
+    ns = @mod(ns, nsPerUnit(.second));
+    t.millisecond = @intCast(@divTrunc(ns, nsPerUnit(.millisecond)));
+    ns = @mod(ns, nsPerUnit(.millisecond));
+    t.microsecond = @intCast(@divTrunc(ns, nsPerUnit(.microsecond)));
+    t.nanosecond = @intCast(@mod(ns, nsPerUnit(.microsecond)));
+}
+
+/// Reject calendar (year/month/week) components in a duration for time-only ops.
+fn ensureNoCalendarUnits(self: *Interpreter, dur: [10]f64) EvalError!void {
+    if (dur[0] != 0 or dur[1] != 0) return self.throwError("RangeError", "calendar units not allowed here");
+}
+
 // ---- Temporal.Instant -----------------------------------------------
+
+/// Instant.add/subtract: shift the epoch by a time-only Duration.
+fn temporalInstantAddFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+            const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            try ensureNoCalendarUnits(self, dur);
+            if (dur[3] != 0 or dur[2] != 0) return self.throwError("RangeError", "Instant arithmetic does not allow day/week units");
+            const o = try makeTemporal(self, .instant, "\x00T.Instant");
+            o.temporal.?.epoch_ns = this.object.temporal.?.epoch_ns + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+/// Instant.until/since: difference as a time-only Duration.
+fn temporalInstantUntilFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+            const other = try toInstantArg(self, if (args.len > 0) args[0] else .undefined);
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .second, .smallest = .nanosecond, .mode = .trunc, .increment = 1 });
+            if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant difference largestUnit must be hour or smaller");
+            var diff = @as(i128, @intFromFloat(sign)) * (other - this.object.temporal.?.epoch_ns);
+            diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
+            return makeDuration(self, balanceTimeNs(diff, opts.largest));
+        }
+    }.call;
+}
+
+fn temporalInstantRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+    const opts = try readRoundOpts(self, if (args.len > 0) args[0] else .undefined, .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant.round smallestUnit must be hour or smaller");
+    const o = try makeTemporal(self, .instant, "\x00T.Instant");
+    o.temporal.?.epoch_ns = roundNs(this.object.temporal.?.epoch_ns, opts.smallest, opts.increment, opts.mode);
+    return .{ .object = o };
+}
+
+fn temporalInstantEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+    const other = try toInstantArg(self, if (args.len > 0) args[0] else .undefined);
+    return .{ .boolean = this.object.temporal.?.epoch_ns == other };
+}
+
+fn temporalInstantCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const a = try toInstantArg(self, if (args.len > 0) args[0] else .undefined);
+    const b = try toInstantArg(self, if (args.len > 1) args[1] else .undefined);
+    return .{ .number = if (a < b) -1 else if (a > b) 1 else 0 };
+}
+
+fn temporalInstantExtraEpochGetter(comptime div: i128) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+            const ns = this.object.temporal.?.epoch_ns;
+            if (div == 1) return self.makeBigInt(ns);
+            if (div >= 1_000_000) return .{ .number = @floatFromInt(@divFloor(ns, div)) };
+            return self.makeBigInt(@divFloor(ns, div));
+        }
+    }.call;
+}
+
+/// Coerce a value to an Instant's epoch nanoseconds (an Instant or an ISO
+/// instant string with a `Z`/offset).
+fn toInstantArg(self: *Interpreter, v: Value) EvalError!i128 {
+    if (tIsTemporal(v, .instant)) return v.object.temporal.?.epoch_ns;
+    if (tIsTemporal(v, .zoned_date_time)) return v.object.temporal.?.epoch_ns;
+    if (v == .string) return parseInstantString(self, v.string);
+    return self.throwError("TypeError", "value is not an Instant");
+}
+
+/// Parse "YYYY-MM-DDTHH:MM:SS[.fff]Z|±HH:MM" to epoch nanoseconds.
+fn parseInstantString(self: *Interpreter, s: []const u8) EvalError!i128 {
+    const dt = try parseDateTimeNs(self, s);
+    return dt.epoch_ns;
+}
+
+fn temporalInstantFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const v = if (args.len > 0) args[0] else Value.undefined;
+    const ns = try toInstantArg(self, v);
+    const o = try makeTemporal(self, .instant, "\x00T.Instant");
+    o.temporal.?.epoch_ns = ns;
+    return .{ .object = o };
+}
+
+// ---- PlainTime arithmetic -------------------------------------------
+
+fn temporalPlainTimeAddFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
+            const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            const total = timeToNs(this.object.temporal.?) + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
+            nsToTime(o.temporal.?, total);
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+fn temporalPlainTimeUntilFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
+            const other = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 });
+            if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference largestUnit must be hour or smaller");
+            var diff = @as(i128, @intFromFloat(sign)) * (timeToNs(&other) - timeToNs(this.object.temporal.?));
+            diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
+            return makeDuration(self, balanceTimeNs(diff, opts.largest));
+        }
+    }.call;
+}
+
+fn temporalPlainTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
+    if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "PlainTime.round requires options");
+    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime.round smallestUnit must be hour or smaller");
+    const rounded = roundNs(timeToNs(this.object.temporal.?), opts.smallest, opts.increment, opts.mode);
+    const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
+    nsToTime(o.temporal.?, rounded);
+    return .{ .object = o };
+}
+
+/// Coerce to PlainTime fields (a PlainTime, a PlainDateTime, a fields bag, or a
+/// "HH:MM:SS" string).
+fn toPlainTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalData {
+    if (tIsTemporal(v, .plain_time) or tIsTemporal(v, .plain_date_time)) {
+        return v.object.temporal.?.*;
+    }
+    var t: value.TemporalData = .{ .kind = .plain_time };
+    if (v == .object) {
+        const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
+        const maxes = [_]i64{ 23, 59, 59, 999, 999, 999 };
+        var any = false;
+        var vals: [6]i64 = .{ 0, 0, 0, 0, 0, 0 };
+        for (names, 0..) |nm, i| {
+            const pv = try self.getProperty(v, nm);
+            if (pv == .undefined) continue;
+            any = true;
+            const n: i64 = @intFromFloat(try temporalIntArg(self, pv, nm));
+            if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
+            vals[i] = n;
+        }
+        if (!any) return self.throwError("TypeError", "invalid PlainTime fields");
+        setTimeFields(&t, .{ @floatFromInt(vals[0]), @floatFromInt(vals[1]), @floatFromInt(vals[2]), @floatFromInt(vals[3]), @floatFromInt(vals[4]), @floatFromInt(vals[5]) });
+        return t;
+    }
+    if (v == .string) {
+        // Accept a bare time, or the time portion of a date-time string.
+        const s = v.string;
+        const tpos = std.mem.indexOfAny(u8, s, "Tt ");
+        const ts = if (tpos) |p| s[p + 1 ..] else s;
+        if (ts.len < 2) return self.throwError("RangeError", "invalid ISO time");
+        var i: usize = 0;
+        const h = std.fmt.parseInt(u8, ts[0..2], 10) catch return self.throwError("RangeError", "invalid ISO time");
+        i = 2;
+        var mi: u8 = 0;
+        var sec: u8 = 0;
+        if (i < ts.len and ts[i] == ':') i += 1;
+        if (i + 2 <= ts.len and std.ascii.isDigit(ts[i])) {
+            mi = std.fmt.parseInt(u8, ts[i .. i + 2], 10) catch 0;
+            i += 2;
+            if (i < ts.len and ts[i] == ':') i += 1;
+            if (i + 2 <= ts.len and std.ascii.isDigit(ts[i])) {
+                sec = std.fmt.parseInt(u8, ts[i .. i + 2], 10) catch 0;
+            }
+        }
+        if (h > 23 or mi > 59 or sec > 59) return self.throwError("RangeError", "time out of range");
+        setTimeFields(&t, .{ @floatFromInt(h), @floatFromInt(mi), @floatFromInt(sec), 0, 0, 0 });
+        return t;
+    }
+    return self.throwError("TypeError", "cannot convert to a PlainTime");
+}
+
+fn temporalPlainTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const t = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
+    const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
+    o.temporal.?.* = t;
+    o.temporal.?.kind = .plain_time;
+    return .{ .object = o };
+}
+
+fn temporalPlainTimeEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
+    const other = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
+    return .{ .boolean = timeToNs(this.object.temporal.?) == timeToNs(&other) };
+}
+
+fn temporalPlainTimeCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const a = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
+    const b = try toPlainTimeData(self, if (args.len > 1) args[1] else .undefined);
+    const na = timeToNs(&a);
+    const nb = timeToNs(&b);
+    return .{ .number = if (na < nb) -1 else if (na > nb) 1 else 0 };
+}
+
+// ---- PlainDateTime arithmetic / conversions -------------------------
+
+/// Add a calendar date duration (years/months/weeks/days) to ISO y/m/d with the
+/// standard `constrain` overflow, returning the resulting civil date.
+fn addCalendarDate(y0: i64, m0: u8, d0: u8, years: f64, months: f64, weeks: f64, days: f64, sign: f64) Civil {
+    var y: i64 = y0 + @as(i64, @intFromFloat(sign * years));
+    var m: i64 = @as(i64, m0) + @as(i64, @intFromFloat(sign * months));
+    y += @divFloor(m - 1, 12);
+    m = @mod(m - 1, 12) + 1;
+    var d: i64 = d0;
+    const dim = isoDaysInMonth(y, @intCast(m));
+    if (d > dim) d = dim;
+    const epoch = tDaysFromCivil(y, @intCast(m), @intCast(d)) + @as(i64, @intFromFloat(sign * (weeks * 7 + days)));
+    return tCivilFromDays(epoch);
+}
+
+fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+            const t = this.object.temporal.?;
+            const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            // Date part with constrain, then time part carrying whole days.
+            const c = addCalendarDate(t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign);
+            const time_ns = timeToNs(t) + @as(i128, @intFromFloat(sign)) * (durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day));
+            const day_carry = @divFloor(time_ns, 86_400_000_000_000);
+            const epoch = tDaysFromCivil(c.y, c.m, c.d) + @as(i64, @intCast(day_carry));
+            const cc = tCivilFromDays(epoch);
+            const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+            o.temporal.?.year = @intCast(cc.y);
+            o.temporal.?.month = cc.m;
+            o.temporal.?.day = cc.d;
+            nsToTime(o.temporal.?, time_ns);
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+/// PlainDateTime as nanoseconds since the ISO epoch (treating it as UTC), for
+/// exact (day-or-smaller) differences and rounding.
+fn dateTimeToNs(t: *const value.TemporalData) i128 {
+    return @as(i128, tDaysFromCivil(t.year, t.month, t.day)) * 86_400_000_000_000 + timeToNs(t);
+}
+
+fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+            const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else .undefined);
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .day, .smallest = .nanosecond, .mode = .trunc, .increment = 1 });
+            const a = this.object.temporal.?;
+            const b = &other;
+            if (@intFromEnum(opts.largest) >= @intFromEnum(TUnit.day)) {
+                // Exact nanosecond difference balanced into days and below.
+                var diff = @as(i128, @intFromFloat(sign)) * (dateTimeToNs(b) - dateTimeToNs(a));
+                diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
+                return makeDuration(self, balanceTimeNs(diff, opts.largest));
+            }
+            // Calendar largestUnit: diff the dates (years/months), then the time.
+            const earlier = if (dateTimeToNs(a) <= dateTimeToNs(b)) a else b;
+            const later = if (dateTimeToNs(a) <= dateTimeToNs(b)) b else a;
+            var dd = calendarDateDiff(earlier.year, earlier.month, earlier.day, later.year, later.month, later.day, opts.largest);
+            // Time component (may borrow a day).
+            var time_diff = timeToNs(later) - timeToNs(earlier);
+            if (time_diff < 0) {
+                time_diff += 86_400_000_000_000;
+                dd[3] -= 1; // borrow a day
+            }
+            const tparts = balanceTimeNs(time_diff, .hour);
+            for (4..10) |i| dd[i] = tparts[i];
+            const s2 = sign * (if (dateTimeToNs(a) <= dateTimeToNs(b)) @as(f64, 1) else -1);
+            if (s2 < 0) for (&dd) |*c| {
+                c.* = -c.*;
+            };
+            return makeDuration(self, dd);
+        }
+    }.call;
+}
+
+/// Difference between two ISO dates (earlier→later) as a [10]f64 duration using
+/// units up to `largest` (year/month/week/day).
+fn calendarDateDiff(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: TUnit) [10]f64 {
+    var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (largest == .day or largest == .week) {
+        var days = tDaysFromCivil(y2, m2, d2) - tDaysFromCivil(y1, m1, d1);
+        if (largest == .week) {
+            out[2] = @floatFromInt(@divTrunc(days, 7));
+            days = @rem(days, 7);
+        }
+        out[3] = @floatFromInt(days);
+        return out;
+    }
+    // year/month: the largest whole-month span that doesn't overshoot, then days.
+    const years0: i64 = y2 - y1;
+    const months0: i64 = @as(i64, m2) - @as(i64, m1);
+    var total_months = years0 * 12 + months0;
+    while (true) {
+        const inter = addMonthsClamp(y1, m1, d1, total_months);
+        if (tDaysFromCivil(inter.y, inter.m, inter.d) > tDaysFromCivil(y2, m2, d2)) {
+            total_months -= 1;
+        } else break;
+    }
+    const inter = addMonthsClamp(y1, m1, d1, total_months);
+    const day_rem = tDaysFromCivil(y2, m2, d2) - tDaysFromCivil(inter.y, inter.m, inter.d);
+    const years = @divTrunc(total_months, 12);
+    const months = @rem(total_months, 12);
+    if (largest == .month) {
+        out[1] = @floatFromInt(total_months);
+    } else {
+        out[0] = @floatFromInt(years);
+        out[1] = @floatFromInt(months);
+    }
+    out[3] = @floatFromInt(day_rem);
+    return out;
+}
+
+fn addMonthsClamp(y0: i64, m0: u8, d0: u8, add_months: i64) Civil {
+    var total = (y0 * 12 + (@as(i64, m0) - 1)) + add_months;
+    const ny = @divFloor(total, 12);
+    total = @mod(total, 12);
+    const nm: u8 = @intCast(total + 1);
+    var nd: u8 = d0;
+    const dim = isoDaysInMonth(ny, nm);
+    if (nd > dim) nd = dim;
+    return .{ .y = ny, .m = nm, .d = nd };
+}
+
+fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "PlainDateTime.round requires options");
+    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDateTime.round smallestUnit must be day or smaller");
+    const t = this.object.temporal.?;
+    const total = dateTimeToNs(t);
+    const rounded = roundNs(total, opts.smallest, opts.increment, opts.mode);
+    const days = @divFloor(rounded, 86_400_000_000_000);
+    const c = tCivilFromDays(@intCast(days));
+    const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+    o.temporal.?.year = @intCast(c.y);
+    o.temporal.?.month = c.m;
+    o.temporal.?.day = c.d;
+    nsToTime(o.temporal.?, rounded);
+    return .{ .object = o };
+}
+
+/// Coerce to PlainDateTime fields (instance, fields bag, or ISO string).
+fn toPlainDateTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalData {
+    if (tIsTemporal(v, .plain_date_time)) return v.object.temporal.?.*;
+    if (tIsTemporal(v, .plain_date)) {
+        var t = v.object.temporal.?.*;
+        t.kind = .plain_date_time;
+        return t;
+    }
+    if (v == .object) {
+        const f = try toPlainDateFields(self, v);
+        const tm = try toPlainTimeData(self, v);
+        var t: value.TemporalData = .{ .kind = .plain_date_time };
+        t.year = @intCast(f.y);
+        t.month = f.m;
+        t.day = f.d;
+        t.hour = tm.hour;
+        t.minute = tm.minute;
+        t.second = tm.second;
+        t.millisecond = tm.millisecond;
+        t.microsecond = tm.microsecond;
+        t.nanosecond = tm.nanosecond;
+        return t;
+    }
+    if (v == .string) {
+        const p = try parseDateTimeNs(self, v.string);
+        var t: value.TemporalData = .{ .kind = .plain_date_time };
+        t.year = @intCast(p.y);
+        t.month = p.mo;
+        t.day = p.d;
+        t.hour = p.h;
+        t.minute = p.mi;
+        t.second = p.s;
+        t.millisecond = p.ms;
+        t.microsecond = p.us;
+        t.nanosecond = p.ns;
+        return t;
+    }
+    return self.throwError("TypeError", "cannot convert to a PlainDateTime");
+}
+
+fn temporalPlainDateTimeEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else .undefined);
+    return .{ .boolean = dateTimeToNs(this.object.temporal.?) == dateTimeToNs(&other) };
+}
+
+fn temporalPlainDateTimeCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const a = try toPlainDateTimeData(self, if (args.len > 0) args[0] else .undefined);
+    const b = try toPlainDateTimeData(self, if (args.len > 1) args[1] else .undefined);
+    const na = dateTimeToNs(&a);
+    const nb = dateTimeToNs(&b);
+    return .{ .number = if (na < nb) -1 else if (na > nb) 1 else 0 };
+}
+
+fn temporalDateTimeToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.object.temporal.?;
+    const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
+    o.temporal.?.year = t.year;
+    o.temporal.?.month = t.month;
+    o.temporal.?.day = t.day;
+    return .{ .object = o };
+}
+
+fn temporalDateTimeToPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.object.temporal.?;
+    const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
+    o.temporal.?.hour = t.hour;
+    o.temporal.?.minute = t.minute;
+    o.temporal.?.second = t.second;
+    o.temporal.?.millisecond = t.millisecond;
+    o.temporal.?.microsecond = t.microsecond;
+    o.temporal.?.nanosecond = t.nanosecond;
+    return .{ .object = o };
+}
+
+fn temporalDateTimeToPlainYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.object.temporal.?;
+    return makeYearMonth(self, t.year, t.month);
+}
+
+fn temporalDateTimeToPlainMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.object.temporal.?;
+    return makeMonthDay(self, t.month, t.day);
+}
+
+fn temporalDateTimeWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.object.temporal.?;
+    const tm = if (args.len == 0 or args[0] == .undefined) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
+    const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+    o.temporal.?.year = t.year;
+    o.temporal.?.month = t.month;
+    o.temporal.?.day = t.day;
+    o.temporal.?.hour = tm.hour;
+    o.temporal.?.minute = tm.minute;
+    o.temporal.?.second = tm.second;
+    o.temporal.?.millisecond = tm.millisecond;
+    o.temporal.?.microsecond = tm.microsecond;
+    o.temporal.?.nanosecond = tm.nanosecond;
+    return .{ .object = o };
+}
+
+fn temporalDateTimeWithPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.object.temporal.?;
+    const f = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
+    const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+    o.temporal.?.year = @intCast(f.y);
+    o.temporal.?.month = f.m;
+    o.temporal.?.day = f.d;
+    o.temporal.?.hour = t.hour;
+    o.temporal.?.minute = t.minute;
+    o.temporal.?.second = t.second;
+    o.temporal.?.millisecond = t.millisecond;
+    o.temporal.?.microsecond = t.microsecond;
+    o.temporal.?.nanosecond = t.nanosecond;
+    return .{ .object = o };
+}
+
+fn temporalDateTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const t = try toPlainDateTimeData(self, if (args.len > 0) args[0] else .undefined);
+    const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+    o.temporal.?.* = t;
+    o.temporal.?.kind = .plain_date_time;
+    return .{ .object = o };
+}
+
+// ---- PlainDate conversions / diff -----------------------------------
+
+fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+            const t = this.object.temporal.?;
+            const b = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 });
+            const lg = if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.day)) TUnit.day else opts.largest;
+            const fwd = tDaysFromCivil(t.year, t.month, t.day) <= tDaysFromCivil(b.y, b.m, b.d);
+            const e = if (fwd) IsoYMD{ .y = t.year, .m = t.month, .d = t.day } else b;
+            const l = if (fwd) b else IsoYMD{ .y = t.year, .m = t.month, .d = t.day };
+            var dd = calendarDateDiff(e.y, e.m, e.d, l.y, l.m, l.d, lg);
+            const s2 = sign * (if (fwd) @as(f64, 1) else -1);
+            if (s2 < 0) for (&dd) |*c| {
+                c.* = -c.*;
+            };
+            return makeDuration(self, dd);
+        }
+    }.call;
+}
+
+fn temporalDateToPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+    const t = this.object.temporal.?;
+    const tm = if (args.len == 0 or args[0] == .undefined) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
+    const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+    o.temporal.?.year = t.year;
+    o.temporal.?.month = t.month;
+    o.temporal.?.day = t.day;
+    o.temporal.?.hour = tm.hour;
+    o.temporal.?.minute = tm.minute;
+    o.temporal.?.second = tm.second;
+    o.temporal.?.millisecond = tm.millisecond;
+    o.temporal.?.microsecond = tm.microsecond;
+    o.temporal.?.nanosecond = tm.nanosecond;
+    return .{ .object = o };
+}
+
+fn temporalDateToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+    const t = this.object.temporal.?;
+    return makeYearMonth(self, t.year, t.month);
+}
+
+fn temporalDateToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+    const t = this.object.temporal.?;
+    return makeMonthDay(self, t.month, t.day);
+}
 
 fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -11810,6 +12665,11 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "add", 1, temporalPlainDateAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalPlainDateAddFn(-1));
         try setNative(a, rs, p, "with", 1, temporalPlainDateWithFn);
+        try setNative(a, rs, p, "until", 1, temporalPlainDateUntilFn(1));
+        try setNative(a, rs, p, "since", 1, temporalPlainDateUntilFn(-1));
+        try setNative(a, rs, p, "toPlainDateTime", 1, temporalDateToPlainDateTimeFn);
+        try setNative(a, rs, p, "toPlainYearMonth", 0, temporalDateToYearMonthFn);
+        try setNative(a, rs, p, "toPlainMonthDay", 0, temporalDateToMonthDayFn);
         if (ns.getOwn("PlainDate")) |c| if (c == .object) {
             try setNative(a, rs, c.object, "from", 1, temporalPlainDateFromFn);
             try setNative(a, rs, c.object, "compare", 2, temporalPlainDateCompareFn);
@@ -11827,6 +12687,16 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalPlainTimeToStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalPlainTimeToStringFn);
         try setNative(a, rs, p, "with", 1, temporalPlainTimeWithFn);
+        try setNative(a, rs, p, "add", 1, temporalPlainTimeAddFn(1));
+        try setNative(a, rs, p, "subtract", 1, temporalPlainTimeAddFn(-1));
+        try setNative(a, rs, p, "until", 1, temporalPlainTimeUntilFn(1));
+        try setNative(a, rs, p, "since", 1, temporalPlainTimeUntilFn(-1));
+        try setNative(a, rs, p, "round", 1, temporalPlainTimeRoundFn);
+        try setNative(a, rs, p, "equals", 1, temporalPlainTimeEqualsFn);
+        if (ns.getOwn("PlainTime")) |c| if (c == .object) {
+            try setNative(a, rs, c.object, "from", 1, temporalPlainTimeFromFn);
+            try setNative(a, rs, c.object, "compare", 2, temporalPlainTimeCompareFn);
+        };
     }
     // Temporal.PlainDateTime (reuses the PlainDate + PlainTime getters).
     {
@@ -11845,9 +12715,30 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "millisecond", temporalPlainTimeGetter(.millisecond));
         try setNativeGetter(a, rs, p, "microsecond", temporalPlainTimeGetter(.microsecond));
         try setNativeGetter(a, rs, p, "nanosecond", temporalPlainTimeGetter(.nanosecond));
+        try setNativeGetter(a, rs, p, "dayOfYear", temporalPlainDateGetter(.day_of_year));
+        try setNativeGetter(a, rs, p, "daysInYear", temporalPlainDateGetter(.days_in_year));
+        try setNativeGetter(a, rs, p, "monthsInYear", temporalPlainDateGetter(.months_in_year));
+        try setNativeGetter(a, rs, p, "daysInWeek", temporalPlainDateGetter(.days_in_week));
+        try setNativeGetter(a, rs, p, "weekOfYear", temporalPlainDateGetter(.week_of_year));
         try setNative(a, rs, p, "toString", 0, temporalPlainDateTimeToStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalPlainDateTimeToStringFn);
         try setNative(a, rs, p, "with", 1, temporalPlainDateTimeWithFn);
+        try setNative(a, rs, p, "add", 1, temporalPlainDateTimeAddFn(1));
+        try setNative(a, rs, p, "subtract", 1, temporalPlainDateTimeAddFn(-1));
+        try setNative(a, rs, p, "until", 1, temporalPlainDateTimeUntilFn(1));
+        try setNative(a, rs, p, "since", 1, temporalPlainDateTimeUntilFn(-1));
+        try setNative(a, rs, p, "round", 1, temporalPlainDateTimeRoundFn);
+        try setNative(a, rs, p, "equals", 1, temporalPlainDateTimeEqualsFn);
+        try setNative(a, rs, p, "toPlainDate", 0, temporalDateTimeToPlainDateFn);
+        try setNative(a, rs, p, "toPlainTime", 0, temporalDateTimeToPlainTimeFn);
+        try setNative(a, rs, p, "toPlainYearMonth", 0, temporalDateTimeToPlainYearMonthFn);
+        try setNative(a, rs, p, "toPlainMonthDay", 0, temporalDateTimeToPlainMonthDayFn);
+        try setNative(a, rs, p, "withPlainTime", 1, temporalDateTimeWithPlainTimeFn);
+        try setNative(a, rs, p, "withPlainDate", 1, temporalDateTimeWithPlainDateFn);
+        if (ns.getOwn("PlainDateTime")) |c| if (c == .object) {
+            try setNative(a, rs, c.object, "from", 1, temporalDateTimeFromFn);
+            try setNative(a, rs, c.object, "compare", 2, temporalPlainDateTimeCompareFn);
+        };
     }
     // Temporal.PlainYearMonth.
     {
@@ -11892,11 +12783,23 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         const p = try temporalType(a, rs, env, ns, object_proto, "Instant", "\x00T.Instant", 1, temporalInstantConstructorFn, tag);
         try setNativeGetter(a, rs, p, "epochMilliseconds", temporalInstantEpochGetter(true));
         try setNativeGetter(a, rs, p, "epochNanoseconds", temporalInstantEpochGetter(false));
+        try setNativeGetter(a, rs, p, "epochSeconds", temporalInstantExtraEpochGetter(1_000_000_000));
+        try setNativeGetter(a, rs, p, "epochMicroseconds", temporalInstantExtraEpochGetter(1_000));
         try setNative(a, rs, p, "toString", 0, temporalInstantToStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalInstantToStringFn);
+        try setNative(a, rs, p, "add", 1, temporalInstantAddFn(1));
+        try setNative(a, rs, p, "subtract", 1, temporalInstantAddFn(-1));
+        try setNative(a, rs, p, "until", 1, temporalInstantUntilFn(1));
+        try setNative(a, rs, p, "since", 1, temporalInstantUntilFn(-1));
+        try setNative(a, rs, p, "round", 1, temporalInstantRoundFn);
+        try setNative(a, rs, p, "equals", 1, temporalInstantEqualsFn);
         if (ns.getOwn("Instant")) |c| if (c == .object) {
             try setNative(a, rs, c.object, "fromEpochMilliseconds", 1, temporalInstantFromEpochFn(1_000_000));
             try setNative(a, rs, c.object, "fromEpochNanoseconds", 1, temporalInstantFromEpochFn(1));
+            try setNative(a, rs, c.object, "fromEpochSeconds", 1, temporalInstantFromEpochFn(1_000_000_000));
+            try setNative(a, rs, c.object, "fromEpochMicroseconds", 1, temporalInstantFromEpochFn(1_000));
+            try setNative(a, rs, c.object, "from", 1, temporalInstantFromFn);
+            try setNative(a, rs, c.object, "compare", 2, temporalInstantCompareFn);
         };
     }
 
