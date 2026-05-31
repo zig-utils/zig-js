@@ -2186,7 +2186,7 @@ pub const Interpreter = struct {
                 }
             }
         }
-        try self.setProp(o, "__t", .{ .number = t });
+        o.date_ms = t;
         return .{ .object = o };
     }
 
@@ -2245,6 +2245,7 @@ pub const Interpreter = struct {
     /// fields roll over (e.g. `setHours(0,0,0,-1)`); a non-finite or absurd field, or
     /// a result past the ±8.64e15 ms range (TimeClip), yields NaN.
     fn dateCommit(self: *Interpreter, o: *value.Object, y: f64, mo: f64, d: f64, h: f64, mi: f64, s: f64, ms: f64) EvalError!Value {
+        _ = self; // [[DateValue]] now lives in the `date_ms` field, no property write
         const nan = std.math.nan(f64);
         var tf: f64 = nan;
         const fields = [_]f64{ y, mo, d, h, mi, s, ms };
@@ -2263,20 +2264,20 @@ pub const Interpreter = struct {
             tf = @as(f64, @floatFromInt(days)) * @as(f64, @floatFromInt(ms_per_day)) + @as(f64, @floatFromInt(tod));
             if (@abs(tf) > 8.64e15) tf = nan;
         }
-        try self.setProp(o, "__t", .{ .number = tf });
+        o.date_ms = tf;
         return Value{ .number = tf };
     }
 
     /// `Date.prototype` methods (UTC-based; v1 ignores local timezone, so
-    /// get*/getUTC* coincide). Time is the own `__t` property.
+    /// get*/getUTC* coincide). Time is the internal-slot field `date_ms`.
     fn dateMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
-        const t = (o.getOwn("__t") orelse Value{ .number = 0 }).number;
+        const t = o.date_ms;
         const nan = std.math.nan(f64);
         if (eq(name, "getTime") or eq(name, "valueOf")) return Value{ .number = t };
         if (eq(name, "setTime")) {
             var nt = try self.toNumberV(arg0(args));
             if (@abs(nt) > 8.64e15) nt = nan;
-            try self.setProp(o, "__t", .{ .number = nt });
+            o.date_ms = nt;
             return Value{ .number = nt };
         }
 
@@ -3228,6 +3229,11 @@ pub const Interpreter = struct {
                 const n = v.toNumber();
                 const u = v.toUint32();
                 if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
+                // ArraySetLength: a non-writable `length` rejects the assignment
+                // (the RangeError above still precedes this) — sloppy silently,
+                // strict throws.
+                if (o.attrs != null and !o.getAttr("length").writable)
+                    return if (self.strict) self.throwError("TypeError", "Cannot assign to read only property 'length'") else {};
                 if (u < o.elements.items.len) {
                     o.elements.shrinkRetainingCapacity(u);
                     o.array_len = 0; // physical length is now exactly `u`
@@ -7572,7 +7578,7 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         // `new Date(dateObject)` copies its time value; otherwise ToPrimitive
         // (a string would be parsed — not yet — else ToNumber).
         if (args[0] == .object and args[0].object.is_date)
-            return self.makeDate((args[0].object.getOwn("__t") orelse Value{ .number = 0 }).number);
+            return self.makeDate(args[0].object.date_ms);
         const prim = try self.toPrimitive(args[0], .default);
         if (prim == .string) return self.makeDate(Interpreter.dateTimeFromArgs(&.{prim}));
         return self.makeDate(prim.toNumber());

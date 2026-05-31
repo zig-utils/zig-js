@@ -674,8 +674,10 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
         // and its (possibly new) writability are still applied before throwing.
         var blocked = false;
         if (d.getOwn("value")) |val| {
-            const n = val.toNumber();
-            const u = val.toUint32();
+            // ToUint32(ToNumber(value)): a value object's valueOf/toString runs
+            // here (and a Symbol/BigInt throws) — newLen must equal numberLen.
+            const n = try self.toNumberV(val);
+            const u = Value.uint32FromF64(n);
             if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
             if (!cur_writable and u != @max(target.elements.items.len, target.array_len))
                 return self.throwError("TypeError", "Cannot assign to read only property 'length'");
@@ -834,8 +836,11 @@ fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) Host
     if (props == .null or props == .undefined)
         return self.throwError("TypeError", "Cannot convert undefined or null to object");
     if (props != .object) return;
+    // Snapshot the enumerable own keys, then read each descriptor object via
+    // [[Get]] (so an accessor-valued descriptor property runs its getter), per
+    // ObjectDefineProperties — not the raw data slot.
     for (try props.object.enumerableKeys(self.arena)) |k| {
-        const d = props.object.getOwn(k) orelse continue;
+        const d = try self.getProperty(props, k);
         if (d != .object) return self.throwError("TypeError", "Property description must be an object");
         try defineOne(self, target, k, d.object);
     }

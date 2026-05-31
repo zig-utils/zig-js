@@ -191,9 +191,11 @@ pub const Object = struct {
     /// (`Object.getOwnPropertyDescriptor(sym, "description")` is undefined) —
     /// `Symbol.prototype.description` is a prototype accessor instead.
     sym_desc: ?[]const u8 = null,
-    /// A `Date` instance — its time (ms since the Unix epoch) is the own `__t`
-    /// property; methods are dispatched in `dateMethod`.
+    /// A `Date` instance — its [[DateValue]] (ms since the Unix epoch, or NaN
+    /// for an invalid date) is the internal-slot field `date_ms`, invisible to
+    /// reflection/enumeration; methods are dispatched in `dateMethod`.
     is_date: bool = false,
+    date_ms: f64 = 0,
     is_array: bool = false,
     /// For arrays, a *logical* length floor used when it exceeds the physically
     /// stored `elements` — so `new Array(4294967295)` / `arr.length = big` track a
@@ -512,6 +514,15 @@ pub const Value = union(enum) {
     /// ECMAScript ToUint32 (the same bit pattern, read unsigned).
     pub fn toUint32(self: Value) u32 {
         return @bitCast(self.toInt32());
+    }
+
+    /// ECMAScript ToUint32 over an already-coerced Number (so a value object's
+    /// valueOf/toString is run once by the caller via ToNumber, not again here).
+    pub fn uint32FromF64(n: f64) u32 {
+        if (std.math.isNan(n) or std.math.isInf(n)) return 0;
+        const t = @trunc(n);
+        const m = t - @floor(t / 4294967296.0) * 4294967296.0; // t mod 2^32
+        return @intFromFloat(m);
     }
 
     /// The `typeof` operator result.
