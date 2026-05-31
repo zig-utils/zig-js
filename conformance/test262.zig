@@ -398,7 +398,7 @@ const subtrees = [_][]const u8{
     "test/built-ins/Symbol",   "test/built-ins/Function", "test/built-ins/Date",
     "test/built-ins/Promise",
     "test/built-ins/BigInt",   "test/built-ins/TypedArray", "test/built-ins/TypedArrayConstructors",
-    "test/built-ins/ArrayBuffer", "test/built-ins/DataView",
+    "test/built-ins/ArrayBuffer", "test/built-ins/DataView", "test/built-ins/RegExp",
 };
 
 pub fn main(init: std.process.Init) !void {

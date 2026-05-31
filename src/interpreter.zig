@@ -2208,6 +2208,16 @@ pub const Interpreter = struct {
     /// `global`/`ignoreCase`/`multiline` booleans. Matching (test/exec) is
     /// dispatched in `regexMethod`, backed by zig-regex.
     pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
+        // Validate the flags: each must be one of `dgimsuvy` with no duplicates
+        // (RegExp construction reports a SyntaxError otherwise). `u` and `v` are
+        // also mutually exclusive.
+        var seen = std.mem.zeroes([128]bool);
+        for (flags) |f| {
+            if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f])
+                return self.throwError("SyntaxError", "Invalid regular expression flags");
+            seen[f] = true;
+        }
+        if (seen['u'] and seen['v']) return self.throwError("SyntaxError", "Invalid regular expression flags");
         const o = (try self.newObject()).object;
         o.is_regex = true;
         // An empty pattern's [[OriginalSource]] is "(?:)" (so `//`, `new RegExp()`,
@@ -2224,6 +2234,10 @@ pub const Interpreter = struct {
         try self.setProp(o, "unicode", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'u') != null });
         try self.setProp(o, "unicodeSets", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'v') != null });
         try self.setProp(o, "hasIndices", .{ .boolean = std.mem.indexOfScalar(u8, flags, 'd') != null });
+        // Eagerly compile to validate the pattern — RegExp construction reports a
+        // SyntaxError for an invalid pattern (the compiled form is discarded;
+        // methods recompile on demand).
+        _ = try self.compileRegex(o);
         return .{ .object = o };
     }
 
