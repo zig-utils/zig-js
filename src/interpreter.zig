@@ -3774,6 +3774,10 @@ pub const Interpreter = struct {
             "forEach",   "reduce",  "reduceRight", "some",     "every", "find",   "findIndex", "findLast",
             "findLastIndex", "at",  "flat",        "flatMap",  "keys",  "values", "entries",
             "toReversed",    "toSorted", "toSpliced", "with",
+            // fill/copyWithin operate purely through [[Get]]/[[Set]] over the
+            // receiver, so they work on an array-like `this` (and read its
+            // `length` via ToLength, throwing for a Symbol/BigInt length).
+            "fill",          "copyWithin",
         };
         // NB: `toString` is intentionally NOT generic here — a plain object's
         // `.toString()` must reach `Object.prototype.toString` (the `[object
@@ -3852,8 +3856,8 @@ pub const Interpreter = struct {
     /// ToIntegerOrInfinity-based start index for the forward searches
     /// (indexOf/includes): a negative `fromIndex` counts from the end, `+∞`
     /// (or any value ≥ len) yields `len` (no iterations), NaN/undefined → 0.
-    fn fromIndexForward(v: Value, len: usize) usize {
-        const n = v.toNumber();
+    fn fromIndexForward(self: *Interpreter, v: Value, len: usize) EvalError!usize {
+        const n = try self.toNumberV(v);
         if (std.math.isNan(n)) return 0;
         const flen: f64 = @floatFromInt(len);
         const fl = @trunc(n);
@@ -3896,10 +3900,9 @@ pub const Interpreter = struct {
         // (via `.call`) materializes its `length`/indexed properties into a
         // temporary slice so the read-only methods below work unchanged.
         const items: []Value = if (o.is_array) o.elements.items else blk: {
-            // ToLength(ToNumber(obj.length)) — coerce via toPrimitive so an
-            // object `length` with a `valueOf`/`toString` is honored.
-            const len_val = try self.toPrimitive(try self.getProperty(.{ .object = o }, "length"), .number);
-            const len = toLen(len_val.toNumber());
+            // ToLength(ToNumber(obj.length)) — `toNumberV` runs valueOf/toString
+            // and throws a TypeError for a Symbol/BigInt `length`.
+            const len = toLen(try self.toNumberV(try self.getProperty(.{ .object = o }, "length")));
             if (len > (1 << 22)) return null; // guard against pathological array-like lengths (OOM)
             const buf = try self.arena.alloc(Value, len);
             for (buf, 0..) |*slot, i| {
@@ -3959,7 +3962,7 @@ pub const Interpreter = struct {
             // +Infinity on a 2**32-length array) means no iterations — which is
             // also what keeps a huge sparse array from being walked element by
             // element.
-            const k = if (args.len > 1) fromIndexForward(args[1], ilen) else 0;
+            const k = if (args.len > 1) try self.fromIndexForward(args[1], ilen) else 0;
             // Dense scan: indexOf skips holes (HasProperty check).
             const dense_hi = @min(o.elements.items.len, ilen);
             var i = k;
@@ -3979,7 +3982,7 @@ pub const Interpreter = struct {
         if (eq(name, "includes")) {
             const target = arg0(args);
             if (ilen == 0) return Value{ .boolean = false };
-            const k = if (args.len > 1) fromIndexForward(args[1], ilen) else 0;
+            const k = if (args.len > 1) try self.fromIndexForward(args[1], ilen) else 0;
             // includes treats holes as `undefined` and uses SameValueZero (so
             // NaN matches NaN). Dense scan visits every in-range index.
             const dense_hi = @min(o.elements.items.len, ilen);
@@ -4015,8 +4018,8 @@ pub const Interpreter = struct {
             return Value{ .string = try buf.toOwnedSlice(self.arena) };
         }
         if (eq(name, "slice")) {
-            const start = relIndex(arg0(args), ilen, 0);
-            const end = relIndex(arg(args, 1), ilen, @floatFromInt(ilen));
+            const start = try relIndex(self, arg0(args), ilen, 0);
+            const end = try relIndex(self, arg(args, 1), ilen, @floatFromInt(ilen));
             const count = if (end > start) end - start else 0;
             const result = try self.arraySpeciesCreate(.{ .object = o }, count);
             const ra = result.object.is_array;
@@ -4080,7 +4083,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "toSpliced")) {
             const len = items.len;
-            const start = relIndex(arg0(args), len, 0);
+            const start = try relIndex(self, arg0(args), len, 0);
             const del: usize = if (args.len <= 1) len - start else blk: {
                 const d = arg(args, 1).toNumber();
                 if (std.math.isNan(d) or d <= 0) break :blk 0;
@@ -4268,8 +4271,8 @@ pub const Interpreter = struct {
         }
         if (eq(name, "fill")) {
             const v = arg0(args);
-            const start = relIndex(arg(args, 1), ilen, 0);
-            const end = relIndex(arg(args, 2), ilen, @floatFromInt(ilen));
+            const start = try relIndex(self, arg(args, 1), ilen, 0);
+            const end = try relIndex(self, arg(args, 2), ilen, @floatFromInt(ilen));
             // fill writes through [[Set]] over the full length, so it also fills
             // holes (and creates indexed properties on an array-like `this`).
             var i = start;
@@ -4324,7 +4327,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "splice")) {
             const len = items.len;
-            const start = relIndex(arg0(args), len, 0);
+            const start = try relIndex(self, arg0(args), len, 0);
             const del: usize = if (args.len <= 1) len - start else blk: {
                 const d = arg(args, 1).toNumber();
                 if (std.math.isNan(d) or d <= 0) break :blk 0;
@@ -4346,9 +4349,9 @@ pub const Interpreter = struct {
         }
         if (eq(name, "copyWithin")) {
             const len = ilen;
-            const target = relIndex(arg0(args), len, 0);
-            const start = relIndex(arg(args, 1), len, 0);
-            const end = relIndex(arg(args, 2), len, @floatFromInt(len));
+            const target = try relIndex(self, arg0(args), len, 0);
+            const start = try relIndex(self, arg(args, 1), len, 0);
+            const end = try relIndex(self, arg(args, 2), len, @floatFromInt(len));
             var count = @min(if (end > start) end - start else 0, len - target);
             // Copy through [[Get]]/[[Set]] over the full length; a hole at the
             // source deletes the target (so holes move correctly). Walk backward
@@ -4573,7 +4576,7 @@ pub const Interpreter = struct {
             }
         }
         if (eq(name, "charAt")) {
-            const i = relIndex(arg0(args), s.len, 0);
+            const i = try relIndex(self, arg0(args), s.len, 0);
             return if (i < s.len) Value{ .string = try self.arena.dupe(u8, s[i .. i + 1]) } else Value{ .string = "" };
         }
         if (eq(name, "charCodeAt")) {
@@ -4597,13 +4600,13 @@ pub const Interpreter = struct {
             return Value{ .boolean = std.mem.endsWith(u8, s, sub) };
         }
         if (eq(name, "slice")) {
-            const start = relIndex(arg0(args), s.len, 0);
-            const end = relIndex(arg(args, 1), s.len, @floatFromInt(s.len));
+            const start = try relIndex(self, arg0(args), s.len, 0);
+            const end = try relIndex(self, arg(args, 1), s.len, @floatFromInt(s.len));
             return Value{ .string = if (start < end) try self.arena.dupe(u8, s[start..end]) else "" };
         }
         if (eq(name, "substring")) {
-            var a0 = relIndex(arg0(args), s.len, 0);
-            var b0 = relIndex(arg(args, 1), s.len, @floatFromInt(s.len));
+            var a0 = try relIndex(self, arg0(args), s.len, 0);
+            var b0 = try relIndex(self, arg(args, 1), s.len, @floatFromInt(s.len));
             if (a0 > b0) {
                 const t = a0;
                 a0 = b0;
@@ -4787,7 +4790,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "substr")) {
             // `substr(start, length)`: start may count from the end.
-            const start = relIndex(arg0(args), s.len, 0);
+            const start = try relIndex(self, arg0(args), s.len, 0);
             const remaining = s.len - start;
             const len: usize = if (args.len > 1 and arg(args, 1) != .undefined) blk: {
                 const l = arg(args, 1).toNumber();
@@ -6315,8 +6318,10 @@ fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
 }
 
 /// Normalize a relative index (negative counts from the end) into [0, len].
-fn relIndex(v: Value, len: usize, default: f64) usize {
-    const n = if (v == .undefined) default else v.toNumber();
+/// The argument is coerced via ToIntegerOrInfinity (`toNumberV`), so a Symbol
+/// or BigInt — or an object whose `valueOf` throws — propagates a TypeError.
+fn relIndex(self: *Interpreter, v: Value, len: usize, default: f64) EvalError!usize {
+    const n = if (v == .undefined) default else try self.toNumberV(v);
     if (std.math.isNan(n)) return 0;
     const fl = @trunc(n);
     if (fl < 0) {
@@ -6334,8 +6339,8 @@ fn arrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const ab = this.object.array_buffer.?;
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.data.len;
-    const start = relIndex(if (args.len > 0) args[0] else .undefined, blen, 0);
-    const end = relIndex(if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
+    const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, blen, 0);
+    const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
     const count = if (end > start) end - start else 0;
     const out = try self.makeArrayBuffer(count);
     @memcpy(out.array_buffer.?.data[0..count], ab.data[start .. start + count]);
@@ -6455,8 +6460,8 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     }
     if (eq(name, "fill")) {
         const v = if (args.len > 0) try self.toNumberV(args[0]) else std.math.nan(f64);
-        const start = relIndex(if (args.len > 1) args[1] else .undefined, len, 0);
-        const end = relIndex(if (args.len > 2) args[2] else .undefined, len, @floatFromInt(len));
+        const start = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, 0);
+        const end = try relIndex(self, if (args.len > 2) args[2] else .undefined, len, @floatFromInt(len));
         var i = start;
         while (i < end) : (i += 1) value.taWrite(ta, i, v);
         return recv;
@@ -6471,8 +6476,8 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         return recv;
     }
     if (eq(name, "slice") or eq(name, "subarray")) {
-        const start = relIndex(if (args.len > 0) args[0] else .undefined, len, 0);
-        const end = relIndex(if (args.len > 1) args[1] else .undefined, len, @floatFromInt(len));
+        const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, len, 0);
+        const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, @floatFromInt(len));
         const count = if (end > start) end - start else 0;
         if (eq(name, "subarray")) {
             // A view onto the same buffer (no copy).
