@@ -2741,7 +2741,7 @@ pub const Interpreter = struct {
 
     /// A property key as a JS value for passing to a trap. (String keys only for
     /// now; symbol-keyed trap arguments aren't reconstructed yet.)
-    fn keyToValue(self: *Interpreter, key: []const u8) Value {
+    pub fn keyToValue(self: *Interpreter, key: []const u8) Value {
         _ = self;
         return .{ .string = key };
     }
@@ -2800,7 +2800,26 @@ pub const Interpreter = struct {
 
     /// `ownKeys` trap → an array of keys (string values). Falls back to the
     /// target's own string keys.
-    fn proxyOwnKeys(self: *Interpreter, o: *value.Object) EvalError![]const []const u8 {
+    /// An object's [[OwnPropertyKeys]] as encoded key strings — proxy-aware, and
+    /// including an array's dense element indices and `length` (which live
+    /// outside the shape).
+    pub fn objectOwnKeysList(self: *Interpreter, t: *value.Object) EvalError![]const []const u8 {
+        if (t.proxy_handler != null or t.proxy_revoked) return self.proxyOwnKeys(t);
+        if (t.is_array) {
+            var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            var i: usize = 0;
+            while (i < t.elements.items.len) : (i += 1) {
+                if (t.isHole(i)) continue;
+                try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+            }
+            for (try t.ownKeys(self.arena)) |k| try list.append(self.arena, k);
+            try list.append(self.arena, "length");
+            return list.items;
+        }
+        return t.ownKeys(self.arena);
+    }
+
+    pub fn proxyOwnKeys(self: *Interpreter, o: *value.Object) EvalError![]const []const u8 {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
@@ -2808,11 +2827,49 @@ pub const Interpreter = struct {
         if (try self.proxyTrap(o, "ownKeys")) |trap| {
             const res = try self.callValueWithThis(trap, &.{.{ .object = target }}, .{ .object = o.proxy_handler.? });
             if (res != .object or !res.object.is_array) return self.throwError("TypeError", "ownKeys trap must return an array");
+            // CreateListFromArrayLike(types: String, Symbol): every element must
+            // be a String or Symbol.
+            for (res.object.elements.items) |k| {
+                if (k != .string and !(k == .object and k.object.is_symbol))
+                    return self.throwError("TypeError", "ownKeys trap result includes a non-String, non-Symbol key");
+            }
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
             for (res.object.elements.items) |k| try list.append(self.arena, try self.keyOf(k));
+            // [[OwnPropertyKeys]] invariants: no duplicates; every
+            // non-configurable target key must be present; for a non-extensible
+            // target the result must be exactly the target's keys.
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            for (list.items) |k| {
+                if (seen.contains(k)) return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
+                try seen.put(self.arena, k, {});
+            }
+            const extensible = target.extensible;
+            const tkeys = try self.objectOwnKeysList(target);
+            var has_nonconfig = false;
+            for (tkeys) |tk| {
+                if (objectHasOwn(target, tk) and !target.getAttr(tk).configurable) has_nonconfig = true;
+            }
+            if (!extensible or has_nonconfig) {
+                var unchecked: std.StringHashMapUnmanaged(void) = .empty;
+                for (list.items) |k| try unchecked.put(self.arena, k, {});
+                // Every non-configurable target key must appear.
+                for (tkeys) |tk| {
+                    if (!objectHasOwn(target, tk) or target.getAttr(tk).configurable) continue;
+                    if (!unchecked.remove(tk)) return self.throwError("TypeError", "ownKeys trap omitted a non-configurable key");
+                }
+                if (!extensible) {
+                    // Non-extensible: the remaining (configurable) target keys must
+                    // also appear, and nothing extra may be present.
+                    for (tkeys) |tk| {
+                        if (!objectHasOwn(target, tk) or !target.getAttr(tk).configurable) continue;
+                        if (!unchecked.remove(tk)) return self.throwError("TypeError", "ownKeys trap omitted a key on a non-extensible target");
+                    }
+                    if (unchecked.count() != 0) return self.throwError("TypeError", "ownKeys trap added a key absent from a non-extensible target");
+                }
+            }
             return list.items;
         }
-        return target.ownKeys(self.arena);
+        return self.objectOwnKeysList(target);
     }
 
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {

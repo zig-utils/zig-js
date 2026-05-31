@@ -346,6 +346,17 @@ pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 /// a per-index `enumerable:false` (from defineProperty) hides one.
 fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    // A Proxy's enumerable own string keys: [[OwnPropertyKeys]] (ownKeys trap)
+    // filtered by [[GetOwnProperty]] (getOwnPropertyDescriptor trap) enumerable.
+    if (o.proxy_handler != null or o.proxy_revoked) {
+        for (try self.proxyOwnKeys(o)) |k| {
+            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+            const desc = try objectGetOwnPropertyDescriptor(self, .undefined, &.{ .{ .object = o }, self.keyToValue(k) });
+            if (desc == .object and (try self.getProperty(desc, "enumerable")).toBoolean())
+                try list.append(self.arena, k);
+        }
+        return list.items;
+    }
     if (o.is_array) {
         var i: usize = 0;
         while (i < o.elements.items.len) : (i += 1) {
@@ -700,6 +711,20 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
     if (set) |s| {
         if (s != .undefined and !(s == .object and s.object.isCallableObject()))
             return self.throwError("TypeError", "Setter must be a function");
+    }
+    // [[DefineOwnProperty]] on a Proxy: invoke the `defineProperty` trap with the
+    // normalized descriptor object; a falsy result is a TypeError. An absent trap
+    // forwards to the target.
+    if (target.proxy_handler != null or target.proxy_revoked) {
+        if (target.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
+        const handler = target.proxy_handler.?;
+        const tgt = target.proxy_target.?;
+        const trap = try self.getProperty(.{ .object = handler }, "defineProperty");
+        if (trap == .undefined or trap == .null) return defineOne(self, tgt, key, d);
+        if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
+        const res = try self.callValueWithThis(trap, &.{ .{ .object = tgt }, self.keyToValue(key), .{ .object = d } }, .{ .object = handler });
+        if (!res.toBoolean()) return self.throwError("TypeError", "proxy 'defineProperty' trap returned falsish for property");
+        return;
     }
     // Array `length` is a data property { writable, !enumerable, !configurable }.
     // Redefining it can change the value (ToUint32, truncating/extending) and
@@ -1082,6 +1107,26 @@ pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []con
     return result;
 }
 
+/// CompletePropertyDescriptor ∘ FromPropertyDescriptor over a (possibly partial)
+/// descriptor object — fills omitted fields with their defaults and returns a
+/// fresh, fully-populated data or accessor descriptor object.
+fn completeDescriptor(self: *Interpreter, desc_obj: *value.Object) HostError!Value {
+    const getf = try descField(self, desc_obj, "get");
+    const setf = try descField(self, desc_obj, "set");
+    const is_accessor = getf != null or setf != null;
+    const out = (try self.newObject()).object;
+    if (is_accessor) {
+        try self.setMember(.{ .object = out }, "get", getf orelse .undefined);
+        try self.setMember(.{ .object = out }, "set", setf orelse .undefined);
+    } else {
+        try self.setMember(.{ .object = out }, "value", (try descField(self, desc_obj, "value")) orelse .undefined);
+        try self.setMember(.{ .object = out }, "writable", .{ .boolean = if (try descField(self, desc_obj, "writable")) |w| w.toBoolean() else false });
+    }
+    try self.setMember(.{ .object = out }, "enumerable", .{ .boolean = if (try descField(self, desc_obj, "enumerable")) |e| e.toBoolean() else false });
+    try self.setMember(.{ .object = out }, "configurable", .{ .boolean = if (try descField(self, desc_obj, "configurable")) |c| c.toBoolean() else false });
+    return .{ .object = out };
+}
+
 pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
@@ -1091,6 +1136,23 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     const key = try self.keyOf(arg(args, 1));
     // Private members are internal slots — invisible to reflection.
     if (value.isPrivateKey(key)) return .undefined;
+
+    // [[GetOwnProperty]] on a Proxy: the trap returns a descriptor object or
+    // undefined; the result is normalized (CompletePropertyDescriptor). An
+    // absent trap forwards to the target.
+    if (o.proxy_handler != null or o.proxy_revoked) {
+        if (o.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
+        const handler = o.proxy_handler.?;
+        const tgt = o.proxy_target.?;
+        const trap = try self.getProperty(.{ .object = handler }, "getOwnPropertyDescriptor");
+        if (trap == .undefined or trap == .null)
+            return objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ .{ .object = tgt }, arg(args, 1) });
+        if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap is not callable");
+        const res = try self.callValueWithThis(trap, &.{ .{ .object = tgt }, self.keyToValue(key) }, .{ .object = handler });
+        if (res == .undefined) return .undefined;
+        if (res != .object) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap must return an object or undefined");
+        return try completeDescriptor(self, res.object);
+    }
 
     if (o.getAccessor(key)) |acc| {
         const a = o.getAttr(key);
@@ -1147,15 +1209,10 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Val
     const result = try self.newArray();
     if (arg(args, 0) == .object) {
         const o = arg(args, 0).object;
-        if (o.is_array) {
-            var i: usize = 0;
-            while (i < o.elements.items.len) : (i += 1) {
-                try result.object.elements.append(self.arena, .{ .string = try std.fmt.allocPrint(self.arena, "{d}", .{i}) });
-            }
-        }
-        const keys = try o.ownKeys(self.arena);
-        for (keys) |k| {
-            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue; // symbol/private keys excluded from getOwnPropertyNames
+        // [[OwnPropertyKeys]] (proxy-aware, array-index/length-aware), string
+        // keys only (symbols go to getOwnPropertySymbols).
+        for (try self.objectOwnKeysList(o)) |k| {
+            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
             try result.object.elements.append(self.arena, .{ .string = k });
         }
     }
@@ -1487,16 +1544,39 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
             while (i < len) : (i += 1) {
                 const k = try std.fmt.allocPrint(a, "{d}", .{i});
                 const nv = try internalizeJson(self, val, k, reviver);
-                if (nv == .undefined) _ = try self.deleteOwn(o, k) else try self.setMember(val, k, nv);
+                try internalizeStore(self, o, val, k, nv);
             }
         } else {
-            for (try o.enumerableKeys(a)) |k| {
+            for (try ownEnumerableKeys(self, o)) |k| {
                 const nv = try internalizeJson(self, val, k, reviver);
-                if (nv == .undefined) _ = try self.deleteOwn(o, k) else try self.setMember(val, k, nv);
+                try internalizeStore(self, o, val, k, nv);
             }
         }
     }
     return self.callValueWithThis(reviver, &.{ .{ .string = key }, val }, holder);
+}
+
+/// InternalizeJSONProperty's store step: `undefined` ⇒ DeletePropertyOrThrow,
+/// else CreateDataProperty. On a Proxy these route through the deleteProperty /
+/// defineProperty traps (so a throwing trap propagates); a plain object takes
+/// the fast `setMember` path.
+fn internalizeStore(self: *Interpreter, o: *value.Object, val: Value, key: []const u8, nv: Value) HostError!void {
+    if (nv == .undefined) {
+        const ok = try self.deleteOwn(o, key); // routes to the proxy deleteProperty trap
+        if (!ok) return self.throwError("TypeError", "Cannot delete property");
+        return;
+    }
+    if (o.proxy_handler != null or o.proxy_revoked) {
+        // CreateDataProperty(o, key, nv) → the proxy defineProperty trap.
+        const desc = (try self.newObject()).object;
+        try desc.setOwn(self.arena, self.root_shape, "value", nv);
+        try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+        try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+        try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+        try defineOne(self, o, key, desc);
+        return;
+    }
+    try self.setMember(val, key, nv);
 }
 
 /// Explicit error set so the mutually-recursive parser methods don't form an
