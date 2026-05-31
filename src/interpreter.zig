@@ -3055,7 +3055,10 @@ pub const Interpreter = struct {
                         }
                     }
                 }
-                // Accessor or data, then walk the prototype chain.
+                // Accessor or data, then walk the prototype chain (a native/bound
+                // function with no explicit prototype inherits from
+                // %Function.prototype% — so `fn.constructor`, `fn.call` as a
+                // value, etc. resolve).
                 var cur: ?*value.Object = o;
                 while (cur) |c| {
                     if (c.getAccessor(key)) |acc| {
@@ -3067,7 +3070,7 @@ pub const Interpreter = struct {
                         return .undefined; // accessor with no getter
                     }
                     if (c.getOwn(key)) |v| return v;
-                    cur = c.proto;
+                    cur = self.effectiveProto(c);
                 }
                 // On the global object, an absent own property falls back to the
                 // global lexical bindings, so `globalThis.Math`, `this.parseInt`,
