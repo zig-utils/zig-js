@@ -3057,6 +3057,7 @@ pub const Interpreter = struct {
                     if (std.mem.eql(u8, key, "BYTES_PER_ELEMENT")) return .{ .number = @floatFromInt(ta.kind.byteSize()) };
                     if (arrayIndex(key)) |i| {
                         if (detached or i >= ta.length) return .undefined;
+                        if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
                         return value.taRead(ta, i);
                     }
                     // other keys (methods, constructor, @@toStringTag) fall through.
@@ -3423,8 +3424,16 @@ pub const Interpreter = struct {
             // in the buffer; out-of-bounds / detached writes are silently ignored
             // (a canonical numeric index never falls through to a named property).
             if (arrayIndex(key)) |i| {
-                const num = (try self.toNumberV(v));
-                if (!ta.buffer.array_buffer.?.detached and i < ta.length) value.taWrite(ta, i, num);
+                // A BigInt array coerces the value with ToBigInt (rejecting a
+                // Number), a numeric array with ToNumber. The coercion still runs
+                // (and can throw) even when the index is out of bounds/detached.
+                if (ta.kind.isBigInt()) {
+                    const bv = try self.toBigIntValueImpl(v, false);
+                    if (!ta.buffer.array_buffer.?.detached and i < ta.length) value.taWriteBig(ta, i, bv.object.bigint);
+                } else {
+                    const num = (try self.toNumberV(v));
+                    if (!ta.buffer.array_buffer.?.detached and i < ta.length) value.taWrite(ta, i, num);
+                }
                 return;
             }
             // non-index keys fall through to ordinary [[Set]].
@@ -3765,20 +3774,25 @@ pub const Interpreter = struct {
             return .{ .object = o };
         }
         if (a0 == .object and a0.object.typed_array != null) {
-            // new TA(typedArray): copy elements (converting numeric types).
+            // new TA(typedArray): copy elements (converting numeric types). A
+            // BigInt and a non-BigInt element type can't be mixed.
             const src = a0.object.typed_array.?;
+            if (src.kind.isBigInt() != kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when constructing a TypedArray");
             const length = src.length;
             ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
             var i: usize = 0;
-            while (i < length) : (i += 1) value.taWrite(ta, i, value.taRead(src, i).number);
+            while (i < length) : (i += 1) {
+                if (kind.isBigInt()) value.taWriteBig(ta, i, value.taReadBig(src, i)) else value.taWrite(ta, i, value.taRead(src, i).number);
+            }
             return .{ .object = o };
         }
         if (a0 == .object) {
-            // new TA(arrayLike | iterable): collect the values, then copy.
+            // new TA(arrayLike | iterable): collect the values, then coerce + copy
+            // (ToBigInt for a BigInt view, ToNumber otherwise).
             const list = try self.iterableOrArrayLikeToList(a0);
             ta.* = .{ .buffer = try self.makeArrayBuffer(list.len * size), .byte_offset = 0, .length = list.len, .kind = kind };
             var i: usize = 0;
-            while (i < list.len) : (i += 1) value.taWrite(ta, i, try self.toNumberV(list[i]));
+            while (i < list.len) : (i += 1) try self.taStore(ta, i, list[i]);
             return .{ .object = o };
         }
         // new TA(length)
@@ -3787,6 +3801,24 @@ pub const Interpreter = struct {
         const length: usize = @intFromFloat(len_f);
         ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
         return .{ .object = o };
+    }
+
+    /// Store `v` into typed-array element `i`, coercing per the element type:
+    /// ToBigInt for a BigInt view (rejecting a Number), ToNumber otherwise.
+    fn taStore(self: *Interpreter, ta: *value.TypedArrayData, i: usize, v: Value) EvalError!void {
+        if (ta.kind.isBigInt()) {
+            const bv = try self.toBigIntValueImpl(v, false);
+            value.taWriteBig(ta, i, bv.object.bigint);
+        } else {
+            value.taWrite(ta, i, try self.toNumberV(v));
+        }
+    }
+
+    /// Read typed-array element `i` as a Value (a BigInt for a BigInt view, a
+    /// Number otherwise).
+    fn taLoad(self: *Interpreter, ta: *const value.TypedArrayData, i: usize) EvalError!Value {
+        if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
+        return value.taRead(ta, i);
     }
 
     /// Collect an iterable's values (via `Symbol.iterator`) or an array-like's
@@ -7144,7 +7176,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         var idx = if (args.len > 0) @as(i64, @intFromFloat(@trunc((try self.toNumberV(args[0]))))) else 0;
         if (idx < 0) idx += @as(i64, @intCast(len));
         if (idx < 0 or idx >= len) return Value.undefined;
-        return value.taRead(ta, @intCast(idx));
+        return try self.taLoad(ta, @intCast(idx));
     }
     if (eq(name, "join")) {
         const sep = if (args.len > 0 and args[0] != .undefined) try self.toStringV(args[0]) else ",";
@@ -8392,6 +8424,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         value.TAKind.i8,  value.TAKind.u8,  value.TAKind.u8c,
         value.TAKind.i16, value.TAKind.u16, value.TAKind.i32,
         value.TAKind.u32, value.TAKind.f32, value.TAKind.f64,
+        value.TAKind.i64, value.TAKind.u64,
     }) |kind| {
         const proto = try a.create(value.Object);
         proto.* = .{ .proto = ta_proto };

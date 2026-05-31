@@ -40,13 +40,15 @@ pub const TAKind = enum {
     u32,
     f32,
     f64,
+    i64, // BigInt64Array  (elements are BigInt)
+    u64, // BigUint64Array (elements are BigInt)
 
     pub fn byteSize(self: TAKind) usize {
         return switch (self) {
             .i8, .u8, .u8c => 1,
             .i16, .u16 => 2,
             .i32, .u32, .f32 => 4,
-            .f64 => 8,
+            .f64, .i64, .u64 => 8,
         };
     }
 
@@ -62,11 +64,19 @@ pub const TAKind = enum {
             .u32 => "Uint32Array",
             .f32 => "Float32Array",
             .f64 => "Float64Array",
+            .i64 => "BigInt64Array",
+            .u64 => "BigUint64Array",
         };
     }
 
+    /// Whether the element type is BigInt (BigInt64Array / BigUint64Array): such
+    /// arrays read/write BigInt values rather than Numbers.
+    pub fn isBigInt(self: TAKind) bool {
+        return self == .i64 or self == .u64;
+    }
+
     pub fn fromName(name: []const u8) ?TAKind {
-        inline for (.{ .i8, .u8, .u8c, .i16, .u16, .i32, .u32, .f32, .f64 }) |k| {
+        inline for (.{ .i8, .u8, .u8c, .i16, .u16, .i32, .u32, .f32, .f64, .i64, .u64 }) |k| {
             if (std.mem.eql(u8, name, (@as(TAKind, k)).ctorName())) return k;
         }
         return null;
@@ -93,8 +103,32 @@ pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
         .u32 => @floatFromInt(std.mem.readInt(u32, bytes[off..][0..4], .little)),
         .f32 => @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[off..][0..4], .little)))),
         .f64 => @bitCast(std.mem.readInt(u64, bytes[off..][0..8], .little)),
+        // A BigInt element read as a Number is lossy, but keeps the Number-typed
+        // method paths crash-free; the interpreter's index get uses `taReadBig`.
+        .i64 => @floatFromInt(std.mem.readInt(i64, bytes[off..][0..8], .little)),
+        .u64 => @floatFromInt(std.mem.readInt(u64, bytes[off..][0..8], .little)),
     };
     return .{ .number = n };
+}
+
+/// Read a BigInt typed-array element `i` as an `i128` (the raw 64-bit value,
+/// sign-extended for BigInt64Array).
+pub fn taReadBig(ta: *const TypedArrayData, i: usize) i128 {
+    const bytes = ta.buffer.array_buffer.?.data;
+    const off = ta.byte_offset + i * ta.kind.byteSize();
+    return switch (ta.kind) {
+        .i64 => std.mem.readInt(i64, bytes[off..][0..8], .little),
+        .u64 => @as(i128, std.mem.readInt(u64, bytes[off..][0..8], .little)),
+        else => 0,
+    };
+}
+
+/// Write a BigInt typed-array element `i` from an `i128` (the low 64 bits).
+pub fn taWriteBig(ta: *const TypedArrayData, i: usize, val: i128) void {
+    const bytes = ta.buffer.array_buffer.?.data;
+    const off = ta.byte_offset + i * ta.kind.byteSize();
+    const low: u64 = @truncate(@as(u128, @bitCast(val)));
+    std.mem.writeInt(u64, bytes[off..][0..8], low, .little);
 }
 
 /// ToInt of `num` truncated to a wrapping integer width (NaN/±Inf → 0).
@@ -138,6 +172,10 @@ pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
         .u32 => std.mem.writeInt(u32, bytes[off..][0..4], taToInt(u32, num), .little),
         .f32 => std.mem.writeInt(u32, bytes[off..][0..4], @bitCast(@as(f32, @floatCast(num))), .little),
         .f64 => std.mem.writeInt(u64, bytes[off..][0..8], @bitCast(num), .little),
+        // A Number written to a BigInt array is only reached via the lossy
+        // Number-typed method paths; the index set uses `taWriteBig`.
+        .i64 => std.mem.writeInt(i64, bytes[off..][0..8], taToInt(i64, num), .little),
+        .u64 => std.mem.writeInt(u64, bytes[off..][0..8], taToInt(u64, num), .little),
     }
 }
 
