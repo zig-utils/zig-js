@@ -5643,6 +5643,10 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     if (args[0] != .string) return args[0]; // eval of a non-string is the identity
     const src = args[0].string;
     var parser = Parser.init(self.arena, src) catch return self.throwError("SyntaxError", "eval: invalid source");
+    // A direct eval (this engine runs eval code in the caller's scope) inherits
+    // the caller's strict mode, so the eval'd code's early errors — `var eval`,
+    // `eval = …`, `with`, duplicate params, … — are enforced under strict.
+    if (self.strict) parser.strict = true;
     const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "eval: parse error");
     return self.eval(prog);
 }
