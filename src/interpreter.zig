@@ -1123,7 +1123,19 @@ pub const Interpreter = struct {
     }
 
     fn evalUpdate(self: *Interpreter, inc: bool, prefix: bool, target: *Node) EvalError!Value {
-        const old = (try self.eval(target)).toNumber();
+        var old_val = try self.eval(target);
+        // ToNumeric: an object operand coerces via ToPrimitive(number); a BigInt
+        // is incremented/decremented by 1n (not the Number 1), and the result
+        // stays a BigInt.
+        if (old_val == .object and !old_val.object.is_bigint and !old_val.object.is_symbol)
+            old_val = try self.toPrimitive(old_val, .number);
+        if (old_val == .object and old_val.object.is_bigint) {
+            const b = old_val.object.bigint;
+            const updated = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
+            try self.assignTo(target, updated);
+            return if (prefix) updated else old_val;
+        }
+        const old = old_val.toNumber();
         const updated = if (inc) old + 1 else old - 1;
         try self.assignTo(target, .{ .number = updated });
         return .{ .number = if (prefix) updated else old };
@@ -2063,17 +2075,26 @@ pub const Interpreter = struct {
 
     /// ToBigInt(v): a boolean/number(integer)/string/BigInt converts; a
     /// non-integer Number is a RangeError; null/undefined/Symbol a TypeError.
+    /// ToBigInt(v) (`number_ok = false`) or the `BigInt(v)` constructor's
+    /// NumberToBigInt (`number_ok = true`). The only difference is a Number
+    /// argument: ToBigInt rejects it (TypeError), while the constructor converts
+    /// an integral Number to the matching BigInt.
     pub fn toBigIntValue(self: *Interpreter, v: Value) EvalError!Value {
+        return self.toBigIntValueImpl(v, false);
+    }
+
+    pub fn toBigIntValueImpl(self: *Interpreter, v: Value, number_ok: bool) EvalError!Value {
         switch (v) {
             .object => |o| {
                 if (o.is_bigint) return v;
                 if (o.is_symbol) return self.throwError("TypeError", "Cannot convert a Symbol value to a BigInt");
                 const p = try self.toPrimitive(v, .number);
-                if (p == .object and !p.object.is_bigint) return self.throwError("TypeError", "Cannot convert object to a BigInt");
-                return self.toBigIntValue(p);
+                if (p == .object and !p.object.is_bigint and !p.object.is_symbol) return self.throwError("TypeError", "Cannot convert object to a BigInt");
+                return self.toBigIntValueImpl(p, number_ok);
             },
             .boolean => |b| return self.makeBigInt(if (b) 1 else 0),
             .number => |n| {
+                if (!number_ok) return self.throwError("TypeError", "Cannot convert a Number to a BigInt; use BigInt()");
                 if (std.math.isNan(n) or std.math.isInf(n) or @trunc(n) != n)
                     return self.throwError("RangeError", "The number is not a safe integer");
                 return self.makeBigInt(@intFromFloat(n));
@@ -5523,7 +5544,9 @@ pub const Interpreter = struct {
                 if (fnv.isCallable()) {
                     user_tried += 1;
                     const res = try self.callValueWithThis(fnv, &.{}, v);
-                    if (res != .object) return res;
+                    // A BigInt or Symbol result is a primitive (it is represented
+                    // as an object internally), so it ends ToPrimitive too.
+                    if (res != .object or res.object.is_bigint or res.object.is_symbol) return res;
                 }
             }
         }
@@ -6784,12 +6807,21 @@ fn formatBigIntRadix(arena: std.mem.Allocator, val: i128, radix: u8) error{OutOf
     return arena.dupe(u8, buf[i..]);
 }
 
-/// `BigInt(value)` — ToBigInt; not a constructor.
+/// `BigInt(value)` — NumberToBigInt for an integral Number, else ToBigInt; not a
+/// constructor. ToPrimitive(number) is applied to an object argument first
+/// (handled inside `toBigIntValueImpl`).
 fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target != .undefined) return self.throwError("TypeError", "BigInt is not a constructor");
-    return self.toBigIntValue(if (args.len > 0) args[0] else .undefined);
+    return self.toBigIntValueImpl(if (args.len > 0) args[0] else .undefined, true);
+}
+
+fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const big: i128 = if (this == .object and this.object.is_bigint) this.object.bigint else if (this == .object and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) this.object.prim.?.object.bigint else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
+    return .{ .string = try formatBigIntRadix(self.arena, big, 10) };
 }
 
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
@@ -6805,6 +6837,8 @@ fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this == .object and this.object.is_bigint) return this;
+    // A BigInt wrapper object (`Object(1n)`) unwraps to its boxed BigInt.
+    if (this == .object and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) return this.object.prim.?;
     return self.throwError("TypeError", "BigInt.prototype.valueOf requires that 'this' be a BigInt");
 }
 
@@ -6815,17 +6849,28 @@ fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = this;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            // ToIndex(bits) first (the Number coercion runs valueOf and rejects a
+            // Symbol/BigInt), then ToBigInt(x) (which rejects a Number) — matching
+            // the spec's step order.
             const bits_f = if (args.len > 0) try self.toNumberV(args[0]) else 0;
-            if (bits_f < 0 or @trunc(bits_f) != bits_f or bits_f > 127) return self.throwError("RangeError", "Invalid bit count for BigInt.asIntN");
-            const bits: u7 = @intFromFloat(bits_f);
-            const xv = try self.toBigIntValue(if (args.len > 1) args[1] else .undefined);
+            const bits_int = if (std.math.isNan(bits_f)) 0 else @trunc(bits_f);
+            if (bits_int < 0 or bits_int > 9007199254740991.0) return self.throwError("RangeError", "BigInt.asIntN bit count is out of range");
+            const bits_count: u64 = @intFromFloat(bits_int);
+            const xv = try self.toBigIntValueImpl(if (args.len > 1) args[1] else .undefined, false);
             const x = xv.object.bigint;
-            if (bits == 0) return self.makeBigInt(0);
-            const modulus: i128 = @as(i128, 1) << bits;
-            var m = @mod(x, modulus); // [0, 2^bits)
-            if (m < 0) m += modulus;
-            if (signed and m >= (modulus >> 1)) m -= modulus;
-            return self.makeBigInt(m);
+            if (bits_count == 0) return self.makeBigInt(if (signed) 0 else 0);
+            // For a field at least as wide as the i128 storage, a signed result is
+            // x unchanged and a non-negative unsigned result is x unchanged (a
+            // negative value in a ≥128-bit unsigned field exceeds i128 and isn't
+            // modeled).
+            if (bits_count >= 128) return self.makeBigInt(x);
+            const bits: u7 = @intCast(bits_count);
+            const mask: u128 = (@as(u128, 1) << bits) - 1;
+            var m: u128 = @as(u128, @bitCast(x)) & mask; // low `bits` bits = x mod 2^bits
+            if (signed and (m & (@as(u128, 1) << (bits - 1))) != 0) {
+                m |= ~mask; // sign-extend the high bits → a negative i128
+            }
+            return self.makeBigInt(@bitCast(m));
         }
     }.call;
 }
@@ -7645,6 +7690,15 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         bi_proto.* = .{ .proto = object_proto };
         try setNative(a, root_shape, bi_proto, "toString", 0, bigIntToStringFn);
         try setNative(a, root_shape, bi_proto, "valueOf", 0, bigIntValueOfFn);
+        try setNative(a, root_shape, bi_proto, "toLocaleString", 0, bigIntToLocaleStringFn);
+        // BigInt.prototype[Symbol.toStringTag] = "BigInt" (so
+        // `Object.prototype.toString.call(1n)` → "[object BigInt]").
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
+                try bi_proto.setOwn(a, root_shape, tt.object.sym_key, .{ .string = "BigInt" });
+                try bi_proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            };
+        };
         const bi_ns = try a.create(value.Object);
         bi_ns.* = .{ .native = bigIntFn };
         try installNativeProps(a, root_shape, bi_ns, "BigInt", 1);
