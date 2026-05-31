@@ -8263,6 +8263,407 @@ fn arrayBufferIsViewFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     return .{ .boolean = v == .object and (v.object.typed_array != null or v.object.data_view != null) };
 }
 
+// ===== Intl (ECMA-402) ===============================================
+// A structural + en-centric core: the namespace, getCanonicalLocales, Locale,
+// and the formatter/Collator/PluralRules constructors with `format`/`compare`/
+// `select`/`resolvedOptions`. Locale-specific output uses sensible English
+// defaults (no CLDR data).
+
+/// Canonicalize a single BCP-47 tag (case-normalize the subtags). Returns null
+/// for a structurally invalid tag.
+fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
+    if (tag.len == 0) return null;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var first = true;
+    var idx: usize = 0;
+    var it = std.mem.splitScalar(u8, tag, '-');
+    while (it.next()) |part| : (idx += 1) {
+        if (part.len == 0 or part.len > 8) return null;
+        for (part) |c| if (!std.ascii.isAlphanumeric(c)) return null;
+        if (!first) out.append(a, '-') catch return null;
+        // Subtag casing: language (first) lower; 4-char script Titlecase;
+        // 2-char region UPPER; else lower.
+        if (idx == 0) {
+            if (part.len < 2 or part.len > 8) return null;
+            for (part) |c| out.append(a, std.ascii.toLower(c)) catch return null;
+        } else if (part.len == 4 and std.ascii.isAlphabetic(part[0])) {
+            out.append(a, std.ascii.toUpper(part[0])) catch return null;
+            for (part[1..]) |c| out.append(a, std.ascii.toLower(c)) catch return null;
+        } else if (part.len == 2 and std.ascii.isAlphabetic(part[0])) {
+            for (part) |c| out.append(a, std.ascii.toUpper(c)) catch return null;
+        } else {
+            for (part) |c| out.append(a, std.ascii.toLower(c)) catch return null;
+        }
+        first = false;
+    }
+    return out.toOwnedSlice(a) catch null;
+}
+
+/// CanonicalizeLocaleList: a string → [tag]; an array → each element ToString'd,
+/// validated, canonicalized, and de-duplicated.
+fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object {
+    const arr = (try self.newArray()).object;
+    if (v == .undefined) return arr;
+    if (v == .string) {
+        const c = canonicalizeLocaleTag(self.arena, v.string) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+        try arr.elements.append(self.arena, .{ .string = c });
+        return arr;
+    }
+    if (v != .object) return self.throwError("TypeError", "Intl: locales must be a string or an array");
+    const len = toLen((try self.toNumberV(try self.getProperty(v, "length"))));
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const ev = try self.getProperty(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+        if (ev != .string and ev != .object) return self.throwError("TypeError", "Intl: locale must be a string or object");
+        const s = try self.toStringV(ev);
+        const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+        var dup = false;
+        for (arr.elements.items) |e| if (std.mem.eql(u8, e.string, c)) {
+            dup = true;
+        };
+        if (!dup) try arr.elements.append(self.arena, .{ .string = c });
+    }
+    return arr;
+}
+
+fn intlGetCanonicalLocalesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const arr = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
+    return .{ .object = arr };
+}
+
+fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const key = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+    const arr = (try self.newArray()).object;
+    const items: []const []const u8 = if (std.mem.eql(u8, key, "calendar"))
+        &.{"iso8601"}
+    else if (std.mem.eql(u8, key, "numberingSystem"))
+        &.{"latn"}
+    else if (std.mem.eql(u8, key, "currency"))
+        &.{ "USD", "EUR", "GBP", "JPY" }
+    else if (std.mem.eql(u8, key, "timeZone"))
+        &.{"UTC"}
+    else if (std.mem.eql(u8, key, "collation"))
+        &.{"default"}
+    else if (std.mem.eql(u8, key, "unit"))
+        &.{ "meter", "second", "kilogram" }
+    else
+        return self.throwError("RangeError", "Intl.supportedValuesOf: invalid key");
+    for (items) |s| try arr.elements.append(self.arena, .{ .string = s });
+    return .{ .object = arr };
+}
+
+// ---- Intl.Locale ----------------------------------------------------
+
+fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Intl.Locale requires 'new'");
+    const tagv = if (args.len > 0) args[0] else .undefined;
+    const tag_raw = if (tagv == .object and tagv.object.getOwn("\x00locale") != null)
+        tagv.object.getOwn("\x00locale").?.string
+    else
+        try self.toStringV(tagv);
+    const canon = canonicalizeLocaleTag(self.arena, tag_raw) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+    const o = (try self.newObject()).object;
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    try self.setProp(o, "\x00locale", .{ .string = canon });
+    try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+    return .{ .object = o };
+}
+
+const LocaleField = enum { base_name, language, script, region };
+fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale accessor on incompatible receiver");
+            const tag = this.object.getOwn("\x00locale").?.string;
+            // baseName is the tag up to any "-u-"/"-x-" extension; the language/
+            // script/region are its first matching subtags.
+            const base = if (std.mem.indexOf(u8, tag, "-u-")) |k| tag[0..k] else tag;
+            if (f == .base_name) return .{ .string = base };
+            var it = std.mem.splitScalar(u8, base, '-');
+            const lang = it.next() orelse "";
+            if (f == .language) return .{ .string = lang };
+            while (it.next()) |part| {
+                if (f == .script and part.len == 4 and std.ascii.isAlphabetic(part[0])) return .{ .string = part };
+                if (f == .region and (part.len == 2 or part.len == 3)) return .{ .string = part };
+            }
+            return .undefined;
+        }
+    }.call;
+}
+
+fn intlLocaleToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.toString on incompatible receiver");
+    return this.object.getOwn("\x00locale").?;
+}
+
+// ---- Intl formatter constructors (en-centric) -----------------------
+
+/// A generic Intl service constructor: stores the resolved locale, marks the
+/// brand with `\x00intl` = `service`, and supports `new`-less call for the few
+/// services that allow it (NumberFormat/DateTimeFormat/Collator).
+fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = this;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const can_call = comptime (std.mem.eql(u8, service, "NumberFormat") or std.mem.eql(u8, service, "DateTimeFormat") or std.mem.eql(u8, service, "Collator"));
+            const o = blk: {
+                if (self.new_target == .object) {
+                    const oo = (try self.newObject()).object;
+                    oo.proto = try self.protoObject(self.new_target.object);
+                    break :blk oo;
+                }
+                if (!can_call) return self.throwError("TypeError", "Constructor Intl." ++ service ++ " requires 'new'");
+                // Called as a function: `this` is ignored, a fresh instance is made
+                // with the service's own prototype (found via the Intl namespace).
+                const oo = (try self.newObject()).object;
+                if (self.global_object) |g| if (g.getOwn("Intl")) |iv| if (iv == .object) {
+                    if (iv.object.getOwn(service)) |cv| if (cv == .object) {
+                        if (cv.object.getOwn("prototype")) |pv| if (pv == .object) {
+                            oo.proto = pv.object;
+                        };
+                    };
+                };
+                break :blk oo;
+            };
+            // Resolve the locale (first requested, else "en").
+            const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
+            const resolved: []const u8 = if (locs.elements.items.len > 0) locs.elements.items[0].string else "en";
+            try self.setProp(o, "\x00intl", .{ .string = service });
+            try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
+            try self.setProp(o, "\x00locale", .{ .string = resolved });
+            try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+            // Keep the options object (if any) for resolvedOptions.
+            if (args.len > 1 and args[1] == .object) {
+                try self.setProp(o, "\x00opts", args[1]);
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            }
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+fn intlBrandOk(this: Value, service: []const u8) bool {
+    return this == .object and this.object.getOwn("\x00intl") != null and std.mem.eql(u8, this.object.getOwn("\x00intl").?.string, service);
+}
+
+/// Format a Number for Intl.NumberFormat — `en`-style grouping with commas.
+fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.format on incompatible receiver");
+    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    if (std.math.isNan(n)) return .{ .string = "NaN" };
+    if (std.math.isInf(n)) return .{ .string = if (n < 0) "-∞" else "∞" };
+    const neg = n < 0;
+    const mag = @abs(n);
+    const int_part: u64 = @intFromFloat(@floor(mag));
+    const digits = try std.fmt.allocPrint(self.arena, "{d}", .{int_part});
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    if (neg) try buf.append(self.arena, '-');
+    // Group the integer part in threes.
+    const first_group = digits.len % 3;
+    for (digits, 0..) |c, i| {
+        if (i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
+        try buf.append(self.arena, c);
+    }
+    // Up to 3 fraction digits (trailing zeros trimmed).
+    const frac = mag - @floor(mag);
+    if (frac > 0) {
+        const scaled: u64 = @intFromFloat(@round(frac * 1000));
+        if (scaled > 0) {
+            var fb: [3]u8 = undefined;
+            _ = std.fmt.bufPrint(&fb, "{d:0>3}", .{scaled}) catch {};
+            var flen: usize = 3;
+            while (flen > 0 and fb[flen - 1] == '0') flen -= 1;
+            try buf.append(self.arena, '.');
+            try buf.appendSlice(self.arena, fb[0..flen]);
+        }
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "Collator")) return self.throwError("TypeError", "Intl.Collator.prototype.compare on incompatible receiver");
+    const x = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+    const y = try self.toStringV(if (args.len > 1) args[1] else .undefined);
+    const ord = std.mem.order(u8, x, y);
+    return .{ .number = switch (ord) {
+        .lt => -1,
+        .gt => 1,
+        .eq => 0,
+    } };
+}
+
+fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "PluralRules")) return self.throwError("TypeError", "Intl.PluralRules.prototype.select on incompatible receiver");
+    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    // English cardinal rule: 1 → "one", everything else → "other".
+    return .{ .string = if (n == 1) "one" else "other" };
+}
+
+fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "ListFormat")) return self.throwError("TypeError", "Intl.ListFormat.prototype.format on incompatible receiver");
+    const v = if (args.len > 0) args[0] else Value.undefined;
+    if (v == .undefined) return .{ .string = "" };
+    const list = try self.iterableOrArrayLikeToList(v);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (list, 0..) |item, i| {
+        if (item != .string) return self.throwError("TypeError", "Intl.ListFormat: list items must be strings");
+        if (i != 0) {
+            if (i == list.len - 1) try buf.appendSlice(self.arena, if (list.len == 2) " and " else ", and ") else try buf.appendSlice(self.arena, ", ");
+        }
+        try buf.appendSlice(self.arena, item.string);
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!intlBrandOk(this, service)) return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
+            const o = (try self.newObject()).object;
+            const loc = this.object.getOwn("\x00locale") orelse Value{ .string = "en" };
+            try self.setProp(o, "locale", loc);
+            try self.setProp(o, "numberingSystem", .{ .string = "latn" });
+            if (comptime std.mem.eql(u8, service, "NumberFormat")) {
+                try self.setProp(o, "style", .{ .string = "decimal" });
+                try self.setProp(o, "minimumIntegerDigits", .{ .number = 1 });
+                try self.setProp(o, "useGrouping", .{ .string = "auto" });
+            } else if (comptime std.mem.eql(u8, service, "Collator")) {
+                try self.setProp(o, "usage", .{ .string = "sort" });
+                try self.setProp(o, "sensitivity", .{ .string = "variant" });
+                try self.setProp(o, "caseFirst", .{ .string = "false" });
+                try self.setProp(o, "collation", .{ .string = "default" });
+                try self.setProp(o, "numeric", .{ .boolean = false });
+            } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
+                try self.setProp(o, "type", .{ .string = "cardinal" });
+            } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
+                try self.setProp(o, "calendar", .{ .string = "iso8601" });
+                try self.setProp(o, "timeZone", .{ .string = "UTC" });
+            }
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    // No CLDR data: report every requested locale as supported.
+    const arr = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
+    return .{ .object = arr };
+}
+
+/// Install the `Intl` namespace and its services.
+fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+    const ns = try a.create(value.Object);
+    ns.* = .{ .proto = object_proto };
+    if (tag) |k| {
+        try ns.setOwn(a, rs, k, .{ .string = "Intl" });
+        try ns.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    try setNative(a, rs, ns, "getCanonicalLocales", 1, intlGetCanonicalLocalesFn);
+    try setNative(a, rs, ns, "supportedValuesOf", 1, intlSupportedValuesOfFn);
+
+    // Helper to register one Intl service constructor with a prototype.
+    const Svc = struct {
+        fn install(self_a: std.mem.Allocator, shp: *Shape, e: *Environment, namespace: *value.Object, op: *value.Object, name: []const u8, arity: usize, ctor_fn: value.NativeFn, ttag: ?[]const u8) EvalError!*value.Object {
+            const proto = try self_a.create(value.Object);
+            proto.* = .{ .proto = op };
+            const ctor = try self_a.create(value.Object);
+            ctor.* = .{ .native = ctor_fn, .native_ctor = true };
+            try installNativeProps(self_a, shp, ctor, name, arity);
+            try setNative(self_a, shp, ctor, "supportedLocalesOf", 1, intlSupportedLocalesOfFn);
+            try ctor.setOwn(self_a, shp, "prototype", .{ .object = proto });
+            try ctor.setAttr(self_a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+            try setConstructor(self_a, shp, proto, ctor);
+            if (ttag) |k| {
+                const full = std.fmt.allocPrint(self_a, "Intl.{s}", .{name}) catch name;
+                try proto.setOwn(self_a, shp, k, .{ .string = full });
+                try proto.setAttr(self_a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+            }
+            _ = e;
+            try namespace.setOwn(self_a, shp, name, .{ .object = ctor });
+            try namespace.setAttr(self_a, name, .{ .writable = true, .enumerable = false, .configurable = true });
+            return proto;
+        }
+    };
+
+    {
+        const p = try Svc.install(a, rs, env, ns, object_proto, "NumberFormat", 0, intlServiceConstructorFn("NumberFormat"), tag);
+        try setNative(a, rs, p, "format", 1, intlNumberFormatFn);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("NumberFormat"));
+    }
+    {
+        const p = try Svc.install(a, rs, env, ns, object_proto, "DateTimeFormat", 0, intlServiceConstructorFn("DateTimeFormat"), tag);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DateTimeFormat"));
+    }
+    {
+        const p = try Svc.install(a, rs, env, ns, object_proto, "Collator", 0, intlServiceConstructorFn("Collator"), tag);
+        try setNative(a, rs, p, "compare", 2, intlCollatorCompareFn);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("Collator"));
+    }
+    {
+        const p = try Svc.install(a, rs, env, ns, object_proto, "PluralRules", 0, intlServiceConstructorFn("PluralRules"), tag);
+        try setNative(a, rs, p, "select", 1, intlPluralSelectFn);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("PluralRules"));
+    }
+    {
+        const p = try Svc.install(a, rs, env, ns, object_proto, "ListFormat", 0, intlServiceConstructorFn("ListFormat"), tag);
+        try setNative(a, rs, p, "format", 1, intlListFormatFn);
+    }
+    inline for (.{ "RelativeTimeFormat", "DisplayNames", "Segmenter" }) |svc| {
+        _ = try Svc.install(a, rs, env, ns, object_proto, svc, 0, intlServiceConstructorFn(svc), tag);
+    }
+
+    // Intl.Locale.
+    {
+        const proto = try a.create(value.Object);
+        proto.* = .{ .proto = object_proto };
+        try setNativeGetter(a, rs, proto, "baseName", intlLocaleGetter(.base_name));
+        try setNativeGetter(a, rs, proto, "language", intlLocaleGetter(.language));
+        try setNativeGetter(a, rs, proto, "script", intlLocaleGetter(.script));
+        try setNativeGetter(a, rs, proto, "region", intlLocaleGetter(.region));
+        try setNative(a, rs, proto, "toString", 0, intlLocaleToStringFn);
+        if (tag) |k| {
+            try proto.setOwn(a, rs, k, .{ .string = "Intl.Locale" });
+            try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        const ctor = try a.create(value.Object);
+        ctor.* = .{ .native = intlLocaleConstructorFn, .native_ctor = true };
+        try installNativeProps(a, rs, ctor, "Locale", 1);
+        try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, rs, proto, ctor);
+        try ns.setOwn(a, rs, "Locale", .{ .object = ctor });
+        try ns.setAttr(a, "Locale", .{ .writable = true, .enumerable = false, .configurable = true });
+    }
+
+    try env.put("Intl", .{ .object = ns });
+}
+
 // ===== SharedArrayBuffer =============================================
 
 /// `new SharedArrayBuffer(byteLength, { maxByteLength }?)`.
@@ -9680,6 +10081,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installIterator(env, rs, object_proto);
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
+    try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
     {
         const proto = try a.create(value.Object);
