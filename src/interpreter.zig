@@ -2260,7 +2260,7 @@ pub const Interpreter = struct {
         const nan = std.math.nan(f64);
         if (eq(name, "getTime") or eq(name, "valueOf")) return Value{ .number = t };
         if (eq(name, "setTime")) {
-            var nt = (try self.toPrimitive(arg0(args), .number)).toNumber();
+            var nt = try self.toNumberV(arg0(args));
             if (@abs(nt) > 8.64e15) nt = nan;
             try self.setProp(o, "__t", .{ .number = nt });
             return Value{ .number = nt };
@@ -2269,8 +2269,15 @@ pub const Interpreter = struct {
         // ---- setters ----------------------------------------------------------
         if (std.mem.startsWith(u8, name, "set")) {
             const fy = eq(name, "setFullYear") or eq(name, "setUTCFullYear");
-            // Non-fullyear setters on an invalid date stay invalid; setFullYear
-            // revives it from a zero base.
+            // ToNumber each provided argument once, left-to-right (object args
+            // invoke valueOf exactly once), BEFORE consulting the stored time —
+            // the spec reads [[DateValue]] first (captured in `t` above) but still
+            // coerces every argument even when the date is invalid. A Symbol/
+            // BigInt argument throws here (toNumberV).
+            const a = try self.arena.alloc(Value, args.len);
+            for (args, 0..) |av, idx| a[idx] = .{ .number = try self.toNumberV(av) };
+            // Non-fullyear setters on an invalid date stay invalid (arguments were
+            // still coerced above); setFullYear revives it from a zero base.
             if (std.math.isNan(t) and !fy) return Value{ .number = nan };
             const c = dateDecompose(if (std.math.isNan(t)) 0 else t);
             var y: f64 = @floatFromInt(c.y);
@@ -2280,9 +2287,6 @@ pub const Interpreter = struct {
             var mi: f64 = @floatFromInt(c.mi);
             var s: f64 = @floatFromInt(c.s);
             var ms: f64 = @floatFromInt(c.ms);
-            // ToNumber each argument once (object args invoke valueOf exactly once).
-            const a = try self.arena.alloc(Value, args.len);
-            for (args, 0..) |av, idx| a[idx] = .{ .number = (try self.toPrimitive(av, .number)).toNumber() };
             if (fy) {
                 y = arg0(a).toNumber();
                 if (a.len > 1) mo = a[1].toNumber();
