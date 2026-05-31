@@ -338,6 +338,11 @@ pub const Object = struct {
     /// RegExp.prototype accessor getters (not instance own data properties).
     regex_source: []const u8 = "",
     regex_flags: []const u8 = "",
+    /// A `WeakRef`'s target (the held value). Non-null marks a WeakRef; with no
+    /// real GC the target is never reclaimed, so `deref()` always returns it.
+    weak_ref_target: ?Value = null,
+    /// Marks a `FinalizationRegistry` (its cleanup callback never fires — no GC).
+    is_finalization_registry: bool = false,
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {

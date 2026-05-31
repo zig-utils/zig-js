@@ -1689,8 +1689,9 @@ pub const Interpreter = struct {
         // AggregateError(errors, message, options) shifts message/options by one
         // and carries an own `errors` array built from the first (iterable) arg.
         const aggregate = std.mem.eql(u8, name, "AggregateError");
-        const msg_i: usize = if (aggregate) 1 else 0;
-        const opt_i: usize = if (aggregate) 2 else 1;
+        const suppressed = std.mem.eql(u8, name, "SuppressedError");
+        const msg_i: usize = if (aggregate) 1 else if (suppressed) 2 else 0;
+        const opt_i: usize = if (aggregate) 2 else if (suppressed) 3 else 1;
 
         // The message is ToString'd (via ToPrimitive(string), so an object's
         // toString/valueOf runs); a Symbol message throws a TypeError.
@@ -1710,6 +1711,15 @@ pub const Interpreter = struct {
                 try self.newArray();
             try self.setProp(err.object, "errors", errs);
             try err.object.setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
+        }
+
+        if (suppressed) {
+            // SuppressedError(error, suppressed, message): the first two arguments
+            // become non-enumerable own `error` / `suppressed` properties.
+            try self.setProp(err.object, "error", if (args.len > 0) args[0] else .undefined);
+            try err.object.setAttr(self.arena, "error", .{ .enumerable = false, .configurable = true, .writable = true });
+            try self.setProp(err.object, "suppressed", if (args.len > 1) args[1] else .undefined);
+            try err.object.setAttr(self.arena, "suppressed", .{ .enumerable = false, .configurable = true, .writable = true });
         }
 
         // ES2022 `cause` option: `new Error(msg, { cause })` installs a
@@ -7121,6 +7131,111 @@ fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) v
 }
 
 /// Install `DataView` (constructor + prototype get/set accessors and methods).
+/// CanBeHeldWeakly(v): an Object or a Symbol (a BigInt or a primitive is not).
+fn canBeHeldWeakly(v: Value) bool {
+    return v == .object and !v.object.is_bigint;
+}
+
+fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor WeakRef requires 'new'");
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "WeakRef: target must be an object or a symbol");
+    const o = (try self.newObject()).object;
+    o.weak_ref_target = target;
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+fn weakRefDerefFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.weak_ref_target == null) return self.throwError("TypeError", "WeakRef.prototype.deref called on a non-WeakRef");
+    return this.object.weak_ref_target.?;
+}
+
+fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor FinalizationRegistry requires 'new'");
+    const cb = if (args.len > 0) args[0] else .undefined;
+    if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry: cleanup callback must be callable");
+    const o = (try self.newObject()).object;
+    o.is_finalization_registry = true;
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or !this.object.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.register called on an incompatible receiver");
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "FinalizationRegistry.register: target must be an object or a symbol");
+    const held = if (args.len > 1) args[1] else .undefined;
+    if (value.strictEquals(target, held)) return self.throwError("TypeError", "FinalizationRegistry.register: target and held value must not be the same");
+    const token = if (args.len > 2) args[2] else Value.undefined;
+    if (token != .undefined and !canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.register: unregister token must be an object or a symbol");
+    // No real GC, so the cleanup callback never runs; registration is a no-op.
+    return .undefined;
+}
+
+fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or !this.object.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.unregister called on an incompatible receiver");
+    const token = if (args.len > 0) args[0] else .undefined;
+    if (!canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.unregister: token must be an object or a symbol");
+    return .{ .boolean = false }; // nothing is ever registered
+}
+
+/// Install `WeakRef` and `FinalizationRegistry` (the cleanup callback never
+/// fires — there is no garbage collector — but the full API surface and brand
+/// checks are present).
+fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const tt: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+    // WeakRef.
+    {
+        const proto = try a.create(value.Object);
+        proto.* = .{ .proto = object_proto };
+        try setNative(a, rs, proto, "deref", 0, weakRefDerefFn);
+        if (tt) |k| {
+            try proto.setOwn(a, rs, k, .{ .string = "WeakRef" });
+            try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        const ctor = try a.create(value.Object);
+        ctor.* = .{ .native = weakRefConstructorFn, .native_ctor = true };
+        try installNativeProps(a, rs, ctor, "WeakRef", 1);
+        try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, rs, proto, ctor);
+        try env.put("WeakRef", .{ .object = ctor });
+    }
+    // FinalizationRegistry.
+    {
+        const proto = try a.create(value.Object);
+        proto.* = .{ .proto = object_proto };
+        try setNative(a, rs, proto, "register", 2, finRegRegisterFn);
+        try setNative(a, rs, proto, "unregister", 1, finRegUnregisterFn);
+        if (tt) |k| {
+            try proto.setOwn(a, rs, k, .{ .string = "FinalizationRegistry" });
+            try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        const ctor = try a.create(value.Object);
+        ctor.* = .{ .native = finalizationRegistryConstructorFn, .native_ctor = true };
+        try installNativeProps(a, rs, ctor, "FinalizationRegistry", 1);
+        try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, rs, proto, ctor);
+        try env.put("FinalizationRegistry", .{ .object = ctor });
+    }
+}
+
 fn installDataView(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
     const proto = try a.create(value.Object);
@@ -7663,14 +7778,17 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol: ?*value.Object) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
-        "Error",       "TypeError", "RangeError", "ReferenceError",
-        "SyntaxError", "EvalError",  "URIError",   "AggregateError",
+        "Error",       "TypeError", "RangeError",     "ReferenceError",
+        "SyntaxError", "EvalError",  "URIError",      "AggregateError",
+        "SuppressedError",
     };
     for (error_names) |name| {
         const o = try a.create(value.Object);
         o.* = .{ .error_ctor = name };
-        // AggregateError(errors, message) has arity 2; the others (message) 1.
-        try installNativeProps(a, root_shape, o, name, if (std.mem.eql(u8, name, "AggregateError")) 2 else 1);
+        // AggregateError(errors, message) has arity 2; SuppressedError(error,
+        // suppressed, message) arity 3; the others (message) 1.
+        const arity: usize = if (std.mem.eql(u8, name, "SuppressedError")) 3 else if (std.mem.eql(u8, name, "AggregateError")) 2 else 1;
+        try installNativeProps(a, root_shape, o, name, arity);
         try env.put(name, .{ .object = o });
     }
     try env.put("NaN", .{ .number = std.math.nan(f64) });
@@ -8822,6 +8940,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     }
 
     try installDataView(env, rs, object_proto);
+    try installWeakRefAndFinReg(env, rs, object_proto);
 }
 
 fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {
