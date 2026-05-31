@@ -6639,6 +6639,22 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     try installSetProto(env, root_shape);
     try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.mapFn);
     try defineGlobalFnC(env, root_shape, "WeakSet", 0, true, builtins.setFn);
+    // WeakMap/WeakSet instances reuse the Map/Set internals (is_map/is_set), but
+    // their prototypes are distinct and carry only the weak subset as real own
+    // methods (so `typeof WeakMap.prototype.set === "function"`, `.call`, and
+    // reflection work). No clear/forEach/iterators on the weak collections.
+    if (env.get("WeakMap")) |wm| if (wm == .object) {
+        if (wm.object.getOwn("prototype")) |pv| if (pv == .object) {
+            inline for (.{ .{ "set", 2 }, .{ "get", 1 }, .{ "has", 1 }, .{ "delete", 1 }, .{ "getOrInsert", 2 }, .{ "getOrInsertComputed", 2 } }) |s|
+                try setNative(a, root_shape, pv.object, s[0], s[1], mapProtoMethod(s[0]));
+        };
+    };
+    if (env.get("WeakSet")) |ws| if (ws == .object) {
+        if (ws.object.getOwn("prototype")) |pv| if (pv == .object) {
+            inline for (.{ .{ "add", 1 }, .{ "has", 1 }, .{ "delete", 1 } }) |s|
+                try setNative(a, root_shape, pv.object, s[0], s[1], setProtoMethod(s[0]));
+        };
+    };
     try defineGlobalFnC(env, root_shape, "Boolean", 1, true, builtins.booleanFn);
     try defineGlobalFn(env, root_shape, "print", 1, printFn);
 

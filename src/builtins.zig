@@ -558,12 +558,17 @@ pub fn arrayIsArray(ctx: *anyopaque, this: Value, args: []const Value) HostError
 
 pub fn mapFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
-    return interp(ctx).makeMap(arg(args, 0));
+    const ip = interp(ctx);
+    // Map/WeakMap are constructors only: a plain call (`Map()`) throws.
+    if (ip.new_target == .undefined) return ip.throwError("TypeError", "Constructor Map/WeakMap requires 'new'");
+    return ip.makeMap(arg(args, 0));
 }
 
 pub fn setFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
-    return interp(ctx).makeSet(arg(args, 0));
+    const ip = interp(ctx);
+    if (ip.new_target == .undefined) return ip.throwError("TypeError", "Constructor Set/WeakSet requires 'new'");
+    return ip.makeSet(arg(args, 0));
 }
 
 /// `RegExp(pattern, flags)` / `new RegExp(...)`. Accepts a string source or an
