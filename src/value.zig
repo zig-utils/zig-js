@@ -242,6 +242,7 @@ pub const IterHelper = struct {
     padding: Value = .undefined, // zip(longest)'s per-source padding values
     done: bool = false,
     started: bool = false, // drop: the initial skip has run
+    is_async: bool = false, // AsyncIterator helper: `next` returns a promise
 };
 
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed

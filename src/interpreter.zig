@@ -6060,6 +6060,13 @@ fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
     return .{ .object = pobj };
 }
 
+/// A fresh promise already rejected with `reason`.
+fn promiseRejectValue(self: *Interpreter, reason: Value) EvalError!Value {
+    const pobj = try promise.newPromise(self);
+    try promise.reject(self, @ptrCast(@alignCast(pobj.promise.?)), reason);
+    return .{ .object = pobj };
+}
+
 /// `Promise.resolve(v)` — uses `this` as the constructor `C`: returns `v`
 /// unchanged when it is a promise whose `constructor` is `C`, otherwise builds
 /// `C`'s capability and resolves it with `v` (so a subclass's `resolve` yields a
@@ -7814,6 +7821,370 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try iter_proto.setAttr(a, k, .{ .writable = true, .enumerable = false, .configurable = true });
     }
     try env.put("Iterator", .{ .object = ctor });
+}
+
+// ===== AsyncIterator helpers =========================================
+// The async analogue of the Iterator-helpers family. Built on the engine's
+// synchronous-settling promise model: each helper's `next` returns a promise
+// that is computed eagerly (driving the awaited sub-promises to settlement via
+// `awaitValue`) and then resolved/rejected.
+
+/// Pull one step from an async iterator: `await it.next()` then read
+/// `{ value, done }` (value is itself awaited, matching async-iteration).
+fn asyncIterStep(self: *Interpreter, it: Value) EvalError!struct { done: bool, value: Value } {
+    const r0 = try self.callMethod(it, "next", &.{});
+    const r = try self.awaitValue(r0);
+    if (r != .object) return self.throwError("TypeError", "iterator result is not an object");
+    const done = (try self.getProperty(r, "done")).toBoolean();
+    const val = if (done) Value.undefined else try self.awaitValue(try self.getProperty(r, "value"));
+    return .{ .done = done, .value = val };
+}
+
+/// Produce the next `{ done, value }` of an async iterator helper, driving the
+/// underlying async iterator and any callback to settlement.
+fn asyncHelperProduce(self: *Interpreter, h: *value.IterHelper) EvalError!struct { done: bool, value: Value } {
+    switch (h.kind) {
+        .wrap => {
+            const s = try asyncIterStep(self, h.src);
+            if (s.done) {
+                h.done = true;
+                return .{ .done = true, .value = .undefined };
+            }
+            return .{ .done = false, .value = s.value };
+        },
+        .map => {
+            const s = try asyncIterStep(self, h.src);
+            if (s.done) {
+                h.done = true;
+                return .{ .done = true, .value = .undefined };
+            }
+            const mapped = try self.awaitValue(try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined));
+            h.counter += 1;
+            return .{ .done = false, .value = mapped };
+        },
+        .filter => {
+            while (true) {
+                const s = try asyncIterStep(self, h.src);
+                if (s.done) {
+                    h.done = true;
+                    return .{ .done = true, .value = .undefined };
+                }
+                const keep = (try self.awaitValue(try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined))).toBoolean();
+                h.counter += 1;
+                if (keep) return .{ .done = false, .value = s.value };
+            }
+        },
+        .take => {
+            if (h.counter >= h.limit) {
+                h.done = true;
+                return .{ .done = true, .value = .undefined };
+            }
+            const s = try asyncIterStep(self, h.src);
+            if (s.done) {
+                h.done = true;
+                return .{ .done = true, .value = .undefined };
+            }
+            h.counter += 1;
+            return .{ .done = false, .value = s.value };
+        },
+        .drop => {
+            if (!h.started) {
+                h.started = true;
+                while (h.counter < h.limit) : (h.counter += 1) {
+                    const s = try asyncIterStep(self, h.src);
+                    if (s.done) {
+                        h.done = true;
+                        return .{ .done = true, .value = .undefined };
+                    }
+                }
+            }
+            const s = try asyncIterStep(self, h.src);
+            if (s.done) {
+                h.done = true;
+                return .{ .done = true, .value = .undefined };
+            }
+            return .{ .done = false, .value = s.value };
+        },
+        .flat_map => {
+            while (true) {
+                if (h.inner == null) {
+                    const s = try asyncIterStep(self, h.src);
+                    if (s.done) {
+                        h.done = true;
+                        return .{ .done = true, .value = .undefined };
+                    }
+                    const mapped = try self.awaitValue(try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined));
+                    h.counter += 1;
+                    h.inner = try self.asyncIteratorOf(mapped);
+                }
+                const is = try asyncIterStep(self, h.inner.?);
+                if (is.done) {
+                    h.inner = null;
+                    continue;
+                }
+                return .{ .done = false, .value = is.value };
+            }
+        },
+        else => {
+            h.done = true;
+            return .{ .done = true, .value = .undefined };
+        },
+    }
+}
+
+fn asyncIterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.iter_helper == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper next called on an incompatible receiver"));
+    const h = this.object.iter_helper.?;
+    if (h.done) return promiseResolveValue(self, try self.iterResultObj(.undefined, true));
+    const produced = asyncHelperProduce(self, h) catch {
+        const exc = self.exception;
+        self.exception = .undefined;
+        return promiseRejectValue(self, exc);
+    };
+    return promiseResolveValue(self, try self.iterResultObj(produced.value, produced.done));
+}
+
+fn asyncIterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this == .object and this.object.iter_helper != null) this.object.iter_helper.?.done = true;
+    return promiseResolveValue(self, try self.iterResultObj(.undefined, true));
+}
+
+/// Make an async iterator-helper object wrapping `src` (already an async
+/// iterator) with the given kind/callback/limit.
+fn makeAsyncIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, func: Value, limit: f64) EvalError!Value {
+    const o = (try self.newObject()).object;
+    const h = try self.arena.create(value.IterHelper);
+    h.* = .{ .src = src, .kind = kind, .func = func, .limit = limit, .is_async = true };
+    o.iter_helper = h;
+    if (self.env.get("\x00AsyncIterHelperProto")) |p| if (p == .object) {
+        o.proto = p.object;
+    };
+    return .{ .object = o };
+}
+
+// --- the lazy async helper methods on %AsyncIteratorPrototype% -------
+
+fn asyncIterMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "AsyncIterator.prototype.map called on a non-object");
+    const f = if (args.len > 0) args[0] else .undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "AsyncIterator.prototype.map: mapper is not a function");
+    return makeAsyncIterHelper(self, this, .map, f, 0);
+}
+fn asyncIterFilterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "AsyncIterator.prototype.filter called on a non-object");
+    const f = if (args.len > 0) args[0] else .undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "AsyncIterator.prototype.filter: fn is not a function");
+    return makeAsyncIterHelper(self, this, .filter, f, 0);
+}
+fn asyncIterFlatMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "AsyncIterator.prototype.flatMap called on a non-object");
+    const f = if (args.len > 0) args[0] else .undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "AsyncIterator.prototype.flatMap: fn is not a function");
+    return makeAsyncIterHelper(self, this, .flat_map, f, 0);
+}
+fn asyncIterTakeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "AsyncIterator.prototype.take called on a non-object");
+    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    if (std.math.isNan(n) or n < 0) return self.throwError("RangeError", "AsyncIterator.prototype.take: invalid count");
+    return makeAsyncIterHelper(self, this, .take, .undefined, @trunc(n));
+}
+fn asyncIterDropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "AsyncIterator.prototype.drop called on a non-object");
+    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    if (std.math.isNan(n) or n < 0) return self.throwError("RangeError", "AsyncIterator.prototype.drop: invalid count");
+    return makeAsyncIterHelper(self, this, .drop, .undefined, @trunc(n));
+}
+
+// --- the eager async consumer methods (return a promise) -------------
+
+const AsyncConsumeKind = enum { to_array, for_each, reduce, some, every, find };
+
+/// Drive an async iterator `this` to completion, collecting all values, then
+/// run `body` over the collected list and resolve/reject a single promise.
+fn asyncIterConsume(self: *Interpreter, this: Value, comptime which: AsyncConsumeKind, args: []const Value) value.HostError!Value {
+    const result = asyncIterConsumeImpl(self, this, which, args) catch {
+        const exc = self.exception;
+        self.exception = .undefined;
+        return promiseRejectValue(self, exc);
+    };
+    return promiseResolveValue(self, result);
+}
+
+fn asyncIterConsumeImpl(self: *Interpreter, this: Value, comptime which: AsyncConsumeKind, args: []const Value) EvalError!Value {
+    if (this != .object) return self.throwError("TypeError", "AsyncIterator.prototype method called on a non-object");
+    const f = if (args.len > 0) args[0] else Value.undefined;
+    if (which != .to_array and !f.isCallable()) return self.throwError("TypeError", "AsyncIterator.prototype method: fn is not a function");
+    var i: f64 = 0;
+    switch (which) {
+        .to_array => {
+            const arr = (try self.newArray()).object;
+            while (true) {
+                const s = try asyncIterStep(self, this);
+                if (s.done) break;
+                try arr.elements.append(self.arena, s.value);
+            }
+            return .{ .object = arr };
+        },
+        .for_each => {
+            while (true) : (i += 1) {
+                const s = try asyncIterStep(self, this);
+                if (s.done) break;
+                _ = try self.awaitValue(try self.callValueWithThis(f, &.{ s.value, .{ .number = i } }, .undefined));
+            }
+            return .undefined;
+        },
+        .reduce => {
+            var acc: Value = undefined;
+            if (args.len > 1) {
+                acc = args[1];
+            } else {
+                const s = try asyncIterStep(self, this);
+                if (s.done) return self.throwError("TypeError", "Reduce of empty async iterator with no initial value");
+                acc = s.value;
+                i = 1;
+            }
+            while (true) : (i += 1) {
+                const s = try asyncIterStep(self, this);
+                if (s.done) break;
+                acc = try self.awaitValue(try self.callValueWithThis(f, &.{ acc, s.value, .{ .number = i } }, .undefined));
+            }
+            return acc;
+        },
+        .some, .every, .find => {
+            while (true) : (i += 1) {
+                const s = try asyncIterStep(self, this);
+                if (s.done) break;
+                const t = (try self.awaitValue(try self.callValueWithThis(f, &.{ s.value, .{ .number = i } }, .undefined))).toBoolean();
+                switch (which) {
+                    .some => if (t) return .{ .boolean = true },
+                    .every => if (!t) return .{ .boolean = false },
+                    .find => if (t) return s.value,
+                    else => unreachable,
+                }
+            }
+            return switch (which) {
+                .some => .{ .boolean = false },
+                .every => .{ .boolean = true },
+                .find => .undefined,
+                else => unreachable,
+            };
+        },
+    }
+}
+
+fn asyncIterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    return asyncIterConsume(@ptrCast(@alignCast(ctx)), this, .to_array, args);
+}
+fn asyncIterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    return asyncIterConsume(@ptrCast(@alignCast(ctx)), this, .for_each, args);
+}
+fn asyncIterReduceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    return asyncIterConsume(@ptrCast(@alignCast(ctx)), this, .reduce, args);
+}
+fn asyncIterSomeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    return asyncIterConsume(@ptrCast(@alignCast(ctx)), this, .some, args);
+}
+fn asyncIterEveryFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    return asyncIterConsume(@ptrCast(@alignCast(ctx)), this, .every, args);
+}
+fn asyncIterFindFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    return asyncIterConsume(@ptrCast(@alignCast(ctx)), this, .find, args);
+}
+
+fn asyncIterProtoSymbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = args;
+    return this; // %AsyncIteratorPrototype%[@@asyncIterator] returns the iterator
+}
+
+/// `AsyncIterator.from(O)`: wrap a sync/async iterable so the helpers apply.
+fn asyncIteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = if (args.len > 0) args[0] else .undefined;
+    if (o != .object) return self.throwError("TypeError", "AsyncIterator.from: argument is not async iterable");
+    const it = try self.asyncIteratorOf(o);
+    return makeAsyncIterHelper(self, it, .wrap, .undefined, 0);
+}
+
+fn asyncIteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor AsyncIterator requires 'new'");
+    if (self.new_target == .object) {
+        if (self.env.get("AsyncIterator")) |ic| if (ic == .object and self.new_target.object == ic.object)
+            return self.throwError("TypeError", "Abstract class AsyncIterator not directly constructable");
+    }
+    const o = (try self.newObject()).object;
+    o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+/// Install `%AsyncIteratorPrototype%`, `%AsyncIteratorHelperPrototype%`, and
+/// the `AsyncIterator` global with `from` and the helper methods.
+fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const sym_async_iter: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("asyncIterator")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+    const sym_tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+
+    // %AsyncIteratorPrototype%.
+    const proto = try a.create(value.Object);
+    proto.* = .{ .proto = object_proto };
+    if (sym_async_iter) |k| try setNative(a, rs, proto, k, 0, asyncIterProtoSymbolFn);
+    inline for (.{
+        .{ "map", asyncIterMapFn },         .{ "filter", asyncIterFilterFn },
+        .{ "take", asyncIterTakeFn },       .{ "drop", asyncIterDropFn },
+        .{ "flatMap", asyncIterFlatMapFn },  .{ "reduce", asyncIterReduceFn },
+        .{ "toArray", asyncIterToArrayFn },  .{ "forEach", asyncIterForEachFn },
+        .{ "some", asyncIterSomeFn },        .{ "every", asyncIterEveryFn },
+        .{ "find", asyncIterFindFn },
+    }) |m| try setNative(a, rs, proto, m[0], 1, m[1]);
+    try env.put("\x00AsyncIterProto", .{ .object = proto });
+
+    // %AsyncIteratorHelperPrototype%.
+    const helper_proto = try a.create(value.Object);
+    helper_proto.* = .{ .proto = proto };
+    try setNative(a, rs, helper_proto, "next", 0, asyncIterHelperNextFn);
+    try setNative(a, rs, helper_proto, "return", 0, asyncIterHelperReturnFn);
+    if (sym_tag) |k| {
+        try helper_proto.setOwn(a, rs, k, .{ .string = "Async Iterator Helper" });
+        try helper_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    try env.put("\x00AsyncIterHelperProto", .{ .object = helper_proto });
+
+    // The `AsyncIterator` constructor (abstract).
+    const ctor = try a.create(value.Object);
+    ctor.* = .{ .native = asyncIteratorConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "AsyncIterator", 0);
+    try setNative(a, rs, ctor, "from", 1, asyncIteratorFromFn);
+    try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    if (sym_tag) |k| {
+        try proto.setOwn(a, rs, k, .{ .string = "AsyncIterator" });
+        try proto.setAttr(a, k, .{ .writable = true, .enumerable = false, .configurable = true });
+    }
+    try env.put("AsyncIterator", .{ .object = ctor });
 }
 
 /// CanBeHeldWeakly(v): an Object or a Symbol (a BigInt or a primitive is not).
@@ -10256,6 +10627,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installDataView(env, rs, object_proto);
     try installWeakRefAndFinReg(env, rs, object_proto);
     try installIterator(env, rs, object_proto);
+    try installAsyncIterator(env, rs, object_proto);
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
