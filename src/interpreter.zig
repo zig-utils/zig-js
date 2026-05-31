@@ -2172,6 +2172,20 @@ pub const Interpreter = struct {
     pub fn makeDate(self: *Interpreter, t: f64) EvalError!Value {
         const o = (try self.newObject()).object;
         o.is_date = true;
+        // Proto from the in-flight constructor's new.target (`new Date`, or a
+        // `class extends Date` subclass), else %Date.prototype% — so
+        // `Date.prototype.isPrototypeOf(d)` and `d.constructor` resolve. Date
+        // methods still dispatch via the `is_date` branch in builtinMethod.
+        if (self.new_target == .object and self.new_target.object.getOwn("prototype") != null) {
+            if (self.new_target.object.getOwn("prototype").? == .object)
+                o.proto = self.new_target.object.getOwn("prototype").?.object;
+        } else if (self.env.get("Date")) |ctor| {
+            if (ctor == .object) {
+                if (ctor.object.getOwn("prototype")) |p| {
+                    if (p == .object) o.proto = p.object;
+                }
+            }
+        }
         try self.setProp(o, "__t", .{ .number = t });
         return .{ .object = o };
     }
