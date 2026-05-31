@@ -1335,7 +1335,23 @@ pub const Parser = struct {
     /// whole chain string-typed, so JS `+` applies ToString to each expression —
     /// exactly untagged-template semantics. Works on the tree-walker and the VM
     /// for free (it's just `add` nodes).
-    fn parseTemplate(self: *Parser, raw: []const u8) ParseError!*Node {
+    /// Normalize template line terminators (the TRV rules): `<CR><LF>` and a
+    /// lone `<CR>` both become a single `<LF>`. `<LS>`/`<PS>` are left as-is.
+    fn normalizeTemplateRaw(arena: std.mem.Allocator, raw: []const u8) ParseError![]const u8 {
+        if (std.mem.indexOfScalar(u8, raw, '\r') == null) return raw;
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var i: usize = 0;
+        while (i < raw.len) : (i += 1) {
+            if (raw[i] == '\r') {
+                try out.append(arena, '\n');
+                if (i + 1 < raw.len and raw[i + 1] == '\n') i += 1; // CRLF → one LF
+            } else try out.append(arena, raw[i]);
+        }
+        return out.items;
+    }
+
+    fn parseTemplate(self: *Parser, raw_in: []const u8) ParseError!*Node {
+        const raw = try normalizeTemplateRaw(self.arena, raw_in);
         var node: ?*Node = null;
         var lit: std.ArrayListUnmanaged(u8) = .empty;
         var i: usize = 0;
@@ -1364,7 +1380,8 @@ pub const Parser = struct {
     /// decoded), the raw quasis (text verbatim), and the substitution
     /// expressions, then build a `tagged_template` node. There is always one
     /// more quasi than substitution.
-    fn parseTaggedTemplate(self: *Parser, tag: *Node, raw: []const u8) ParseError!*Node {
+    fn parseTaggedTemplate(self: *Parser, tag: *Node, raw_in: []const u8) ParseError!*Node {
+        const raw = try normalizeTemplateRaw(self.arena, raw_in);
         var cooked: std.ArrayListUnmanaged([]const u8) = .empty;
         var raws: std.ArrayListUnmanaged([]const u8) = .empty;
         var exprs: std.ArrayListUnmanaged(*Node) = .empty;

@@ -6504,7 +6504,9 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     genv.* = .{ .arena = a, .fn_scope = true };
     const gobj = try a.create(value.Object);
     gobj.* = .{};
-    try installGlobals(genv, self.root_shape);
+    // Share the creating realm's well-known symbols with the new realm.
+    const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv == .object) sv.object else null) else null;
+    try installGlobalsInner(genv, self.root_shape, parent_symbol);
     try genv.put("globalThis", .{ .object = gobj });
     try mirrorGlobalsOnto(genv, gobj, self.root_shape);
     // Point the new realm's own `$262.global` at its global object.
@@ -6864,6 +6866,14 @@ fn typedArrayCtorFn(comptime kind: value.TAKind) value.NativeFn {
 }
 
 pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
+    return installGlobalsInner(env, root_shape, null);
+}
+
+/// `parent_symbol`, when non-null (a `$262.createRealm()` child realm), is the
+/// creating realm's `Symbol` object: the well-known symbols are *shared* across
+/// realms, so the child reuses those same symbol objects (identity holds across
+/// realms) and keys all its `@@`-methods under them.
+pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol: ?*value.Object) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
         "Error",       "TypeError", "RangeError", "ReferenceError",
@@ -7278,7 +7288,15 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
     // Well-known symbols are own props of `Symbol` with attributes
     // {writable:false, enumerable:false, configurable:false}.
     inline for (.{ "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables", "dispose", "asyncDispose" }) |name| {
-        try symbol_ns.setOwn(a, root_shape, name, try makeSymbolObj(a, root_shape, "Symbol." ++ name, symbol_proto));
+        // Reuse the creating realm's symbol (shared across realms) when present,
+        // else mint a fresh one. Sharing means `realmA.Symbol.iterator ===
+        // realmB.Symbol.iterator` and every `@@`-keyed built-in method in this
+        // realm is keyed under the same symbol.
+        const sym: Value = if (parent_symbol != null and parent_symbol.?.getOwn(name) != null)
+            parent_symbol.?.getOwn(name).?
+        else
+            try makeSymbolObj(a, root_shape, "Symbol." ++ name, symbol_proto);
+        try symbol_ns.setOwn(a, root_shape, name, sym);
         try symbol_ns.setAttr(a, name, .{ .writable = false, .enumerable = false, .configurable = false });
     }
     // Symbol.prototype[@@toPrimitive] (a method) and [@@toStringTag] ("Symbol").
