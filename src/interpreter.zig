@@ -8247,6 +8247,267 @@ fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 /// Install `WeakRef` and `FinalizationRegistry` (the cleanup callback never
 /// fires — there is no garbage collector — but the full API surface and brand
 /// checks are present).
+// ===== DisposableStack / AsyncDisposableStack ========================
+// The explicit-resource-management container objects. The `using`/`await using`
+// *syntax* isn't wired, but the class API (use/adopt/defer/move/dispose) is.
+
+fn dsHidden(self: *Interpreter, o: *value.Object, key: []const u8, v: Value) EvalError!void {
+    try self.setProp(o, key, v);
+    try o.setAttr(self.arena, key, .{ .writable = true, .enumerable = false, .configurable = false });
+}
+
+fn isDispStack(this: Value) bool {
+    return this == .object and this.object.getOwn("\x00ds_res") != null;
+}
+
+fn dispDisposed(o: *value.Object) bool {
+    return (o.getOwn("\x00ds_done") orelse Value{ .boolean = false }).toBoolean();
+}
+
+fn disposableStackConstructorFn(comptime is_async: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = this;
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const name = if (is_async) "AsyncDisposableStack" else "DisposableStack";
+            if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor " ++ name ++ " requires 'new'");
+            const o = (try self.newObject()).object;
+            if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+            try dsHidden(self, o, "\x00ds_res", try self.newArray());
+            try dsHidden(self, o, "\x00ds_done", .{ .boolean = false });
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+/// Push a resource entry [value, onDispose, kind] (kind 0=use,1=adopt,2=defer).
+fn dispPush(self: *Interpreter, o: *value.Object, v: Value, f: Value, kind: f64) EvalError!void {
+    const entry = (try self.newArray()).object;
+    try entry.elements.append(self.arena, v);
+    try entry.elements.append(self.arena, f);
+    try entry.elements.append(self.arena, .{ .number = kind });
+    const res = o.getOwn("\x00ds_res").?.object;
+    try res.elements.append(self.arena, .{ .object = entry });
+}
+
+fn dispGetMethod(self: *Interpreter, v: Value, sym_key: []const u8) EvalError!Value {
+    const m = try self.getProperty(v, sym_key);
+    if (m == .undefined or m == .null) return self.throwError("TypeError", "value is not disposable (no dispose method)");
+    if (!m.isCallable()) return self.throwError("TypeError", "dispose method is not callable");
+    return m;
+}
+
+fn dispUseFn(comptime is_async: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!isDispStack(this)) return self.throwError("TypeError", "use called on a non-DisposableStack");
+            if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+            const v = if (args.len > 0) args[0] else Value.undefined;
+            if (v == .undefined or v == .null) return v;
+            const key = self.wellKnownSymbolKey(if (is_async) "asyncDispose" else "dispose") orelse return self.throwError("TypeError", "Symbol.dispose unavailable");
+            var method = self.getProperty(v, key) catch return error.Throw;
+            if (is_async and (method == .undefined or method == .null)) {
+                // async stacks fall back to the sync @@dispose method.
+                const sk = self.wellKnownSymbolKey("dispose") orelse "";
+                method = try self.getProperty(v, sk);
+            }
+            if (method == .undefined or method == .null) return self.throwError("TypeError", "value is not disposable");
+            if (!method.isCallable()) return self.throwError("TypeError", "dispose method is not callable");
+            try dispPush(self, this.object, v, method, 0);
+            return v;
+        }
+    }.call;
+}
+
+fn dispAdoptFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!isDispStack(this)) return self.throwError("TypeError", "adopt called on a non-DisposableStack");
+    if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+    const v = if (args.len > 0) args[0] else Value.undefined;
+    const f = if (args.len > 1) args[1] else Value.undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "onDispose is not callable");
+    try dispPush(self, this.object, v, f, 1);
+    return v;
+}
+
+fn dispDeferFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!isDispStack(this)) return self.throwError("TypeError", "defer called on a non-DisposableStack");
+    if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+    const f = if (args.len > 0) args[0] else Value.undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "onDispose is not callable");
+    try dispPush(self, this.object, .undefined, f, 2);
+    return .undefined;
+}
+
+fn dispMoveFn(comptime is_async: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!isDispStack(this)) return self.throwError("TypeError", "move called on a non-DisposableStack");
+            if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+            const o = (try self.newObject()).object;
+            o.proto = this.object.proto;
+            try dsHidden(self, o, "\x00ds_res", this.object.getOwn("\x00ds_res").?);
+            try dsHidden(self, o, "\x00ds_done", .{ .boolean = false });
+            // The source keeps an empty list and is marked disposed.
+            try dsHidden(self, this.object, "\x00ds_res", try self.newArray());
+            try dsHidden(self, this.object, "\x00ds_done", .{ .boolean = true });
+            _ = is_async;
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+/// Dispose one resource entry, returning normally or propagating its throw.
+fn dispOne(self: *Interpreter, entry: *value.Object, is_async: bool) EvalError!void {
+    const v = entry.elements.items[0];
+    const f = entry.elements.items[1];
+    const kind = entry.elements.items[2].number;
+    const r = switch (@as(u8, @intFromFloat(kind))) {
+        1 => try self.callValueWithThis(f, &.{v}, .undefined), // adopt: onDispose(value)
+        2 => try self.callValueWithThis(f, &.{}, .undefined), // defer: onDispose()
+        else => try self.callValueWithThis(f, &.{}, v), // use: value[@@dispose]()
+    };
+    if (is_async) _ = try self.awaitValue(r);
+}
+
+/// Run a stack's disposal: dispose every resource in reverse, chaining throws
+/// into SuppressedError. Returns the pending error (to throw) or null.
+fn dispRunAll(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!?Value {
+    const res = o.getOwn("\x00ds_res").?.object;
+    var has_err = false;
+    var err: Value = .undefined;
+    var i = res.elements.items.len;
+    while (i > 0) {
+        i -= 1;
+        const entry = res.elements.items[i].object;
+        if (dispOne(self, entry, is_async)) |_| {} else |e| {
+            if (e != error.Throw) return e;
+            const thrown = self.exception;
+            self.exception = .undefined;
+            if (has_err) {
+                err = try makeSuppressed(self, thrown, err);
+            } else {
+                has_err = true;
+                err = thrown;
+            }
+        }
+    }
+    res.elements.clearRetainingCapacity();
+    return if (has_err) err else null;
+}
+
+fn makeSuppressed(self: *Interpreter, errv: Value, suppressed: Value) EvalError!Value {
+    const e = try self.makeError("SuppressedError", "An error was suppressed during disposal");
+    if (e == .object) {
+        try self.setProp(e.object, "error", errv);
+        try e.object.setAttr(self.arena, "error", .{ .enumerable = false, .configurable = true, .writable = true });
+        try self.setProp(e.object, "suppressed", suppressed);
+        try e.object.setAttr(self.arena, "suppressed", .{ .enumerable = false, .configurable = true, .writable = true });
+    }
+    return e;
+}
+
+fn dispDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!isDispStack(this)) return self.throwError("TypeError", "dispose called on a non-DisposableStack");
+    if (dispDisposed(this.object)) return .undefined;
+    try dsHidden(self, this.object, "\x00ds_done", .{ .boolean = true });
+    if (try dispRunAll(self, this.object, false)) |err| {
+        self.exception = err;
+        return error.Throw;
+    }
+    return .undefined;
+}
+
+fn dispDisposeAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!isDispStack(this)) return promiseRejectValue(self, try self.makeError("TypeError", "disposeAsync called on a non-AsyncDisposableStack"));
+    if (dispDisposed(this.object)) return promiseResolveValue(self, .undefined);
+    try dsHidden(self, this.object, "\x00ds_done", .{ .boolean = true });
+    const r = dispRunAll(self, this.object, true) catch {
+        const exc = self.exception;
+        self.exception = .undefined;
+        return promiseRejectValue(self, exc);
+    };
+    if (r) |err| return promiseRejectValue(self, err);
+    return promiseResolveValue(self, .undefined);
+}
+
+fn dispDisposedGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!isDispStack(this)) return self.throwError("TypeError", "disposed getter on a non-DisposableStack");
+    return .{ .boolean = dispDisposed(this.object) };
+}
+
+fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const sym = env.get("Symbol");
+    const symKey = struct {
+        fn get(s: ?Value, name: []const u8) ?[]const u8 {
+            if (s) |sv| if (sv == .object) {
+                if (sv.object.getOwn(name)) |t| if (t == .object and t.object.is_symbol) return t.object.sym_key;
+            };
+            return null;
+        }
+    }.get;
+    const tag = symKey(sym, "toStringTag");
+
+    // Sync DisposableStack.
+    {
+        const proto = try a.create(value.Object);
+        proto.* = .{ .proto = object_proto };
+        try setNative(a, rs, proto, "use", 1, dispUseFn(false));
+        try setNative(a, rs, proto, "adopt", 2, dispAdoptFn);
+        try setNative(a, rs, proto, "defer", 1, dispDeferFn);
+        try setNative(a, rs, proto, "move", 0, dispMoveFn(false));
+        try setNative(a, rs, proto, "dispose", 0, dispDisposeFn);
+        try setNativeGetter(a, rs, proto, "disposed", dispDisposedGetter);
+        if (symKey(sym, "dispose")) |k| try setNative(a, rs, proto, k, 0, dispDisposeFn);
+        if (tag) |k| {
+            try proto.setOwn(a, rs, k, .{ .string = "DisposableStack" });
+            try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        const ctor = try a.create(value.Object);
+        ctor.* = .{ .native = disposableStackConstructorFn(false), .native_ctor = true };
+        try installNativeProps(a, rs, ctor, "DisposableStack", 0);
+        try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, rs, proto, ctor);
+        try env.put("DisposableStack", .{ .object = ctor });
+    }
+    // AsyncDisposableStack.
+    {
+        const proto = try a.create(value.Object);
+        proto.* = .{ .proto = object_proto };
+        try setNative(a, rs, proto, "use", 1, dispUseFn(true));
+        try setNative(a, rs, proto, "adopt", 2, dispAdoptFn);
+        try setNative(a, rs, proto, "defer", 1, dispDeferFn);
+        try setNative(a, rs, proto, "move", 0, dispMoveFn(true));
+        try setNative(a, rs, proto, "disposeAsync", 0, dispDisposeAsyncFn);
+        try setNativeGetter(a, rs, proto, "disposed", dispDisposedGetter);
+        if (symKey(sym, "asyncDispose")) |k| try setNative(a, rs, proto, k, 0, dispDisposeAsyncFn);
+        if (tag) |k| {
+            try proto.setOwn(a, rs, k, .{ .string = "AsyncDisposableStack" });
+            try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        const ctor = try a.create(value.Object);
+        ctor.* = .{ .native = disposableStackConstructorFn(true), .native_ctor = true };
+        try installNativeProps(a, rs, ctor, "AsyncDisposableStack", 0);
+        try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, rs, proto, ctor);
+        try env.put("AsyncDisposableStack", .{ .object = ctor });
+    }
+}
+
 fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
     const tt: ?[]const u8 = blk: {
@@ -10628,6 +10889,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installWeakRefAndFinReg(env, rs, object_proto);
     try installIterator(env, rs, object_proto);
     try installAsyncIterator(env, rs, object_proto);
+    try installDisposableStacks(env, rs, object_proto);
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
     try installIntl(env, rs, object_proto);
