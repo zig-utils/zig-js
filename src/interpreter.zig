@@ -3400,8 +3400,13 @@ pub const Interpreter = struct {
         }
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) {
-                const n = v.toNumber();
-                const u = v.toUint32();
+                // ArraySetLength: newLen = ToUint32(value); if it differs from
+                // ToNumber(value) the length isn't a valid array index → RangeError.
+                // Both coercions run through the throwing ToNumber so a boolean,
+                // string, or `new Number(1)`/`new String("1")` wrapper is honored
+                // (`x.length = true` → 1, `x.length = new Number(1)` → 1).
+                const n = try self.toNumberV(v);
+                const u = value.Value.uint32FromF64(n);
                 if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
                 // ArraySetLength: a non-writable `length` rejects the assignment
                 // (the RangeError above still precedes this) — sloppy silently,
