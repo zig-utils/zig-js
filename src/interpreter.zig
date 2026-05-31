@@ -3097,7 +3097,7 @@ pub const Interpreter = struct {
     /// IteratorClose: invoke `iterator.return()` if present (generators are
     /// closed through their dispatched `return`). The result is discarded; a
     /// throw propagates (normal-completion close).
-    fn iteratorClose(self: *Interpreter, iter: Value) EvalError!void {
+    pub fn iteratorClose(self: *Interpreter, iter: Value) EvalError!void {
         if (iter == .object and iter.object.gen != null) {
             _ = try self.callMethod(iter, "return", &.{});
             return;

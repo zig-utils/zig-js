@@ -403,16 +403,33 @@ pub fn objectHasOwn(ctx: *anyopaque, this: Value, args: []const Value) HostError
 pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const target = arg(args, 0);
-    if (target != .object) return target;
+    // ToObject(target): null/undefined throw; a primitive boxes to a wrapper.
+    const to = try self.toObject(arg(args, 0));
+    const to_v: Value = .{ .object = to };
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
-        if (args[i] != .object) continue;
-        const src = args[i].object;
-        const keys = try src.enumerableKeys(self.arena);
-        for (keys) |k| try self.setMember(target, k, src.getOwn(k) orelse .undefined);
+        // A null/undefined source is skipped; other primitives ToObject.
+        if (args[i] == .null or args[i] == .undefined) continue;
+        const src_v: Value = .{ .object = try self.toObject(args[i]) };
+        // Every enumerable own key — string AND symbol (private excluded) — is
+        // copied, in [[OwnPropertyKeys]] order.
+        for (try src_v.object.ownKeys(self.arena)) |k| {
+            if (value.isPrivateKey(k)) continue;
+            if (!src_v.object.getAttr(k).enumerable) continue;
+            // Get(from, key) runs a source getter, then Set(to, key, v, true) —
+            // assignment to a read-only / non-extensible / setter-less target
+            // property must throw, so force the throwing (strict) [[Set]].
+            const v = try self.getProperty(src_v, k);
+            const saved = self.strict;
+            self.strict = true;
+            self.setMember(to_v, k, v) catch |e| {
+                self.strict = saved;
+                return e;
+            };
+            self.strict = saved;
+        }
     }
-    return target;
+    return to_v;
 }
 
 pub fn objectEntries(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -435,15 +452,35 @@ pub fn objectEntries(ctx: *anyopaque, this: Value, args: []const Value) HostErro
 pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const iterable = arg(args, 0);
+    // RequireObjectCoercible(iterable): undefined/null throw.
+    if (iterable == .null or iterable == .undefined)
+        return self.throwError("TypeError", "Object.fromEntries requires an iterable argument");
     const result = try self.newObject();
-    if (arg(args, 0) == .object and arg(args, 0).object.is_array) {
-        for (arg(args, 0).object.elements.items) |entry| {
-            if (entry != .object or !entry.object.is_array) continue;
-            const items = entry.object.elements.items;
-            const k = if (items.len > 0) try items[0].toString(self.arena) else "";
-            const v = if (items.len > 1) items[1] else .undefined;
-            try self.setMember(result, k, v);
+    const iter = try self.iteratorOf(iterable); // GetIterator — non-iterable throws
+    while (true) {
+        // IteratorStep: a next() that isn't callable / doesn't return an object
+        // throws WITHOUT closing the iterator.
+        const r = try self.callMethod(iter, "next", &.{});
+        if (r != .object) return self.throwError("TypeError", "iterator.next() did not return an object");
+        if ((try self.getProperty(r, "done")).toBoolean()) break;
+        const entry = try self.getProperty(r, "value");
+        // Each entry must be an Object; otherwise close the iterator, then throw.
+        if (entry != .object) {
+            self.iteratorClose(iter) catch {};
+            return self.throwError("TypeError", "Object.fromEntries entry is not an object");
         }
+        // key = ToPropertyKey(Get(entry,"0")); value = Get(entry,"1"); a throw in
+        // either step closes the iterator (IteratorClose on abrupt completion).
+        const key = self.keyOf(try self.getProperty(entry, "0")) catch |e| {
+            self.iteratorClose(iter) catch {};
+            return e;
+        };
+        const v = self.getProperty(entry, "1") catch |e| {
+            self.iteratorClose(iter) catch {};
+            return e;
+        };
+        try self.setMember(result, key, v);
     }
     return result;
 }
