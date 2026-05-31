@@ -656,9 +656,44 @@ pub fn numberToString(arena: std.mem.Allocator, n: f64) ![]const u8 {
 /// Parse a string to a number per a simplified ToNumber(string): trims ASCII
 /// whitespace, empty string is 0, otherwise float parse or NaN.
 pub fn stringToNumber(s: []const u8) f64 {
-    const trimmed = std.mem.trim(u8, s, " \t\r\n");
+    const nan = std.math.nan(f64);
+    // StringToNumber trims leading/trailing StrWhiteSpace (the ASCII set here);
+    // an empty/all-whitespace string is +0.
+    const trimmed = std.mem.trim(u8, s, " \t\n\r\x0b\x0c");
     if (trimmed.len == 0) return 0;
-    return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
+    // Numeric separators (`_`) are a *source* lexical feature and never valid in
+    // a runtime ToNumber(String) — `Number("1_0")` is NaN, not 10. (Zig's
+    // parseFloat would otherwise accept them.)
+    if (std.mem.indexOfScalar(u8, trimmed, '_') != null) return nan;
+    // `Infinity` with an optional sign and exact casing (Zig also accepts
+    // "inf"/"infinity"/"nan", which JS does not).
+    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
+    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
+    // Non-decimal integer literals: `0x`/`0o`/`0b` (unsigned, no sign, no '.').
+    if (trimmed.len > 2 and trimmed[0] == '0') {
+        const radix: ?u8 = switch (trimmed[1]) {
+            'x', 'X' => 16,
+            'o', 'O' => 8,
+            'b', 'B' => 2,
+            else => null,
+        };
+        if (radix) |r| {
+            var acc: f64 = 0;
+            for (trimmed[2..]) |c| {
+                const d = std.fmt.charToDigit(c, r) catch return nan;
+                acc = acc * @as(f64, @floatFromInt(r)) + @as(f64, @floatFromInt(d));
+            }
+            return acc;
+        }
+    }
+    // A decimal literal: restrict to the StrDecimalLiteral character set so Zig's
+    // parseFloat can't accept its extensions (hex floats, "inf"/"nan"); the parse
+    // still rejects malformed combinations (e.g. "1e", "1.2.3") as NaN.
+    for (trimmed) |c| switch (c) {
+        '0'...'9', '.', 'e', 'E', '+', '-' => {},
+        else => return nan,
+    };
+    return std.fmt.parseFloat(f64, trimmed) catch nan;
 }
 
 /// Strict equality (===).
