@@ -562,8 +562,20 @@ pub const Interpreter = struct {
             .super_call => |sc| blk: {
                 const sup = self.super_ctor orelse return self.throwError("SyntaxError", "'super' keyword unexpected here");
                 const args = try self.evalArgs(sc);
-                // Run the superclass constructor on the current `this`.
-                _ = try self.callValueWithThis(.{ .object = sup }, args, self.this_value);
+                // Run the superclass constructor on the current `this`. A built-in
+                // super (`class extends Set/Map/Array/...`) returns a fresh exotic
+                // object carrying the internal slots; per spec that object becomes
+                // the `this` binding, so rebind `this` and record it for construct.
+                const sup_ret = try self.callValueWithThis(.{ .object = sup }, args, self.this_value);
+                // A built-in super (`class extends Set/Map/Array/Promise/...`)
+                // returns a fresh exotic object carrying the internal slots the
+                // derived `this` should have. Rather than rebind `this`'s identity
+                // (the derived instance already has the right prototype and may be
+                // mid-chain), copy the super result's internal state onto the
+                // existing `this` in place. A JS super returns undefined (it
+                // initialized `this` directly), so nothing to adopt.
+                if (self.this_value == .object and sup_ret == .object and sup_ret.object != self.this_value.object)
+                    adoptInternalSlots(self.this_value.object, sup_ret.object);
                 break :blk .undefined;
             },
             .super_member => |m| blk: {
@@ -1758,6 +1770,20 @@ pub const Interpreter = struct {
 
     /// Construct an instance from `callee` with already-evaluated `args`. Shared
     /// by the `new` operator and the C-API `JSObjectCallAsConstructor`.
+    /// Copy a built-in super constructor's result (`src`, a fresh exotic object)
+    /// onto the derived instance (`dst`) in place, so the instance gains the
+    /// internal slots — [[SetData]]/[[MapData]]/array elements/[[PromiseState]]/
+    /// wrapper [[…Data]]/etc. — plus any maintained own properties (e.g. a Set's
+    /// `size`). `dst`'s prototype (its derived `.prototype`) is preserved; `dst`
+    /// is otherwise pristine (a derived constructor cannot touch `this` before
+    /// `super()` returns). `src` is discarded, so sharing its arena-backed
+    /// stores is safe.
+    fn adoptInternalSlots(dst: *value.Object, src: *value.Object) void {
+        const keep_proto = dst.proto;
+        dst.* = src.*;
+        dst.proto = keep_proto;
+    }
+
     pub fn construct(self: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
         if (callee != .object) return self.throwError("TypeError", "value is not a constructor");
         const obj = callee.object;
@@ -2619,8 +2645,12 @@ pub const Interpreter = struct {
     /// its own elements rather than the protocol.
     fn getSetRecord(self: *Interpreter, v: Value) EvalError!SetRecord {
         if (v != .object) return self.throwError("TypeError", "argument is not an object");
-        const size = (try self.toPrimitive(try self.getProperty(v, "size"), .number)).toNumber();
+        // GetSetRecord: rawSize = Get(obj,"size"); numSize = ToNumber(rawSize)
+        // (a Symbol/BigInt size throws a TypeError); NaN throws; intSize < 0 is a
+        // RangeError. ToNumber runs before `has`/`keys` are read.
+        const size = try self.toNumberV(try self.getProperty(v, "size"));
         if (std.math.isNan(size)) return self.throwError("TypeError", "set-like 'size' is NaN");
+        if (@trunc(size) < 0) return self.throwError("RangeError", "set-like 'size' is negative"); // intSize = ToIntegerOrInfinity
         if (v.object.is_set) return .{ .obj = v.object, .has = .undefined, .keys = .undefined, .size = size, .is_set = true };
         const has = try self.getProperty(v, "has");
         if (!has.isCallable()) return self.throwError("TypeError", "set-like 'has' is not callable");
