@@ -3548,8 +3548,17 @@ pub const Interpreter = struct {
     /// methods that aren't stored as own properties first. Shared by the
     /// tree-walker's `evalCall` and the VM's `call_method`.
     pub fn callMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!Value {
-        if (try self.builtinMethod(recv, name, args)) |result| return result;
+        // A real (possibly user-reassigned) method property found on the receiver
+        // or its prototype chain takes precedence over the engine's native
+        // fast-path, so an override like `Date.prototype.toString =
+        // Object.prototype.toString` is honored. The brand fast-paths
+        // (dateMethod / arrayMethod / mapMethod / …) remain the implementation of
+        // the unshadowed intrinsics and the fallback for method names that aren't
+        // installed as real own properties (synthesized push/getDay/etc.).
         const method = try self.getProperty(recv, name);
+        if (method == .object and method.object.isCallableObject())
+            return self.callValueWithThis(method, args, recv);
+        if (try self.builtinMethod(recv, name, args)) |result| return result;
         return self.callValueWithThis(method, args, recv);
     }
 
