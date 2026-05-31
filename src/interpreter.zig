@@ -2547,7 +2547,6 @@ pub const Interpreter = struct {
             }
         }
         o.is_weak = self.protoReachesCtorProto("WeakMap", o.proto);
-        try self.setProp(o, "size", .{ .number = 0 });
         if (init_v == .object and init_v.object.is_array) {
             for (init_v.object.elements.items) |entry| {
                 if (entry == .object and entry.object.is_array) {
@@ -2575,7 +2574,6 @@ pub const Interpreter = struct {
             }
         }
         o.is_weak = self.protoReachesCtorProto("WeakSet", o.proto);
-        try self.setProp(o, "size", .{ .number = 0 });
         if (init_v == .object and init_v.object.is_array) {
             for (init_v.object.elements.items) |v| _ = try self.setMethod(o, "add", &.{v});
         }
@@ -2596,7 +2594,6 @@ pub const Interpreter = struct {
             try pair.elements.append(self.arena, k);
             try pair.elements.append(self.arena, arg(args, 1));
             try o.elements.append(self.arena, .{ .object = pair });
-            try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
             return self_v;
         }
         if (eq(name, "get")) {
@@ -2615,7 +2612,6 @@ pub const Interpreter = struct {
             for (o.elements.items, 0..) |e, i| {
                 if (value.sameValueZero(e.object.elements.items[0], arg0(args))) {
                     _ = o.elements.orderedRemove(i);
-                    try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
                     return Value{ .boolean = true };
                 }
             }
@@ -2623,7 +2619,6 @@ pub const Interpreter = struct {
         }
         if (eq(name, "clear")) {
             o.elements.clearRetainingCapacity();
-            try self.setProp(o, "size", .{ .number = 0 });
             return Value.undefined;
         }
         if (eq(name, "forEach")) {
@@ -2673,7 +2668,6 @@ pub const Interpreter = struct {
                 if (value.sameValueZero(e, arg0(args))) return self_v;
             }
             try o.elements.append(self.arena, arg0(args));
-            try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
             return self_v;
         }
         if (eq(name, "has")) {
@@ -2686,7 +2680,6 @@ pub const Interpreter = struct {
             for (o.elements.items, 0..) |e, i| {
                 if (value.sameValueZero(e, arg0(args))) {
                     _ = o.elements.orderedRemove(i);
-                    try self.setProp(o, "size", .{ .number = @floatFromInt(o.elements.items.len) });
                     return Value{ .boolean = true };
                 }
             }
@@ -2694,7 +2687,6 @@ pub const Interpreter = struct {
         }
         if (eq(name, "clear")) {
             o.elements.clearRetainingCapacity();
-            try self.setProp(o, "size", .{ .number = 0 });
             return Value.undefined;
         }
         if (eq(name, "forEach")) {
@@ -7987,6 +7979,33 @@ fn mapProtoMethod(comptime name: []const u8, comptime weak: bool) value.NativeFn
     }.call;
 }
 
+/// `Map.prototype.size` / `Set.prototype.size` — an accessor getter (not an own
+/// data property of instances) returning the live entry count; brand-checked so
+/// it rejects a WeakMap/WeakSet or any non-collection receiver.
+fn collectionSizeGetter(comptime is_set_kind: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const ok = this == .object and !this.object.is_weak and
+                (if (is_set_kind) this.object.is_set else this.object.is_map);
+            if (!ok) return self.throwError("TypeError", if (is_set_kind) "Set.prototype.size getter called on a non-Set" else "Map.prototype.size getter called on a non-Map");
+            return .{ .number = @floatFromInt(this.object.elements.items.len) };
+        }
+    }.call;
+}
+
+/// Install an accessor property `prop` on `obj` whose getter is the native `f`
+/// (a function named "get <prop>" with length 0, per spec), non-enumerable and
+/// configurable.
+fn setNativeGetter(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, comptime prop: []const u8, f: value.NativeFn) EvalError!void {
+    const g = try a.create(value.Object);
+    g.* = .{ .native = f };
+    try installNativeProps(a, rs, g, "get " ++ prop, 0);
+    try obj.setAccessor(a, prop, .{ .object = g }, null);
+    try obj.setAttr(a, prop, .{ .enumerable = false, .configurable = true });
+}
+
 /// Install `ArrayBuffer` and the typed-array constructors (`Int8Array` …
 /// `Float64Array`), sharing one `%TypedArray%.prototype` for the methods.
 fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
@@ -8056,6 +8075,7 @@ fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {
         .{ "entries", 0 }, .{ "getOrInsert", 2 }, .{ "getOrInsertComputed", 2 },
     };
     inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], mapProtoMethod(s[0], false));
+    try setNativeGetter(a, rs, p, "size", collectionSizeGetter(false));
 }
 
 /// Install the Set.prototype methods (real, brand-checked own properties) on
@@ -8074,6 +8094,7 @@ fn installSetProto(env: *Environment, rs: *Shape) EvalError!void {
         .{ "isSubsetOf", 1 }, .{ "isSupersetOf", 1 }, .{ "isDisjointFrom", 1 },
     };
     inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], setProtoMethod(s[0], false));
+    try setNativeGetter(a, rs, p, "size", collectionSizeGetter(true));
 }
 
 /// Monotonic id for unique Symbol property-key encodings (single-threaded;
