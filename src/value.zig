@@ -150,6 +150,14 @@ pub const TypedArrayData = struct {
     kind: TAKind,
 };
 
+/// A `DataView`: a typed read/write window of `byte_length` bytes starting at
+/// `byte_offset` into `buffer`'s bytes, with per-access endianness.
+pub const DataViewData = struct {
+    buffer: *Object,
+    byte_offset: usize,
+    byte_length: usize,
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -275,6 +283,9 @@ pub const Object = struct {
     /// integer-indexed view over `buffer`'s bytes. Index get/set read/write the
     /// underlying bytes coerced to/from the element type.
     typed_array: ?*TypedArrayData = null,
+    /// `DataView` view (non-null marks a DataView): a typed read/write window
+    /// over `buffer`'s bytes with per-access endianness.
+    data_view: ?*DataViewData = null,
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {

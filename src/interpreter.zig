@@ -6875,6 +6875,222 @@ fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
     }.call;
 }
 
+// ===== DataView =====================================================
+
+/// ToIndex(v): ToIntegerOrInfinity, then RangeError outside [0, 2^53-1]. The
+/// Number coercion runs valueOf/toString (so a Symbol/BigInt throws), matching
+/// the spec's argument-coercion order.
+fn toIndexArg(self: *Interpreter, v: Value) EvalError!u64 {
+    if (v == .undefined) return 0;
+    const n = try self.toNumberV(v);
+    const i = if (std.math.isNan(n)) 0 else @trunc(n);
+    if (i < 0 or i > 9007199254740991.0) return self.throwError("RangeError", "index out of range");
+    return @intFromFloat(i);
+}
+
+const DVType = struct { name: []const u8, bytes: u8, signed: bool, float: bool, big: bool };
+const dv_types = [_]DVType{
+    .{ .name = "Int8", .bytes = 1, .signed = true, .float = false, .big = false },
+    .{ .name = "Uint8", .bytes = 1, .signed = false, .float = false, .big = false },
+    .{ .name = "Int16", .bytes = 2, .signed = true, .float = false, .big = false },
+    .{ .name = "Uint16", .bytes = 2, .signed = false, .float = false, .big = false },
+    .{ .name = "Int32", .bytes = 4, .signed = true, .float = false, .big = false },
+    .{ .name = "Uint32", .bytes = 4, .signed = false, .float = false, .big = false },
+    .{ .name = "Float32", .bytes = 4, .signed = true, .float = true, .big = false },
+    .{ .name = "Float64", .bytes = 8, .signed = true, .float = true, .big = false },
+    .{ .name = "BigInt64", .bytes = 8, .signed = true, .float = false, .big = true },
+    .{ .name = "BigUint64", .bytes = 8, .signed = false, .float = false, .big = true },
+};
+
+/// `new DataView(buffer, byteOffset?, byteLength?)`.
+fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor DataView requires 'new'");
+    const buf_v = if (args.len > 0) args[0] else .undefined;
+    if (buf_v != .object or buf_v.object.array_buffer == null) return self.throwError("TypeError", "First argument to DataView must be an ArrayBuffer");
+    const ab = buf_v.object.array_buffer.?;
+    const offset = try toIndexArg(self, if (args.len > 1) args[1] else .undefined);
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const buf_len = ab.data.len;
+    if (offset > buf_len) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
+    var view_len: usize = buf_len - @as(usize, @intCast(offset));
+    if (args.len > 2 and args[2] != .undefined) {
+        const vl = try toIndexArg(self, args[2]);
+        if (@as(u64, @intCast(offset)) + vl > buf_len) return self.throwError("RangeError", "Invalid DataView length");
+        view_len = @intCast(vl);
+    }
+    // The detached re-check after ToIndex coercions is spec'd (a side-effecting
+    // length argument could detach the buffer).
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const o = (try self.newObject()).object;
+    if (self.new_target == .object and self.new_target.object.getOwn("prototype") != null and self.new_target.object.getOwn("prototype").? == .object) {
+        o.proto = self.new_target.object.getOwn("prototype").?.object;
+    } else if (self.env.get("DataView")) |c| {
+        if (c == .object) o.proto = try self.protoObject(c.object);
+    }
+    const dv = try self.arena.create(value.DataViewData);
+    dv.* = .{ .buffer = buf_v.object, .byte_offset = @intCast(offset), .byte_length = view_len };
+    o.data_view = dv;
+    return .{ .object = o };
+}
+
+/// A `DataView.prototype.get<Type>(byteOffset, littleEndian)` accessor.
+fn dataViewGetFn(comptime t: DVType) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
+            const dv = this.object.data_view.?;
+            const get_index = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
+            const little = if (args.len > 1) args[1].toBoolean() else false;
+            const ab = dv.buffer.array_buffer.?;
+            if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+            if (get_index + t.bytes > dv.byte_length) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
+            const off = dv.byte_offset + @as(usize, @intCast(get_index));
+            const endian: std.builtin.Endian = if (little) .little else .big;
+            const UInt = switch (t.bytes) {
+                1 => u8,
+                2 => u16,
+                4 => u32,
+                else => u64,
+            };
+            const raw = std.mem.readInt(UInt, ab.data[off..][0..t.bytes], endian);
+            if (t.big) {
+                if (t.signed) return self.makeBigInt(@as(i64, @bitCast(@as(u64, raw))));
+                return self.makeBigInt(@as(i128, @as(u64, raw)));
+            }
+            if (t.float) {
+                if (t.bytes == 4) return .{ .number = @floatCast(@as(f32, @bitCast(@as(u32, raw)))) };
+                return .{ .number = @bitCast(@as(u64, raw)) };
+            }
+            if (t.signed) {
+                const SInt = switch (t.bytes) {
+                    1 => i8,
+                    2 => i16,
+                    4 => i32,
+                    else => i64,
+                };
+                return .{ .number = @floatFromInt(@as(SInt, @bitCast(raw))) };
+            }
+            return .{ .number = @floatFromInt(raw) };
+        }
+    }.call;
+}
+
+/// A `DataView.prototype.set<Type>(byteOffset, value, littleEndian)` mutator.
+fn dataViewSetFn(comptime t: DVType) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
+            const dv = this.object.data_view.?;
+            const get_index = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
+            const val = if (args.len > 1) args[1] else .undefined;
+            // Coerce the value (ToBigInt for the Big types, else ToNumber) before
+            // the bounds/detach check, per SetViewValue.
+            var num: f64 = 0;
+            var big: i128 = 0;
+            if (t.big) {
+                const bv = try self.toBigIntValueImpl(val, false);
+                big = bv.object.bigint;
+            } else {
+                num = try self.toNumberV(val);
+            }
+            const little = if (args.len > 2) args[2].toBoolean() else false;
+            const ab = dv.buffer.array_buffer.?;
+            if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+            if (get_index + t.bytes > dv.byte_length) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
+            const off = dv.byte_offset + @as(usize, @intCast(get_index));
+            const endian: std.builtin.Endian = if (little) .little else .big;
+            const UInt = switch (t.bytes) {
+                1 => u8,
+                2 => u16,
+                4 => u32,
+                else => u64,
+            };
+            var raw: UInt = undefined;
+            if (t.big) {
+                raw = @truncate(@as(u128, @bitCast(big))); // low `bytes*8` bits (two's complement)
+            } else if (t.float) {
+                if (t.bytes == 4) {
+                    raw = @bitCast(@as(f32, @floatCast(num)));
+                } else {
+                    raw = @bitCast(num);
+                }
+            } else {
+                raw = numToRaw(UInt, num);
+            }
+            std.mem.writeInt(UInt, ab.data[off..][0..t.bytes], raw, endian);
+            return .undefined;
+        }
+    }.call;
+}
+
+/// ToIntXX/ToUintXX truncation for a DataView integer store (NaN/±Inf → 0, wrap
+/// modulo 2^bits), returning the raw unsigned bit pattern.
+fn numToRaw(comptime UInt: type, num: f64) UInt {
+    if (std.math.isNan(num) or std.math.isInf(num)) return 0;
+    const bits = @bitSizeOf(UInt);
+    const two_pow: f64 = std.math.pow(f64, 2, @floatFromInt(bits));
+    var m = @mod(@trunc(num), two_pow);
+    if (m < 0) m += two_pow;
+    return @intFromFloat(m);
+}
+
+fn dataViewBufferGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.buffer requires a DataView receiver");
+    return .{ .object = this.object.data_view.?.buffer };
+}
+
+fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.byteLength requires a DataView receiver");
+    const dv = this.object.data_view.?;
+    if (dv.buffer.array_buffer.?.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    return .{ .number = @floatFromInt(dv.byte_length) };
+}
+
+fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.byteOffset requires a DataView receiver");
+    const dv = this.object.data_view.?;
+    if (dv.buffer.array_buffer.?.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    return .{ .number = @floatFromInt(dv.byte_offset) };
+}
+
+/// Install `DataView` (constructor + prototype get/set accessors and methods).
+fn installDataView(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const proto = try a.create(value.Object);
+    proto.* = .{ .proto = object_proto };
+    inline for (dv_types) |t| {
+        try setNative(a, rs, proto, "get" ++ t.name, 1, dataViewGetFn(t));
+        try setNative(a, rs, proto, "set" ++ t.name, 2, dataViewSetFn(t));
+    }
+    try setNativeGetter(a, rs, proto, "buffer", dataViewBufferGetter);
+    try setNativeGetter(a, rs, proto, "byteLength", dataViewByteLengthGetter);
+    try setNativeGetter(a, rs, proto, "byteOffset", dataViewByteOffsetGetter);
+    // DataView.prototype[Symbol.toStringTag] = "DataView" {configurable}.
+    if (env.get("Symbol")) |sym| if (sym == .object) {
+        if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
+            try proto.setOwn(a, rs, tt.object.sym_key, .{ .string = "DataView" });
+            try proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        };
+    };
+    const ctor = try a.create(value.Object);
+    ctor.* = .{ .native = dataViewConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "DataView", 1);
+    try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+    try env.put("DataView", .{ .object = ctor });
+}
+
 /// Normalize a relative index (negative counts from the end) into [0, len].
 /// The argument is coerced via ToIntegerOrInfinity (`toNumberV`), so a Symbol
 /// or BigInt — or an object whose `valueOf` throws — propagates a TypeError.
@@ -8118,6 +8334,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         try setConstructor(a, rs, proto, ctor);
         try env.put(kind.ctorName(), .{ .object = ctor });
     }
+
+    try installDataView(env, rs, object_proto);
 }
 
 fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {
