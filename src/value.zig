@@ -88,12 +88,18 @@ pub const TAKind = enum {
 pub const ArrayBufferData = struct {
     data: []u8,
     detached: bool = false,
+    /// For a resizable ArrayBuffer, the maximum byte length; null means a
+    /// fixed-length buffer (not resizable).
+    max_byte_length: ?usize = null,
 };
 
 /// Read typed-array element `i` (within bounds, buffer attached) as a Number.
 pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
     const bytes = ta.buffer.array_buffer.?.data;
     const off = ta.byte_offset + i * ta.kind.byteSize();
+    // A resizable buffer may have shrunk below the view's cached length; reading
+    // out of bounds returns 0 rather than a panic.
+    if (off + ta.kind.byteSize() > bytes.len) return .{ .number = 0 };
     const n: f64 = switch (ta.kind) {
         .i8 => @floatFromInt(@as(i8, @bitCast(bytes[off]))),
         .u8, .u8c => @floatFromInt(bytes[off]),
@@ -116,6 +122,7 @@ pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
 pub fn taReadBig(ta: *const TypedArrayData, i: usize) i128 {
     const bytes = ta.buffer.array_buffer.?.data;
     const off = ta.byte_offset + i * ta.kind.byteSize();
+    if (off + 8 > bytes.len) return 0;
     return switch (ta.kind) {
         .i64 => std.mem.readInt(i64, bytes[off..][0..8], .little),
         .u64 => @as(i128, std.mem.readInt(u64, bytes[off..][0..8], .little)),
@@ -127,6 +134,7 @@ pub fn taReadBig(ta: *const TypedArrayData, i: usize) i128 {
 pub fn taWriteBig(ta: *const TypedArrayData, i: usize, val: i128) void {
     const bytes = ta.buffer.array_buffer.?.data;
     const off = ta.byte_offset + i * ta.kind.byteSize();
+    if (off + 8 > bytes.len) return;
     const low: u64 = @truncate(@as(u128, @bitCast(val)));
     std.mem.writeInt(u64, bytes[off..][0..8], low, .little);
 }
@@ -148,6 +156,7 @@ fn taToInt(comptime T: type, num: f64) T {
 pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
     const bytes = ta.buffer.array_buffer.?.data;
     const off = ta.byte_offset + i * ta.kind.byteSize();
+    if (off + ta.kind.byteSize() > bytes.len) return; // shrunk resizable buffer
     switch (ta.kind) {
         .i8 => bytes[off] = @bitCast(taToInt(i8, num)),
         .u8 => bytes[off] = taToInt(u8, num),

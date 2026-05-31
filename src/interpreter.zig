@@ -7533,14 +7533,80 @@ fn taProtoMethod(comptime name: []const u8) value.NativeFn {
     }.call;
 }
 
-/// `new ArrayBuffer(byteLength)`.
+/// `new ArrayBuffer(byteLength, { maxByteLength }?)`.
 fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor ArrayBuffer requires 'new'");
-    const len_f = if (args.len > 0) try self.toNumberV(args[0]) else 0;
-    if (len_f < 0 or @trunc(len_f) != len_f or len_f > 0x7fffffff) return self.throwError("RangeError", "Invalid ArrayBuffer length");
-    return .{ .object = try self.makeArrayBuffer(@intFromFloat(len_f)) };
+    const len = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
+    if (len > 0x7fffffff) return self.throwError("RangeError", "Invalid ArrayBuffer length");
+    // The optional `maxByteLength` option makes the buffer resizable.
+    var max: ?usize = null;
+    if (args.len > 1 and args[1] == .object) {
+        const mv = try self.getProperty(args[1], "maxByteLength");
+        if (mv != .undefined) {
+            const m = try toIndexArg(self, mv);
+            if (m > 0x7fffffff or m < len) return self.throwError("RangeError", "Invalid maxByteLength");
+            max = @intCast(m);
+        }
+    }
+    const o = try self.makeArrayBuffer(@intCast(len));
+    o.array_buffer.?.max_byte_length = max;
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resizable, detached }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a non-ArrayBuffer");
+            const ab = this.object.array_buffer.?;
+            return switch (which) {
+                .byte_length => .{ .number = @floatFromInt(if (ab.detached) 0 else ab.data.len) },
+                .max_byte_length => .{ .number = @floatFromInt(if (ab.detached) 0 else (ab.max_byte_length orelse ab.data.len)) },
+                .resizable => .{ .boolean = ab.max_byte_length != null },
+                .detached => .{ .boolean = ab.detached },
+            };
+        }
+    }.call;
+}
+
+/// `ArrayBuffer.prototype.resize(newByteLength)` — grow/shrink a resizable buffer.
+fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a non-ArrayBuffer");
+    const ab = this.object.array_buffer.?;
+    if (ab.max_byte_length == null) return self.throwError("TypeError", "ArrayBuffer is not resizable");
+    const new_len = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (new_len > ab.max_byte_length.?) return self.throwError("RangeError", "resize exceeds maxByteLength");
+    const nl: usize = @intCast(new_len);
+    const fresh = try self.arena.alloc(u8, nl);
+    @memset(fresh, 0);
+    @memcpy(fresh[0..@min(nl, ab.data.len)], ab.data[0..@min(nl, ab.data.len)]);
+    ab.data = fresh;
+    return .undefined;
+}
+
+/// `ArrayBuffer.prototype.transfer(newLength?)` / `transferToFixedLength` — move
+/// the bytes into a new buffer and detach the original.
+fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
+            const ab = this.object.array_buffer.?;
+            if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+            const new_len: usize = if (args.len > 0 and args[0] != .undefined) @intCast(try toIndexArg(self, args[0])) else ab.data.len;
+            const out = try self.makeArrayBuffer(new_len);
+            @memcpy(out.array_buffer.?.data[0..@min(new_len, ab.data.len)], ab.data[0..@min(new_len, ab.data.len)]);
+            if (!fixed) out.array_buffer.?.max_byte_length = ab.max_byte_length;
+            ab.detached = true;
+            return .{ .object = out };
+        }
+    }.call;
 }
 
 /// `ArrayBuffer.isView(v)` — true for a typed-array (or DataView) view.
@@ -8507,6 +8573,19 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     const ab_proto = try a.create(value.Object);
     ab_proto.* = .{ .proto = object_proto };
     try setNative(a, rs, ab_proto, "slice", 2, arrayBufferSliceFn);
+    try setNative(a, rs, ab_proto, "resize", 1, arrayBufferResizeFn);
+    try setNative(a, rs, ab_proto, "transfer", 0, arrayBufferTransferFn(false));
+    try setNative(a, rs, ab_proto, "transferToFixedLength", 0, arrayBufferTransferFn(true));
+    try setNativeGetter(a, rs, ab_proto, "byteLength", arrayBufferGetter(.byte_length));
+    try setNativeGetter(a, rs, ab_proto, "maxByteLength", arrayBufferGetter(.max_byte_length));
+    try setNativeGetter(a, rs, ab_proto, "resizable", arrayBufferGetter(.resizable));
+    try setNativeGetter(a, rs, ab_proto, "detached", arrayBufferGetter(.detached));
+    if (env.get("Symbol")) |sym| if (sym == .object) {
+        if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
+            try ab_proto.setOwn(a, rs, tt.object.sym_key, .{ .string = "ArrayBuffer" });
+            try ab_proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        };
+    };
     const ab_ctor = try a.create(value.Object);
     ab_ctor.* = .{ .native = arrayBufferConstructorFn, .native_ctor = true };
     try installNativeProps(a, rs, ab_ctor, "ArrayBuffer", 1);
@@ -8514,6 +8593,17 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try ab_ctor.setOwn(a, rs, "prototype", .{ .object = ab_proto });
     try ab_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, ab_proto, ab_ctor);
+    // ArrayBuffer[Symbol.species] — installed here (the early generic species
+    // pass runs before ArrayBuffer exists).
+    if (env.get("Symbol")) |sym| if (sym == .object) {
+        if (sym.object.getOwn("species")) |sp| if (sp == .object and sp.object.is_symbol) {
+            const g = try a.create(value.Object);
+            g.* = .{ .native = returnThisFn };
+            try installNativeProps(a, rs, g, "get [Symbol.species]", 0);
+            try ab_ctor.setAccessor(a, sp.object.sym_key, .{ .object = g }, null);
+            try ab_ctor.setAttr(a, sp.object.sym_key, .{ .enumerable = false, .configurable = true });
+        };
+    };
     try env.put("ArrayBuffer", .{ .object = ab_ctor });
 
     // %TypedArray%.prototype — shared methods for every view kind.
