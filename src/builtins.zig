@@ -1082,8 +1082,18 @@ pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) H
 
 pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
-    _ = args;
-    return interp(ctx).newArray(); // no Symbol type yet → always empty
+    const self = interp(ctx);
+    const result = try self.newArray();
+    if (arg(args, 0) == .object) {
+        const o = arg(args, 0).object;
+        // [[OwnPropertyKeys]] (proxy-aware: the ownKeys trap + its invariants run
+        // here and may throw), then keep only the symbol keys.
+        for (try self.objectOwnKeysList(o)) |k| {
+            if (value.isSymbolKey(k) and !value.isPrivateKey(k))
+                try result.object.elements.append(self.arena, self.keyToValue(k));
+        }
+    }
+    return result;
 }
 
 pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

@@ -5814,10 +5814,12 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const ond = try self.arena.create(FinallyData);
     ond.* = .{ .on_finally = cb, .is_catch = false };
     onf.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ond) };
+    try installNativeProps(self.arena, self.root_shape, onf, "", 1);
     const onr = try self.arena.create(value.Object);
     const ord = try self.arena.create(FinallyData);
     ord.* = .{ .on_finally = cb, .is_catch = true };
     onr.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ord) };
+    try installNativeProps(self.arena, self.root_shape, onr, "", 1);
     return promise.then(self, p, .{ .object = onf }, .{ .object = onr });
 }
 
@@ -6079,10 +6081,12 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         const fe = try self.arena.create(promise.Elem);
         fe.* = .{ .combine = combine, .index = index, .is_reject = false, .already = already };
         f.* = .{ .native = combineElemFn, .private_data = @ptrCast(fe) };
+        try installNativeProps(self.arena, self.root_shape, f, "", 1); // anonymous, length 1
         const r = try self.arena.create(value.Object);
         const re = try self.arena.create(promise.Elem);
         re.* = .{ .combine = combine, .index = index, .is_reject = true, .already = already };
         r.* = .{ .native = combineElemFn, .private_data = @ptrCast(re) };
+        try installNativeProps(self.arena, self.root_shape, r, "", 1);
         // Invoke(nextPromise, "then", «resolveElement, rejectElement»): for a
         // native promise this is the native `then`; for a thenable it runs its
         // own `then` (which may settle synchronously).
