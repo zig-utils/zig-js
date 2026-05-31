@@ -3825,8 +3825,10 @@ pub const Interpreter = struct {
     /// `0..length` elements into a freshly-allocated slice.
     fn iterableOrArrayLikeToList(self: *Interpreter, v: Value) EvalError![]Value {
         var out: std.ArrayListUnmanaged(Value) = .empty;
-        const itk = self.symbolIteratorKey();
-        if (v == .object and itk != null and hasProperty(v.object, itk.?)) {
+        // An iterable (array, Set/Map, generator, string, or any object with a
+        // `Symbol.iterator`) is drained through its iterator; otherwise the value
+        // is treated as an array-like and read by `0..ToLength(length)`.
+        if ((v == .object and self.isIterable(v)) or v == .string) {
             const it = try self.iteratorOf(v);
             while (true) {
                 const r = try self.callMethod(it, "next", &.{});
@@ -7460,6 +7462,41 @@ fn typedArrayAbstractFn(ctx: *anyopaque, this: Value, args: []const Value) value
     return self.throwError("TypeError", "Abstract class TypedArray not directly constructable");
 }
 
+/// `%TypedArray%.of(...items)` — `this` is a view constructor; build a length-N
+/// view of it and store each item.
+fn typedArrayOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!isConstructorValue(this)) return self.throwError("TypeError", "%TypedArray%.of requires a constructor `this`");
+    const result = try self.construct(this, &.{.{ .number = @floatFromInt(args.len) }});
+    if (result == .object and result.object.typed_array != null) {
+        const ta = result.object.typed_array.?;
+        for (args, 0..) |av, i| try self.taStore(ta, i, av);
+    }
+    return result;
+}
+
+/// `%TypedArray%.from(source, mapfn?, thisArg?)` — `this` is a view constructor;
+/// collect the source's values (iterator or array-like), optionally map, and
+/// store them into a new view.
+fn typedArrayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!isConstructorValue(this)) return self.throwError("TypeError", "%TypedArray%.from requires a constructor `this`");
+    const source = if (args.len > 0) args[0] else .undefined;
+    const mapfn = if (args.len > 1) args[1] else Value.undefined;
+    if (mapfn != .undefined and !mapfn.isCallable()) return self.throwError("TypeError", "%TypedArray%.from mapfn is not callable");
+    const this_arg = if (args.len > 2) args[2] else Value.undefined;
+    const list = try self.iterableOrArrayLikeToList(source);
+    const result = try self.construct(this, &.{.{ .number = @floatFromInt(list.len) }});
+    if (result == .object and result.object.typed_array != null) {
+        const ta = result.object.typed_array.?;
+        for (list, 0..) |v, i| {
+            const mapped = if (mapfn.isCallable()) try self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg) else v;
+            try self.taStore(ta, i, mapped);
+        }
+    }
+    return result;
+}
+
 /// A `%TypedArray%.prototype` accessor getter (`length`/`byteLength`/`byteOffset`/
 /// `buffer`/`@@toStringTag`). All but `@@toStringTag` brand-check the receiver;
 /// `@@toStringTag` returns undefined for a non-TypedArray (no throw).
@@ -8515,6 +8552,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     const ta_ctor = try a.create(value.Object);
     ta_ctor.* = .{ .native = typedArrayAbstractFn, .native_ctor = true };
     try installNativeProps(a, rs, ta_ctor, "TypedArray", 0);
+    try setNative(a, rs, ta_ctor, "from", 1, typedArrayFromFn);
+    try setNative(a, rs, ta_ctor, "of", 0, typedArrayOfFn);
     try ta_ctor.setOwn(a, rs, "prototype", .{ .object = ta_proto });
     try ta_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, ta_proto, ta_ctor);
