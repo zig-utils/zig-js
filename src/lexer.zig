@@ -605,6 +605,9 @@ pub const Lexer = struct {
         self.i += 1; // opening backtick
         const text_start = self.i;
         var depth: usize = 0; // brace depth inside ${ ... }
+        // Last significant byte scanned inside the current `${ }` — drives the
+        // regex-vs-division decision for a `/` (see `templateRegexAllowed`).
+        var last_sig: u8 = 0;
         while (self.i < self.src.len) {
             const c = self.src[self.i];
             if (depth == 0) {
@@ -619,25 +622,101 @@ pub const Lexer = struct {
                 }
                 if (c == '$' and self.peek2() == '{') {
                     depth = 1;
+                    last_sig = 0;
                     self.i += 2;
                     continue;
                 }
                 self.i += 1;
             } else {
+                // Inside a `${ ... }` substitution: skip strings, regexes,
+                // comments, and nested templates so their braces/quotes don't
+                // confuse the outer brace-depth tracking.
                 switch (c) {
-                    '{' => depth += 1,
-                    '}' => depth -= 1,
+                    ' ', '\t', '\n', '\r' => self.i += 1,
+                    '{' => {
+                        depth += 1;
+                        last_sig = '{';
+                        self.i += 1;
+                    },
+                    '}' => {
+                        depth -= 1;
+                        last_sig = '}';
+                        self.i += 1;
+                    },
                     '\'', '"' => {
                         self.skipStringLiteral(c);
-                        continue;
+                        last_sig = '"';
                     },
-                    '\\' => self.i += 1,
-                    else => {},
+                    '`' => {
+                        _ = try self.lexTemplate(); // nested template (recurses)
+                        last_sig = '`';
+                    },
+                    '/' => {
+                        const n = self.peek2();
+                        if (n == '/') {
+                            while (self.i < self.src.len and self.src[self.i] != '\n') self.i += 1;
+                        } else if (n == '*') {
+                            self.i += 2;
+                            while (self.i + 1 < self.src.len and !(self.src[self.i] == '*' and self.src[self.i + 1] == '/')) self.i += 1;
+                            self.i = @min(self.i + 2, self.src.len);
+                        } else if (templateRegexAllowed(last_sig)) {
+                            self.skipRegexLiteral();
+                            last_sig = 'r';
+                        } else {
+                            last_sig = '/';
+                            self.i += 1;
+                        }
+                    },
+                    '\\' => {
+                        self.i += 2;
+                        last_sig = '\\';
+                    },
+                    else => {
+                        last_sig = c;
+                        self.i += 1;
+                    },
                 }
-                self.i += 1;
             }
         }
         return LexError.UnterminatedString;
+    }
+
+    /// Within a template substitution, decide whether a `/` begins a regex
+    /// literal (true) or is a division operator (false), from the previous
+    /// significant byte. Regex is allowed at the start of the substitution or
+    /// after an operator/opening punctuator — never after a value-producing
+    /// char (identifier, digit, or closing `)`/`]`/`}`/quote).
+    fn templateRegexAllowed(last: u8) bool {
+        return switch (last) {
+            0, '(', '[', '{', ',', ';', ':', '?', '=', '+', '-', '*', '/', '%', '!', '&', '|', '^', '~', '<', '>' => true,
+            else => false,
+        };
+    }
+
+    /// Advance `self.i` past a `/pattern/flags` regex literal (no token built);
+    /// used by the template-substitution scanner.
+    fn skipRegexLiteral(self: *Lexer) void {
+        self.i += 1; // opening /
+        var in_class = false;
+        while (self.i < self.src.len) {
+            const c = self.src[self.i];
+            if (c == '\n') return;
+            if (c == '\\') {
+                self.i += 2;
+                continue;
+            }
+            if (c == '[') {
+                in_class = true;
+            } else if (c == ']') {
+                in_class = false;
+            } else if (c == '/' and !in_class) {
+                break;
+            }
+            self.i += 1;
+        }
+        if (self.i >= self.src.len) return;
+        self.i += 1; // closing /
+        while (self.i < self.src.len and std.ascii.isAlphabetic(self.src[self.i])) self.i += 1;
     }
 
     /// Scan `/pattern/flags`. `text` is the pattern (between the slashes,

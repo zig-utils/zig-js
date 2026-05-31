@@ -1709,16 +1709,31 @@ pub const Parser = struct {
 /// Decode one escape char in a template literal's literal text.
 /// Given the raw template text and the index just past a `${`, return the index
 /// of the matching `}` (or `raw.len` if unterminated). Brace- and string-aware.
+/// Within a template substitution, whether a `/` at `last_sig` begins a regex
+/// literal (true) rather than a division. Mirrors the lexer's heuristic.
+fn substRegexAllowed(last: u8) bool {
+    return switch (last) {
+        0, '(', '[', '{', ',', ';', ':', '?', '=', '+', '-', '*', '/', '%', '!', '&', '|', '^', '~', '<', '>' => true,
+        else => false,
+    };
+}
+
 fn substEnd(raw: []const u8, start: usize) usize {
     var depth: usize = 1;
     var i = start;
+    var last_sig: u8 = 0; // last significant byte — drives regex-vs-division
     while (i < raw.len) {
         const c = raw[i];
         switch (c) {
-            '{' => depth += 1,
+            ' ', '\t', '\n', '\r' => {},
+            '{' => {
+                depth += 1;
+                last_sig = '{';
+            },
             '}' => {
                 depth -= 1;
                 if (depth == 0) return i;
+                last_sig = '}';
             },
             '\'', '"' => {
                 i += 1;
@@ -1729,9 +1744,58 @@ fn substEnd(raw: []const u8, start: usize) usize {
                     }
                     if (raw[i] == c) break;
                 }
+                last_sig = '"';
+            },
+            '`' => {
+                // Nested template — skip to its matching backtick, honoring its
+                // own `${ }` substitutions recursively.
+                i += 1;
+                while (i < raw.len) : (i += 1) {
+                    if (raw[i] == '\\') {
+                        i += 1;
+                        continue;
+                    }
+                    if (raw[i] == '`') break;
+                    if (raw[i] == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
+                        const inner = substEnd(raw, i + 2);
+                        i = if (inner < raw.len) inner else raw.len - 1;
+                    }
+                }
+                last_sig = '`';
+            },
+            '/' => {
+                const n = if (i + 1 < raw.len) raw[i + 1] else 0;
+                if (n == '/') {
+                    while (i < raw.len and raw[i] != '\n') i += 1;
+                    continue; // i now at '\n' or end; outer loop re-checks
+                } else if (n == '*') {
+                    i += 2;
+                    while (i + 1 < raw.len and !(raw[i] == '*' and raw[i + 1] == '/')) i += 1;
+                    i += 1; // land on the closing '/', then the trailing i+=1 passes it
+                    last_sig = '/';
+                } else if (substRegexAllowed(last_sig)) {
+                    // Regex literal: skip to the unescaped terminating '/'.
+                    i += 1;
+                    var in_class = false;
+                    while (i < raw.len) : (i += 1) {
+                        const rc = raw[i];
+                        if (rc == '\\') {
+                            i += 1;
+                            continue;
+                        }
+                        if (rc == '[') in_class = true else if (rc == ']') in_class = false else if (rc == '/' and !in_class) break;
+                    }
+                    // skip flags
+                    var j = i + 1;
+                    while (j < raw.len and std.ascii.isAlphabetic(raw[j])) j += 1;
+                    i = j - 1; // trailing i+=1 lands past the flags
+                    last_sig = 'r';
+                } else {
+                    last_sig = '/';
+                }
             },
             '\\' => i += 1,
-            else => {},
+            else => last_sig = c,
         }
         i += 1;
     }
