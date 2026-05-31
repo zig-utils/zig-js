@@ -1763,3 +1763,179 @@ const JsonParser = struct {
         }
     }
 };
+
+// ===== URI handling (encodeURI / decodeURI / …) ======================
+
+const uri_unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()";
+const uri_reserved = ";/?:@&=+$,#"; // uriReserved + '#'
+
+fn hexDigit(v: u8) u8 {
+    return if (v < 10) '0' + v else 'A' + (v - 10);
+}
+
+fn hexVal(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Encode (24.5.2.1): ToString, then percent-escape every byte not in the
+/// `unescaped` set. `component` excludes the reserved set (encodeURIComponent).
+fn uriEncode(self: *Interpreter, v: Value, comptime component: bool) HostError!Value {
+    const s = try self.toStringV(v);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const b = s[i];
+        const keep = b < 0x80 and (std.mem.indexOfScalar(u8, uri_unreserved, b) != null or
+            (!component and std.mem.indexOfScalar(u8, uri_reserved, b) != null));
+        if (keep) {
+            try buf.append(self.arena, b);
+        } else {
+            // A non-ASCII byte must be part of a well-formed UTF-8 sequence; a
+            // lone/invalid byte is a URIError.
+            if (b >= 0x80) {
+                const n = std.unicode.utf8ByteSequenceLength(b) catch return self.throwError("URIError", "URI malformed");
+                if (i + n > s.len) return self.throwError("URIError", "URI malformed");
+                _ = std.unicode.utf8Decode(s[i .. i + n]) catch return self.throwError("URIError", "URI malformed");
+                for (s[i .. i + n]) |bb| {
+                    try buf.append(self.arena, '%');
+                    try buf.append(self.arena, hexDigit(bb >> 4));
+                    try buf.append(self.arena, hexDigit(bb & 0xF));
+                }
+                i += n - 1;
+            } else {
+                try buf.append(self.arena, '%');
+                try buf.append(self.arena, hexDigit(b >> 4));
+                try buf.append(self.arena, hexDigit(b & 0xF));
+            }
+        }
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+/// Decode (24.5.2.2): ToString, then un-escape `%XX` runs. A single byte whose
+/// decoded value is in the `reserved` set keeps its escape; multi-byte UTF-8
+/// runs are decoded and validated. `full` (decodeURIComponent) has no reserved
+/// set. A malformed escape/sequence is a URIError.
+fn uriDecode(self: *Interpreter, v: Value, comptime full: bool) HostError!Value {
+    const s = try self.toStringV(v);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] != '%') {
+            try buf.append(self.arena, s[i]);
+            i += 1;
+            continue;
+        }
+        if (i + 3 > s.len) return self.throwError("URIError", "URI malformed");
+        const h = hexVal(s[i + 1]) orelse return self.throwError("URIError", "URI malformed");
+        const l = hexVal(s[i + 2]) orelse return self.throwError("URIError", "URI malformed");
+        const b0: u8 = h * 16 + l;
+        if (b0 < 0x80) {
+            if (!full and std.mem.indexOfScalar(u8, uri_reserved, b0) != null) {
+                try buf.appendSlice(self.arena, s[i .. i + 3]); // keep the escape
+            } else {
+                try buf.append(self.arena, b0);
+            }
+            i += 3;
+        } else {
+            const n = std.unicode.utf8ByteSequenceLength(b0) catch return self.throwError("URIError", "URI malformed");
+            var bytes: [4]u8 = undefined;
+            bytes[0] = b0;
+            var k: usize = 1;
+            var j: usize = i + 3;
+            while (k < n) : (k += 1) {
+                if (j + 3 > s.len or s[j] != '%') return self.throwError("URIError", "URI malformed");
+                const hh = hexVal(s[j + 1]) orelse return self.throwError("URIError", "URI malformed");
+                const ll = hexVal(s[j + 2]) orelse return self.throwError("URIError", "URI malformed");
+                const bk: u8 = hh * 16 + ll;
+                if (bk & 0xC0 != 0x80) return self.throwError("URIError", "URI malformed");
+                bytes[k] = bk;
+                j += 3;
+            }
+            _ = std.unicode.utf8Decode(bytes[0..n]) catch return self.throwError("URIError", "URI malformed");
+            try buf.appendSlice(self.arena, bytes[0..n]);
+            i = j;
+        }
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+pub fn encodeURIFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    return uriEncode(interp(ctx), arg(args, 0), false);
+}
+pub fn encodeURIComponentFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    return uriEncode(interp(ctx), arg(args, 0), true);
+}
+pub fn decodeURIFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    return uriDecode(interp(ctx), arg(args, 0), false);
+}
+pub fn decodeURIComponentFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    return uriDecode(interp(ctx), arg(args, 0), true);
+}
+
+/// `escape` (Annex B B.2.1): legacy escape — `%XX` for a code unit < 256, else
+/// `%uXXXX`; the unreserved set is `A–Za–z0–9@*_+-./`.
+pub fn escapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const s = try self.toStringV(arg(args, 0));
+    const keep = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@*_+-./";
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var it = std.unicode.Utf8Iterator{ .bytes = s, .i = 0 };
+    while (it.nextCodepoint()) |cp| {
+        if (cp < 0x80 and std.mem.indexOfScalar(u8, keep, @intCast(cp)) != null) {
+            try buf.append(self.arena, @intCast(cp));
+        } else if (cp < 0x100) {
+            try buf.append(self.arena, '%');
+            try buf.append(self.arena, hexDigit(@intCast(cp >> 4)));
+            try buf.append(self.arena, hexDigit(@intCast(cp & 0xF)));
+        } else {
+            try buf.appendSlice(self.arena, "%u");
+            try buf.append(self.arena, hexDigit(@intCast((cp >> 12) & 0xF)));
+            try buf.append(self.arena, hexDigit(@intCast((cp >> 8) & 0xF)));
+            try buf.append(self.arena, hexDigit(@intCast((cp >> 4) & 0xF)));
+            try buf.append(self.arena, hexDigit(@intCast(cp & 0xF)));
+        }
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+/// `unescape` (Annex B B.2.2): reverse of `escape` — `%uXXXX` and `%XX`.
+pub fn unescapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const s = try self.toStringV(arg(args, 0));
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var cpbuf: [4]u8 = undefined;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '%' and i + 6 <= s.len and s[i + 1] == 'u' and
+            hexVal(s[i + 2]) != null and hexVal(s[i + 3]) != null and
+            hexVal(s[i + 4]) != null and hexVal(s[i + 5]) != null)
+        {
+            const cp: u21 = @as(u21, hexVal(s[i + 2]).?) << 12 | @as(u21, hexVal(s[i + 3]).?) << 8 |
+                @as(u21, hexVal(s[i + 4]).?) << 4 | hexVal(s[i + 5]).?;
+            const n = std.unicode.utf8Encode(cp, &cpbuf) catch 1;
+            try buf.appendSlice(self.arena, cpbuf[0..n]);
+            i += 6;
+        } else if (s[i] == '%' and i + 3 <= s.len and hexVal(s[i + 1]) != null and hexVal(s[i + 2]) != null) {
+            const cp: u21 = @as(u21, hexVal(s[i + 1]).?) * 16 + hexVal(s[i + 2]).?;
+            const n = std.unicode.utf8Encode(cp, &cpbuf) catch 1;
+            try buf.appendSlice(self.arena, cpbuf[0..n]);
+            i += 3;
+        } else {
+            try buf.append(self.arena, s[i]);
+            i += 1;
+        }
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}

@@ -7683,6 +7683,12 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
     try defineGlobalFn(env, root_shape, "isNaN", 1, builtins.isNaNFn);
     try defineGlobalFn(env, root_shape, "isFinite", 1, builtins.isFiniteFn);
+    try defineGlobalFn(env, root_shape, "encodeURI", 1, builtins.encodeURIFn);
+    try defineGlobalFn(env, root_shape, "encodeURIComponent", 1, builtins.encodeURIComponentFn);
+    try defineGlobalFn(env, root_shape, "decodeURI", 1, builtins.decodeURIFn);
+    try defineGlobalFn(env, root_shape, "decodeURIComponent", 1, builtins.decodeURIComponentFn);
+    try defineGlobalFn(env, root_shape, "escape", 1, builtins.escapeFn);
+    try defineGlobalFn(env, root_shape, "unescape", 1, builtins.unescapeFn);
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
     try installRegExpProto(env, root_shape);
     try defineGlobalFnC(env, root_shape, "Map", 0, true, builtins.mapFn);

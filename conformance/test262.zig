@@ -382,23 +382,81 @@ fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []
     }
 }
 
-// The full `language` tree plus the built-ins areas the engine implements.
-// With subprocess isolation a panic no longer aborts the run, so this scores
-// broadly and credits every area already handled (Boolean/Number/Error/JSON/
-// Map/Set/Symbol/Function/Date/… were previously unscored). The giant, mostly-
-// unimplemented dirs (TypedArray/ArrayBuffer/Atomics/Proxy/Reflect-heavy/
-// Temporal) are left out to keep `zig build test262` to a few minutes; add
-// `"test/built-ins"` for a full (slow) audit.
+// The ENTIRE test262 corpus: `language`, `annexB`, `intl402`, `staging`, and
+// every `built-ins/*` area — so `zig build test262` measures everything (each
+// dir reported separately for visibility). Subprocess isolation means an
+// unimplemented area just scores low rather than aborting the run. Some giant
+// areas (Temporal, intl402, Atomics/SharedArrayBuffer, ShadowRealm) are largely
+// unimplemented and run slow; they're scored honestly at their true (low) rate.
 const subtrees = [_][]const u8{
     "test/language",
-    "test/built-ins/Math",     "test/built-ins/String",  "test/built-ins/Array",
-    "test/built-ins/Object",   "test/built-ins/Boolean", "test/built-ins/Number",
-    "test/built-ins/Error",    "test/built-ins/JSON",    "test/built-ins/Map",
-    "test/built-ins/Set",      "test/built-ins/WeakMap", "test/built-ins/WeakSet",
-    "test/built-ins/Symbol",   "test/built-ins/Function", "test/built-ins/Date",
+    "test/annexB",
+    "test/intl402",
+    "test/staging",
+    "test/built-ins/AbstractModuleSource",
+    "test/built-ins/AggregateError",
+    "test/built-ins/Array",
+    "test/built-ins/ArrayBuffer",
+    "test/built-ins/ArrayIteratorPrototype",
+    "test/built-ins/AsyncDisposableStack",
+    "test/built-ins/AsyncFromSyncIteratorPrototype",
+    "test/built-ins/AsyncFunction",
+    "test/built-ins/AsyncGeneratorFunction",
+    "test/built-ins/AsyncGeneratorPrototype",
+    "test/built-ins/AsyncIteratorPrototype",
+    "test/built-ins/Atomics",
+    "test/built-ins/BigInt",
+    "test/built-ins/Boolean",
+    "test/built-ins/DataView",
+    "test/built-ins/Date",
+    "test/built-ins/decodeURI",
+    "test/built-ins/decodeURIComponent",
+    "test/built-ins/DisposableStack",
+    "test/built-ins/encodeURI",
+    "test/built-ins/encodeURIComponent",
+    "test/built-ins/Error",
+    "test/built-ins/eval",
+    "test/built-ins/FinalizationRegistry",
+    "test/built-ins/Function",
+    "test/built-ins/GeneratorFunction",
+    "test/built-ins/GeneratorPrototype",
+    "test/built-ins/global",
+    "test/built-ins/Infinity",
+    "test/built-ins/isFinite",
+    "test/built-ins/isNaN",
+    "test/built-ins/Iterator",
+    "test/built-ins/JSON",
+    "test/built-ins/Map",
+    "test/built-ins/MapIteratorPrototype",
+    "test/built-ins/Math",
+    "test/built-ins/NaN",
+    "test/built-ins/NativeErrors",
+    "test/built-ins/Number",
+    "test/built-ins/Object",
+    "test/built-ins/parseFloat",
+    "test/built-ins/parseInt",
     "test/built-ins/Promise",
-    "test/built-ins/BigInt",   "test/built-ins/TypedArray", "test/built-ins/TypedArrayConstructors",
-    "test/built-ins/ArrayBuffer", "test/built-ins/DataView", "test/built-ins/RegExp",
+    "test/built-ins/Proxy",
+    "test/built-ins/Reflect",
+    "test/built-ins/RegExp",
+    "test/built-ins/RegExpStringIteratorPrototype",
+    "test/built-ins/Set",
+    "test/built-ins/SetIteratorPrototype",
+    "test/built-ins/ShadowRealm",
+    "test/built-ins/SharedArrayBuffer",
+    "test/built-ins/String",
+    "test/built-ins/StringIteratorPrototype",
+    "test/built-ins/SuppressedError",
+    "test/built-ins/Symbol",
+    "test/built-ins/Temporal",
+    "test/built-ins/ThrowTypeError",
+    "test/built-ins/TypedArray",
+    "test/built-ins/TypedArrayConstructors",
+    "test/built-ins/Uint8Array",
+    "test/built-ins/undefined",
+    "test/built-ins/WeakMap",
+    "test/built-ins/WeakRef",
+    "test/built-ins/WeakSet",
 };
 
 pub fn main(init: std.process.Init) !void {
