@@ -1086,6 +1086,59 @@ pub const Interpreter = struct {
         return .{ .number = if (prefix) updated else old };
     }
 
+    /// Pre-declare every `var`-scoped name in `stmts` as `undefined` (hoisting),
+    /// so a forward reference reads `undefined` instead of throwing a
+    /// ReferenceError. Recurses through nested control-flow statements but stops
+    /// at function boundaries (their vars belong to their own scope); existing
+    /// bindings (parameters, hoisted functions, earlier vars) are left untouched.
+    fn hoistVarNames(self: *Interpreter, stmts: []*Node) EvalError!void {
+        for (stmts) |s| try self.hoistVarsIn(s);
+    }
+
+    fn hoistVarsIn(self: *Interpreter, node: *Node) EvalError!void {
+        switch (node.*) {
+            .var_decl => |d| if (d.kind == .@"var") try self.hoistOneVar(d.name),
+            .destructure_decl => |d| if (d.kind == .@"var") try self.hoistPatternVars(d.pattern),
+            .decl_group => |g| for (g) |gs| try self.hoistVarsIn(gs),
+            .block => |b| for (b) |bs| try self.hoistVarsIn(bs),
+            .if_stmt => |i| {
+                try self.hoistVarsIn(i.consequent);
+                if (i.alternate) |alt| try self.hoistVarsIn(alt);
+            },
+            .while_stmt => |w| try self.hoistVarsIn(w.body),
+            .do_while_stmt => |w| try self.hoistVarsIn(w.body),
+            .for_stmt => |f| {
+                if (f.init) |ini| try self.hoistVarsIn(ini);
+                try self.hoistVarsIn(f.body);
+            },
+            .for_in => |f| {
+                if (f.decl_kind) |k| if (k == .@"var") try self.hoistPatternVars(f.target);
+                try self.hoistVarsIn(f.body);
+            },
+            .try_stmt => |t| {
+                try self.hoistVarsIn(t.block);
+                if (t.catch_block) |c| try self.hoistVarsIn(c);
+                if (t.finally_block) |fb| try self.hoistVarsIn(fb);
+            },
+            .switch_stmt => |sw| for (sw.cases) |c| for (c.body) |cs| try self.hoistVarsIn(cs),
+            .labeled_stmt => |l| try self.hoistVarsIn(l.body),
+            else => {}, // function decls/exprs and expressions hoist nothing here
+        }
+    }
+
+    fn hoistOneVar(self: *Interpreter, name: []const u8) EvalError!void {
+        const vs = self.env.varScope();
+        if (vs.vars.contains(name)) return; // param / hoisted function / earlier var
+        try self.globalDefine(name, .undefined);
+    }
+
+    fn hoistPatternVars(self: *Interpreter, pat: *Node) EvalError!void {
+        switch (pat.*) {
+            .identifier => |name| try self.hoistOneVar(name),
+            else => {}, // destructuring patterns bind on execution (rare to forward-ref)
+        }
+    }
+
     pub fn evalStatements(self: *Interpreter, stmts: []*Node) EvalError!Value {
         // Hoist function declarations to the top of the scope so forward
         // references work (`bar(); function bar() {}`). Each is bound exactly
@@ -1108,6 +1161,11 @@ pub const Interpreter = struct {
             },
             else => {},
         };
+        // `var` hoisting: once per function/script var-scope, pre-declare every
+        // `var` name (in nested control-flow too) as `undefined`. Runs after the
+        // function-declaration hoist above (declare-if-absent, so it never
+        // clobbers a hoisted function or parameter).
+        if (self.env == self.env.varScope()) try self.hoistVarNames(stmts);
         // Temporal dead zone: `let`/`const` (and `class`) declarations are
         // hoisted into this scope as uninitialized bindings; reading one before
         // its declaration runs throws a ReferenceError.
@@ -1730,6 +1788,9 @@ pub const Interpreter = struct {
         if (func.is_async and func.is_generator) return self.newObject();
 
         if (func.is_expr_body) return self.eval(func.body);
+        // Hoist the body's `var` declarations into the function scope (the current
+        // `call_env`) before executing it, so a forward reference reads undefined.
+        if (func.body.* == .block) try self.hoistVarNames(func.body.block);
         _ = try self.eval(func.body);
         return if (self.signal == .ret) self.ret_value else .undefined;
     }
