@@ -7178,20 +7178,21 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         if (idx < 0 or idx >= len) return Value.undefined;
         return try self.taLoad(ta, @intCast(idx));
     }
-    if (eq(name, "join")) {
-        const sep = if (args.len > 0 and args[0] != .undefined) try self.toStringV(args[0]) else ",";
+    if (eq(name, "join") or eq(name, "toLocaleString")) {
+        const sep = if (eq(name, "join") and args.len > 0 and args[0] != .undefined) try self.toStringV(args[0]) else ",";
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         var i: usize = 0;
         while (i < len) : (i += 1) {
             if (i > 0) try buf.appendSlice(self.arena, sep);
-            try buf.appendSlice(self.arena, try value.numberToString(self.arena, value.taRead(ta, i).number));
+            const el = try self.taLoad(ta, i);
+            try buf.appendSlice(self.arena, try self.toStringV(el));
         }
         return Value{ .string = try buf.toOwnedSlice(self.arena) };
     }
     if (eq(name, "forEach")) {
         const cb = if (args.len > 0) args[0] else Value.undefined;
         var i: usize = 0;
-        while (i < len) : (i += 1) _ = try self.callValueWithThis(cb, &.{ value.taRead(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
+        while (i < len) : (i += 1) _ = try self.callValueWithThis(cb, &.{ try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
         return Value.undefined;
     }
     if (eq(name, "map")) {
@@ -7199,22 +7200,22 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const result = try newTypedArray(self, ta.kind, len);
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const r = try self.callValueWithThis(cb, &.{ value.taRead(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
-            value.taWrite(result.typed_array.?, i, try self.toNumberV(r));
+            const r = try self.callValueWithThis(cb, &.{ try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
+            try self.taStore(result.typed_array.?, i, r);
         }
         return .{ .object = result };
     }
     if (eq(name, "filter")) {
         const cb = if (args.len > 0) args[0] else Value.undefined;
-        var kept: std.ArrayListUnmanaged(f64) = .empty;
+        var kept: std.ArrayListUnmanaged(Value) = .empty;
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const el = value.taRead(ta, i);
+            const el = try self.taLoad(ta, i);
             if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean())
-                try kept.append(self.arena, el.number);
+                try kept.append(self.arena, el);
         }
         const result = try newTypedArray(self, ta.kind, kept.items.len);
-        for (kept.items, 0..) |x, k| value.taWrite(result.typed_array.?, k, x);
+        for (kept.items, 0..) |x, k| try self.taStore(result.typed_array.?, k, x);
         return .{ .object = result };
     }
     if (eq(name, "some") or eq(name, "every")) {
@@ -7222,62 +7223,95 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const cb = if (args.len > 0) args[0] else Value.undefined;
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const t = (try self.callValueWithThis(cb, &.{ value.taRead(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean();
+            const t = (try self.callValueWithThis(cb, &.{ try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean();
             if (every and !t) return Value{ .boolean = false };
             if (!every and t) return Value{ .boolean = true };
         }
         return Value{ .boolean = every };
     }
-    if (eq(name, "find") or eq(name, "findIndex")) {
-        const want_idx = eq(name, "findIndex");
+    if (eq(name, "find") or eq(name, "findIndex") or eq(name, "findLast") or eq(name, "findLastIndex")) {
+        const want_idx = eq(name, "findIndex") or eq(name, "findLastIndex");
+        const from_end = eq(name, "findLast") or eq(name, "findLastIndex");
         const cb = if (args.len > 0) args[0] else Value.undefined;
-        var i: usize = 0;
-        while (i < len) : (i += 1) {
-            const el = value.taRead(ta, i);
+        var k: usize = 0;
+        while (k < len) : (k += 1) {
+            const i = if (from_end) len - 1 - k else k;
+            const el = try self.taLoad(ta, i);
             if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean())
                 return if (want_idx) Value{ .number = @floatFromInt(i) } else el;
         }
         return if (want_idx) Value{ .number = -1 } else Value.undefined;
     }
-    if (eq(name, "reduce")) {
+    if (eq(name, "reduce") or eq(name, "reduceRight")) {
+        const right = eq(name, "reduceRight");
         const cb = if (args.len > 0) args[0] else Value.undefined;
+        if (!cb.isCallable()) return self.throwError("TypeError", "TypedArray.prototype.reduce callback is not callable");
         var acc: Value = undefined;
-        var i: usize = 0;
+        var count: usize = 0;
+        const idxOf = struct {
+            fn f(r: bool, l: usize, c: usize) usize {
+                return if (r) l - 1 - c else c;
+            }
+        }.f;
         if (args.len > 1) {
             acc = args[1];
         } else {
             if (len == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
-            acc = value.taRead(ta, 0);
-            i = 1;
+            acc = try self.taLoad(ta, idxOf(right, len, 0));
+            count = 1;
         }
-        while (i < len) : (i += 1) acc = try self.callValueWithThis(cb, &.{ acc, value.taRead(ta, i), .{ .number = @floatFromInt(i) }, recv }, .undefined);
+        while (count < len) : (count += 1) {
+            const i = idxOf(right, len, count);
+            acc = try self.callValueWithThis(cb, &.{ acc, try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, .undefined);
+        }
         return acc;
     }
     if (eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes")) {
-        const target = if (args.len > 0) try self.toNumberV(args[0]) else std.math.nan(f64);
         const incl = eq(name, "includes");
-        var i: usize = 0;
-        while (i < len) : (i += 1) {
-            const e = value.taRead(ta, i).number;
-            if (e == target or (incl and std.math.isNan(e) and std.math.isNan(target)))
-                return if (incl) Value{ .boolean = true } else Value{ .number = @floatFromInt(i) };
+        const last = eq(name, "lastIndexOf");
+        const search = if (args.len > 0) args[0] else Value.undefined;
+        var k: usize = 0;
+        while (k < len) : (k += 1) {
+            const i = if (last) len - 1 - k else k;
+            const el = try self.taLoad(ta, i);
+            const match = if (incl) value.sameValueZero(el, search) else value.strictEquals(el, search);
+            if (match) return if (incl) Value{ .boolean = true } else Value{ .number = @floatFromInt(i) };
         }
         return if (incl) Value{ .boolean = false } else Value{ .number = -1 };
     }
     if (eq(name, "fill")) {
-        const v = if (args.len > 0) try self.toNumberV(args[0]) else std.math.nan(f64);
+        // ToBigInt / ToNumber the fill value before clamping start/end.
+        const fillv = if (args.len > 0) args[0] else Value.undefined;
+        if (ta.kind.isBigInt()) {
+            _ = try self.toBigIntValueImpl(fillv, false);
+        } else {
+            _ = try self.toNumberV(fillv);
+        }
         const start = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, 0);
         const end = try relIndex(self, if (args.len > 2) args[2] else .undefined, len, @floatFromInt(len));
         var i = start;
-        while (i < end) : (i += 1) value.taWrite(ta, i, v);
+        while (i < end) : (i += 1) try self.taStore(ta, i, fillv);
         return recv;
     }
     if (eq(name, "reverse")) {
         var i: usize = 0;
         while (i < len / 2) : (i += 1) {
-            const tmp = value.taRead(ta, i).number;
-            value.taWrite(ta, i, value.taRead(ta, len - 1 - i).number);
-            value.taWrite(ta, len - 1 - i, tmp);
+            const tmp = try self.taLoad(ta, i);
+            try self.taStore(ta, i, try self.taLoad(ta, len - 1 - i));
+            try self.taStore(ta, len - 1 - i, tmp);
+        }
+        return recv;
+    }
+    if (eq(name, "copyWithin")) {
+        const target = try relIndex(self, if (args.len > 0) args[0] else .undefined, len, 0);
+        const start = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, 0);
+        const end = try relIndex(self, if (args.len > 2) args[2] else .undefined, len, @floatFromInt(len));
+        const count = @min(if (end > start) end - start else 0, len - target);
+        if (count > 0) {
+            const esz = ta.kind.byteSize();
+            const bytes = ta.buffer.array_buffer.?.data;
+            const base = ta.byte_offset;
+            std.mem.copyForwards(u8, bytes[base + target * esz ..][0 .. count * esz], bytes[base + start * esz ..][0 .. count * esz]);
         }
         return recv;
     }
@@ -7296,21 +7330,56 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         }
         const result = try newTypedArray(self, ta.kind, count);
         var i: usize = 0;
-        while (i < count) : (i += 1) value.taWrite(result.typed_array.?, i, value.taRead(ta, start + i).number);
+        while (i < count) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, start + i));
         return .{ .object = result };
+    }
+    if (eq(name, "with")) {
+        const rel = if (args.len > 0) try self.toNumberV(args[0]) else 0;
+        const idx: i64 = if (rel < 0) @as(i64, @intCast(len)) + @as(i64, @intFromFloat(@trunc(rel))) else @intFromFloat(@trunc(rel));
+        const v = if (args.len > 1) args[1] else Value.undefined;
+        // The value coerces (and can throw) before the bounds check.
+        const cv = if (ta.kind.isBigInt()) try self.toBigIntValueImpl(v, false) else Value{ .number = try self.toNumberV(v) };
+        if (idx < 0 or idx >= len) return self.throwError("RangeError", "Invalid typed array index");
+        const result = try newTypedArray(self, ta.kind, len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, i));
+        try self.taStore(result.typed_array.?, @intCast(idx), cv);
+        return .{ .object = result };
+    }
+    if (eq(name, "toReversed")) {
+        const result = try newTypedArray(self, ta.kind, len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, len - 1 - i));
+        return .{ .object = result };
+    }
+    if (eq(name, "sort") or eq(name, "toSorted")) {
+        const cmp = if (args.len > 0) args[0] else Value.undefined;
+        if (cmp != .undefined and !cmp.isCallable()) return self.throwError("TypeError", "The comparison function must be either a function or undefined");
+        const buf = try self.arena.alloc(Value, len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) buf[i] = try self.taLoad(ta, i);
+        try taSort(self, buf, cmp);
+        if (eq(name, "toSorted")) {
+            const result = try newTypedArray(self, ta.kind, len);
+            for (buf, 0..) |v, k| try self.taStore(result.typed_array.?, k, v);
+            return .{ .object = result };
+        }
+        for (buf, 0..) |v, k| try self.taStore(ta, k, v);
+        return recv;
     }
     if (eq(name, "set")) {
         const src = if (args.len > 0) args[0] else Value.undefined;
         const offset: usize = if (args.len > 1) @intFromFloat(@trunc(@max(0, try self.toNumberV(args[1])))) else 0;
         if (src == .object and src.object.typed_array != null) {
             const s = src.object.typed_array.?;
+            if (s.kind.isBigInt() != ta.kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when setting a TypedArray");
             if (offset + s.length > len) return self.throwError("RangeError", "offset is out of bounds");
             var i: usize = 0;
-            while (i < s.length) : (i += 1) value.taWrite(ta, offset + i, value.taRead(s, i).number);
+            while (i < s.length) : (i += 1) try self.taStore(ta, offset + i, try self.taLoad(s, i));
         } else if (src == .object) {
             const list = try self.iterableOrArrayLikeToList(src);
             if (offset + list.len > len) return self.throwError("RangeError", "offset is out of bounds");
-            for (list, 0..) |x, i| value.taWrite(ta, offset + i, try self.toNumberV(x));
+            for (list, 0..) |x, i| try self.taStore(ta, offset + i, x);
         }
         return Value.undefined;
     }
@@ -7326,17 +7395,55 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             if (eq(name, "keys")) {
                 try arr.elements.append(self.arena, .{ .number = @floatFromInt(i) });
             } else if (eq(name, "values")) {
-                try arr.elements.append(self.arena, value.taRead(ta, i));
+                try arr.elements.append(self.arena, try self.taLoad(ta, i));
             } else {
                 const pair = (try self.newArray()).object;
                 try pair.elements.append(self.arena, .{ .number = @floatFromInt(i) });
-                try pair.elements.append(self.arena, value.taRead(ta, i));
+                try pair.elements.append(self.arena, try self.taLoad(ta, i));
                 try arr.elements.append(self.arena, .{ .object = pair });
             }
         }
         return try self.iteratorOf(.{ .object = arr });
     }
     return null;
+}
+
+/// Sort `buf` in place per %TypedArray%.prototype.sort: with a user `cmp`
+/// function (ToNumber of its result, NaN→0; stable insertion sort so the
+/// comparator is honored exactly), or the default numeric/BigInt ascending
+/// order (NaN sorts last). Used by `sort` and `toSorted`.
+fn taSort(self: *Interpreter, buf: []Value, cmp: Value) EvalError!void {
+    var i: usize = 1;
+    while (i < buf.len) : (i += 1) {
+        const x = buf[i];
+        var j: usize = i;
+        while (j > 0) : (j -= 1) {
+            const ord = try taSortCompare(self, buf[j - 1], x, cmp);
+            if (ord <= 0) break;
+            buf[j] = buf[j - 1];
+        }
+        buf[j] = x;
+    }
+}
+
+fn taSortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f64 {
+    if (cmp.isCallable()) {
+        const r = try self.callValueWithThis(cmp, &.{ a, b }, .undefined);
+        const n = try self.toNumberV(r);
+        return if (std.math.isNan(n)) 0 else n;
+    }
+    if (a == .object and a.object.is_bigint) {
+        const av = a.object.bigint;
+        const bv = b.object.bigint;
+        return if (av < bv) -1 else if (av > bv) 1 else 0;
+    }
+    const an = a.number;
+    const bn = b.number;
+    if (std.math.isNan(an)) return if (std.math.isNan(bn)) 0 else 1;
+    if (std.math.isNan(bn)) return -1;
+    if (an < bn) return -1;
+    if (an > bn) return 1;
+    return 0;
 }
 
 /// A %TypedArray%.prototype method thunk: brand-checks `this` is a typed array,
@@ -8381,7 +8488,9 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         .{ "findIndex", 1 }, .{ "reduce", 1 }, .{ "indexOf", 1 }, .{ "lastIndexOf", 1 },
         .{ "includes", 1 }, .{ "fill", 1 },   .{ "reverse", 0 }, .{ "slice", 2 },
         .{ "subarray", 2 }, .{ "set", 1 },    .{ "toString", 0 }, .{ "keys", 0 },
-        .{ "values", 0 },   .{ "entries", 0 },
+        .{ "values", 0 },   .{ "entries", 0 }, .{ "findLast", 1 },  .{ "findLastIndex", 1 },
+        .{ "reduceRight", 1 }, .{ "sort", 1 }, .{ "toSorted", 1 },  .{ "toReversed", 0 },
+        .{ "with", 2 },     .{ "copyWithin", 2 }, .{ "toLocaleString", 0 },
     }) |s| try setNative(a, rs, ta_proto, s[0], s[1], taProtoMethod(s[0]));
     // %TypedArray%.prototype accessor getters live on the shared prototype, not
     // the instances (length/byteLength/byteOffset/buffer brand-check; the
