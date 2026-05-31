@@ -13,10 +13,10 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > hot subset *and* generators / async functions / async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js` + `assert.js` + `includes:`):
 > `zig build test262` now scores the **entire** corpus — `language/`, `annexB/`, `intl402/`,
-> `staging/`, and every `built-ins/*` area — and currently passes **VALID 31,357 / 48,411 (64.8%)**
+> `staging/`, and every `built-ins/*` area — and currently passes **VALID 33,231 / 48,411 (68.6%)**
 > (including ES modules + top-level await), while `zig build conformance` keeps a 33/33
-> always-green smoke suite. The headline is dragged down by whole subsystems that aren't
-> implemented (Temporal, Intl/`intl402`, Atomics/SharedArrayBuffer); the implemented areas score
+> always-green smoke suite. The headline is dragged down by whole subsystems that are only
+> partially implemented (Temporal, Intl/`intl402`); the implemented areas score
 > far higher — see the per-area table below.
 >
 > Implemented language + runtime: closures, arrow functions, **classes** (fields, private members,
@@ -57,31 +57,34 @@ failing to parse valid code too), so they're kept apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (whole corpus) | **31,357 / 48,411 (64.8%)** |
+| **valid** | can we run the program? (whole corpus) | **33,231 / 48,411 (68.6%)** |
 | negative | do we reject invalid input? (early errors — partial) | 1,717 / 4,669 (36.8%) |
 
-The whole-corpus rate is held down by unimplemented subsystems (Temporal 0/4603, `intl402`
-0.7%, Atomics/SharedArrayBuffer); the implemented areas score much higher.
+The whole-corpus rate is held down by partially-implemented subsystems (Temporal 958/4603,
+`intl402` 13.4% — both lacking CLDR/time-zone data and the harder calendar arithmetic); the
+implemented areas score much higher.
 
 Per area (valid):
 
 | area | passing | | area | passing |
 | ---- | ------: | - | ---- | ------: |
-| `language` (incl. modules) | 16,478 / 19,104 (86.3%) | | `Math` | 299 / 327 (91.4%) |
-| `Object` | 3,134 / 3,411 (91.9%) | | `Date` | 520 / 594 (87.5%) |
-| `Array` | 2,544 / 3,081 (82.6%) | | `Function` | 451 / 509 (88.6%) |
+| `language` (incl. modules) | 16,477 / 19,104 (86.2%) | | `Math` | 299 / 327 (91.4%) |
+| `Object` | 3,135 / 3,411 (91.9%) | | `Date` | 520 / 594 (87.5%) |
+| `Array` | 2,545 / 3,081 (82.6%) | | `Function` | 449 / 509 (88.2%) |
 | `String` | 1,047 / 1,223 (85.6%) | | `Promise` | 561 / 677 (82.9%) |
 | `Number` | 319 / 340 (93.8%) | | `BigInt` | 72 / 77 (93.5%) |
-| `RegExp` | 647 / 1,687 (38.4%) | | `TypedArray` | 947 / 1,446 (65.5%) |
-| `DataView` | 447 / 561 (79.7%) | | `Iterator` | 219 / 514 (42.6%) |
+| `RegExp` | 704 / 1,687 (41.7%) | | `TypedArray` | 952 / 1,446 (65.8%) |
+| `DataView` | 483 / 561 (86.1%) | | `Iterator` | 251 / 514 (48.8%) |
+| `Temporal` | 958 / 4,603 (20.8%) | | `intl402` | 448 / 3,341 (13.4%) |
 | `Map`/`Set` | 87–90% | | `Reflect`/`Proxy` | 48–70% |
 
 > `zig build test262` prints the per-subtree pass rate plus a `parse-fail` / `runtime-fail` split so
 > the work stays data-driven. The runtime drives the **async** corpus (the `$DONE` protocol) and the
 > **ES-module** corpus (parse → link → dependency-order evaluation, live bindings, live namespace
 > objects, top-level await), and scores both. The biggest remaining gaps are whole subsystems:
-> **TypedArray**/**BigInt**, the `$262` host hooks (`createRealm`), advanced RegExp, and full Unicode
-> case mapping. Bump the corpus with `git submodule update --remote test262`.
+> **Temporal** calendar/time-zone arithmetic (ZonedDateTime, `until`/`since`/`round`), **Intl**
+> locale data (CLDR), async-generator helper identity, and full Unicode case mapping. Bump the
+> corpus with `git submodule update --remote test262`.
 
 ## Two ways to use it
 
