@@ -209,7 +209,7 @@ pub const DataViewData = struct {
 
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
-    pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap };
+    pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat };
     src: Value, // the underlying iterator (its `.next()` is pulled)
     kind: Kind,
     func: Value = .undefined, // mapper/filterer/flatMapper
@@ -361,6 +361,9 @@ pub const Object = struct {
     /// Lazy Iterator-Helper state (`map`/`filter`/`take`/`drop`/`flatMap`/wrap),
     /// non-null on a helper iterator returned by those methods.
     iter_helper: ?*IterHelper = null,
+    /// Marks a `ShadowRealm` instance (its child realm's Environment is in
+    /// `private_data`).
+    is_shadow_realm: bool = false,
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {

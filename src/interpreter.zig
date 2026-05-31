@@ -6867,6 +6867,100 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     return .{ .object = realm };
 }
 
+/// Build a fresh realm (own global env + global object + intrinsics), sharing
+/// the creating realm's well-known symbols. Returns the new Environment.
+fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
+    const a = self.arena;
+    const genv = try a.create(Environment);
+    genv.* = .{ .arena = a, .fn_scope = true };
+    const gobj = try a.create(value.Object);
+    gobj.* = .{};
+    const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv == .object) sv.object else null) else null;
+    try installGlobalsInner(genv, self.root_shape, parent_symbol);
+    try genv.put("globalThis", .{ .object = gobj });
+    try mirrorGlobalsOnto(genv, gobj, self.root_shape);
+    if (genv.get("$262")) |d| {
+        if (d == .object) try self.setProp(d.object, "global", .{ .object = gobj });
+    }
+    return genv;
+}
+
+/// GetWrappedValue across a ShadowRealm boundary: a primitive (incl. Symbol /
+/// BigInt) passes through; a callable becomes a forwarding wrapper function; any
+/// other object is a TypeError.
+fn srWrapValue(self: *Interpreter, v: Value) EvalError!Value {
+    if (v != .object) return v;
+    const o = v.object;
+    if (o.is_symbol or o.is_bigint) return v;
+    if (o.isCallableObject()) {
+        const w = (try self.newObject()).object;
+        w.native = srWrappedCallFn;
+        w.private_data = @ptrCast(o);
+        try installNativeProps(self.arena, self.root_shape, w, "", 0);
+        return .{ .object = w };
+    }
+    return self.throwError("TypeError", "ShadowRealm: a non-callable object cannot cross the realm boundary");
+}
+
+/// A wrapped ShadowRealm callable: wrap each argument inward, call the target,
+/// and wrap the result outward.
+fn srWrappedCallFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fnobj = self.active_native orelse return .undefined;
+    const target: *value.Object = @ptrCast(@alignCast(fnobj.private_data orelse return .undefined));
+    const wargs = try self.arena.alloc(Value, args.len);
+    for (args, 0..) |arg_v, i| wargs[i] = try srWrapValue(self, arg_v);
+    const r = try self.callValueWithThis(.{ .object = target }, wargs, .undefined);
+    return srWrapValue(self, r);
+}
+
+fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor ShadowRealm requires 'new'");
+    const genv = try makeChildRealm(self);
+    const o = (try self.newObject()).object;
+    o.is_shadow_realm = true;
+    o.private_data = @ptrCast(genv);
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or !this.object.is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
+    const src = if (args.len > 0) args[0] else .undefined;
+    if (src != .string) return self.throwError("TypeError", "ShadowRealm.prototype.evaluate expects a string");
+    const genv: *Environment = @ptrCast(@alignCast(this.object.private_data orelse return self.throwError("TypeError", "ShadowRealm has no realm")));
+    var parser = Parser.init(self.arena, src.string) catch return self.throwError("SyntaxError", "evaluate: invalid source");
+    const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "evaluate: parse error");
+    const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g == .object) g.object else null) else null;
+    const s_env = self.env;
+    const s_this = self.this_value;
+    const s_glob = self.global_object;
+    self.env = genv;
+    if (gobj) |go| {
+        self.this_value = .{ .object = go };
+        self.global_object = go;
+    }
+    defer {
+        self.env = s_env;
+        self.this_value = s_this;
+        self.global_object = s_glob;
+    }
+    const result = self.eval(prog) catch |e| {
+        // A throw inside the child realm surfaces as a TypeError in the caller
+        // (the thrown value can't cross the boundary).
+        if (e == error.Throw) {
+            return self.throwError("TypeError", "ShadowRealm.prototype.evaluate: the evaluated code threw");
+        }
+        return e;
+    };
+    return srWrapValue(self, result);
+}
+
 /// Install the test262 `$262` host object into `env` (its `global` is wired up
 /// by the caller once the realm's global object exists).
 pub fn install262(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
@@ -7265,6 +7359,28 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                 return self.iterResultObj(is.value, false);
             }
         },
+        .concat => {
+            // `h.src` is a JS array of the source iterables; `counter` is the next
+            // source index and `inner` the iterator currently being drained.
+            const srcs = h.src.object;
+            while (true) {
+                if (h.inner == null) {
+                    const idx: usize = @intFromFloat(h.counter);
+                    if (idx >= srcs.elements.items.len) {
+                        h.done = true;
+                        return self.iterResultObj(.undefined, true);
+                    }
+                    h.counter += 1;
+                    h.inner = try self.iteratorOf(srcs.elements.items[idx]);
+                }
+                const is = try self.iterStep(h.inner.?);
+                if (is.done) {
+                    h.inner = null;
+                    continue;
+                }
+                return self.iterResultObj(is.value, false);
+            }
+        },
     }
 }
 
@@ -7413,6 +7529,19 @@ fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     return makeIterHelper(self, it, .wrap, .undefined, 0);
 }
 
+/// `Iterator.concat(...items)` — an iterator yielding all values of each
+/// iterable argument in order. Each argument must be an iterable object.
+fn iteratorConcatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const srcs = (try self.newArray()).object;
+    for (args) |arg_v| {
+        if (arg_v != .object or !self.isIterable(arg_v)) return self.throwError("TypeError", "Iterator.concat: each argument must be an iterable object");
+        try srcs.elements.append(self.arena, arg_v);
+    }
+    return makeIterHelper(self, .{ .object = srcs }, .concat, .undefined, 0);
+}
+
 /// `Iterator` is abstract — `new Iterator()` directly throws.
 fn iteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -7497,6 +7626,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     ctor.* = .{ .native = iteratorConstructorFn, .native_ctor = true };
     try installNativeProps(a, rs, ctor, "Iterator", 0);
     try setNative(a, rs, ctor, "from", 1, iteratorFromFn);
+    try setNative(a, rs, ctor, "concat", 0, iteratorConcatFn);
     try ctor.setOwn(a, rs, "prototype", .{ .object = iter_proto });
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, iter_proto, ctor);
@@ -9549,6 +9679,25 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installWeakRefAndFinReg(env, rs, object_proto);
     try installIterator(env, rs, object_proto);
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
+    // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
+    {
+        const proto = try a.create(value.Object);
+        proto.* = .{ .proto = object_proto };
+        try setNative(a, rs, proto, "evaluate", 1, shadowRealmEvaluateFn);
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
+                try proto.setOwn(a, rs, tt.object.sym_key, .{ .string = "ShadowRealm" });
+                try proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            };
+        };
+        const ctor = try a.create(value.Object);
+        ctor.* = .{ .native = shadowRealmConstructorFn, .native_ctor = true };
+        try installNativeProps(a, rs, ctor, "ShadowRealm", 0);
+        try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, rs, proto, ctor);
+        try env.put("ShadowRealm", .{ .object = ctor });
+    }
 }
 
 /// Install `SharedArrayBuffer` (an ArrayBuffer-like, growable, never-detached
