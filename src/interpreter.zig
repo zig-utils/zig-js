@@ -307,6 +307,12 @@ pub const Interpreter = struct {
     /// The Context's empty root shape — the origin of every object's shape
     /// transition chain (see shape.zig).
     root_shape: *Shape,
+    /// Symbol objects indexed by their encoded property key (`sym_key`), so the
+    /// original Symbol can be recovered from a stored key — used by
+    /// Object.getOwnPropertySymbols and the Proxy traps (which must hand the
+    /// Symbol, not its encoded string, to the handler). Populated whenever a
+    /// Symbol is used as a property key (see `keyOf`).
+    symbols: std.StringHashMapUnmanaged(*value.Object) = .{},
     signal: Signal = .none,
     ret_value: Value = .undefined,
     /// The `this` binding for the currently-executing function (undefined at
@@ -1960,16 +1966,23 @@ pub const Interpreter = struct {
     }
 
     pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
-        if (k == .object and k.object.is_symbol) return k.object.sym_key;
+        if (k == .object and k.object.is_symbol) return self.registerSymbol(k.object);
         // ToPropertyKey: an object key is first ToPrimitive(key, string) — running
         // its `[Symbol.toPrimitive]`/`toString`/`valueOf` (a TypeError if none
         // yields a primitive) — and a resulting Symbol keeps its key.
         if (k == .object) {
             const prim = try self.toPrimitive(k, .string);
-            if (prim == .object and prim.object.is_symbol) return prim.object.sym_key;
+            if (prim == .object and prim.object.is_symbol) return self.registerSymbol(prim.object);
             return prim.toString(self.arena);
         }
         return k.toString(self.arena);
+    }
+
+    /// Index a Symbol by its encoded `sym_key` so it can later be recovered (by
+    /// getOwnPropertySymbols / proxy traps), then return that key.
+    fn registerSymbol(self: *Interpreter, sym: *value.Object) []const u8 {
+        self.symbols.put(self.arena, sym.sym_key, sym) catch {};
+        return sym.sym_key;
     }
 
     /// Allocate a fresh plain object. The single creation point so later tiers
@@ -2834,7 +2847,11 @@ pub const Interpreter = struct {
     /// A property key as a JS value for passing to a trap. (String keys only for
     /// now; symbol-keyed trap arguments aren't reconstructed yet.)
     pub fn keyToValue(self: *Interpreter, key: []const u8) Value {
-        _ = self;
+        // A symbol-encoded key recovers the original Symbol (registered in
+        // `keyOf` when it was used as a property key); other keys are strings.
+        if (value.isSymbolKey(key)) {
+            if (self.symbols.get(key)) |sym| return .{ .object = sym };
+        }
         return .{ .string = key };
     }
 
