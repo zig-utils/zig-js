@@ -54,18 +54,18 @@ failing to parse valid code too), so they're kept apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? | **25,977 / 30,486 (85.2%)** |
-| negative | do we reject invalid input? (early errors — partial) | 1,704 / 4,455 (38.2%) |
+| **valid** | can we run the program? | **26,071 / 30,486 (85.5%)** |
+| negative | do we reject invalid input? (early errors — partial) | 1,707 / 4,455 (38.3%) |
 
 Per area (valid):
 
 | area | passing | | area | passing |
 | ---- | ------: | - | ---- | ------: |
-| `language` (incl. modules) | 16,097 / 19,104 (84.3%) | | `Math` | 299 / 327 (91.4%) |
-| `Object` | 2,865 / 3,411 (84.0%) | | `Date` | 466 / 594 (78.5%) |
-| `Array` | 2,319 / 3,081 (75.3%) | | `Function` | 401 / 509 (78.8%) |
-| `String` | 850 / 1,223 (69.5%) | | `Promise` | 493 / 677 (72.8%) |
-| `Number` | 270 / 340 (79.4%) | | `Map`/`Set` | 75–78% |
+| `language` (incl. modules) | 16,392 / 19,104 (85.8%) | | `Math` | 299 / 327 (91.4%) |
+| `Object` | 3,048 / 3,411 (89.4%) | | `Date` | 513 / 594 (86.4%) |
+| `Array` | 2,523 / 3,081 (81.9%) | | `Function` | 452 / 509 (88.8%) |
+| `String` | 1,009 / 1,223 (82.5%) | | `Promise` | 561 / 677 (82.9%) |
+| `Number` | 289 / 340 (85.0%) | | `Map`/`Set` | 77–86% |
 
 > `zig build test262` prints the per-subtree pass rate plus a `parse-fail` / `runtime-fail` split so
 > the work stays data-driven. The runtime drives the **async** corpus (the `$DONE` protocol) and the
