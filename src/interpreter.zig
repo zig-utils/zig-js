@@ -3919,8 +3919,38 @@ pub const Interpreter = struct {
         it.* = .{};
         try self.setProp(it, "__src", src);
         try self.setProp(it, "__i", .{ .number = 0 });
-        try setNative(self.arena, self.root_shape, it, "next", 0, cursorIterNext);
+        // Inherit the per-kind built-in iterator prototype (%ArrayIteratorPrototype%
+        // etc.) — which carries `next`, the @@toStringTag, and (via
+        // %IteratorPrototype%) the iterator-helper methods.
+        const proto_key: []const u8 = switch (src) {
+            .string => "\x00StrIterProto",
+            .object => |so| if (so.is_map) "\x00MapIterProto" else if (so.is_set) "\x00SetIterProto" else "\x00ArrIterProto",
+            else => "\x00ArrIterProto",
+        };
+        if (self.env.get(proto_key)) |p| {
+            if (p == .object) it.proto = p.object;
+        } else {
+            // Before %IteratorPrototype% exists (early bootstrap): a plain `next`.
+            try setNative(self.arena, self.root_shape, it, "next", 0, cursorIterNext);
+        }
         return .{ .object = it };
+    }
+
+    /// A fresh `{ value, done }` IteratorResult object.
+    pub fn iterResultObj(self: *Interpreter, val: Value, done: bool) EvalError!Value {
+        const o = (try self.newObject()).object;
+        try self.setProp(o, "value", val);
+        try self.setProp(o, "done", .{ .boolean = done });
+        return .{ .object = o };
+    }
+
+    /// Pull the next result from iterator `it`, returning `{ done, value }`.
+    fn iterStep(self: *Interpreter, it: Value) EvalError!struct { done: bool, value: Value } {
+        const r = try self.callMethod(it, "next", &.{});
+        if (r != .object) return self.throwError("TypeError", "iterator result is not an object");
+        const done = (try self.getProperty(r, "done")).toBoolean();
+        const val = if (done) Value.undefined else try self.getProperty(r, "value");
+        return .{ .done = done, .value = val };
     }
 
     /// `Array.prototype` (the global), for consulting/observing its
@@ -7131,6 +7161,354 @@ fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) v
 }
 
 /// Install `DataView` (constructor + prototype get/set accessors and methods).
+// ===== Iterator + Iterator Helpers (ES2025) ==========================
+
+/// Build a lazy iterator-helper object (`map`/`filter`/…) wrapping `src`.
+fn makeIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, func: Value, limit: f64) EvalError!Value {
+    const o = (try self.newObject()).object;
+    const h = try self.arena.create(value.IterHelper);
+    h.* = .{ .src = src, .kind = kind, .func = func, .limit = limit };
+    o.iter_helper = h;
+    if (self.env.get("\x00IterHelperProto")) |p| if (p == .object) {
+        o.proto = p.object;
+    };
+    return .{ .object = o };
+}
+
+/// `next` for a lazy iterator helper: pulls from the underlying iterator and
+/// applies the helper's transform.
+fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.iter_helper == null) return self.throwError("TypeError", "Iterator Helper next called on an incompatible receiver");
+    const h = this.object.iter_helper.?;
+    if (h.done) return self.iterResultObj(.undefined, true);
+    switch (h.kind) {
+        .wrap => {
+            const s = try self.iterStep(h.src);
+            if (s.done) {
+                h.done = true;
+                return self.iterResultObj(.undefined, true);
+            }
+            return self.iterResultObj(s.value, false);
+        },
+        .map => {
+            const s = try self.iterStep(h.src);
+            if (s.done) {
+                h.done = true;
+                return self.iterResultObj(.undefined, true);
+            }
+            const mapped = try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined);
+            h.counter += 1;
+            return self.iterResultObj(mapped, false);
+        },
+        .filter => {
+            while (true) {
+                const s = try self.iterStep(h.src);
+                if (s.done) {
+                    h.done = true;
+                    return self.iterResultObj(.undefined, true);
+                }
+                const keep = (try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined)).toBoolean();
+                h.counter += 1;
+                if (keep) return self.iterResultObj(s.value, false);
+            }
+        },
+        .take => {
+            if (h.counter >= h.limit) {
+                h.done = true;
+                return self.iterResultObj(.undefined, true);
+            }
+            const s = try self.iterStep(h.src);
+            if (s.done) {
+                h.done = true;
+                return self.iterResultObj(.undefined, true);
+            }
+            h.counter += 1;
+            return self.iterResultObj(s.value, false);
+        },
+        .drop => {
+            if (!h.started) {
+                h.started = true;
+                while (h.counter < h.limit) : (h.counter += 1) {
+                    const s = try self.iterStep(h.src);
+                    if (s.done) {
+                        h.done = true;
+                        return self.iterResultObj(.undefined, true);
+                    }
+                }
+            }
+            const s = try self.iterStep(h.src);
+            if (s.done) {
+                h.done = true;
+                return self.iterResultObj(.undefined, true);
+            }
+            return self.iterResultObj(s.value, false);
+        },
+        .flat_map => {
+            while (true) {
+                if (h.inner == null) {
+                    const s = try self.iterStep(h.src);
+                    if (s.done) {
+                        h.done = true;
+                        return self.iterResultObj(.undefined, true);
+                    }
+                    const mapped = try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined);
+                    h.counter += 1;
+                    h.inner = try self.iteratorOf(mapped);
+                }
+                const is = try self.iterStep(h.inner.?);
+                if (is.done) {
+                    h.inner = null;
+                    continue;
+                }
+                return self.iterResultObj(is.value, false);
+            }
+        },
+    }
+}
+
+fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this == .object and this.object.iter_helper != null) this.object.iter_helper.?.done = true;
+    return self.iterResultObj(.undefined, true);
+}
+
+// --- the lazy helper methods on %Iterator.prototype% -----------------
+
+fn iterMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Iterator.prototype.map called on a non-object");
+    const f = if (args.len > 0) args[0] else .undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.map: mapper is not a function");
+    return makeIterHelper(self, this, .map, f, 0);
+}
+fn iterFilterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Iterator.prototype.filter called on a non-object");
+    const f = if (args.len > 0) args[0] else .undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.filter: predicate is not a function");
+    return makeIterHelper(self, this, .filter, f, 0);
+}
+fn iterFlatMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Iterator.prototype.flatMap called on a non-object");
+    const f = if (args.len > 0) args[0] else .undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.flatMap: mapper is not a function");
+    return makeIterHelper(self, this, .flat_map, f, 0);
+}
+fn iterTakeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Iterator.prototype.take called on a non-object");
+    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    if (std.math.isNan(n) or n < 0) return self.throwError("RangeError", "Iterator.prototype.take: invalid count");
+    return makeIterHelper(self, this, .take, .undefined, @trunc(n));
+}
+fn iterDropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Iterator.prototype.drop called on a non-object");
+    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    if (std.math.isNan(n) or n < 0) return self.throwError("RangeError", "Iterator.prototype.drop: invalid count");
+    return makeIterHelper(self, this, .drop, .undefined, @trunc(n));
+}
+
+// --- the eager helper methods (consume `this`) -----------------------
+
+fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Iterator.prototype.toArray called on a non-object");
+    const arr = (try self.newArray()).object;
+    while (true) {
+        const s = try self.iterStep(this);
+        if (s.done) break;
+        try arr.elements.append(self.arena, s.value);
+    }
+    return .{ .object = arr };
+}
+fn iterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Iterator.prototype.forEach called on a non-object");
+    const f = if (args.len > 0) args[0] else .undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.forEach: fn is not a function");
+    var i: f64 = 0;
+    while (true) : (i += 1) {
+        const s = try self.iterStep(this);
+        if (s.done) break;
+        _ = try self.callValueWithThis(f, &.{ s.value, .{ .number = i } }, .undefined);
+    }
+    return .undefined;
+}
+fn iterReduceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "Iterator.prototype.reduce called on a non-object");
+    const f = if (args.len > 0) args[0] else .undefined;
+    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.reduce: reducer is not a function");
+    var acc: Value = undefined;
+    var i: f64 = 0;
+    if (args.len > 1) {
+        acc = args[1];
+    } else {
+        const s = try self.iterStep(this);
+        if (s.done) return self.throwError("TypeError", "Reduce of empty iterator with no initial value");
+        acc = s.value;
+        i = 1;
+    }
+    while (true) : (i += 1) {
+        const s = try self.iterStep(this);
+        if (s.done) break;
+        acc = try self.callValueWithThis(f, &.{ acc, s.value, .{ .number = i } }, .undefined);
+    }
+    return acc;
+}
+fn iterSomeEveryFindFn(comptime which: enum { some, every, find }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object) return self.throwError("TypeError", "Iterator.prototype method called on a non-object");
+            const f = if (args.len > 0) args[0] else .undefined;
+            if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype method: fn is not a function");
+            var i: f64 = 0;
+            while (true) : (i += 1) {
+                const s = try self.iterStep(this);
+                if (s.done) break;
+                const t = (try self.callValueWithThis(f, &.{ s.value, .{ .number = i } }, .undefined)).toBoolean();
+                switch (which) {
+                    .some => if (t) return .{ .boolean = true },
+                    .every => if (!t) return .{ .boolean = false },
+                    .find => if (t) return s.value,
+                }
+            }
+            return switch (which) {
+                .some => .{ .boolean = false },
+                .every => .{ .boolean = true },
+                .find => .undefined,
+            };
+        }
+    }.call;
+}
+
+fn iterProtoSymbolIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = args;
+    return this; // %IteratorPrototype%[@@iterator] returns the iterator itself
+}
+
+/// `Iterator.from(O)`: wrap an iterator/iterable so the helper methods apply.
+fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = if (args.len > 0) args[0] else .undefined;
+    if (o == .string) return makeIterHelper(self, try self.iteratorOf(o), .wrap, .undefined, 0);
+    if (o != .object) return self.throwError("TypeError", "Iterator.from: argument is not iterable");
+    // An iterable is opened via its iterator; an iterator-like object (has a
+    // `next` method) is used directly; otherwise it is not iterable.
+    const it = if (self.isIterable(o))
+        try self.iteratorOf(o)
+    else if (hasProperty(o.object, "next"))
+        o
+    else
+        return self.throwError("TypeError", "Iterator.from: argument is not iterable");
+    return makeIterHelper(self, it, .wrap, .undefined, 0);
+}
+
+/// `Iterator` is abstract — `new Iterator()` directly throws.
+fn iteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Iterator requires 'new'");
+    // Abstract: cannot be constructed unless subclassed (new.target !== Iterator).
+    if (self.new_target == .object) {
+        if (self.env.get("Iterator")) |ic| if (ic == .object and self.new_target.object == ic.object)
+            return self.throwError("TypeError", "Abstract class Iterator not directly constructable");
+    }
+    const o = (try self.newObject()).object;
+    o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+/// Install `%IteratorPrototype%`, `%IteratorHelperPrototype%`, the `Iterator`
+/// global, and `Iterator.from`.
+fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const sym_iter: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("iterator")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+    const sym_tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+
+    // %IteratorPrototype%.
+    const iter_proto = try a.create(value.Object);
+    iter_proto.* = .{ .proto = object_proto };
+    if (sym_iter) |k| try setNative(a, rs, iter_proto, k, 0, iterProtoSymbolIteratorFn);
+    inline for (.{
+        .{ "map", iterMapFn },        .{ "filter", iterFilterFn },
+        .{ "take", iterTakeFn },      .{ "drop", iterDropFn },
+        .{ "flatMap", iterFlatMapFn }, .{ "reduce", iterReduceFn },
+        .{ "toArray", iterToArrayFn }, .{ "forEach", iterForEachFn },
+    }) |m| try setNative(a, rs, iter_proto, m[0], 1, m[1]);
+    try setNative(a, rs, iter_proto, "some", 1, iterSomeEveryFindFn(.some));
+    try setNative(a, rs, iter_proto, "every", 1, iterSomeEveryFindFn(.every));
+    try setNative(a, rs, iter_proto, "find", 1, iterSomeEveryFindFn(.find));
+    try env.put("\x00IterProto", .{ .object = iter_proto });
+
+    // Per-kind built-in iterator prototypes (%ArrayIteratorPrototype% etc.): each
+    // protos to %IteratorPrototype%, carries the shared cursor `next`, and a
+    // @@toStringTag naming the kind.
+    inline for (.{
+        .{ "\x00ArrIterProto", "Array Iterator" },
+        .{ "\x00MapIterProto", "Map Iterator" },
+        .{ "\x00SetIterProto", "Set Iterator" },
+        .{ "\x00StrIterProto", "String Iterator" },
+    }) |kp| {
+        const kproto = try a.create(value.Object);
+        kproto.* = .{ .proto = iter_proto };
+        try setNative(a, rs, kproto, "next", 0, cursorIterNext);
+        if (sym_tag) |k| {
+            try kproto.setOwn(a, rs, k, .{ .string = kp[1] });
+            try kproto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        try env.put(kp[0], .{ .object = kproto });
+    }
+
+    // %IteratorHelperPrototype% (proto %IteratorPrototype%): next + return, plus
+    // a @@toStringTag of "Iterator Helper".
+    const helper_proto = try a.create(value.Object);
+    helper_proto.* = .{ .proto = iter_proto };
+    try setNative(a, rs, helper_proto, "next", 0, iterHelperNextFn);
+    try setNative(a, rs, helper_proto, "return", 0, iterHelperReturnFn);
+    if (sym_tag) |k| {
+        try helper_proto.setOwn(a, rs, k, .{ .string = "Iterator Helper" });
+        try helper_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    try env.put("\x00IterHelperProto", .{ .object = helper_proto });
+
+    // The `Iterator` constructor (abstract) with `.prototype` = %IteratorProto%.
+    const ctor = try a.create(value.Object);
+    ctor.* = .{ .native = iteratorConstructorFn, .native_ctor = true };
+    try installNativeProps(a, rs, ctor, "Iterator", 0);
+    try setNative(a, rs, ctor, "from", 1, iteratorFromFn);
+    try ctor.setOwn(a, rs, "prototype", .{ .object = iter_proto });
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, iter_proto, ctor);
+    // %IteratorPrototype%[@@toStringTag] is an accessor in the spec; a writable
+    // data property of "Iterator" satisfies the common reflection checks.
+    if (sym_tag) |k| {
+        try iter_proto.setOwn(a, rs, k, .{ .string = "Iterator" });
+        try iter_proto.setAttr(a, k, .{ .writable = true, .enumerable = false, .configurable = true });
+    }
+    try env.put("Iterator", .{ .object = ctor });
+}
+
 /// CanBeHeldWeakly(v): an Object or a Symbol (a BigInt or a primitive is not).
 fn canBeHeldWeakly(v: Value) bool {
     return v == .object and !v.object.is_bigint;
@@ -8941,6 +9319,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
 
     try installDataView(env, rs, object_proto);
     try installWeakRefAndFinReg(env, rs, object_proto);
+    try installIterator(env, rs, object_proto);
 }
 
 fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {

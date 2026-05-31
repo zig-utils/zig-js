@@ -205,6 +205,19 @@ pub const DataViewData = struct {
     byte_length: usize,
 };
 
+/// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
+pub const IterHelper = struct {
+    pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap };
+    src: Value, // the underlying iterator (its `.next()` is pulled)
+    kind: Kind,
+    func: Value = .undefined, // mapper/filterer/flatMapper
+    counter: f64 = 0, // index argument to the callback
+    limit: f64 = 0, // take/drop count
+    inner: ?Value = null, // flat_map's current inner iterator
+    done: bool = false,
+    started: bool = false, // drop: the initial skip has run
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -343,6 +356,9 @@ pub const Object = struct {
     weak_ref_target: ?Value = null,
     /// Marks a `FinalizationRegistry` (its cleanup callback never fires — no GC).
     is_finalization_registry: bool = false,
+    /// Lazy Iterator-Helper state (`map`/`filter`/`take`/`drop`/`flatMap`/wrap),
+    /// non-null on a helper iterator returned by those methods.
+    iter_helper: ?*IterHelper = null,
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {
