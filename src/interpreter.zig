@@ -4960,8 +4960,12 @@ pub const Interpreter = struct {
             return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value{ .number = std.math.nan(f64) };
         }
         if (eq(name, "indexOf")) {
-            const sub = try arg0(args).toString(self.arena);
-            return Value{ .number = if (std.mem.indexOf(u8, s, sub)) |idx| @floatFromInt(idx) else -1 };
+            // ToString(searchString) precedes ToInteger(position), and each runs
+            // the argument's valueOf/toString (so an abrupt completion in either
+            // propagates in spec order).
+            const sub = try self.toStringV(arg0(args));
+            const start = try self.clampPos(arg(args, 1), s.len);
+            return Value{ .number = if (std.mem.indexOfPos(u8, s, start, sub)) |idx| @floatFromInt(idx) else -1 };
         }
         if (eq(name, "includes")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.includes must not be a regular expression");
@@ -5168,8 +5172,19 @@ pub const Interpreter = struct {
             return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value.undefined;
         }
         if (eq(name, "lastIndexOf")) {
-            const sub = try arg0(args).toString(self.arena);
-            return Value{ .number = if (std.mem.lastIndexOf(u8, s, sub)) |idx| @floatFromInt(idx) else -1 };
+            // ToString(searchString) then ToNumber(position): a NaN position
+            // (incl. the default `undefined`) searches the whole string; otherwise
+            // the match must start at or before the clamped position.
+            const sub = try self.toStringV(arg0(args));
+            const np = try self.toNumberV(arg(args, 1));
+            const limit: usize = if (std.math.isNan(np)) s.len else if (np <= 0)
+                0
+            else if (np >= @as(f64, @floatFromInt(s.len))) s.len else @intFromFloat(@trunc(np));
+            if (sub.len == 0) return Value{ .number = @floatFromInt(@min(limit, s.len)) };
+            // A match starting at k (k ≤ limit) occupies s[k .. k+sub.len); the
+            // largest such k is the last occurrence within s[0 .. limit+sub.len].
+            const hi = @min(limit + sub.len, s.len);
+            return Value{ .number = if (std.mem.lastIndexOf(u8, s[0..hi], sub)) |idx| @floatFromInt(idx) else -1 };
         }
         if (eq(name, "substr")) {
             // `substr(start, length)`: start may count from the end.
