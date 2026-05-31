@@ -5650,17 +5650,25 @@ pub const Interpreter = struct {
     /// OrdinaryHasInstance(C=`rc`, O=`l`): is `rc.prototype` in `l`'s prototype
     /// chain? Plus the engine's constructor-identity shortcuts. Assumes `rc` is
     /// already known callable (false otherwise).
+    /// An object's effective [[Prototype]]: its `proto`, or — for a callable
+    /// (native/bound) function that was never given one — %Function.prototype%,
+    /// which every function inherits.
+    pub fn effectiveProto(self: *Interpreter, o: *value.Object) ?*value.Object {
+        if (o.proto) |p| return p;
+        if (o.native != null or o.js_func != null or o.bound != null) return self.functionProto();
+        return null;
+    }
+
     pub fn ordinaryHasInstance(self: *Interpreter, rc: *value.Object, l: Value) EvalError!bool {
-        _ = self;
         if (!rc.isCallableObject()) return false;
         if (l != .object) return false;
         const lo = l.object;
         if (rc.getOwn("prototype")) |p| {
             if (p == .object) {
-                var cur: ?*value.Object = lo.proto;
+                var cur: ?*value.Object = self.effectiveProto(lo);
                 while (cur) |c| {
                     if (c == p.object) return true;
-                    cur = c.proto;
+                    cur = self.effectiveProto(c);
                 }
             }
         }

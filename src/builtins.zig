@@ -638,10 +638,12 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
 }
 
 pub fn objectGetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
+    const self = interp(ctx);
     if (arg(args, 0) == .object) {
-        if (arg(args, 0).object.proto) |p| return .{ .object = p };
+        // [[GetPrototypeOf]]: a callable with no explicit prototype reports
+        // %Function.prototype% (every function inherits it).
+        if (self.effectiveProto(arg(args, 0).object)) |p| return .{ .object = p };
     }
     return .null;
 }
