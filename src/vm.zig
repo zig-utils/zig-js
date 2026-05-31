@@ -373,10 +373,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const recv = stack.items[base - 1];
                 const args = stack.items[base..];
                 const name = chunk.names.items[inst.a];
-                const result = if (try vm.builtinMethod(recv, name, args)) |r|
-                    r
-                else
-                    try callValue(vm, try vm.getProperty(recv, name), args, recv);
+                const result = try invokeMethod(vm, recv, name, args);
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(vm.arena, result);
             },
@@ -398,10 +395,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const recv = stack.pop().?;
                 const name = chunk.names.items[inst.a];
                 const args = args_arr.object.elements.items;
-                const result = if (try vm.builtinMethod(recv, name, args)) |r|
-                    r
-                else
-                    try callValue(vm, try vm.getProperty(recv, name), args, recv);
+                const result = try invokeMethod(vm, recv, name, args);
                 try stack.append(vm.arena, result);
             },
             .new_spread => {
@@ -1128,6 +1122,18 @@ fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Val
         }
     }
     return vm.callValueWithThis(callee, args, this_val);
+}
+
+/// `recv.name(args)` — mirrors the tree-walker's `callMethod`: a real (possibly
+/// user-overridden) method property on the receiver/prototype chain wins over the
+/// engine's native fast-path, which remains the implementation of the unshadowed
+/// intrinsics and the fallback for synthesized-only method names.
+fn invokeMethod(vm: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!Value {
+    const method = try vm.getProperty(recv, name);
+    if (method == .object and method.object.isCallableObject())
+        return callValue(vm, method, args, recv);
+    if (try vm.builtinMethod(recv, name, args)) |r| return r;
+    return callValue(vm, method, args, recv);
 }
 
 /// `new callee(args)`. A VM-compiled constructor runs on the VM with a fresh
