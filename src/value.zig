@@ -207,6 +207,29 @@ pub const DataViewData = struct {
     byte_length: usize,
 };
 
+/// Internal slots for the `Temporal.*` types. One flat record covers every
+/// kind (the `kind` tag selects which fields are meaningful), keeping the
+/// `Object` footprint to a single pointer.
+pub const TemporalData = struct {
+    pub const Kind = enum { instant, plain_date, plain_time, plain_date_time, plain_year_month, plain_month_day, duration, zoned_date_time };
+    kind: Kind,
+    // ISO date components (PlainDate/DateTime/YearMonth/MonthDay/ZonedDateTime).
+    year: i32 = 0,
+    month: u8 = 1,
+    day: u8 = 1,
+    // ISO time components (PlainTime/DateTime/ZonedDateTime).
+    hour: u8 = 0,
+    minute: u8 = 0,
+    second: u8 = 0,
+    millisecond: u16 = 0,
+    microsecond: u16 = 0,
+    nanosecond: u16 = 0,
+    // Instant / ZonedDateTime: nanoseconds since the Unix epoch.
+    epoch_ns: i128 = 0,
+    // Duration components (signed, may be fractional only for the smallest set).
+    dur: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, // years,months,weeks,days,hours,minutes,seconds,ms,us,ns
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat };
@@ -364,6 +387,9 @@ pub const Object = struct {
     /// Marks a `ShadowRealm` instance (its child realm's Environment is in
     /// `private_data`).
     is_shadow_realm: bool = false,
+    /// `Temporal.*` internal slots (PlainDate/Time/DateTime/Duration/Instant/…),
+    /// non-null on a Temporal object.
+    temporal: ?*TemporalData = null,
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {

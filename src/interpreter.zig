@@ -9679,6 +9679,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installWeakRefAndFinReg(env, rs, object_proto);
     try installIterator(env, rs, object_proto);
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
+    try installTemporal(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
     {
         const proto = try a.create(value.Object);
@@ -9702,6 +9703,843 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
 
 /// Install `SharedArrayBuffer` (an ArrayBuffer-like, growable, never-detached
 /// buffer) and the `Atomics` namespace (single-threaded semantics).
+// ===== Temporal ======================================================
+// A faithful subset of the Temporal proposal (ISO-8601 calendar, UTC): the
+// PlainDate/PlainTime/PlainDateTime/PlainYearMonth/PlainMonthDay/Duration/
+// Instant types and Temporal.Now. TimeZone/Calendar objects are represented by
+// their string id (the "calendars/timezones as strings" form).
+
+fn isoLeap(y: i64) bool {
+    return @rem(y, 4) == 0 and (@rem(y, 100) != 0 or @rem(y, 400) == 0);
+}
+fn isoDaysInMonth(y: i64, m: u8) u8 {
+    return switch (m) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => @as(u8, if (isoLeap(y)) 29 else 28),
+        else => 30,
+    };
+}
+/// Days from 1970-01-01 to year-month-day (proleptic Gregorian; Hinnant).
+fn tDaysFromCivil(y_in: i64, m: u8, d: u8) i64 {
+    var y = y_in;
+    if (m <= 2) y -= 1;
+    const era = @divFloor(if (y >= 0) y else y - 399, 400);
+    const yoe = y - era * 400;
+    const mp: i64 = (@as(i64, m) + (if (m > 2) @as(i64, -3) else @as(i64, 9)));
+    const doy = @divTrunc(153 * mp + 2, 5) + @as(i64, d) - 1;
+    const doe = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+const Civil = struct { y: i64, m: u8, d: u8 };
+fn tCivilFromDays(z_in: i64) Civil {
+    const z = z_in + 719468;
+    const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
+    const doe = z - era * 146097;
+    const yoe = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365);
+    const y = yoe + era * 400;
+    const doy = doe - (365 * yoe + @divTrunc(yoe, 4) - @divTrunc(yoe, 100));
+    const mp = @divTrunc(5 * doy + 2, 153);
+    const d: u8 = @intCast(doy - @divTrunc(153 * mp + 2, 5) + 1);
+    const m: u8 = @intCast(if (mp < 10) mp + 3 else mp - 9);
+    return .{ .y = if (m <= 2) y + 1 else y, .m = m, .d = d };
+}
+fn isoDayOfWeek(y: i64, m: u8, d: u8) u8 {
+    const dow = @mod(tDaysFromCivil(y, m, d) + 4, 7); // 1970-01-01 was Thursday(4)
+    return @intCast(if (dow == 0) 7 else dow); // Mon=1..Sun=7
+}
+
+/// A Temporal object of `kind`, with its prototype from the env hidden binding.
+fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []const u8) EvalError!*value.Object {
+    const o = (try self.newObject()).object;
+    const t = try self.arena.create(value.TemporalData);
+    t.* = .{ .kind = kind };
+    o.temporal = t;
+    if (self.env.get(proto_key)) |p| if (p == .object) {
+        o.proto = p.object;
+    };
+    return o;
+}
+
+/// ToIntegerWithTruncation, rejecting non-finite.
+fn temporalIntArg(self: *Interpreter, v: Value, name: []const u8) EvalError!f64 {
+    const n = try self.toNumberV(v);
+    if (std.math.isNan(n) or std.math.isInf(n)) return self.throwError("RangeError", name);
+    return @trunc(n);
+}
+
+// ---- Temporal.Duration ----------------------------------------------
+
+const dur_names = [_][]const u8{ "years", "months", "weeks", "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds" };
+
+fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Temporal.Duration requires 'new'");
+    const o = try makeTemporal(self, .duration, "\x00T.Duration");
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    var any_sign: f64 = 0;
+    for (0..10) |i| {
+        const v = if (args.len > i) args[i] else Value{ .number = 0 };
+        const n = try temporalIntArg(self, v, "Duration component must be an integer");
+        o.temporal.?.dur[i] = n;
+        if (n != 0) {
+            const s: f64 = if (n > 0) 1 else -1;
+            if (any_sign != 0 and any_sign != s) return self.throwError("RangeError", "Temporal.Duration components must all have the same sign");
+            any_sign = s;
+        }
+    }
+    return .{ .object = o };
+}
+
+fn durationSign(t: *const value.TemporalData) f64 {
+    for (t.dur) |c| {
+        if (c > 0) return 1;
+        if (c < 0) return -1;
+    }
+    return 0;
+}
+
+fn temporalDurationGetter(comptime idx: usize) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration)
+                return self.throwError("TypeError", "Temporal.Duration accessor called on a non-Duration");
+            return .{ .number = this.object.temporal.?.dur[idx] };
+        }
+    }.call;
+}
+
+fn temporalDurationSignGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    return .{ .number = durationSign(this.object.temporal.?) };
+}
+fn temporalDurationBlankGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    return .{ .boolean = durationSign(this.object.temporal.?) == 0 };
+}
+
+fn temporalDurationNegatedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const o = try makeTemporal(self, .duration, "\x00T.Duration");
+    for (0..10) |i| o.temporal.?.dur[i] = -this.object.temporal.?.dur[i];
+    return .{ .object = o };
+}
+fn temporalDurationAbsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const o = try makeTemporal(self, .duration, "\x00T.Duration");
+    for (0..10) |i| o.temporal.?.dur[i] = @abs(this.object.temporal.?.dur[i]);
+    return .{ .object = o };
+}
+
+/// `Temporal.Duration.prototype.toString` — ISO-8601 duration (P…T…).
+fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const d = this.object.temporal.?.dur;
+    const sign = durationSign(this.object.temporal.?);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    if (sign < 0) try buf.append(self.arena, '-');
+    try buf.append(self.arena, 'P');
+    const date_units = [_]struct { v: f64, c: u8 }{ .{ .v = d[0], .c = 'Y' }, .{ .v = d[1], .c = 'M' }, .{ .v = d[2], .c = 'W' }, .{ .v = d[3], .c = 'D' } };
+    for (date_units) |u| {
+        if (u.v != 0) try tfmt(self, &buf, "{d}{c}", .{ @abs(u.v), u.c });
+    }
+    // Time part. Seconds combine s + ms + us + ns into a fractional second.
+    const have_time = d[4] != 0 or d[5] != 0 or d[6] != 0 or d[7] != 0 or d[8] != 0 or d[9] != 0;
+    if (have_time) {
+        try buf.append(self.arena, 'T');
+        if (d[4] != 0) try tfmt(self, &buf, "{d}H", .{@abs(d[4])});
+        if (d[5] != 0) try tfmt(self, &buf, "{d}M", .{@abs(d[5])});
+        const frac_ns = @abs(d[7]) * 1_000_000 + @abs(d[8]) * 1_000 + @abs(d[9]);
+        const whole = @abs(d[6]);
+        if (whole != 0 or frac_ns != 0 or (d[4] == 0 and d[5] == 0)) {
+            if (frac_ns != 0) {
+                var fb: [9]u8 = undefined;
+                const ns_int: u64 = @intFromFloat(frac_ns);
+                _ = std.fmt.bufPrint(&fb, "{d:0>9}", .{ns_int}) catch {};
+                var flen: usize = 9;
+                while (flen > 0 and fb[flen - 1] == '0') flen -= 1;
+                try tfmt(self, &buf, "{d}.{s}S", .{ whole, fb[0..flen] });
+            } else {
+                try tfmt(self, &buf, "{d}S", .{whole});
+            }
+        }
+    }
+    if (buf.items.len == @as(usize, if (sign < 0) 2 else 1)) try buf.appendSlice(self.arena, "T0S");
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const a0 = if (args.len > 0) args[0] else .undefined;
+    // From an existing Duration: copy. From a property bag: read each component.
+    if (a0 == .object and a0.object.temporal != null and a0.object.temporal.?.kind == .duration) {
+        const o = try makeTemporal(self, .duration, "\x00T.Duration");
+        o.temporal.?.dur = a0.object.temporal.?.dur;
+        return .{ .object = o };
+    }
+    if (a0 == .object) {
+        const o = try makeTemporal(self, .duration, "\x00T.Duration");
+        var any = false;
+        var any_sign: f64 = 0;
+        for (dur_names, 0..) |nm, i| {
+            const pv = try self.getProperty(a0, nm);
+            if (pv == .undefined) continue;
+            any = true;
+            const n = try temporalIntArg(self, pv, "Duration component must be an integer");
+            o.temporal.?.dur[i] = n;
+            if (n != 0) {
+                const s: f64 = if (n > 0) 1 else -1;
+                if (any_sign != 0 and any_sign != s) return self.throwError("RangeError", "mixed-sign Duration");
+                any_sign = s;
+            }
+        }
+        if (!any) return self.throwError("TypeError", "Temporal.Duration.from: object has no duration properties");
+        return .{ .object = o };
+    }
+    return self.throwError("RangeError", "Temporal.Duration.from: expected an object (string parsing not supported)");
+}
+
+// ---- ISO date/time formatting helpers -------------------------------
+
+/// Append `std.fmt`-formatted text to an ArrayListUnmanaged (the engine has no
+/// `.writer(allocator)` on the unmanaged list in this Zig version).
+fn tfmt(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), comptime fmt: []const u8, args: anytype) EvalError!void {
+    try buf.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, fmt, args));
+}
+
+/// Append `n` as a decimal zero-padded to at least `width` digits.
+fn tfmtPad(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), n: u64, width: usize) EvalError!void {
+    const s = try std.fmt.allocPrint(self.arena, "{d}", .{n});
+    var k = s.len;
+    while (k < width) : (k += 1) try buf.append(self.arena, '0');
+    try buf.appendSlice(self.arena, s);
+}
+
+fn isoYearStr(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), y: i64) EvalError!void {
+    if (y < 0 or y > 9999) {
+        try buf.append(self.arena, if (y < 0) '-' else '+');
+        try tfmtPad(self, buf, @intCast(@abs(y)), 6);
+    } else {
+        try tfmtPad(self, buf, @intCast(y), 4);
+    }
+}
+
+/// Append "HH:MM:SS" plus a fractional second when any sub-second field is set.
+fn isoTimeStr(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), t: *const value.TemporalData) EvalError!void {
+    try tfmt(self, buf, "{d:0>2}:{d:0>2}:{d:0>2}", .{ t.hour, t.minute, t.second });
+    const frac = @as(u32, t.millisecond) * 1_000_000 + @as(u32, t.microsecond) * 1_000 + t.nanosecond;
+    if (frac != 0) {
+        var fb: [9]u8 = undefined;
+        _ = std.fmt.bufPrint(&fb, "{d:0>9}", .{frac}) catch {};
+        var flen: usize = 9;
+        while (flen > 0 and fb[flen - 1] == '0') flen -= 1;
+        try tfmt(self, buf, ".{s}", .{fb[0..flen]});
+    }
+}
+
+fn temporalIsoDateString(self: *Interpreter, t: *const value.TemporalData) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoYearStr(self, &buf, t.year);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ t.month, t.day });
+    return buf.toOwnedSlice(self.arena);
+}
+
+/// Validate ISO date fields are in range (RangeError otherwise).
+fn checkIsoDate(self: *Interpreter, y: f64, m: f64, d: f64) EvalError!void {
+    if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
+    if (y < -271821 or y > 275760) return self.throwError("RangeError", "year out of range");
+    const dim = isoDaysInMonth(@intFromFloat(y), @intFromFloat(m));
+    if (d < 1 or d > @as(f64, @floatFromInt(dim))) return self.throwError("RangeError", "day out of range");
+}
+
+fn tIsTemporal(this: Value, kind: value.TemporalData.Kind) bool {
+    return this == .object and this.object.temporal != null and this.object.temporal.?.kind == kind;
+}
+
+// ---- Temporal.PlainDate ---------------------------------------------
+
+fn temporalPlainDateConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Temporal.PlainDate requires 'new'");
+    const y = try temporalIntArg(self, if (args.len > 0) args[0] else .undefined, "year");
+    const m = try temporalIntArg(self, if (args.len > 1) args[1] else .undefined, "month");
+    const d = try temporalIntArg(self, if (args.len > 2) args[2] else .undefined, "day");
+    try checkIsoDate(self, y, m, d);
+    const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
+    o.temporal.?.year = @intFromFloat(y);
+    o.temporal.?.month = @intFromFloat(m);
+    o.temporal.?.day = @intFromFloat(d);
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+const PlainDateField = enum { year, month, day, day_of_week, day_of_year, days_in_month, days_in_year, months_in_year, days_in_week, week_of_year, in_leap_year };
+
+fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_date) and !tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "Temporal.PlainDate accessor on incompatible receiver");
+            const t = this.object.temporal.?;
+            const y: i64 = t.year;
+            return switch (f) {
+                .year => .{ .number = @floatFromInt(t.year) },
+                .month => .{ .number = @floatFromInt(t.month) },
+                .day => .{ .number = @floatFromInt(t.day) },
+                .day_of_week => .{ .number = @floatFromInt(isoDayOfWeek(y, t.month, t.day)) },
+                .day_of_year => .{ .number = @floatFromInt(tDaysFromCivil(y, t.month, t.day) - tDaysFromCivil(y, 1, 1) + 1) },
+                .days_in_month => .{ .number = @floatFromInt(isoDaysInMonth(y, t.month)) },
+                .days_in_year => .{ .number = @floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365)) },
+                .months_in_year => .{ .number = 12 },
+                .days_in_week => .{ .number = 7 },
+                .week_of_year => .{ .number = @floatFromInt(@divTrunc(tDaysFromCivil(y, t.month, t.day) - tDaysFromCivil(y, 1, 1), 7) + 1) },
+                .in_leap_year => .{ .boolean = isoLeap(y) },
+            };
+        }
+    }.call;
+}
+
+fn temporalMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null) return self.throwError("TypeError", "non-Temporal");
+    const m = this.object.temporal.?.month;
+    return .{ .string = try std.fmt.allocPrint(self.arena, "M{d:0>2}", .{m}) };
+}
+fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    _ = this;
+    _ = ctx;
+    return .{ .string = "iso8601" };
+}
+
+fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+    return .{ .string = try temporalIsoDateString(self, this.object.temporal.?) };
+}
+
+/// Read year/month/day from a PlainDate, a PlainDateTime, or a fields object.
+const IsoYMD = struct { y: i64, m: u8, d: u8 };
+fn toPlainDateFields(self: *Interpreter, v: Value) EvalError!IsoYMD {
+    if (tIsTemporal(v, .plain_date) or tIsTemporal(v, .plain_date_time)) {
+        const t = v.object.temporal.?;
+        return .{ .y = t.year, .m = t.month, .d = t.day };
+    }
+    if (v == .object) {
+        const yv = try self.getProperty(v, "year");
+        const mv = try self.getProperty(v, "month");
+        const dv = try self.getProperty(v, "day");
+        if (yv == .undefined or dv == .undefined) return self.throwError("TypeError", "PlainDate fields require year and day");
+        var m: f64 = undefined;
+        if (mv != .undefined) {
+            m = try temporalIntArg(self, mv, "month");
+        } else {
+            const mc = try self.getProperty(v, "monthCode");
+            if (mc != .string or mc.string.len < 3) return self.throwError("TypeError", "month or monthCode required");
+            m = @floatFromInt(std.fmt.parseInt(u8, mc.string[1..3], 10) catch return self.throwError("RangeError", "bad monthCode"));
+        }
+        const y = try temporalIntArg(self, yv, "year");
+        const d = try temporalIntArg(self, dv, "day");
+        try checkIsoDate(self, y, m, d);
+        return .{ .y = @intFromFloat(y), .m = @intFromFloat(m), .d = @intFromFloat(d) };
+    }
+    if (v == .string) return parseIsoDate(self, v.string);
+    return self.throwError("TypeError", "cannot convert to a PlainDate");
+}
+
+/// Parse a minimal ISO date / date-time prefix ("YYYY-MM-DD…").
+fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
+    var s = s_in;
+    var neg = false;
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) {
+        neg = s[0] == '-';
+        s = s[1..];
+    }
+    // YYYY (4) or YYYYYY (6 with sign already consumed)
+    const ylen: usize = if (neg or (s_in.len > 0 and s_in[0] == '+')) 6 else 4;
+    if (s.len < ylen + 6) return self.throwError("RangeError", "invalid ISO date string");
+    const y = std.fmt.parseInt(i64, s[0..ylen], 10) catch return self.throwError("RangeError", "invalid ISO year");
+    if (s[ylen] != '-' or s[ylen + 3] != '-') return self.throwError("RangeError", "invalid ISO date string");
+    const m = std.fmt.parseInt(u8, s[ylen + 1 .. ylen + 3], 10) catch return self.throwError("RangeError", "invalid ISO month");
+    const d = std.fmt.parseInt(u8, s[ylen + 4 .. ylen + 6], 10) catch return self.throwError("RangeError", "invalid ISO day");
+    const yy: i64 = if (neg) -y else y;
+    try checkIsoDate(self, @floatFromInt(yy), @floatFromInt(m), @floatFromInt(d));
+    return .{ .y = yy, .m = m, .d = d };
+}
+
+fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const f = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
+    const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
+    o.temporal.?.year = @intCast(f.y);
+    o.temporal.?.month = f.m;
+    o.temporal.?.day = f.d;
+    return .{ .object = o };
+}
+
+fn temporalPlainDateCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const a = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
+    const b = try toPlainDateFields(self, if (args.len > 1) args[1] else .undefined);
+    const da = tDaysFromCivil(a.y, a.m, a.d);
+    const db = tDaysFromCivil(b.y, b.m, b.d);
+    return .{ .number = if (da < db) -1 else if (da > db) 1 else 0 };
+}
+
+fn temporalPlainDateEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+    const t = this.object.temporal.?;
+    const b = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
+    return .{ .boolean = t.year == b.y and t.month == b.m and t.day == b.d };
+}
+
+/// PlainDate add/subtract a Duration (years/months adjust the calendar fields
+/// with `constrain` overflow, then weeks+days shift the epoch day).
+fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+            const t = this.object.temporal.?;
+            const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            var y: i64 = t.year + @as(i64, @intFromFloat(sign * dur[0]));
+            var m: i64 = @as(i64, t.month) + @as(i64, @intFromFloat(sign * dur[1]));
+            // Balance month into [1,12].
+            y += @divFloor(m - 1, 12);
+            m = @mod(m - 1, 12) + 1;
+            var d: i64 = t.day;
+            const dim = isoDaysInMonth(y, @intCast(m));
+            if (d > dim) d = dim; // constrain
+            const epoch = tDaysFromCivil(y, @intCast(m), @intCast(d)) + @as(i64, @intFromFloat(sign * (dur[2] * 7 + dur[3])));
+            const c = tCivilFromDays(epoch);
+            const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
+            o.temporal.?.year = @intCast(c.y);
+            o.temporal.?.month = c.m;
+            o.temporal.?.day = c.d;
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+/// Extract the 10 duration components from a Duration object or a fields bag.
+fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
+    if (tIsTemporal(v, .duration)) return v.object.temporal.?.dur;
+    if (v == .object) {
+        var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        var any = false;
+        for (dur_names, 0..) |nm, i| {
+            const pv = try self.getProperty(v, nm);
+            if (pv == .undefined) continue;
+            any = true;
+            out[i] = try temporalIntArg(self, pv, "duration component");
+        }
+        if (!any) return self.throwError("TypeError", "invalid duration");
+        return out;
+    }
+    return self.throwError("TypeError", "invalid duration (string parsing not supported)");
+}
+
+// ---- Temporal.PlainTime ---------------------------------------------
+
+fn temporalPlainTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Temporal.PlainTime requires 'new'");
+    const fields = [_]struct { max: f64 }{ .{ .max = 23 }, .{ .max = 59 }, .{ .max = 59 }, .{ .max = 999 }, .{ .max = 999 }, .{ .max = 999 } };
+    var vals: [6]f64 = .{ 0, 0, 0, 0, 0, 0 };
+    for (fields, 0..) |fl, i| {
+        const v = if (args.len > i) args[i] else Value{ .number = 0 };
+        const n = try temporalIntArg(self, v, "time component");
+        if (n < 0 or n > fl.max) return self.throwError("RangeError", "time component out of range");
+        vals[i] = n;
+    }
+    const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
+    setTimeFields(o.temporal.?, vals);
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+fn setTimeFields(t: *value.TemporalData, vals: [6]f64) void {
+    t.hour = @intFromFloat(vals[0]);
+    t.minute = @intFromFloat(vals[1]);
+    t.second = @intFromFloat(vals[2]);
+    t.millisecond = @intFromFloat(vals[3]);
+    t.microsecond = @intFromFloat(vals[4]);
+    t.nanosecond = @intFromFloat(vals[5]);
+}
+
+const PlainTimeField = enum { hour, minute, second, millisecond, microsecond, nanosecond };
+fn temporalPlainTimeGetter(comptime f: PlainTimeField) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_time) and !tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "Temporal.PlainTime accessor on incompatible receiver");
+            const t = this.object.temporal.?;
+            return .{ .number = @floatFromInt(switch (f) {
+                .hour => t.hour,
+                .minute => t.minute,
+                .second => t.second,
+                .millisecond => t.millisecond,
+                .microsecond => t.microsecond,
+                .nanosecond => t.nanosecond,
+            }) };
+        }
+    }.call;
+}
+
+fn temporalPlainTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoTimeStr(self, &buf, this.object.temporal.?);
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+// ---- Temporal.PlainDateTime -----------------------------------------
+
+fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Temporal.PlainDateTime requires 'new'");
+    const y = try temporalIntArg(self, if (args.len > 0) args[0] else .undefined, "year");
+    const m = try temporalIntArg(self, if (args.len > 1) args[1] else .undefined, "month");
+    const d = try temporalIntArg(self, if (args.len > 2) args[2] else .undefined, "day");
+    try checkIsoDate(self, y, m, d);
+    var vals: [6]f64 = .{ 0, 0, 0, 0, 0, 0 };
+    const maxes = [_]f64{ 23, 59, 59, 999, 999, 999 };
+    for (0..6) |i| {
+        const v = if (args.len > 3 + i) args[3 + i] else Value{ .number = 0 };
+        const n = try temporalIntArg(self, v, "time component");
+        if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
+        vals[i] = n;
+    }
+    const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+    o.temporal.?.year = @intFromFloat(y);
+    o.temporal.?.month = @intFromFloat(m);
+    o.temporal.?.day = @intFromFloat(d);
+    setTimeFields(o.temporal.?, vals);
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.object.temporal.?;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoYearStr(self, &buf, t.year);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ t.month, t.day });
+    try isoTimeStr(self, &buf, t);
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+// ---- Temporal.Instant -----------------------------------------------
+
+fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Temporal.Instant requires 'new'");
+    const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else .undefined, false);
+    const o = try makeTemporal(self, .instant, "\x00T.Instant");
+    o.temporal.?.epoch_ns = bv.object.bigint;
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+fn temporalInstantEpochGetter(comptime ms: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+            const ns = this.object.temporal.?.epoch_ns;
+            if (ms) return .{ .number = @floatFromInt(@divFloor(ns, 1_000_000)) };
+            return self.makeBigInt(ns);
+        }
+    }.call;
+}
+
+fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+    const ns = this.object.temporal.?.epoch_ns;
+    const total_ms = @divFloor(ns, 1_000_000);
+    const days = @divFloor(total_ms, 86_400_000);
+    const c = tCivilFromDays(@intCast(days));
+    var rem = @mod(total_ms, 86_400_000);
+    const hh = @divFloor(rem, 3_600_000);
+    rem = @mod(rem, 3_600_000);
+    const mm = @divFloor(rem, 60_000);
+    rem = @mod(rem, 60_000);
+    const ss = @divFloor(rem, 1000);
+    const msec = @mod(rem, 1000);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoYearStr(self, &buf, c.y);
+    try buf.append(self.arena, '-');
+    try tfmtPad(self, &buf, c.m, 2);
+    try buf.append(self.arena, '-');
+    try tfmtPad(self, &buf, c.d, 2);
+    try buf.append(self.arena, 'T');
+    try tfmtPad(self, &buf, @intCast(hh), 2);
+    try buf.append(self.arena, ':');
+    try tfmtPad(self, &buf, @intCast(mm), 2);
+    try buf.append(self.arena, ':');
+    try tfmtPad(self, &buf, @intCast(ss), 2);
+    if (msec != 0) {
+        try buf.append(self.arena, '.');
+        try tfmtPad(self, &buf, @intCast(msec), 3);
+    }
+    try buf.append(self.arena, 'Z');
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn temporalInstantFromEpochFn(comptime unit_ns: i128) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = this;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const o = try makeTemporal(self, .instant, "\x00T.Instant");
+            if (unit_ns == 1) {
+                const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else .undefined, false);
+                o.temporal.?.epoch_ns = bv.object.bigint;
+            } else {
+                const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+                o.temporal.?.epoch_ns = @as(i128, @intFromFloat(@trunc(n))) * unit_ns;
+            }
+            return .{ .object = o };
+        }
+    }.call;
+}
+
+// ---- Temporal.Now ---------------------------------------------------
+
+fn nowEpochNs(self: *Interpreter) i128 {
+    _ = self;
+    // The engine uses a deterministic epoch clock (Date.now() === 0), so "now"
+    // is the Unix epoch; the Temporal.Now methods are still structurally correct.
+    return 0;
+}
+
+fn temporalNowInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = try makeTemporal(self, .instant, "\x00T.Instant");
+    o.temporal.?.epoch_ns = nowEpochNs(self);
+    return .{ .object = o };
+}
+fn temporalNowPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const total_ms = @divFloor(nowEpochNs(self), 1_000_000);
+    const days = @divFloor(total_ms, 86_400_000);
+    const c = tCivilFromDays(@intCast(days));
+    var rem = @mod(total_ms, 86_400_000);
+    const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+    o.temporal.?.year = @intCast(c.y);
+    o.temporal.?.month = c.m;
+    o.temporal.?.day = c.d;
+    o.temporal.?.hour = @intCast(@divFloor(rem, 3_600_000));
+    rem = @mod(rem, 3_600_000);
+    o.temporal.?.minute = @intCast(@divFloor(rem, 60_000));
+    rem = @mod(rem, 60_000);
+    o.temporal.?.second = @intCast(@divFloor(rem, 1000));
+    o.temporal.?.millisecond = @intCast(@mod(rem, 1000));
+    return .{ .object = o };
+}
+fn temporalNowPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const dt = try temporalNowPlainDateTimeFn(ctx, this, args);
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
+    o.temporal.?.year = dt.object.temporal.?.year;
+    o.temporal.?.month = dt.object.temporal.?.month;
+    o.temporal.?.day = dt.object.temporal.?.day;
+    return .{ .object = o };
+}
+fn temporalNowPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const dt = try temporalNowPlainDateTimeFn(ctx, this, args);
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
+    o.temporal.?.hour = dt.object.temporal.?.hour;
+    o.temporal.?.minute = dt.object.temporal.?.minute;
+    o.temporal.?.second = dt.object.temporal.?.second;
+    o.temporal.?.millisecond = dt.object.temporal.?.millisecond;
+    return .{ .object = o };
+}
+fn temporalNowTimeZoneIdFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return .{ .string = "UTC" };
+}
+
+/// Make a Temporal type prototype (stored under `proto_key` for `makeTemporal`),
+/// a constructor `ctor_fn`, link them, set the `@@toStringTag`, and register
+/// `Temporal.<name>`. Returns the prototype object for further method install.
+fn temporalType(self_a: std.mem.Allocator, rs: *Shape, env: *Environment, ns: *value.Object, object_proto: *value.Object, name: []const u8, proto_key: []const u8, arity: usize, ctor_fn: value.NativeFn, tag_key: ?[]const u8) EvalError!*value.Object {
+    const proto = try self_a.create(value.Object);
+    proto.* = .{ .proto = object_proto };
+    const ctor = try self_a.create(value.Object);
+    ctor.* = .{ .native = ctor_fn, .native_ctor = true };
+    try installNativeProps(self_a, rs, ctor, name, arity);
+    try ctor.setOwn(self_a, rs, "prototype", .{ .object = proto });
+    try ctor.setAttr(self_a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(self_a, rs, proto, ctor);
+    if (tag_key) |k| {
+        const full = std.fmt.allocPrint(self_a, "Temporal.{s}", .{name}) catch name;
+        try proto.setOwn(self_a, rs, k, .{ .string = full });
+        try proto.setAttr(self_a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    try env.put(proto_key, .{ .object = proto });
+    try ns.setOwn(self_a, rs, name, .{ .object = ctor });
+    try ns.setAttr(self_a, name, .{ .writable = true, .enumerable = false, .configurable = true });
+    return proto;
+}
+
+fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+    const ns = try a.create(value.Object);
+    ns.* = .{ .proto = object_proto };
+    if (tag) |k| {
+        try ns.setOwn(a, rs, k, .{ .string = "Temporal" });
+        try ns.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+
+    // Temporal.Duration.
+    {
+        const p = try temporalType(a, rs, env, ns, object_proto, "Duration", "\x00T.Duration", 0, temporalDurationConstructorFn, tag);
+        inline for (dur_names, 0..) |nm, i| try setNativeGetter(a, rs, p, nm, temporalDurationGetter(i));
+        try setNativeGetter(a, rs, p, "sign", temporalDurationSignGetter);
+        try setNativeGetter(a, rs, p, "blank", temporalDurationBlankGetter);
+        try setNative(a, rs, p, "negated", 0, temporalDurationNegatedFn);
+        try setNative(a, rs, p, "abs", 0, temporalDurationAbsFn);
+        try setNative(a, rs, p, "toString", 0, temporalDurationToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalDurationToStringFn);
+        if (ns.getOwn("Duration")) |dc| if (dc == .object) try setNative(a, rs, dc.object, "from", 1, temporalDurationFromFn);
+    }
+    // Temporal.PlainDate.
+    {
+        const p = try temporalType(a, rs, env, ns, object_proto, "PlainDate", "\x00T.PlainDate", 3, temporalPlainDateConstructorFn, tag);
+        try setNativeGetter(a, rs, p, "year", temporalPlainDateGetter(.year));
+        try setNativeGetter(a, rs, p, "month", temporalPlainDateGetter(.month));
+        try setNativeGetter(a, rs, p, "day", temporalPlainDateGetter(.day));
+        try setNativeGetter(a, rs, p, "dayOfWeek", temporalPlainDateGetter(.day_of_week));
+        try setNativeGetter(a, rs, p, "dayOfYear", temporalPlainDateGetter(.day_of_year));
+        try setNativeGetter(a, rs, p, "weekOfYear", temporalPlainDateGetter(.week_of_year));
+        try setNativeGetter(a, rs, p, "daysInWeek", temporalPlainDateGetter(.days_in_week));
+        try setNativeGetter(a, rs, p, "daysInMonth", temporalPlainDateGetter(.days_in_month));
+        try setNativeGetter(a, rs, p, "daysInYear", temporalPlainDateGetter(.days_in_year));
+        try setNativeGetter(a, rs, p, "monthsInYear", temporalPlainDateGetter(.months_in_year));
+        try setNativeGetter(a, rs, p, "inLeapYear", temporalPlainDateGetter(.in_leap_year));
+        try setNativeGetter(a, rs, p, "monthCode", temporalMonthCodeGetter);
+        try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
+        try setNative(a, rs, p, "toString", 0, temporalPlainDateToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalPlainDateToStringFn);
+        try setNative(a, rs, p, "equals", 1, temporalPlainDateEqualsFn);
+        try setNative(a, rs, p, "add", 1, temporalPlainDateAddFn(1));
+        try setNative(a, rs, p, "subtract", 1, temporalPlainDateAddFn(-1));
+        if (ns.getOwn("PlainDate")) |c| if (c == .object) {
+            try setNative(a, rs, c.object, "from", 1, temporalPlainDateFromFn);
+            try setNative(a, rs, c.object, "compare", 2, temporalPlainDateCompareFn);
+        };
+    }
+    // Temporal.PlainTime.
+    {
+        const p = try temporalType(a, rs, env, ns, object_proto, "PlainTime", "\x00T.PlainTime", 0, temporalPlainTimeConstructorFn, tag);
+        try setNativeGetter(a, rs, p, "hour", temporalPlainTimeGetter(.hour));
+        try setNativeGetter(a, rs, p, "minute", temporalPlainTimeGetter(.minute));
+        try setNativeGetter(a, rs, p, "second", temporalPlainTimeGetter(.second));
+        try setNativeGetter(a, rs, p, "millisecond", temporalPlainTimeGetter(.millisecond));
+        try setNativeGetter(a, rs, p, "microsecond", temporalPlainTimeGetter(.microsecond));
+        try setNativeGetter(a, rs, p, "nanosecond", temporalPlainTimeGetter(.nanosecond));
+        try setNative(a, rs, p, "toString", 0, temporalPlainTimeToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalPlainTimeToStringFn);
+    }
+    // Temporal.PlainDateTime (reuses the PlainDate + PlainTime getters).
+    {
+        const p = try temporalType(a, rs, env, ns, object_proto, "PlainDateTime", "\x00T.PlainDateTime", 3, temporalPlainDateTimeConstructorFn, tag);
+        try setNativeGetter(a, rs, p, "year", temporalPlainDateGetter(.year));
+        try setNativeGetter(a, rs, p, "month", temporalPlainDateGetter(.month));
+        try setNativeGetter(a, rs, p, "day", temporalPlainDateGetter(.day));
+        try setNativeGetter(a, rs, p, "dayOfWeek", temporalPlainDateGetter(.day_of_week));
+        try setNativeGetter(a, rs, p, "daysInMonth", temporalPlainDateGetter(.days_in_month));
+        try setNativeGetter(a, rs, p, "inLeapYear", temporalPlainDateGetter(.in_leap_year));
+        try setNativeGetter(a, rs, p, "monthCode", temporalMonthCodeGetter);
+        try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
+        try setNativeGetter(a, rs, p, "hour", temporalPlainTimeGetter(.hour));
+        try setNativeGetter(a, rs, p, "minute", temporalPlainTimeGetter(.minute));
+        try setNativeGetter(a, rs, p, "second", temporalPlainTimeGetter(.second));
+        try setNativeGetter(a, rs, p, "millisecond", temporalPlainTimeGetter(.millisecond));
+        try setNativeGetter(a, rs, p, "microsecond", temporalPlainTimeGetter(.microsecond));
+        try setNativeGetter(a, rs, p, "nanosecond", temporalPlainTimeGetter(.nanosecond));
+        try setNative(a, rs, p, "toString", 0, temporalPlainDateTimeToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalPlainDateTimeToStringFn);
+    }
+    // Temporal.Instant.
+    {
+        const p = try temporalType(a, rs, env, ns, object_proto, "Instant", "\x00T.Instant", 1, temporalInstantConstructorFn, tag);
+        try setNativeGetter(a, rs, p, "epochMilliseconds", temporalInstantEpochGetter(true));
+        try setNativeGetter(a, rs, p, "epochNanoseconds", temporalInstantEpochGetter(false));
+        try setNative(a, rs, p, "toString", 0, temporalInstantToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalInstantToStringFn);
+        if (ns.getOwn("Instant")) |c| if (c == .object) {
+            try setNative(a, rs, c.object, "fromEpochMilliseconds", 1, temporalInstantFromEpochFn(1_000_000));
+            try setNative(a, rs, c.object, "fromEpochNanoseconds", 1, temporalInstantFromEpochFn(1));
+        };
+    }
+
+    // Temporal.Now (a namespace object, not a constructor).
+    {
+        const now = try a.create(value.Object);
+        now.* = .{ .proto = object_proto };
+        try setNative(a, rs, now, "instant", 0, temporalNowInstantFn);
+        try setNative(a, rs, now, "plainDateTimeISO", 0, temporalNowPlainDateTimeFn);
+        try setNative(a, rs, now, "plainDateISO", 0, temporalNowPlainDateFn);
+        try setNative(a, rs, now, "plainTimeISO", 0, temporalNowPlainTimeFn);
+        try setNative(a, rs, now, "timeZoneId", 0, temporalNowTimeZoneIdFn);
+        if (tag) |k| {
+            try now.setOwn(a, rs, k, .{ .string = "Temporal.Now" });
+            try now.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        try ns.setOwn(a, rs, "Now", .{ .object = now });
+        try ns.setAttr(a, "Now", .{ .writable = true, .enumerable = false, .configurable = true });
+    }
+
+    try env.put("Temporal", .{ .object = ns });
+}
+
 fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
     const sym_tag: ?[]const u8 = blk: {
