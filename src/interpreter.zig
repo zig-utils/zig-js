@@ -4956,7 +4956,7 @@ pub const Interpreter = struct {
             return if (i < s.len) Value{ .string = try self.arena.dupe(u8, s[i .. i + 1]) } else Value{ .string = "" };
         }
         if (eq(name, "charCodeAt")) {
-            const i = toLen(arg0(args).toNumber());
+            const i = toLen(try self.toNumberV(arg0(args)));
             return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value{ .number = std.math.nan(f64) };
         }
         if (eq(name, "indexOf")) {
@@ -5012,7 +5012,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "trim")) return Value{ .string = jsTrim(s, true, true) };
         if (eq(name, "repeat")) {
-            const rn = arg0(args).toNumber();
+            const rn = try self.toNumberV(arg0(args));
             if (rn < 0 or std.math.isInf(rn)) return self.throwError("RangeError", "Invalid count value");
             const n = toLen(rn);
             var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -5023,7 +5023,7 @@ pub const Interpreter = struct {
         if (eq(name, "concat")) {
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             try buf.appendSlice(self.arena, s);
-            for (args) |a| try buf.appendSlice(self.arena, try a.toString(self.arena));
+            for (args) |a| try buf.appendSlice(self.arena, try self.toStringV(a));
             return Value{ .string = try buf.toOwnedSlice(self.arena) };
         }
         if (eq(name, "split")) {
@@ -5084,7 +5084,7 @@ pub const Interpreter = struct {
             return result;
         }
         if (eq(name, "at")) {
-            const fl = @trunc(arg0(args).toNumber());
+            const fl = @trunc(try self.toNumberV(arg0(args)));
             const idx: i64 = if (fl < 0) @as(i64, @intCast(s.len)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
             if (idx < 0 or idx >= s.len) return Value.undefined;
             return Value{ .string = try self.arena.dupe(u8, s[@intCast(idx) .. @as(usize, @intCast(idx)) + 1]) };
@@ -5092,9 +5092,9 @@ pub const Interpreter = struct {
         if (eq(name, "trimStart")) return Value{ .string = jsTrim(s, true, false) };
         if (eq(name, "trimEnd")) return Value{ .string = jsTrim(s, false, true) };
         if (eq(name, "padStart") or eq(name, "padEnd")) {
-            const target = toLen(arg0(args).toNumber());
+            const target = toLen(try self.toNumberV(arg0(args)));
             if (s.len >= target) return Value{ .string = try self.arena.dupe(u8, s) };
-            const pad = if (args.len > 1 and args[1] != .undefined) try args[1].toString(self.arena) else " ";
+            const pad = if (args.len > 1 and args[1] != .undefined) try self.toStringV(args[1]) else " ";
             if (pad.len == 0) return Value{ .string = try self.arena.dupe(u8, s) };
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             const fill_len = target - s.len;
@@ -5168,7 +5168,7 @@ pub const Interpreter = struct {
             return Value{ .string = try buf.toOwnedSlice(a) };
         }
         if (eq(name, "codePointAt")) {
-            const i = toLen(arg0(args).toNumber());
+            const i = toLen(try self.toNumberV(arg0(args)));
             return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value.undefined;
         }
         if (eq(name, "lastIndexOf")) {
