@@ -3303,6 +3303,12 @@ pub const Interpreter = struct {
             // (handled by the prototype-chain setter walk below), not the store.
             if (arrayIndex(key) != null and o.getAccessor(key) != null) {
                 // fall through to the setter walk
+            } else if (arrayIndex(key) != null and arrayProtoAccessor(o, key) and
+                !(arrayIndex(key).? < o.elements.items.len and !o.isHole(arrayIndex(key).?)))
+            {
+                // The index isn't an own present element and an inherited accessor
+                // (e.g. `Array.prototype[0]`) intercepts the write — OrdinarySet
+                // routes to its setter; fall through to the setter walk.
             } else if (arrayIndex(key)) |i| {
                 // A per-index descriptor (recorded in `attrs`) may mark the
                 // element non-writable: sloppy ignores the write, strict throws.
@@ -4009,6 +4015,48 @@ pub const Interpreter = struct {
         return list.items;
     }
 
+    /// Whether a real array's `length` is writable — `Set(O, "length", …, true)`
+    /// (the final step of pop/push/shift/unshift/splice) throws when it is not.
+    fn arrayLenWritable(o: *value.Object) bool {
+        return !(o.attrs != null and !o.getAttr("length").writable);
+    }
+
+    /// Whether some object on `o`'s *prototype* chain defines an accessor at the
+    /// (array-index) key — so an assignment to a hole/out-of-range index routes
+    /// to that inherited setter (OrdinarySet) instead of the dense store.
+    fn arrayProtoAccessor(o: *value.Object, key: []const u8) bool {
+        var cur: ?*value.Object = o.proto;
+        while (cur) |c| {
+            if (c.getAccessor(key) != null) return true;
+            cur = c.proto;
+        }
+        return false;
+    }
+
+    /// `Set(O, ToString(i), v, true)` — the throwing element store used by
+    /// push/unshift: fires an inherited index setter and rejects a non-extensible
+    /// / non-writable slot (forcing strict so the rejection throws). User setters
+    /// keep their own strictness.
+    fn arraySetIndexThrowing(self: *Interpreter, o: *value.Object, i: usize, v: Value) EvalError!void {
+        const idx = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        const saved = self.strict;
+        self.strict = true;
+        defer self.strict = saved;
+        return self.setMember(.{ .object = o }, idx, v);
+    }
+
+    /// `Set(O, "length", newLen, true)` for a grow (push/unshift): a real array
+    /// with non-writable `length` throws; otherwise the logical length advances.
+    /// An array-like routes through [[Set]].
+    fn arraySetLengthThrowing(self: *Interpreter, o: *value.Object, old_len: usize, new_len: usize) EvalError!void {
+        if (o.is_array) {
+            if (new_len != old_len and !arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+            if (new_len > o.elements.items.len and new_len > o.array_len) o.array_len = @intCast(new_len);
+            return;
+        }
+        try self.setMember(.{ .object = o }, "length", .{ .number = @floatFromInt(new_len) });
+    }
+
     /// Whether the array's element at dense index `i` carries an explicit
     /// non-configurable attribute (only possible after `seal`/`freeze` or a
     /// `defineProperty`) — so deleting it (pop/shift) must throw.
@@ -4062,31 +4110,83 @@ pub const Interpreter = struct {
         // sparse tail (`array_len`); an array-like uses its materialized slice.
         const ilen: usize = if (o.is_array) @max(o.elements.items.len, o.array_len) else items.len;
         if (eq(name, "push")) {
-            // Growing a non-extensible (sealed/frozen) array can't create the new
-            // index — a TypeError, after the length would have moved past it.
-            if (args.len > 0 and !o.extensible) return self.throwError("TypeError", "Cannot add property to a non-extensible array");
-            for (args) |a| try o.elements.append(self.arena, a);
-            return Value{ .number = @floatFromInt(o.elements.items.len) };
+            const len = ilen;
+            // Set(O, ToString(len+k), E, true) for each argument (fires an
+            // inherited index setter; a non-extensible array throws), then
+            // Set(O, "length", newLen, true).
+            var k: usize = 0;
+            while (k < args.len) : (k += 1) {
+                try self.arraySetIndexThrowing(o, len + k, args[k]);
+            }
+            const new_len = len + args.len;
+            try self.arraySetLengthThrowing(o, len, new_len);
+            return Value{ .number = @floatFromInt(new_len) };
         }
         if (eq(name, "pop")) {
-            if (items.len == 0) return Value.undefined;
-            // Removing the last element deletes it: blocked when it is
-            // non-configurable (a sealed/frozen array).
-            if (arrayElemNonConfigurable(o, items.len - 1)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
-            return o.elements.pop() orelse Value.undefined;
+            if (ilen == 0) {
+                if (!o.is_array) try self.setMember(.{ .object = o }, "length", .{ .number = 0 });
+                return Value.undefined;
+            }
+            const last = ilen - 1;
+            const idx = try std.fmt.allocPrint(self.arena, "{d}", .{last});
+            // [[Get]] the last element first (fires an inherited accessor when the
+            // slot is a hole — that is how the spec's order is observed).
+            const element = try self.getProperty(.{ .object = o }, idx);
+            if (o.is_array) {
+                if (arrayElemNonConfigurable(o, last)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+                if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+                if (last < o.elements.items.len) o.elements.shrinkRetainingCapacity(last);
+                o.array_len = @intCast(last);
+                return element;
+            }
+            if (!try self.deleteOwn(o, idx)) return self.throwError("TypeError", "Cannot delete property");
+            try self.setMember(.{ .object = o }, "length", .{ .number = @floatFromInt(last) });
+            return element;
         }
         if (eq(name, "shift")) {
-            if (items.len == 0) return Value.undefined;
-            if (arrayElemNonConfigurable(o, 0)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
-            const first = items[0];
-            _ = o.elements.orderedRemove(0);
+            if (ilen == 0) {
+                if (!o.is_array) try self.setMember(.{ .object = o }, "length", .{ .number = 0 });
+                return Value.undefined;
+            }
+            const first = try self.getProperty(.{ .object = o }, "0"); // fires accessor on a hole
+            if (o.is_array) {
+                if (arrayElemNonConfigurable(o, 0)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+                if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+                if (o.elements.items.len > 0) _ = o.elements.orderedRemove(0);
+                o.array_len = if (ilen > 0) @intCast(ilen - 1) else 0;
+                return first;
+            }
+            // Array-like: move each element down, delete the tail, set length.
+            var k: usize = 1;
+            while (k < ilen) : (k += 1) {
+                const from = try std.fmt.allocPrint(self.arena, "{d}", .{k});
+                const to = try std.fmt.allocPrint(self.arena, "{d}", .{k - 1});
+                if (self.arrIndexPresent(o, k)) try self.setMember(.{ .object = o }, to, try self.getProperty(.{ .object = o }, from)) else _ = try self.deleteOwn(o, to);
+            }
+            _ = try self.deleteOwn(o, try std.fmt.allocPrint(self.arena, "{d}", .{ilen - 1}));
+            try self.setMember(.{ .object = o }, "length", .{ .number = @floatFromInt(ilen - 1) });
             return first;
         }
         if (eq(name, "unshift")) {
-            if (args.len > 0 and !o.extensible) return self.throwError("TypeError", "Cannot add property to a non-extensible array");
-            var i: usize = args.len;
-            while (i > 0) : (i -= 1) try o.elements.insert(self.arena, 0, args[i - 1]);
-            return Value{ .number = @floatFromInt(o.elements.items.len) };
+            const len = ilen;
+            if (args.len > 0) {
+                // Shift each existing element up by argCount (high to low, via
+                // [[Get]]/[[Set]]/[[Delete]] so holes move and inherited accessors
+                // fire), then place the new arguments at the front, then Set
+                // length — the spec protocol, also fed by a real array's dense
+                // store through setMember/getProperty.
+                var k: usize = len;
+                while (k > 0) : (k -= 1) {
+                    const to = k - 1 + args.len;
+                    if (self.arrIndexPresent(o, k - 1))
+                        try self.arraySetIndexThrowing(o, to, try self.arrIndexGet(o, k - 1))
+                    else
+                        _ = try self.deleteOwn(o, try std.fmt.allocPrint(self.arena, "{d}", .{to}));
+                }
+                for (args, 0..) |a, j| try self.arraySetIndexThrowing(o, j, a);
+                try self.arraySetLengthThrowing(o, len, len + args.len);
+            }
+            return Value{ .number = @floatFromInt(len + args.len) };
         }
         if (eq(name, "indexOf")) {
             const target = arg0(args);

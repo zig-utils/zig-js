@@ -522,16 +522,10 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
     if (args.len == 1 and args[0] == .number) {
         const n = args[0].number;
         if (n < 0 or @trunc(n) != n or n > 4294967295) return self.throwError("RangeError", "Invalid array length");
-        const len: usize = @intFromFloat(n);
-        // Materialize small arrays densely (preserving hole-as-undefined behavior);
-        // for large lengths keep only a logical length so we don't OOM on holes.
-        const dense_cap: usize = 1 << 24;
-        if (len <= dense_cap) {
-            var i: usize = 0;
-            while (i < len) : (i += 1) try arr.object.elements.append(self.arena, .undefined);
-        } else {
-            arr.object.array_len = len;
-        }
+        // `new Array(len)` is a sparse array — length `len`, no elements (every
+        // index a hole, so `0 in new Array(1)` is false and forEach/map skip
+        // them). Only the logical length is set.
+        arr.object.array_len = @intFromFloat(n);
     } else {
         for (args) |v| try arr.object.elements.append(self.arena, v);
     }
