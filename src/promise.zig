@@ -72,6 +72,9 @@ pub const Elem = struct {
     combine: *Combine,
     index: usize,
     is_reject: bool,
+    /// [[AlreadyCalled]] — shared between the resolve and reject element
+    /// functions of one element, so the element settles at most once.
+    already: *bool,
 };
 
 /// Native resolve/reject closures (used for thenable assimilation): each reaches

@@ -5829,6 +5829,10 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return .undefined;
     const e: *promise.Elem = @ptrCast(@alignCast(fnobj.private_data.?));
+    // [[AlreadyCalled]]: a resolve/reject element function settles its element at
+    // most once; subsequent calls are no-ops.
+    if (e.already.*) return .undefined;
+    e.already.* = true;
     const c = e.combine;
     const val = if (args.len > 0) args[0] else .undefined;
     switch (c.kind) {
@@ -5898,6 +5902,10 @@ fn capabilityExecutorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return .undefined;
     const cap: *CapCapture = @ptrCast(@alignCast(fnobj.private_data.?));
+    // GetCapabilitiesExecutor: the executor may be invoked only once — if
+    // [[Resolve]] or [[Reject]] is already set, a second call throws.
+    if (cap.resolve != .undefined or cap.reject != .undefined)
+        return self.throwError("TypeError", "Promise capability executor already invoked");
     cap.resolve = if (args.len > 0) args[0] else .undefined;
     cap.reject = if (args.len > 1) args[1] else .undefined;
     return .undefined;
@@ -5961,18 +5969,25 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         const el = maybe orelse break;
         try values.elements.append(self.arena, .undefined);
         combine.remaining += 1;
-        // `Call(promiseResolve, C, «el»)` — an abrupt completion here closes the
-        // (still-open) iterator before rejecting.
-        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return closeAndReject(self, cap, iter, err);
+        // `nextPromise = Call(promiseResolve, C, «el»)` — an abrupt completion
+        // here closes the (still-open) iterator before rejecting.
+        const next = self.callValueWithThis(promise_resolve, &.{el}, this) catch |err| return closeAndReject(self, cap, iter, err);
+        // One [[AlreadyCalled]] record shared by this element's resolve & reject
+        // functions — the element settles at most once.
+        const already = try self.arena.create(bool);
+        already.* = false;
         const f = try self.arena.create(value.Object);
         const fe = try self.arena.create(promise.Elem);
-        fe.* = .{ .combine = combine, .index = index, .is_reject = false };
+        fe.* = .{ .combine = combine, .index = index, .is_reject = false, .already = already };
         f.* = .{ .native = combineElemFn, .private_data = @ptrCast(fe) };
         const r = try self.arena.create(value.Object);
         const re = try self.arena.create(promise.Elem);
-        re.* = .{ .combine = combine, .index = index, .is_reject = true };
+        re.* = .{ .combine = combine, .index = index, .is_reject = true, .already = already };
         r.* = .{ .native = combineElemFn, .private_data = @ptrCast(re) };
-        _ = try promise.then(self, pp, .{ .object = f }, .{ .object = r });
+        // Invoke(nextPromise, "then", «resolveElement, rejectElement»): for a
+        // native promise this is the native `then`; for a thenable it runs its
+        // own `then` (which may settle synchronously).
+        _ = self.callMethod(next, "then", &.{ .{ .object = f }, .{ .object = r } }) catch |err| return closeAndReject(self, cap, iter, err);
         index += 1;
     }
     combine.remaining -= 1; // the loop's own count
