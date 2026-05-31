@@ -7309,6 +7309,43 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
 
 /// A %TypedArray%.prototype method thunk: brand-checks `this` is a typed array,
 /// then dispatches to `typedArrayMethod`.
+/// `%TypedArray%` — the abstract superclass constructor shared by Int8Array …
+/// Float64Array. It cannot be constructed or called directly (it has no
+/// associated element kind); its only role is to hold the shared prototype and
+/// the `from`/`of`/`@@species` statics, and to be the `[[Prototype]]` of the
+/// concrete view constructors.
+fn typedArrayAbstractFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.throwError("TypeError", "Abstract class TypedArray not directly constructable");
+}
+
+/// A `%TypedArray%.prototype` accessor getter (`length`/`byteLength`/`byteOffset`/
+/// `buffer`/`@@toStringTag`). All but `@@toStringTag` brand-check the receiver;
+/// `@@toStringTag` returns undefined for a non-TypedArray (no throw).
+fn taProtoGetter(comptime which: enum { length, byte_length, byte_offset, buffer, tag }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.typed_array == null) {
+                if (which == .tag) return .undefined;
+                return self.throwError("TypeError", "%TypedArray%.prototype accessor called on a non-TypedArray");
+            }
+            const ta = this.object.typed_array.?;
+            const detached = ta.buffer.array_buffer.?.detached;
+            return switch (which) {
+                .length => .{ .number = @floatFromInt(if (detached) 0 else ta.length) },
+                .byte_length => .{ .number = @floatFromInt(if (detached) 0 else ta.length * ta.kind.byteSize()) },
+                .byte_offset => .{ .number = @floatFromInt(if (detached) 0 else ta.byte_offset) },
+                .buffer => .{ .object = ta.buffer },
+                .tag => .{ .string = ta.kind.ctorName() },
+            };
+        }
+    }.call;
+}
+
 fn taProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -8314,6 +8351,42 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         .{ "subarray", 2 }, .{ "set", 1 },    .{ "toString", 0 }, .{ "keys", 0 },
         .{ "values", 0 },   .{ "entries", 0 },
     }) |s| try setNative(a, rs, ta_proto, s[0], s[1], taProtoMethod(s[0]));
+    // %TypedArray%.prototype accessor getters live on the shared prototype, not
+    // the instances (length/byteLength/byteOffset/buffer brand-check; the
+    // @@toStringTag getter returns the view kind name, or undefined off-brand).
+    try setNativeGetter(a, rs, ta_proto, "length", taProtoGetter(.length));
+    try setNativeGetter(a, rs, ta_proto, "byteLength", taProtoGetter(.byte_length));
+    try setNativeGetter(a, rs, ta_proto, "byteOffset", taProtoGetter(.byte_offset));
+    try setNativeGetter(a, rs, ta_proto, "buffer", taProtoGetter(.buffer));
+    if (env.get("Symbol")) |sym| if (sym == .object) {
+        if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
+            const g = try a.create(value.Object);
+            g.* = .{ .native = taProtoGetter(.tag) };
+            try installNativeProps(a, rs, g, "get [Symbol.toStringTag]", 0);
+            try ta_proto.setAccessor(a, tt.object.sym_key, .{ .object = g }, null);
+            try ta_proto.setAttr(a, tt.object.sym_key, .{ .enumerable = false, .configurable = true });
+        };
+    };
+
+    // %TypedArray% — the abstract superclass constructor. Not a global; reachable
+    // as `Object.getPrototypeOf(Int8Array)`. Holds the shared prototype and is
+    // the [[Prototype]] of every concrete view constructor.
+    const ta_ctor = try a.create(value.Object);
+    ta_ctor.* = .{ .native = typedArrayAbstractFn, .native_ctor = true };
+    try installNativeProps(a, rs, ta_ctor, "TypedArray", 0);
+    try ta_ctor.setOwn(a, rs, "prototype", .{ .object = ta_proto });
+    try ta_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, ta_proto, ta_ctor);
+    // %TypedArray%[Symbol.species] — a getter returning the receiver.
+    if (env.get("Symbol")) |sym| if (sym == .object) {
+        if (sym.object.getOwn("species")) |sp| if (sp == .object and sp.object.is_symbol) {
+            const g = try a.create(value.Object);
+            g.* = .{ .native = returnThisFn };
+            try installNativeProps(a, rs, g, "get [Symbol.species]", 0);
+            try ta_ctor.setAccessor(a, sp.object.sym_key, .{ .object = g }, null);
+            try ta_ctor.setAttr(a, sp.object.sym_key, .{ .enumerable = false, .configurable = true });
+        };
+    };
 
     inline for (.{
         value.TAKind.i8,  value.TAKind.u8,  value.TAKind.u8c,
@@ -8325,7 +8398,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         try proto.setOwn(a, rs, "BYTES_PER_ELEMENT", .{ .number = @floatFromInt(kind.byteSize()) });
         try proto.setAttr(a, "BYTES_PER_ELEMENT", .{ .writable = false, .enumerable = false, .configurable = false });
         const ctor = try a.create(value.Object);
-        ctor.* = .{ .native = typedArrayCtorFn(kind), .native_ctor = true };
+        // A concrete view constructor's [[Prototype]] is %TypedArray%.
+        ctor.* = .{ .native = typedArrayCtorFn(kind), .native_ctor = true, .proto = ta_ctor };
         try installNativeProps(a, rs, ctor, kind.ctorName(), 3);
         try ctor.setOwn(a, rs, "BYTES_PER_ELEMENT", .{ .number = @floatFromInt(kind.byteSize()) });
         try ctor.setAttr(a, "BYTES_PER_ELEMENT", .{ .writable = false, .enumerable = false, .configurable = false });
