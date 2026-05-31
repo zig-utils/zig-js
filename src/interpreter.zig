@@ -8130,7 +8130,202 @@ fn arrayBufferIsViewFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = ctx;
     _ = this;
     const v = if (args.len > 0) args[0] else Value.undefined;
-    return .{ .boolean = v == .object and v.object.typed_array != null };
+    return .{ .boolean = v == .object and (v.object.typed_array != null or v.object.data_view != null) };
+}
+
+// ===== SharedArrayBuffer =============================================
+
+/// `new SharedArrayBuffer(byteLength, { maxByteLength }?)`.
+fn sharedArrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor SharedArrayBuffer requires 'new'");
+    const len = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
+    if (len > 0x7fffffff) return self.throwError("RangeError", "Invalid SharedArrayBuffer length");
+    var max: ?usize = null;
+    if (args.len > 1 and args[1] == .object) {
+        const mv = try self.getProperty(args[1], "maxByteLength");
+        if (mv != .undefined) {
+            const m = try toIndexArg(self, mv);
+            if (m > 0x7fffffff or m < len) return self.throwError("RangeError", "Invalid maxByteLength");
+            max = @intCast(m);
+        }
+    }
+    const o = try self.makeArrayBuffer(@intCast(len));
+    o.array_buffer.?.max_byte_length = max;
+    o.array_buffer.?.is_shared = true;
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+fn sabGetter(comptime which: enum { byte_length, max_byte_length, growable }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.array_buffer == null or !this.object.array_buffer.?.is_shared)
+                return self.throwError("TypeError", "SharedArrayBuffer.prototype accessor called on a non-SharedArrayBuffer");
+            const ab = this.object.array_buffer.?;
+            return switch (which) {
+                .byte_length => .{ .number = @floatFromInt(ab.data.len) },
+                .max_byte_length => .{ .number = @floatFromInt(ab.max_byte_length orelse ab.data.len) },
+                .growable => .{ .boolean = ab.max_byte_length != null },
+            };
+        }
+    }.call;
+}
+
+/// `SharedArrayBuffer.prototype.grow(newByteLength)` — increase the length (a
+/// shared buffer can only grow, never shrink).
+fn sabGrowFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.array_buffer == null or !this.object.array_buffer.?.is_shared)
+        return self.throwError("TypeError", "SharedArrayBuffer.prototype.grow called on a non-SharedArrayBuffer");
+    const ab = this.object.array_buffer.?;
+    if (ab.max_byte_length == null) return self.throwError("TypeError", "SharedArrayBuffer is not growable");
+    const new_len = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
+    if (new_len > ab.max_byte_length.? or new_len < ab.data.len) return self.throwError("RangeError", "grow out of range");
+    const nl: usize = @intCast(new_len);
+    const fresh = try self.arena.alloc(u8, nl);
+    @memset(fresh, 0);
+    @memcpy(fresh[0..ab.data.len], ab.data);
+    ab.data = fresh;
+    return .undefined;
+}
+
+fn sharedArrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.array_buffer == null or !this.object.array_buffer.?.is_shared)
+        return self.throwError("TypeError", "SharedArrayBuffer.prototype.slice called on a non-SharedArrayBuffer");
+    const ab = this.object.array_buffer.?;
+    const blen = ab.data.len;
+    const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, blen, 0);
+    const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
+    const count = if (end > start) end - start else 0;
+    const out = try self.makeArrayBuffer(count);
+    out.array_buffer.?.is_shared = true;
+    @memcpy(out.array_buffer.?.data[0..count], ab.data[start .. start + count]);
+    return .{ .object = out };
+}
+
+// ===== Atomics =======================================================
+
+/// ValidateIntegerTypedArray: the receiver must be an integer typed array (not
+/// a Float or Uint8Clamped view) over an attached buffer; returns the in-bounds
+/// element index from ToIndex(request).
+fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value) value.HostError!struct { ta: *value.TypedArrayData, i: usize } {
+    if (ta_v != .object or ta_v.object.typed_array == null) return self.throwError("TypeError", "Atomics operand must be an integer TypedArray");
+    const ta = ta_v.object.typed_array.?;
+    switch (ta.kind) {
+        .i8, .u8, .i16, .u16, .i32, .u32, .i64, .u64 => {},
+        else => return self.throwError("TypeError", "Atomics operand must be an integer TypedArray (not Float/Uint8Clamped)"),
+    }
+    if (ta.buffer.array_buffer.?.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const i = try toIndexArg(self, idx_v);
+    if (i >= ta.length) return self.throwError("RangeError", "Atomics index out of range");
+    return .{ .ta = ta, .i = @intCast(i) };
+}
+
+/// Coerce an Atomics value argument per the element type (ToBigInt for BigInt
+/// views, else ToIntegerOrInfinity).
+fn atomicsCoerce(self: *Interpreter, ta: *value.TypedArrayData, v: Value) value.HostError!f64 {
+    if (ta.kind.isBigInt()) {
+        const bv = try self.toBigIntValueImpl(v, false);
+        return @floatFromInt(@as(i64, @truncate(bv.object.bigint)));
+    }
+    return @trunc(try self.toNumberV(v));
+}
+
+fn atomicsReadV(self: *Interpreter, ta: *const value.TypedArrayData, i: usize) Value {
+    if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i)) catch .undefined;
+    return value.taRead(ta, i);
+}
+fn atomicsWriteN(ta: *value.TypedArrayData, i: usize, n: f64) void {
+    if (ta.kind.isBigInt()) value.taWriteBig(ta, i, @intFromFloat(n)) else value.taWrite(ta, i, n);
+}
+
+/// A read-modify-write Atomics op (`add`/`and`/`or`/`xor`/`sub`/`exchange`).
+fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = this;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+            const arg_v = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
+            const old = atomicsReadV(self, vd.ta, vd.i);
+            const old_n: f64 = if (old == .object and old.object.is_bigint) @floatFromInt(@as(i64, @truncate(old.object.bigint))) else old.number;
+            const oi: i64 = @intFromFloat(old_n);
+            const ai: i64 = @intFromFloat(arg_v);
+            const res: i64 = switch (op) {
+                .add => oi +% ai,
+                .sub => oi -% ai,
+                .and_ => oi & ai,
+                .or_ => oi | ai,
+                .xor => oi ^ ai,
+                .exchange => ai,
+            };
+            atomicsWriteN(vd.ta, vd.i, @floatFromInt(res));
+            return old;
+        }
+    }.call;
+}
+
+fn atomicsLoadFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    return atomicsReadV(self, vd.ta, vd.i);
+}
+fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    const raw = if (args.len > 2) args[2] else Value.undefined;
+    const n = try atomicsCoerce(self, vd.ta, raw);
+    atomicsWriteN(vd.ta, vd.i, n);
+    // store returns the *integer* value written (a Number, or BigInt for a
+    // BigInt view).
+    if (vd.ta.kind.isBigInt()) return self.makeBigInt(@intFromFloat(n));
+    return .{ .number = n };
+}
+fn atomicsCompareExchangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
+    const replacement = try atomicsCoerce(self, vd.ta, if (args.len > 3) args[3] else .undefined);
+    const old = atomicsReadV(self, vd.ta, vd.i);
+    const old_n: f64 = if (old == .object and old.object.is_bigint) @floatFromInt(@as(i64, @truncate(old.object.bigint))) else old.number;
+    if (@as(i64, @intFromFloat(old_n)) == @as(i64, @intFromFloat(expected))) atomicsWriteN(vd.ta, vd.i, replacement);
+    return old;
+}
+fn atomicsIsLockFreeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    const sz = @trunc(n);
+    return .{ .boolean = sz == 1 or sz == 2 or sz == 4 or sz == 8 };
+}
+fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    if (vd.ta.kind != .i32 and vd.ta.kind != .i64) return self.throwError("TypeError", "Atomics.wait requires an Int32Array or BigInt64Array");
+    if (!vd.ta.buffer.array_buffer.?.is_shared) return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
+    const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
+    const cur = atomicsReadV(self, vd.ta, vd.i);
+    const cur_n: f64 = if (cur == .object and cur.object.is_bigint) @floatFromInt(@as(i64, @truncate(cur.object.bigint))) else cur.number;
+    // Single-threaded: if the value differs, "not-equal"; otherwise no other
+    // agent can ever change it, so "timed-out".
+    if (@as(i64, @intFromFloat(cur_n)) != @as(i64, @intFromFloat(expected))) return .{ .string = "not-equal" };
+    return .{ .string = "timed-out" };
+}
+fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    _ = vd;
+    return .{ .number = 0 }; // no agents are ever waiting
 }
 
 /// A typed-array constructor for `kind` (`new Int8Array(...)`, …).
@@ -9353,6 +9548,62 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installDataView(env, rs, object_proto);
     try installWeakRefAndFinReg(env, rs, object_proto);
     try installIterator(env, rs, object_proto);
+    try installSharedArrayBufferAndAtomics(env, rs, object_proto);
+}
+
+/// Install `SharedArrayBuffer` (an ArrayBuffer-like, growable, never-detached
+/// buffer) and the `Atomics` namespace (single-threaded semantics).
+fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const sym_tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+    // SharedArrayBuffer.
+    {
+        const proto = try a.create(value.Object);
+        proto.* = .{ .proto = object_proto };
+        try setNative(a, rs, proto, "slice", 2, sharedArrayBufferSliceFn);
+        try setNative(a, rs, proto, "grow", 1, sabGrowFn);
+        try setNativeGetter(a, rs, proto, "byteLength", sabGetter(.byte_length));
+        try setNativeGetter(a, rs, proto, "maxByteLength", sabGetter(.max_byte_length));
+        try setNativeGetter(a, rs, proto, "growable", sabGetter(.growable));
+        if (sym_tag) |k| {
+            try proto.setOwn(a, rs, k, .{ .string = "SharedArrayBuffer" });
+            try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        const ctor = try a.create(value.Object);
+        ctor.* = .{ .native = sharedArrayBufferConstructorFn, .native_ctor = true };
+        try installNativeProps(a, rs, ctor, "SharedArrayBuffer", 1);
+        try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+        try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try setConstructor(a, rs, proto, ctor);
+        try env.put("SharedArrayBuffer", .{ .object = ctor });
+    }
+    // Atomics namespace.
+    {
+        const atomics = try a.create(value.Object);
+        atomics.* = .{ .proto = object_proto };
+        try setNative(a, rs, atomics, "load", 2, atomicsLoadFn);
+        try setNative(a, rs, atomics, "store", 3, atomicsStoreFn);
+        try setNative(a, rs, atomics, "add", 3, atomicsRMWFn(.add));
+        try setNative(a, rs, atomics, "sub", 3, atomicsRMWFn(.sub));
+        try setNative(a, rs, atomics, "and", 3, atomicsRMWFn(.and_));
+        try setNative(a, rs, atomics, "or", 3, atomicsRMWFn(.or_));
+        try setNative(a, rs, atomics, "xor", 3, atomicsRMWFn(.xor));
+        try setNative(a, rs, atomics, "exchange", 3, atomicsRMWFn(.exchange));
+        try setNative(a, rs, atomics, "compareExchange", 4, atomicsCompareExchangeFn);
+        try setNative(a, rs, atomics, "isLockFree", 1, atomicsIsLockFreeFn);
+        try setNative(a, rs, atomics, "wait", 4, atomicsWaitFn);
+        try setNative(a, rs, atomics, "notify", 3, atomicsNotifyFn);
+        if (sym_tag) |k| {
+            try atomics.setOwn(a, rs, k, .{ .string = "Atomics" });
+            try atomics.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        try env.put("Atomics", .{ .object = atomics });
+    }
 }
 
 fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {

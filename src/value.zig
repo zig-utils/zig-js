@@ -88,9 +88,11 @@ pub const TAKind = enum {
 pub const ArrayBufferData = struct {
     data: []u8,
     detached: bool = false,
-    /// For a resizable ArrayBuffer, the maximum byte length; null means a
-    /// fixed-length buffer (not resizable).
+    /// For a resizable ArrayBuffer (or growable SharedArrayBuffer), the maximum
+    /// byte length; null means fixed-length (not resizable/growable).
     max_byte_length: ?usize = null,
+    /// A SharedArrayBuffer (never detaches; `grow` only increases length).
+    is_shared: bool = false,
 };
 
 /// Read typed-array element `i` (within bounds, buffer attached) as a Number.
