@@ -233,6 +233,9 @@ pub const Object = struct {
     /// `elements`; a Set keeps values directly. `size` is a maintained property.
     is_map: bool = false,
     is_set: bool = false,
+    /// A WeakMap/WeakSet reuses the `is_map`/`is_set` storage but carries this
+    /// flag so the brand checks can tell a Map from a WeakMap (and Set/WeakSet).
+    is_weak: bool = false,
     /// For error instances, the error class name (e.g. "TypeError"); for a
     /// builtin error *constructor* object, see `error_ctor`.
     error_name: []const u8 = "",

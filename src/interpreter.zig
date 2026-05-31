@@ -2518,6 +2518,22 @@ pub const Interpreter = struct {
     }
 
     /// Build a `Map`, optionally populated from an iterable of `[k,v]` pairs.
+    /// Whether `start`'s [[Prototype]] chain reaches the named constructor's
+    /// `.prototype` — used to tell a WeakMap/WeakSet (whose chain includes
+    /// %WeakMap.prototype%/%WeakSet.prototype%) from a Map/Set, including
+    /// subclasses, since both kinds share the `is_map`/`is_set` storage.
+    fn protoReachesCtorProto(self: *Interpreter, ctor_name: []const u8, start: ?*value.Object) bool {
+        const cv = self.env.get(ctor_name) orelse return false;
+        if (cv != .object) return false;
+        const wp = cv.object.getOwn("prototype") orelse return false;
+        if (wp != .object) return false;
+        var cur = start;
+        while (cur) |c| : (cur = c.proto) {
+            if (c == wp.object) return true;
+        }
+        return false;
+    }
+
     pub fn makeMap(self: *Interpreter, init_v: Value) EvalError!Value {
         const o = (try self.newObject()).object;
         o.is_map = true;
@@ -2530,6 +2546,7 @@ pub const Interpreter = struct {
                 }
             }
         }
+        o.is_weak = self.protoReachesCtorProto("WeakMap", o.proto);
         try self.setProp(o, "size", .{ .number = 0 });
         if (init_v == .object and init_v.object.is_array) {
             for (init_v.object.elements.items) |entry| {
@@ -2557,6 +2574,7 @@ pub const Interpreter = struct {
                 }
             }
         }
+        o.is_weak = self.protoReachesCtorProto("WeakSet", o.proto);
         try self.setProp(o, "size", .{ .number = 0 });
         if (init_v == .object and init_v.object.is_array) {
             for (init_v.object.elements.items) |v| _ = try self.setMethod(o, "add", &.{v});
@@ -7127,13 +7145,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (env.get("WeakMap")) |wm| if (wm == .object) {
         if (wm.object.getOwn("prototype")) |pv| if (pv == .object) {
             inline for (.{ .{ "set", 2 }, .{ "get", 1 }, .{ "has", 1 }, .{ "delete", 1 }, .{ "getOrInsert", 2 }, .{ "getOrInsertComputed", 2 } }) |s|
-                try setNative(a, root_shape, pv.object, s[0], s[1], mapProtoMethod(s[0]));
+                try setNative(a, root_shape, pv.object, s[0], s[1], mapProtoMethod(s[0], true));
         };
     };
     if (env.get("WeakSet")) |ws| if (ws == .object) {
         if (ws.object.getOwn("prototype")) |pv| if (pv == .object) {
             inline for (.{ .{ "add", 1 }, .{ "has", 1 }, .{ "delete", 1 } }) |s|
-                try setNative(a, root_shape, pv.object, s[0], s[1], setProtoMethod(s[0]));
+                try setNative(a, root_shape, pv.object, s[0], s[1], setProtoMethod(s[0], true));
         };
     };
     try defineGlobalFnC(env, root_shape, "Boolean", 1, true, builtins.booleanFn);
@@ -7922,12 +7940,15 @@ fn dateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 /// `setMethod` — making the methods real own properties of `Set.prototype` (so
 /// reflection and `Set.prototype.m.call(...)` work) on top of the existing
 /// instance dispatch.
-fn setProtoMethod(comptime name: []const u8) value.NativeFn {
+fn setProtoMethod(comptime name: []const u8, comptime weak: bool) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (this != .object or !this.object.is_set)
-                return self.throwError("TypeError", "Set.prototype method called on a non-Set");
+            // A WeakSet shares `is_set` with a Set, so the brand check also
+            // requires the weakness to match (a Set method rejects a WeakSet and
+            // vice versa).
+            if (this != .object or !this.object.is_set or this.object.is_weak != weak)
+                return self.throwError("TypeError", if (weak) "WeakSet.prototype method called on an incompatible receiver" else "Set.prototype method called on a non-Set");
             return (try self.setMethod(this.object, name, args)) orelse .undefined;
         }
     }.call;
@@ -7952,12 +7973,15 @@ fn numberProtoMethod(comptime name: []const u8) value.NativeFn {
 }
 
 /// A brand-checked `Map.prototype` method dispatching to `mapMethod`.
-fn mapProtoMethod(comptime name: []const u8) value.NativeFn {
+fn mapProtoMethod(comptime name: []const u8, comptime weak: bool) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (this != .object or !this.object.is_map)
-                return self.throwError("TypeError", "Map.prototype method called on a non-Map");
+            // A WeakMap shares `is_map` with a Map, so the brand check also
+            // requires the weakness to match (a Map method rejects a WeakMap and
+            // vice versa).
+            if (this != .object or !this.object.is_map or this.object.is_weak != weak)
+                return self.throwError("TypeError", if (weak) "WeakMap.prototype method called on an incompatible receiver" else "Map.prototype method called on a non-Map");
             return (try self.mapMethod(this.object, name, args)) orelse .undefined;
         }
     }.call;
@@ -8031,7 +8055,7 @@ fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {
         .{ "clear", 0 },   .{ "forEach", 1 }, .{ "keys", 0 },     .{ "values", 0 },
         .{ "entries", 0 }, .{ "getOrInsert", 2 }, .{ "getOrInsertComputed", 2 },
     };
-    inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], mapProtoMethod(s[0]));
+    inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], mapProtoMethod(s[0], false));
 }
 
 /// Install the Set.prototype methods (real, brand-checked own properties) on
@@ -8049,7 +8073,7 @@ fn installSetProto(env: *Environment, rs: *Shape) EvalError!void {
         .{ "union", 1 },     .{ "intersection", 1 }, .{ "difference", 1 }, .{ "symmetricDifference", 1 },
         .{ "isSubsetOf", 1 }, .{ "isSupersetOf", 1 }, .{ "isDisjointFrom", 1 },
     };
-    inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], setProtoMethod(s[0]));
+    inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], setProtoMethod(s[0], false));
 }
 
 /// Monotonic id for unique Symbol property-key encodings (single-threaded;
