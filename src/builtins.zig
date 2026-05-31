@@ -38,7 +38,15 @@ pub fn isFiniteFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 pub fn stringFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const ip = interp(ctx);
-    const s: []const u8 = if (args.len == 0) "" else try args[0].toString(ip.arena);
+    const s: []const u8 = blk: {
+        if (args.len == 0) break :blk "";
+        // String(symbol) (called, not constructed) → SymbolDescriptiveString; in
+        // any other case ToString (toStringV, running @@toPrimitive/toString/
+        // valueOf and throwing for a Symbol under `new String(sym)`).
+        if (ip.new_target == .undefined and args[0] == .object and args[0].object.is_symbol)
+            break :blk try std.fmt.allocPrint(ip.arena, "Symbol({s})", .{args[0].object.sym_desc orelse ""});
+        break :blk try ip.toStringV(args[0]);
+    };
     if (ip.new_target != .undefined) return ip.makeWrapper(.{ .string = s });
     return .{ .string = s };
 }

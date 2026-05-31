@@ -4630,6 +4630,27 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// IsRegExp(v): true if `v` is an object whose `[Symbol.match]` is truthy
+    /// (or, when that property is absent, has a [[RegExpMatcher]] — `is_regex`).
+    fn isRegExp(self: *Interpreter, v: Value) EvalError!bool {
+        if (v != .object) return false;
+        if (self.wellKnownSymbolKey("match")) |mkey| {
+            const m = try self.getProperty(v, mkey);
+            if (m != .undefined) return m.toBoolean();
+        }
+        return v.object.is_regex;
+    }
+
+    /// ToIntegerOrInfinity(v) clamped into `[0, len]` — the position argument of
+    /// `includes`/`startsWith`/`endsWith` (a Symbol/BigInt throws via toNumberV).
+    fn clampPos(self: *Interpreter, v: Value, len: usize) EvalError!usize {
+        const n = try self.toNumberV(v);
+        if (std.math.isNan(n) or n <= 0) return 0;
+        const flen: f64 = @floatFromInt(len);
+        if (n >= flen) return len;
+        return @intFromFloat(@trunc(n));
+    }
+
     fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value) EvalError!?Value {
         if (eq(name, "valueOf") or eq(name, "toString")) return Value{ .string = s };
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
@@ -4664,16 +4685,23 @@ pub const Interpreter = struct {
             return Value{ .number = if (std.mem.indexOf(u8, s, sub)) |idx| @floatFromInt(idx) else -1 };
         }
         if (eq(name, "includes")) {
-            const sub = try arg0(args).toString(self.arena);
-            return Value{ .boolean = std.mem.indexOf(u8, s, sub) != null };
+            if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.includes must not be a regular expression");
+            const sub = try self.toStringV(arg0(args));
+            const pos = try self.clampPos(arg(args, 1), s.len);
+            return Value{ .boolean = std.mem.indexOf(u8, s[pos..], sub) != null };
         }
         if (eq(name, "startsWith")) {
-            const sub = try arg0(args).toString(self.arena);
-            return Value{ .boolean = std.mem.startsWith(u8, s, sub) };
+            if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.startsWith must not be a regular expression");
+            const sub = try self.toStringV(arg0(args));
+            const pos = try self.clampPos(arg(args, 1), s.len);
+            return Value{ .boolean = std.mem.startsWith(u8, s[pos..], sub) };
         }
         if (eq(name, "endsWith")) {
-            const sub = try arg0(args).toString(self.arena);
-            return Value{ .boolean = std.mem.endsWith(u8, s, sub) };
+            if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.endsWith must not be a regular expression");
+            const sub = try self.toStringV(arg0(args));
+            // `endPosition` defaults to the string length; the match ends there.
+            const end_pos = if (args.len > 1 and args[1] != .undefined) try self.clampPos(args[1], s.len) else s.len;
+            return Value{ .boolean = std.mem.endsWith(u8, s[0..end_pos], sub) };
         }
         if (eq(name, "slice")) {
             const start = try relIndex(self, arg0(args), s.len, 0);
@@ -5130,6 +5158,23 @@ pub const Interpreter = struct {
     pub fn toPrimitive(self: *Interpreter, v: Value, hint: enum { default, number, string }) EvalError!Value {
         if (v != .object or v.object.is_symbol or v.object.is_bigint) return v;
         const o = v.object;
+        // GetMethod(v, @@toPrimitive): if present, it alone decides — it is called
+        // with the hint string and must return a non-object (an object result is
+        // the "Cannot convert" TypeError); a non-callable @@toPrimitive throws.
+        if (self.wellKnownSymbolKey("toPrimitive")) |tpkey| {
+            const exotic = try self.getProperty(v, tpkey);
+            if (exotic != .undefined and exotic != .null) {
+                if (!exotic.isCallable()) return self.throwError("TypeError", "@@toPrimitive value is not callable");
+                const hint_str: []const u8 = switch (hint) {
+                    .string => "string",
+                    .number => "number",
+                    .default => "default",
+                };
+                const res = try self.callValueWithThis(exotic, &.{.{ .string = hint_str }}, v);
+                if (res != .object or res.object.is_symbol or res.object.is_bigint) return res;
+                return self.throwError("TypeError", "Cannot convert object to primitive value");
+            }
+        }
         // Honor a *user-defined* valueOf/toString (a JS function found on the
         // object or its prototype chain — e.g. `{ valueOf() {…} }` or a class
         // method) in the hint's order; the first primitive result wins. The
@@ -5161,8 +5206,17 @@ pub const Interpreter = struct {
             if (hint == .string) return .{ .string = try p.toString(self.arena) };
             return p;
         }
-        // No user override → the engine's built-in coercion: arrays join, errors
-        // render "Name: message", plain objects "[object Object]", etc.
+        // The built-in "[object …]" / array-join / Date / error fallback is the
+        // result of the *built-in* `toString`; it is only reachable when
+        // `toString` still resolves to that built-in. If it is shadowed — by a
+        // non-callable own value (`toString: undefined`) or by a user method
+        // (which, having been tried in the loop above, must have returned an
+        // object, since we're at the fallback) — there is no primitive and no
+        // built-in to fall back to: the spec's "Cannot convert object to
+        // primitive value" TypeError.
+        const own_ts = o.getOwn("toString");
+        const ts_shadowed = (own_ts != null and !own_ts.?.isCallable()) or userMethodOf(o, "toString") != null;
+        if (ts_shadowed) return self.throwError("TypeError", "Cannot convert object to primitive value");
         return .{ .string = try v.toString(self.arena) };
     }
 
