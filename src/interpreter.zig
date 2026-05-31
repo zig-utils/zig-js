@@ -2968,6 +2968,15 @@ pub const Interpreter = struct {
         switch (recv) {
             .object => |o| {
                 if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, recv);
+                // Legacy `caller`: a *non-strict ordinary* function (not strict,
+                // arrow, generator, async, or bound) reads `null` for `.caller`,
+                // shadowing the inherited %ThrowTypeError% poison pill — which
+                // still fires for strict/bound functions and for `.arguments`.
+                if (std.mem.eql(u8, key, "caller") and o.bound == null and o.getOwn(key) == null) {
+                    if (funcOf(recv)) |f| {
+                        if (!f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async) return .null;
+                    }
+                }
                 // A (non-arrow) function's `.prototype` is an own data property,
                 // materialized lazily on first access — every [[Construct]]-able
                 // function has one, with a `constructor` back-reference. Without
