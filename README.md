@@ -12,9 +12,12 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset *and* generators / async functions / async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js` + `assert.js` + `includes:`):
-> `zig build test262` currently passes **VALID 29,158 / 35,216 (82.8%)** across `language/`
-> (including ES modules + top-level await) and the implemented built-in subtrees, and
-> `zig build conformance` keeps a 33/33 always-green smoke suite.
+> `zig build test262` now scores the **entire** corpus — `language/`, `annexB/`, `intl402/`,
+> `staging/`, and every `built-ins/*` area — and currently passes **VALID 31,357 / 48,411 (64.8%)**
+> (including ES modules + top-level await), while `zig build conformance` keeps a 33/33
+> always-green smoke suite. The headline is dragged down by whole subsystems that aren't
+> implemented (Temporal, Intl/`intl402`, Atomics/SharedArrayBuffer); the implemented areas score
+> far higher — see the per-area table below.
 >
 > Implemented language + runtime: closures, arrow functions, **classes** (fields, private members,
 > getters/setters, `static`, `super`, derived constructors), **destructuring** (array/object,
@@ -54,18 +57,24 @@ failing to parse valid code too), so they're kept apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? | **29,158 / 35,216 (82.8%)** |
-| negative | do we reject invalid input? (early errors — partial) | 1,707 / 4,455 (38.3%) |
+| **valid** | can we run the program? (whole corpus) | **31,357 / 48,411 (64.8%)** |
+| negative | do we reject invalid input? (early errors — partial) | 1,717 / 4,669 (36.8%) |
+
+The whole-corpus rate is held down by unimplemented subsystems (Temporal 0/4603, `intl402`
+0.7%, Atomics/SharedArrayBuffer); the implemented areas score much higher.
 
 Per area (valid):
 
 | area | passing | | area | passing |
 | ---- | ------: | - | ---- | ------: |
-| `language` (incl. modules) | 16,394 / 19,104 (85.8%) | | `Math` | 299 / 327 (91.4%) |
-| `Object` | 3,094 / 3,411 (90.7%) | | `Date` | 520 / 594 (87.5%) |
-| `Array` | 2,531 / 3,081 (82.1%) | | `Function` | 452 / 509 (88.8%) |
-| `String` | 1,044 / 1,223 (85.4%) | | `Promise` | 561 / 677 (82.9%) |
-| `Number` | 319 / 340 (93.8%) | | `Map`/`Set` | 85–89% |
+| `language` (incl. modules) | 16,478 / 19,104 (86.3%) | | `Math` | 299 / 327 (91.4%) |
+| `Object` | 3,134 / 3,411 (91.9%) | | `Date` | 520 / 594 (87.5%) |
+| `Array` | 2,544 / 3,081 (82.6%) | | `Function` | 451 / 509 (88.6%) |
+| `String` | 1,047 / 1,223 (85.6%) | | `Promise` | 561 / 677 (82.9%) |
+| `Number` | 319 / 340 (93.8%) | | `BigInt` | 72 / 77 (93.5%) |
+| `RegExp` | 647 / 1,687 (38.4%) | | `TypedArray` | 947 / 1,446 (65.5%) |
+| `DataView` | 447 / 561 (79.7%) | | `Iterator` | 219 / 514 (42.6%) |
+| `Map`/`Set` | 87–90% | | `Reflect`/`Proxy` | 48–70% |
 
 > `zig build test262` prints the per-subtree pass rate plus a `parse-fail` / `runtime-fail` split so
 > the work stays data-driven. The runtime drives the **async** corpus (the `$DONE` protocol) and the
