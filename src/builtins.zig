@@ -833,7 +833,12 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
         try target.setAccessor(self.arena, key, get, set);
     } else {
         if (d.getOwn("writable")) |w| attr.writable = w.toBoolean();
-        try target.setOwn(self.arena, self.root_shape, key, d.getOwn("value") orelse .undefined);
+        // An omitted `value` keeps the existing data property's value on a
+        // redefine (a partial descriptor like `{enumerable:false}` must not reset
+        // it); a brand-new property — or one converted from an accessor — defaults
+        // to undefined.
+        const new_value = d.getOwn("value") orelse (cur_data orelse .undefined);
+        try target.setOwn(self.arena, self.root_shape, key, new_value);
     }
     try target.setAttr(self.arena, key, attr);
     // Defining an own property at an array index at or past the current length
