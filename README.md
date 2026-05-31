@@ -12,7 +12,7 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset *and* generators / async functions / async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js` + `assert.js` + `includes:`):
-> `zig build test262` currently passes **VALID 26,230 / 30,486 (86.0%)** across `language/`
+> `zig build test262` currently passes **VALID 26,239 / 30,486 (86.1%)** across `language/`
 > (including ES modules + top-level await) and the implemented built-in subtrees, and
 > `zig build conformance` keeps a 33/33 always-green smoke suite.
 >
@@ -54,7 +54,7 @@ failing to parse valid code too), so they're kept apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? | **26,230 / 30,486 (86.0%)** |
+| **valid** | can we run the program? | **26,239 / 30,486 (86.1%)** |
 | negative | do we reject invalid input? (early errors — partial) | 1,707 / 4,455 (38.3%) |
 
 Per area (valid):
@@ -65,7 +65,7 @@ Per area (valid):
 | `Object` | 3,094 / 3,411 (90.7%) | | `Date` | 520 / 594 (87.5%) |
 | `Array` | 2,523 / 3,081 (81.9%) | | `Function` | 452 / 509 (88.8%) |
 | `String` | 1,044 / 1,223 (85.4%) | | `Promise` | 561 / 677 (82.9%) |
-| `Number` | 319 / 340 (93.8%) | | `Map`/`Set` | 82–88% |
+| `Number` | 319 / 340 (93.8%) | | `Map`/`Set` | 85–89% |
 
 > `zig build test262` prints the per-subtree pass rate plus a `parse-fail` / `runtime-fail` split so
 > the work stays data-driven. The runtime drives the **async** corpus (the `$DONE` protocol) and the
