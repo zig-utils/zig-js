@@ -5525,6 +5525,19 @@ pub const Interpreter = struct {
                 l = try self.toPrimitive(l, .number);
                 r = try self.toPrimitive(r, .number);
             },
+            .eq, .neq => {
+                // Abstract equality (IsLooselyEqual): when one operand is an
+                // ordinary object and the other is a primitive, the object is
+                // ToPrimitive'd (default hint) and the comparison retried — so
+                // `Object("1") == "1"` and `{valueOf(){return 1}} == 1` hold. Two
+                // objects compare by identity, and an object vs null/undefined is
+                // always unequal, so neither is coerced. A BigInt/Symbol value is
+                // boxed as an object here but counts as a primitive operand.
+                const l_obj = l == .object and !l.object.is_bigint and !l.object.is_symbol;
+                const r_obj = r == .object and !r.object.is_bigint and !r.object.is_symbol;
+                if (l_obj and !r_obj and r != .undefined and r != .null) l = try self.toPrimitive(l, .default);
+                if (r_obj and !l_obj and l != .undefined and l != .null) r = try self.toPrimitive(r, .default);
+            },
             else => {},
         }
         // BigInt operands. Arithmetic/bitwise require both to be BigInt (mixing
