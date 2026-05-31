@@ -12696,6 +12696,489 @@ fn temporalNowTimeZoneIdFn(ctx: *anyopaque, this: Value, args: []const Value) va
     return .{ .string = "UTC" };
 }
 
+fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const tz = if (args.len > 0 and args[0] != .undefined) try parseTimeZone(self, try self.toStringV(args[0])) else TimeZone{ .name = "UTC", .offset_ns = 0 };
+    const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
+    o.temporal.?.epoch_ns = nowEpochNs(self);
+    o.temporal.?.tz_name = tz.name;
+    o.temporal.?.tz_offset_ns = tz.offset_ns;
+    return .{ .object = o };
+}
+
+// ---- Temporal.ZonedDateTime -----------------------------------------
+// Fixed-offset and UTC time zones are modeled exactly; IANA-named zones are
+// accepted but (lacking DST data) treated as their non-DST base — offset 0 for
+// region names, so structural behavior is correct even when the wall-clock
+// offset isn't.
+
+const TimeZone = struct { name: []const u8, offset_ns: i64 };
+
+/// Parse a time-zone identifier: "UTC", a numeric offset ("+05:00"), or an IANA
+/// name. Returns the canonical name and the fixed UTC offset in ns.
+fn parseTimeZone(self: *Interpreter, s: []const u8) EvalError!TimeZone {
+    if (s.len == 0) return self.throwError("RangeError", "invalid time zone");
+    if (std.ascii.eqlIgnoreCase(s, "utc")) return .{ .name = "UTC", .offset_ns = 0 };
+    if (s[0] == '+' or s[0] == '-') {
+        const neg = s[0] == '-';
+        var i: usize = 1;
+        if (i + 2 > s.len) return self.throwError("RangeError", "invalid offset time zone");
+        const oh = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid offset");
+        i += 2;
+        var om: u8 = 0;
+        var os: u8 = 0;
+        if (i < s.len and s[i] == ':') i += 1;
+        if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
+            om = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch 0;
+            i += 2;
+            if (i < s.len and s[i] == ':') i += 1;
+            if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
+                os = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch 0;
+            }
+        }
+        if (oh > 23 or om > 59) return self.throwError("RangeError", "offset out of range");
+        var off: i64 = @as(i64, oh) * 3_600_000_000_000 + @as(i64, om) * 60_000_000_000 + @as(i64, os) * 1_000_000_000;
+        if (neg) off = -off;
+        const name = offsetNsToString(self, off) catch "+00:00";
+        return .{ .name = name, .offset_ns = off };
+    }
+    // IANA name: accept it (offset 0 — no DST data). Require a '/' or a known id.
+    if (std.mem.indexOfScalar(u8, s, '/') != null or std.ascii.eqlIgnoreCase(s, "gmt")) {
+        return .{ .name = self.arena.dupe(u8, s) catch "UTC", .offset_ns = 0 };
+    }
+    return self.throwError("RangeError", "unknown time zone");
+}
+
+/// Render a UTC offset (ns) as "±HH:MM" or "±HH:MM:SS".
+fn offsetNsToString(self: *Interpreter, off: i64) EvalError![]const u8 {
+    const neg = off < 0;
+    var v: u64 = @intCast(if (neg) -off else off);
+    const hh = v / 3_600_000_000_000;
+    v %= 3_600_000_000_000;
+    const mm = v / 60_000_000_000;
+    v %= 60_000_000_000;
+    const ss = v / 1_000_000_000;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.append(self.arena, if (neg) '-' else '+');
+    try tfmtPad(self, &buf, hh, 2);
+    try buf.append(self.arena, ':');
+    try tfmtPad(self, &buf, mm, 2);
+    if (ss != 0) {
+        try buf.append(self.arena, ':');
+        try tfmtPad(self, &buf, ss, 2);
+    }
+    return buf.toOwnedSlice(self.arena);
+}
+
+fn tIsZdt(this: Value) bool {
+    return tIsTemporal(this, .zoned_date_time);
+}
+
+/// The ZonedDateTime's local civil date-time (epoch + offset).
+fn zdtLocal(t: *const value.TemporalData) value.TemporalData {
+    const local = t.epoch_ns + t.tz_offset_ns;
+    const days = @divFloor(local, 86_400_000_000_000);
+    const c = tCivilFromDays(@intCast(days));
+    var out: value.TemporalData = .{ .kind = .plain_date_time };
+    out.year = @intCast(c.y);
+    out.month = c.m;
+    out.day = c.d;
+    nsToTime(&out, local);
+    return out;
+}
+
+fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Temporal.ZonedDateTime requires 'new'");
+    const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else .undefined, false);
+    if (args.len < 2 or args[1] == .undefined) return self.throwError("TypeError", "ZonedDateTime requires a time zone");
+    if (args[1] != .string) return self.throwError("TypeError", "time zone must be a string");
+    const tz = try parseTimeZone(self, args[1].string);
+    const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
+    o.temporal.?.epoch_ns = bv.object.bigint;
+    o.temporal.?.tz_name = tz.name;
+    o.temporal.?.tz_offset_ns = tz.offset_ns;
+    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    return .{ .object = o };
+}
+
+const ZdtField = enum {
+    year, month, day, hour, minute, second, millisecond, microsecond, nanosecond,
+    day_of_week, day_of_year, days_in_month, days_in_year, months_in_year, days_in_week,
+    in_leap_year, hours_in_day, offset_ns,
+};
+fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsZdt(this)) return self.throwError("TypeError", "Temporal.ZonedDateTime accessor on incompatible receiver");
+            const t = this.object.temporal.?;
+            const l = zdtLocal(t);
+            const y: i64 = l.year;
+            return switch (f) {
+                .year => .{ .number = @floatFromInt(l.year) },
+                .month => .{ .number = @floatFromInt(l.month) },
+                .day => .{ .number = @floatFromInt(l.day) },
+                .hour => .{ .number = @floatFromInt(l.hour) },
+                .minute => .{ .number = @floatFromInt(l.minute) },
+                .second => .{ .number = @floatFromInt(l.second) },
+                .millisecond => .{ .number = @floatFromInt(l.millisecond) },
+                .microsecond => .{ .number = @floatFromInt(l.microsecond) },
+                .nanosecond => .{ .number = @floatFromInt(l.nanosecond) },
+                .day_of_week => .{ .number = @floatFromInt(isoDayOfWeek(y, l.month, l.day)) },
+                .day_of_year => .{ .number = @floatFromInt(tDaysFromCivil(y, l.month, l.day) - tDaysFromCivil(y, 1, 1) + 1) },
+                .days_in_month => .{ .number = @floatFromInt(isoDaysInMonth(y, l.month)) },
+                .days_in_year => .{ .number = @floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365)) },
+                .months_in_year => .{ .number = 12 },
+                .days_in_week => .{ .number = 7 },
+                .in_leap_year => .{ .boolean = isoLeap(y) },
+                .hours_in_day => .{ .number = 24 },
+                .offset_ns => .{ .number = @floatFromInt(t.tz_offset_ns) },
+            };
+        }
+    }.call;
+}
+
+fn temporalZdtMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const l = zdtLocal(this.object.temporal.?);
+    return .{ .string = try std.fmt.allocPrint(self.arena, "M{d:0>2}", .{l.month}) };
+}
+
+fn temporalZdtEpochGetter(comptime ms: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+            const ns = this.object.temporal.?.epoch_ns;
+            if (ms) return .{ .number = @floatFromInt(@divFloor(ns, 1_000_000)) };
+            return self.makeBigInt(ns);
+        }
+    }.call;
+}
+
+fn temporalZdtTimeZoneIdGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    return .{ .string = this.object.temporal.?.tz_name };
+}
+
+fn temporalZdtOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    return .{ .string = try offsetNsToString(self, this.object.temporal.?.tz_offset_ns) };
+}
+
+fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const t = this.object.temporal.?;
+    const l = zdtLocal(t);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoYearStr(self, &buf, l.year);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ l.month, l.day });
+    try isoTimeStr(self, &buf, &l);
+    try buf.appendSlice(self.arena, try offsetNsToString(self, t.tz_offset_ns));
+    try buf.append(self.arena, '[');
+    try buf.appendSlice(self.arena, t.tz_name);
+    try buf.append(self.arena, ']');
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn zdtMake(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i64) EvalError!Value {
+    const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
+    o.temporal.?.epoch_ns = epoch_ns;
+    o.temporal.?.tz_name = tz_name;
+    o.temporal.?.tz_offset_ns = tz_offset;
+    return .{ .object = o };
+}
+
+fn temporalZdtToInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const o = try makeTemporal(self, .instant, "\x00T.Instant");
+    o.temporal.?.epoch_ns = this.object.temporal.?.epoch_ns;
+    return .{ .object = o };
+}
+
+fn zdtLocalToTemporal(self: *Interpreter, this: Value, kind: value.TemporalData.Kind, proto_key: []const u8) EvalError!Value {
+    const l = zdtLocal(this.object.temporal.?);
+    const o = try makeTemporal(self, kind, proto_key);
+    o.temporal.?.year = l.year;
+    o.temporal.?.month = l.month;
+    o.temporal.?.day = l.day;
+    o.temporal.?.hour = l.hour;
+    o.temporal.?.minute = l.minute;
+    o.temporal.?.second = l.second;
+    o.temporal.?.millisecond = l.millisecond;
+    o.temporal.?.microsecond = l.microsecond;
+    o.temporal.?.nanosecond = l.nanosecond;
+    return .{ .object = o };
+}
+
+fn temporalZdtToPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    return zdtLocalToTemporal(self, this, .plain_date_time, "\x00T.PlainDateTime");
+}
+fn temporalZdtToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    return zdtLocalToTemporal(self, this, .plain_date, "\x00T.PlainDate");
+}
+fn temporalZdtToPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    return zdtLocalToTemporal(self, this, .plain_time, "\x00T.PlainTime");
+}
+fn temporalZdtToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const l = zdtLocal(this.object.temporal.?);
+    return makeYearMonth(self, l.year, l.month);
+}
+fn temporalZdtToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const l = zdtLocal(this.object.temporal.?);
+    return makeMonthDay(self, l.month, l.day);
+}
+
+/// ZDT add/subtract: time units shift the epoch; calendar units shift the local
+/// date (fixed offset, so no DST re-anchoring) then re-apply the offset.
+fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+            const t = this.object.temporal.?;
+            const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            var epoch = t.epoch_ns;
+            if (durHasCalendar(dur) or dur[3] != 0) {
+                // Apply date units to the local date.
+                const l = zdtLocal(t);
+                const c = addCalendarDate(l.year, l.month, l.day, dur[0], dur[1], dur[2], dur[3], sign);
+                const local_ns = @as(i128, tDaysFromCivil(c.y, c.m, c.d)) * 86_400_000_000_000 + timeToNs(&l);
+                epoch = local_ns - t.tz_offset_ns;
+                // Then time-of-day units.
+                const time_only = durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day);
+                epoch += @as(i128, @intFromFloat(sign)) * time_only;
+            } else {
+                epoch += @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            }
+            return zdtMake(self, epoch, t.tz_name, t.tz_offset_ns);
+        }
+    }.call;
+}
+
+fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+            const other = try toZdtArg(self, if (args.len > 0) args[0] else .undefined);
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 });
+            if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.day)) {
+                var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - this.object.temporal.?.epoch_ns);
+                diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
+                return makeDuration(self, balanceTimeNs(diff, opts.largest));
+            }
+            // Calendar largestUnit: diff the local date-times.
+            const a = zdtLocal(this.object.temporal.?);
+            const b = zdtLocal(&other);
+            const fwd = dateTimeToNs(&a) <= dateTimeToNs(&b);
+            const e = if (fwd) a else b;
+            const l = if (fwd) b else a;
+            var dd = calendarDateDiff(e.year, e.month, e.day, l.year, l.month, l.day, opts.largest);
+            var time_diff = timeToNs(&l) - timeToNs(&e);
+            if (time_diff < 0) {
+                time_diff += 86_400_000_000_000;
+                dd[3] -= 1;
+            }
+            const tparts = balanceTimeNs(time_diff, .hour);
+            for (4..10) |i| dd[i] = tparts[i];
+            const s2 = sign * (if (fwd) @as(f64, 1) else -1);
+            if (s2 < 0) for (&dd) |*c| {
+                c.* = -c.*;
+            };
+            return makeDuration(self, dd);
+        }
+    }.call;
+}
+
+fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "ZonedDateTime.round requires options");
+    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "ZonedDateTime.round smallestUnit must be day or smaller");
+    const t = this.object.temporal.?;
+    // Round the local wall-clock, then re-apply the offset.
+    const local = t.epoch_ns + t.tz_offset_ns;
+    const rounded = roundNs(local, opts.smallest, opts.increment, opts.mode);
+    return zdtMake(self, rounded - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
+}
+
+fn temporalZdtEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const other = try toZdtArg(self, if (args.len > 0) args[0] else .undefined);
+    const t = this.object.temporal.?;
+    return .{ .boolean = t.epoch_ns == other.epoch_ns and std.mem.eql(u8, t.tz_name, other.tz_name) };
+}
+
+fn temporalZdtCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const a = try toZdtArg(self, if (args.len > 0) args[0] else .undefined);
+    const b = try toZdtArg(self, if (args.len > 1) args[1] else .undefined);
+    return .{ .number = if (a.epoch_ns < b.epoch_ns) -1 else if (a.epoch_ns > b.epoch_ns) 1 else 0 };
+}
+
+fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const t = this.object.temporal.?;
+    const bag = if (args.len > 0) args[0] else Value.undefined;
+    if (bag != .object) return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: argument must be an object");
+    var l = zdtLocal(t);
+    const y = try withIntField(self, bag, "year", l.year);
+    const m = try withMonthField(self, bag, l.month);
+    var d = try withIntField(self, bag, "day", l.day);
+    const dim = isoDaysInMonth(y, @intCast(@max(1, @min(12, m))));
+    if (d > dim) d = dim;
+    try checkIsoDate(self, @floatFromInt(y), @floatFromInt(m), @floatFromInt(d));
+    const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
+    const cur = [_]i64{ l.hour, l.minute, l.second, l.millisecond, l.microsecond, l.nanosecond };
+    var vals: [6]f64 = undefined;
+    for (names, 0..) |nm, i| vals[i] = @floatFromInt(try withIntField(self, bag, nm, cur[i]));
+    l.year = @intCast(y);
+    l.month = @intCast(m);
+    l.day = @intCast(d);
+    setTimeFields(&l, vals);
+    const local_ns = @as(i128, tDaysFromCivil(l.year, l.month, l.day)) * 86_400_000_000_000 + timeToNs(&l);
+    return zdtMake(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
+}
+
+fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const t = this.object.temporal.?;
+    const l = zdtLocal(t);
+    const tm = if (args.len == 0 or args[0] == .undefined) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
+    var nl = l;
+    nl.hour = tm.hour;
+    nl.minute = tm.minute;
+    nl.second = tm.second;
+    nl.millisecond = tm.millisecond;
+    nl.microsecond = tm.microsecond;
+    nl.nanosecond = tm.nanosecond;
+    const local_ns = @as(i128, tDaysFromCivil(nl.year, nl.month, nl.day)) * 86_400_000_000_000 + timeToNs(&nl);
+    return zdtMake(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
+}
+
+fn temporalZdtWithTimeZoneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const t = this.object.temporal.?;
+    if (args.len == 0 or args[0] != .string) return self.throwError("TypeError", "withTimeZone requires a time-zone string");
+    const tz = try parseTimeZone(self, args[0].string);
+    return zdtMake(self, t.epoch_ns, tz.name, tz.offset_ns);
+}
+
+fn temporalZdtWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    if (args.len == 0 or args[0] != .string or !std.ascii.eqlIgnoreCase(args[0].string, "iso8601"))
+        return self.throwError("RangeError", "only the iso8601 calendar is supported");
+    const t = this.object.temporal.?;
+    return zdtMake(self, t.epoch_ns, t.tz_name, t.tz_offset_ns);
+}
+
+fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const t = this.object.temporal.?;
+    const l = zdtLocal(t);
+    const local_ns = @as(i128, tDaysFromCivil(l.year, l.month, l.day)) * 86_400_000_000_000;
+    return zdtMake(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
+}
+
+/// Coerce to ZonedDateTime data (an instance or a "…[TimeZone]" string).
+fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
+    if (tIsZdt(v)) return v.object.temporal.?.*;
+    if (v == .string) return parseZdtString(self, v.string);
+    if (v == .object) {
+        // A fields bag with timeZone.
+        const tzv = try self.getProperty(v, "timeZone");
+        if (tzv == .string) {
+            const tz = try parseTimeZone(self, tzv.string);
+            const f = try toPlainDateFields(self, v);
+            const tm = try toPlainTimeData(self, v);
+            var l: value.TemporalData = .{ .kind = .plain_date_time };
+            l.year = @intCast(f.y);
+            l.month = f.m;
+            l.day = f.d;
+            l.hour = tm.hour;
+            l.minute = tm.minute;
+            l.second = tm.second;
+            l.millisecond = tm.millisecond;
+            l.microsecond = tm.microsecond;
+            l.nanosecond = tm.nanosecond;
+            const local_ns = @as(i128, tDaysFromCivil(l.year, l.month, l.day)) * 86_400_000_000_000 + timeToNs(&l);
+            var out: value.TemporalData = .{ .kind = .zoned_date_time };
+            out.epoch_ns = local_ns - tz.offset_ns;
+            out.tz_name = tz.name;
+            out.tz_offset_ns = tz.offset_ns;
+            return out;
+        }
+    }
+    return self.throwError("TypeError", "cannot convert to a ZonedDateTime");
+}
+
+/// Parse "YYYY-MM-DDTHH:MM:SS±OO:OO[Zone]" into ZonedDateTime data.
+fn parseZdtString(self: *Interpreter, s: []const u8) EvalError!value.TemporalData {
+    // Time-zone annotation in [...]; the rest is a date-time with offset/Z.
+    var dt_part = s;
+    var tz: TimeZone = .{ .name = "UTC", .offset_ns = 0 };
+    if (std.mem.indexOfScalar(u8, s, '[')) |lb| {
+        const rb = std.mem.indexOfScalarPos(u8, s, lb, ']') orelse return self.throwError("RangeError", "invalid ZonedDateTime string");
+        tz = try parseTimeZone(self, s[lb + 1 .. rb]);
+        dt_part = s[0..lb];
+    } else return self.throwError("RangeError", "ZonedDateTime string requires a [TimeZone] annotation");
+    const p = try parseDateTimeNs(self, dt_part);
+    var out: value.TemporalData = .{ .kind = .zoned_date_time };
+    out.epoch_ns = p.epoch_ns;
+    out.tz_name = tz.name;
+    out.tz_offset_ns = tz.offset_ns;
+    return out;
+}
+
+fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const d = try toZdtArg(self, if (args.len > 0) args[0] else .undefined);
+    return zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
+}
+
+/// Make a Temporal type prototype (stored under `proto_key` for `makeTemporal`),
+
 /// Make a Temporal type prototype (stored under `proto_key` for `makeTemporal`),
 /// a constructor `ctor_fn`, link them, set the `@@toStringTag`, and register
 /// `Temporal.<name>`. Returns the prototype object for further method install.
@@ -12914,11 +13397,64 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         };
     }
 
+    // Temporal.ZonedDateTime.
+    {
+        const p = try temporalType(a, rs, env, ns, object_proto, "ZonedDateTime", "\x00T.ZonedDateTime", 2, temporalZonedDateTimeConstructorFn, tag);
+        try setNativeGetter(a, rs, p, "year", temporalZdtGetter(.year));
+        try setNativeGetter(a, rs, p, "month", temporalZdtGetter(.month));
+        try setNativeGetter(a, rs, p, "day", temporalZdtGetter(.day));
+        try setNativeGetter(a, rs, p, "hour", temporalZdtGetter(.hour));
+        try setNativeGetter(a, rs, p, "minute", temporalZdtGetter(.minute));
+        try setNativeGetter(a, rs, p, "second", temporalZdtGetter(.second));
+        try setNativeGetter(a, rs, p, "millisecond", temporalZdtGetter(.millisecond));
+        try setNativeGetter(a, rs, p, "microsecond", temporalZdtGetter(.microsecond));
+        try setNativeGetter(a, rs, p, "nanosecond", temporalZdtGetter(.nanosecond));
+        try setNativeGetter(a, rs, p, "dayOfWeek", temporalZdtGetter(.day_of_week));
+        try setNativeGetter(a, rs, p, "dayOfYear", temporalZdtGetter(.day_of_year));
+        try setNativeGetter(a, rs, p, "daysInMonth", temporalZdtGetter(.days_in_month));
+        try setNativeGetter(a, rs, p, "daysInYear", temporalZdtGetter(.days_in_year));
+        try setNativeGetter(a, rs, p, "monthsInYear", temporalZdtGetter(.months_in_year));
+        try setNativeGetter(a, rs, p, "daysInWeek", temporalZdtGetter(.days_in_week));
+        try setNativeGetter(a, rs, p, "inLeapYear", temporalZdtGetter(.in_leap_year));
+        try setNativeGetter(a, rs, p, "hoursInDay", temporalZdtGetter(.hours_in_day));
+        try setNativeGetter(a, rs, p, "offsetNanoseconds", temporalZdtGetter(.offset_ns));
+        try setNativeGetter(a, rs, p, "monthCode", temporalZdtMonthCodeGetter);
+        try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
+        try setNativeGetter(a, rs, p, "epochMilliseconds", temporalZdtEpochGetter(true));
+        try setNativeGetter(a, rs, p, "epochNanoseconds", temporalZdtEpochGetter(false));
+        try setNativeGetter(a, rs, p, "timeZoneId", temporalZdtTimeZoneIdGetter);
+        try setNativeGetter(a, rs, p, "offset", temporalZdtOffsetGetter);
+        try setNative(a, rs, p, "toString", 0, temporalZdtToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalZdtToStringFn);
+        try setNative(a, rs, p, "toInstant", 0, temporalZdtToInstantFn);
+        try setNative(a, rs, p, "toPlainDateTime", 0, temporalZdtToPlainDateTimeFn);
+        try setNative(a, rs, p, "toPlainDate", 0, temporalZdtToPlainDateFn);
+        try setNative(a, rs, p, "toPlainTime", 0, temporalZdtToPlainTimeFn);
+        try setNative(a, rs, p, "toPlainYearMonth", 0, temporalZdtToYearMonthFn);
+        try setNative(a, rs, p, "toPlainMonthDay", 0, temporalZdtToMonthDayFn);
+        try setNative(a, rs, p, "add", 1, temporalZdtAddFn(1));
+        try setNative(a, rs, p, "subtract", 1, temporalZdtAddFn(-1));
+        try setNative(a, rs, p, "until", 1, temporalZdtUntilFn(1));
+        try setNative(a, rs, p, "since", 1, temporalZdtUntilFn(-1));
+        try setNative(a, rs, p, "round", 1, temporalZdtRoundFn);
+        try setNative(a, rs, p, "equals", 1, temporalZdtEqualsFn);
+        try setNative(a, rs, p, "with", 1, temporalZdtWithFn);
+        try setNative(a, rs, p, "withPlainTime", 1, temporalZdtWithPlainTimeFn);
+        try setNative(a, rs, p, "withTimeZone", 1, temporalZdtWithTimeZoneFn);
+        try setNative(a, rs, p, "withCalendar", 1, temporalZdtWithCalendarFn);
+        try setNative(a, rs, p, "startOfDay", 0, temporalZdtStartOfDayFn);
+        if (ns.getOwn("ZonedDateTime")) |c| if (c == .object) {
+            try setNative(a, rs, c.object, "from", 1, temporalZdtFromFn);
+            try setNative(a, rs, c.object, "compare", 2, temporalZdtCompareFn);
+        };
+    }
+
     // Temporal.Now (a namespace object, not a constructor).
     {
         const now = try a.create(value.Object);
         now.* = .{ .proto = object_proto };
         try setNative(a, rs, now, "instant", 0, temporalNowInstantFn);
+        try setNative(a, rs, now, "zonedDateTimeISO", 0, temporalNowZonedDateTimeFn);
         try setNative(a, rs, now, "plainDateTimeISO", 0, temporalNowPlainDateTimeFn);
         try setNative(a, rs, now, "plainDateISO", 0, temporalNowPlainDateFn);
         try setNative(a, rs, now, "plainTimeISO", 0, temporalNowPlainTimeFn);

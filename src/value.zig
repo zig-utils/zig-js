@@ -226,6 +226,10 @@ pub const TemporalData = struct {
     nanosecond: u16 = 0,
     // Instant / ZonedDateTime: nanoseconds since the Unix epoch.
     epoch_ns: i128 = 0,
+    // ZonedDateTime time zone: its identifier and (for fixed-offset zones) the
+    // UTC offset in nanoseconds. IANA-named zones without DST data use offset 0.
+    tz_name: []const u8 = "UTC",
+    tz_offset_ns: i64 = 0,
     // Duration components (signed, may be fractional only for the smallest set).
     dur: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, // years,months,weeks,days,hours,minutes,seconds,ms,us,ns
 };
