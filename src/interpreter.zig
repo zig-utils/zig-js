@@ -109,6 +109,13 @@ pub const Environment = struct {
     /// for a block `{…}` scope. `var`/function declarations hoist to the nearest
     /// variable environment, while `let`/`const`/`class` bind in the block.
     fn_scope: bool = false,
+    /// An object Environment Record for a `with (obj) {…}` block: identifier
+    /// resolution at this chain position consults `obj`'s properties (honoring
+    /// `Symbol.unscopables`). Because it sits in the lexical chain, a binding
+    /// declared *inside* the `with` (innermost) shadows it, and it in turn
+    /// shadows outer scopes — and a function defined inside the `with` captures
+    /// it through its closure.
+    with_object: ?*value.Object = null,
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
@@ -411,6 +418,40 @@ pub const Interpreter = struct {
         return o;
     }
 
+    /// Resolve an identifier through the lexical environment chain, consulting
+    /// each scope's bindings (live `import` aliases, then `var`/`let`/`const`),
+    /// and — at a `with` object Environment Record — that object's properties, in
+    /// chain order. Returns the value, or null when unresolved (the caller then
+    /// tries the global object and finally throws a ReferenceError).
+    fn lookupIdent(self: *Interpreter, name: []const u8) EvalError!?Value {
+        var env: ?*Environment = self.env;
+        while (env) |e| {
+            if (e.aliases.get(name)) |a| return a.env.get(a.name);
+            if (e.vars.get(name)) |v| return v;
+            if (e.with_object) |wo| {
+                if (try self.withHasBinding(wo, name)) return try self.getProperty(.{ .object = wo }, name);
+            }
+            env = e.parent;
+        }
+        return null;
+    }
+
+    /// Resolve an identifier *for assignment*: a `with` object that provides the
+    /// binding takes the write (returns true); otherwise the caller assigns to
+    /// the lexical/global binding. Stops at the first scope (binding or `with`)
+    /// that owns `name`.
+    fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
+        var env: ?*Environment = self.env;
+        while (env) |e| {
+            if (e.aliases.get(name) != null or e.vars.get(name) != null) return null; // a real binding owns it
+            if (e.with_object) |wo| {
+                if (try self.withHasBinding(wo, name)) return wo;
+            }
+            env = e.parent;
+        }
+        return null;
+    }
+
     /// Whether a `with` binding object provides a binding for `name`: it has the
     /// property AND `name` is not listed truthy in the object's
     /// `[Symbol.unscopables]` (which hides selected names from `with` scope).
@@ -467,15 +508,10 @@ pub const Interpreter = struct {
             .this_expr => self.this_value,
             .new_target_expr => self.new_target,
             .identifier => |name| blk: {
-                // `with` scope objects take precedence over the lexical env.
-                if (self.with_stack.items.len > 0) {
-                    var i = self.with_stack.items.len;
-                    while (i > 0) : (i -= 1) {
-                        const o = self.with_stack.items[i - 1];
-                        if (try self.withHasBinding(o, name)) break :blk try self.getProperty(.{ .object = o }, name);
-                    }
-                }
-                if (self.env.get(name)) |v| {
+                // Walk the lexical chain (bindings and `with` objects in chain
+                // order), so a `with` object shadows outer scopes but is itself
+                // shadowed by any binding more local than it.
+                if (try self.lookupIdent(name)) |v| {
                     if (self.isTdz(v)) return self.throwError("ReferenceError", name); // accessed in its TDZ
                     break :blk v;
                 }
@@ -505,16 +541,11 @@ pub const Interpreter = struct {
                 // `delete <name>` inside a `with` deletes from the binding object
                 // (an object environment record); elsewhere a bare-name delete is
                 // a no-op that evaluates to true.
-                if (target.* == .identifier and self.with_stack.items.len > 0) {
-                    const name = target.identifier;
-                    var i = self.with_stack.items.len;
-                    while (i > 0) : (i -= 1) {
-                        const o = self.with_stack.items[i - 1];
-                        if (try self.withHasBinding(o, name)) {
-                            const ok = try self.deleteOwn(o, name);
-                            if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
-                            break :blk .{ .boolean = ok };
-                        }
+                if (target.* == .identifier) {
+                    if (try self.assignWithObject(target.identifier)) |o| {
+                        const ok = try self.deleteOwn(o, target.identifier);
+                        if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
+                        break :blk .{ .boolean = ok };
                     }
                 }
                 break :blk .{ .boolean = true };
@@ -746,10 +777,16 @@ pub const Interpreter = struct {
                 // The binding object is ToObject(expr): a primitive is boxed,
                 // null/undefined throw — only those throw, not every non-object.
                 const obj = try self.toObject(try self.eval(w.obj));
-                try self.with_stack.append(self.arena, obj);
-                const result = self.eval(w.body);
-                _ = self.with_stack.pop();
-                break :blk try result;
+                // Push an object Environment Record onto the lexical chain. A
+                // function defined in the body captures it via its closure, and a
+                // binding declared inside the body shadows it — both fall out of
+                // the chain position automatically.
+                const wenv = try self.arena.create(Environment);
+                wenv.* = .{ .arena = self.arena, .parent = self.env, .with_object = obj };
+                const saved_env = self.env;
+                self.env = wenv;
+                defer self.env = saved_env;
+                break :blk try self.eval(w.body);
             },
             .while_stmt => |s| try self.evalWhile(s.cond, s.body),
             .do_while_stmt => |s| blk: {
@@ -1215,10 +1252,9 @@ pub const Interpreter = struct {
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
         };
-        // Capture the enclosing `with`-scope chain lexically (empty for the vast
-        // majority of functions, defined outside any `with`).
-        if (self.with_stack.items.len > 0)
-            func.with_stack = try self.arena.dupe(*value.Object, self.with_stack.items);
+        // A `with` block's object Environment Record is part of the lexical chain
+        // (`Environment.with_object`), so a function defined inside a `with`
+        // captures it automatically through its `closure` — no separate capture.
         // Arrows capture `super` (home object + super constructor) lexically from
         // the enclosing method, just as they capture `this`/`new.target`. A
         // non-arrow gets its home object later (e.g. when installed as a method).
@@ -1736,13 +1772,6 @@ pub const Interpreter = struct {
         const saved_super = self.super_ctor;
         const saved_nt = self.new_target;
         const saved_strict = self.strict;
-        // The callee runs with its lexically-captured `with` chain, not the
-        // caller's — an arrow inherits the current one (it has no own snapshot).
-        const saved_with = self.with_stack;
-        if (!func.is_arrow) {
-            self.with_stack = .empty;
-            self.with_stack.appendSlice(self.arena, func.with_stack) catch {};
-        }
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
@@ -1766,7 +1795,6 @@ pub const Interpreter = struct {
             self.super_ctor = saved_super;
             self.new_target = saved_nt;
             self.strict = saved_strict;
-            if (!func.is_arrow) self.with_stack = saved_with;
         }
 
         // Non-arrow functions get an `arguments` array-like over the call args.
@@ -3267,15 +3295,9 @@ pub const Interpreter = struct {
     fn assignTo(self: *Interpreter, target: *Node, v: Value) EvalError!void {
         switch (target.*) {
             .identifier => |name| {
-                // Assigning a name found on a `with` object writes to that object
-                // (honoring `[Symbol.unscopables]`).
-                if (self.with_stack.items.len > 0) {
-                    var i = self.with_stack.items.len;
-                    while (i > 0) : (i -= 1) {
-                        const o = self.with_stack.items[i - 1];
-                        if (try self.withHasBinding(o, name)) return self.setMember(.{ .object = o }, name, v);
-                    }
-                }
+                // A `with` object that provides this name (and isn't shadowed by a
+                // closer binding) takes the write (honoring `[Symbol.unscopables]`).
+                if (try self.assignWithObject(name)) |o| return self.setMember(.{ .object = o }, name, v);
                 // Assigning to a binding still in its TDZ is a ReferenceError.
                 if (self.env.get(name)) |cur| {
                     if (self.isTdz(cur)) return self.throwError("ReferenceError", name);
