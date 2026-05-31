@@ -7549,17 +7549,21 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         }
     };
 
-    // Promise[Symbol.species] — a getter returning the receiver, so a subclass's
-    // SpeciesConstructor is the subclass itself (installed now that the symbol
-    // and Promise both exist). {enumerable:false, configurable:true}.
+    // `Constructor[Symbol.species]` — a getter returning the receiver, so a
+    // subclass's SpeciesConstructor is the subclass itself. Installed on every
+    // constructor the spec gives a species slot, now that the well-known symbol
+    // and the constructors all exist. {enumerable:false, configurable:true}.
     if (symbol_ns.getOwn("species")) |sp| if (sp == .object) {
-        if (env.get("Promise")) |pc| if (pc == .object) {
-            const getter = try a.create(value.Object);
-            getter.* = .{ .native = returnThisFn };
-            try installNativeProps(a, root_shape, getter, "get [Symbol.species]", 0);
-            try pc.object.setAccessor(a, sp.object.sym_key, .{ .object = getter }, null);
-            try pc.object.setAttr(a, sp.object.sym_key, .{ .enumerable = false, .configurable = true });
-        };
+        const skey = sp.object.sym_key;
+        inline for (.{ "Promise", "Array", "Map", "Set", "RegExp", "ArrayBuffer" }) |ctor_name| {
+            if (env.get(ctor_name)) |cv| if (cv == .object) {
+                const getter = try a.create(value.Object);
+                getter.* = .{ .native = returnThisFn };
+                try installNativeProps(a, root_shape, getter, "get [Symbol.species]", 0);
+                try cv.object.setAccessor(a, skey, .{ .object = getter }, null);
+                try cv.object.setAttr(a, skey, .{ .enumerable = false, .configurable = true });
+            };
+        }
     };
 
     // Proxy (constructor) + Proxy.revocable.
