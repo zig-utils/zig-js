@@ -5458,10 +5458,32 @@ pub const Interpreter = struct {
         const names: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
         var user_tried: u8 = 0;
         for (names) |m| {
-            if (userMethodOf(o, m)) |fnv| {
-                user_tried += 1;
-                const res = try self.callValueWithThis(fnv, &.{}, v);
-                if (res != .object) return res;
+            // OrdinaryToPrimitive resolves each method via `Get(O, name)`, so an
+            // *accessor* `valueOf`/`toString` getter is run (and its abrupt
+            // completion must propagate — `{ get valueOf() { throw } }`). A data
+            // property that is a JS function is the method directly; the engine's
+            // native prototype thunks / non-callable shadows are left to the
+            // built-in coercion below (calling them would loop through dispatch).
+            var method: ?Value = null;
+            var cur: ?*value.Object = o;
+            while (cur) |c| : (cur = c.proto) {
+                if (c.getAccessor(m)) |acc| {
+                    if (acc.get) |g| {
+                        if (g != .undefined) method = try self.callValueWithThis(g, &.{}, v);
+                    }
+                    break;
+                }
+                if (c.getOwn(m)) |fv| {
+                    if (fv == .object and fv.object.js_func != null) method = fv;
+                    break; // native thunk or non-callable shadow → built-in coercion
+                }
+            }
+            if (method) |fnv| {
+                if (fnv.isCallable()) {
+                    user_tried += 1;
+                    const res = try self.callValueWithThis(fnv, &.{}, v);
+                    if (res != .object) return res;
+                }
             }
         }
         // Both `toString` and `valueOf` were user-defined and each returned an
