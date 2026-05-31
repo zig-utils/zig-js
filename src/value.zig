@@ -232,13 +232,14 @@ pub const TemporalData = struct {
 
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
-    pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat };
+    pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
     src: Value, // the underlying iterator (its `.next()` is pulled)
     kind: Kind,
-    func: Value = .undefined, // mapper/filterer/flatMapper
+    func: Value = .undefined, // mapper/filterer/flatMapper; or zip_keyed's key array
     counter: f64 = 0, // index argument to the callback
-    limit: f64 = 0, // take/drop count
-    inner: ?Value = null, // flat_map's current inner iterator
+    limit: f64 = 0, // take/drop count; or zip mode (0 shortest, 1 longest, 2 strict)
+    inner: ?Value = null, // flat_map's current inner iterator; or zip's per-source done-flag array
+    padding: Value = .undefined, // zip(longest)'s per-source padding values
     done: bool = false,
     started: bool = false, // drop: the initial skip has run
 };

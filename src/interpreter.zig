@@ -7381,6 +7381,87 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                 return self.iterResultObj(is.value, false);
             }
         },
+        .zip, .zip_keyed => {
+            // `src` = array of opened iterators; `inner` = per-source done flags;
+            // `limit` = mode (0 shortest, 1 longest, 2 strict); `padding` =
+            // per-source padding (longest); `func` = key array (zip_keyed).
+            const iters = h.src.object.elements.items;
+            const flags = h.inner.?.object;
+            const n = iters.len;
+            if (n == 0) {
+                h.done = true;
+                return self.iterResultObj(.undefined, true);
+            }
+            const mode: u8 = @intFromFloat(h.limit);
+            const results = (try self.newArray()).object;
+            try results.elements.ensureTotalCapacity(self.arena, n);
+            var any_done = false;
+            var any_live = false;
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                if (flags.elements.items[i].toBoolean()) {
+                    // already finished — pad (longest) or mark done.
+                    any_done = true;
+                    const pad = if (h.padding == .object and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
+                    try results.elements.append(self.arena, pad);
+                    continue;
+                }
+                const s = try self.iterStep(iters[i]);
+                if (s.done) {
+                    flags.elements.items[i] = .{ .boolean = true };
+                    any_done = true;
+                    const pad = if (h.padding == .object and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
+                    try results.elements.append(self.arena, pad);
+                } else {
+                    any_live = true;
+                    try results.elements.append(self.arena, s.value);
+                }
+            }
+            switch (mode) {
+                1 => { // longest: finish only when every source is exhausted
+                    if (!any_live) {
+                        h.done = true;
+                        return self.iterResultObj(.undefined, true);
+                    }
+                },
+                2 => { // strict: all must advance in lock-step, else throw
+                    if (any_done and any_live) {
+                        h.done = true;
+                        try closeZipIterators(self, iters, flags);
+                        return self.throwError("RangeError", "Iterator.zip: strict mode requires all iterators to have the same length");
+                    }
+                    if (!any_live) {
+                        h.done = true;
+                        return self.iterResultObj(.undefined, true);
+                    }
+                },
+                else => { // shortest: finish as soon as any source is exhausted
+                    if (any_done) {
+                        h.done = true;
+                        try closeZipIterators(self, iters, flags);
+                        return self.iterResultObj(.undefined, true);
+                    }
+                },
+            }
+            if (h.kind == .zip) return self.iterResultObj(.{ .object = results }, false);
+            // zip_keyed: assemble an object from the parallel key array.
+            const keys = h.func.object.elements.items;
+            const obj = (try self.newObject()).object;
+            var k: usize = 0;
+            while (k < keys.len and k < results.elements.items.len) : (k += 1) {
+                try self.setProp(obj, keys[k].string, results.elements.items[k]);
+            }
+            return self.iterResultObj(.{ .object = obj }, false);
+        },
+    }
+}
+
+/// Close any still-live source iterators (call their `return`) when a zip
+/// helper finishes early or throws.
+fn closeZipIterators(self: *Interpreter, iters: []Value, flags: *value.Object) EvalError!void {
+    for (iters, 0..) |it, i| {
+        if (i < flags.elements.items.len and flags.elements.items[i].toBoolean()) continue;
+        self.iteratorClose(it) catch {};
     }
 }
 
@@ -7542,6 +7623,100 @@ fn iteratorConcatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     return makeIterHelper(self, .{ .object = srcs }, .concat, .undefined, 0);
 }
 
+/// Read the shared `{ mode, padding }` options of `Iterator.zip`/`zipKeyed`.
+/// Returns the mode (0 shortest, 1 longest, 2 strict). `padding_out` receives
+/// the raw `padding` value (undefined if absent or mode != longest).
+fn zipReadMode(self: *Interpreter, options: Value, padding_out: *Value) EvalError!u8 {
+    padding_out.* = .undefined;
+    if (options == .undefined) return 0;
+    if (options != .object) return self.throwError("TypeError", "Iterator.zip: options must be an object");
+    const mv = try self.getProperty(options, "mode");
+    var mode: u8 = 0;
+    if (mv != .undefined) {
+        const ms = try self.toStringV(mv);
+        if (std.mem.eql(u8, ms, "shortest")) {
+            mode = 0;
+        } else if (std.mem.eql(u8, ms, "longest")) {
+            mode = 1;
+        } else if (std.mem.eql(u8, ms, "strict")) {
+            mode = 2;
+        } else return self.throwError("TypeError", "Iterator.zip: mode must be 'shortest', 'longest', or 'strict'");
+    }
+    if (mode == 1) padding_out.* = try self.getProperty(options, "padding");
+    return mode;
+}
+
+/// `Iterator.zip(iterables[, options])` — yields arrays of one value pulled
+/// from each input iterable per step. Modes: shortest (default), longest
+/// (pad), strict (equal lengths required).
+fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const iterables = if (args.len > 0) args[0] else .undefined;
+    if (iterables != .object) return self.throwError("TypeError", "Iterator.zip: iterables must be an object");
+    var padding: Value = .undefined;
+    const mode = try zipReadMode(self, if (args.len > 1) args[1] else .undefined, &padding);
+
+    // Open each input's iterator.
+    const iters = (try self.newArray()).object;
+    const list = try self.iterableOrArrayLikeToList(iterables);
+    for (list) |item| {
+        if (item != .object or !self.isIterable(item)) return self.throwError("TypeError", "Iterator.zip: every input must be an iterable object");
+        try iters.elements.append(self.arena, try self.iteratorOf(item));
+    }
+    // Per-source padding aligned to iterator order (longest mode only).
+    var pad_arr: Value = .undefined;
+    if (mode == 1 and padding != .undefined) {
+        if (padding != .object) return self.throwError("TypeError", "Iterator.zip: padding must be an object");
+        const pads = (try self.newArray()).object;
+        const plist = try self.iterableOrArrayLikeToList(padding);
+        for (plist) |p| try pads.elements.append(self.arena, p);
+        pad_arr = .{ .object = pads };
+    }
+    return makeZipHelper(self, .zip, iters, .undefined, mode, pad_arr);
+}
+
+/// `Iterator.zipKeyed(iterables[, options])` — like zip but `iterables` is an
+/// object whose own enumerable keys name the inputs; each step yields an object.
+fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const iterables = if (args.len > 0) args[0] else .undefined;
+    if (iterables != .object) return self.throwError("TypeError", "Iterator.zipKeyed: iterables must be an object");
+    var padding: Value = .undefined;
+    const mode = try zipReadMode(self, if (args.len > 1) args[1] else .undefined, &padding);
+
+    const keys = (try self.newArray()).object;
+    const iters = (try self.newArray()).object;
+    const pads = (try self.newArray()).object;
+    // Own enumerable string keys, in insertion order.
+    for (iterables.object.enumerableKeys(self.arena) catch &.{}) |key| {
+        const v = try self.getProperty(iterables, key);
+        if (v != .object or !self.isIterable(v)) return self.throwError("TypeError", "Iterator.zipKeyed: every input must be an iterable object");
+        try keys.elements.append(self.arena, .{ .string = key });
+        try iters.elements.append(self.arena, try self.iteratorOf(v));
+        if (mode == 1 and padding == .object) {
+            try pads.elements.append(self.arena, try self.getProperty(padding, key));
+        }
+    }
+    const pad_arr: Value = if (mode == 1 and padding == .object) .{ .object = pads } else .undefined;
+    return makeZipHelper(self, .zip_keyed, iters, .{ .object = keys }, mode, pad_arr);
+}
+
+/// Build a zip/zipKeyed iterator-helper object with its per-source done flags.
+fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.Object, keys: Value, mode: u8, padding: Value) EvalError!Value {
+    const flags = (try self.newArray()).object;
+    for (iters.elements.items) |_| try flags.elements.append(self.arena, .{ .boolean = false });
+    const o = (try self.newObject()).object;
+    const h = try self.arena.create(value.IterHelper);
+    h.* = .{ .src = .{ .object = iters }, .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = .{ .object = flags }, .padding = padding };
+    o.iter_helper = h;
+    if (self.env.get("\x00IterHelperProto")) |p| if (p == .object) {
+        o.proto = p.object;
+    };
+    return .{ .object = o };
+}
+
 /// `Iterator` is abstract — `new Iterator()` directly throws.
 fn iteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -7627,6 +7802,8 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     try installNativeProps(a, rs, ctor, "Iterator", 0);
     try setNative(a, rs, ctor, "from", 1, iteratorFromFn);
     try setNative(a, rs, ctor, "concat", 0, iteratorConcatFn);
+    try setNative(a, rs, ctor, "zip", 1, iteratorZipFn);
+    try setNative(a, rs, ctor, "zipKeyed", 1, iteratorZipKeyedFn);
     try ctor.setOwn(a, rs, "prototype", .{ .object = iter_proto });
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, iter_proto, ctor);
