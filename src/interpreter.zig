@@ -7287,6 +7287,7 @@ const dv_types = [_]DVType{
     .{ .name = "Uint16", .bytes = 2, .signed = false, .float = false, .big = false },
     .{ .name = "Int32", .bytes = 4, .signed = true, .float = false, .big = false },
     .{ .name = "Uint32", .bytes = 4, .signed = false, .float = false, .big = false },
+    .{ .name = "Float16", .bytes = 2, .signed = true, .float = true, .big = false },
     .{ .name = "Float32", .bytes = 4, .signed = true, .float = true, .big = false },
     .{ .name = "Float64", .bytes = 8, .signed = true, .float = true, .big = false },
     .{ .name = "BigInt64", .bytes = 8, .signed = true, .float = false, .big = true },
@@ -7352,6 +7353,7 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
                 return self.makeBigInt(@as(i128, @as(u64, raw)));
             }
             if (t.float) {
+                if (t.bytes == 2) return .{ .number = @floatCast(@as(f16, @bitCast(@as(u16, raw)))) };
                 if (t.bytes == 4) return .{ .number = @floatCast(@as(f32, @bitCast(@as(u32, raw)))) };
                 return .{ .number = @bitCast(@as(u64, raw)) };
             }
@@ -7404,7 +7406,9 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             if (t.big) {
                 raw = @truncate(@as(u128, @bitCast(big))); // low `bytes*8` bits (two's complement)
             } else if (t.float) {
-                if (t.bytes == 4) {
+                if (t.bytes == 2) {
+                    raw = @bitCast(@as(f16, @floatCast(num)));
+                } else if (t.bytes == 4) {
                     raw = @bitCast(@as(f32, @floatCast(num)));
                 } else {
                     raw = @bitCast(num);
