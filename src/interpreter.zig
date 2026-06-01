@@ -3284,6 +3284,16 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "constructor")) {
                     if (self.constructorOf(recv)) |ctor| return ctor;
                 }
+                // A symbol-keyed property (e.g. `"abc"[Symbol.iterator]`) resolves
+                // through String.prototype's chain. String-keyed methods keep their
+                // existing call-time dispatch, so only `@@`-keys are routed here.
+                if (value.isSymbolKey(key)) {
+                    if (self.env.get("String")) |sc| if (sc == .object)
+                        if (sc.object.getOwn("prototype")) |pv| if (pv == .object) {
+                            var cur: ?*value.Object = pv.object;
+                            while (cur) |c| : (cur = c.proto) if (c.getOwn(key)) |v| return v;
+                        };
+                }
                 return .undefined;
             },
             .undefined, .null => return self.throwError("TypeError", "cannot read property of null or undefined"),
