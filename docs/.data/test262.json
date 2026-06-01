@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 35721,
+    "passing": 35762,
     "total": 48411,
-    "percentage": 73.8,
+    "percentage": 73.9,
     "parseFail": 206,
-    "runtimeFail": 12460,
+    "runtimeFail": 12419,
     "hostFail": 24
   },
   "negative": {

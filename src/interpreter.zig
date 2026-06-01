@@ -11171,7 +11171,7 @@ fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const dur = this.object.temporal.?.dur;
     if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "Temporal.Duration.prototype.round requires options");
-    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (durHasCalendar(dur) or @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.round with calendar units requires relativeTo");
     const rounded = roundNs(durationTimeNs(dur), opts.smallest, opts.increment, opts.mode);
@@ -11322,6 +11322,32 @@ fn checkIsoDate(self: *Interpreter, y: f64, m: f64, d: f64) EvalError!void {
         return self.throwError("RangeError", "date outside the representable Temporal range");
 }
 
+/// RegulateISODate: with `constrain` the month is clamped to 1–12 and the day to
+/// the month's length (Temporal's default `overflow`); with reject (constrain
+/// false) an out-of-range month/day is a RangeError. The year range and the
+/// representable-range limit are always enforced.
+fn regulateIsoDate(self: *Interpreter, yf: f64, mf: f64, df: f64, constrain: bool) EvalError!IsoYMD {
+    if (yf < -271821 or yf > 275760) return self.throwError("RangeError", "year out of range");
+    var m = mf;
+    var d = df;
+    if (constrain) {
+        m = @max(1, @min(12, mf));
+        const dim: f64 = @floatFromInt(isoDaysInMonth(@intFromFloat(yf), @intFromFloat(m)));
+        d = @max(1, @min(dim, df));
+    } else {
+        if (mf < 1 or mf > 12) return self.throwError("RangeError", "month out of range");
+        const dim: f64 = @floatFromInt(isoDaysInMonth(@intFromFloat(yf), @intFromFloat(mf)));
+        if (df < 1 or df > dim) return self.throwError("RangeError", "day out of range");
+    }
+    const yi: i64 = @intFromFloat(yf);
+    const mi: u8 = @intFromFloat(m);
+    const di: u8 = @intFromFloat(d);
+    const ed = tDaysFromCivil(yi, mi, di);
+    if (ed < tDaysFromCivil(-271821, 4, 19) or ed > tDaysFromCivil(275760, 9, 13))
+        return self.throwError("RangeError", "date outside the representable Temporal range");
+    return .{ .y = yi, .m = mi, .d = di };
+}
+
 fn tIsTemporal(this: Value, kind: value.TemporalData.Kind) bool {
     return this == .object and this.object.temporal != null and this.object.temporal.?.kind == kind;
 }
@@ -11412,7 +11438,7 @@ const CalName = enum { auto, always, never, critical };
 /// argument is a TypeError; an unrecognised value is a RangeError.
 fn readCalendarName(self: *Interpreter, options: Value) EvalError!CalName {
     if (options == .undefined) return .auto;
-    if (options != .object) return self.throwError("TypeError", "options must be an object or undefined");
+    if (options != .object or options.object.is_symbol or options.object.is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
     const v = try self.getProperty(options, "calendarName");
     if (v == .undefined) return .auto;
     const s = try self.toStringV(v);
@@ -11473,9 +11499,11 @@ fn isCalendarId(s: []const u8) bool {
 fn readCalendarField(self: *Interpreter, bag: Value) EvalError!void {
     const c = try self.getProperty(bag, "calendar");
     if (c == .undefined) return;
-    if (c == .object) {
+    if (c == .object and !c.object.is_symbol and !c.object.is_bigint) {
         if (c.object.temporal != null) return; // a Temporal value → ISO calendar
     } else if (c != .string) {
+        // A symbol or bigint (or any non-string primitive) is not a valid
+        // calendar identifier — a TypeError, not a string-coercion RangeError.
         return self.throwError("TypeError", "calendar is not a valid calendar");
     }
     const s = try self.toStringV(c);
@@ -11517,18 +11545,24 @@ fn isTemporalIsoString(self: *Interpreter, s: []const u8) bool {
 /// other than "constrain"/"reject" is a RangeError. (The engine already rejects
 /// out-of-range fields, so this only adds the missing input validation.)
 fn validateTemporalOptions(self: *Interpreter, options: Value) EvalError!void {
-    if (options == .undefined) return;
-    if (options != .object) return self.throwError("TypeError", "options must be an object or undefined");
+    _ = try readOverflowReject(self, options);
+}
+
+/// Returns true when `overflow` is "reject", false for "constrain"/absent.
+fn readOverflowReject(self: *Interpreter, options: Value) EvalError!bool {
+    if (options == .undefined) return false;
+    if (options != .object or options.object.is_symbol or options.object.is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
     const ov = try self.getProperty(options, "overflow");
-    if (ov == .undefined) return;
+    if (ov == .undefined) return false;
     const s = try self.toStringV(ov);
-    if (!std.mem.eql(u8, s, "constrain") and !std.mem.eql(u8, s, "reject"))
-        return self.throwError("RangeError", "invalid overflow option");
+    if (std.mem.eql(u8, s, "reject")) return true;
+    if (std.mem.eql(u8, s, "constrain")) return false;
+    return self.throwError("RangeError", "invalid overflow option");
 }
 
 /// Read year/month/day from a PlainDate, a PlainDateTime, or a fields object.
 const IsoYMD = struct { y: i64, m: u8, d: u8 };
-fn toPlainDateFields(self: *Interpreter, v: Value) EvalError!IsoYMD {
+fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYMD {
     if (tIsTemporal(v, .plain_date) or tIsTemporal(v, .plain_date_time)) {
         const t = v.object.temporal.?;
         return .{ .y = t.year, .m = t.month, .d = t.day };
@@ -11549,8 +11583,7 @@ fn toPlainDateFields(self: *Interpreter, v: Value) EvalError!IsoYMD {
         }
         const y = try temporalIntArg(self, yv, "year");
         const d = try temporalIntArg(self, dv, "day");
-        try checkIsoDate(self, y, m, d);
-        return .{ .y = @intFromFloat(y), .m = @intFromFloat(m), .d = @intFromFloat(d) };
+        return regulateIsoDate(self, y, m, d, constrain);
     }
     if (v == .string) return parseIsoDate(self, v.string);
     return self.throwError("TypeError", "cannot convert to a PlainDate");
@@ -11801,8 +11834,8 @@ fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
 fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const f = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
-    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
+    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined);
+    const f = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined, !reject);
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intCast(f.y);
     o.temporal.?.month = f.m;
@@ -11813,8 +11846,8 @@ fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn temporalPlainDateCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const a = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
-    const b = try toPlainDateFields(self, if (args.len > 1) args[1] else .undefined);
+    const a = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined, true);
+    const b = try toPlainDateFields(self, if (args.len > 1) args[1] else .undefined, true);
     const da = tDaysFromCivil(a.y, a.m, a.d);
     const db = tDaysFromCivil(b.y, b.m, b.d);
     return .{ .number = if (da < db) -1 else if (da > db) 1 else 0 };
@@ -11824,7 +11857,7 @@ fn temporalPlainDateEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const t = this.object.temporal.?;
-    const b = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
+    const b = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined, true);
     return .{ .boolean = t.year == b.y and t.month == b.m and t.day == b.d };
 }
 
@@ -12329,7 +12362,7 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
             const other = try toYearMonthFields(self, if (args.len > 0) args[0] else .undefined);
-            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .year, .smallest = .month, .mode = .trunc, .increment = 1 });
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .year, .smallest = .month, .mode = .trunc, .increment = 1 }, false);
             // Only year/month units are valid for a PlainYearMonth difference.
             if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference largestUnit must be year or month");
             if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference smallestUnit must be year or month");
@@ -12675,14 +12708,17 @@ fn roundNs(total: i128, smallest: TUnit, increment: f64, mode: RoundMode) i128 {
 
 /// Read `largestUnit`/`smallestUnit`/`roundingMode`/`roundingIncrement` from an
 /// options value (string shorthand = smallestUnit for round()).
-fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts) EvalError!RoundOpts {
+fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: bool) EvalError!RoundOpts {
     var r = def;
     if (opts == .undefined) return r;
     if (opts == .string) {
+        // Only round() accepts the smallestUnit string shorthand; until/since
+        // require an options object (GetOptionsObject → TypeError otherwise).
+        if (!allow_string) return self.throwError("TypeError", "options must be an object or undefined");
         r.smallest = tUnitFromStr(opts.string) orelse return self.throwError("RangeError", "invalid smallestUnit");
         return r;
     }
-    if (opts != .object) return self.throwError("TypeError", "options must be an object");
+    if (opts != .object or opts.object.is_symbol or opts.object.is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
     // Each unit/mode option is coerced to a string (GetOption) and validated
     // against its allowed set; a wrong-typed value is therefore a RangeError.
     const lu = try self.getProperty(opts, "largestUnit");
@@ -12766,7 +12802,7 @@ fn temporalInstantUntilFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
             const other = try toInstantArg(self, if (args.len > 0) args[0] else .undefined);
-            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .second, .smallest = .nanosecond, .mode = .trunc, .increment = 1 });
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .second, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant difference largestUnit must be hour or smaller");
             var diff = @as(i128, @intFromFloat(sign)) * (other - this.object.temporal.?.epoch_ns);
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
@@ -12778,7 +12814,7 @@ fn temporalInstantUntilFn(comptime sign: f64) value.NativeFn {
 fn temporalInstantRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
-    const opts = try readRoundOpts(self, if (args.len > 0) args[0] else .undefined, .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    const opts = try readRoundOpts(self, if (args.len > 0) args[0] else .undefined, .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant.round smallestUnit must be hour or smaller");
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
     o.temporal.?.epoch_ns = roundNs(this.object.temporal.?.epoch_ns, opts.smallest, opts.increment, opts.mode);
@@ -12861,7 +12897,7 @@ fn temporalPlainTimeUntilFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
             const other = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
-            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 });
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference largestUnit must be hour or smaller");
             var diff = @as(i128, @intFromFloat(sign)) * (timeToNs(&other) - timeToNs(this.object.temporal.?));
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
@@ -12874,7 +12910,7 @@ fn temporalPlainTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "PlainTime.round requires options");
-    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime.round smallestUnit must be hour or smaller");
     const rounded = roundNs(timeToNs(this.object.temporal.?), opts.smallest, opts.increment, opts.mode);
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
@@ -13025,7 +13061,7 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
             const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else .undefined);
-            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .day, .smallest = .nanosecond, .mode = .trunc, .increment = 1 });
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .day, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             const a = this.object.temporal.?;
             const b = &other;
             if (@intFromEnum(opts.largest) >= @intFromEnum(TUnit.day)) {
@@ -13107,7 +13143,7 @@ fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "PlainDateTime.round requires options");
-    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDateTime.round smallestUnit must be day or smaller");
     const t = this.object.temporal.?;
     const total = dateTimeToNs(t);
@@ -13131,7 +13167,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalDat
         return t;
     }
     if (v == .object) {
-        const f = try toPlainDateFields(self, v);
+        const f = try toPlainDateFields(self, v, true);
         const tm = try toPlainTimeDataOpt(self, v, false);
         var t: value.TemporalData = .{ .kind = .plain_date_time };
         t.year = @intCast(f.y);
@@ -13245,7 +13281,7 @@ fn temporalDateTimeWithPlainDateFn(ctx: *anyopaque, this: Value, args: []const V
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const t = this.object.temporal.?;
-    const f = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
+    const f = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined, true);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = @intCast(f.y);
     o.temporal.?.month = f.m;
@@ -13278,8 +13314,8 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
             const t = this.object.temporal.?;
-            const b = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
-            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 });
+            const b = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined, true);
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 }, false);
             const lg = if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.day)) TUnit.day else opts.largest;
             const fwd = tDaysFromCivil(t.year, t.month, t.day) <= tDaysFromCivil(b.y, b.m, b.d);
             const e = if (fwd) IsoYMD{ .y = t.year, .m = t.month, .d = t.day } else b;
@@ -13766,7 +13802,7 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
             const other = try toZdtArg(self, if (args.len > 0) args[0] else .undefined);
-            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 });
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.day)) {
                 var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - this.object.temporal.?.epoch_ns);
                 diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
@@ -13799,7 +13835,7 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "ZonedDateTime.round requires options");
-    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 });
+    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "ZonedDateTime.round smallestUnit must be day or smaller");
     const t = this.object.temporal.?;
     // Round the local wall-clock, then re-apply the offset.
@@ -13903,7 +13939,7 @@ fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
         const tzv = try self.getProperty(v, "timeZone");
         if (tzv == .string) {
             const tz = try parseTimeZone(self, tzv.string);
-            const f = try toPlainDateFields(self, v);
+            const f = try toPlainDateFields(self, v, true);
             const tm = try toPlainTimeDataOpt(self, v, false);
             var l: value.TemporalData = .{ .kind = .plain_date_time };
             l.year = @intCast(f.y);
