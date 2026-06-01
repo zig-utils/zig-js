@@ -10981,6 +10981,16 @@ fn temporalIntArg(self: *Interpreter, v: Value, name: []const u8) EvalError!f64 
     return @trunc(n);
 }
 
+/// ToIntegerIfIntegral: like `temporalIntArg` but also rejects a non-integral
+/// (fractional) value with a RangeError instead of silently truncating it.
+/// Used by Temporal.Duration, whose components must be integers.
+fn temporalIntegralArg(self: *Interpreter, v: Value, name: []const u8) EvalError!f64 {
+    const n = try self.toNumberV(v);
+    if (std.math.isNan(n) or std.math.isInf(n)) return self.throwError("RangeError", name);
+    if (n != @trunc(n)) return self.throwError("RangeError", name);
+    return n;
+}
+
 // ---- Temporal.Duration ----------------------------------------------
 
 const dur_names = [_][]const u8{ "years", "months", "weeks", "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds" };
@@ -10993,8 +11003,11 @@ fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Val
     if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
     var any_sign: f64 = 0;
     for (0..10) |i| {
-        const v = if (args.len > i) args[i] else Value{ .number = 0 };
-        const n = try temporalIntArg(self, v, "Duration component must be an integer");
+        // Each Duration component defaults to 0 when missing OR explicitly
+        // undefined; otherwise it goes through ToIntegerIfIntegral (which
+        // rejects NaN, ±∞, and non-integral values with a RangeError).
+        const v = if (args.len > i) args[i] else Value.undefined;
+        const n = if (v == .undefined) 0 else try temporalIntegralArg(self, v, "Duration component must be an integer");
         o.temporal.?.dur[i] = n;
         if (n != 0) {
             const s: f64 = if (n > 0) 1 else -1;
