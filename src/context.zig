@@ -1171,6 +1171,14 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "parseInt skips the full StrWhiteSpace set" {
+    // U+2028/U+2029 line separators and non-ASCII spaces are leading whitespace.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('\\u20281')")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('\\u20291')")).number);
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn("parseInt('\\u00A0\\u000B42')")).number);
+    try std.testing.expectEqual(@as(f64, 255), (try evalIn("parseInt('  0xff')")).number);
+}
+
 test "parseFloat: Unicode whitespace, Infinity, and no numeric separators" {
     // Leading StrWhiteSpace (incl. VT/FF/NBSP) is skipped, like `1.1`.
     try std.testing.expectEqual(@as(f64, 1.1), (try evalIn("parseFloat('\\u000B\\u000C\\u00A01.1')")).number);

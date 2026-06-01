@@ -159,8 +159,9 @@ pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
         const r = arg(args, 1).toNumber();
         if (!std.math.isNan(r) and r >= 2 and r <= 36) radix = @intFromFloat(r);
     }
-    var i: usize = 0;
-    while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+    // Skip leading StrWhiteSpace (the full WhiteSpace+LineTerminator set, incl.
+    // U+2028/U+2029 and non-ASCII spaces), not just the four ASCII blanks.
+    var i: usize = skipStrWhiteSpace(s);
     var neg = false;
     if (i < s.len and (s[i] == '+' or s[i] == '-')) {
         neg = s[i] == '-';
