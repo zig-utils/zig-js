@@ -3890,6 +3890,31 @@ pub const Interpreter = struct {
         return self.construct(ctor, &.{.{ .number = @floatFromInt(len) }});
     }
 
+    /// TypedArraySpeciesCreate(exemplar, «length»): the result a method like
+    /// `map`/`filter`/`slice`/`toSorted` produces. `exemplar.constructor`'s
+    /// `Symbol.species` (a real constructor, else TypeError) is `new`-ed with the
+    /// length; the result must be a non-detached typed array of at least `len`
+    /// elements and the same content type (BigInt vs Number) as the exemplar.
+    fn typedArraySpeciesCreate(self: *Interpreter, exemplar: *value.Object, len: usize) EvalError!*value.Object {
+        const kind = exemplar.typed_array.?.kind;
+        const default_ctor = self.env.get(kind.ctorName()) orelse return newTypedArray(self, kind, len);
+        const ctor = try self.speciesConstructor(.{ .object = exemplar }, default_ctor);
+        // Fast path: the intrinsic constructor for this view kind.
+        if (ctor == .object and default_ctor == .object and ctor.object == default_ctor.object)
+            return newTypedArray(self, kind, len);
+        const res = try self.construct(ctor, &.{.{ .number = @floatFromInt(len) }});
+        if (res != .object or res.object.typed_array == null)
+            return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
+        const rta = res.object.typed_array.?;
+        if (rta.buffer.array_buffer.?.detached)
+            return self.throwError("TypeError", "TypedArray species returned a detached TypedArray");
+        if (rta.kind.isBigInt() != kind.isBigInt())
+            return self.throwError("TypeError", "TypedArray species content type does not match");
+        if (rta.length < len)
+            return self.throwError("TypeError", "TypedArray species result is too short");
+        return res.object;
+    }
+
     /// Create a zero-filled `ArrayBuffer` object of `len` bytes.
     pub fn makeArrayBuffer(self: *Interpreter, len: usize) EvalError!*value.Object {
         const o = (try self.newObject()).object;
@@ -8874,7 +8899,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     }
     if (eq(name, "map")) {
         const cb = if (args.len > 0) args[0] else Value.undefined;
-        const result = try newTypedArray(self, ta.kind, len);
+        const result = try self.typedArraySpeciesCreate(o, len);
         var i: usize = 0;
         while (i < len) : (i += 1) {
             const r = try self.callValueWithThis(cb, &.{ try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
@@ -8891,7 +8916,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean())
                 try kept.append(self.arena, el);
         }
-        const result = try newTypedArray(self, ta.kind, kept.items.len);
+        const result = try self.typedArraySpeciesCreate(o, kept.items.len);
         for (kept.items, 0..) |x, k| try self.taStore(result.typed_array.?, k, x);
         return .{ .object = result };
     }
@@ -9005,7 +9030,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             o2.proto = o.proto;
             return .{ .object = o2 };
         }
-        const result = try newTypedArray(self, ta.kind, count);
+        const result = try self.typedArraySpeciesCreate(o, count);
         var i: usize = 0;
         while (i < count) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, start + i));
         return .{ .object = result };
