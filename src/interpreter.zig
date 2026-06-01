@@ -7346,6 +7346,8 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const buf_len = ab.data.len;
     if (offset > buf_len) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
     var view_len: usize = buf_len - @as(usize, @intCast(offset));
+    // Omitting byteLength on a resizable buffer makes the view length-tracking.
+    const track = (args.len <= 2 or args[2] == .undefined) and ab.max_byte_length != null;
     if (args.len > 2 and args[2] != .undefined) {
         const vl = try toIndexArg(self, args[2]);
         if (@as(u64, @intCast(offset)) + vl > buf_len) return self.throwError("RangeError", "Invalid DataView length");
@@ -7361,7 +7363,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         if (c == .object) o.proto = try self.protoObject(c.object);
     }
     const dv = try self.arena.create(value.DataViewData);
-    dv.* = .{ .buffer = buf_v.object, .byte_offset = @intCast(offset), .byte_length = view_len };
+    dv.* = .{ .buffer = buf_v.object, .byte_offset = @intCast(offset), .byte_length = view_len, .track_length = track };
     o.data_view = dv;
     return .{ .object = o };
 }
@@ -7376,8 +7378,8 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
             const little = if (args.len > 1) args[1].toBoolean() else false;
             const ab = dv.buffer.array_buffer.?;
-            if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
-            if (get_index + t.bytes > dv.byte_length) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
+            const view_len = dv.currentByteLength() orelse return self.throwError("TypeError", "DataView is detached or out of bounds");
+            if (get_index + t.bytes > view_len) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
             const off = dv.byte_offset + @as(usize, @intCast(get_index));
             const endian: std.builtin.Endian = if (little) .little else .big;
             const UInt = switch (t.bytes) {
@@ -7433,8 +7435,8 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             }
             const little = if (args.len > 2) args[2].toBoolean() else false;
             const ab = dv.buffer.array_buffer.?;
-            if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
-            if (get_index + t.bytes > dv.byte_length) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
+            const view_len = dv.currentByteLength() orelse return self.throwError("TypeError", "DataView is detached or out of bounds");
+            if (get_index + t.bytes > view_len) return self.throwError("RangeError", "Offset is outside the bounds of the DataView");
             const off = dv.byte_offset + @as(usize, @intCast(get_index));
             const endian: std.builtin.Endian = if (little) .little else .big;
             const UInt = switch (t.bytes) {
@@ -7486,8 +7488,9 @@ fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.byteLength requires a DataView receiver");
     const dv = this.object.data_view.?;
-    if (dv.buffer.array_buffer.?.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
-    return .{ .number = @floatFromInt(dv.byte_length) };
+    // get byteLength throws when the view is detached or out of bounds.
+    const cur = dv.currentByteLength() orelse return self.throwError("TypeError", "DataView is detached or out of bounds");
+    return .{ .number = @floatFromInt(cur) };
 }
 
 fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -7495,7 +7498,8 @@ fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.byteOffset requires a DataView receiver");
     const dv = this.object.data_view.?;
-    if (dv.buffer.array_buffer.?.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    // get byteOffset throws when the view is detached or out of bounds.
+    if (dv.currentByteLength() == null) return self.throwError("TypeError", "DataView is detached or out of bounds");
     return .{ .number = @floatFromInt(dv.byte_offset) };
 }
 

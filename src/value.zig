@@ -230,6 +230,19 @@ pub const DataViewData = struct {
     buffer: *Object,
     byte_offset: usize,
     byte_length: usize,
+    /// A length-tracking DataView (no explicit byteLength on a resizable buffer).
+    track_length: bool = false,
+
+    /// The view's current byte length, or null if it is out of bounds (the
+    /// resizable buffer shrank below it) or detached.
+    pub fn currentByteLength(self: *const DataViewData) ?usize {
+        const buf = self.buffer.array_buffer orelse return null;
+        if (buf.detached) return null;
+        if (self.byte_offset > buf.data.len) return null;
+        if (self.track_length) return buf.data.len - self.byte_offset;
+        if (self.byte_offset + self.byte_length > buf.data.len) return null;
+        return self.byte_length;
+    }
 };
 
 /// Internal slots for the `Temporal.*` types. One flat record covers every
