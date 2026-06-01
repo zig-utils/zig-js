@@ -11898,6 +11898,55 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
     }.call;
 }
 
+/// PlainYearMonth.prototype.until / since. Differences are calendar-only
+/// (years/months); the reference day is the first of each month. largestUnit
+/// defaults to "year", smallestUnit to "month"; week/day/time units are invalid.
+fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
+            const other = try toYearMonthFields(self, if (args.len > 0) args[0] else .undefined);
+            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .year, .smallest = .month, .mode = .trunc, .increment = 1 });
+            // Only year/month units are valid for a PlainYearMonth difference.
+            if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference largestUnit must be year or month");
+            if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference smallestUnit must be year or month");
+            if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
+            const a = this.object.temporal.?;
+            const earlier_first = (@as(i64, a.year) * 12 + a.month) <= (other.y * 12 + other.m);
+            const e_y = if (earlier_first) a.year else other.y;
+            const e_m: u8 = if (earlier_first) a.month else other.m;
+            const l_y = if (earlier_first) other.y else a.year;
+            const l_m: u8 = if (earlier_first) other.m else a.month;
+            // Whole months between the two first-of-month dates.
+            var total_months: i64 = (l_y * 12 + l_m) - (e_y * 12 + e_m);
+            const result_neg = (!earlier_first) != (sign < 0); // XOR: final sign negative?
+            if (result_neg) total_months = -total_months;
+            // Round to the requested smallest unit / increment.
+            const incr: i64 = @intFromFloat(opts.increment);
+            var years: f64 = 0;
+            var months: f64 = 0;
+            if (opts.smallest == .year) {
+                const q = applyRounding(total_months, 12 * incr, opts.mode);
+                years = @floatFromInt(q * incr);
+            } else {
+                const q = applyRounding(total_months, incr, opts.mode);
+                const m_total = q * incr;
+                if (opts.largest == .year) {
+                    years = @floatFromInt(@divTrunc(m_total, 12));
+                    months = @floatFromInt(@rem(m_total, 12));
+                } else {
+                    months = @floatFromInt(m_total);
+                }
+            }
+            var dd: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            dd[0] = years;
+            dd[1] = months;
+            return makeDuration(self, dd);
+        }
+    }.call;
+}
+
 fn temporalYearMonthToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
@@ -13626,6 +13675,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "equals", 1, temporalYearMonthEqualsFn);
         try setNative(a, rs, p, "add", 1, temporalYearMonthAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalYearMonthAddFn(-1));
+        try setNative(a, rs, p, "until", 1, temporalYearMonthUntilFn(1));
+        try setNative(a, rs, p, "since", 1, temporalYearMonthUntilFn(-1));
         try setNative(a, rs, p, "toPlainDate", 1, temporalYearMonthToPlainDateFn);
         if (ns.getOwn("PlainYearMonth")) |c| if (c == .object) {
             try setNative(a, rs, c.object, "from", 1, temporalYearMonthFromFn);
