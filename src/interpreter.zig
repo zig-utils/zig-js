@@ -10259,6 +10259,36 @@ fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     return .{ .number = 0 }; // no agents are ever waiting
 }
 
+/// `Atomics.waitAsync(typedArray, index, value, timeout)` — the non-blocking
+/// form of `wait`. It accepts a non-shared buffer; in this single-threaded
+/// engine no other agent can ever notify, so an actual wait yields a forever
+/// pending promise, and the early-out cases resolve synchronously.
+fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
+    if (vd.ta.kind != .i32 and vd.ta.kind != .i64) return self.throwError("TypeError", "Atomics.waitAsync requires an Int32Array or BigInt64Array");
+    const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
+    const t = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);
+    const timeout: f64 = if (std.math.isNan(t)) std.math.inf(f64) else @max(0, t);
+    const cur = atomicsReadV(self, vd.ta, vd.i);
+    const cur_n: f64 = if (cur == .object and cur.object.is_bigint) @floatFromInt(@as(i64, @truncate(cur.object.bigint))) else cur.number;
+    const res = (try self.newObject()).object;
+    if (@as(i64, @intFromFloat(cur_n)) != @as(i64, @intFromFloat(expected))) {
+        try self.setProp(res, "async", .{ .boolean = false });
+        try self.setProp(res, "value", .{ .string = "not-equal" });
+    } else if (timeout == 0) {
+        try self.setProp(res, "async", .{ .boolean = false });
+        try self.setProp(res, "value", .{ .string = "timed-out" });
+    } else {
+        // A genuine wait: no agent can ever notify, so the promise stays pending.
+        const cap = try newPromiseCapability(self, self.env.get("Promise") orelse .undefined);
+        try self.setProp(res, "async", .{ .boolean = true });
+        try self.setProp(res, "value", cap.promise);
+    }
+    return .{ .object = res };
+}
+
 /// A typed-array constructor for `kind` (`new Int8Array(...)`, …).
 fn typedArrayCtorFn(comptime kind: value.TAKind) value.NativeFn {
     return struct {
@@ -14997,6 +15027,7 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
         try setNative(a, rs, atomics, "compareExchange", 4, atomicsCompareExchangeFn);
         try setNative(a, rs, atomics, "isLockFree", 1, atomicsIsLockFreeFn);
         try setNative(a, rs, atomics, "wait", 4, atomicsWaitFn);
+        try setNative(a, rs, atomics, "waitAsync", 4, atomicsWaitAsyncFn);
         try setNative(a, rs, atomics, "notify", 3, atomicsNotifyFn);
         if (sym_tag) |k| {
             try atomics.setOwn(a, rs, k, .{ .string = "Atomics" });
