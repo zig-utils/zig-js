@@ -782,8 +782,15 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
             if (!has_own) {
                 if (!tgt.extensible) return self.throwError("TypeError", "proxy 'defineProperty' cannot add a property to a non-extensible target");
                 if (setting_nonconfig) return self.throwError("TypeError", "proxy 'defineProperty' cannot define a non-configurable property absent from the target");
-            } else if (setting_nonconfig and tgt.getAttr(key).configurable) {
-                return self.throwError("TypeError", "proxy 'defineProperty' cannot make a configurable target property non-configurable");
+            } else {
+                // Reporting a property as non-configurable that the target still
+                // exposes as configurable is a lie.
+                if (setting_nonconfig and tgt.getAttr(key).configurable)
+                    return self.throwError("TypeError", "proxy 'defineProperty' cannot report a configurable target property as non-configurable");
+                // A non-configurable target property only admits a compatible
+                // redefinition (IsCompatiblePropertyDescriptor).
+                if (!tgt.getAttr(key).configurable)
+                    try rejectIncompatibleRedefine(self, tgt.getAttr(key), tgt.getOwn(key), tgt.getAccessor(key), d);
             }
         }
         return;
