@@ -10096,13 +10096,16 @@ fn sharedArrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) v
 /// ValidateIntegerTypedArray: the receiver must be an integer typed array (not
 /// a Float or Uint8Clamped view) over an attached buffer; returns the in-bounds
 /// element index from ToIndex(request).
-fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value) value.HostError!struct { ta: *value.TypedArrayData, i: usize } {
+fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool) value.HostError!struct { ta: *value.TypedArrayData, i: usize } {
     if (ta_v != .object or ta_v.object.typed_array == null) return self.throwError("TypeError", "Atomics operand must be an integer TypedArray");
     const ta = ta_v.object.typed_array.?;
     switch (ta.kind) {
         .i8, .u8, .i16, .u16, .i32, .u32, .i64, .u64 => {},
         else => return self.throwError("TypeError", "Atomics operand must be an integer TypedArray (not Float/Uint8Clamped)"),
     }
+    // ValidateTypedArray(write): reject an immutable buffer before the index is
+    // coerced (the value isn't coerced yet either).
+    if (write and ta.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Atomics cannot write to an immutable ArrayBuffer");
     if (ta.buffer.array_buffer.?.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const i = try toIndexArg(self, idx_v);
     if (i >= ta.length) return self.throwError("RangeError", "Atomics index out of range");
@@ -10133,7 +10136,7 @@ fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = this;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+            const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true);
             const arg_v = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
             const old = atomicsReadV(self, vd.ta, vd.i);
             const old_n: f64 = if (old == .object and old.object.is_bigint) @floatFromInt(@as(i64, @truncate(old.object.bigint))) else old.number;
@@ -10156,13 +10159,13 @@ fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.
 fn atomicsLoadFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
     return atomicsReadV(self, vd.ta, vd.i);
 }
 fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true);
     const raw = if (args.len > 2) args[2] else Value.undefined;
     const n = try atomicsCoerce(self, vd.ta, raw);
     atomicsWriteN(vd.ta, vd.i, n);
@@ -10174,7 +10177,7 @@ fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 fn atomicsCompareExchangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true);
     const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     const replacement = try atomicsCoerce(self, vd.ta, if (args.len > 3) args[3] else .undefined);
     const old = atomicsReadV(self, vd.ta, vd.i);
@@ -10192,7 +10195,7 @@ fn atomicsIsLockFreeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
     if (vd.ta.kind != .i32 and vd.ta.kind != .i64) return self.throwError("TypeError", "Atomics.wait requires an Int32Array or BigInt64Array");
     if (!vd.ta.buffer.array_buffer.?.is_shared) return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
     const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
@@ -10206,7 +10209,7 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
     _ = vd;
     return .{ .number = 0 }; // no agents are ever waiting
 }
