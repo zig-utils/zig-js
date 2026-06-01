@@ -10398,6 +10398,14 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             try installFunctionProps(a, root_shape, it_fn, &.{}, "[Symbol.iterator]");
             try array_proto.setOwn(a, root_shape, it_sym.object.sym_key, .{ .object = it_fn });
             try array_proto.setAttr(a, it_sym.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
+            // `String.prototype[Symbol.iterator]` — a String Iterator over the
+            // ToString of `this` (so `""[Symbol.iterator]()`, for-of, and spread
+            // over a string all obtain a real %StringIteratorPrototype% iterator).
+            const str_it = try a.create(value.Object);
+            str_it.* = .{ .native = stringIteratorFn };
+            try installFunctionProps(a, root_shape, str_it, &.{}, "[Symbol.iterator]");
+            try string_proto.setOwn(a, root_shape, it_sym.object.sym_key, .{ .object = str_it });
+            try string_proto.setAttr(a, it_sym.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
         }
     }
     // `Map.prototype[Symbol.iterator]` aliases `entries`, and `Set.prototype[
@@ -10482,6 +10490,16 @@ fn arrayValuesIterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     return self.makeCursorIterator(this);
+}
+
+/// `String.prototype[Symbol.iterator]` — RequireObjectCoercible(this), then a
+/// String Iterator over ToString(this).
+fn stringIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this == .undefined or this == .null)
+        return self.throwError("TypeError", "String.prototype[Symbol.iterator] called on null or undefined");
+    return self.makeCursorIterator(.{ .string = try self.toStringV(this) });
 }
 
 fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {

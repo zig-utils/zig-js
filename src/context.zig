@@ -1171,6 +1171,14 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "String.prototype[Symbol.iterator] yields a String Iterator" {
+    try std.testing.expect((try evalIn("typeof ''[Symbol.iterator] === 'function'")).boolean);
+    try expectEvalStr("a,b,c", "[...'abc'].join(',')");
+    try expectEvalStr("a", "var it = 'ab'[Symbol.iterator](); it.next().value");
+    // RequireObjectCoercible: a null/undefined receiver throws.
+    try std.testing.expectError(error.Throw, evalIn("String.prototype[Symbol.iterator].call(undefined)"));
+}
+
 test "iterator next() brand-checks its receiver" {
     // A real iterator works; calling next with an incompatible receiver throws.
     try std.testing.expectError(error.Throw, evalIn("[][Symbol.iterator]().next.call({})"));
