@@ -204,6 +204,24 @@ pub const TypedArrayData = struct {
     byte_offset: usize,
     length: usize,
     kind: TAKind,
+    /// A length-tracking view (created without an explicit length on a resizable
+    /// ArrayBuffer): its length follows the buffer's current size rather than the
+    /// cached `length`.
+    track_length: bool = false,
+
+    /// The view's current element length, or null if it is out of bounds (the
+    /// backing resizable buffer shrank below it) or detached. A length-tracking
+    /// view recomputes from the live buffer size; a fixed view keeps `length`
+    /// unless its range no longer fits.
+    pub fn currentLength(self: *const TypedArrayData) ?usize {
+        const buf = self.buffer.array_buffer orelse return null;
+        if (buf.detached) return null;
+        const esz = self.kind.byteSize();
+        if (self.byte_offset > buf.data.len) return null;
+        if (self.track_length) return (buf.data.len - self.byte_offset) / esz;
+        if (self.byte_offset + self.length * esz > buf.data.len) return null;
+        return self.length;
+    }
 };
 
 /// A `DataView`: a typed read/write window of `byte_length` bytes starting at

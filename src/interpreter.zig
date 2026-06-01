@@ -3204,14 +3204,14 @@ pub const Interpreter = struct {
                     if (std.mem.eql(u8, key, "byteLength")) return .{ .number = @floatFromInt(if (ab.detached) 0 else ab.data.len) };
                 }
                 if (o.typed_array) |ta| {
-                    const detached = ta.buffer.array_buffer.?.detached;
-                    if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(if (detached) 0 else ta.length) };
-                    if (std.mem.eql(u8, key, "byteLength")) return .{ .number = @floatFromInt(if (detached) 0 else ta.length * ta.kind.byteSize()) };
-                    if (std.mem.eql(u8, key, "byteOffset")) return .{ .number = @floatFromInt(if (detached) 0 else ta.byte_offset) };
+                    const cur = ta.currentLength(); // null when detached / out of bounds
+                    if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(cur orelse 0) };
+                    if (std.mem.eql(u8, key, "byteLength")) return .{ .number = @floatFromInt((cur orelse 0) * ta.kind.byteSize()) };
+                    if (std.mem.eql(u8, key, "byteOffset")) return .{ .number = @floatFromInt(if (cur == null) 0 else ta.byte_offset) };
                     if (std.mem.eql(u8, key, "buffer")) return .{ .object = ta.buffer };
                     if (std.mem.eql(u8, key, "BYTES_PER_ELEMENT")) return .{ .number = @floatFromInt(ta.kind.byteSize()) };
                     if (arrayIndex(key)) |i| {
-                        if (detached or i >= ta.length) return .undefined;
+                        if (i >= (cur orelse 0)) return .undefined;
                         if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
                         return value.taRead(ta, i);
                     }
@@ -3594,10 +3594,10 @@ pub const Interpreter = struct {
                 // (and can throw) even when the index is out of bounds/detached.
                 if (ta.kind.isBigInt()) {
                     const bv = try self.toBigIntValueImpl(v, false);
-                    if (!ta.buffer.array_buffer.?.detached and i < ta.length) value.taWriteBig(ta, i, bv.object.bigint);
+                    if (i < (ta.currentLength() orelse 0)) value.taWriteBig(ta, i, bv.object.bigint);
                 } else {
                     const num = (try self.toNumberV(v));
-                    if (!ta.buffer.array_buffer.?.detached and i < ta.length) value.taWrite(ta, i, num);
+                    if (i < (ta.currentLength() orelse 0)) value.taWrite(ta, i, num);
                 }
                 return;
             }
@@ -3953,6 +3953,9 @@ pub const Interpreter = struct {
             const byte_offset: usize = @intFromFloat(@trunc(@max(0, bo_f)));
             if (byte_offset % size != 0 or byte_offset > buflen) return self.throwError("RangeError", "invalid typed array offset");
             var length: usize = undefined;
+            // Omitting the length on a resizable buffer makes the view
+            // length-tracking; on a fixed buffer it spans the remaining bytes.
+            const track = (args.len <= 2 or args[2] == .undefined) and buffer.array_buffer.?.max_byte_length != null;
             if (args.len > 2 and args[2] != .undefined) {
                 length = @intFromFloat(@trunc(@max(0, try self.toNumberV(args[2]))));
             } else {
@@ -3960,7 +3963,7 @@ pub const Interpreter = struct {
                 length = (buflen - byte_offset) / size;
             }
             if (byte_offset + length * size > buflen) return self.throwError("RangeError", "invalid typed array length");
-            ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind };
+            ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind, .track_length = track };
             return .{ .object = o };
         }
         if (a0 == .object and a0.object.typed_array != null) {
@@ -8866,12 +8869,14 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     if (ta.buffer.array_buffer.?.immutable and
         (eq(name, "fill") or eq(name, "set") or eq(name, "sort") or eq(name, "copyWithin") or eq(name, "reverse")))
         return self.throwError("TypeError", "Cannot modify a TypedArray backed by an immutable ArrayBuffer");
-    // ValidateTypedArray throws on a detached buffer, before any argument is
-    // coerced. `subarray` is the lone method that tolerates detachment (it just
-    // builds a zero-length view).
-    if (ta.buffer.array_buffer.?.detached and !eq(name, "subarray"))
-        return self.throwError("TypeError", "Cannot operate on a TypedArray backed by a detached ArrayBuffer");
-    const len = if (ta.buffer.array_buffer.?.detached) 0 else ta.length;
+    // ValidateTypedArray throws when the buffer is detached or the view is out
+    // of bounds (a resizable buffer shrank below it), before any argument is
+    // coerced. `subarray` is the lone method that tolerates this (it just builds
+    // a zero-length view).
+    const cur_len = ta.currentLength();
+    if (cur_len == null and !eq(name, "subarray"))
+        return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
+    const len = cur_len orelse 0;
     const recv = Value{ .object = o };
     const cb_this: Value = if (args.len > 1) args[1] else .undefined;
     if (eq(name, "at")) {
@@ -9210,11 +9215,11 @@ fn taProtoGetter(comptime which: enum { length, byte_length, byte_offset, buffer
                 return self.throwError("TypeError", "%TypedArray%.prototype accessor called on a non-TypedArray");
             }
             const ta = this.object.typed_array.?;
-            const detached = ta.buffer.array_buffer.?.detached;
+            const cur = ta.currentLength(); // null when detached / out of bounds
             return switch (which) {
-                .length => .{ .number = @floatFromInt(if (detached) 0 else ta.length) },
-                .byte_length => .{ .number = @floatFromInt(if (detached) 0 else ta.length * ta.kind.byteSize()) },
-                .byte_offset => .{ .number = @floatFromInt(if (detached) 0 else ta.byte_offset) },
+                .length => .{ .number = @floatFromInt(cur orelse 0) },
+                .byte_length => .{ .number = @floatFromInt((cur orelse 0) * ta.kind.byteSize()) },
+                .byte_offset => .{ .number = @floatFromInt(if (cur == null) 0 else ta.byte_offset) },
                 .buffer => .{ .object = ta.buffer },
                 .tag => .{ .string = ta.kind.ctorName() },
             };
