@@ -38,6 +38,7 @@ pub const TAKind = enum {
     u16,
     i32,
     u32,
+    f16,
     f32,
     f64,
     i64, // BigInt64Array  (elements are BigInt)
@@ -46,7 +47,7 @@ pub const TAKind = enum {
     pub fn byteSize(self: TAKind) usize {
         return switch (self) {
             .i8, .u8, .u8c => 1,
-            .i16, .u16 => 2,
+            .i16, .u16, .f16 => 2,
             .i32, .u32, .f32 => 4,
             .f64, .i64, .u64 => 8,
         };
@@ -62,6 +63,7 @@ pub const TAKind = enum {
             .u16 => "Uint16Array",
             .i32 => "Int32Array",
             .u32 => "Uint32Array",
+            .f16 => "Float16Array",
             .f32 => "Float32Array",
             .f64 => "Float64Array",
             .i64 => "BigInt64Array",
@@ -76,7 +78,7 @@ pub const TAKind = enum {
     }
 
     pub fn fromName(name: []const u8) ?TAKind {
-        inline for (.{ .i8, .u8, .u8c, .i16, .u16, .i32, .u32, .f32, .f64, .i64, .u64 }) |k| {
+        inline for (.{ .i8, .u8, .u8c, .i16, .u16, .i32, .u32, .f16, .f32, .f64, .i64, .u64 }) |k| {
             if (std.mem.eql(u8, name, (@as(TAKind, k)).ctorName())) return k;
         }
         return null;
@@ -109,6 +111,7 @@ pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
         .u16 => @floatFromInt(std.mem.readInt(u16, bytes[off..][0..2], .little)),
         .i32 => @floatFromInt(std.mem.readInt(i32, bytes[off..][0..4], .little)),
         .u32 => @floatFromInt(std.mem.readInt(u32, bytes[off..][0..4], .little)),
+        .f16 => @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[off..][0..2], .little)))),
         .f32 => @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[off..][0..4], .little)))),
         .f64 => @bitCast(std.mem.readInt(u64, bytes[off..][0..8], .little)),
         // A BigInt element read as a Number is lossy, but keeps the Number-typed
@@ -181,6 +184,7 @@ pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
         .u16 => std.mem.writeInt(u16, bytes[off..][0..2], taToInt(u16, num), .little),
         .i32 => std.mem.writeInt(i32, bytes[off..][0..4], taToInt(i32, num), .little),
         .u32 => std.mem.writeInt(u32, bytes[off..][0..4], taToInt(u32, num), .little),
+        .f16 => std.mem.writeInt(u16, bytes[off..][0..2], @bitCast(@as(f16, @floatCast(num))), .little),
         .f32 => std.mem.writeInt(u32, bytes[off..][0..4], @bitCast(@as(f32, @floatCast(num))), .little),
         .f64 => std.mem.writeInt(u64, bytes[off..][0..8], @bitCast(num), .little),
         // A Number written to a BigInt array is only reached via the lossy

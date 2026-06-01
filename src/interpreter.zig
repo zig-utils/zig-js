@@ -11392,8 +11392,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     inline for (.{
         value.TAKind.i8,  value.TAKind.u8,  value.TAKind.u8c,
         value.TAKind.i16, value.TAKind.u16, value.TAKind.i32,
-        value.TAKind.u32, value.TAKind.f32, value.TAKind.f64,
-        value.TAKind.i64, value.TAKind.u64,
+        value.TAKind.u32, value.TAKind.f16, value.TAKind.f32,
+        value.TAKind.f64, value.TAKind.i64, value.TAKind.u64,
     }) |kind| {
         const proto = try a.create(value.Object);
         proto.* = .{ .proto = ta_proto };
