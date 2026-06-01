@@ -10962,6 +10962,24 @@ fn isoDayOfWeek(y: i64, m: u8, d: u8) u8 {
     return @intCast(if (dow == 0) 7 else dow); // Mon=1..Sun=7
 }
 
+/// Number of ISO 8601 weeks (52 or 53) in week-numbering year `y`.
+fn isoWeeksInYear(y: i64) u8 {
+    const p = @mod(y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400), 7);
+    const p1 = @mod((y - 1) + @divFloor(y - 1, 4) - @divFloor(y - 1, 100) + @divFloor(y - 1, 400), 7);
+    return if (p == 4 or p1 == 3) 53 else 52;
+}
+
+/// ISO 8601 week date: returns the week number (1..53) and the week-numbering
+/// year, which may be the previous or next calendar year near the boundaries.
+fn isoWeekOfYear(y: i64, m: u8, d: u8) struct { week: u8, year: i64 } {
+    const doy: i64 = tDaysFromCivil(y, m, d) - tDaysFromCivil(y, 1, 1) + 1;
+    const dow: i64 = isoDayOfWeek(y, m, d);
+    const w = @divFloor(doy - dow + 10, 7);
+    if (w < 1) return .{ .week = isoWeeksInYear(y - 1), .year = y - 1 };
+    if (w > isoWeeksInYear(y)) return .{ .week = 1, .year = y + 1 };
+    return .{ .week = @intCast(w), .year = y };
+}
+
 /// A Temporal object of `kind`, with its prototype from the env hidden binding.
 fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []const u8) EvalError!*value.Object {
     const o = (try self.newObject()).object;
@@ -11239,7 +11257,12 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
         if (!any) return self.throwError("TypeError", "Temporal.Duration.from: object has no duration properties");
         return .{ .object = o };
     }
-    return self.throwError("RangeError", "Temporal.Duration.from: expected an object (string parsing not supported)");
+    // Any non-object argument is coerced to a string and parsed (a Symbol throws
+    // in ToString); undefined/null/number/etc. simply fail to parse → RangeError.
+    const s = try self.toStringV(a0);
+    const o = try makeTemporal(self, .duration, "\x00T.Duration");
+    o.temporal.?.dur = try parseDurationString(self, s);
+    return .{ .object = o };
 }
 
 // ---- ISO date/time formatting helpers -------------------------------
@@ -11337,7 +11360,7 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
                 .days_in_year => .{ .number = @floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365)) },
                 .months_in_year => .{ .number = 12 },
                 .days_in_week => .{ .number = 7 },
-                .week_of_year => .{ .number = @floatFromInt(@divTrunc(tDaysFromCivil(y, t.month, t.day) - tDaysFromCivil(y, 1, 1), 7) + 1) },
+                .week_of_year => .{ .number = @floatFromInt(isoWeekOfYear(y, t.month, t.day).week) },
                 .in_leap_year => .{ .boolean = isoLeap(y) },
             };
         }
@@ -11358,11 +11381,69 @@ fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) v
     return .{ .string = "iso8601" };
 }
 
-fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+/// `era`/`eraYear` accessors. The ISO 8601 calendar has no eras, so both read as
+/// `undefined`; they still brand-check the receiver is a Temporal date-bearing
+/// object.
+fn temporalEraGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null) return self.throwError("TypeError", "Temporal era accessor on incompatible receiver");
+    return .undefined;
+}
+
+/// `yearOfWeek` accessor: the ISO week-numbering year for the receiver's date.
+fn temporalYearOfWeekGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null) return self.throwError("TypeError", "Temporal yearOfWeek accessor on incompatible receiver");
+    const t = this.object.temporal.?;
+    return .{ .number = @floatFromInt(isoWeekOfYear(t.year, t.month, t.day).year) };
+}
+
+/// `calendarName` show option for Temporal toString (RFC 9557 calendar
+/// annotation).
+const CalName = enum { auto, always, never, critical };
+
+/// GetTemporalShowCalendarNameOption. A non-object, non-undefined options
+/// argument is a TypeError; an unrecognised value is a RangeError.
+fn readCalendarName(self: *Interpreter, options: Value) EvalError!CalName {
+    if (options == .undefined) return .auto;
+    if (options != .object) return self.throwError("TypeError", "options must be an object or undefined");
+    const v = try self.getProperty(options, "calendarName");
+    if (v == .undefined) return .auto;
+    const s = try self.toStringV(v);
+    if (std.mem.eql(u8, s, "auto")) return .auto;
+    if (std.mem.eql(u8, s, "always")) return .always;
+    if (std.mem.eql(u8, s, "never")) return .never;
+    if (std.mem.eql(u8, s, "critical")) return .critical;
+    return self.throwError("RangeError", "invalid calendarName option");
+}
+
+/// Whether the calendar annotation (and, for YearMonth/MonthDay, the reference
+/// day/year that makes the ISO string complete) must be emitted.
+fn calShowsAnnotation(name: CalName) bool {
+    return name == .always or name == .critical;
+}
+
+/// Append "[u-ca=iso8601]" (or the critical variant) per the show option.
+fn appendCalAnnotation(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), name: CalName) EvalError!void {
+    switch (name) {
+        .always => try buf.appendSlice(self.arena, "[u-ca=iso8601]"),
+        .critical => try buf.appendSlice(self.arena, "[!u-ca=iso8601]"),
+        .auto, .never => {},
+    }
+}
+
+fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    return .{ .string = try temporalIsoDateString(self, this.object.temporal.?) };
+    const cal = try readCalendarName(self, if (args.len > 0) args[0] else .undefined);
+    const t = this.object.temporal.?;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoYearStr(self, &buf, t.year);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ t.month, t.day });
+    try appendCalAnnotation(self, &buf, cal);
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
 /// Read year/month/day from a PlainDate, a PlainDateTime, or a fields object.
@@ -11554,7 +11635,114 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
     }.call;
 }
 
-/// Extract the 10 duration components from a Duration object or a fields bag.
+/// Distribute the fractional part of a time component into the smaller fields.
+/// `frac_scale` is the fraction times 1e9 (an integer in [0, 1e9)); `field` is
+/// the duration index of the fractional unit (4=hours, 5=minutes, 6=seconds).
+fn distributeDurationFraction(out: *[10]f64, field: usize, frac_scale: i128) void {
+    const mult: i128 = switch (field) {
+        4 => 3600, // hours → seconds
+        5 => 60, // minutes → seconds
+        else => 1, // seconds
+    };
+    var total_ns: i128 = frac_scale * mult; // nanoseconds below `field`
+    if (field == 4) { // hours: spill into minutes first
+        out[5] = @floatFromInt(@divTrunc(total_ns, 60_000_000_000));
+        total_ns = @mod(total_ns, 60_000_000_000);
+    }
+    if (field <= 5) { // hours/minutes: then seconds
+        out[6] = @floatFromInt(@divTrunc(total_ns, 1_000_000_000));
+        total_ns = @mod(total_ns, 1_000_000_000);
+    }
+    out[7] = @floatFromInt(@divTrunc(total_ns, 1_000_000));
+    total_ns = @mod(total_ns, 1_000_000);
+    out[8] = @floatFromInt(@divTrunc(total_ns, 1_000));
+    out[9] = @floatFromInt(@mod(total_ns, 1_000));
+}
+
+/// ParseTemporalDurationString: "[sign]PnYnMnWnDTnHnMnS" (ISO 8601 / RFC 9557).
+/// Designators are case-insensitive and must appear in order; a decimal fraction
+/// (".",",") is allowed only on the smallest provided time unit and cascades
+/// down to nanoseconds. Returns the signed component array or a RangeError.
+fn parseDurationString(self: *Interpreter, s: []const u8) EvalError![10]f64 {
+    var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var i: usize = 0;
+    var sign: f64 = 1;
+    if (i + 3 <= s.len and s[i] == 0xE2 and s[i + 1] == 0x88 and s[i + 2] == 0x92) {
+        sign = -1; // U+2212 MINUS SIGN
+        i += 3;
+    } else if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+        if (s[i] == '-') sign = -1;
+        i += 1;
+    }
+    if (i >= s.len or (s[i] != 'P' and s[i] != 'p')) return self.throwError("RangeError", "invalid ISO 8601 duration");
+    i += 1;
+    var any = false;
+    // Date section: Y(0) M(1) W(2) D(3), in order, integers only.
+    var date_next: usize = 0;
+    while (i < s.len and s[i] != 'T' and s[i] != 't') {
+        const start = i;
+        while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+        if (i == start) return self.throwError("RangeError", "invalid duration: expected digits");
+        const num = std.fmt.parseInt(i64, s[start..i], 10) catch return self.throwError("RangeError", "duration component out of range");
+        if (i >= s.len) return self.throwError("RangeError", "invalid duration: missing designator");
+        const idx = std.mem.indexOfScalar(u8, "YMWD", std.ascii.toUpper(s[i])) orelse return self.throwError("RangeError", "invalid duration date designator");
+        if (idx < date_next) return self.throwError("RangeError", "duration designators out of order");
+        date_next = idx + 1;
+        out[idx] = @floatFromInt(num);
+        any = true;
+        i += 1;
+    }
+    // Time section: H(4) M(5) S(6).
+    if (i < s.len and (s[i] == 'T' or s[i] == 't')) {
+        i += 1;
+        if (i >= s.len) return self.throwError("RangeError", "duration: empty time section");
+        var time_next: usize = 0;
+        var frac_seen = false;
+        while (i < s.len) {
+            if (frac_seen) return self.throwError("RangeError", "duration: fraction only on the smallest unit");
+            const start = i;
+            while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+            if (i == start) return self.throwError("RangeError", "invalid duration: expected digits");
+            const intpart = std.fmt.parseInt(i64, s[start..i], 10) catch return self.throwError("RangeError", "duration component out of range");
+            var frac_scale: i128 = 0;
+            var has_frac = false;
+            if (i < s.len and (s[i] == '.' or s[i] == ',')) {
+                i += 1;
+                const fstart = i;
+                var fbuf: [9]u8 = .{ '0', '0', '0', '0', '0', '0', '0', '0', '0' };
+                var k: usize = 0;
+                while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {
+                    if (k < 9) fbuf[k] = s[i];
+                    k += 1;
+                }
+                if (i == fstart) return self.throwError("RangeError", "duration: empty fraction");
+                if (i - fstart > 9) return self.throwError("RangeError", "duration: no more than 9 fractional digits");
+                frac_scale = std.fmt.parseInt(i128, &fbuf, 10) catch 0;
+                has_frac = true;
+            }
+            if (i >= s.len) return self.throwError("RangeError", "invalid duration: missing time designator");
+            const idx = std.mem.indexOfScalar(u8, "HMS", std.ascii.toUpper(s[i])) orelse return self.throwError("RangeError", "invalid duration time designator");
+            if (idx < time_next) return self.throwError("RangeError", "duration designators out of order");
+            time_next = idx + 1;
+            i += 1;
+            any = true;
+            out[idx + 4] = @floatFromInt(intpart);
+            if (has_frac) {
+                frac_seen = true;
+                distributeDurationFraction(&out, idx + 4, frac_scale);
+            }
+        }
+    }
+    if (!any) return self.throwError("RangeError", "duration must have at least one component");
+    if (i != s.len) return self.throwError("RangeError", "trailing characters in duration");
+    if (sign < 0) for (&out) |*v| {
+        v.* = -v.*;
+    };
+    return out;
+}
+
+/// Extract the 10 duration components from a Duration object, a fields bag, or
+/// an ISO 8601 duration string.
 fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
     if (tIsTemporal(v, .duration)) return v.object.temporal.?.dur;
     if (v == .object) {
@@ -11569,7 +11757,9 @@ fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
         if (!any) return self.throwError("TypeError", "invalid duration");
         return out;
     }
-    return self.throwError("TypeError", "invalid duration (string parsing not supported)");
+    // Non-object: ToString then parse as an ISO 8601 duration (Symbol throws).
+    const s = try self.toStringV(v);
+    return parseDurationString(self, s);
 }
 
 // ---- Temporal.PlainTime ---------------------------------------------
@@ -11658,14 +11848,15 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
 }
 
 fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const cal = try readCalendarName(self, if (args.len > 0) args[0] else .undefined);
     const t = this.object.temporal.?;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, t.year);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ t.month, t.day });
     try isoTimeStr(self, &buf, t);
+    try appendCalAnnotation(self, &buf, cal);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -11798,13 +11989,17 @@ fn temporalYearMonthGetter(comptime f: YearMonthField) value.NativeFn {
 }
 
 fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
+    const cal = try readCalendarName(self, if (args.len > 0) args[0] else .undefined);
     const t = this.object.temporal.?;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, t.year);
     try tfmt(self, &buf, "-{d:0>2}", .{t.month});
+    // When the calendar annotation is shown the reference day completes the
+    // ISO string ("YYYY-MM-DD[u-ca=iso8601]").
+    if (calShowsAnnotation(cal)) try tfmt(self, &buf, "-{d:0>2}", .{t.day});
+    try appendCalAnnotation(self, &buf, cal);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -12002,19 +12197,20 @@ fn temporalMonthDayGetter(comptime f: MonthDayField) value.NativeFn {
 }
 
 fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
+    const cal = try readCalendarName(self, if (args.len > 0) args[0] else .undefined);
     const t = this.object.temporal.?;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    // Non-reference years are emitted as a full date; the ISO reference (1972)
-    // renders the short "MM-DD" form.
-    if (t.year != 1972) {
+    // The reference year (1972) renders the short "MM-DD" form; a non-reference
+    // year, or a shown calendar annotation, forces the full "YYYY-MM-DD".
+    if (t.year != 1972 or calShowsAnnotation(cal)) {
         try isoYearStr(self, &buf, t.year);
         try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ t.month, t.day });
     } else {
         try tfmt(self, &buf, "{d:0>2}-{d:0>2}", .{ t.month, t.day });
     }
+    try appendCalAnnotation(self, &buf, cal);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -12453,6 +12649,13 @@ fn temporalPlainTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) v
 /// Coerce to PlainTime fields (a PlainTime, a PlainDateTime, a fields bag, or a
 /// "HH:MM:SS" string).
 fn toPlainTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalData {
+    return toPlainTimeDataOpt(self, v, true);
+}
+
+/// As `toPlainTimeData`, but when `require_any` is false a fields bag with no
+/// recognised time fields yields all-zero time (used by PlainDateTime, where the
+/// time portion is optional and defaults to midnight).
+fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool) EvalError!value.TemporalData {
     if (tIsTemporal(v, .plain_time) or tIsTemporal(v, .plain_date_time)) {
         return v.object.temporal.?.*;
     }
@@ -12470,7 +12673,7 @@ fn toPlainTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalData {
             if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
             vals[i] = n;
         }
-        if (!any) return self.throwError("TypeError", "invalid PlainTime fields");
+        if (!any and require_any) return self.throwError("TypeError", "invalid PlainTime fields");
         setTimeFields(&t, .{ @floatFromInt(vals[0]), @floatFromInt(vals[1]), @floatFromInt(vals[2]), @floatFromInt(vals[3]), @floatFromInt(vals[4]), @floatFromInt(vals[5]) });
         return t;
     }
@@ -12686,7 +12889,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalDat
     }
     if (v == .object) {
         const f = try toPlainDateFields(self, v);
-        const tm = try toPlainTimeData(self, v);
+        const tm = try toPlainTimeDataOpt(self, v, false);
         var t: value.TemporalData = .{ .kind = .plain_date_time };
         t.year = @intCast(f.y);
         t.month = f.m;
@@ -13131,7 +13334,7 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
 const ZdtField = enum {
     year, month, day, hour, minute, second, millisecond, microsecond, nanosecond,
     day_of_week, day_of_year, days_in_month, days_in_year, months_in_year, days_in_week,
-    in_leap_year, hours_in_day, offset_ns,
+    in_leap_year, hours_in_day, offset_ns, week_of_year, year_of_week,
 };
 fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
     return struct {
@@ -13161,6 +13364,8 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
                 .in_leap_year => .{ .boolean = isoLeap(y) },
                 .hours_in_day => .{ .number = 24 },
                 .offset_ns => .{ .number = @floatFromInt(t.tz_offset_ns) },
+                .week_of_year => .{ .number = @floatFromInt(isoWeekOfYear(y, l.month, l.day).week) },
+                .year_of_week => .{ .number = @floatFromInt(isoWeekOfYear(y, l.month, l.day).year) },
             };
         }
     }.call;
@@ -13570,12 +13775,15 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "dayOfWeek", temporalPlainDateGetter(.day_of_week));
         try setNativeGetter(a, rs, p, "dayOfYear", temporalPlainDateGetter(.day_of_year));
         try setNativeGetter(a, rs, p, "weekOfYear", temporalPlainDateGetter(.week_of_year));
+        try setNativeGetter(a, rs, p, "yearOfWeek", temporalYearOfWeekGetter);
         try setNativeGetter(a, rs, p, "daysInWeek", temporalPlainDateGetter(.days_in_week));
         try setNativeGetter(a, rs, p, "daysInMonth", temporalPlainDateGetter(.days_in_month));
         try setNativeGetter(a, rs, p, "daysInYear", temporalPlainDateGetter(.days_in_year));
         try setNativeGetter(a, rs, p, "monthsInYear", temporalPlainDateGetter(.months_in_year));
         try setNativeGetter(a, rs, p, "inLeapYear", temporalPlainDateGetter(.in_leap_year));
         try setNativeGetter(a, rs, p, "monthCode", temporalMonthCodeGetter);
+        try setNativeGetter(a, rs, p, "era", temporalEraGetter);
+        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNative(a, rs, p, "toString", 0, temporalPlainDateToStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalPlainDateToStringFn);
@@ -13638,6 +13846,9 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "monthsInYear", temporalPlainDateGetter(.months_in_year));
         try setNativeGetter(a, rs, p, "daysInWeek", temporalPlainDateGetter(.days_in_week));
         try setNativeGetter(a, rs, p, "weekOfYear", temporalPlainDateGetter(.week_of_year));
+        try setNativeGetter(a, rs, p, "yearOfWeek", temporalYearOfWeekGetter);
+        try setNativeGetter(a, rs, p, "era", temporalEraGetter);
+        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
         try setNative(a, rs, p, "toString", 0, temporalPlainDateTimeToStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalPlainDateTimeToStringFn);
         try setNative(a, rs, p, "with", 1, temporalPlainDateTimeWithFn);
@@ -13668,6 +13879,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "daysInYear", temporalYearMonthGetter(.days_in_year));
         try setNativeGetter(a, rs, p, "monthsInYear", temporalYearMonthGetter(.months_in_year));
         try setNativeGetter(a, rs, p, "inLeapYear", temporalYearMonthGetter(.in_leap_year));
+        try setNativeGetter(a, rs, p, "era", temporalEraGetter);
+        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNative(a, rs, p, "toString", 0, temporalYearMonthToStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalYearMonthToStringFn);
@@ -13744,7 +13957,11 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "inLeapYear", temporalZdtGetter(.in_leap_year));
         try setNativeGetter(a, rs, p, "hoursInDay", temporalZdtGetter(.hours_in_day));
         try setNativeGetter(a, rs, p, "offsetNanoseconds", temporalZdtGetter(.offset_ns));
+        try setNativeGetter(a, rs, p, "weekOfYear", temporalZdtGetter(.week_of_year));
+        try setNativeGetter(a, rs, p, "yearOfWeek", temporalZdtGetter(.year_of_week));
         try setNativeGetter(a, rs, p, "monthCode", temporalZdtMonthCodeGetter);
+        try setNativeGetter(a, rs, p, "era", temporalEraGetter);
+        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNativeGetter(a, rs, p, "epochMilliseconds", temporalZdtEpochGetter(true));
         try setNativeGetter(a, rs, p, "epochNanoseconds", temporalZdtEpochGetter(false));
