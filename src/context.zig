@@ -1181,6 +1181,22 @@ test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     try std.testing.expectError(error.Throw, evalIn("isNaN(Symbol())"));
 }
 
+test "strict arguments.callee is the %ThrowTypeError% poison pill" {
+    // Reading or writing `arguments.callee` in a strict function throws TypeError,
+    // and its accessor get is the single shared %ThrowTypeError% intrinsic.
+    try std.testing.expect((try evalIn(
+        \\function f() { "use strict"; try { arguments.callee; return false; } catch (e) { return e instanceof TypeError; } }
+        \\f()
+    )).boolean);
+    // The same intrinsic backs both `arguments.callee` and `Function.prototype.caller`.
+    try std.testing.expect((try evalIn(
+        \\var g = function () { "use strict"; return arguments; }();
+        \\var callee = Object.getOwnPropertyDescriptor(g, "callee").get;
+        \\var caller = Object.getOwnPropertyDescriptor(Function.prototype, "caller").get;
+        \\callee === caller
+    )).boolean);
+}
+
 test "Number/Boolean/String prototypes are Exotic Objects with their primitive" {
     // Per spec, `Number.prototype` has [[NumberData]] = +0, `Boolean.prototype`
     // has [[BooleanData]] = false, `String.prototype` has [[StringData]] = "" —

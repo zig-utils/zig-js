@@ -1829,6 +1829,17 @@ pub const Interpreter = struct {
         if (!func.is_arrow) {
             const args_obj = try self.newArray();
             for (args) |av| try args_obj.object.elements.append(self.arena, av);
+            // Strict mode's `arguments.callee` is a poison-pill accessor whose
+            // get and set are both `%ThrowTypeError%`. Reading or writing it
+            // throws, but `Object.getOwnPropertyDescriptor(arguments, "callee").
+            // get` returns the shared intrinsic (its identity and properties are
+            // what test262 probes).
+            if (func.is_strict) {
+                if (self.throwTypeError()) |tte| {
+                    try args_obj.object.setAccessor(self.arena, "callee", .{ .object = tte }, .{ .object = tte });
+                    try args_obj.object.setAttr(self.arena, "callee", .{ .enumerable = false, .configurable = false });
+                }
+            }
             try call_env.put("arguments", args_obj);
         }
 
@@ -2167,6 +2178,16 @@ pub const Interpreter = struct {
         if (av != .object) return null;
         const p = av.object.getOwn("prototype") orelse return null;
         return if (p == .object) p.object else null;
+    }
+
+    /// The shared `%ThrowTypeError%` intrinsic, stashed as the get/set of
+    /// `Function.prototype.caller` during setup — reused by the strict
+    /// `arguments.callee` and `arguments.caller` poison-pill accessors.
+    pub fn throwTypeError(self: *Interpreter) ?*value.Object {
+        const fp = self.functionProto() orelse return null;
+        const acc = fp.getAccessor("caller") orelse return null;
+        if (acc.get) |g| if (g == .object) return g.object;
+        return null;
     }
 
     /// `Function.prototype`, the [[Prototype]] of every function object — so
