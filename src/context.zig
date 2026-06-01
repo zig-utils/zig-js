@@ -1171,6 +1171,19 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "NativeError constructors inherit from Error; Error from Function.prototype" {
+    // Each NativeError constructor's [[Prototype]] is the Error constructor.
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError) === Error")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(RangeError) === Error")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(AggregateError) === Error")).boolean);
+    // Error itself is a function, so its [[Prototype]] is Function.prototype.
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Error) === Function.prototype")).boolean);
+    // The prototype chain was already linked: TypeError.prototype -> Error.prototype.
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError.prototype) === Error.prototype")).boolean);
+    // Static inheritance through the constructor chain works.
+    try std.testing.expect((try evalIn("typeof TypeError.isError === 'function'")).boolean);
+}
+
 test "parseInt skips the full StrWhiteSpace set" {
     // U+2028/U+2029 line separators and non-ASCII spaces are leading whitespace.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('\\u20281')")).number);

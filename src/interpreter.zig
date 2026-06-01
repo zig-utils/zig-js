@@ -10023,10 +10023,15 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     const ro: value.PropAttr = .{ .enumerable = false, .configurable = true, .writable = true };
     const error_proto = try a.create(value.Object);
     error_proto.* = .{ .proto = object_proto };
+    // The base `Error` constructor object, captured on the first iteration so the
+    // NativeError constructors below can set it as their [[Prototype]] (spec:
+    // `Object.getPrototypeOf(TypeError) === Error`).
+    var error_ctor_obj: ?*value.Object = null;
     for (error_names) |ename| {
         const ctor_v = env.get(ename) orelse continue;
         const ctor = ctor_v.object;
         const is_base = std.mem.eql(u8, ename, "Error");
+        if (is_base) error_ctor_obj = ctor else ctor.proto = error_ctor_obj; // NativeError [[Prototype]] is %Error%
         const proto = if (is_base) error_proto else blk: {
             const p = try a.create(value.Object);
             p.* = .{ .proto = error_proto };
@@ -10065,6 +10070,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Function.prototype is a callable (noop) object, and its call/apply/bind/
     // toString brand-check that `this` is callable (TypeError otherwise).
     func_proto.* = .{ .proto = object_proto, .native = funcProtoNoop };
+    // The base `Error` constructor is a function, so its [[Prototype]] is
+    // %Function.prototype% (`Object.getPrototypeOf(Error) === Function.prototype`).
+    if (error_ctor_obj) |eo| eo.proto = func_proto;
     inline for (.{
         .{ "call", 1 }, .{ "apply", 2 }, .{ "bind", 1 }, .{ "toString", 0 },
     }) |s| try setNative(a, root_shape, func_proto, s[0], s[1], funcProtoMethod(s[0]));
