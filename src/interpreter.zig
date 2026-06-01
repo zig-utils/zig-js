@@ -3017,7 +3017,20 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const target = o.proxy_target.?;
         if (try self.proxyTrap(o, "get")) |trap| {
-            return self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key), receiver }, .{ .object = o.proxy_handler.? });
+            const res = try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key), receiver }, .{ .object = o.proxy_handler.? });
+            // [[Get]] invariant (9.5.8): a non-configurable non-writable data
+            // property must report its value; a non-configurable accessor with
+            // no getter must report undefined.
+            if (target.proxy_handler == null and !target.proxy_revoked and objectHasOwn(target, key) and !target.getAttr(key).configurable) {
+                if (target.getAccessor(key)) |acc| {
+                    if (acc.get == null and res != .undefined)
+                        return self.throwError("TypeError", "proxy 'get' must report undefined for a non-configurable accessor with no getter");
+                } else if (!target.getAttr(key).writable) {
+                    if (target.getOwn(key)) |tv| if (!value.strictEquals(res, tv))
+                        return self.throwError("TypeError", "proxy 'get' must report the target value for a non-configurable non-writable property");
+                }
+            }
+            return res;
         }
         return self.getProperty(.{ .object = target }, key);
     }
@@ -3028,7 +3041,18 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const target = o.proxy_target.?;
         if (try self.proxyTrap(o, "set")) |trap| {
-            _ = try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key), v, receiver }, .{ .object = o.proxy_handler.? });
+            const ok = (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key), v, receiver }, .{ .object = o.proxy_handler.? })).toBoolean();
+            // [[Set]] invariant (9.5.9): a successful set can't disagree with a
+            // non-configurable non-writable data property, nor target a
+            // non-configurable accessor that has no setter.
+            if (ok and target.proxy_handler == null and !target.proxy_revoked and objectHasOwn(target, key) and !target.getAttr(key).configurable) {
+                if (target.getAccessor(key)) |acc| {
+                    if (acc.set == null) return self.throwError("TypeError", "proxy 'set' cannot succeed for a non-configurable accessor with no setter");
+                } else if (!target.getAttr(key).writable) {
+                    if (target.getOwn(key)) |tv| if (!value.strictEquals(v, tv))
+                        return self.throwError("TypeError", "proxy 'set' cannot change a non-configurable non-writable property");
+                }
+            }
             return;
         }
         return self.setMember(.{ .object = target }, key, v);
@@ -3040,7 +3064,14 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const target = o.proxy_target.?;
         if (try self.proxyTrap(o, "has")) |trap| {
-            return (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key) }, .{ .object = o.proxy_handler.? })).toBoolean();
+            const b = (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key) }, .{ .object = o.proxy_handler.? })).toBoolean();
+            // [[HasProperty]] invariant (9.5.7): can't hide a non-configurable
+            // own property, nor an own property of a non-extensible target.
+            if (!b and target.proxy_handler == null and !target.proxy_revoked and objectHasOwn(target, key)) {
+                if (!target.getAttr(key).configurable) return self.throwError("TypeError", "proxy 'has' cannot report a non-configurable own property as absent");
+                if (!try self.ordinaryIsExtensible(target)) return self.throwError("TypeError", "proxy 'has' cannot report an own property of a non-extensible target as absent");
+            }
+            return b;
         }
         if (target.proxy_handler != null) return self.proxyHas(target, key);
         return hasProperty(target, key);
@@ -3052,7 +3083,14 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const target = o.proxy_target.?;
         if (try self.proxyTrap(o, "deleteProperty")) |trap| {
-            return (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key) }, .{ .object = o.proxy_handler.? })).toBoolean();
+            const b = (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key) }, .{ .object = o.proxy_handler.? })).toBoolean();
+            // [[Delete]] invariant (9.5.10): can't report deleting a
+            // non-configurable property, nor any property of a non-extensible target.
+            if (b and target.proxy_handler == null and !target.proxy_revoked and objectHasOwn(target, key)) {
+                if (!target.getAttr(key).configurable) return self.throwError("TypeError", "proxy 'deleteProperty' cannot delete a non-configurable property");
+                if (!try self.ordinaryIsExtensible(target)) return self.throwError("TypeError", "proxy 'deleteProperty' cannot delete a property of a non-extensible target");
+            }
+            return b;
         }
         return self.deleteOwn(target, key);
     }
