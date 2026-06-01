@@ -11475,106 +11475,239 @@ fn toPlainDateFields(self: *Interpreter, v: Value) EvalError!IsoYMD {
     return self.throwError("TypeError", "cannot convert to a PlainDate");
 }
 
-/// Parse a minimal ISO date / date-time prefix ("YYYY-MM-DD…").
-fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
-    var s = s_in;
-    var neg = false;
-    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) {
-        neg = s[0] == '-';
-        s = s[1..];
+/// Case-insensitive ASCII equality (no Unicode case folding — "İ" ≠ "i").
+fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        const la = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
+        if (la != cb) return false;
     }
-    // YYYY (4) or YYYYYY (6 with sign already consumed)
-    const ylen: usize = if (neg or (s_in.len > 0 and s_in[0] == '+')) 6 else 4;
-    if (s.len < ylen + 6) return self.throwError("RangeError", "invalid ISO date string");
-    const y = std.fmt.parseInt(i64, s[0..ylen], 10) catch return self.throwError("RangeError", "invalid ISO year");
-    if (s[ylen] != '-' or s[ylen + 3] != '-') return self.throwError("RangeError", "invalid ISO date string");
-    const m = std.fmt.parseInt(u8, s[ylen + 1 .. ylen + 3], 10) catch return self.throwError("RangeError", "invalid ISO month");
-    const d = std.fmt.parseInt(u8, s[ylen + 4 .. ylen + 6], 10) catch return self.throwError("RangeError", "invalid ISO day");
-    const yy: i64 = if (neg) -y else y;
-    try checkIsoDate(self, @floatFromInt(yy), @floatFromInt(m), @floatFromInt(d));
-    return .{ .y = yy, .m = m, .d = d };
+    return true;
+}
+
+/// Strip and validate RFC 9557 annotations ("[u-ca=…]", "[!key=…]", "[TimeZone]")
+/// from the tail of a Temporal ISO string. Returns the bare date/time body and
+/// the calendar value (validated to be ISO 8601). Malformed/critical-unknown/
+/// duplicate annotations raise RangeError.
+const AnnResult = struct { body: []const u8, cal: ?[]const u8 };
+fn stripTemporalAnnotations(self: *Interpreter, s: []const u8) EvalError!AnnResult {
+    const lb = std.mem.indexOfScalar(u8, s, '[') orelse return .{ .body = s, .cal = null };
+    var cal: ?[]const u8 = null;
+    var cal_count: usize = 0;
+    var cal_critical = false;
+    var tz_count: usize = 0;
+    var i: usize = lb;
+    while (i < s.len) {
+        if (s[i] != '[') return self.throwError("RangeError", "invalid annotation");
+        const close = std.mem.indexOfScalarPos(u8, s, i, ']') orelse return self.throwError("RangeError", "unterminated annotation");
+        var content = s[i + 1 .. close];
+        i = close + 1;
+        var critical = false;
+        if (content.len > 0 and content[0] == '!') {
+            critical = true;
+            content = content[1..];
+        }
+        if (std.mem.indexOfScalar(u8, content, '=')) |eqpos| {
+            const key = content[0..eqpos];
+            const val = content[eqpos + 1 ..];
+            // AnnotationKey: lowercase letter or '_' lead, then a-z/0-9/'-'/'_'.
+            if (key.len == 0) return self.throwError("RangeError", "empty annotation key");
+            for (key) |c| {
+                if (!((c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-' or c == '_'))
+                    return self.throwError("RangeError", "annotation keys must be lowercase");
+            }
+            if (std.mem.eql(u8, key, "u-ca")) {
+                // Every calendar value must be a syntactically valid id; only the
+                // first (the one actually used) must name a supported calendar.
+                if (val.len == 0) return self.throwError("RangeError", "empty string is not a valid calendar ID");
+                for (val) |c| {
+                    if (!((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '-'))
+                        return self.throwError("RangeError", "invalid calendar ID");
+                }
+                cal_count += 1;
+                if (critical) cal_critical = true;
+                if (cal == null) cal = val;
+            } else {
+                if (critical) return self.throwError("RangeError", "reject unknown annotation with critical flag");
+            }
+        } else {
+            tz_count += 1;
+            if (tz_count > 1) return self.throwError("RangeError", "reject more than one time zone annotation");
+        }
+    }
+    if (cal_count > 1 and cal_critical) return self.throwError("RangeError", "reject more than one calendar annotation if any critical");
+    if (cal) |c| if (!asciiEqlIgnoreCase(c, "iso8601")) return self.throwError("RangeError", "unknown calendar");
+    return .{ .body = s[0..lb], .cal = cal };
+}
+
+/// A fully-parsed Temporal ISO date/time body (annotations already stripped).
+const TBody = struct {
+    y: i64,
+    mo: u8,
+    d: u8,
+    has_time: bool = false,
+    h: u8 = 0,
+    mi: u8 = 0,
+    s: u8 = 0,
+    frac_ns: u32 = 0,
+    z: bool = false,
+    has_offset: bool = false,
+    off_ns: i128 = 0,
+};
+
+/// Strictly parse "sign? YYYY[YY] - MM - DD ([T ] HH[:MM[:SS[.frac]]] [Z|±HH:MM[:SS[.frac]]])?".
+/// The whole input must be consumed; a fraction is permitted only on seconds;
+/// a negative six-digit zero year is rejected. (Date separators are required, as
+/// in the strings the engine already accepts.)
+fn parseTemporalBody(self: *Interpreter, s: []const u8) EvalError!TBody {
+    var i: usize = 0;
+    var neg = false;
+    var has_sign = false;
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) {
+        has_sign = true;
+        neg = s[0] == '-';
+        i = 1;
+    }
+    const ylen: usize = if (has_sign) 6 else 4;
+    if (i + ylen > s.len) return self.throwError("RangeError", "invalid ISO year");
+    for (s[i .. i + ylen]) |c| if (!std.ascii.isDigit(c)) return self.throwError("RangeError", "invalid ISO year");
+    if (has_sign and neg) {
+        var all_zero = true;
+        for (s[i .. i + ylen]) |c| {
+            if (c != '0') all_zero = false;
+        }
+        if (all_zero) return self.throwError("RangeError", "minus zero is not a valid extended year");
+    }
+    const yraw = std.fmt.parseInt(i64, s[i .. i + ylen], 10) catch return self.throwError("RangeError", "invalid ISO year");
+    const y: i64 = if (neg) -yraw else yraw;
+    i += ylen;
+    // "-MM-DD"
+    if (i + 6 > s.len or s[i] != '-' or s[i + 3] != '-') return self.throwError("RangeError", "invalid ISO date");
+    if (!std.ascii.isDigit(s[i + 1]) or !std.ascii.isDigit(s[i + 2]) or !std.ascii.isDigit(s[i + 4]) or !std.ascii.isDigit(s[i + 5]))
+        return self.throwError("RangeError", "invalid ISO date");
+    const mo = std.fmt.parseInt(u8, s[i + 1 .. i + 3], 10) catch return self.throwError("RangeError", "invalid ISO month");
+    const d = std.fmt.parseInt(u8, s[i + 4 .. i + 6], 10) catch return self.throwError("RangeError", "invalid ISO day");
+    i += 6;
+    try checkIsoDate(self, @floatFromInt(y), @floatFromInt(mo), @floatFromInt(d));
+    var out: TBody = .{ .y = y, .mo = mo, .d = d };
+    // Optional time.
+    if (i < s.len and (s[i] == 'T' or s[i] == 't' or s[i] == ' ')) {
+        i += 1;
+        out.has_time = true;
+        try parseTimeSection(self, s, &i, &out);
+        // Optional offset / Z designator.
+        try parseOffset(self, s, &i, &out);
+    }
+    if (i != s.len) return self.throwError("RangeError", "trailing characters in ISO string");
+    return out;
+}
+
+/// Two ASCII digits at `s[p]` form a number, or null.
+fn twoDigits(s: []const u8, p: usize) ?u8 {
+    if (p + 2 > s.len or !std.ascii.isDigit(s[p]) or !std.ascii.isDigit(s[p + 1])) return null;
+    return std.fmt.parseInt(u8, s[p .. p + 2], 10) catch null;
+}
+
+/// Parse "HH[[:]MM[[:]SS[.fraction]]]" at `*i` (no leading designator). The ':'
+/// separators are optional (compact ISO form is accepted); a fraction is allowed
+/// only on seconds — the caller's full-consume check rejects fractional
+/// minutes/hours. A leap second (:60) is clamped to :59.
+fn parseTimeSection(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalError!void {
+    out.h = twoDigits(s, i.*) orelse return self.throwError("RangeError", "invalid ISO time");
+    i.* += 2;
+    if (i.* < s.len and s[i.*] == ':') i.* += 1;
+    if (twoDigits(s, i.*)) |mm| {
+        out.mi = mm;
+        i.* += 2;
+        if (i.* < s.len and s[i.*] == ':') i.* += 1;
+        if (twoDigits(s, i.*)) |ss| {
+            out.s = ss;
+            i.* += 2;
+            if (i.* < s.len and (s[i.*] == '.' or s[i.*] == ',')) {
+                i.* += 1;
+                const fstart = i.*;
+                var fbuf: [9]u8 = .{ '0', '0', '0', '0', '0', '0', '0', '0', '0' };
+                var k: usize = 0;
+                while (i.* < s.len and std.ascii.isDigit(s[i.*])) : (i.* += 1) {
+                    if (k < 9) fbuf[k] = s[i.*];
+                    k += 1;
+                }
+                if (i.* == fstart or i.* - fstart > 9) return self.throwError("RangeError", "invalid fractional second");
+                out.frac_ns = std.fmt.parseInt(u32, &fbuf, 10) catch 0;
+            }
+        }
+    }
+    if (out.h > 23 or out.mi > 59 or out.s > 60) return self.throwError("RangeError", "ISO time out of range");
+    if (out.s == 60) out.s = 59; // leap second
+}
+
+/// Parse a trailing "Z" / "±HH[:MM[:SS[.frac]]]" UTC offset, advancing `*i`.
+fn parseOffset(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalError!void {
+    if (i.* >= s.len) return;
+    if (s[i.*] == 'Z' or s[i.*] == 'z') {
+        out.z = true;
+        i.* += 1;
+        return;
+    }
+    var oneg = false;
+    if (s[i.*] == '+' or s[i.*] == '-') {
+        oneg = s[i.*] == '-';
+        i.* += 1;
+    } else return; // a non-ASCII minus sign is not a valid offset
+    const oh = twoDigits(s, i.*) orelse return self.throwError("RangeError", "invalid UTC offset");
+    i.* += 2;
+    var om: u8 = 0;
+    if (i.* < s.len and s[i.*] == ':') i.* += 1;
+    if (twoDigits(s, i.*)) |mm| {
+        om = mm;
+        i.* += 2;
+        // Optional offset seconds and fraction (consumed and validated, ignored).
+        if (i.* < s.len and s[i.*] == ':') i.* += 1;
+        if (twoDigits(s, i.*)) |_| {
+            i.* += 2;
+            if (i.* < s.len and (s[i.*] == '.' or s[i.*] == ',')) {
+                i.* += 1;
+                const fs = i.*;
+                while (i.* < s.len and std.ascii.isDigit(s[i.*])) i.* += 1;
+                if (i.* == fs or i.* - fs > 9) return self.throwError("RangeError", "invalid UTC offset");
+            }
+        }
+    }
+    if (oh > 23 or om > 59) return self.throwError("RangeError", "UTC offset out of range");
+    out.has_offset = true;
+    out.off_ns = (@as(i128, oh) * nsPerUnit(.hour) + @as(i128, om) * nsPerUnit(.minute)) * (if (oneg) @as(i128, -1) else 1);
+}
+
+/// Parse a Plain* date string: strips annotations, parses the body, and rejects
+/// a UTC ("Z") designator (which would make it an exact-time string).
+fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
+    const ann = try stripTemporalAnnotations(self, s_in);
+    const b = try parseTemporalBody(self, ann.body);
+    if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainDate");
+    return .{ .y = b.y, .m = b.mo, .d = b.d };
 }
 
 /// Parsed ISO date-time with its epoch nanoseconds (offset/`Z` applied).
-const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128 };
+const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_offset: bool = false };
 
-/// Parse "YYYY-MM-DD[T ]HH:MM[:SS[.fraction]][Z|±HH:MM]" (time optional). The
-/// epoch is computed from the local fields minus any UTC offset.
+/// Parse "YYYY-MM-DD[T ]HH:MM[:SS[.fraction]][Z|±HH:MM]" (annotations stripped,
+/// time optional). The epoch is the local fields minus any UTC offset; callers
+/// that forbid an exact-time string check `.z`/`.has_offset` themselves.
 fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
-    var s = s_in;
-    var neg = false;
-    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) {
-        neg = s[0] == '-';
-        s = s[1..];
-    }
-    const ylen: usize = if (neg or (s_in.len > 0 and s_in[0] == '+')) 6 else 4;
-    if (s.len < ylen + 6) return self.throwError("RangeError", "invalid ISO date-time");
-    const yraw = std.fmt.parseInt(i64, s[0..ylen], 10) catch return self.throwError("RangeError", "invalid ISO year");
-    if (s[ylen] != '-' or s[ylen + 3] != '-') return self.throwError("RangeError", "invalid ISO date-time");
-    const mo = std.fmt.parseInt(u8, s[ylen + 1 .. ylen + 3], 10) catch return self.throwError("RangeError", "invalid ISO month");
-    const d = std.fmt.parseInt(u8, s[ylen + 4 .. ylen + 6], 10) catch return self.throwError("RangeError", "invalid ISO day");
-    const y: i64 = if (neg) -yraw else yraw;
-    try checkIsoDate(self, @floatFromInt(y), @floatFromInt(mo), @floatFromInt(d));
-    var h: u8 = 0;
-    var mi: u8 = 0;
-    var sec: u8 = 0;
-    var frac_ns: u32 = 0;
-    var off_ns: i128 = 0;
-    var i: usize = ylen + 6;
-    if (i < s.len and (s[i] == 'T' or s[i] == 't' or s[i] == ' ')) {
-        i += 1;
-        if (i + 2 > s.len) return self.throwError("RangeError", "invalid ISO time");
-        h = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid ISO hour");
-        i += 2;
-        if (i < s.len and s[i] == ':') i += 1;
-        if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
-            mi = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid ISO minute");
-            i += 2;
-            if (i < s.len and s[i] == ':') i += 1;
-            if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
-                sec = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid ISO second");
-                i += 2;
-                if (i < s.len and (s[i] == '.' or s[i] == ',')) {
-                    i += 1;
-                    var fbuf: [9]u8 = .{ '0', '0', '0', '0', '0', '0', '0', '0', '0' };
-                    var k: usize = 0;
-                    while (i < s.len and std.ascii.isDigit(s[i]) and k < 9) : (i += 1) {
-                        fbuf[k] = s[i];
-                        k += 1;
-                    }
-                    while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
-                    frac_ns = std.fmt.parseInt(u32, &fbuf, 10) catch 0;
-                }
-            }
-        }
-        // Offset / Z.
-        if (i < s.len and (s[i] == 'Z' or s[i] == 'z')) {
-            i += 1;
-        } else if (i < s.len and (s[i] == '+' or s[i] == '-')) {
-            const oneg = s[i] == '-';
-            i += 1;
-            if (i + 2 > s.len) return self.throwError("RangeError", "invalid offset");
-            const oh = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid offset");
-            i += 2;
-            var om: u8 = 0;
-            if (i < s.len and s[i] == ':') i += 1;
-            if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
-                om = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch 0;
-                i += 2;
-            }
-            off_ns = (@as(i128, oh) * nsPerUnit(.hour) + @as(i128, om) * nsPerUnit(.minute)) * (if (oneg) @as(i128, -1) else 1);
-        }
-    }
-    const epoch_days = tDaysFromCivil(y, mo, d);
+    const ann = try stripTemporalAnnotations(self, s_in);
+    const b = try parseTemporalBody(self, ann.body);
+    const epoch_days = tDaysFromCivil(b.y, b.mo, b.d);
     const local_ns = @as(i128, epoch_days) * 86_400_000_000_000 +
-        @as(i128, h) * nsPerUnit(.hour) + @as(i128, mi) * nsPerUnit(.minute) +
-        @as(i128, sec) * nsPerUnit(.second) + @as(i128, frac_ns);
+        @as(i128, b.h) * nsPerUnit(.hour) + @as(i128, b.mi) * nsPerUnit(.minute) +
+        @as(i128, b.s) * nsPerUnit(.second) + @as(i128, b.frac_ns);
     return .{
-        .y = y, .mo = mo, .d = d, .h = h, .mi = mi, .s = sec,
-        .ms = @intCast(frac_ns / 1_000_000),
-        .us = @intCast((frac_ns / 1_000) % 1_000),
-        .ns = @intCast(frac_ns % 1_000),
-        .epoch_ns = local_ns - off_ns,
+        .y = b.y, .mo = b.mo, .d = b.d, .h = b.h, .mi = b.mi, .s = b.s,
+        .ms = @intCast(b.frac_ns / 1_000_000),
+        .us = @intCast((b.frac_ns / 1_000) % 1_000),
+        .ns = @intCast(b.frac_ns % 1_000),
+        .epoch_ns = local_ns - b.off_ns,
+        .z = b.z,
+        .has_offset = b.has_offset,
     };
 }
 
@@ -11667,10 +11800,7 @@ fn parseDurationString(self: *Interpreter, s: []const u8) EvalError![10]f64 {
     var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     var i: usize = 0;
     var sign: f64 = 1;
-    if (i + 3 <= s.len and s[i] == 0xE2 and s[i + 1] == 0x88 and s[i + 2] == 0x92) {
-        sign = -1; // U+2212 MINUS SIGN
-        i += 3;
-    } else if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) {
         if (s[i] == '-') sign = -1;
         i += 1;
     }
@@ -12019,16 +12149,19 @@ fn toYearMonthFields(self: *Interpreter, v: Value) EvalError!IsoYM {
         return .{ .y = @intFromFloat(y), .m = m };
     }
     if (v == .string) {
-        // Accept a bare "YYYY-MM" as well as a full ISO date prefix.
-        const s = v.string;
-        if (s.len == 7 and s[4] == '-') {
+        // Accept a bare "YYYY-MM" (annotations allowed) as well as a full ISO
+        // date string. A UTC designator makes it an exact-time string → reject.
+        const ann = try stripTemporalAnnotations(self, v.string);
+        const s = ann.body;
+        if (s.len == 7 and s[4] == '-' and std.ascii.isDigit(s[0])) {
             const y = std.fmt.parseInt(i64, s[0..4], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
             const m = std.fmt.parseInt(u8, s[5..7], 10) catch return self.throwError("RangeError", "invalid ISO month");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             return .{ .y = y, .m = m };
         }
-        const d = try parseIsoDate(self, s);
-        return .{ .y = d.y, .m = d.m };
+        const b = try parseTemporalBody(self, s);
+        if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainYearMonth");
+        return .{ .y = b.y, .m = b.mo };
     }
     return self.throwError("TypeError", "cannot convert to a PlainYearMonth");
 }
@@ -12231,10 +12364,12 @@ fn toMonthDayFields(self: *Interpreter, v: Value) EvalError!IsoMD {
         return .{ .m = m, .d = @intFromFloat(d) };
     }
     if (v == .string) {
-        // Accept "MM-DD" and "--MM-DD" as well as a full ISO date prefix.
-        var s = v.string;
+        // Accept "MM-DD" and "--MM-DD" (annotations allowed) as well as a full
+        // ISO date string; a UTC designator is rejected.
+        const ann = try stripTemporalAnnotations(self, v.string);
+        var s = ann.body;
         if (std.mem.startsWith(u8, s, "--")) s = s[2..];
-        if (s.len == 5 and s[2] == '-') {
+        if (s.len == 5 and s[2] == '-' and std.ascii.isDigit(s[0])) {
             const m = std.fmt.parseInt(u8, s[0..2], 10) catch return self.throwError("RangeError", "invalid ISO month");
             const d = std.fmt.parseInt(u8, s[3..5], 10) catch return self.throwError("RangeError", "invalid ISO day");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
@@ -12242,8 +12377,9 @@ fn toMonthDayFields(self: *Interpreter, v: Value) EvalError!IsoMD {
             if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
             return .{ .m = m, .d = d };
         }
-        const dd = try parseIsoDate(self, v.string);
-        return .{ .m = dd.m, .d = dd.d };
+        const b = try parseTemporalBody(self, ann.body);
+        if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainMonthDay");
+        return .{ .m = b.mo, .d = b.d };
     }
     return self.throwError("TypeError", "cannot convert to a PlainMonthDay");
 }
@@ -12678,27 +12814,33 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool) EvalError
         return t;
     }
     if (v == .string) {
-        // Accept a bare time, or the time portion of a date-time string.
-        const s = v.string;
-        const tpos = std.mem.indexOfAny(u8, s, "Tt ");
-        const ts = if (tpos) |p| s[p + 1 ..] else s;
-        if (ts.len < 2) return self.throwError("RangeError", "invalid ISO time");
-        var i: usize = 0;
-        const h = std.fmt.parseInt(u8, ts[0..2], 10) catch return self.throwError("RangeError", "invalid ISO time");
-        i = 2;
-        var mi: u8 = 0;
-        var sec: u8 = 0;
-        if (i < ts.len and ts[i] == ':') i += 1;
-        if (i + 2 <= ts.len and std.ascii.isDigit(ts[i])) {
-            mi = std.fmt.parseInt(u8, ts[i .. i + 2], 10) catch 0;
-            i += 2;
-            if (i < ts.len and ts[i] == ':') i += 1;
-            if (i + 2 <= ts.len and std.ascii.isDigit(ts[i])) {
-                sec = std.fmt.parseInt(u8, ts[i .. i + 2], 10) catch 0;
-            }
+        // A bare time ("HH:MM:SS.fff"), or the time portion of a full date-time
+        // string. A UTC designator is rejected, as is a date-only string.
+        const ann = try stripTemporalAnnotations(self, v.string);
+        const s = ann.body;
+        var tb: TBody = .{ .y = 0, .mo = 1, .d = 1, .has_time = true };
+        if (s.len > 0 and (s[0] == 'T' or s[0] == 't')) {
+            // Bare time with the ISO time designator: "T00:30", "T0030".
+            var i: usize = 1;
+            try parseTimeSection(self, s, &i, &tb);
+            try parseOffset(self, s, &i, &tb);
+            if (i != s.len) return self.throwError("RangeError", "trailing characters in ISO time");
+        } else if (s.len >= 10 and s[4] == '-' and s[7] == '-') {
+            // A full date-time string: parse it and take the time portion.
+            tb = try parseTemporalBody(self, s);
+            if (!tb.has_time) return self.throwError("RangeError", "PlainTime string has no time component");
+        } else {
+            var i: usize = 0;
+            try parseTimeSection(self, s, &i, &tb);
+            try parseOffset(self, s, &i, &tb);
+            if (i != s.len) return self.throwError("RangeError", "trailing characters in ISO time");
         }
-        if (h > 23 or mi > 59 or sec > 59) return self.throwError("RangeError", "time out of range");
-        setTimeFields(&t, .{ @floatFromInt(h), @floatFromInt(mi), @floatFromInt(sec), 0, 0, 0 });
+        if (tb.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainTime");
+        setTimeFields(&t, .{
+            @floatFromInt(tb.h),                     @floatFromInt(tb.mi),
+            @floatFromInt(tb.s),                     @floatFromInt(tb.frac_ns / 1_000_000),
+            @floatFromInt((tb.frac_ns / 1_000) % 1_000), @floatFromInt(tb.frac_ns % 1_000),
+        });
         return t;
     }
     return self.throwError("TypeError", "cannot convert to a PlainTime");
@@ -12904,6 +13046,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalDat
     }
     if (v == .string) {
         const p = try parseDateTimeNs(self, v.string);
+        if (p.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainDateTime");
         var t: value.TemporalData = .{ .kind = .plain_date_time };
         t.year = @intCast(p.y);
         t.month = p.mo;
@@ -13659,7 +13802,7 @@ fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
         if (tzv == .string) {
             const tz = try parseTimeZone(self, tzv.string);
             const f = try toPlainDateFields(self, v);
-            const tm = try toPlainTimeData(self, v);
+            const tm = try toPlainTimeDataOpt(self, v, false);
             var l: value.TemporalData = .{ .kind = .plain_date_time };
             l.year = @intCast(f.y);
             l.month = f.m;
