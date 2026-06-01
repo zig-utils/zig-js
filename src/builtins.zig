@@ -649,9 +649,11 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) H
     _ = this;
     const self = interp(ctx);
     if (arg(args, 0) == .object) {
+        const o = arg(args, 0).object;
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGetProto(o);
         // [[GetPrototypeOf]]: a callable with no explicit prototype reports
         // %Function.prototype% (every function inherits it).
-        if (self.effectiveProto(arg(args, 0).object)) |p| return .{ .object = p };
+        if (self.effectiveProto(o)) |p| return .{ .object = p };
     }
     return .null;
 }
@@ -928,18 +930,24 @@ fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) Host
 }
 
 pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
+    const self = interp(ctx);
     const o = arg(args, 0);
-    if (o == .object) o.object.extensible = false;
+    if (o == .object) {
+        if (o.object.proxy_handler != null or o.object.proxy_revoked) {
+            _ = try self.proxyPreventExt(o.object);
+        } else o.object.extensible = false;
+    }
     return o;
 }
 
 pub fn objectIsExtensible(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
+    const self = interp(ctx);
     const o = arg(args, 0);
-    return .{ .boolean = o == .object and o.object.extensible };
+    if (o != .object) return .{ .boolean = false };
+    if (o.object.proxy_handler != null or o.object.proxy_revoked) return .{ .boolean = try self.proxyIsExtensible(o.object) };
+    return .{ .boolean = o.object.extensible };
 }
 
 pub fn objectSeal(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

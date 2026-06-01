@@ -1909,7 +1909,11 @@ pub const Interpreter = struct {
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.object.elements.append(self.arena, a);
-                return self.callValueWithThis(trap, &.{ .{ .object = target }, arr, callee }, .{ .object = obj.proxy_handler.? });
+                const res = try self.callValueWithThis(trap, &.{ .{ .object = target }, arr, callee }, .{ .object = obj.proxy_handler.? });
+                // The [[Construct]] trap must return an Object (9.5.14 step 9).
+                if (res != .object or res.object.is_symbol or res.object.is_bigint)
+                    return self.throwError("TypeError", "proxy 'construct' trap must return an object");
+                return res;
             }
             return self.construct(.{ .object = target }, args);
         }
@@ -2925,6 +2929,64 @@ pub const Interpreter = struct {
     /// without a JS call frame, so the normal call-depth limit wouldn't catch it).
     fn proxyDepth(self: *Interpreter) EvalError!void {
         if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
+    }
+
+    /// [[GetPrototypeOf]] of an (unwrapped) prototype value for a target object,
+    /// honoring a target that is itself a Proxy.
+    fn ordinaryProtoValue(self: *Interpreter, o: *value.Object) EvalError!Value {
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGetProto(o);
+        return if (o.proto) |p| Value{ .object = p } else .null;
+    }
+
+    /// [[GetPrototypeOf]] for a Proxy (9.5.1): invoke the trap, require an Object
+    /// or null result, and enforce the non-extensible-target invariant.
+    pub fn proxyGetProto(self: *Interpreter, o: *value.Object) EvalError!Value {
+        try self.proxyDepth();
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'getPrototypeOf' on a proxy that has been revoked");
+        const trap = (try self.proxyTrap(o, "getPrototypeOf")) orelse return self.ordinaryProtoValue(target);
+        const res = try self.callValueWithThis(trap, &.{.{ .object = target }}, .{ .object = o.proxy_handler.? });
+        if (res != .null and (res != .object or res.object.is_symbol or res.object.is_bigint))
+            return self.throwError("TypeError", "proxy 'getPrototypeOf' trap must return an object or null");
+        if (!try self.ordinaryIsExtensible(target)) {
+            const tp = try self.ordinaryProtoValue(target);
+            const same = (res == .null and tp == .null) or (res == .object and tp == .object and res.object == tp.object);
+            if (!same) return self.throwError("TypeError", "proxy 'getPrototypeOf' trap result must match the prototype of a non-extensible target");
+        }
+        return res;
+    }
+
+    /// [[IsExtensible]] honoring a Proxy target.
+    fn ordinaryIsExtensible(self: *Interpreter, o: *value.Object) EvalError!bool {
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxyIsExtensible(o);
+        return o.extensible;
+    }
+
+    /// [[IsExtensible]] for a Proxy (9.5.3): the boolean trap result must equal
+    /// the target's own extensibility.
+    pub fn proxyIsExtensible(self: *Interpreter, o: *value.Object) EvalError!bool {
+        try self.proxyDepth();
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'isExtensible' on a proxy that has been revoked");
+        const trap = (try self.proxyTrap(o, "isExtensible")) orelse return self.ordinaryIsExtensible(target);
+        const res = (try self.callValueWithThis(trap, &.{.{ .object = target }}, .{ .object = o.proxy_handler.? })).toBoolean();
+        if (res != try self.ordinaryIsExtensible(target))
+            return self.throwError("TypeError", "proxy 'isExtensible' trap result must match the target's extensibility");
+        return res;
+    }
+
+    /// [[PreventExtensions]] for a Proxy (9.5.4): a truthy trap result requires
+    /// the target to already be non-extensible.
+    pub fn proxyPreventExt(self: *Interpreter, o: *value.Object) EvalError!bool {
+        try self.proxyDepth();
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'preventExtensions' on a proxy that has been revoked");
+        const trap = (try self.proxyTrap(o, "preventExtensions")) orelse {
+            if (target.proxy_handler != null) return self.proxyPreventExt(target);
+            target.extensible = false;
+            return true;
+        };
+        const res = (try self.callValueWithThis(trap, &.{.{ .object = target }}, .{ .object = o.proxy_handler.? })).toBoolean();
+        if (res and try self.ordinaryIsExtensible(target))
+            return self.throwError("TypeError", "proxy 'preventExtensions' cannot report success while the target is extensible");
+        return res;
     }
 
     fn proxyGet(self: *Interpreter, o: *value.Object, key: []const u8, receiver: Value) EvalError!Value {
@@ -6729,6 +6791,7 @@ fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
     if (target != .object) return self.throwError("TypeError", "Reflect.getPrototypeOf called on non-object");
+    if (target.object.proxy_handler != null or target.object.proxy_revoked) return self.proxyGetProto(target.object);
     return if (target.object.proto) |p| .{ .object = p } else .null;
 }
 
