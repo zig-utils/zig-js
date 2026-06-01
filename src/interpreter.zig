@@ -4076,6 +4076,14 @@ pub const Interpreter = struct {
         return .{ .object = o };
     }
 
+    /// The `{ read, written }` record returned by Uint8Array.prototype.setFrom*.
+    fn readWrittenResult(self: *Interpreter, read: usize, written: usize) EvalError!Value {
+        const o = (try self.newObject()).object;
+        try self.setProp(o, "read", .{ .number = @floatFromInt(read) });
+        try self.setProp(o, "written", .{ .number = @floatFromInt(written) });
+        return .{ .object = o };
+    }
+
     /// Pull the next result from iterator `it`, returning `{ done, value }`.
     fn iterStep(self: *Interpreter, it: Value) EvalError!struct { done: bool, value: Value } {
         const r = try self.callMethod(it, "next", &.{});
@@ -9162,6 +9170,297 @@ fn taProtoGetter(comptime which: enum { length, byte_length, byte_offset, buffer
     }.call;
 }
 
+// ===== Uint8Array <-> base64 / hex (ES2025) ================================
+// Faithful port of the proposal-arraybuffer-base64 abstract operations
+// (FromBase64 / FromHex / encode). Whitespace, padding, the lastChunkHandling
+// modes, the strict extra-bits check, and the maxLength byte budget (used by
+// the set* methods) all follow the spec.
+
+const LastChunkHandling = enum { loose, strict, stop_before_partial };
+
+/// A decode result: bytes produced so far, the number of input characters
+/// fully consumed (`read`), and whether a SyntaxError should be raised. The
+/// set* methods write `bytes` into the target *before* raising, so an error
+/// still leaves the valid leading chunks in place.
+const DecodeResult = struct { read: usize, bytes: []u8, err: bool };
+
+fn isAsciiB64Whitespace(c: u8) bool {
+    return c == 0x09 or c == 0x0A or c == 0x0C or c == 0x0D or c == 0x20;
+}
+
+fn base64Sextet(c: u8, url: bool) ?u8 {
+    return switch (c) {
+        'A'...'Z' => c - 'A',
+        'a'...'z' => c - 'a' + 26,
+        '0'...'9' => c - '0' + 52,
+        '+' => if (url) null else @as(u8, 62),
+        '/' => if (url) null else @as(u8, 63),
+        '-' => if (url) @as(u8, 62) else null,
+        '_' => if (url) @as(u8, 63) else null,
+        else => null,
+    };
+}
+
+fn hexDigit(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// DecodeBase64Chunk: append the 1–3 bytes a 2/3/4-sextet chunk encodes. With
+/// `throw_extra` (strict mode) a non-zero tail-bit pattern yields no output and
+/// signals an error instead.
+fn decodeBase64Chunk(self: *Interpreter, bytes: *std.ArrayListUnmanaged(u8), chunk: []const u8, throw_extra: bool) EvalError!bool {
+    switch (chunk.len) {
+        2 => {
+            if (throw_extra and (chunk[1] & 0x0F) != 0) return true;
+            try bytes.append(self.arena, (chunk[0] << 2) | (chunk[1] >> 4));
+        },
+        3 => {
+            if (throw_extra and (chunk[2] & 0x03) != 0) return true;
+            try bytes.append(self.arena, (chunk[0] << 2) | (chunk[1] >> 4));
+            try bytes.append(self.arena, ((chunk[1] & 0x0F) << 4) | (chunk[2] >> 2));
+        },
+        else => {
+            try bytes.append(self.arena, (chunk[0] << 2) | (chunk[1] >> 4));
+            try bytes.append(self.arena, ((chunk[1] & 0x0F) << 4) | (chunk[2] >> 2));
+            try bytes.append(self.arena, ((chunk[2] & 0x03) << 6) | chunk[3]);
+        },
+    }
+    return false;
+}
+
+fn decodeBase64(self: *Interpreter, s: []const u8, url: bool, lch: LastChunkHandling, max_len: usize) EvalError!DecodeResult {
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    var read: usize = 0;
+    var chunk: [4]u8 = undefined;
+    var chunk_len: usize = 0;
+    var index: usize = 0;
+    const length = s.len;
+    if (max_len == 0) return .{ .read = 0, .bytes = bytes.items, .err = false };
+    while (true) {
+        while (index < length and isAsciiB64Whitespace(s[index])) index += 1;
+        if (index == length) {
+            if (chunk_len > 0) switch (lch) {
+                .stop_before_partial => return .{ .read = read, .bytes = bytes.items, .err = false },
+                .loose => {
+                    if (chunk_len == 1) return .{ .read = read, .bytes = bytes.items, .err = true };
+                    _ = try decodeBase64Chunk(self, &bytes, chunk[0..chunk_len], false);
+                },
+                .strict => return .{ .read = read, .bytes = bytes.items, .err = true },
+            };
+            return .{ .read = length, .bytes = bytes.items, .err = false };
+        }
+        const ch = s[index];
+        if (ch == '=') {
+            if (chunk_len < 2) return .{ .read = read, .bytes = bytes.items, .err = true };
+            index += 1;
+            while (index < length and isAsciiB64Whitespace(s[index])) index += 1;
+            if (chunk_len == 2) {
+                if (index == length) {
+                    if (lch == .stop_before_partial) return .{ .read = read, .bytes = bytes.items, .err = false };
+                    return .{ .read = read, .bytes = bytes.items, .err = true };
+                }
+                if (s[index] == '=') {
+                    index += 1;
+                    while (index < length and isAsciiB64Whitespace(s[index])) index += 1;
+                }
+            }
+            if (index < length) return .{ .read = read, .bytes = bytes.items, .err = true };
+            const had_extra = try decodeBase64Chunk(self, &bytes, chunk[0..chunk_len], lch == .strict);
+            return .{ .read = if (had_extra) read else length, .bytes = bytes.items, .err = had_extra };
+        }
+        const val = base64Sextet(ch, url) orelse return .{ .read = read, .bytes = bytes.items, .err = true };
+        const remaining = max_len - bytes.items.len;
+        // Stop before a chunk that the byte budget cannot fully hold.
+        if ((remaining == 1 and chunk_len == 2) or (remaining == 2 and chunk_len == 3))
+            return .{ .read = read, .bytes = bytes.items, .err = false };
+        chunk[chunk_len] = val;
+        chunk_len += 1;
+        index += 1;
+        if (chunk_len == 4) {
+            _ = try decodeBase64Chunk(self, &bytes, chunk[0..4], false);
+            chunk_len = 0;
+            read = index;
+            if (bytes.items.len == max_len) return .{ .read = read, .bytes = bytes.items, .err = false };
+        }
+    }
+}
+
+fn decodeHex(self: *Interpreter, s: []const u8, max_len: usize) EvalError!DecodeResult {
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    var read: usize = 0;
+    // FromHex rejects an odd-length input up front, before decoding any byte —
+    // a partial leading run is *not* written when the total length is odd.
+    if (s.len % 2 != 0) return .{ .read = 0, .bytes = bytes.items, .err = true };
+    while (read < s.len and bytes.items.len < max_len) {
+        const hi = hexDigit(s[read]) orelse return .{ .read = read, .bytes = bytes.items, .err = true };
+        const lo = hexDigit(s[read + 1]) orelse return .{ .read = read, .bytes = bytes.items, .err = true };
+        try bytes.append(self.arena, hi * 16 + lo);
+        read += 2;
+    }
+    return .{ .read = read, .bytes = bytes.items, .err = false };
+}
+
+fn encodeBase64(self: *Interpreter, bytes: []const u8, url: bool, omit_padding: bool) EvalError![]const u8 {
+    const tbl: []const u8 = if (url)
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    else
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i + 3 <= bytes.len) : (i += 3) {
+        const n = (@as(u32, bytes[i]) << 16) | (@as(u32, bytes[i + 1]) << 8) | bytes[i + 2];
+        try out.append(self.arena, tbl[(n >> 18) & 63]);
+        try out.append(self.arena, tbl[(n >> 12) & 63]);
+        try out.append(self.arena, tbl[(n >> 6) & 63]);
+        try out.append(self.arena, tbl[n & 63]);
+    }
+    switch (bytes.len - i) {
+        1 => {
+            const n = @as(u32, bytes[i]) << 16;
+            try out.append(self.arena, tbl[(n >> 18) & 63]);
+            try out.append(self.arena, tbl[(n >> 12) & 63]);
+            if (!omit_padding) try out.appendSlice(self.arena, "==");
+        },
+        2 => {
+            const n = (@as(u32, bytes[i]) << 16) | (@as(u32, bytes[i + 1]) << 8);
+            try out.append(self.arena, tbl[(n >> 18) & 63]);
+            try out.append(self.arena, tbl[(n >> 12) & 63]);
+            try out.append(self.arena, tbl[(n >> 6) & 63]);
+            if (!omit_padding) try out.append(self.arena, '=');
+        },
+        else => {},
+    }
+    return out.items;
+}
+
+/// GetOptionsObject: undefined → no options; an ordinary object → itself;
+/// anything else (including null, symbols, bigints) → TypeError.
+fn getOptionsObject(self: *Interpreter, v: Value) EvalError!?*value.Object {
+    if (v == .undefined) return null;
+    if (v == .object and !v.object.is_symbol and !v.object.is_bigint) return v.object;
+    return self.throwError("TypeError", "options must be an object");
+}
+
+/// GetOption for a string-typed option: the value must be undefined (→default)
+/// or a primitive String drawn from `allowed`; no ToString coercion.
+fn getStringOption(self: *Interpreter, opts: ?*value.Object, key: []const u8, allowed: []const []const u8, default: []const u8) EvalError![]const u8 {
+    const o = opts orelse return default;
+    const v = try self.getProperty(.{ .object = o }, key);
+    if (v == .undefined) return default;
+    if (v != .string) return self.throwError("TypeError", "option value must be a string");
+    for (allowed) |a| if (std.mem.eql(u8, v.string, a)) return v.string;
+    return self.throwError("TypeError", "invalid option value");
+}
+
+fn getBoolOption(self: *Interpreter, opts: ?*value.Object, key: []const u8) EvalError!bool {
+    const o = opts orelse return false;
+    return (try self.getProperty(.{ .object = o }, key)).toBoolean();
+}
+
+fn uint8ArrayBytes(o: *value.Object) ?[]u8 {
+    const ta = o.typed_array orelse return null;
+    if (ta.kind != .u8) return null;
+    const buf = ta.buffer.array_buffer orelse return null;
+    if (buf.detached) return null;
+    const avail = if (ta.byte_offset <= buf.data.len) buf.data.len - ta.byte_offset else 0;
+    const n = @min(ta.length, avail);
+    return buf.data[ta.byte_offset .. ta.byte_offset + n];
+}
+
+fn requireUint8Array(self: *Interpreter, this: Value) EvalError!*value.Object {
+    if (this == .object) if (this.object.typed_array) |ta| if (ta.kind == .u8) return this.object;
+    return self.throwError("TypeError", "method requires a Uint8Array receiver");
+}
+
+fn uint8FromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    _ = this;
+    const sv = arg(args, 0);
+    if (sv != .string) return self.throwError("TypeError", "Uint8Array.fromBase64 requires a string argument");
+    const opts = try getOptionsObject(self, arg(args, 1));
+    const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
+    const lch = lastChunkFromName(try getStringOption(self, opts, "lastChunkHandling", &.{ "loose", "strict", "stop-before-partial" }, "loose"));
+    const r = try decodeBase64(self, sv.string, url, lch, std.math.maxInt(usize));
+    if (r.err) return self.throwError("SyntaxError", "invalid base64-encoded string");
+    const o = try newTypedArray(self, .u8, r.bytes.len);
+    @memcpy(o.typed_array.?.buffer.array_buffer.?.data[0..r.bytes.len], r.bytes);
+    return .{ .object = o };
+}
+
+fn uint8FromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    _ = this;
+    const sv = arg(args, 0);
+    if (sv != .string) return self.throwError("TypeError", "Uint8Array.fromHex requires a string argument");
+    const r = try decodeHex(self, sv.string, std.math.maxInt(usize));
+    if (r.err) return self.throwError("SyntaxError", "invalid hex-encoded string");
+    const o = try newTypedArray(self, .u8, r.bytes.len);
+    @memcpy(o.typed_array.?.buffer.array_buffer.?.data[0..r.bytes.len], r.bytes);
+    return .{ .object = o };
+}
+
+fn uint8ToBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = try requireUint8Array(self, this);
+    const opts = try getOptionsObject(self, arg(args, 0));
+    const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
+    const omit = try getBoolOption(self, opts, "omitPadding");
+    const bytes = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
+    return .{ .string = try encodeBase64(self, bytes, url, omit) };
+}
+
+fn uint8ToHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    _ = args;
+    const o = try requireUint8Array(self, this);
+    const bytes = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
+    const hex = "0123456789abcdef";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (bytes) |b| {
+        try out.append(self.arena, hex[b >> 4]);
+        try out.append(self.arena, hex[b & 0x0F]);
+    }
+    return .{ .string = out.items };
+}
+
+fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = try requireUint8Array(self, this);
+    const sv = arg(args, 0);
+    if (sv != .string) return self.throwError("TypeError", "setFromBase64 requires a string argument");
+    const opts = try getOptionsObject(self, arg(args, 1));
+    const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
+    const lch = lastChunkFromName(try getStringOption(self, opts, "lastChunkHandling", &.{ "loose", "strict", "stop-before-partial" }, "loose"));
+    const target = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
+    const r = try decodeBase64(self, sv.string, url, lch, target.len);
+    @memcpy(target[0..r.bytes.len], r.bytes);
+    if (r.err) return self.throwError("SyntaxError", "invalid base64-encoded string");
+    return try self.readWrittenResult(r.read, r.bytes.len);
+}
+
+fn uint8SetFromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const o = try requireUint8Array(self, this);
+    const sv = arg(args, 0);
+    if (sv != .string) return self.throwError("TypeError", "setFromHex requires a string argument");
+    const target = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
+    const r = try decodeHex(self, sv.string, target.len);
+    @memcpy(target[0..r.bytes.len], r.bytes);
+    if (r.err) return self.throwError("SyntaxError", "invalid hex-encoded string");
+    return try self.readWrittenResult(r.read, r.bytes.len);
+}
+
+fn lastChunkFromName(s: []const u8) LastChunkHandling {
+    if (std.mem.eql(u8, s, "strict")) return .strict;
+    if (std.mem.eql(u8, s, "stop-before-partial")) return .stop_before_partial;
+    return .loose;
+}
+
 fn taProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -11105,6 +11404,15 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
         try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
         try setConstructor(a, rs, proto, ctor);
+        // Uint8Array-only base64/hex conversion methods (ES2025).
+        if (kind == .u8) {
+            try setNative(a, rs, ctor, "fromBase64", 1, uint8FromBase64Fn);
+            try setNative(a, rs, ctor, "fromHex", 1, uint8FromHexFn);
+            try setNative(a, rs, proto, "toBase64", 0, uint8ToBase64Fn);
+            try setNative(a, rs, proto, "toHex", 0, uint8ToHexFn);
+            try setNative(a, rs, proto, "setFromBase64", 1, uint8SetFromBase64Fn);
+            try setNative(a, rs, proto, "setFromHex", 1, uint8SetFromHexFn);
+        }
         try env.put(kind.ctorName(), .{ .object = ctor });
     }
 
