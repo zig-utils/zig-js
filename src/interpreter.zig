@@ -8841,6 +8841,11 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     if (ta.buffer.array_buffer.?.immutable and
         (eq(name, "fill") or eq(name, "set") or eq(name, "sort") or eq(name, "copyWithin") or eq(name, "reverse")))
         return self.throwError("TypeError", "Cannot modify a TypedArray backed by an immutable ArrayBuffer");
+    // ValidateTypedArray throws on a detached buffer, before any argument is
+    // coerced. `subarray` is the lone method that tolerates detachment (it just
+    // builds a zero-length view).
+    if (ta.buffer.array_buffer.?.detached and !eq(name, "subarray"))
+        return self.throwError("TypeError", "Cannot operate on a TypedArray backed by a detached ArrayBuffer");
     const len = if (ta.buffer.array_buffer.?.detached) 0 else ta.length;
     const recv = Value{ .object = o };
     const cb_this: Value = if (args.len > 1) args[1] else .undefined;
