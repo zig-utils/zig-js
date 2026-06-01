@@ -3973,9 +3973,14 @@ pub const Interpreter = struct {
     fn taStore(self: *Interpreter, ta: *value.TypedArrayData, i: usize, v: Value) EvalError!void {
         if (ta.kind.isBigInt()) {
             const bv = try self.toBigIntValueImpl(v, false);
+            // TypedArraySetElement coerces first, then skips the store for an
+            // immutable buffer (a silent no-op, not a throw).
+            if (ta.buffer.array_buffer.?.immutable) return;
             value.taWriteBig(ta, i, bv.object.bigint);
         } else {
-            value.taWrite(ta, i, try self.toNumberV(v));
+            const num = try self.toNumberV(v);
+            if (ta.buffer.array_buffer.?.immutable) return;
+            value.taWrite(ta, i, num);
         }
     }
 
@@ -7378,6 +7383,8 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this != .object or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
             const dv = this.object.data_view.?;
+            // SetViewValue checks IsImmutableBuffer before coercing the index/value.
+            if (dv.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Cannot modify a DataView backed by an immutable ArrayBuffer");
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
             const val = if (args.len > 1) args[1] else .undefined;
             // Coerce the value (ToBigInt for the Big types, else ToNumber) before
@@ -8823,6 +8830,11 @@ fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*
 /// go through the buffer (`taRead`), writes coerce via ToNumber + `taWrite`.
 fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
     const ta = o.typed_array.?;
+    // ValidateTypedArray(O, write): the in-place mutators reject an immutable
+    // buffer up front, before coercing any argument.
+    if (ta.buffer.array_buffer.?.immutable and
+        (eq(name, "fill") or eq(name, "set") or eq(name, "sort") or eq(name, "copyWithin") or eq(name, "reverse")))
+        return self.throwError("TypeError", "Cannot modify a TypedArray backed by an immutable ArrayBuffer");
     const len = if (ta.buffer.array_buffer.?.detached) 0 else ta.length;
     const recv = Value{ .object = o };
     const cb_this: Value = if (args.len > 1) args[1] else .undefined;
@@ -9435,6 +9447,7 @@ fn uint8ToHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try requireUint8Array(self, this);
+    if (o.typed_array.?.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Cannot write to a Uint8Array backed by an immutable ArrayBuffer");
     const sv = arg(args, 0);
     if (sv != .string) return self.throwError("TypeError", "setFromBase64 requires a string argument");
     const opts = try getOptionsObject(self, arg(args, 1));
@@ -9450,6 +9463,7 @@ fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn uint8SetFromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try requireUint8Array(self, this);
+    if (o.typed_array.?.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Cannot write to a Uint8Array backed by an immutable ArrayBuffer");
     const sv = arg(args, 0);
     if (sv != .string) return self.throwError("TypeError", "setFromHex requires a string argument");
     const target = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
@@ -9499,21 +9513,61 @@ fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     return .{ .object = o };
 }
 
-fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resizable, detached }) value.NativeFn {
+fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resizable, detached, immutable }) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a non-ArrayBuffer");
             const ab = this.object.array_buffer.?;
+            // `immutable` is a non-shared-buffer accessor; the others apply to both.
+            if (which == .immutable and ab.is_shared) return self.throwError("TypeError", "get ArrayBuffer.prototype.immutable called on a SharedArrayBuffer");
             return switch (which) {
                 .byte_length => .{ .number = @floatFromInt(if (ab.detached) 0 else ab.data.len) },
                 .max_byte_length => .{ .number = @floatFromInt(if (ab.detached) 0 else (ab.max_byte_length orelse ab.data.len)) },
                 .resizable => .{ .boolean = ab.max_byte_length != null },
                 .detached => .{ .boolean = ab.detached },
+                .immutable => .{ .boolean = ab.immutable },
             };
         }
     }.call;
+}
+
+/// `ArrayBuffer.prototype.transferToImmutable([newLength])` — ArrayBufferCopyAndDetach
+/// with `preserveResizability` = immutable: copy the (clamped) bytes into a fresh
+/// fixed-length immutable buffer and detach the source.
+fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transferToImmutable called on a non-ArrayBuffer");
+    const ab = this.object.array_buffer.?;
+    if (ab.is_shared) return self.throwError("TypeError", "transferToImmutable cannot be called on a SharedArrayBuffer");
+    const new_len: usize = if (args.len > 0 and args[0] != .undefined) @intCast(try toIndexArg(self, args[0])) else ab.data.len;
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.immutable) return self.throwError("TypeError", "ArrayBuffer is already immutable");
+    const out = try self.makeArrayBuffer(new_len);
+    @memcpy(out.array_buffer.?.data[0..@min(new_len, ab.data.len)], ab.data[0..@min(new_len, ab.data.len)]);
+    out.array_buffer.?.immutable = true;
+    ab.detached = true;
+    return .{ .object = out };
+}
+
+/// `ArrayBuffer.prototype.sliceToImmutable([start[, end]])` — like `slice`, but
+/// the resulting buffer is immutable and the source is left intact.
+fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.sliceToImmutable called on a non-ArrayBuffer");
+    const ab = this.object.array_buffer.?;
+    if (ab.is_shared) return self.throwError("TypeError", "sliceToImmutable cannot be called on a SharedArrayBuffer");
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const blen = ab.data.len;
+    const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, blen, 0);
+    const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
+    const count = if (end > start) end - start else 0;
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const out = try self.makeArrayBuffer(count);
+    @memcpy(out.array_buffer.?.data[0..count], ab.data[start .. start + count]);
+    out.array_buffer.?.immutable = true;
+    return .{ .object = out };
 }
 
 /// `ArrayBuffer.prototype.resize(newByteLength)` — grow/shrink a resizable buffer.
@@ -9542,6 +9596,7 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
             const ab = this.object.array_buffer.?;
             if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+            if (ab.immutable) return self.throwError("TypeError", "an immutable ArrayBuffer cannot be transferred");
             const new_len: usize = if (args.len > 0 and args[0] != .undefined) @intCast(try toIndexArg(self, args[0])) else ab.data.len;
             const out = try self.makeArrayBuffer(new_len);
             @memcpy(out.array_buffer.?.data[0..@min(new_len, ab.data.len)], ab.data[0..@min(new_len, ab.data.len)]);
@@ -11307,10 +11362,13 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try setNative(a, rs, ab_proto, "resize", 1, arrayBufferResizeFn);
     try setNative(a, rs, ab_proto, "transfer", 0, arrayBufferTransferFn(false));
     try setNative(a, rs, ab_proto, "transferToFixedLength", 0, arrayBufferTransferFn(true));
+    try setNative(a, rs, ab_proto, "transferToImmutable", 0, arrayBufferTransferToImmutableFn);
+    try setNative(a, rs, ab_proto, "sliceToImmutable", 2, arrayBufferSliceToImmutableFn);
     try setNativeGetter(a, rs, ab_proto, "byteLength", arrayBufferGetter(.byte_length));
     try setNativeGetter(a, rs, ab_proto, "maxByteLength", arrayBufferGetter(.max_byte_length));
     try setNativeGetter(a, rs, ab_proto, "resizable", arrayBufferGetter(.resizable));
     try setNativeGetter(a, rs, ab_proto, "detached", arrayBufferGetter(.detached));
+    try setNativeGetter(a, rs, ab_proto, "immutable", arrayBufferGetter(.immutable));
     if (env.get("Symbol")) |sym| if (sym == .object) {
         if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
             try ab_proto.setOwn(a, rs, tt.object.sym_key, .{ .string = "ArrayBuffer" });

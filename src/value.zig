@@ -95,6 +95,9 @@ pub const ArrayBufferData = struct {
     max_byte_length: ?usize = null,
     /// A SharedArrayBuffer (never detaches; `grow` only increases length).
     is_shared: bool = false,
+    /// An immutable ArrayBuffer (from `transferToImmutable`/`sliceToImmutable`):
+    /// fixed-length, never detaches, and rejects every write.
+    immutable: bool = false,
 };
 
 /// Read typed-array element `i` (within bounds, buffer attached) as a Number.
