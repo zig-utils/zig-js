@@ -10400,6 +10400,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             try array_proto.setAttr(a, it_sym.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
         }
     }
+    // `Map.prototype[Symbol.iterator]` aliases `entries`, and `Set.prototype[
+    // Symbol.iterator]` aliases `values` — the same function objects. Done here
+    // (not in installMap/SetProto) because Symbol.iterator must already exist.
+    if (env.get("Map")) |mv| if (mv == .object) if (mv.object.getOwn("prototype")) |pv| if (pv == .object)
+        try aliasIteratorToMethod(a, root_shape, env, pv.object, "entries");
+    if (env.get("Set")) |sv| if (sv == .object) if (sv.object.getOwn("prototype")) |pv| if (pv == .object)
+        try aliasIteratorToMethod(a, root_shape, env, pv.object, "values");
 
     // Date — callable + constructable, with Date.now and a prototype.
     const date_ns = try a.create(value.Object);
@@ -14549,6 +14556,7 @@ fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {
     };
     inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], mapProtoMethod(s[0], false));
     try setNativeGetter(a, rs, p, "size", collectionSizeGetter(false));
+    // `Map.prototype[Symbol.iterator]` (= `entries`) is aliased after Symbol setup.
 }
 
 /// Install the Set.prototype methods (real, brand-checked own properties) on
@@ -14568,6 +14576,27 @@ fn installSetProto(env: *Environment, rs: *Shape) EvalError!void {
     };
     inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], setProtoMethod(s[0], false));
     try setNativeGetter(a, rs, p, "size", collectionSizeGetter(true));
+    // For a Set, `keys`, `values`, and `[Symbol.iterator]` are all the same
+    // function object (`values`), so `new Set()[Symbol.iterator]` is callable and
+    // `Set.prototype.keys === Set.prototype.values`.
+    if (p.getOwn("values")) |values_fn| {
+        try p.setOwn(a, rs, "keys", values_fn);
+        try p.setAttr(a, "keys", .{ .writable = true, .enumerable = false, .configurable = true });
+    }
+    // `Set.prototype[Symbol.iterator]` (= `values`) is aliased after Symbol setup.
+}
+
+/// Install `proto[Symbol.iterator]` as the same function object already on
+/// `proto[method]` (e.g. Map→entries, Set→values), with the standard method
+/// attributes. No-op if the Symbol global or the method isn't present yet.
+fn aliasIteratorToMethod(a: std.mem.Allocator, rs: *Shape, env: *Environment, proto: *value.Object, method: []const u8) EvalError!void {
+    const symv = env.get("Symbol") orelse return;
+    if (symv != .object) return;
+    const itv = symv.object.getOwn("iterator") orelse return;
+    if (itv != .object or !itv.object.is_symbol) return;
+    const fn_v = proto.getOwn(method) orelse return;
+    try proto.setOwn(a, rs, itv.object.sym_key, fn_v);
+    try proto.setAttr(a, itv.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
 }
 
 /// Monotonic id for unique Symbol property-key encodings (single-threaded;

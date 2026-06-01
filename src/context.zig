@@ -1171,6 +1171,20 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "Map/Set expose [Symbol.iterator]; Set keys === values" {
+    // `Map.prototype[Symbol.iterator]` is the same function as `entries`, and
+    // `Set.prototype[Symbol.iterator]`/`keys`/`values` are all the same.
+    try std.testing.expect((try evalIn("Map.prototype[Symbol.iterator] === Map.prototype.entries")).boolean);
+    try std.testing.expect((try evalIn("Set.prototype[Symbol.iterator] === Set.prototype.values")).boolean);
+    try std.testing.expect((try evalIn("Set.prototype.keys === Set.prototype.values")).boolean);
+    // for-of and spread over a Map/Set go through the property iterator.
+    try expectEvalStr("a,1|b,2",
+        \\var m = new Map([['a', 1], ['b', 2]]);
+        \\var out = []; for (var e of m) out.push(e[0] + ',' + e[1]); out.join('|')
+    );
+    try expectEvalStr("1,2,3", "[...new Set([1, 2, 3])].join(',')");
+}
+
 test "Reflect.* require a real Object target (Symbol/primitive throws)" {
     // A Symbol is internally object-tagged, but Reflect.* must reject it.
     try std.testing.expectError(error.Throw, evalIn("Reflect.get(Symbol(), 'x')"));
