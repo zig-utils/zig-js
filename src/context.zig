@@ -1171,6 +1171,19 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "parseFloat: Unicode whitespace, Infinity, and no numeric separators" {
+    // Leading StrWhiteSpace (incl. VT/FF/NBSP) is skipped, like `1.1`.
+    try std.testing.expectEqual(@as(f64, 1.1), (try evalIn("parseFloat('\\u000B\\u000C\\u00A01.1')")).number);
+    // Longest StrDecimalLiteral prefix; trailing junk and `_` separators stop it.
+    try std.testing.expectEqual(@as(f64, 3.14), (try evalIn("parseFloat('3.14abc')")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('1_0')")).number);
+    try std.testing.expectEqual(@as(f64, 1e100), (try evalIn("parseFloat('1e+100')")).number);
+    // Signed Infinity, and a bare `e` is not part of the number.
+    try std.testing.expect(std.math.isInf((try evalIn("parseFloat('-Infinity')")).number));
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('1e')")).number);
+    try std.testing.expect(std.math.isNan((try evalIn("parseFloat('.e5')")).number));
+}
+
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
     try std.testing.expect((try evalIn("isFinite('0')")).boolean);

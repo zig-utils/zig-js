@@ -28,8 +28,9 @@ pub fn toLen(n: f64) usize {
 }
 
 /// True for any ECMAScript WhiteSpace or LineTerminator code point — the exact
-/// set `String.prototype.trim`/`trimStart`/`trimEnd` strip.
-fn isJsTrimCp(cp: u21) bool {
+/// set `String.prototype.trim`/`trimStart`/`trimEnd` strip, and the StrWhiteSpace
+/// that `parseInt`/`parseFloat`/`Number(str)` skip at the start of their argument.
+pub fn isJsTrimCp(cp: u21) bool {
     return switch (cp) {
         0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020 => true,
         0x00A0, 0x1680 => true,

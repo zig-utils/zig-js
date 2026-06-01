@@ -99,18 +99,56 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     return self.eval(prog);
 }
 
-pub fn parseFloatFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    const s = try arg(args, 0).toString(interp(ctx).arena);
-    _ = this;
-    const trimmed = std.mem.trim(u8, s, " \t\r\n");
-    // Longest leading prefix that parses as a float.
-    var end: usize = trimmed.len;
-    while (end > 0) : (end -= 1) {
-        if (std.fmt.parseFloat(f64, trimmed[0..end])) |n| {
-            return .{ .number = n };
-        } else |_| {}
+/// Byte offset past the leading run of ECMAScript StrWhiteSpace (WhiteSpace +
+/// LineTerminator, the same set `trim` strips) in UTF-8 `s` — for parseInt /
+/// parseFloat, whose argument is trimmed of leading whitespace before scanning.
+fn skipStrWhiteSpace(s: []const u8) usize {
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        const len: usize = if (c < 0x80) 1 else (std.unicode.utf8ByteSequenceLength(c) catch break);
+        if (i + len > s.len) break;
+        const cp: u21 = if (len == 1) @as(u21, c) else (std.unicode.utf8Decode(s[i .. i + len]) catch break);
+        if (!interpreter.isJsTrimCp(cp)) break;
+        i += len;
     }
-    return .{ .number = std.math.nan(f64) };
+    return i;
+}
+
+pub fn parseFloatFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const s = try arg(args, 0).toString(interp(ctx).arena);
+    const nan = std.math.nan(f64);
+    // ParseFloat: trim leading StrWhiteSpace, then take the longest prefix that is
+    // a StrDecimalLiteral. We scan that grammar by hand rather than leaning on
+    // `std.fmt.parseFloat`, which accepts Zig-isms JS rejects (notably `_`
+    // digit separators, so `parseFloat("1_0")` must be 1, not 10).
+    var i = skipStrWhiteSpace(s);
+    const sign_start = i;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+    // "Infinity" (optionally signed) parses to ±∞.
+    if (std.mem.startsWith(u8, s[i..], "Infinity"))
+        return .{ .number = if (i > sign_start and s[sign_start] == '-') -std.math.inf(f64) else std.math.inf(f64) };
+    const num_start = i;
+    var saw_digit = false;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) saw_digit = true;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) saw_digit = true;
+    }
+    if (!saw_digit) return .{ .number = nan }; // no mantissa digits → NaN
+    // An exponent counts only if it has at least one digit; otherwise the `e`
+    // is not part of the number (`parseFloat("1e")` is 1).
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        var j = i + 1;
+        if (j < s.len and (s[j] == '+' or s[j] == '-')) j += 1;
+        if (j < s.len and s[j] >= '0' and s[j] <= '9') {
+            while (j < s.len and s[j] >= '0' and s[j] <= '9') : (j += 1) {}
+            i = j;
+        }
+    }
+    const n = std.fmt.parseFloat(f64, s[num_start..i]) catch return .{ .number = nan };
+    return .{ .number = if (sign_start != num_start and s[sign_start] == '-') -n else n };
 }
 
 pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
