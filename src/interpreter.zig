@@ -6768,7 +6768,7 @@ fn reflectGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
-    if (target != .object) return self.throwError("TypeError", "Reflect.get called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.get called on non-object");
     return self.getProperty(target, try self.keyOf(if (args.len > 1) args[1] else .undefined));
 }
 
@@ -6776,7 +6776,7 @@ fn reflectSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
-    if (target != .object) return self.throwError("TypeError", "Reflect.set called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.set called on non-object");
     try self.setMember(target, try self.keyOf(if (args.len > 1) args[1] else .undefined), if (args.len > 2) args[2] else .undefined);
     return .{ .boolean = true };
 }
@@ -6785,7 +6785,7 @@ fn reflectHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
-    if (target != .object) return self.throwError("TypeError", "Reflect.has called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.has called on non-object");
     return .{ .boolean = try self.inOperator(if (args.len > 1) args[1] else .undefined, target) };
 }
 
@@ -6793,7 +6793,7 @@ fn reflectDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
-    if (target != .object) return self.throwError("TypeError", "Reflect.deleteProperty called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.deleteProperty called on non-object");
     return .{ .boolean = try self.deleteOwn(target.object, try self.keyOf(if (args.len > 1) args[1] else .undefined)) };
 }
 
@@ -6801,7 +6801,7 @@ fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
-    if (target != .object) return self.throwError("TypeError", "Reflect.ownKeys called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.ownKeys called on non-object");
     const keys = if (target.object.proxy_handler != null) try self.proxyOwnKeys(target.object) else try target.object.ownKeys(self.arena);
     const arr = try self.newArray();
     for (keys) |k| try arr.object.elements.append(self.arena, self.keyToValue(k));
@@ -6812,7 +6812,7 @@ fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
-    if (target != .object) return self.throwError("TypeError", "Reflect.getPrototypeOf called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.getPrototypeOf called on non-object");
     if (target.object.proxy_handler != null or target.object.proxy_revoked) return self.proxyGetProto(target.object);
     return if (target.object.proto) |p| .{ .object = p } else .null;
 }
@@ -6837,6 +6837,58 @@ fn reflectConstructFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         return self.throwError("TypeError", "Reflect.construct newTarget is not a constructor");
     const list: []const Value = if (args.len > 1 and args[1] == .object and args[1].object.is_array) args[1].object.elements.items else &.{};
     return self.construct(target, list);
+}
+
+/// `Reflect.getOwnPropertyDescriptor(target, key)` — like the Object.* form but
+/// a non-Object target is a TypeError (Object.* coerces / returns undefined).
+fn reflectGetOwnDescFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!builtins.isRealObject(if (args.len > 0) args[0] else .undefined))
+        return self.throwError("TypeError", "Reflect.getOwnPropertyDescriptor called on non-object");
+    return builtins.objectGetOwnPropertyDescriptor(ctx, this, args);
+}
+
+/// `Reflect.isExtensible(target)` — TypeError on a non-Object (Object.* returns false).
+fn reflectIsExtensibleFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!builtins.isRealObject(if (args.len > 0) args[0] else .undefined))
+        return self.throwError("TypeError", "Reflect.isExtensible called on non-object");
+    return builtins.objectIsExtensible(ctx, this, args);
+}
+
+/// `Reflect.preventExtensions(target)` — TypeError on a non-Object, returns a
+/// boolean (Object.preventExtensions returns the target / no-ops a primitive).
+fn reflectPreventExtFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!builtins.isRealObject(if (args.len > 0) args[0] else .undefined))
+        return self.throwError("TypeError", "Reflect.preventExtensions called on non-object");
+    _ = try builtins.objectPreventExtensions(ctx, this, args);
+    return .{ .boolean = true };
+}
+
+/// `Reflect.setPrototypeOf(target, proto)` — OrdinarySetPrototypeOf returning a
+/// boolean: TypeError if target is not an Object or proto is not Object|null;
+/// otherwise true on success and false (NOT a throw) when the object is
+/// non-extensible or the new prototype would form a cycle.
+fn reflectSetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (!builtins.isRealObject(target))
+        return self.throwError("TypeError", "Reflect.setPrototypeOf called on non-object");
+    const p = if (args.len > 1) args[1] else .undefined;
+    if (p != .object and p != .null)
+        return self.throwError("TypeError", "Object prototype may only be an Object or null");
+    const o = target.object;
+    const new_proto: ?*value.Object = if (p == .object) p.object else null;
+    if (o.proto == new_proto) return .{ .boolean = true }; // unchanged: always succeeds
+    if (!o.extensible) return .{ .boolean = false };
+    var cur = new_proto;
+    while (cur) |c| : (cur = c.proto) {
+        if (c == o) return .{ .boolean = false }; // cycle
+    }
+    o.proto = new_proto;
+    return .{ .boolean = true };
 }
 
 /// Best-effort [[Construct]]-ability test: a native flagged `native_ctor`, an
@@ -10288,13 +10340,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, reflect_ns, "deleteProperty", 2, reflectDeleteFn);
     try setNative(a, root_shape, reflect_ns, "ownKeys", 1, reflectOwnKeysFn);
     try setNative(a, root_shape, reflect_ns, "getPrototypeOf", 1, reflectGetProtoFn);
-    try setNative(a, root_shape, reflect_ns, "setPrototypeOf", 2, builtins.objectSetPrototypeOf);
+    try setNative(a, root_shape, reflect_ns, "setPrototypeOf", 2, reflectSetProtoFn);
     try setNative(a, root_shape, reflect_ns, "apply", 3, reflectApplyFn);
     try setNative(a, root_shape, reflect_ns, "construct", 2, reflectConstructFn);
     try setNative(a, root_shape, reflect_ns, "defineProperty", 3, builtins.objectDefineProperty);
-    try setNative(a, root_shape, reflect_ns, "getOwnPropertyDescriptor", 2, builtins.objectGetOwnPropertyDescriptor);
-    try setNative(a, root_shape, reflect_ns, "isExtensible", 1, builtins.objectIsExtensible);
-    try setNative(a, root_shape, reflect_ns, "preventExtensions", 1, builtins.objectPreventExtensions);
+    try setNative(a, root_shape, reflect_ns, "getOwnPropertyDescriptor", 2, reflectGetOwnDescFn);
+    try setNative(a, root_shape, reflect_ns, "isExtensible", 1, reflectIsExtensibleFn);
+    try setNative(a, root_shape, reflect_ns, "preventExtensions", 1, reflectPreventExtFn);
     try env.put("Reflect", .{ .object = reflect_ns });
 
     // `Array.prototype[Symbol.iterator]` as a real, deletable/overridable own

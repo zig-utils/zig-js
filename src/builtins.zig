@@ -22,7 +22,10 @@ fn arg(args: []const Value, i: usize) Value {
 
 /// Whether `v` is an ECMAScript Object — `.object` that is not one of the
 /// primitive values represented as objects internally (BigInt, Symbol).
-fn isRealObject(v: Value) bool {
+/// True for a genuine Object — excluding the internally object-tagged primitives
+/// (Symbol, BigInt). The Reflect.* methods and several Object.* methods require
+/// an Object argument and must throw TypeError for a Symbol/BigInt.
+pub fn isRealObject(v: Value) bool {
     return v == .object and !v.object.is_bigint and !v.object.is_symbol;
 }
 

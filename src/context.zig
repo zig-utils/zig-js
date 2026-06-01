@@ -1171,6 +1171,23 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "Reflect.* require a real Object target (Symbol/primitive throws)" {
+    // A Symbol is internally object-tagged, but Reflect.* must reject it.
+    try std.testing.expectError(error.Throw, evalIn("Reflect.get(Symbol(), 'x')"));
+    try std.testing.expectError(error.Throw, evalIn("Reflect.ownKeys(Symbol())"));
+    try std.testing.expectError(error.Throw, evalIn("Reflect.isExtensible(1)"));
+    try std.testing.expectError(error.Throw, evalIn("Reflect.getOwnPropertyDescriptor(1, 'x')"));
+    try std.testing.expectError(error.Throw, evalIn("Reflect.preventExtensions('s')"));
+    try std.testing.expectError(error.Throw, evalIn("Reflect.setPrototypeOf(Symbol(), null)"));
+    // setPrototypeOf returns a boolean: true on success, false (not a throw) on
+    // a non-extensible target.
+    try std.testing.expect((try evalIn("Reflect.setPrototypeOf({}, null)")).boolean);
+    try std.testing.expect(!(try evalIn(
+        \\var o = {}; Object.preventExtensions(o);
+        \\Reflect.setPrototypeOf(o, { a: 1 })
+    )).boolean);
+}
+
 test "NativeError constructors inherit from Error; Error from Function.prototype" {
     // Each NativeError constructor's [[Prototype]] is the Error constructor.
     try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError) === Error")).boolean);
