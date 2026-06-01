@@ -775,6 +775,17 @@ fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: 
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
         const res = try self.callValueWithThis(trap, &.{ .{ .object = tgt }, self.keyToValue(key), .{ .object = d } }, .{ .object = handler });
         if (!res.toBoolean()) return self.throwError("TypeError", "proxy 'defineProperty' trap returned falsish for property");
+        // [[DefineOwnProperty]] invariants (9.5.6) for an ordinary target.
+        if (tgt.proxy_handler == null and !tgt.proxy_revoked) {
+            const setting_nonconfig = if (d.getOwn("configurable")) |c| !c.toBoolean() else false;
+            const has_own = tgt.getOwn(key) != null or tgt.getAccessor(key) != null;
+            if (!has_own) {
+                if (!tgt.extensible) return self.throwError("TypeError", "proxy 'defineProperty' cannot add a property to a non-extensible target");
+                if (setting_nonconfig) return self.throwError("TypeError", "proxy 'defineProperty' cannot define a non-configurable property absent from the target");
+            } else if (setting_nonconfig and tgt.getAttr(key).configurable) {
+                return self.throwError("TypeError", "proxy 'defineProperty' cannot make a configurable target property non-configurable");
+            }
+        }
         return;
     }
     // Array `length` is a data property { writable, !enumerable, !configurable }.
@@ -1221,8 +1232,17 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             return objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ .{ .object = tgt }, arg(args, 1) });
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap is not callable");
         const res = try self.callValueWithThis(trap, &.{ .{ .object = tgt }, self.keyToValue(key) }, .{ .object = handler });
+        if (res != .undefined and res != .object) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap must return an object or undefined");
+        // [[GetOwnProperty]] invariants (9.5.5) for an ordinary target: a trap
+        // that hides a property must respect non-configurability / extensibility.
+        if (tgt.proxy_handler == null and !tgt.proxy_revoked) {
+            const has_own = tgt.getOwn(key) != null or tgt.getAccessor(key) != null;
+            if (res == .undefined and has_own) {
+                if (!tgt.getAttr(key).configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a non-configurable property as absent");
+                if (!tgt.extensible) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a property of a non-extensible target as absent");
+            }
+        }
         if (res == .undefined) return .undefined;
-        if (res != .object) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap must return an object or undefined");
         return try completeDescriptor(self, res.object);
     }
 
