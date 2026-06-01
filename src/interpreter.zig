@@ -10489,7 +10489,12 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "next called on non-object");
     const o = this.object;
-    const src = o.getOwn("__src") orelse Value.undefined;
+    // Brand check: a genuine Array/Map/Set/String iterator carries its `__src`
+    // cursor slot as an OWN property. A bare object, a boxed primitive, the
+    // iterator *prototype* itself, or `Object.create(anIterator)` (which only
+    // inherits the slot) has none — `next` must throw, not yield {done:true}.
+    const src = o.getOwn("__src") orelse
+        return self.throwError("TypeError", "next called on an incompatible receiver");
     const i = toLen((o.getOwn("__i") orelse Value{ .number = 0 }).number);
     var done = true;
     var val: Value = .undefined;

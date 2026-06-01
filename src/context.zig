@@ -1171,6 +1171,19 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "iterator next() brand-checks its receiver" {
+    // A real iterator works; calling next with an incompatible receiver throws.
+    try std.testing.expectError(error.Throw, evalIn("[][Symbol.iterator]().next.call({})"));
+    try std.testing.expectError(error.Throw, evalIn("new Map().entries().next.call(new Set())"));
+    // Object.create(iterator) only *inherits* the internal slots — next throws.
+    try std.testing.expectError(error.Throw, evalIn(
+        \\var it = new Set([1]).values();
+        \\Object.create(it).next()
+    ));
+    // The legitimate iterator still iterates.
+    try expectEvalStr("1", "var it = new Set([1, 2]).values(); String(it.next().value)");
+}
+
 test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     // `Map.prototype[Symbol.iterator]` is the same function as `entries`, and
     // `Set.prototype[Symbol.iterator]`/`keys`/`values` are all the same.
