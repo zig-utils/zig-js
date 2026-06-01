@@ -11316,6 +11316,10 @@ fn checkIsoDate(self: *Interpreter, y: f64, m: f64, d: f64) EvalError!void {
     if (y < -271821 or y > 275760) return self.throwError("RangeError", "year out of range");
     const dim = isoDaysInMonth(@intFromFloat(y), @intFromFloat(m));
     if (d < 1 or d > @as(f64, @floatFromInt(dim))) return self.throwError("RangeError", "day out of range");
+    // Temporal representable range: -271821-04-19 … +275760-09-13 inclusive.
+    const ed = tDaysFromCivil(@intFromFloat(y), @intFromFloat(m), @intFromFloat(d));
+    if (ed < tDaysFromCivil(-271821, 4, 19) or ed > tDaysFromCivil(275760, 9, 13))
+        return self.throwError("RangeError", "date outside the representable Temporal range");
 }
 
 fn tIsTemporal(this: Value, kind: value.TemporalData.Kind) bool {
@@ -11480,10 +11484,32 @@ fn readCalendarField(self: *Interpreter, bag: Value) EvalError!void {
     // the engine's ISO-only calendar support — never reject an unknown calendar
     // here, which would break the non-ISO calendars the intl402 tests rely on).
     if (isCalendarId(s)) return;
-    // Not a bare id: it must be an ISO date(-time) string. stripTemporalAnnotations
-    // validates any annotations; parseTemporalBody validates the date.
-    const ann = try stripTemporalAnnotations(self, s);
-    _ = parseTemporalBody(self, ann.body) catch return self.throwError("RangeError", "invalid calendar ID");
+    // Not a bare id: it must be a Temporal ISO string (date, date-time, time,
+    // year-month, or month-day) from which the calendar is taken.
+    if (!isTemporalIsoString(self, s)) return self.throwError("RangeError", "invalid calendar ID");
+}
+
+/// Whether `s` parses as some Temporal ISO string — a date/date-time, a bare
+/// "HH:MM…" time (optionally with a 'T'), a "YYYY-MM" year-month, or an
+/// "MM-DD"/"--MM-DD" month-day — after stripping any (valid) annotations.
+fn isTemporalIsoString(self: *Interpreter, s: []const u8) bool {
+    const ann = stripTemporalAnnotations(self, s) catch return false;
+    const b = ann.body;
+    if (b.len == 0) return false;
+    if (parseTemporalBody(self, b)) |_| return true else |_| {}
+    // Bare time (leading 'T' designator or "HH:MM").
+    if (b[0] == 'T' or b[0] == 't') return true;
+    if (b.len >= 2 and std.ascii.isDigit(b[0]) and std.ascii.isDigit(b[1])) {
+        if (b.len == 2 or b[2] == ':') return true; // "HH" / "HH:MM…"
+        if (b.len == 5 and b[2] == '-') return true; // "MM-DD" month-day
+    }
+    if (std.mem.startsWith(u8, b, "--")) return true; // "--MM-DD" month-day
+    // "YYYY-MM" or "±YYYYYY-MM" year-month.
+    var i: usize = 0;
+    if (b[0] == '+' or b[0] == '-') i = 1;
+    const yl: usize = if (i == 1) 6 else 4;
+    if (b.len == i + yl + 3 and b[i + yl] == '-') return true;
+    return false;
 }
 
 /// GetOptionsObject + validate the `overflow` option of a from/with call. A
@@ -11636,13 +11662,19 @@ fn parseTemporalBody(self: *Interpreter, s: []const u8) EvalError!TBody {
     const yraw = std.fmt.parseInt(i64, s[i .. i + ylen], 10) catch return self.throwError("RangeError", "invalid ISO year");
     const y: i64 = if (neg) -yraw else yraw;
     i += ylen;
-    // "-MM-DD"
-    if (i + 6 > s.len or s[i] != '-' or s[i + 3] != '-') return self.throwError("RangeError", "invalid ISO date");
-    if (!std.ascii.isDigit(s[i + 1]) or !std.ascii.isDigit(s[i + 2]) or !std.ascii.isDigit(s[i + 4]) or !std.ascii.isDigit(s[i + 5]))
-        return self.throwError("RangeError", "invalid ISO date");
-    const mo = std.fmt.parseInt(u8, s[i + 1 .. i + 3], 10) catch return self.throwError("RangeError", "invalid ISO month");
-    const d = std.fmt.parseInt(u8, s[i + 4 .. i + 6], 10) catch return self.throwError("RangeError", "invalid ISO day");
-    i += 6;
+    // "-MM-DD" (extended) or "MMDD" (basic, no separators).
+    var mo: u8 = undefined;
+    var d: u8 = undefined;
+    if (i < s.len and s[i] == '-') {
+        if (i + 6 > s.len or s[i + 3] != '-') return self.throwError("RangeError", "invalid ISO date");
+        mo = twoDigits(s, i + 1) orelse return self.throwError("RangeError", "invalid ISO month");
+        d = twoDigits(s, i + 4) orelse return self.throwError("RangeError", "invalid ISO day");
+        i += 6;
+    } else {
+        mo = twoDigits(s, i) orelse return self.throwError("RangeError", "invalid ISO date");
+        d = twoDigits(s, i + 2) orelse return self.throwError("RangeError", "invalid ISO date");
+        i += 4;
+    }
     try checkIsoDate(self, @floatFromInt(y), @floatFromInt(mo), @floatFromInt(d));
     var out: TBody = .{ .y = y, .mo = mo, .d = d };
     // Optional time.
