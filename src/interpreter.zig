@@ -11486,6 +11486,20 @@ fn readCalendarField(self: *Interpreter, bag: Value) EvalError!void {
     _ = parseTemporalBody(self, ann.body) catch return self.throwError("RangeError", "invalid calendar ID");
 }
 
+/// GetOptionsObject + validate the `overflow` option of a from/with call. A
+/// non-object, non-undefined options argument is a TypeError; an `overflow`
+/// other than "constrain"/"reject" is a RangeError. (The engine already rejects
+/// out-of-range fields, so this only adds the missing input validation.)
+fn validateTemporalOptions(self: *Interpreter, options: Value) EvalError!void {
+    if (options == .undefined) return;
+    if (options != .object) return self.throwError("TypeError", "options must be an object or undefined");
+    const ov = try self.getProperty(options, "overflow");
+    if (ov == .undefined) return;
+    const s = try self.toStringV(ov);
+    if (!std.mem.eql(u8, s, "constrain") and !std.mem.eql(u8, s, "reject"))
+        return self.throwError("RangeError", "invalid overflow option");
+}
+
 /// Read year/month/day from a PlainDate, a PlainDateTime, or a fields object.
 const IsoYMD = struct { y: i64, m: u8, d: u8 };
 fn toPlainDateFields(self: *Interpreter, v: Value) EvalError!IsoYMD {
@@ -11756,6 +11770,7 @@ fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const f = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined);
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intCast(f.y);
     o.temporal.?.month = f.m;
@@ -12061,6 +12076,7 @@ fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     var d = try withIntField(self, bag, "day", t.day);
     const dim = isoDaysInMonth(y, @intCast(@max(1, @min(12, m))));
     if (d > dim) d = dim; // constrain
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     try checkIsoDate(self, @floatFromInt(y), @floatFromInt(m), @floatFromInt(d));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intCast(y);
@@ -12084,6 +12100,7 @@ fn temporalPlainTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
         if (v < 0 or v > maxes[i]) return self.throwError("RangeError", "time component out of range");
         vals[i] = @floatFromInt(v);
     }
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     setTimeFields(o.temporal.?, vals);
     return .{ .object = o };
@@ -12110,6 +12127,7 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
         if (v < 0 or v > maxes[i]) return self.throwError("RangeError", "time component out of range");
         vals[i] = @floatFromInt(v);
     }
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = @intCast(y);
     o.temporal.?.month = @intCast(m);
@@ -12220,6 +12238,7 @@ fn temporalYearMonthFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const f = try toYearMonthFields(self, if (args.len > 0) args[0] else .undefined);
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     return makeYearMonth(self, f.y, f.m);
 }
 
@@ -12231,6 +12250,7 @@ fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (bag != .object) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be an object");
     const y = try withIntField(self, bag, "year", t.year);
     const m = try withMonthField(self, bag, t.month);
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
     return makeYearMonth(self, y, m);
 }
@@ -12439,6 +12459,7 @@ fn temporalMonthDayFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const f = try toMonthDayFields(self, if (args.len > 0) args[0] else .undefined);
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     return makeMonthDay(self, f.m, f.d);
 }
 
@@ -12449,8 +12470,9 @@ fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (bag != .object) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with: argument must be an object");
     const m = try withMonthField(self, bag, t.month);
-    if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
     const d: u8 = @intCast(try withIntField(self, bag, "day", t.day));
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
+    if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
     const dim = isoDaysInMonth(1972, m);
     if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
     return makeMonthDay(self, m, d);
@@ -12896,6 +12918,7 @@ fn temporalPlainTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const t = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     o.temporal.?.* = t;
     o.temporal.?.kind = .plain_time;
@@ -13208,6 +13231,7 @@ fn temporalDateTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const t = try toPlainDateTimeData(self, if (args.len > 0) args[0] else .undefined);
+    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.* = t;
     o.temporal.?.kind = .plain_date_time;
