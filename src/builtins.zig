@@ -29,15 +29,16 @@ fn isRealObject(v: Value) bool {
 // ---- global functions --------------------------------------------------
 
 pub fn isNaNFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return .{ .boolean = std.math.isNan(arg(args, 0).toNumber()) };
+    // Spec: `Let num be ? ToNumber(number)` — so a Symbol/BigInt argument and an
+    // object whose toPrimitive throws propagate that throw, not silently NaN.
+    const n = try interp(ctx).toNumberV(arg(args, 0));
+    return .{ .boolean = std.math.isNan(n) };
 }
 
 pub fn isFiniteFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    const n = arg(args, 0).toNumber();
+    const n = try interp(ctx).toNumberV(arg(args, 0));
     return .{ .boolean = !std.math.isNan(n) and !std.math.isInf(n) };
 }
 

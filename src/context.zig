@@ -1171,6 +1171,16 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
     );
 }
 
+test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
+    // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
+    try std.testing.expect((try evalIn("isFinite('0')")).boolean);
+    try std.testing.expect(!(try evalIn("isFinite('Infinity')")).boolean);
+    try std.testing.expect((try evalIn("isNaN('not a number')")).boolean);
+    try std.testing.expect(!(try evalIn("isNaN('42')")).boolean);
+    try std.testing.expectError(error.Throw, evalIn("isFinite(Symbol())"));
+    try std.testing.expectError(error.Throw, evalIn("isNaN(Symbol())"));
+}
+
 test "Number/Boolean/String prototypes are Exotic Objects with their primitive" {
     // Per spec, `Number.prototype` has [[NumberData]] = +0, `Boolean.prototype`
     // has [[BooleanData]] = false, `String.prototype` has [[StringData]] = "" —
