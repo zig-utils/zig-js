@@ -1,6 +1,7 @@
 const std = @import("std");
 const lex = @import("lexer.zig");
 const ast = @import("ast.zig");
+const regex = @import("regex");
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
@@ -1687,7 +1688,14 @@ pub const Parser = struct {
             },
             .string => return self.alloc(.{ .string = t.text }),
             .template => return self.parseTemplate(t.text),
-            .regex => return self.alloc(.{ .regex_literal = .{ .pattern = t.text, .flags = t.flags } }),
+            .regex => {
+                // A regex literal's pattern and flags are early errors: validate
+                // them at parse time so an invalid literal fails the parse (the
+                // `phase: parse` negative tests rely on this), matching the same
+                // compile the interpreter runs eagerly at evaluation.
+                try validateRegexLiteral(self.arena, t.text, t.flags);
+                return self.alloc(.{ .regex_literal = .{ .pattern = t.text, .flags = t.flags } });
+            },
             .lparen => {
                 const e = try self.parseExpression();
                 try self.expect(.rparen);
@@ -1711,6 +1719,25 @@ pub const Parser = struct {
 /// of the matching `}` (or `raw.len` if unterminated). Brace- and string-aware.
 /// Within a template substitution, whether a `/` at `last_sig` begins a regex
 /// literal (true) rather than a division. Mirrors the lexer's heuristic.
+/// Validate a regex literal's flags and pattern, returning a parse error for an
+/// invalid one. Mirrors the interpreter's eager compile so the result is the
+/// same whether the literal is rejected at parse or at evaluation.
+fn validateRegexLiteral(arena: std.mem.Allocator, pattern: []const u8, flags: []const u8) ParseError!void {
+    var seen = std.mem.zeroes([128]bool);
+    for (flags) |f| {
+        if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f]) return ParseError.UnexpectedToken;
+        seen[f] = true;
+    }
+    if (seen['u'] and seen['v']) return ParseError.UnexpectedToken;
+    const cf = regex.common.CompileFlags{
+        .case_insensitive = seen['i'],
+        .multiline = seen['m'],
+        .dot_all = seen['s'],
+        .unicode = seen['u'] or seen['v'],
+    };
+    _ = regex.Regex.compileWithFlags(arena, pattern, cf) catch return ParseError.UnexpectedToken;
+}
+
 fn substRegexAllowed(last: u8) bool {
     return switch (last) {
         0, '(', '[', '{', ',', ';', ':', '?', '=', '+', '-', '*', '/', '%', '!', '&', '|', '^', '~', '<', '>' => true,
