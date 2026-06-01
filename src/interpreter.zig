@@ -5453,7 +5453,13 @@ pub const Interpreter = struct {
         }
         if (eq(name, "codePointAt")) {
             const i = toLen(try self.toNumberV(arg0(args)));
-            return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value.undefined;
+            if (i >= s.len) return Value.undefined;
+            // Decode the UTF-8 code point at byte offset `i` (a lone/invalid byte
+            // reports its own value, as a lone code unit would).
+            const n = utf8SeqLen(s, i);
+            if (n == 1) return Value{ .number = @floatFromInt(s[i]) };
+            const cp = std.unicode.utf8Decode(s[i .. i + n]) catch return Value{ .number = @floatFromInt(s[i]) };
+            return Value{ .number = @floatFromInt(cp) };
         }
         if (eq(name, "lastIndexOf")) {
             // ToString(searchString) then ToNumber(position): a NaN position
@@ -10873,6 +10879,15 @@ fn stringIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     return self.makeCursorIterator(.{ .string = try self.toStringV(this) });
 }
 
+/// The byte length of the well-formed UTF-8 sequence starting at `s[i]`; 1 for a
+/// lone/invalid byte (so iteration always progresses without ever decoding past
+/// the end of the string).
+fn utf8SeqLen(s: []const u8, i: usize) usize {
+    const n = std.unicode.utf8ByteSequenceLength(s[i]) catch return 1;
+    if (i + n > s.len) return 1;
+    return if (std.unicode.utf8ValidateSlice(s[i .. i + n])) n else 1;
+}
+
 fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -10887,6 +10902,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const i = toLen((o.getOwn("__i") orelse Value{ .number = 0 }).number);
     var done = true;
     var val: Value = .undefined;
+    var advance: usize = 1;
     switch (src) {
         .object => |so| if (so.is_array) {
             // Arrays iterate the *logical* length, reading via [[Get]] so a hole
@@ -10901,12 +10917,15 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
             done = false;
         },
         .string => |s| if (i < s.len) {
-            val = .{ .string = try self.arena.dupe(u8, s[i .. i + 1]) };
+            // A String iterator yields one Unicode code point (1–4 UTF-8 bytes),
+            // not one byte — `for (c of "é")` must yield "é", not its lead byte.
+            advance = utf8SeqLen(s, i);
+            val = .{ .string = try self.arena.dupe(u8, s[i .. i + advance]) };
             done = false;
         },
         else => {},
     }
-    if (!done) try self.setProp(o, "__i", .{ .number = @floatFromInt(i + 1) });
+    if (!done) try self.setProp(o, "__i", .{ .number = @floatFromInt(i + advance) });
     const res = try self.newObject();
     try self.setMember(res, "value", val);
     try self.setMember(res, "done", .{ .boolean = done });

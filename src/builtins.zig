@@ -1364,6 +1364,20 @@ pub fn stringFromCharCode(ctx: *anyopaque, this: Value, args: []const Value) Hos
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
+/// Append code point `cp` (already validated to be ≤ 0x10FFFF) to `buf`. A lone
+/// surrogate, which `std.unicode.utf8Encode` rejects, is emitted in the generic
+/// 3-byte form (WTF-8) so `String.fromCodePoint(0xD800)` succeeds.
+fn appendCodePointWtf8(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u21) std.mem.Allocator.Error!void {
+    var tmp: [4]u8 = undefined;
+    if (std.unicode.utf8Encode(cp, &tmp)) |n| {
+        try buf.appendSlice(arena, tmp[0..n]);
+    } else |_| {
+        try buf.append(arena, @intCast(0xE0 | (cp >> 12)));
+        try buf.append(arena, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try buf.append(arena, @intCast(0x80 | (cp & 0x3F)));
+    }
+}
+
 /// `String.fromCodePoint(...cps)` — like fromCharCode but validates that each
 /// argument is an integer code point in [0, 0x10FFFF] (else RangeError). In
 /// this byte-string engine a code point is emitted as its UTF-8 encoding.
@@ -1376,9 +1390,10 @@ pub fn stringFromCodePoint(ctx: *anyopaque, this: Value, args: []const Value) Ho
         if (std.math.isNan(n) or @trunc(n) != n or n < 0 or n > 0x10FFFF)
             return self.throwError("RangeError", "Invalid code point");
         const cp: u21 = @intFromFloat(n);
-        var tmp: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(cp, &tmp) catch return self.throwError("RangeError", "Invalid code point");
-        try buf.appendSlice(self.arena, tmp[0..len]);
+        // A lone surrogate (0xD800–0xDFFF) is a valid fromCodePoint argument even
+        // though it is not a valid UTF-8 scalar; encode it as WTF-8 (the generic
+        // 3-byte form) rather than rejecting it the way std.unicode does.
+        try appendCodePointWtf8(self.arena, &buf, cp);
     }
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
