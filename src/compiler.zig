@@ -225,8 +225,15 @@ pub const Compiler = struct {
                 try self.emitDefine(fnode.name);
             },
             .return_stmt => |maybe| {
-                if (self.finally_depth > 0) return error.Unsupported; // return across finally → tree-walk
-                if (maybe) |e| {
+                // A `return` lexically inside a `try`/`catch`/`finally` must run
+                // the enclosing finally block(s) first: `abrupt_return` unwinds
+                // the handler stack, runs each finally carrying a return
+                // completion, and returns once they finish (only reachable inside
+                // a generator, since compileTry is generator-only).
+                if (self.finally_depth > 0) {
+                    if (maybe) |e| try self.compileExpr(e) else _ = try self.chunk.emit(.load_undefined, 0);
+                    _ = try self.chunk.emit(.abrupt_return, 0);
+                } else if (maybe) |e| {
                     try self.compileExpr(e);
                     _ = try self.chunk.emit(.ret, 0);
                 } else {
