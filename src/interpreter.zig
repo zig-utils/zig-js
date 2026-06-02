@@ -92,8 +92,16 @@ pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 /// `parent` is the function's closure environment, which gives real closures.
 /// Variable names are duplicated into `arena` on first definition so they
 /// outlive the source buffer of any single evaluation.
+/// A `using`/`await using` resource registered for disposal at scope exit:
+/// its value and the (pre-resolved) `[Symbol.dispose]`/`[Symbol.asyncDispose]`
+/// method.
+pub const Disposable = struct { value: Value, method: Value, is_async: bool };
+
 pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
+    /// `using` resources declared in this scope, in declaration order (disposed
+    /// in reverse when the scope exits).
+    disposables: std.ArrayListUnmanaged(Disposable) = .empty,
     /// Names in `vars` declared `const` — assigning to them is a TypeError.
     consts: std.StringHashMapUnmanaged(void) = .{},
     /// Names that are *non-strict* immutable bindings — a named function
@@ -473,6 +481,74 @@ pub const Interpreter = struct {
     }
 
     /// Build an `Error`-family instance with `name`/`message` properties.
+    /// Register a `using`/`await using` resource on the current scope. Validates
+    /// it has a [Symbol.dispose] / [Symbol.asyncDispose] method (null/undefined is
+    /// a permitted no-op resource).
+    fn addDisposable(self: *Interpreter, val: Value, is_async: bool) EvalError!void {
+        if (val == .null or val == .undefined) return;
+        if (val != .object) return self.throwError("TypeError", "a 'using' declaration value must be an object or null/undefined");
+        var method: Value = .undefined;
+        if (is_async) {
+            if (self.wellKnownSymbolKey("asyncDispose")) |k| method = try self.getProperty(val, k);
+            if (method == .undefined or method == .null) {
+                if (self.wellKnownSymbolKey("dispose")) |k| method = try self.getProperty(val, k);
+            }
+        } else if (self.wellKnownSymbolKey("dispose")) |k| {
+            method = try self.getProperty(val, k);
+        }
+        if (!method.isCallable()) return self.throwError("TypeError", "a 'using' declaration value must have a [Symbol.dispose] method");
+        try self.env.disposables.append(self.arena, .{ .value = val, .method = method, .is_async = is_async });
+    }
+
+    /// Dispose a scope's `using` resources in reverse declaration order, threading
+    /// `body_err` (the scope body's thrown value, if any). A disposal error
+    /// becomes the pending completion, wrapping any earlier one in a
+    /// SuppressedError. Returns the value to re-throw, or null on clean exit.
+    fn disposeScope(self: *Interpreter, env: *Environment, body_err: ?Value) EvalError!?Value {
+        var pending = body_err;
+        var i = env.disposables.items.len;
+        while (i > 0) {
+            i -= 1;
+            const d = env.disposables.items[i];
+            const r = self.callValueWithThis(d.method, &.{}, d.value);
+            if (r) |rv| {
+                if (d.is_async) _ = self.awaitValue(rv) catch {};
+            } else |e| {
+                if (e != error.Throw) return e;
+                const this_err = self.exception;
+                pending = if (pending) |prev|
+                    (self.makeErrorWithArgs("SuppressedError", &.{ this_err, prev }) catch this_err)
+                else
+                    this_err;
+            }
+        }
+        env.disposables.clearRetainingCapacity();
+        return pending;
+    }
+
+    /// Evaluate a `{…}` block in its own lexical scope, disposing any `using`
+    /// resources declared in it when it exits (normally or abruptly).
+    fn evalBlockScope(self: *Interpreter, stmts: []*Node) EvalError!Value {
+        const block_env = try self.arena.create(Environment);
+        block_env.* = .{ .arena = self.arena, .parent = self.env };
+        const saved_env = self.env;
+        self.env = block_env;
+        defer self.env = saved_env;
+        const result = self.evalStatements(stmts);
+        if (block_env.disposables.items.len == 0) return result;
+        var body_err: ?Value = null;
+        const val: Value = result catch |e| blk: {
+            if (e != error.Throw) return e;
+            body_err = self.exception;
+            break :blk Value.undefined;
+        };
+        if (try self.disposeScope(block_env, body_err)) |err| {
+            self.exception = err;
+            return error.Throw;
+        }
+        return val;
+    }
+
     fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .is_error = true, .error_name = name };
@@ -670,6 +746,9 @@ pub const Interpreter = struct {
                     try self.env.putConst(d.name, v)
                 else
                     try self.env.put(d.name, v);
+                // A `using`/`await using` binding registers its resource for
+                // disposal when the enclosing scope exits.
+                if (d.dispose != 0) try self.addDisposable(v, d.dispose == 2);
                 break :blk .undefined;
             },
 
@@ -759,16 +838,10 @@ pub const Interpreter = struct {
 
             .expr_stmt => |e| try self.eval(e),
 
-            .block => |stmts| blk: {
-                // A `{…}` block is its own lexical scope: `let`/`const`/`class`
-                // and block function declarations live here, `var` hoists past it.
-                const block_env = try self.arena.create(Environment);
-                block_env.* = .{ .arena = self.arena, .parent = self.env };
-                const saved_env = self.env;
-                self.env = block_env;
-                defer self.env = saved_env;
-                break :blk try self.evalStatements(stmts);
-            },
+            // A `{…}` block is its own lexical scope: `let`/`const`/`class` and
+            // block function declarations live here, `var` hoists past it; any
+            // `using` resources are disposed when it exits.
+            .block => |stmts| try self.evalBlockScope(stmts),
             // A multi-declarator group runs in the current scope (no new block).
             .decl_group => |stmts| try self.evalStatements(stmts),
             .program => |stmts| try self.evalStatements(stmts),

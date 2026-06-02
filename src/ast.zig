@@ -208,7 +208,8 @@ pub const Node = union(enum) {
     arr_pattern: struct { elems: []ArrPatElem, rest: ?*Node },
 
     // statements
-    var_decl: struct { kind: DeclKind, name: []const u8, init: ?*Node },
+    // `dispose`: 0 = ordinary declaration, 1 = `using` (sync), 2 = `await using`.
+    var_decl: struct { kind: DeclKind, name: []const u8, init: ?*Node, dispose: u8 = 0 },
     destructure_decl: struct { kind: DeclKind, pattern: *Node, init: *Node },
     func_decl: *FunctionNode, // `function name(...) {...}` -> binds name
     return_stmt: ?*Node,

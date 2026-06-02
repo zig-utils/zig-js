@@ -379,11 +379,11 @@ pub const Parser = struct {
             // same line) by a binding identifier is an ordinary expression.
             if (std.mem.eql(u8, t.text, "using") and self.peekKind(1) == .identifier and
                 self.noNewlineBefore(1) and !isReservedWord(self.tokens[self.pos + 1].text))
-                return self.parseVarDecl(.@"const");
+                return self.parseVarDeclDispose(.@"const", 1);
             if (std.mem.eql(u8, t.text, "await") and self.peekIsKeyword(1, "using") and
                 self.peekKind(2) == .identifier and self.noNewlineBefore(2)) {
                 _ = self.advance(); // await
-                return self.parseVarDecl(.@"const");
+                return self.parseVarDeclDispose(.@"const", 2);
             }
             if (std.mem.eql(u8, t.text, "if")) return self.parseIf();
             if (std.mem.eql(u8, t.text, "while")) return self.parseWhile();
@@ -562,9 +562,16 @@ pub const Parser = struct {
     }
 
     fn parseVarDecl(self: *Parser, kind: ast.DeclKind) ParseError!*Node {
-        _ = self.advance(); // var/let/const
+        return self.parseVarDeclDispose(kind, 0);
+    }
+
+    /// `dispose`: 0 = ordinary `var`/`let`/`const`, 1 = `using`, 2 = `await using`.
+    fn parseVarDeclDispose(self: *Parser, kind: ast.DeclKind, dispose: u8) ParseError!*Node {
+        _ = self.advance(); // var/let/const/using
         // Destructuring declaration: `let {a, b} = obj` / `let [x, y] = arr`.
+        // A `using` binding must be a plain identifier (no pattern).
         if (self.check(.lbrace) or self.check(.lbracket)) {
+            if (dispose != 0) return ParseError.UnexpectedToken;
             const pattern = try self.parseBindingTarget();
             try self.expect(.assign);
             const init_expr = try self.parseAssignment();
@@ -582,11 +589,11 @@ pub const Parser = struct {
             if (self.match(.assign)) {
                 init_expr = try self.parseAssignment();
                 nameAnon(init_expr.?, name_tok.text);
-            } else if (kind == .@"const") {
-                // A `const` declaration (in statement position) requires an initializer.
+            } else if (kind == .@"const" or dispose != 0) {
+                // `const` and `using` declarations require an initializer.
                 return ParseError.UnexpectedToken;
             }
-            try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr } }));
+            try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr, .dispose = dispose } }));
             if (!self.match(.comma)) break;
         }
         _ = self.match(.semicolon);
