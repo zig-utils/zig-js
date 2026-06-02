@@ -7142,6 +7142,9 @@ fn reflectSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.set called on non-object");
+    // A module namespace's [[Set]] returns false (Reflect.set reports it without
+    // throwing, unlike a strict assignment).
+    if (target == .object and isModuleNs(target.object)) return .{ .boolean = false };
     try self.setMember(target, try self.keyOf(if (args.len > 1) args[1] else .undefined), if (args.len > 2) args[2] else .undefined);
     return .{ .boolean = true };
 }
@@ -7167,7 +7170,8 @@ fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.ownKeys called on non-object");
-    const keys = if (target.object.proxy_handler != null) try self.proxyOwnKeys(target.object) else try target.object.ownKeys(self.arena);
+    // objectOwnKeysList is proxy- and module-namespace-aware (sorted exotic keys).
+    const keys = try self.objectOwnKeysList(target.object);
     const arr = try self.newArray();
     for (keys) |k| try arr.object.elements.append(self.arena, self.keyToValue(k));
     return arr;
