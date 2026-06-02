@@ -8354,6 +8354,30 @@ fn genProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn {
     }.call;
 }
 
+/// Async-generator next/return/throw: unlike the sync forms, a bad receiver
+/// (not an async generator) yields a *rejected promise* rather than a synchronous
+/// throw.
+fn asyncGenProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.gen == null or !vm.asyncGenObj(this.object)) {
+                const pobj = try promise.newPromise(self);
+                const p = promise.promiseOf(.{ .object = pobj }).?;
+                const err = try self.makeError("TypeError", "AsyncGenerator method called on an incompatible receiver");
+                try promise.reject(self, p, err);
+                return .{ .object = pobj };
+            }
+            const v: Value = if (args.len > 0) args[0] else .undefined;
+            return switch (which) {
+                .next => vm.genNext(self, this.object, v),
+                .ret => vm.genReturn(self, this.object, v),
+                .throw => vm.genThrow(self, this.object, v),
+            };
+        }
+    }.call;
+}
+
 fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
     const sym_iter: ?[]const u8 = blk: {
@@ -8810,9 +8834,9 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     {
         const agen_proto = try a.create(value.Object);
         agen_proto.* = .{ .proto = proto };
-        try setNative(a, rs, agen_proto, "next", 1, genProtoMethod(.next));
-        try setNative(a, rs, agen_proto, "return", 1, genProtoMethod(.ret));
-        try setNative(a, rs, agen_proto, "throw", 1, genProtoMethod(.throw));
+        try setNative(a, rs, agen_proto, "next", 1, asyncGenProtoMethod(.next));
+        try setNative(a, rs, agen_proto, "return", 1, asyncGenProtoMethod(.ret));
+        try setNative(a, rs, agen_proto, "throw", 1, asyncGenProtoMethod(.throw));
         if (sym_tag) |k| {
             try agen_proto.setOwn(a, rs, k, .{ .string = "AsyncGenerator" });
             try agen_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });

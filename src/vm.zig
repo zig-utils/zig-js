@@ -713,7 +713,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     return makeIterResult(vm, v, true); // `v` is the body's return value
 }
 
-fn asyncGenObj(gen_obj: *value.Object) bool {
+pub fn asyncGenObj(gen_obj: *value.Object) bool {
     const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
     return g.is_async_gen;
 }
