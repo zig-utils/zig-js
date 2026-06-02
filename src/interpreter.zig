@@ -12329,6 +12329,221 @@ fn isoDayOfWeek(y: i64, m: u8, d: u8) u8 {
     return @intCast(if (dow == 0) 7 else dow); // Mon=1..Sun=7
 }
 
+/// AddISODate(constrain): add (years, months, weeks, days) to an ISO date,
+/// balancing the month into 1..12 and constraining the day to the month length
+/// before applying weeks/days. Matches `temporalPlainDateAddFn`.
+fn isoDateAdd(y0: i64, m0: u8, d0: u8, yy: i64, mm: i64, ww: i64, dd: i64) Civil {
+    var y = y0 + yy;
+    var m: i64 = @as(i64, m0) + mm;
+    y += @divFloor(m - 1, 12);
+    m = @mod(m - 1, 12) + 1;
+    var d: i64 = d0;
+    const dim = isoDaysInMonth(y, @intCast(m));
+    if (d > dim) d = dim; // constrain
+    const epoch = tDaysFromCivil(y, @intCast(m), @intCast(d)) + ww * 7 + dd;
+    return tCivilFromDays(epoch);
+}
+
+/// -1 / 0 / +1 for date1 vs date2.
+fn compareISO(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8) i64 {
+    if (y1 != y2) return if (y1 < y2) -1 else 1;
+    if (m1 != m2) return if (m1 < m2) -1 else 1;
+    if (d1 != d2) return if (d1 < d2) -1 else 1;
+    return 0;
+}
+
+/// DifferenceISODate (ISO calendar): the calendar difference date2 − date1 as
+/// [years, months, weeks, days], expressed up to `largest`. Mirrors the
+/// proposal-temporal reference algorithm.
+fn differenceISODate(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: TUnit) [4]f64 {
+    if (largest == .year or largest == .month) {
+        const sign: i64 = -compareISO(y1, m1, d1, y2, m2, d2); // +1 if date2 after date1
+        if (sign == 0) return .{ 0, 0, 0, 0 };
+        var years: i64 = y2 - y1;
+        var mid = isoDateAdd(y1, m1, d1, years, 0, 0, 0);
+        var midSign: i64 = -compareISO(mid.y, mid.m, mid.d, y2, m2, d2);
+        if (midSign == 0) {
+            return if (largest == .year) .{ @floatFromInt(years), 0, 0, 0 } else .{ 0, @floatFromInt(years * 12), 0, 0 };
+        }
+        var months: i64 = @as(i64, m2) - @as(i64, m1);
+        if (midSign != sign) {
+            years -= sign;
+            months += sign * 12;
+        }
+        mid = isoDateAdd(y1, m1, d1, years, months, 0, 0);
+        midSign = -compareISO(mid.y, mid.m, mid.d, y2, m2, d2);
+        if (midSign == 0) {
+            return if (largest == .year) .{ @floatFromInt(years), @floatFromInt(months), 0, 0 } else .{ 0, @floatFromInt(months + years * 12), 0, 0 };
+        }
+        if (midSign != sign) {
+            months -= sign;
+            if (months == -sign) {
+                years -= sign;
+                months = 11 * sign;
+            }
+            mid = isoDateAdd(y1, m1, d1, years, months, 0, 0);
+        }
+        var days: i64 = 0;
+        if (mid.m == m2) {
+            days = @as(i64, d2) - @as(i64, mid.d);
+        } else if (sign < 0) {
+            days = -@as(i64, mid.d) - (@as(i64, isoDaysInMonth(y2, m2)) - @as(i64, d2));
+        } else {
+            days = @as(i64, d2) + (@as(i64, isoDaysInMonth(mid.y, mid.m)) - @as(i64, mid.d));
+        }
+        if (largest == .month) {
+            months += years * 12;
+            years = 0;
+        }
+        return .{ @floatFromInt(years), @floatFromInt(months), 0, @floatFromInt(days) };
+    } else {
+        var days: i64 = tDaysFromCivil(y2, m2, d2) - tDaysFromCivil(y1, m1, d1);
+        var weeks: i64 = 0;
+        if (largest == .week) {
+            weeks = @divTrunc(days, 7);
+            days = @rem(days, 7);
+        }
+        return .{ 0, 0, @floatFromInt(weeks), @floatFromInt(days) };
+    }
+}
+
+/// A resolved `relativeTo` anchor: an ISO date plus its time-of-day in ns.
+const RelTo = struct { y: i64, m: u8, d: u8, time_ns: i128 };
+
+/// Resolve the `relativeTo` option (a Temporal date/dateTime/zonedDateTime, an
+/// ISO string, or a property bag). Null when absent.
+fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
+    if (opts != .object) return null;
+    const rv = try self.getProperty(opts, "relativeTo");
+    if (rv == .undefined or rv == .null) return null;
+    if (rv == .object and rv.object.temporal != null) {
+        const t = rv.object.temporal.?;
+        switch (t.kind) {
+            .plain_date => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = 0 },
+            .plain_date_time, .zoned_date_time => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = timeToNs(t) },
+            else => return self.throwError("TypeError", "relativeTo must be a PlainDate, PlainDateTime, or ZonedDateTime"),
+        }
+    }
+    if (rv == .string) {
+        const p = try parseDateTimeNs(self, rv.string);
+        const tod: i128 = @as(i128, p.h) * nsPerUnit(.hour) + @as(i128, p.mi) * nsPerUnit(.minute) +
+            @as(i128, p.s) * nsPerUnit(.second) + @as(i128, p.ms) * nsPerUnit(.millisecond) +
+            @as(i128, p.us) * nsPerUnit(.microsecond) + @as(i128, p.ns);
+        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod };
+    }
+    if (rv == .object) {
+        // Property bag: require year, month, day.
+        const yv = try self.getProperty(rv, "year");
+        const mv = try self.getProperty(rv, "month");
+        const dv = try self.getProperty(rv, "day");
+        if (yv == .undefined or mv == .undefined or dv == .undefined)
+            return self.throwError("TypeError", "relativeTo object must have year, month, and day");
+        return .{
+            .y = @intFromFloat(@trunc(try self.toNumberV(yv))),
+            .m = @intFromFloat(@trunc(try self.toNumberV(mv))),
+            .d = @intFromFloat(@trunc(try self.toNumberV(dv))),
+            .time_ns = 0,
+        };
+    }
+    return self.throwError("TypeError", "invalid relativeTo");
+}
+
+const DAY_NS: i128 = 86_400_000_000_000;
+
+/// Time-only nanoseconds of a duration (hours..nanoseconds; excludes Y/M/W/D).
+fn durTimeOnlyNs(dur: [10]f64) i128 {
+    return @as(i128, @intFromFloat(dur[4])) * nsPerUnit(.hour) +
+        @as(i128, @intFromFloat(dur[5])) * nsPerUnit(.minute) +
+        @as(i128, @intFromFloat(dur[6])) * nsPerUnit(.second) +
+        @as(i128, @intFromFloat(dur[7])) * nsPerUnit(.millisecond) +
+        @as(i128, @intFromFloat(dur[8])) * nsPerUnit(.microsecond) +
+        @as(i128, @intFromFloat(dur[9]));
+}
+
+/// The absolute end nanoseconds of `rel + dur` (calendar part added on the date,
+/// time part added on top), and the start nanoseconds of `rel`.
+fn durEndpointsNs(dur: [10]f64, rel: RelTo) struct { start: i128, end: i128 } {
+    const end_date = isoDateAdd(rel.y, rel.m, rel.d, @intFromFloat(dur[0]), @intFromFloat(dur[1]), @intFromFloat(dur[2]), @intFromFloat(dur[3]));
+    const start = @as(i128, tDaysFromCivil(rel.y, rel.m, rel.d)) * DAY_NS + rel.time_ns;
+    const end = @as(i128, tDaysFromCivil(end_date.y, end_date.m, end_date.d)) * DAY_NS + rel.time_ns + durTimeOnlyNs(dur);
+    return .{ .start = start, .end = end };
+}
+
+/// Temporal.Duration.prototype.total with a `relativeTo` anchor (ISO calendar):
+/// the (fractional) total of the duration measured in `unit`.
+fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) f64 {
+    _ = self;
+    const ep = durEndpointsNs(dur, rel);
+    // Day-and-smaller units (and weeks) have a fixed nanosecond length.
+    if (unit == .day or @intFromEnum(unit) > @intFromEnum(TUnit.day)) {
+        const per: f64 = @floatFromInt(nsPerUnit(unit));
+        return @as(f64, @floatFromInt(ep.end - ep.start)) / per;
+    }
+    if (unit == .week) {
+        return @as(f64, @floatFromInt(ep.end - ep.start)) / @as(f64, @floatFromInt(7 * DAY_NS));
+    }
+    // Year/month: whole calendar units toward the end, plus a fraction of the
+    // next unit (variable length).
+    const end_floor = tCivilFromDays(@intCast(@divFloor(ep.end, DAY_NS)));
+    const diff = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, unit);
+    const whole: i64 = if (unit == .year) @intFromFloat(diff[0]) else @intFromFloat(diff[1]);
+    const lo_date = if (unit == .year)
+        isoDateAdd(rel.y, rel.m, rel.d, whole, 0, 0, 0)
+    else
+        isoDateAdd(rel.y, rel.m, rel.d, 0, whole, 0, 0);
+    const sign: i64 = if (ep.end >= ep.start) 1 else -1;
+    const hi_date = if (unit == .year)
+        isoDateAdd(rel.y, rel.m, rel.d, whole + sign, 0, 0, 0)
+    else
+        isoDateAdd(rel.y, rel.m, rel.d, 0, whole + sign, 0, 0);
+    const lo_ns = @as(i128, tDaysFromCivil(lo_date.y, lo_date.m, lo_date.d)) * DAY_NS + rel.time_ns;
+    const hi_ns = @as(i128, tDaysFromCivil(hi_date.y, hi_date.m, hi_date.d)) * DAY_NS + rel.time_ns;
+    const span = hi_ns - lo_ns;
+    if (span == 0) return @floatFromInt(whole);
+    const frac = @as(f64, @floatFromInt(ep.end - lo_ns)) / @as(f64, @floatFromInt(span));
+    return @as(f64, @floatFromInt(whole)) + frac;
+}
+
+/// Temporal.Duration.prototype.round with a `relativeTo` anchor (ISO calendar).
+fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpts) EvalError![10]f64 {
+    const ep = durEndpointsNs(dur, rel);
+    const smallest = opts.smallest;
+    const largest = opts.largest;
+    // Case 1: smallestUnit is day or a time unit — round on the nanosecond span.
+    if (@intFromEnum(smallest) >= @intFromEnum(TUnit.day)) {
+        const total_ns = ep.end - ep.start;
+        const rounded_ns = roundNs(total_ns, smallest, opts.increment, opts.mode);
+        // Express the rounded span balanced to largestUnit.
+        if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
+            // Time/day-only output (no calendar units in the result).
+            return balanceTimeNs(rounded_ns, largest);
+        }
+        // Calendar largestUnit: re-difference the rounded end date, keep sub-day
+        // time (zero when smallestUnit ≥ day).
+        const rounded_end_days = @divFloor(ep.start + rounded_ns, DAY_NS);
+        const time_ns = (ep.start + rounded_ns) - rounded_end_days * DAY_NS;
+        const ed = tCivilFromDays(@intCast(rounded_end_days));
+        const diff = differenceISODate(rel.y, rel.m, rel.d, ed.y, ed.m, ed.d, largest);
+        var out: [10]f64 = .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
+        const tparts = balanceTimeNs(time_ns, .hour);
+        for (4..10) |i| out[i] = tparts[i];
+        return out;
+    }
+    // Case 2: smallestUnit is year/month/week — round the fractional calendar total.
+    const total = totalDurationRel(self, dur, rel, smallest);
+    const inc = opts.increment;
+    const scaled: i128 = applyRounding(@intFromFloat(@round(total * 1e9)), @intFromFloat(@round(inc * 1e9)), opts.mode);
+    const rounded_units: i64 = @intFromFloat(@as(f64, @floatFromInt(scaled)) * inc);
+    // Place `rounded_units` of smallestUnit at `rel`, then express to largestUnit.
+    const placed = switch (smallest) {
+        .year => isoDateAdd(rel.y, rel.m, rel.d, rounded_units, 0, 0, 0),
+        .month => isoDateAdd(rel.y, rel.m, rel.d, 0, rounded_units, 0, 0),
+        else => isoDateAdd(rel.y, rel.m, rel.d, 0, 0, rounded_units, 0), // week
+    };
+    const diff = differenceISODate(rel.y, rel.m, rel.d, placed.y, placed.m, placed.d, largest);
+    return .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
+}
+
 /// Number of ISO 8601 weeks (52 or 53) in week-numbering year `y`.
 fn isoWeeksInYear(y: i64) u8 {
     const p = @mod(y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400), 7);
@@ -12525,7 +12740,10 @@ fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const dur = this.object.temporal.?.dur;
-    const unit = (try readUnitArg(self, if (args.len > 0) args[0] else .undefined, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
+    const a0 = if (args.len > 0) args[0] else .undefined;
+    const unit = (try readUnitArg(self, a0, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
+    // With a relativeTo anchor, compute the calendar-aware (fractional) total.
+    if (try resolveRelativeTo(self, a0)) |rel| return .{ .number = totalDurationRel(self, dur, rel, unit) };
     if (durHasCalendar(dur) or @intFromEnum(unit) < @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.total with calendar units requires relativeTo");
     const total_ns: f64 = @floatFromInt(durationTimeNs(dur));
@@ -12533,12 +12751,23 @@ fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) va
     return .{ .number = total_ns / per };
 }
 
+/// The largest non-zero unit of a duration (default `day`), for `largestUnit:
+/// "auto"`.
+fn durPresentLargest(dur: [10]f64) TUnit {
+    for (0..10) |i| if (dur[i] != 0) return @enumFromInt(@as(u8, @intCast(i)));
+    return .day;
+}
+
 fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const dur = this.object.temporal.?.dur;
     if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "Temporal.Duration.prototype.round requires options");
-    const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
+    // largestUnit defaults to "auto" → the largest unit present in the duration.
+    var opts = try readRoundOpts(self, args[0], .{ .largest = durPresentLargest(dur), .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
+    // largestUnit must be ≥ smallestUnit.
+    if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) opts.largest = opts.smallest;
+    if (try resolveRelativeTo(self, args[0])) |rel| return makeDuration(self, try roundDurationRel(self, dur, rel, opts));
     if (durHasCalendar(dur) or @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.round with calendar units requires relativeTo");
     const rounded = roundNs(durationTimeNs(dur), opts.smallest, opts.increment, opts.mode);
@@ -12550,6 +12779,13 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const a = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
     const b = try durationFromArg(self, if (args.len > 1) args[1] else .undefined);
+    // With a relativeTo anchor, compare the two durations' absolute endpoints
+    // (handles calendar units of differing real length).
+    if (try resolveRelativeTo(self, if (args.len > 2) args[2] else .undefined)) |rel| {
+        const ea = durEndpointsNs(a, rel);
+        const eb = durEndpointsNs(b, rel);
+        return .{ .number = if (ea.end < eb.end) -1 else if (ea.end > eb.end) 1 else 0 };
+    }
     if (durHasCalendar(a) or durHasCalendar(b)) return self.throwError("RangeError", "Temporal.Duration.compare with calendar units requires relativeTo");
     const na = durationTimeNs(a);
     const nb = durationTimeNs(b);
