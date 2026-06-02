@@ -10186,16 +10186,137 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
 
 // ---- Intl.Locale ----------------------------------------------------
 
+/// Extract a Unicode (`-u-`) extension keyword value from a canonical tag, e.g.
+/// `localeUValue(tag, "ca")` → the calendar. A boolean key present with no value
+/// (`-u-kn`) returns "". Null if the key is absent.
+fn localeUValue(tag: []const u8, key: []const u8) ?[]const u8 {
+    const u = std.mem.indexOf(u8, tag, "-u-") orelse return null;
+    var rest = tag[u + 3 ..];
+    // The extension ends at the next singleton ("-x-"/"-t-") — for our purposes
+    // we scan keyword/value subtags (2-char key followed by value subtags).
+    var it = std.mem.splitScalar(u8, rest, '-');
+    var cur_key: ?[]const u8 = null;
+    var val_start: ?usize = null;
+    var val_end: usize = 0;
+    var off: usize = u + 3;
+    _ = &rest;
+    while (it.next()) |part| {
+        const this_off = off;
+        off += part.len + 1;
+        if (part.len == 2 and !std.ascii.isDigit(part[0])) {
+            // A new keyword key. Emit the previous one if it matches.
+            if (cur_key) |ck| if (std.mem.eql(u8, ck, key)) {
+                if (val_start) |vs| return tag[vs..val_end] else return "";
+            };
+            cur_key = part;
+            val_start = null;
+        } else {
+            // A value subtag of the current keyword.
+            if (cur_key != null) {
+                if (val_start == null) val_start = this_off;
+                val_end = this_off + part.len;
+            }
+        }
+    }
+    if (cur_key) |ck| if (std.mem.eql(u8, ck, key)) {
+        if (val_start) |vs| return tag[vs..val_end] else return "";
+    };
+    return null;
+}
+
+/// GetOption(options, key) coerced to a lowercase string, validated against an
+/// allowed set when `allowed` is non-empty. Returns null if absent/undefined.
+fn localeStringOption(self: *Interpreter, opts: Value, key: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
+    const v = try self.getProperty(opts, key);
+    if (v == .undefined) return null;
+    const raw = try self.toStringV(v);
+    const low = try std.ascii.allocLowerString(self.arena, raw);
+    if (allowed.len > 0) {
+        var ok = false;
+        for (allowed) |a| if (std.mem.eql(u8, low, a)) {
+            ok = true;
+        };
+        if (!ok) return self.throwError("RangeError", "invalid Intl.Locale option");
+    }
+    return low;
+}
+
 fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor Intl.Locale requires 'new'");
     const tagv = if (args.len > 0) args[0] else .undefined;
+    if (tagv != .string and tagv != .object) return self.throwError("TypeError", "Locale tag must be a string or Intl.Locale");
     const tag_raw = if (tagv == .object and tagv.object.getOwn("\x00locale") != null)
         tagv.object.getOwn("\x00locale").?.string
     else
         try self.toStringV(tagv);
-    const canon = canonicalizeLocaleTag(self.arena, tag_raw) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+    var canon = canonicalizeLocaleTag(self.arena, tag_raw) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+
+    // Apply the options bag (ApplyOptionsToTag + per-keyword -u- options).
+    const optsv = if (args.len > 1) args[1] else Value.undefined;
+    if (optsv != .undefined) {
+        const opts = Value{ .object = try self.toObject(optsv) };
+        // language/script/region replace the corresponding base subtags.
+        const language = try localeStringOption(self, opts, "language", &.{});
+        const script = try localeStringOption(self, opts, "script", &.{});
+        const region = try localeStringOption(self, opts, "region", &.{});
+        // -u- keyword options.
+        const ca = try localeStringOption(self, opts, "calendar", &.{});
+        const co = try localeStringOption(self, opts, "collation", &.{});
+        const hc = try localeStringOption(self, opts, "hourCycle", &.{ "h11", "h12", "h23", "h24" });
+        const kf = try localeStringOption(self, opts, "caseFirst", &.{ "upper", "lower", "false" });
+        const nu = try localeStringOption(self, opts, "numberingSystem", &.{});
+        const numeric_v = try self.getProperty(opts, "numeric");
+        const kn: ?[]const u8 = if (numeric_v == .undefined) null else if (numeric_v.toBoolean()) "true" else "false";
+
+        // Rebuild: base subtags (with overrides), then sorted -u- keywords.
+        const base0 = if (std.mem.indexOf(u8, canon, "-u-")) |k| canon[0..k] else canon;
+        var bit = std.mem.splitScalar(u8, base0, '-');
+        const orig_lang = bit.next() orelse "";
+        var orig_script: []const u8 = "";
+        var orig_region: []const u8 = "";
+        while (bit.next()) |part| {
+            if (part.len == 4 and std.ascii.isAlphabetic(part[0])) orig_script = part else if (part.len == 2 or part.len == 3) orig_region = part;
+        }
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        try buf.appendSlice(self.arena, if (language) |l| l else orig_lang);
+        const use_script = if (script) |s| s else orig_script;
+        const use_region = if (region) |r| r else orig_region;
+        if (use_script.len > 0) {
+            try buf.append(self.arena, '-');
+            try buf.appendSlice(self.arena, use_script);
+        }
+        if (use_region.len > 0) {
+            try buf.append(self.arena, '-');
+            try buf.appendSlice(self.arena, use_region);
+        }
+        // Merge -u- keywords (option overrides input tag), emit in key order.
+        const keys = [_]struct { k: []const u8, v: ?[]const u8 }{
+            .{ .k = "ca", .v = ca }, .{ .k = "co", .v = co },  .{ .k = "fw", .v = null },
+            .{ .k = "hc", .v = hc }, .{ .k = "kf", .v = kf },  .{ .k = "kn", .v = kn },
+            .{ .k = "nu", .v = nu },
+        };
+        var u_buf: std.ArrayListUnmanaged(u8) = .empty;
+        for (keys) |kv| {
+            const val: ?[]const u8 = if (kv.v) |v| v else localeUValue(canon, kv.k);
+            if (val) |v| {
+                try u_buf.append(self.arena, '-');
+                try u_buf.appendSlice(self.arena, kv.k);
+                // "kn" with value "true" serializes as a bare "-u-kn".
+                if (!(std.mem.eql(u8, kv.k, "kn") and std.mem.eql(u8, v, "true")) and v.len > 0) {
+                    try u_buf.append(self.arena, '-');
+                    try u_buf.appendSlice(self.arena, v);
+                }
+            }
+        }
+        if (u_buf.items.len > 0) {
+            try buf.appendSlice(self.arena, "-u");
+            try buf.appendSlice(self.arena, u_buf.items);
+        }
+        canon = canonicalizeLocaleTag(self.arena, buf.items) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+    }
+
     const o = (try self.newObject()).object;
     if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
     try self.setProp(o, "\x00locale", .{ .string = canon });
@@ -10203,7 +10324,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     return .{ .object = o };
 }
 
-const LocaleField = enum { base_name, language, script, region };
+const LocaleField = enum { base_name, language, script, region, calendar, case_first, collation, hour_cycle, numeric, numbering_system, first_day_of_week };
 fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -10211,6 +10332,17 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale accessor on incompatible receiver");
             const tag = this.object.getOwn("\x00locale").?.string;
+            // -u- extension keyword accessors.
+            switch (f) {
+                .calendar => return if (localeUValue(tag, "ca")) |v| .{ .string = v } else .undefined,
+                .case_first => return if (localeUValue(tag, "kf")) |v| .{ .string = v } else .undefined,
+                .collation => return if (localeUValue(tag, "co")) |v| .{ .string = v } else .undefined,
+                .hour_cycle => return if (localeUValue(tag, "hc")) |v| .{ .string = v } else .undefined,
+                .numbering_system => return if (localeUValue(tag, "nu")) |v| .{ .string = v } else .undefined,
+                .numeric => return .{ .boolean = if (localeUValue(tag, "kn")) |v| (v.len == 0 or std.mem.eql(u8, v, "true")) else false },
+                .first_day_of_week => return if (localeUValue(tag, "fw")) |v| .{ .string = v } else .undefined,
+                else => {},
+            }
             // baseName is the tag up to any "-u-"/"-x-" extension; the language/
             // script/region are its first matching subtags.
             const base = if (std.mem.indexOf(u8, tag, "-u-")) |k| tag[0..k] else tag;
@@ -10225,6 +10357,66 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
             return .undefined;
         }
     }.call;
+}
+
+/// `Intl.Locale.prototype.maximize`/`minimize` — without CLDR likely-subtags
+/// data we return a Locale for the same tag (a correct identity for fully-
+/// specified tags; the structural contract — returns an Intl.Locale — holds).
+fn intlLocaleTransformFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+    const o = (try self.newObject()).object;
+    o.proto = this.object.proto;
+    try self.setProp(o, "\x00locale", this.object.getOwn("\x00locale").?);
+    try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+    return .{ .object = o };
+}
+
+/// Locale info methods returning an array of one default (getCalendars →
+/// ["iso8601"], etc.) or, for the keyword-backed ones, the tag's value.
+fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, numbering_systems, time_zones }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+            const tag = this.object.getOwn("\x00locale").?.string;
+            const arr = (try self.newArray()).object;
+            const def: ?[]const u8 = switch (which) {
+                .calendars => localeUValue(tag, "ca") orelse "iso8601",
+                .collations => localeUValue(tag, "co") orelse "default",
+                .hour_cycles => localeUValue(tag, "hc") orelse "h23",
+                .numbering_systems => localeUValue(tag, "nu") orelse "latn",
+                .time_zones => null, // requires region data
+            };
+            if (def) |d| try arr.elements.append(self.arena, .{ .string = d });
+            return .{ .object = arr };
+        }
+    }.call;
+}
+
+fn intlLocaleTextInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTextInfo on incompatible receiver");
+    const o = (try self.newObject()).object;
+    try self.setProp(o, "direction", .{ .string = "ltr" });
+    return .{ .object = o };
+}
+
+fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getWeekInfo on incompatible receiver");
+    const o = (try self.newObject()).object;
+    try self.setProp(o, "firstDay", .{ .number = 1 });
+    try self.setProp(o, "minimalDays", .{ .number = 1 });
+    const we = (try self.newArray()).object;
+    try we.elements.append(self.arena, .{ .number = 6 });
+    try we.elements.append(self.arena, .{ .number = 7 });
+    try self.setProp(o, "weekend", .{ .object = we });
+    return .{ .object = o };
 }
 
 fn intlLocaleToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -10499,7 +10691,23 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNativeGetter(a, rs, proto, "language", intlLocaleGetter(.language));
         try setNativeGetter(a, rs, proto, "script", intlLocaleGetter(.script));
         try setNativeGetter(a, rs, proto, "region", intlLocaleGetter(.region));
+        try setNativeGetter(a, rs, proto, "calendar", intlLocaleGetter(.calendar));
+        try setNativeGetter(a, rs, proto, "caseFirst", intlLocaleGetter(.case_first));
+        try setNativeGetter(a, rs, proto, "collation", intlLocaleGetter(.collation));
+        try setNativeGetter(a, rs, proto, "hourCycle", intlLocaleGetter(.hour_cycle));
+        try setNativeGetter(a, rs, proto, "numeric", intlLocaleGetter(.numeric));
+        try setNativeGetter(a, rs, proto, "numberingSystem", intlLocaleGetter(.numbering_system));
+        try setNativeGetter(a, rs, proto, "firstDayOfWeek", intlLocaleGetter(.first_day_of_week));
         try setNative(a, rs, proto, "toString", 0, intlLocaleToStringFn);
+        try setNative(a, rs, proto, "maximize", 0, intlLocaleTransformFn);
+        try setNative(a, rs, proto, "minimize", 0, intlLocaleTransformFn);
+        try setNative(a, rs, proto, "getCalendars", 0, intlLocaleListFn(.calendars));
+        try setNative(a, rs, proto, "getCollations", 0, intlLocaleListFn(.collations));
+        try setNative(a, rs, proto, "getHourCycles", 0, intlLocaleListFn(.hour_cycles));
+        try setNative(a, rs, proto, "getNumberingSystems", 0, intlLocaleListFn(.numbering_systems));
+        try setNative(a, rs, proto, "getTimeZones", 0, intlLocaleListFn(.time_zones));
+        try setNative(a, rs, proto, "getTextInfo", 0, intlLocaleTextInfoFn);
+        try setNative(a, rs, proto, "getWeekInfo", 0, intlLocaleWeekInfoFn);
         if (tag) |k| {
             try proto.setOwn(a, rs, k, .{ .string = "Intl.Locale" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
