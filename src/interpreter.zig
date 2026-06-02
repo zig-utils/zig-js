@@ -10738,12 +10738,40 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             // service. `numberingSystem` belongs to the number/date/plural
             // services, not Collator/ListFormat.
             if (comptime std.mem.eql(u8, service, "NumberFormat")) {
+                // Reflect the explicitly-provided options over the spec defaults
+                // (en-style; the basic/default case keeps the defaults).
+                var style: []const u8 = "decimal";
+                var min_int: f64 = 1;
+                var min_frac: f64 = 0;
+                var max_frac: f64 = 3;
+                var grouping: Value = .{ .string = "auto" };
+                if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+                    const sv = try self.getProperty(ov, "style");
+                    if (sv == .string) {
+                        style = sv.string;
+                        if (std.mem.eql(u8, style, "percent")) max_frac = 0;
+                    }
+                    const mi = try self.getProperty(ov, "minimumIntegerDigits");
+                    if (mi != .undefined) min_int = @max(1, @min(21, @trunc(try self.toNumberV(mi))));
+                    const mnf = try self.getProperty(ov, "minimumFractionDigits");
+                    if (mnf != .undefined) {
+                        min_frac = @max(0, @min(100, @trunc(try self.toNumberV(mnf))));
+                        if (max_frac < min_frac) max_frac = min_frac;
+                    }
+                    const mxf = try self.getProperty(ov, "maximumFractionDigits");
+                    if (mxf != .undefined) {
+                        max_frac = @max(0, @min(100, @trunc(try self.toNumberV(mxf))));
+                        if (max_frac < min_frac) min_frac = max_frac;
+                    }
+                    const ug = try self.getProperty(ov, "useGrouping");
+                    if (ug == .boolean) grouping = .{ .boolean = ug.boolean } else if (ug == .string) grouping = .{ .string = ug.string };
+                };
                 try self.setProp(o, "numberingSystem", .{ .string = "latn" });
-                try self.setProp(o, "style", .{ .string = "decimal" });
-                try self.setProp(o, "minimumIntegerDigits", .{ .number = 1 });
-                try self.setProp(o, "minimumFractionDigits", .{ .number = 0 });
-                try self.setProp(o, "maximumFractionDigits", .{ .number = 3 });
-                try self.setProp(o, "useGrouping", .{ .string = "auto" });
+                try self.setProp(o, "style", .{ .string = style });
+                try self.setProp(o, "minimumIntegerDigits", .{ .number = min_int });
+                try self.setProp(o, "minimumFractionDigits", .{ .number = min_frac });
+                try self.setProp(o, "maximumFractionDigits", .{ .number = max_frac });
+                try self.setProp(o, "useGrouping", grouping);
                 try self.setProp(o, "notation", .{ .string = "standard" });
                 try self.setProp(o, "signDisplay", .{ .string = "auto" });
                 try self.setProp(o, "roundingIncrement", .{ .number = 1 });
