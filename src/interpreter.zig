@@ -7409,6 +7409,11 @@ pub fn install262(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
     es.* = .{ .native = host262EvalScriptFn, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, es, "evalScript", 1);
     try d.setOwn(a, rs, "evalScript", .{ .object = es });
+    try installAgent(a, rs, d);
+    // On the main thread, each test gets a fresh Context → reset cross-test
+    // agent coordination state. Agent threads must NOT reset it (the parent owns
+    // the broadcast/report channels they're using).
+    if (!t_is_agent) agentResetState();
     try env.put("$262", .{ .object = d });
 }
 
@@ -10501,6 +10506,196 @@ fn sharedArrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) v
     return .{ .object = out };
 }
 
+// ===== $262.agent (cooperative synchronous agents) ==================
+// test262's agent model: the main agent calls `$262.agent.start(src)` to spawn
+// a worker agent running `src` in a fresh realm; they share memory through a
+// SharedArrayBuffer handed over via `broadcast`, coordinate with `report`/
+// `getReport`, and (in real hosts) block/wake on `Atomics.wait`/`.notify`.
+//
+// This zig-dev std has no usable thread Mutex/Condition/sleep (mid `Io`
+// rewrite), and the test runner has no wall-clock timeout, so real preemptive
+// agents would be both hard to write and dangerous (a single never-woken wait
+// would wedge the whole worker forever). Instead we run agents *cooperatively*:
+// `broadcast(sab)` synchronously runs each started agent to completion in its
+// own realm, with `receiveBroadcast` immediately invoked with a view over the
+// shared bytes; `report`s queue for the parent's `getReport`. This passes every
+// agent test whose worker completes during the broadcast (the common timeout /
+// value-report pattern) and simply reports "timed-out" for the cases that would
+// need a genuine concurrent mid-wait wakeup. Zero threads → zero hang risk.
+
+const AgentState = struct {
+    /// Sources of agents started but not yet run (run at the next broadcast).
+    pending: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// FIFO of reports queued by agents, for the parent's getReport.
+    reports: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// The most recent broadcast's shared bytes (seen by receiveBroadcast).
+    bcast_ptr: ?[*]u8 = null,
+    bcast_len: usize = 0,
+};
+
+var g_agent: AgentState = .{};
+const g_agent_alloc = std.heap.page_allocator;
+
+/// True while running inside a cooperatively-spawned agent realm — keeps the
+/// `$262` install from resetting the parent's agent state.
+threadlocal var t_is_agent: bool = false;
+
+/// Reset cross-test agent state (called from the parent per Context).
+fn agentResetState() void {
+    g_agent.pending.clearRetainingCapacity();
+    g_agent.reports.clearRetainingCapacity();
+    g_agent.bcast_ptr = null;
+    g_agent.bcast_len = 0;
+}
+
+/// Wrap externally-owned shared bytes in a fresh SharedArrayBuffer for *this*
+/// realm (the agent's view of the broadcast buffer).
+fn makeSharedArrayBufferOver(self: *Interpreter, ptr: [*]u8, len: usize) EvalError!*value.Object {
+    const o = (try self.newObject()).object;
+    const ab = try self.arena.create(value.ArrayBufferData);
+    ab.* = .{ .data = ptr[0..len], .is_shared = true };
+    o.array_buffer = ab;
+    if (self.env.get("SharedArrayBuffer")) |c| if (c == .object) {
+        o.proto = try self.protoObject(c.object);
+    };
+    return o;
+}
+
+/// Run one agent's `src` synchronously in a fresh realm on the current thread.
+fn agentRunSync(src: []const u8) void {
+    const prev = t_is_agent;
+    t_is_agent = true;
+    defer t_is_agent = prev;
+    var arena_state = std.heap.ArenaAllocator.init(g_agent_alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = Shape.createRoot(a) catch return;
+    installGlobals(&env, root_shape) catch return;
+    const global_obj = a.create(value.Object) catch return;
+    global_obj.* = .{};
+    env.put("globalThis", .{ .object = global_obj }) catch {};
+    if (env.get("$262")) |d| if (d == .object) {
+        d.object.setOwn(a, root_shape, "global", .{ .object = global_obj }) catch {};
+    };
+    const tdz = a.create(value.Object) catch return;
+    tdz.* = .{};
+    var microtasks: std.ArrayListUnmanaged(promise.Microtask) = .empty;
+    var print_buffer: std.ArrayListUnmanaged(u8) = .empty;
+    var machine = Interpreter{
+        .arena = a,
+        .env = &env,
+        .global_object = global_obj,
+        .this_value = .{ .object = global_obj },
+        .root_shape = root_shape,
+        .microtasks = &microtasks,
+        .print_buffer = &print_buffer,
+        .tdz_marker = tdz,
+    };
+    var parser = Parser.init(a, src) catch return;
+    const prog = parser.parseProgram() catch return;
+    machine.strict = parser.strict;
+    if (Compiler.compileProgram(a, prog)) |chunk| {
+        _ = vm.run(&machine, chunk, null) catch {};
+    } else |_| {
+        _ = machine.eval(prog) catch {};
+    }
+    machine.drainMicrotasks() catch {};
+}
+
+fn host262AgentStartFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const src = try self.toStringV(arg0(args));
+    const dup = g_agent_alloc.dupe(u8, src) catch return self.throwError("Error", "agent.start: out of memory");
+    g_agent.pending.append(g_agent_alloc, dup) catch {};
+    return .undefined;
+}
+
+const SabBytes = struct { ptr: [*]u8, len: usize };
+fn sabBytesOf(v: Value) ?SabBytes {
+    if (v != .object) return null;
+    const o = v.object;
+    if (o.array_buffer) |ab| return .{ .ptr = ab.data.ptr, .len = ab.data.len };
+    if (o.typed_array) |ta| {
+        const ab = ta.buffer.array_buffer orelse return null;
+        return .{ .ptr = ab.data.ptr, .len = ab.data.len };
+    }
+    return null;
+}
+
+fn host262AgentBroadcastFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const b = sabBytesOf(arg0(args)) orelse return self.throwError("TypeError", "agent.broadcast expects a SharedArrayBuffer or shared TypedArray");
+    g_agent.bcast_ptr = b.ptr;
+    g_agent.bcast_len = b.len;
+    // Run each started agent to completion now (cooperative). Drain `pending`
+    // into a local copy first so an agent that itself starts a sub-agent queues
+    // for a later broadcast rather than mutating the list we're iterating.
+    const batch = g_agent.pending.toOwnedSlice(g_agent_alloc) catch &.{};
+    for (batch) |src| agentRunSync(src);
+    return .undefined;
+}
+
+fn host262AgentReceiveBroadcastFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cb = arg0(args);
+    const ptr = g_agent.bcast_ptr orelse return .undefined;
+    const sab = try makeSharedArrayBufferOver(self, ptr, g_agent.bcast_len);
+    _ = try self.callValueWithThis(cb, &.{.{ .object = sab }}, .undefined);
+    return .undefined;
+}
+
+fn host262AgentReportFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const s = try self.toStringV(arg0(args));
+    const dup = g_agent_alloc.dupe(u8, s) catch return self.throwError("Error", "agent.report: out of memory");
+    g_agent.reports.append(g_agent_alloc, dup) catch {};
+    return .undefined;
+}
+
+fn host262AgentGetReportFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (g_agent.reports.items.len == 0) return .null; // none available (harness polls)
+    const r = g_agent.reports.orderedRemove(0);
+    return .{ .string = try self.arena.dupe(u8, r) };
+}
+
+fn host262AgentNoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return .undefined;
+}
+
+fn host262AgentMonotonicNowFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return .{ .number = 0 }; // deterministic clock (matches Date.now())
+}
+
+/// Install `$262.agent` with the parent-side (start/broadcast/getReport) and
+/// agent-side (receiveBroadcast/report/leaving) primitives.
+fn installAgent(a: std.mem.Allocator, rs: *Shape, d: *value.Object) EvalError!void {
+    const agent = try a.create(value.Object);
+    agent.* = .{};
+    try setNative(a, rs, agent, "start", 1, host262AgentStartFn);
+    try setNative(a, rs, agent, "broadcast", 1, host262AgentBroadcastFn);
+    try setNative(a, rs, agent, "getReport", 0, host262AgentGetReportFn);
+    try setNative(a, rs, agent, "sleep", 1, host262AgentNoopFn);
+    try setNative(a, rs, agent, "monotonicNow", 0, host262AgentMonotonicNowFn);
+    try setNative(a, rs, agent, "receiveBroadcast", 1, host262AgentReceiveBroadcastFn);
+    try setNative(a, rs, agent, "report", 1, host262AgentReportFn);
+    try setNative(a, rs, agent, "leaving", 0, host262AgentNoopFn);
+    try d.setOwn(a, rs, "agent", .{ .object = agent });
+}
+
 // ===== Atomics =======================================================
 
 /// ValidateIntegerTypedArray: the receiver must be an integer typed array (not
@@ -10609,10 +10804,13 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     if (vd.ta.kind != .i32 and vd.ta.kind != .i64) return self.throwError("TypeError", "Atomics.wait requires an Int32Array or BigInt64Array");
     if (!vd.ta.buffer.array_buffer.?.is_shared) return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
     const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
+    // ToNumber(timeout) is still observable (a valueOf side effect must run)
+    // even though, in the cooperative agent model, no concurrent agent can wake
+    // a wait: a matching value can never change underneath us, so we return
+    // "timed-out"; a mismatch returns "not-equal".
+    if (args.len > 3) _ = try self.toNumberV(args[3]);
     const cur = atomicsReadV(self, vd.ta, vd.i);
     const cur_n: f64 = if (cur == .object and cur.object.is_bigint) @floatFromInt(@as(i64, @truncate(cur.object.bigint))) else cur.number;
-    // Single-threaded: if the value differs, "not-equal"; otherwise no other
-    // agent can ever change it, so "timed-out".
     if (@as(i64, @intFromFloat(cur_n)) != @as(i64, @intFromFloat(expected))) return .{ .string = "not-equal" };
     return .{ .string = "timed-out" };
 }
@@ -10621,7 +10819,10 @@ fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
     _ = vd;
-    return .{ .number = 0 }; // no agents are ever waiting
+    // count: ToInteger is observable; no agent is ever blocked in a cooperative
+    // wait, so zero are woken.
+    if (args.len > 2 and args[2] != .undefined) _ = try self.toNumberV(args[2]);
+    return .{ .number = 0 };
 }
 
 /// `Atomics.waitAsync(typedArray, index, value, timeout)` — the non-blocking
