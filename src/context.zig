@@ -1192,6 +1192,27 @@ test "iterator next() brand-checks its receiver" {
     try expectEvalStr("1", "var it = new Set([1, 2]).values(); String(it.next().value)");
 }
 
+test "Map/Set constructors take any iterable (AddEntriesFromIterable)" {
+    // A non-array iterable (here a Set / a string) populates the collection.
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Set('abc').size")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("new Map(new Map([['a',1],['b',2]])).size")).number);
+    // A generator of entries works for Map.
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn(
+        \\function* g() { yield ['x', 3]; yield ['y', 4]; }
+        \\var m = new Map(g()); m.get('x') + m.get('y')
+    )).number);
+    // A non-object Map entry, a non-iterable argument, and a non-callable adder
+    // each throw a TypeError.
+    try std.testing.expectError(error.Throw, evalIn("new Map([1, 2])"));
+    try std.testing.expectError(error.Throw, evalIn("new Map({})"));
+    // The instance's own (possibly overridden) `set` is the adder.
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn(
+        \\var calls = 0;
+        \\class M extends Map { set(k, v) { calls++; return super.set(k, v); } }
+        \\new M([['a', 1]]); calls
+    )).number);
+}
+
 test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     // `Map.prototype[Symbol.iterator]` is the same function as `entries`, and
     // `Set.prototype[Symbol.iterator]`/`keys`/`values` are all the same.

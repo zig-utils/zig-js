@@ -2701,14 +2701,7 @@ pub const Interpreter = struct {
             }
         }
         o.is_weak = self.protoReachesCtorProto("WeakMap", o.proto);
-        if (init_v == .object and init_v.object.is_array) {
-            for (init_v.object.elements.items) |entry| {
-                if (entry == .object and entry.object.is_array) {
-                    const items = entry.object.elements.items;
-                    _ = try self.mapMethod(o, "set", &.{ if (items.len > 0) items[0] else .undefined, if (items.len > 1) items[1] else .undefined });
-                }
-            }
-        }
+        try self.addEntriesFromIterable(o, init_v, false);
         return .{ .object = o };
     }
 
@@ -2728,10 +2721,49 @@ pub const Interpreter = struct {
             }
         }
         o.is_weak = self.protoReachesCtorProto("WeakSet", o.proto);
-        if (init_v == .object and init_v.object.is_array) {
-            for (init_v.object.elements.items) |v| _ = try self.setMethod(o, "add", &.{v});
-        }
+        try self.addEntriesFromIterable(o, init_v, true);
         return .{ .object = o };
+    }
+
+    /// Map's AddEntriesFromIterable and the Set constructor's add loop: drain
+    /// `iterable` through its iterator protocol, invoking the instance's own
+    /// `set`/`add` (so a user override and the WeakMap/WeakSet variants are
+    /// honored). A non-callable adder, a non-iterable argument, or — for a Map —
+    /// a non-object entry is a TypeError; any abrupt completion mid-iteration
+    /// closes the iterator (preserving the original exception) before propagating.
+    fn addEntriesFromIterable(self: *Interpreter, o: *value.Object, iterable: Value, is_set: bool) EvalError!void {
+        if (iterable == .undefined or iterable == .null) return;
+        const adder = try self.getProperty(.{ .object = o }, if (is_set) "add" else "set");
+        if (!adder.isCallable())
+            return self.throwError("TypeError", if (is_set) "Set add method is not callable" else "Map set method is not callable");
+        const iter = try self.iteratorOf(iterable);
+        while (true) {
+            const r = try self.callMethod(iter, "next", &.{});
+            if (r != .object) return self.throwError("TypeError", "iterator.next() did not return an object");
+            if ((try self.getProperty(r, "done")).toBoolean()) break;
+            const item = try self.getProperty(r, "value");
+            self.addOneEntry(o, adder, item, is_set) catch |e| {
+                // IteratorClose, keeping the original abrupt completion's value.
+                const saved = self.exception;
+                self.iteratorClose(iter) catch {};
+                self.exception = saved;
+                return e;
+            };
+        }
+    }
+
+    /// Add one drained iterator value to the collection via `adder` (bound to
+    /// `o`). For a Map the value must be an entry object `{0: key, 1: value}`.
+    fn addOneEntry(self: *Interpreter, o: *value.Object, adder: Value, item: Value, is_set: bool) EvalError!void {
+        const self_v = Value{ .object = o };
+        if (is_set) {
+            _ = try self.callValueWithThis(adder, &.{item}, self_v);
+            return;
+        }
+        if (item != .object) return self.throwError("TypeError", "Iterator value is not an entry object");
+        const k = try self.getProperty(item, "0");
+        const v = try self.getProperty(item, "1");
+        _ = try self.callValueWithThis(adder, &.{ k, v }, self_v);
     }
 
     fn mapMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
