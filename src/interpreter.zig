@@ -1374,8 +1374,26 @@ pub const Interpreter = struct {
                 error.OutOfMemory => return error.OutOfMemory,
             };
         }
+        // A function object's [[Prototype]] is the kind-specific function
+        // prototype intrinsic: %GeneratorFunction.prototype% for `function*`,
+        // %AsyncFunction.prototype% for `async function`,
+        // %AsyncGeneratorFunction.prototype% for `async function*`, else
+        // %Function.prototype%. So `Object.getPrototypeOf(function*(){}).
+        // constructor === GeneratorFunction`, etc.
+        const fproto: ?*value.Object = blk: {
+            const tag: ?[]const u8 = if (fnode.is_generator and fnode.is_async)
+                "\x00AsyncGenFuncProto"
+            else if (fnode.is_generator)
+                "\x00GenFuncProto"
+            else if (fnode.is_async)
+                "\x00AsyncFuncProto"
+            else
+                null;
+            if (tag) |t| if (self.env.get(t)) |v| if (v == .object) break :blk v.object;
+            break :blk self.functionProto();
+        };
         const obj = try self.arena.create(value.Object);
-        obj.* = .{ .js_func = @ptrCast(func), .proto = self.functionProto() };
+        obj.* = .{ .js_func = @ptrCast(func), .proto = fproto };
         func.obj = obj;
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return .{ .object = obj };
@@ -8658,6 +8676,124 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     try env.put("AsyncIterator", .{ .object = ctor });
 }
 
+// ===== GeneratorFunction / AsyncFunction / AsyncGeneratorFunction ====
+// The three hidden function-kind constructors, reachable only through the
+// prototype chain (e.g. `Object.getPrototypeOf(function*(){}).constructor`).
+// Each is a CreateDynamicFunction-style callable that parses a function of its
+// kind from string arguments, and carries a prototype intrinsic whose
+// [[Prototype]] is %Function.prototype% and whose `.constructor` points back.
+
+const DynFnKind = enum { generator, async_fn, async_generator };
+
+fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = this;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            var params: std.ArrayListUnmanaged(u8) = .empty;
+            var body: []const u8 = "";
+            if (args.len > 0) {
+                body = try self.toStringV(args[args.len - 1]);
+                var i: usize = 0;
+                while (i + 1 < args.len) : (i += 1) {
+                    if (i != 0) try params.append(self.arena, ',');
+                    try params.appendSlice(self.arena, try self.toStringV(args[i]));
+                }
+            }
+            const prefix = switch (kind) {
+                .generator => "function* anonymous",
+                .async_fn => "async function anonymous",
+                .async_generator => "async function* anonymous",
+            };
+            const source = try std.fmt.allocPrint(self.arena, "({s}({s}\n) {{\n{s}\n}})", .{ prefix, params.items, body });
+            var parser = Parser.init(self.arena, source) catch
+                return self.throwError("SyntaxError", "Function: invalid parameters or body");
+            const prog = parser.parseProgram() catch
+                return self.throwError("SyntaxError", "Function: invalid parameters or body");
+            const nt = self.new_target;
+            const fnval = try self.eval(prog);
+            // GetPrototypeFromConstructor: a real new.target subclass overrides
+            // the function object's [[Prototype]] (the default kind-prototype is
+            // already installed by makeFunction).
+            if (nt == .object and fnval == .object) {
+                const p = try self.getProperty(nt, "prototype");
+                if (p == .object) fnval.object.proto = p.object;
+            }
+            return fnval;
+        }
+    }.call;
+}
+
+fn installOneFunctionKind(
+    a: std.mem.Allocator,
+    rs: *Shape,
+    func_ctor: *value.Object,
+    func_proto: *value.Object,
+    sym_tag: ?[]const u8,
+    name: []const u8,
+    native_fn: value.NativeFn,
+    instance_proto: ?*value.Object,
+) EvalError!*value.Object {
+    // %XFunction.prototype% (e.g. %Generator%): [[Prototype]] %Function.prototype%.
+    const kproto = try a.create(value.Object);
+    kproto.* = .{ .proto = func_proto };
+    // %XFunction% constructor: [[Prototype]] %Function% (the Function ctor).
+    const ctor = try a.create(value.Object);
+    ctor.* = .{ .native = native_fn, .native_ctor = true, .proto = func_ctor };
+    try installNativeProps(a, rs, ctor, name, 1);
+    try ctor.setOwn(a, rs, "prototype", .{ .object = kproto });
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    // %XFunction.prototype%.constructor === %XFunction% ({ !w, !e, c }).
+    try kproto.setOwn(a, rs, "constructor", .{ .object = ctor });
+    try kproto.setAttr(a, "constructor", .{ .writable = false, .enumerable = false, .configurable = true });
+    if (sym_tag) |k| {
+        try kproto.setOwn(a, rs, k, .{ .string = name });
+        try kproto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    if (instance_proto) |gp| {
+        // %XFunction.prototype%.prototype === %XPrototype% ({ !w, !e, c }), and
+        // %XPrototype%.constructor === %XFunction.prototype% ({ !w, !e, c }).
+        try kproto.setOwn(a, rs, "prototype", .{ .object = gp });
+        try kproto.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = true });
+        try gp.setOwn(a, rs, "constructor", .{ .object = kproto });
+        try gp.setAttr(a, "constructor", .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    return kproto;
+}
+
+fn installFunctionKinds(env: *Environment, rs: *Shape) EvalError!void {
+    const a = env.arena;
+    const sym_tag: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("toStringTag")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+    const func_ctor: *value.Object = blk: {
+        if (env.get("Function")) |fv| if (fv == .object) break :blk fv.object;
+        return;
+    };
+    const func_proto: *value.Object = blk: {
+        if (func_ctor.getOwn("prototype")) |pv| if (pv == .object) break :blk pv.object;
+        return;
+    };
+    const gen_proto: ?*value.Object = blk: {
+        if (env.get("\x00GenProto")) |v| if (v == .object) break :blk v.object;
+        break :blk null;
+    };
+    const agen_proto: ?*value.Object = blk: {
+        if (env.get("\x00AsyncGenProto")) |v| if (v == .object) break :blk v.object;
+        break :blk null;
+    };
+
+    const genfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, "GeneratorFunction", dynamicFunctionFn(.generator), gen_proto);
+    try env.put("\x00GenFuncProto", .{ .object = genfp });
+    const asyncfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, "AsyncFunction", dynamicFunctionFn(.async_fn), null);
+    try env.put("\x00AsyncFuncProto", .{ .object = asyncfp });
+    const agenfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, "AsyncGeneratorFunction", dynamicFunctionFn(.async_generator), agen_proto);
+    try env.put("\x00AsyncGenFuncProto", .{ .object = agenfp });
+}
+
 /// CanBeHeldWeakly(v): an Object or a Symbol (a BigInt or a primitive is not).
 fn canBeHeldWeakly(v: Value) bool {
     return v == .object and !v.object.is_bigint;
@@ -11832,6 +11968,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installWeakRefAndFinReg(env, rs, object_proto);
     try installIterator(env, rs, object_proto);
     try installAsyncIterator(env, rs, object_proto);
+    try installFunctionKinds(env, rs);
     try installDisposableStacks(env, rs, object_proto);
     try installSharedArrayBufferAndAtomics(env, rs, object_proto);
     try installTemporal(env, rs, object_proto);
