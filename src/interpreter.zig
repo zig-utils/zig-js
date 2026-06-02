@@ -15250,6 +15250,11 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             const e = if (fwd) IsoYMD{ .y = t.year, .m = t.month, .d = t.day } else b;
             const l = if (fwd) b else IsoYMD{ .y = t.year, .m = t.month, .d = t.day };
             var dd = calendarDateDiff(e.y, e.m, e.d, l.y, l.m, l.d, lg);
+            // Round the (positive) magnitude to smallestUnit relative to the
+            // earlier date when a calendar smallestUnit / increment is requested.
+            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1) {
+                dd = try roundDurationRel(self, dd, .{ .y = e.y, .m = e.m, .d = e.d, .time_ns = 0 }, .{ .largest = lg, .smallest = opts.smallest, .mode = opts.mode, .increment = opts.increment });
+            }
             const s2 = sign * (if (fwd) @as(f64, 1) else -1);
             if (s2 < 0) for (&dd) |*c| {
                 c.* = -c.*;
