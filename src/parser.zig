@@ -671,6 +671,12 @@ pub const Parser = struct {
         } else if (isKeyword(self.cur(), "const")) {
             decl_kind = .@"const";
             _ = self.advance();
+        } else if (isKeyword(self.cur(), "using") and self.peekKind(1) == .identifier and
+            !self.peekIsKeyword(1, "of") and self.noNewlineBefore(1))
+        {
+            // `for (using x of …)` (but `for (using of …)` has `using` as the var).
+            decl_kind = .@"const";
+            _ = self.advance();
         }
         // Iteration form `for ([decl] target in/of iterable)`, where `target`
         // is an identifier, a destructuring pattern, or (assignment form) a
@@ -729,12 +735,21 @@ pub const Parser = struct {
             // Assignment form: an array/object literal cover → destructuring pattern.
             return try self.litToPattern(try self.parsePrimary());
         }
-        if (self.check(.identifier) and !isReservedWord(self.cur().text)) {
-            if (decl_kind != null) return try self.alloc(.{ .identifier = self.advance().text });
-            // Assignment LHS: an identifier or member chain (`obj.x`, `a[i]`).
-            return try self.parsePostfix();
+        if (decl_kind != null) {
+            // A declaration binds a single BindingIdentifier.
+            if (self.check(.identifier) and !isReservedWord(self.cur().text))
+                return try self.alloc(.{ .identifier = self.advance().text });
+            return null;
         }
-        return null;
+        // Assignment form: a LeftHandSideExpression that must be a valid
+        // assignment target. Anything else (a call, `this`, a literal, …) makes
+        // this not an iteration form, so the caller rewinds and it becomes a
+        // syntax error in the classic-`for` path.
+        const node = try self.parsePostfix();
+        return switch (node.*) {
+            .identifier, .member, .super_member => node,
+            else => null,
+        };
     }
 
     fn parseSwitch(self: *Parser) ParseError!*Node {
