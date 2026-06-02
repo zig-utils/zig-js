@@ -7059,12 +7059,26 @@ fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     return if (target.object.proto) |p| .{ .object = p } else .null;
 }
 
+/// CreateListFromArrayLike: a non-Array argumentsList is still read via its
+/// `length` + indexed properties (a throwing `length`/index getter propagates);
+/// a non-object is a TypeError. Real arrays take the dense fast path.
+fn createListFromArrayLike(self: *Interpreter, v: Value) EvalError![]const Value {
+    if (v != .object) return self.throwError("TypeError", "Reflect: arguments list is not an object");
+    if (v.object.is_array) return v.object.elements.items;
+    const len = toLen((try self.toPrimitive(try self.getProperty(v, "length"), .number)).toNumber());
+    if (len > (1 << 22)) return self.throwError("RangeError", "arguments list is too large");
+    const buf = try self.arena.alloc(Value, len);
+    for (buf, 0..) |*slot, i| slot.* = try self.getProperty(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+    return buf;
+}
+
 fn reflectApplyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
+    if (!target.isCallable()) return self.throwError("TypeError", "Reflect.apply target is not a function");
     const this_arg = if (args.len > 1) args[1] else .undefined;
-    const list: []const Value = if (args.len > 2 and args[2] == .object and args[2].object.is_array) args[2].object.elements.items else &.{};
+    const list = try createListFromArrayLike(self, if (args.len > 2) args[2] else .undefined);
     return self.callValueWithThis(target, list, this_arg);
 }
 
@@ -7077,7 +7091,7 @@ fn reflectConstructFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     // `isConstructor` harness probes via `Reflect.construct(fn, [], target)`.
     if (args.len > 2 and !isConstructorValue(args[2]))
         return self.throwError("TypeError", "Reflect.construct newTarget is not a constructor");
-    const list: []const Value = if (args.len > 1 and args[1] == .object and args[1].object.is_array) args[1].object.elements.items else &.{};
+    const list = try createListFromArrayLike(self, if (args.len > 1) args[1] else .undefined);
     return self.construct(target, list);
 }
 
@@ -10988,7 +11002,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Reflect — the static reflection namespace.
     const reflect_ns = try a.create(value.Object);
-    reflect_ns.* = .{};
+    // Reflect is an ordinary object: [[Prototype]] = %Object.prototype%, with a
+    // `Symbol.toStringTag` of "Reflect".
+    reflect_ns.* = .{ .proto = object_proto };
+    if (symbol_ns.getOwn("toStringTag")) |rtt| if (rtt == .object and rtt.object.is_symbol) {
+        try reflect_ns.setOwn(a, root_shape, rtt.object.sym_key, .{ .string = "Reflect" });
+        try reflect_ns.setAttr(a, rtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+    };
     try setNative(a, root_shape, reflect_ns, "get", 2, reflectGetFn);
     try setNative(a, root_shape, reflect_ns, "set", 3, reflectSetFn);
     try setNative(a, root_shape, reflect_ns, "has", 2, reflectHasFn);

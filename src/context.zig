@@ -1258,6 +1258,22 @@ test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     try expectEvalStr("1,2,3", "[...new Set([1, 2, 3])].join(',')");
 }
 
+test "Reflect: prototype, toStringTag, array-like argumentsList" {
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Reflect) === Object.prototype")).boolean);
+    try expectEvalStr("Reflect", "Reflect[Symbol.toStringTag]");
+    // apply/construct accept an array-like (not just a real Array) argumentsList.
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\Reflect.apply(function () { return arguments.length; }, null, { length: 2, 0: 'a', 1: 'b' })
+    )).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn(
+        \\function P(a, b) { this.sum = a + b; }
+        \\Reflect.construct(P, { length: 2, 0: 2, 1: 3 }).sum
+    )).number);
+    // apply on a non-callable target throws; a throwing length getter propagates.
+    try std.testing.expectError(error.Throw, evalIn("Reflect.apply({}, null, [])"));
+    try std.testing.expectError(error.Throw, evalIn("Reflect.apply(function(){}, null, { get length() { throw new TypeError('x'); } })"));
+}
+
 test "Reflect.* require a real Object target (Symbol/primitive throws)" {
     // A Symbol is internally object-tagged, but Reflect.* must reject it.
     try std.testing.expectError(error.Throw, evalIn("Reflect.get(Symbol(), 'x')"));
