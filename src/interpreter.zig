@@ -8148,6 +8148,50 @@ fn iterProtoSymbolIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) 
     return this; // %IteratorPrototype%[@@iterator] returns the iterator itself
 }
 
+/// %IteratorPrototype%[@@dispose]: call `this.return()` (if present); undefined.
+fn iterProtoDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const ret = try self.getProperty(this, "return");
+    if (ret == .object and ret.object.isCallableObject()) _ = try self.callValueWithThis(ret, &.{}, this);
+    return .undefined;
+}
+
+/// %AsyncIteratorPrototype%[@@asyncDispose]: a promise that calls (and awaits)
+/// `this.return()` if present, then fulfills with undefined.
+fn asyncIterProtoDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const pobj = try promise.newPromise(self);
+    const p = promise.promiseOf(.{ .object = pobj }).?;
+    const ret = self.getProperty(this, "return") catch {
+        promise.reject(self, p, self.exception) catch {};
+        return .{ .object = pobj };
+    };
+    if (ret == .object and ret.object.isCallableObject()) {
+        const r = self.callValueWithThis(ret, &.{}, this) catch {
+            promise.reject(self, p, self.exception) catch {};
+            return .{ .object = pobj };
+        };
+        _ = self.awaitValue(r) catch {
+            promise.reject(self, p, self.exception) catch {};
+            return .{ .object = pobj };
+        };
+    }
+    promise.resolve(self, p, .undefined) catch {};
+    return .{ .object = pobj };
+}
+
+/// Install a well-known-symbol-keyed method whose `name` is the spec display
+/// form (e.g. "[Symbol.dispose]") rather than the encoded key.
+fn installSymbolMethod(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, key: []const u8, display: []const u8, len: usize, f: value.NativeFn) EvalError!void {
+    try setNative(a, rs, obj, key, len, f);
+    if (obj.getOwn(key)) |mv| if (mv == .object) {
+        try mv.object.setOwn(a, rs, "name", .{ .string = display });
+        try mv.object.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+    };
+}
+
 /// `Iterator.from(O)`: wrap an iterator/iterable so the helper methods apply.
 fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -8325,10 +8369,18 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         break :blk null;
     };
 
+    const sym_dispose: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("dispose")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
+
     // %IteratorPrototype%.
     const iter_proto = try a.create(value.Object);
     iter_proto.* = .{ .proto = object_proto };
     if (sym_iter) |k| try setNative(a, rs, iter_proto, k, 0, iterProtoSymbolIteratorFn);
+    if (sym_dispose) |k| try installSymbolMethod(a, rs, iter_proto, k, "[Symbol.dispose]", 0, iterProtoDisposeFn);
     inline for (.{
         .{ "map", iterMapFn },        .{ "filter", iterFilterFn },
         .{ "take", iterTakeFn },      .{ "drop", iterDropFn },
@@ -8730,11 +8782,18 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
         };
         break :blk null;
     };
+    const sym_async_dispose: ?[]const u8 = blk: {
+        if (env.get("Symbol")) |sym| if (sym == .object) {
+            if (sym.object.getOwn("asyncDispose")) |t| if (t == .object and t.object.is_symbol) break :blk t.object.sym_key;
+        };
+        break :blk null;
+    };
 
     // %AsyncIteratorPrototype%.
     const proto = try a.create(value.Object);
     proto.* = .{ .proto = object_proto };
     if (sym_async_iter) |k| try setNative(a, rs, proto, k, 0, asyncIterProtoSymbolFn);
+    if (sym_async_dispose) |k| try installSymbolMethod(a, rs, proto, k, "[Symbol.asyncDispose]", 0, asyncIterProtoDisposeFn);
     inline for (.{
         .{ "map", asyncIterMapFn },         .{ "filter", asyncIterFilterFn },
         .{ "take", asyncIterTakeFn },       .{ "drop", asyncIterDropFn },
