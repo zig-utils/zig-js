@@ -2287,6 +2287,7 @@ pub const Interpreter = struct {
             // `u`/`v` (unicode): pattern is interpreted as Unicode code points
             // (enables `\u{...}` and code-point-aware classes in the engine).
             .unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null,
+            .unicode_sets = std.mem.indexOfScalar(u8, flags, 'v') != null,
         };
         return regex.Regex.compileWithFlags(self.arena, src, cf) catch
             return self.throwError("SyntaxError", "invalid regular expression");
