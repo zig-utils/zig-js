@@ -10367,20 +10367,45 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             const o = (try self.newObject()).object;
             const loc = this.object.getOwn("\x00locale") orelse Value{ .string = "en" };
             try self.setProp(o, "locale", loc);
-            try self.setProp(o, "numberingSystem", .{ .string = "latn" });
+            // The spec resolvedOptions field set (with default values) per
+            // service. `numberingSystem` belongs to the number/date/plural
+            // services, not Collator/ListFormat.
             if (comptime std.mem.eql(u8, service, "NumberFormat")) {
+                try self.setProp(o, "numberingSystem", .{ .string = "latn" });
                 try self.setProp(o, "style", .{ .string = "decimal" });
                 try self.setProp(o, "minimumIntegerDigits", .{ .number = 1 });
+                try self.setProp(o, "minimumFractionDigits", .{ .number = 0 });
+                try self.setProp(o, "maximumFractionDigits", .{ .number = 3 });
                 try self.setProp(o, "useGrouping", .{ .string = "auto" });
+                try self.setProp(o, "notation", .{ .string = "standard" });
+                try self.setProp(o, "signDisplay", .{ .string = "auto" });
+                try self.setProp(o, "roundingIncrement", .{ .number = 1 });
+                try self.setProp(o, "roundingMode", .{ .string = "halfExpand" });
+                try self.setProp(o, "roundingPriority", .{ .string = "auto" });
+                try self.setProp(o, "trailingZeroDisplay", .{ .string = "auto" });
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 try self.setProp(o, "usage", .{ .string = "sort" });
                 try self.setProp(o, "sensitivity", .{ .string = "variant" });
-                try self.setProp(o, "caseFirst", .{ .string = "false" });
+                try self.setProp(o, "ignorePunctuation", .{ .boolean = false });
                 try self.setProp(o, "collation", .{ .string = "default" });
                 try self.setProp(o, "numeric", .{ .boolean = false });
+                try self.setProp(o, "caseFirst", .{ .string = "false" });
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
+                try self.setProp(o, "numberingSystem", .{ .string = "latn" });
                 try self.setProp(o, "type", .{ .string = "cardinal" });
+                try self.setProp(o, "minimumIntegerDigits", .{ .number = 1 });
+                try self.setProp(o, "minimumFractionDigits", .{ .number = 0 });
+                try self.setProp(o, "maximumFractionDigits", .{ .number = 3 });
+                const cats = (try self.newArray()).object;
+                try cats.elements.append(self.arena, .{ .string = "one" });
+                try cats.elements.append(self.arena, .{ .string = "other" });
+                try self.setProp(o, "pluralCategories", .{ .object = cats });
+                try self.setProp(o, "roundingIncrement", .{ .number = 1 });
+                try self.setProp(o, "roundingMode", .{ .string = "halfExpand" });
+                try self.setProp(o, "roundingPriority", .{ .string = "auto" });
+                try self.setProp(o, "trailingZeroDisplay", .{ .string = "auto" });
             } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
+                try self.setProp(o, "numberingSystem", .{ .string = "latn" });
                 try self.setProp(o, "calendar", .{ .string = "iso8601" });
                 try self.setProp(o, "timeZone", .{ .string = "UTC" });
             }
