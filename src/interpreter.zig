@@ -3144,6 +3144,20 @@ pub const Interpreter = struct {
         // `keyOf` when it was used as a property key); other keys are strings.
         if (value.isSymbolKey(key)) {
             if (self.symbols.get(key)) |sym| return .{ .object = sym };
+            // Fallback: a well-known symbol (Symbol.iterator / toStringTag / …)
+            // whose key wasn't registered via `keyOf` this evaluation — find the
+            // canonical Symbol object on the global `Symbol` so identity holds
+            // (e.g. getOwnPropertySymbols/Reflect.ownKeys surfacing @@toStringTag).
+            if (self.env.get("Symbol")) |symv| if (symv == .object) {
+                const ks = symv.object.ownKeys(self.arena) catch &.{};
+                for (ks) |k| {
+                    const v = symv.object.getOwn(k) orelse continue;
+                    if (v == .object and v.object.is_symbol and std.mem.eql(u8, v.object.sym_key, key)) {
+                        self.symbols.put(self.arena, key, v.object) catch {};
+                        return .{ .object = v.object };
+                    }
+                }
+            };
         }
         return .{ .string = key };
     }
