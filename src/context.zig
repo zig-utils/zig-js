@@ -1192,6 +1192,24 @@ test "iterator next() brand-checks its receiver" {
     try expectEvalStr("1", "var it = new Set([1, 2]).values(); String(it.next().value)");
 }
 
+test "Math: signed-zero, pow/hypot edge cases, prototype + toStringTag" {
+    // max prefers +0, min prefers -0.
+    try std.testing.expect((try evalIn("1 / Math.max(-0, 0)")).number == std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.min(0, -0)")).number == -std.math.inf(f64));
+    // round of a value that rounds to zero keeps the operand's sign.
+    try std.testing.expect((try evalIn("1 / Math.round(-0.5)")).number == -std.math.inf(f64));
+    // pow: NaN exponent and (±1, ±Infinity) are NaN.
+    try std.testing.expect(std.math.isNan((try evalIn("Math.pow(1, NaN)")).number));
+    try std.testing.expect(std.math.isNan((try evalIn("Math.pow(-1, Infinity)")).number));
+    // hypot: ±Infinity wins over a NaN argument.
+    try std.testing.expect((try evalIn("Math.hypot(NaN, Infinity)")).number == std.math.inf(f64));
+    // each element is ToNumber-coerced (a Symbol throws).
+    try std.testing.expectError(error.Throw, evalIn("Math.max(1, Symbol())"));
+    // Math is an ordinary object with the right prototype + tag.
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Math) === Object.prototype")).boolean);
+    try expectEvalStr("[object Math]", "Object.prototype.toString.call(Math)");
+}
+
 test "Map/Set constructors take any iterable (AddEntriesFromIterable)" {
     // A non-array iterable (here a Set / a string) populates the collection.
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Set('abc').size")).number);

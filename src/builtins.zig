@@ -220,8 +220,12 @@ pub fn mathRound(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     _ = ctx;
     _ = this;
     const n = num1(args);
-    if (std.math.isNan(n) or std.math.isInf(n)) return .{ .number = n };
-    return .{ .number = @floor(n + 0.5) }; // JS rounds halves toward +Infinity
+    if (std.math.isNan(n) or std.math.isInf(n) or n == 0) return .{ .number = n }; // preserves ±0
+    // Halves round toward +Infinity, but a value rounding to zero keeps the
+    // sign of the operand: `Math.round(-0.5)` is -0, `Math.round(-0.4)` is -0.
+    if (n > 0 and n < 0.5) return .{ .number = 0 };
+    if (n < 0 and n >= -0.5) return .{ .number = -0.0 };
+    return .{ .number = @floor(n + 0.5) };
 }
 pub fn mathAbs(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = ctx;
@@ -243,29 +247,37 @@ pub fn mathSign(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
     return .{ .number = n }; // preserves +0 / -0
 }
 pub fn mathPow(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return .{ .number = std.math.pow(f64, num1(args), arg(args, 1).toNumber()) };
+    const self = interp(ctx);
+    const base = try self.toNumberV(arg(args, 0));
+    const exp = try self.toNumberV(arg(args, 1));
+    // JS exponentiation overrides IEEE pow: a NaN exponent is always NaN (even
+    // `pow(1, NaN)`), and `pow(±1, ±Infinity)` is NaN (IEEE returns 1).
+    if (std.math.isNan(exp)) return .{ .number = std.math.nan(f64) };
+    if (std.math.isInf(exp) and @abs(base) == 1) return .{ .number = std.math.nan(f64) };
+    return .{ .number = std.math.pow(f64, base, exp) };
 }
 pub fn mathMax(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
+    const self = interp(ctx);
     var m: f64 = -std.math.inf(f64);
     for (args) |v| {
-        const n = v.toNumber();
+        const n = try self.toNumberV(v); // ToNumber per element, in order
         if (std.math.isNan(n)) return .{ .number = n };
-        if (n > m) m = n;
+        // +0 is greater than -0: prefer +0 when both are zero.
+        if (n > m or (n == 0 and m == 0 and std.math.signbit(m) and !std.math.signbit(n))) m = n;
     }
     return .{ .number = m };
 }
 pub fn mathMin(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
+    const self = interp(ctx);
     var m: f64 = std.math.inf(f64);
     for (args) |v| {
-        const n = v.toNumber();
+        const n = try self.toNumberV(v);
         if (std.math.isNan(n)) return .{ .number = n };
-        if (n < m) m = n;
+        // -0 is less than +0: prefer -0 when both are zero.
+        if (n < m or (n == 0 and m == 0 and !std.math.signbit(m) and std.math.signbit(n))) m = n;
     }
     return .{ .number = m };
 }
@@ -354,13 +366,20 @@ pub fn mathAtan2(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 }
 
 pub fn mathHypot(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
+    const self = interp(ctx);
     var sum: f64 = 0;
+    var any_inf = false;
+    var any_nan = false;
     for (args) |v| {
-        const n = v.toNumber();
+        const n = try self.toNumberV(v); // coerce every arg in order (abrupt propagates)
+        if (std.math.isInf(n)) any_inf = true;
+        if (std.math.isNan(n)) any_nan = true;
         sum += n * n;
     }
+    // ±Infinity in any argument wins over a NaN in another.
+    if (any_inf) return .{ .number = std.math.inf(f64) };
+    if (any_nan) return .{ .number = std.math.nan(f64) };
     return .{ .number = @sqrt(sum) };
 }
 

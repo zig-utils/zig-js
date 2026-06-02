@@ -10903,6 +10903,17 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     };
     try env.put("Symbol", .{ .object = symbol_ns });
 
+    // `Math` is an ordinary object: its [[Prototype]] is %Object.prototype% and
+    // it has a `Symbol.toStringTag` of "Math" (so `Object.getPrototypeOf(Math)
+    // === Object.prototype` and `Object.prototype.toString.call(Math)` is
+    // "[object Math]"). Wired here, now that both Object.prototype and Symbol.
+    // toStringTag exist.
+    math_obj.proto = object_proto;
+    if (symbol_ns.getOwn("toStringTag")) |mtt| if (mtt == .object and mtt.object.is_symbol) {
+        try math_obj.setOwn(a, root_shape, mtt.object.sym_key, .{ .string = "Math" });
+        try math_obj.setAttr(a, mtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+    };
+
     // Function.prototype[Symbol.hasInstance] — a {!w,!e,!c} method backing the
     // ordinary `instanceof` (installed now that the well-known symbol exists).
     if (symbol_ns.getOwn("hasInstance")) |hi| if (hi == .object) {
