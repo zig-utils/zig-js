@@ -10609,34 +10609,81 @@ fn intlBrandOk(this: Value, service: []const u8) bool {
 fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.format on incompatible receiver");
-    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    var n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+
+    // Resolve the fraction/integer-digit and style options (en-style algorithm,
+    // no CLDR): minimumIntegerDigits (1), minimumFractionDigits (0),
+    // maximumFractionDigits (3 decimal / 0 percent), style decimal|percent.
+    var min_int: usize = 1;
+    var min_frac: usize = 0;
+    var max_frac: usize = 3;
+    var is_percent = false;
+    var use_grouping = true;
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+        const o = ov;
+        const sv = try self.getProperty(o, "style");
+        if (sv == .string and std.mem.eql(u8, sv.string, "percent")) {
+            is_percent = true;
+            max_frac = 0;
+        }
+        const mi = try self.getProperty(o, "minimumIntegerDigits");
+        if (mi != .undefined) min_int = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(mi)))));
+        const mnf = try self.getProperty(o, "minimumFractionDigits");
+        const mxf = try self.getProperty(o, "maximumFractionDigits");
+        if (mnf != .undefined) {
+            min_frac = @intFromFloat(@max(0, @min(100, @trunc(try self.toNumberV(mnf)))));
+            if (max_frac < min_frac) max_frac = min_frac;
+        }
+        if (mxf != .undefined) {
+            max_frac = @intFromFloat(@max(0, @min(100, @trunc(try self.toNumberV(mxf)))));
+            if (max_frac < min_frac) min_frac = max_frac;
+        }
+        const ug = try self.getProperty(o, "useGrouping");
+        if (ug == .boolean and !ug.boolean) use_grouping = false;
+        if (ug == .string and std.mem.eql(u8, ug.string, "false")) use_grouping = false;
+    };
+
     if (std.math.isNan(n)) return .{ .string = "NaN" };
-    if (std.math.isInf(n)) return .{ .string = if (n < 0) "-∞" else "∞" };
-    const neg = n < 0;
+    const neg = std.math.signbit(n);
+    if (std.math.isInf(n)) return .{ .string = if (neg) (if (is_percent) "-∞%" else "-∞") else (if (is_percent) "∞%" else "∞") };
+    if (is_percent) n *= 100;
     const mag = @abs(n);
-    const int_part: u64 = @intFromFloat(@floor(mag));
-    const digits = try std.fmt.allocPrint(self.arena, "{d}", .{int_part});
+    // Round to max_frac fraction digits.
+    var scale: f64 = 1;
+    for (0..max_frac) |_| scale *= 10;
+    const rounded = @round(mag * scale) / scale;
+    const int_part: u64 = @intFromFloat(@floor(rounded));
+    var digits = try std.fmt.allocPrint(self.arena, "{d}", .{int_part});
+    // Pad the integer part to minimumIntegerDigits.
+    while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    if (neg) try buf.append(self.arena, '-');
-    // Group the integer part in threes.
+    if (neg and rounded != 0) try buf.append(self.arena, '-');
     const first_group = digits.len % 3;
     for (digits, 0..) |c, i| {
-        if (i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
+        if (use_grouping and i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
         try buf.append(self.arena, c);
     }
-    // Up to 3 fraction digits (trailing zeros trimmed).
-    const frac = mag - @floor(mag);
-    if (frac > 0) {
-        const scaled: u64 = @intFromFloat(@round(frac * 1000));
-        if (scaled > 0) {
-            var fb: [3]u8 = undefined;
-            _ = std.fmt.bufPrint(&fb, "{d:0>3}", .{scaled}) catch {};
-            var flen: usize = 3;
-            while (flen > 0 and fb[flen - 1] == '0') flen -= 1;
+    // Fraction digits: between min_frac and max_frac (trailing zeros beyond
+    // min_frac trimmed).
+    if (max_frac > 0) {
+        const frac = rounded - @floor(rounded);
+        var fb: std.ArrayListUnmanaged(u8) = .empty;
+        var f = frac;
+        for (0..max_frac) |_| {
+            f *= 10;
+            const d: u8 = @intFromFloat(@floor(f + 1e-9));
+            try fb.append(self.arena, '0' + @as(u8, @min(d, 9)));
+            f -= @floor(f + 1e-9);
+        }
+        var flen: usize = fb.items.len;
+        while (flen > min_frac and fb.items[flen - 1] == '0') flen -= 1;
+        if (flen > 0) {
             try buf.append(self.arena, '.');
-            try buf.appendSlice(self.arena, fb[0..flen]);
+            try buf.appendSlice(self.arena, fb.items[0..flen]);
         }
     }
+    if (is_percent) try buf.append(self.arena, '%');
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
