@@ -70,6 +70,15 @@ pub const Parser = struct {
     fn cur(self: *Parser) Token {
         return self.tokens[self.pos];
     }
+    /// Whether no line terminator separates the token `ahead` positions away from
+    /// the one just before it (the restricted-production check, e.g. `using` may
+    /// not be followed by a newline before its binding identifier).
+    fn noNewlineBefore(self: *Parser, ahead: usize) bool {
+        const idx = self.pos + ahead;
+        if (idx == 0 or idx >= self.tokens.len) return true;
+        const gap = self.source[self.tokens[idx - 1].end..self.tokens[idx].pos];
+        return std.mem.indexOfScalar(u8, gap, '\n') == null;
+    }
 
     fn advance(self: *Parser) Token {
         const t = self.tokens[self.pos];
@@ -364,6 +373,18 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "var")) return self.parseVarDecl(.@"var");
             if (std.mem.eql(u8, t.text, "let")) return self.parseVarDecl(.let);
             if (std.mem.eql(u8, t.text, "const")) return self.parseVarDecl(.@"const");
+            // `using x = e, …;` (explicit resource management): a block-scoped,
+            // initializer-required declaration — parsed like `const` (disposal at
+            // scope exit is not yet implemented). `using` not followed (on the
+            // same line) by a binding identifier is an ordinary expression.
+            if (std.mem.eql(u8, t.text, "using") and self.peekKind(1) == .identifier and
+                self.noNewlineBefore(1) and !isReservedWord(self.tokens[self.pos + 1].text))
+                return self.parseVarDecl(.@"const");
+            if (std.mem.eql(u8, t.text, "await") and self.peekIsKeyword(1, "using") and
+                self.peekKind(2) == .identifier and self.noNewlineBefore(2)) {
+                _ = self.advance(); // await
+                return self.parseVarDecl(.@"const");
+            }
             if (std.mem.eql(u8, t.text, "if")) return self.parseIf();
             if (std.mem.eql(u8, t.text, "while")) return self.parseWhile();
             if (std.mem.eql(u8, t.text, "do")) return self.parseDoWhile();
