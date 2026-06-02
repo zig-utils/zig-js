@@ -14578,6 +14578,19 @@ fn balanceTimeNs(total: i128, largest: TUnit) [10]f64 {
 const RoundOpts = struct { largest: TUnit, smallest: TUnit, mode: RoundMode, increment: f64 };
 const RoundMode = enum { ceil, floor, expand, trunc, half_ceil, half_floor, half_expand, half_trunc, half_even };
 
+/// The rounding mode to use for a *negative* result (since() / a backward
+/// difference): directional modes flip (ceil↔floor, halfCeil↔halfFloor), while
+/// magnitude/even modes are symmetric.
+fn negateRoundMode(m: RoundMode) RoundMode {
+    return switch (m) {
+        .ceil => .floor,
+        .floor => .ceil,
+        .half_ceil => .half_floor,
+        .half_floor => .half_ceil,
+        else => m, // trunc/expand/half_expand/half_trunc/half_even are symmetric
+    };
+}
+
 fn roundModeFromStr(s: []const u8) ?RoundMode {
     const pairs = .{
         .{ "ceil", RoundMode.ceil },   .{ "floor", RoundMode.floor },
@@ -15012,6 +15025,12 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             const tparts = balanceTimeNs(time_diff, .hour);
             for (4..10) |i| dd[i] = tparts[i];
             const s2 = sign * (if (dateTimeToNs(a) <= dateTimeToNs(b)) @as(f64, 1) else -1);
+            // Round the positive magnitude to smallestUnit relative to the
+            // earlier datetime; a negative result (since/backward) flips the mode.
+            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1) {
+                const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
+                dd = try roundDurationRel(self, dd, .{ .y = earlier.year, .m = earlier.month, .d = earlier.day, .time_ns = timeToNs(earlier) }, .{ .largest = opts.largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+            }
             if (s2 < 0) for (&dd) |*c| {
                 c.* = -c.*;
             };
@@ -15250,12 +15269,14 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             const e = if (fwd) IsoYMD{ .y = t.year, .m = t.month, .d = t.day } else b;
             const l = if (fwd) b else IsoYMD{ .y = t.year, .m = t.month, .d = t.day };
             var dd = calendarDateDiff(e.y, e.m, e.d, l.y, l.m, l.d, lg);
-            // Round the (positive) magnitude to smallestUnit relative to the
-            // earlier date when a calendar smallestUnit / increment is requested.
-            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1) {
-                dd = try roundDurationRel(self, dd, .{ .y = e.y, .m = e.m, .d = e.d, .time_ns = 0 }, .{ .largest = lg, .smallest = opts.smallest, .mode = opts.mode, .increment = opts.increment });
-            }
             const s2 = sign * (if (fwd) @as(f64, 1) else -1);
+            // Round the (positive) magnitude to smallestUnit relative to the
+            // earlier date when a calendar smallestUnit / increment is requested;
+            // a negative result (since/backward) flips the rounding mode.
+            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1) {
+                const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
+                dd = try roundDurationRel(self, dd, .{ .y = e.y, .m = e.m, .d = e.d, .time_ns = 0 }, .{ .largest = lg, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+            }
             if (s2 < 0) for (&dd) |*c| {
                 c.* = -c.*;
             };
