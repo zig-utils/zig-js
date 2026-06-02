@@ -102,6 +102,12 @@ pub const Lexer = struct {
     /// start of a regex literal).
     prev_kind: TokenKind = .eof,
     prev_text: []const u8 = "",
+    /// A stack of brace kinds (true = object literal `{`, false = block `{`), to
+    /// resolve the `}`-then-`/` ambiguity: `{…} / x` divides an object literal,
+    /// whereas a block `}` allows a regex.
+    brace_obj: [512]bool = undefined,
+    brace_top: usize = 0,
+    last_rbrace_object: bool = false,
 
     pub fn init(arena: std.mem.Allocator, src: []const u8) Lexer {
         return .{ .src = src, .arena = arena };
@@ -280,8 +286,21 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) LexError!Token {
+        const prev = self.prev_kind;
+        const prev_text = self.prev_text;
         var t = try self.nextRaw();
         t.end = self.i;
+        if (t.kind == .lbrace) {
+            if (self.brace_top < self.brace_obj.len) {
+                self.brace_obj[self.brace_top] = bracePosIsObject(prev, prev_text);
+                self.brace_top += 1;
+            }
+        } else if (t.kind == .rbrace) {
+            self.last_rbrace_object = if (self.brace_top > 0) blk: {
+                self.brace_top -= 1;
+                break :blk self.brace_obj[self.brace_top];
+            } else false;
+        }
         self.prev_kind = t.kind;
         self.prev_text = t.text;
         return t;
@@ -292,6 +311,9 @@ pub const Lexer = struct {
     fn regexAllowed(self: *Lexer) bool {
         return switch (self.prev_kind) {
             .number, .string, .template, .regex, .rparen, .rbracket => false,
+            // A `}` that closed an object literal ends an expression (division);
+            // one that closed a block does not (regex allowed).
+            .rbrace => !self.last_rbrace_object,
             .identifier => isOperandKeyword(self.prev_text), // `return /re/` yes, `x / y` no
             else => true,
         };
@@ -912,6 +934,30 @@ fn stripSeparators(arena: std.mem.Allocator, s: []const u8) LexError![]const u8 
 }
 
 /// Keywords after which a `/` begins a regex (they expect an operand).
+/// Whether a `{` following a token of kind `prev_kind` begins an object literal
+/// (expression position) rather than a block. Used only to disambiguate a later
+/// `}`-then-`/`; an imperfect heuristic is fine since it only affects regex-vs-
+/// division at a `}`.
+fn bracePosIsObject(prev_kind: TokenKind, prev_text: []const u8) bool {
+    return switch (prev_kind) {
+        .lparen, .lbracket, .comma, .colon, .question,
+        .assign, .plus_eq, .minus_eq, .star_eq, .slash_eq, .percent_eq,
+        .star_star_eq, .shl_eq, .shr_eq, .ushr_eq, .amp_eq, .pipe_eq, .caret_eq,
+        .amp_amp_eq, .pipe_pipe_eq, .qq_eq,
+        .plus, .minus, .star, .star_star, .slash, .percent,
+        .eq, .eq_strict, .neq, .neq_strict, .lt, .le, .gt, .ge,
+        .bang, .tilde, .amp, .pipe, .caret, .amp_amp, .pipe_pipe, .qq,
+        .shl, .shr, .ushr,
+        => true,
+        // Expression-introducing keywords (but NOT do/else/case/default, which
+        // introduce a block/clause body).
+        .identifier => isOperandKeyword(prev_text) and
+            !std.mem.eql(u8, prev_text, "do") and !std.mem.eql(u8, prev_text, "else") and
+            !std.mem.eql(u8, prev_text, "case") and !std.mem.eql(u8, prev_text, "default"),
+        else => false,
+    };
+}
+
 fn isOperandKeyword(text: []const u8) bool {
     const words = [_][]const u8{
         "return", "typeof", "instanceof", "in",    "of",    "new",
