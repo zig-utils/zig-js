@@ -326,6 +326,16 @@ pub const Interpreter = struct {
     /// Symbol, not its encoded string, to the handler). Populated whenever a
     /// Symbol is used as a property key (see `keyOf`).
     symbols: std.StringHashMapUnmanaged(*value.Object) = .{},
+    /// Dynamic-import support (set by the module driver in context.zig). `cur_module`
+    /// is the referrer path; `dyn_import`/`dyn_import_ctx` resolve+load+evaluate a
+    /// specifier and write the module namespace into `out`, returning true on
+    /// success (false leaves the failure in `self.exception`). Null in plain
+    /// script evaluation (where `import(...)` rejects).
+    cur_module: []const u8 = "",
+    dyn_import_ctx: ?*anyopaque = null,
+    dyn_import: ?*const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, out: *Value) bool = null,
+    /// The surrounding module's `import.meta` object, created lazily and cached.
+    import_meta_obj: ?*value.Object = null,
     signal: Signal = .none,
     ret_value: Value = .undefined,
     /// The `this` binding for the currently-executing function (undefined at
@@ -676,6 +686,9 @@ pub const Interpreter = struct {
             .yield_expr => return self.throwError("SyntaxError", "yield is only supported in VM-compiled generator bodies"),
 
             .await_expr => |a| try self.evalAwait(a.argument),
+
+            .import_meta => try self.evalImportMeta(),
+            .import_call => |ic| try self.evalImportCall(ic.specifier, ic.options),
 
             .super_call => |sc| blk: {
                 const sup = self.super_ctor orelse return self.throwError("SyntaxError", "'super' keyword unexpected here");
@@ -2161,6 +2174,54 @@ pub const Interpreter = struct {
     /// as-is. Not spec-faithful on ordering, but correct on values.
     fn evalAwait(self: *Interpreter, arg_node: *Node) EvalError!Value {
         return self.awaitValue(try self.eval(arg_node));
+    }
+
+    /// `import.meta` — the surrounding module's meta-object (an ordinary
+    /// extensible object with a null [[Prototype]]), created once and cached.
+    fn evalImportMeta(self: *Interpreter) EvalError!Value {
+        if (self.import_meta_obj) |o| return .{ .object = o };
+        const o = try self.arena.create(value.Object);
+        o.* = .{ .proto = null };
+        self.import_meta_obj = o;
+        return .{ .object = o };
+    }
+
+    /// `import(specifier [, options])` — returns a promise for the module
+    /// namespace. Per IfAbruptRejectPromise, evaluating/coercing the specifier
+    /// abruptly rejects the returned promise rather than throwing.
+    fn evalImportCall(self: *Interpreter, spec_node: *Node, options_node: ?*Node) EvalError!Value {
+        const pobj = try promise.newPromise(self);
+        const p = promise.promiseOf(.{ .object = pobj }).?;
+        // Evaluate specifier then options (their side effects are observable),
+        // routing any abrupt completion into a rejection.
+        const specv = self.eval(spec_node) catch {
+            try promise.reject(self, p, self.exception);
+            return .{ .object = pobj };
+        };
+        if (options_node) |on| {
+            _ = self.eval(on) catch {
+                try promise.reject(self, p, self.exception);
+                return .{ .object = pobj };
+            };
+        }
+        const spec = self.toStringV(specv) catch {
+            try promise.reject(self, p, self.exception);
+            return .{ .object = pobj };
+        };
+        // Resolve+load the module synchronously through the host (set by the
+        // module driver). With no host (plain script), reject with a TypeError.
+        if (self.dyn_import) |f| {
+            var out: Value = .undefined;
+            if (f(self.dyn_import_ctx.?, self, self.cur_module, spec, &out)) {
+                try promise.resolve(self, p, out);
+            } else {
+                try promise.reject(self, p, self.exception);
+            }
+        } else {
+            const err = try self.makeError("TypeError", "dynamic import is not available in this context");
+            try promise.reject(self, p, err);
+        }
+        return .{ .object = pobj };
     }
 
     /// `await v` on an already-evaluated value (synchronous-settling): if `v` is

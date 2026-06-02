@@ -27,6 +27,10 @@ pub const Context = struct {
     print_buffer: std.ArrayListUnmanaged(u8) = .empty,
     /// TDZ sentinel for uninitialized let/const bindings.
     tdz_marker: *value.Object,
+    /// Active module graph state during `evaluateModule`, so runtime `import()`
+    /// (dynamic import) can resolve+load+evaluate further modules on demand.
+    mod_host: ?ModuleHost = null,
+    mod_cache: ?*std.StringHashMapUnmanaged(*Module) = null,
 
     pub fn create(gpa: std.mem.Allocator) !*Context {
         const arena_state = try gpa.create(std.heap.ArenaAllocator);
@@ -183,6 +187,11 @@ pub const Context = struct {
         try self.linkModule(root);
         var machine = self.interpreter();
         machine.strict = true;
+        // Expose the graph to runtime dynamic `import()`.
+        self.mod_host = host;
+        self.mod_cache = &cache;
+        machine.dyn_import = dynImportHook;
+        machine.dyn_import_ctx = self;
         // Populate any namespace objects after the whole graph has evaluated, so
         // every exported binding holds its final value.
         const outcome = self.evalModule(&machine, root);
@@ -346,11 +355,14 @@ pub const Context = struct {
 
         const saved_env = machine.env;
         const saved_this = machine.this_value;
+        const saved_mod = machine.cur_module;
         machine.env = m.env;
         machine.this_value = .undefined; // module top-level `this` is undefined
+        machine.cur_module = m.path; // referrer for runtime import()
         defer {
             machine.env = saved_env;
             machine.this_value = saved_this;
+            machine.cur_module = saved_mod;
         }
         _ = try machine.evalStatements(m.items);
         // Now that bindings hold their final values, populate the namespace
@@ -367,6 +379,39 @@ pub const Context = struct {
         ns.* = .{};
         module.ns = ns;
         return ns;
+    }
+
+    /// Runtime `import(specifier)` driver (wired into the interpreter as
+    /// `dyn_import`): resolve the specifier relative to `referrer`, then load,
+    /// link, and evaluate the target module, writing its namespace into `out`.
+    /// Returns false (leaving the reason in `machine.exception`) on any failure,
+    /// so the caller rejects the dynamic-import promise.
+    fn dynImportHook(ctx: *anyopaque, machine: *interp.Interpreter, referrer: []const u8, specifier: []const u8, out: *value.Value) bool {
+        const self: *Context = @ptrCast(@alignCast(ctx));
+        const host = self.mod_host orelse return self.dynImportFail(machine, "dynamic import is not available");
+        const cache = self.mod_cache orelse return self.dynImportFail(machine, "dynamic import is not available");
+        var dep_path: []const u8 = "";
+        const src = host.load(host.ctx, referrer, specifier, &dep_path) orelse
+            return self.dynImportFail(machine, "Cannot resolve module specifier");
+        const dep = self.loadModule(dep_path, src, host, cache) catch return self.surfaceFail(machine);
+        self.linkModule(dep) catch return self.surfaceFail(machine);
+        self.evalModule(machine, dep) catch return self.surfaceFail(machine);
+        const ns = self.namespaceObject(dep) catch return self.surfaceFail(machine);
+        self.fillNamespace(machine, dep, ns) catch return self.surfaceFail(machine);
+        out.* = .{ .object = ns };
+        return true;
+    }
+
+    fn dynImportFail(self: *Context, machine: *interp.Interpreter, msg: []const u8) bool {
+        _ = self;
+        machine.throwError("TypeError", msg) catch {};
+        return false;
+    }
+
+    /// A load/link/eval step already threw; surface its reason for rejection.
+    fn surfaceFail(self: *Context, machine: *interp.Interpreter) bool {
+        if (self.exception) |ex| machine.exception = ex;
+        return false;
     }
 
     /// A module namespace binding behind a live accessor: reads `name` in module

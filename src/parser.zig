@@ -1270,6 +1270,11 @@ pub const Parser = struct {
             const inc = self.cur().kind == .plus_plus;
             _ = self.advance();
             const operand = try self.parseUnary();
+            // The operand of a prefix `++`/`--` must be a simple assignment
+            // target (identifier or member access) — `++import(x)`, `++f()`,
+            // `++1` are early SyntaxErrors.
+            if (operand.* != .identifier and operand.* != .member and operand.* != .super_member)
+                return ParseError.InvalidAssignmentTarget;
             return self.alloc(.{ .update = .{ .inc = inc, .prefix = true, .target = operand } });
         }
         const t = self.cur();
@@ -1304,6 +1309,10 @@ pub const Parser = struct {
         const e = try self.parsePrimary();
         const m = try self.parseMemberTail(e);
         if (self.check(.plus_plus) or self.check(.minus_minus)) {
+            // A postfix `++`/`--` target must be a simple assignment target —
+            // `import(x)++`, `f()++`, `1++` are early SyntaxErrors.
+            if (m.* != .identifier and m.* != .member and m.* != .super_member)
+                return ParseError.InvalidAssignmentTarget;
             const inc = self.cur().kind == .plus_plus;
             _ = self.advance();
             return self.alloc(.{ .update = .{ .inc = inc, .prefix = false, .target = m } });
@@ -1584,6 +1593,40 @@ pub const Parser = struct {
         return ParseError.UnexpectedToken;
     }
 
+    /// `import(specifier ,opt)` / `import(specifier, options ,opt)` (dynamic
+    /// import) or `import.meta`. The `import` keyword has already been peeked but
+    /// not consumed.
+    fn parseImportExpr(self: *Parser) ParseError!*Node {
+        _ = self.advance(); // `import`
+        if (self.match(.dot)) {
+            const m = self.advance();
+            if (m.kind != .identifier) return ParseError.UnexpectedToken;
+            // `import.meta` — meta-property. `import.source(x)` / `import.defer(x)`
+            // — the source-phase-import / import-defer proposals; parse them as a
+            // phased dynamic import (the phase doesn't change the AST here).
+            if (std.mem.eql(u8, m.text, "meta")) return self.alloc(.import_meta);
+            if (std.mem.eql(u8, m.text, "source") or std.mem.eql(u8, m.text, "defer")) {
+                // fall through to the call form below.
+            } else return ParseError.UnexpectedToken;
+        }
+        try self.expect(.lparen);
+        // ImportCall requires exactly one AssignmentExpression specifier (no
+        // empty `import()`, no leading spread), plus an optional second options
+        // argument, plus an optional trailing comma.
+        if (self.check(.rparen) or self.check(.ellipsis)) return ParseError.UnexpectedToken;
+        const spec = try self.parseAssignment();
+        var options: ?*Node = null;
+        if (self.match(.comma)) {
+            if (!self.check(.rparen)) {
+                if (self.check(.ellipsis)) return ParseError.UnexpectedToken;
+                options = try self.parseAssignment();
+                _ = self.match(.comma); // optional trailing comma after 2nd arg
+            }
+        }
+        try self.expect(.rparen);
+        return self.alloc(.{ .import_call = .{ .specifier = spec, .options = options } });
+    }
+
     /// True when the next token starts a property name — used to tell an
     /// accessor (`get x`) from a method/property literally named `get`.
     fn propNameAhead(self: *Parser) bool {
@@ -1767,6 +1810,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, w, "new")) return self.parseNew();
             if (std.mem.eql(u8, w, "class")) return self.parseClassExpr();
             if (std.mem.eql(u8, w, "super")) return self.parseSuper();
+            if (std.mem.eql(u8, w, "import")) return self.parseImportExpr();
         }
         // A decorated class expression: `@dec class {…}`.
         if (self.check(.at)) {

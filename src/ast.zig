@@ -241,6 +241,11 @@ pub const Node = union(enum) {
     import_decl: struct { specifier: []const u8, entries: []ImportEntry },
     /// An `export` declaration in one of its forms (see `ExportNode`).
     export_decl: *ExportNode,
+    /// `import(specifier)` / `import(specifier, options)` — dynamic import; an
+    /// expression that evaluates to a promise for the module namespace.
+    import_call: struct { specifier: *Node, options: ?*Node = null },
+    /// `import.meta` — the meta-object of the surrounding module.
+    import_meta,
     program: []*Node,
 };
 
