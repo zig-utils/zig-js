@@ -262,6 +262,10 @@ pub const Function = struct {
     /// the body falls outside the VM's lowered subset — then calling it throws).
     is_generator: bool = false,
     gen_chunk: ?*bc.Chunk = null,
+    /// Back-pointer to the object wrapping this function, set at creation. Lets
+    /// `makeGenerator` read the function's (lazily-materialized) `.prototype`
+    /// property to use as the new generator instance's [[Prototype]].
+    obj: ?*value.Object = null,
     /// `async function` / `async () => …` (and, with `is_generator`, an async
     /// generator). The Promise + microtask runtime is not yet implemented, so
     /// *calling* an async function throws; it parses and binds like any other
@@ -1372,6 +1376,7 @@ pub const Interpreter = struct {
         }
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .js_func = @ptrCast(func), .proto = self.functionProto() };
+        func.obj = obj;
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return .{ .object = obj };
     }
@@ -3306,6 +3311,17 @@ pub const Interpreter = struct {
                 // `f.prototype.x = …`) read undefined and threw.
                 if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null) {
                     if (funcOf(recv)) |f| {
+                        // A generator function's `.prototype` is a fresh object whose
+                        // [[Prototype]] is %GeneratorPrototype% and which has NO
+                        // `constructor` back-link; it is the [[Prototype]] of every
+                        // instance the generator produces.
+                        if (f.is_generator and !f.is_async) {
+                            const proto = try self.arena.create(value.Object);
+                            proto.* = .{ .proto = if (self.env.get("\x00GenProto")) |gp| (if (gp == .object) gp.object else null) else null };
+                            try o.setOwn(self.arena, self.root_shape, "prototype", .{ .object = proto });
+                            try o.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
+                            return .{ .object = proto };
+                        }
                         if (!f.is_arrow) {
                             const proto = try self.protoObject(o);
                             // `Ctor.prototype` is { writable, !enumerable, !configurable };
@@ -8145,6 +8161,25 @@ fn iteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 
 /// Install `%IteratorPrototype%`, `%IteratorHelperPrototype%`, the `Iterator`
 /// global, and `Iterator.from`.
+/// `%GeneratorPrototype%`.next/return/throw (and the async variants): brand-check
+/// a generator receiver and drive it. Normal `gen.next()` uses the callMethod
+/// fast path; these exist as real own properties for reflection / `.call`.
+fn genProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.gen == null)
+                return self.throwError("TypeError", "method called on an incompatible receiver");
+            const v: Value = if (args.len > 0) args[0] else .undefined;
+            return switch (which) {
+                .next => vm.genNext(self, this.object, v),
+                .ret => vm.genReturn(self, this.object, v),
+                .throw => vm.genThrow(self, this.object, v),
+            };
+        }
+    }.call;
+}
+
 fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
     const sym_iter: ?[]const u8 = blk: {
@@ -8174,6 +8209,22 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     try setNative(a, rs, iter_proto, "every", 1, iterSomeEveryFindFn(.every));
     try setNative(a, rs, iter_proto, "find", 1, iterSomeEveryFindFn(.find));
     try env.put("\x00IterProto", .{ .object = iter_proto });
+
+    // %GeneratorPrototype% (proto %IteratorPrototype%): the shared prototype of
+    // every generator instance — next/return/throw own methods and a
+    // @@toStringTag of "Generator".
+    {
+        const gen_proto = try a.create(value.Object);
+        gen_proto.* = .{ .proto = iter_proto };
+        try setNative(a, rs, gen_proto, "next", 1, genProtoMethod(.next));
+        try setNative(a, rs, gen_proto, "return", 1, genProtoMethod(.ret));
+        try setNative(a, rs, gen_proto, "throw", 1, genProtoMethod(.throw));
+        if (sym_tag) |k| {
+            try gen_proto.setOwn(a, rs, k, .{ .string = "Generator" });
+            try gen_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        try env.put("\x00GenProto", .{ .object = gen_proto });
+    }
 
     // Per-kind built-in iterator prototypes (%ArrayIteratorPrototype% etc.): each
     // protos to %IteratorPrototype%, carries the shared cursor `next`, and a

@@ -563,6 +563,23 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     };
     const obj = try vm.arena.create(value.Object);
     obj.* = .{ .gen = @ptrCast(g) };
+    // The instance's [[Prototype]] is the generator function's own `.prototype`
+    // object (whose own [[Prototype]] is %GeneratorPrototype%), per
+    // OrdinaryCreateFromConstructor. Falls back to %GeneratorPrototype% directly
+    // if `.prototype` was reassigned to a non-object. Either way `.next()` keeps
+    // using the callMethod fast path.
+    set_proto: {
+        if (func.obj) |fobj| {
+            const fp = try vm.getProperty(.{ .object = fobj }, "prototype");
+            if (fp == .object) {
+                obj.proto = fp.object;
+                break :set_proto;
+            }
+        }
+        if (vm.env.get("\x00GenProto")) |p| if (p == .object) {
+            obj.proto = p.object;
+        };
+    }
     return .{ .object = obj };
 }
 
