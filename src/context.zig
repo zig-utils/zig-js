@@ -1258,6 +1258,15 @@ test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     try expectEvalStr("1,2,3", "[...new Set([1, 2, 3])].join(',')");
 }
 
+test "Symbol() and Symbol.for() ToString their argument" {
+    // A `{toString}` object is honored as the description / registry key.
+    try expectEvalStr("k", "Symbol({ toString() { return 'k'; } }).description");
+    try expectEvalStr("test262", "Symbol.for({ toString() { return 'test262'; } }).description");
+    // A Symbol description / key is a TypeError, and a throwing toString propagates.
+    try std.testing.expectError(error.Throw, evalIn("Symbol(Symbol())"));
+    try std.testing.expectError(error.Throw, evalIn("Symbol.for({ toString() { throw new TypeError('x'); } })"));
+}
+
 test "Reflect: prototype, toStringTag, array-like argumentsList" {
     try std.testing.expect((try evalIn("Object.getPrototypeOf(Reflect) === Object.prototype")).boolean);
     try expectEvalStr("Reflect", "Reflect[Symbol.toStringTag]");

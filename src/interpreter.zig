@@ -15439,10 +15439,10 @@ fn dateNow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
 fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    // `description` is ToString'd (via ToPrimitive with the string hint, so a
-    // `{toString}`/`{valueOf}` object is honored); `undefined` means none.
+    // `description` is ToString'd (honoring a `{toString}`/`{valueOf}` object);
+    // a Symbol description is a TypeError, and `undefined` means none.
     const desc: ?[]const u8 = if (args.len > 0 and args[0] != .undefined)
-        try (try self.toPrimitive(args[0], .string)).toString(self.arena)
+        try self.toStringV(args[0])
     else
         null;
     return makeSymbolObj(self.arena, self.root_shape, desc, symbolProto(self));
@@ -15469,7 +15469,9 @@ fn symbolRegistry(self: *Interpreter) EvalError!?*value.Object {
 fn symbolForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const key = if (args.len > 0) try args[0].toString(self.arena) else "undefined";
+    // `key` is ToString(arg) — honoring a `{toString}`/`{valueOf}` object and
+    // throwing for a Symbol — not the raw default stringification.
+    const key = if (args.len > 0) try self.toStringV(args[0]) else "undefined";
     const reg = (try symbolRegistry(self)) orelse return self.throwError("TypeError", "Symbol registry unavailable");
     if (reg.getOwn(key)) |existing| return existing;
     const sym = try makeSymbolObj(self.arena, self.root_shape, key, symbolProto(self));
