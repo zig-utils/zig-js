@@ -347,6 +347,15 @@ pub const Parser = struct {
             _ = self.advance();
             return self.alloc(.{ .block = &[_]*Node{} });
         }
+        // A decorated class declaration: `@dec class C {…}`.
+        if (self.check(.at)) {
+            try self.parseDecorators();
+            const cls = try self.parseClassExpr();
+            if (cls.class_expr.name.len > 0)
+                return self.alloc(.{ .var_decl = .{ .kind = .let, .name = cls.class_expr.name, .init = cls } });
+            _ = self.match(.semicolon);
+            return self.alloc(.{ .expr_stmt = cls });
+        }
         const t = self.cur();
         if (t.kind == .identifier) {
             if (std.mem.eql(u8, t.text, "var")) return self.parseVarDecl(.@"var");
@@ -1550,6 +1559,27 @@ pub const Parser = struct {
     /// `class [Name] { members }`. v1: constructor, instance methods, static
     /// methods, computed method names. `extends`/`super`/accessors are deferred
     /// (return a parse error, so such tests simply stay unparsed for now).
+    /// Parse a leading decorator list `@dec @ns.x @call(args) @(expr)` and discard
+    /// it (the syntax is accepted; decorator application is not implemented).
+    fn parseDecorators(self: *Parser) ParseError!void {
+        while (self.check(.at)) {
+            _ = self.advance(); // @
+            if (self.match(.lparen)) {
+                _ = try self.parseExpression();
+                try self.expect(.rparen);
+            } else {
+                if (!self.check(.identifier) and !self.check(.private_name)) return ParseError.UnexpectedToken;
+                _ = self.advance(); // IdentifierReference
+                while (self.check(.dot)) {
+                    _ = self.advance();
+                    if (!self.check(.identifier) and !self.check(.private_name)) return ParseError.UnexpectedToken;
+                    _ = self.advance();
+                }
+                if (self.check(.lparen)) _ = try self.parseArgs(); // DecoratorCallExpression
+            }
+        }
+    }
+
     fn parseClassExpr(self: *Parser) ParseError!*Node {
         const start = self.pos;
         _ = self.advance(); // class
@@ -1569,6 +1599,9 @@ pub const Parser = struct {
         var members: std.ArrayListUnmanaged(ast.ClassMember) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             if (self.match(.semicolon)) continue; // stray semicolons allowed
+            // A class element may carry a leading decorator list (parsed and
+            // discarded; decorators precede `static`).
+            if (self.check(.at)) try self.parseDecorators();
             var is_static = false;
             if (isKeyword(self.cur(), "static") and self.peekKind(1) != .lparen and self.peekKind(1) != .assign) {
                 is_static = true;

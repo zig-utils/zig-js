@@ -66,6 +66,7 @@ pub const TokenKind = enum {
     rbrace,
     lbracket,
     rbracket,
+    at, // @ (decorator)
 };
 
 pub const Token = struct {
@@ -522,6 +523,7 @@ pub const Lexer = struct {
                 return tok(.caret, self.src[start..self.i], start);
             },
             '~' => return tok(.tilde, self.src[start..self.i], start),
+            '@' => return tok(.at, self.src[start..self.i], start),
             else => return LexError.UnexpectedCharacter,
         }
     }
