@@ -717,6 +717,10 @@ pub const Parser = struct {
             init_node = try self.parseVarDecl(.let);
         } else if (isKeyword(self.cur(), "const")) {
             init_node = try self.parseVarDecl(.@"const");
+        } else if (isKeyword(self.cur(), "using") and self.peekKind(1) == .identifier and self.noNewlineBefore(1)) {
+            // `for (using x = e; …)` — a using declaration head (the `using of`
+            // lookahead restriction applies only to for-of, not the classic for).
+            init_node = try self.parseVarDeclDispose(.@"const", 1);
         } else {
             init_node = try self.parseExpression();
             try self.expect(.semicolon);
