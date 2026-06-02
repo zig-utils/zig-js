@@ -414,6 +414,12 @@ pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 /// a per-index `enumerable:false` (from defineProperty) hides one.
 fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    // A module namespace's enumerable own keys are exactly its (sorted) string
+    // export names; the @@toStringTag is non-enumerable.
+    if (interpreter.isModuleNs(o)) {
+        try list.appendSlice(self.arena, interpreter.moduleNsNames(o));
+        return list.items;
+    }
     // A Proxy's enumerable own string keys: [[OwnPropertyKeys]] (ownKeys trap)
     // filtered by [[GetOwnProperty]] (getOwnPropertyDescriptor trap) enumerable.
     if (o.proxy_handler != null or o.proxy_revoked) {
@@ -1245,6 +1251,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     const key = try self.keyOf(arg(args, 1));
     // Private members are internal slots — invisible to reflection.
     if (value.isPrivateKey(key)) return .undefined;
+    if (interpreter.isModuleNs(o)) return interpreter.moduleNsDesc(self, o, key);
 
     // [[GetOwnProperty]] on a Proxy: the trap returns a descriptor object or
     // undefined; the result is normalized (CompletePropertyDescriptor). An

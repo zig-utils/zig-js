@@ -3181,6 +3181,7 @@ pub const Interpreter = struct {
     /// [[IsExtensible]] honoring a Proxy target.
     fn ordinaryIsExtensible(self: *Interpreter, o: *value.Object) EvalError!bool {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyIsExtensible(o);
+        if (o.module_ns != null) return false; // a module namespace is never extensible
         return o.extensible;
     }
 
@@ -3275,6 +3276,7 @@ pub const Interpreter = struct {
             return b;
         }
         if (target.proxy_handler != null) return self.proxyHas(target, key);
+        if (moduleNsOf(target)) |ns| return moduleNsHas(ns, key);
         return hasProperty(target, key);
     }
 
@@ -3303,6 +3305,13 @@ pub const Interpreter = struct {
     /// outside the shape).
     pub fn objectOwnKeysList(self: *Interpreter, t: *value.Object) EvalError![]const []const u8 {
         if (t.proxy_handler != null or t.proxy_revoked) return self.proxyOwnKeys(t);
+        if (moduleNsOf(t)) |ns| {
+            // Sorted string export names first, then the @@toStringTag symbol key.
+            var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            try list.appendSlice(self.arena, ns.names);
+            try list.append(self.arena, ns.tag_key);
+            return list.items;
+        }
         if (t.is_array) {
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
             var i: usize = 0;
@@ -3374,6 +3383,7 @@ pub const Interpreter = struct {
         switch (recv) {
             .object => |o| {
                 if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, recv);
+                if (moduleNsOf(o)) |ns| return moduleNsGet(self, ns, key);
                 // Legacy `caller`: a *non-strict ordinary* function (not strict,
                 // arrow, generator, async, or bound) reads `null` for `.caller`,
                 // shadowing the inherited %ThrowTypeError% poison pill — which
@@ -3805,6 +3815,12 @@ pub const Interpreter = struct {
         }
         const o = recv.object;
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxySet(o, key, v, recv);
+        // A module namespace's [[Set]] always fails: strict throws, sloppy is a
+        // silent no-op.
+        if (o.module_ns != null) {
+            if (self.strict) return self.throwError("TypeError", "Cannot assign to read only property of a module namespace");
+            return;
+        }
         if (o.typed_array) |ta| {
             // An integer-keyed write coerces the value to a number and stores it
             // in the buffer; out-of-bounds / detached writes are silently ignored
@@ -3917,6 +3933,9 @@ pub const Interpreter = struct {
     /// (returns false); a missing property "deletes" successfully (true).
     pub fn deleteOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyDelete(o, key);
+        // A module namespace's own properties (exports + @@toStringTag) are
+        // non-configurable → [[Delete]] returns false; a non-own key "deletes".
+        if (moduleNsOf(o)) |ns| return !moduleNsHas(ns, key);
         // Accessor property.
         if (o.accessors) |m| {
             if (m.getPtr(key) != null) {
@@ -4412,10 +4431,17 @@ pub const Interpreter = struct {
                     }
                     if (eq(name, "hasOwnProperty")) {
                         const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
+                        // A module namespace [[GetOwnProperty]] reads the live
+                        // binding (throwing for an uninitialized one).
+                        if (isModuleNs(o)) return Value{ .boolean = (try moduleNsDesc(self, o, k)) != .undefined };
                         return Value{ .boolean = objectHasOwn(o, k) };
                     }
                     if (eq(name, "propertyIsEnumerable")) {
                         const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
+                        if (isModuleNs(o)) {
+                            _ = try moduleNsDesc(self, o, k); // surfaces TDZ ReferenceError
+                            return Value{ .boolean = moduleNsEnumerable(o, k) };
+                        }
                         // Own + enumerable per its attributes; array `length` is
                         // the notable non-enumerable.
                         const enumerable = objectHasOwn(o, k) and o.getAttr(k).enumerable and
@@ -6252,6 +6278,7 @@ pub const Interpreter = struct {
         const o = r.object;
         const key = try self.keyOf(l);
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyHas(o, key);
+        if (moduleNsOf(o)) |ns| return moduleNsHas(ns, key);
         if (hasProperty(o, key)) return true;
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) return true;
@@ -11159,6 +11186,92 @@ fn typedArrayCtorFn(comptime kind: value.TAKind) value.NativeFn {
             return self.makeTypedArray(kind, args);
         }
     }.call;
+}
+
+// ===== Module Namespace exotic object ===============================
+// A `[[Module]]` namespace exposes its module's exported bindings as live,
+// non-configurable, non-writable-by-the-spec-but-observably-writable data
+// properties, sorted by code unit, plus `[Symbol.toStringTag] = "Module"`. It
+// is non-extensible with a null prototype, and rejects [[Set]]/[[Delete]]/
+// [[DefineOwnProperty]]/[[SetPrototypeOf]] (except no-op preserving cases).
+
+pub const ModuleNs = struct {
+    names: [][]const u8, // sorted export names (strings only)
+    envs: []*Environment, // parallel: the env holding each binding
+    locals: [][]const u8, // parallel: local binding name in that env
+    tag_key: []const u8, // the @@toStringTag property key
+};
+
+fn moduleNsOf(o: *value.Object) ?*ModuleNs {
+    if (o.module_ns) |p| return @ptrCast(@alignCast(p));
+    return null;
+}
+
+fn moduleNsIndex(ns: *ModuleNs, name: []const u8) ?usize {
+    for (ns.names, 0..) |n, i| if (std.mem.eql(u8, n, name)) return i;
+    return null;
+}
+
+/// [[Get]] for a module namespace: live binding read; an uninitialized (TDZ)
+/// binding throws ReferenceError.
+fn moduleNsGet(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!Value {
+    if (std.mem.eql(u8, key, ns.tag_key)) return .{ .string = "Module" };
+    if (moduleNsIndex(ns, key)) |i| {
+        const v = ns.envs[i].get(ns.locals[i]) orelse Value.undefined;
+        if (self.tdz_marker) |tz| if (v == .object and v.object == tz)
+            return self.throwError("ReferenceError", "Cannot access uninitialized binding");
+        return v;
+    }
+    return .undefined;
+}
+
+/// [[HasProperty]]: a string export, or the @@toStringTag key.
+fn moduleNsHas(ns: *ModuleNs, key: []const u8) bool {
+    return std.mem.eql(u8, key, ns.tag_key) or moduleNsIndex(ns, key) != null;
+}
+
+pub fn isModuleNs(o: *value.Object) bool {
+    return o.module_ns != null;
+}
+
+/// The string export names of a module namespace, sorted by code unit (for
+/// Object.keys / getOwnPropertyNames). Empty slice for a non-namespace.
+pub fn moduleNsNames(o: *value.Object) []const []const u8 {
+    if (moduleNsOf(o)) |ns| return ns.names;
+    return &.{};
+}
+
+/// `propertyIsEnumerable`-style flag: string exports are enumerable, the
+/// @@toStringTag is not, an absent key is not.
+pub fn moduleNsEnumerable(o: *value.Object, key: []const u8) bool {
+    if (moduleNsOf(o)) |ns| return moduleNsIndex(ns, key) != null;
+    return false;
+}
+
+/// [[GetOwnProperty]] for a module namespace as a descriptor object (or
+/// undefined if the key is absent). A string export is { value (live, TDZ
+/// throws), writable:true, enumerable:true, configurable:false }; the
+/// @@toStringTag is a frozen string.
+pub fn moduleNsDesc(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!Value {
+    const ns = moduleNsOf(o) orelse return .undefined;
+    if (std.mem.eql(u8, key, ns.tag_key)) {
+        const d = (try self.newObject()).object;
+        try self.setProp(d, "value", .{ .string = "Module" });
+        try self.setProp(d, "writable", .{ .boolean = false });
+        try self.setProp(d, "enumerable", .{ .boolean = false });
+        try self.setProp(d, "configurable", .{ .boolean = false });
+        return .{ .object = d };
+    }
+    if (moduleNsIndex(ns, key) != null) {
+        const v = try moduleNsGet(self, ns, key); // live read; TDZ throws ReferenceError
+        const d = (try self.newObject()).object;
+        try self.setProp(d, "value", v);
+        try self.setProp(d, "writable", .{ .boolean = true });
+        try self.setProp(d, "enumerable", .{ .boolean = true });
+        try self.setProp(d, "configurable", .{ .boolean = false });
+        return .{ .object = d };
+    }
+    return .undefined;
 }
 
 pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
@@ -16394,6 +16507,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
 pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     // Private members (`#x`) are internal slots, invisible to all reflection.
     if (value.isPrivateKey(name)) return false;
+    if (moduleNsOf(o)) |ns| return moduleNsHas(ns, name);
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
     if (o.is_array) {
         if (std.mem.eql(u8, name, "length")) return true;

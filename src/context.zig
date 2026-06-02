@@ -343,6 +343,24 @@ pub const Context = struct {
             },
             else => {},
         };
+
+        // ModuleDeclarationInstantiation (lexical part): top-level let/const/class
+        // bindings exist in the module environment in their TDZ before any code
+        // runs, so observing them through the namespace (e.g. a circular or self
+        // import) throws a ReferenceError until they are initialized.
+        for (m.items) |item| self.instantiateLexical(m, item);
+    }
+
+    /// Pre-declare a statement's top-level lexical (`let`/`const`) bindings as
+    /// TDZ sentinels in the module environment.
+    fn instantiateLexical(self: *Context, m: *Module, item: *ast.Node) void {
+        const tdz = value.Value{ .object = self.tdz_marker };
+        switch (item.*) {
+            .var_decl => |v| if (v.kind != .@"var") m.env.put(v.name, tdz) catch {},
+            .decl_group => |g| for (g) |s| self.instantiateLexical(m, s),
+            .export_decl => |e| if (e.declaration) |d| self.instantiateLexical(m, d),
+            else => {},
+        }
     }
 
     /// Evaluate a module (and its not-yet-evaluated dependencies first), running
@@ -365,9 +383,6 @@ pub const Context = struct {
             machine.cur_module = saved_mod;
         }
         _ = try machine.evalStatements(m.items);
-        // Now that bindings hold their final values, populate the namespace
-        // object's own properties (a snapshot of the live bindings).
-        if (m.ns) |ns| try self.fillNamespace(machine, m, ns);
     }
 
     /// Build (or return) the namespace exotic object for `module`. Created empty
@@ -378,6 +393,11 @@ pub const Context = struct {
         const ns = try a.create(value.Object);
         ns.* = .{};
         module.ns = ns;
+        // Build the live Module Namespace exotic data now (at link time): the
+        // bindings are read lazily on access, so this is valid before the module
+        // has evaluated (and the namespace may be observed during evaluation).
+        var machine = self.interpreter();
+        try self.fillNamespace(&machine, module, ns);
         return ns;
     }
 
@@ -433,35 +453,58 @@ pub const Context = struct {
     /// reachable through `export *`), with `@@toStringTag` "Module".
     fn fillNamespace(self: *Context, machine: *interp.Interpreter, module: *Module, ns: *value.Object) interp.EvalError!void {
         const a = self.arena();
+        // Collect every resolvable export name (own exports + `export *` sources,
+        // default excluded from `*`), with its live binding.
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        var envs: std.ArrayListUnmanaged(*interp.Environment) = .empty;
+        var locals: std.ArrayListUnmanaged([]const u8) = .empty;
+        const add = struct {
+            fn f(aa: std.mem.Allocator, nm: *std.ArrayListUnmanaged([]const u8), ev: *std.ArrayListUnmanaged(*interp.Environment), lo: *std.ArrayListUnmanaged([]const u8), name: []const u8, res: interp.Environment.Alias) !void {
+                for (nm.items) |existing| if (std.mem.eql(u8, existing, name)) return; // de-dup
+                try nm.append(aa, name);
+                try ev.append(aa, res.env);
+                try lo.append(aa, res.name);
+            }
+        }.f;
         var it = module.exports.iterator();
-        while (it.next()) |e| try self.installNsBinding(ns, module, e.key_ptr.*);
-        // Names reachable via `export * from` (default excluded).
+        while (it.next()) |e| {
+            if (resolveExport(module, e.key_ptr.*, 0)) |res| try add(a, &names, &envs, &locals, e.key_ptr.*, res);
+        }
         for (module.star_sources.items) |src| {
             var sit = src.exports.iterator();
             while (sit.next()) |e| {
                 const name = e.key_ptr.*;
                 if (std.mem.eql(u8, name, "default")) continue;
-                if (ns.getAccessor(name) != null or ns.getOwn(name) != null) continue;
-                try self.installNsBinding(ns, src, name);
+                if (resolveExport(src, name, 0)) |res| try add(a, &names, &envs, &locals, name, res);
             }
         }
-        // `[Symbol.toStringTag]` is "Module" — keyed by the well-known symbol's
-        // internal key so `ns[Symbol.toStringTag]` (not a string "@@toStringTag")
-        // resolves; { !writable, !enumerable, !configurable }.
-        const tag_key = machine.wellKnownSymbolKey("toStringTag") orelse "@@toStringTag";
-        try ns.setOwn(a, self.root_shape, tag_key, .{ .string = "Module" });
-        try ns.setAttr(a, tag_key, .{ .writable = false, .enumerable = false, .configurable = false });
-    }
-
-    fn installNsBinding(self: *Context, ns: *value.Object, module: *Module, name: []const u8) interp.EvalError!void {
-        const res = resolveExport(module, name, 0) orelse return;
-        const a = self.arena();
-        const binding = try a.create(NsBinding);
-        binding.* = .{ .env = res.env, .name = res.name };
-        const getter = try a.create(value.Object);
-        getter.* = .{ .native = nsGetter, .private_data = binding };
-        try ns.setAccessor(a, name, .{ .object = getter }, null);
-        try ns.setAttr(a, name, .{ .enumerable = true, .configurable = false });
+        // [[OwnPropertyKeys]] returns the string names sorted by code unit.
+        const N = names.items.len;
+        var order = try a.alloc(usize, N);
+        for (0..N) |i| order[i] = i;
+        std.sort.block(usize, order, names.items, struct {
+            fn lt(ctx: []const []const u8, x: usize, y: usize) bool {
+                return std.mem.lessThan(u8, ctx[x], ctx[y]);
+            }
+        }.lt);
+        const sorted_names = try a.alloc([]const u8, N);
+        const sorted_envs = try a.alloc(*interp.Environment, N);
+        const sorted_locals = try a.alloc([]const u8, N);
+        for (order, 0..) |src_i, dst_i| {
+            sorted_names[dst_i] = names.items[src_i];
+            sorted_envs[dst_i] = envs.items[src_i];
+            sorted_locals[dst_i] = locals.items[src_i];
+        }
+        const modns = try a.create(interp.ModuleNs);
+        modns.* = .{
+            .names = sorted_names,
+            .envs = sorted_envs,
+            .locals = sorted_locals,
+            .tag_key = machine.wellKnownSymbolKey("toStringTag") orelse "@@toStringTag",
+        };
+        ns.module_ns = @ptrCast(modns);
+        ns.proto = null; // a module namespace has a null [[Prototype]]
+        ns.extensible = false;
     }
 };
 

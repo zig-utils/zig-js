@@ -400,6 +400,12 @@ pub const Object = struct {
     proxy_target: ?*Object = null,
     proxy_handler: ?*Object = null,
     proxy_revoked: bool = false,
+    /// Module Namespace exotic object: points to an `interpreter.ModuleNs`
+    /// (its sorted export names + live bindings). When set, this object is a
+    /// `[[Module]]` namespace and the engine intercepts its essential internal
+    /// methods (live [[Get]], [[HasProperty]], sorted [[OwnPropertyKeys]],
+    /// frozen/non-extensible, throwing [[Set]]/[[Delete]]/[[DefineOwnProperty]]).
+    module_ns: ?*anyopaque = null,
     /// For arrays: the set of dense-index *holes* (gaps that read as absent — a
     /// deleted element, an elision in `[1,,3]`, or a gap created by a sparse
     /// assignment). The `elements` slot for a hole still exists (holds undefined),
