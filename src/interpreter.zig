@@ -3565,6 +3565,14 @@ pub const Interpreter = struct {
                 }
                 try self.setMember(recv, m.property, v);
             },
+            // `super.x = v` / `super[e] = v`: PutValue on a super reference sets
+            // the property with `this` as the receiver, so the write lands on (or
+            // through an inherited setter of) the current instance.
+            .super_member => |m| {
+                if (self.home_object == null) return self.throwError("SyntaxError", "'super' outside a method");
+                const key = try self.memberKey(m.property, m.computed);
+                try self.setMember(self.this_value, key, v);
+            },
             // Assignment destructuring: `[a, b] = x` / `({a} = o)`.
             .obj_pattern, .arr_pattern => try self.bindPattern(target, v, false),
             else => return self.throwError("ReferenceError", "invalid assignment target"),
@@ -5756,6 +5764,28 @@ pub const Interpreter = struct {
     }
 
     fn evalBinary(self: *Interpreter, op: ast.BinaryOp, left_node: *Node, right_node: *Node) EvalError!Value {
+        // `#field in obj` — a private-name brand check. The LHS is a private-name
+        // reference (an identifier whose text starts with `#`), which can't be
+        // evaluated as an ordinary value.
+        if (op == .in_op and left_node.* == .identifier and value.isPrivateKey(left_node.identifier)) {
+            const robj = try self.eval(right_node);
+            if (robj != .object)
+                return self.throwError("TypeError", "Cannot use 'in' to search for a private name in a non-object");
+            // Private elements are hidden from ordinary reflection, so look them
+            // up directly. A field is an own data slot; a method/accessor lives on
+            // the class prototype, so walk the prototype chain too.
+            const key = left_node.identifier;
+            var cur: ?*value.Object = robj.object;
+            var has = false;
+            while (cur) |c| {
+                if (c.getOwn(key) != null or c.getAccessor(key) != null) {
+                    has = true;
+                    break;
+                }
+                cur = c.proto;
+            }
+            return .{ .boolean = has };
+        }
         const l = try self.eval(left_node);
         const r = try self.eval(right_node);
         return self.applyBinary(op, l, r);

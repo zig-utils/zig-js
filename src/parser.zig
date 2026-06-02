@@ -24,6 +24,9 @@ pub const Parser = struct {
     /// True while parsing an async function body, so `await` is recognized as an
     /// await expression rather than an identifier. Saved/restored per function.
     in_async: bool = false,
+    /// Inside a class body (so a private name `#x` is in scope) — gates the
+    /// `#field in obj` brand check, which is a syntax error outside any class.
+    in_class: bool = false,
     /// True while parsing strict-mode code: the program (or an enclosing
     /// function) had a `"use strict"` directive prologue, a function body has
     /// its own such directive, or we're inside a class (always strict). Inherited
@@ -998,7 +1001,7 @@ pub const Parser = struct {
         if (self.check(.assign)) {
             // An array/object literal on the LHS is a destructuring pattern.
             const target = switch (left.*) {
-                .identifier, .member => left,
+                .identifier, .member, .super_member => left,
                 .array_lit, .object_lit => try self.litToPattern(left),
                 else => return ParseError.InvalidAssignmentTarget,
             };
@@ -1027,7 +1030,7 @@ pub const Parser = struct {
             else => null,
         };
         if (compound) |op| {
-            if (left.* != .identifier and left.* != .member) return ParseError.InvalidAssignmentTarget;
+            if (left.* != .identifier and left.* != .member and left.* != .super_member) return ParseError.InvalidAssignmentTarget;
             if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
                 return ParseError.UnexpectedToken;
             _ = self.advance();
@@ -1043,7 +1046,7 @@ pub const Parser = struct {
             else => null,
         };
         if (logassign) |op| {
-            if (left.* != .identifier and left.* != .member) return ParseError.InvalidAssignmentTarget;
+            if (left.* != .identifier and left.* != .member and left.* != .super_member) return ParseError.InvalidAssignmentTarget;
             _ = self.advance();
             const rhs = try self.parseAssignment();
             const set = try self.alloc(.{ .assign = .{ .target = left, .value = rhs } });
@@ -1189,7 +1192,13 @@ pub const Parser = struct {
     }
 
     fn parseBinary(self: *Parser, min_bp: u8) ParseError!*Node {
-        var left = try self.parseUnary();
+        // `#field in obj`: a private name is a valid primary only as the LHS of
+        // `in` (a private brand check). Represent it as an identifier whose text
+        // keeps the leading `#` so the interpreter can recognize it.
+        var left = if (self.in_class and self.check(.private_name) and self.peekIsKeyword(1, "in"))
+            try self.alloc(.{ .identifier = self.advance().text })
+        else
+            try self.parseUnary();
         while (self.curBinInfo()) |info| {
             if (info.bp < min_bp) break;
             _ = self.advance();
@@ -1596,6 +1605,9 @@ pub const Parser = struct {
         const saved_strict = self.strict;
         self.strict = true;
         defer self.strict = saved_strict;
+        const saved_in_class = self.in_class;
+        self.in_class = true;
+        defer self.in_class = saved_in_class;
         var members: std.ArrayListUnmanaged(ast.ClassMember) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             if (self.match(.semicolon)) continue; // stray semicolons allowed
