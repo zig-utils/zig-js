@@ -912,12 +912,24 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     };
     const obj = try vm.arena.create(value.Object);
     obj.* = .{ .gen = @ptrCast(g) };
-    // Chain to %AsyncIteratorPrototype% so the async iterator-helper methods
-    // (map/filter/take/.../toArray) are inherited. `next`/`return`/`throw` are
+    // The instance's [[Prototype]] is the async-generator function's own
+    // `.prototype` object, whose own [[Prototype]] is %AsyncGeneratorPrototype%
+    // (itself chaining to %AsyncIteratorPrototype% for the helper methods), per
+    // OrdinaryCreateFromConstructor. Falls back to %AsyncGeneratorPrototype% if
+    // `.prototype` was reassigned to a non-object. `next`/`return`/`throw` are
     // still served by the gen special-case in `builtinMethod`.
-    if (vm.env.get("\x00AsyncIterProto")) |p| if (p == .object) {
-        obj.proto = p.object;
-    };
+    set_proto: {
+        if (func.obj) |fobj| {
+            const fp = try vm.getProperty(.{ .object = fobj }, "prototype");
+            if (fp == .object) {
+                obj.proto = fp.object;
+                break :set_proto;
+            }
+        }
+        if (vm.env.get("\x00AsyncGenProto")) |p| if (p == .object) {
+            obj.proto = p.object;
+        };
+    }
     return .{ .object = obj };
 }
 

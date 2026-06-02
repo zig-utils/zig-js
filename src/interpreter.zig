@@ -3315,9 +3315,10 @@ pub const Interpreter = struct {
                         // [[Prototype]] is %GeneratorPrototype% and which has NO
                         // `constructor` back-link; it is the [[Prototype]] of every
                         // instance the generator produces.
-                        if (f.is_generator and !f.is_async) {
+                        if (f.is_generator) {
+                            const tag = if (f.is_async) "\x00AsyncGenProto" else "\x00GenProto";
                             const proto = try self.arena.create(value.Object);
-                            proto.* = .{ .proto = if (self.env.get("\x00GenProto")) |gp| (if (gp == .object) gp.object else null) else null };
+                            proto.* = .{ .proto = if (self.env.get(tag)) |gp| (if (gp == .object) gp.object else null) else null };
                             try o.setOwn(self.arena, self.root_shape, "prototype", .{ .object = proto });
                             try o.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
                             return .{ .object = proto };
@@ -8614,6 +8615,22 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
         .{ "find", asyncIterFindFn },
     }) |m| try setNative(a, rs, proto, m[0], 1, m[1]);
     try env.put("\x00AsyncIterProto", .{ .object = proto });
+
+    // %AsyncGeneratorPrototype% (proto %AsyncIteratorPrototype%): the shared
+    // prototype of every async-generator instance — next/return/throw own
+    // methods and a @@toStringTag of "AsyncGenerator".
+    {
+        const agen_proto = try a.create(value.Object);
+        agen_proto.* = .{ .proto = proto };
+        try setNative(a, rs, agen_proto, "next", 1, genProtoMethod(.next));
+        try setNative(a, rs, agen_proto, "return", 1, genProtoMethod(.ret));
+        try setNative(a, rs, agen_proto, "throw", 1, genProtoMethod(.throw));
+        if (sym_tag) |k| {
+            try agen_proto.setOwn(a, rs, k, .{ .string = "AsyncGenerator" });
+            try agen_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        try env.put("\x00AsyncGenProto", .{ .object = agen_proto });
+    }
 
     // %AsyncIteratorHelperPrototype%.
     const helper_proto = try a.create(value.Object);
