@@ -1757,6 +1757,11 @@ pub const Parser = struct {
             if (std.mem.eql(u8, w, "class")) return self.parseClassExpr();
             if (std.mem.eql(u8, w, "super")) return self.parseSuper();
         }
+        // A decorated class expression: `@dec class {…}`.
+        if (self.check(.at)) {
+            try self.parseDecorators();
+            return self.parseClassExpr();
+        }
         if (self.check(.lbrace)) return self.parseObjectLiteral();
         if (self.check(.lbracket)) return self.parseArrayLiteral();
         const t = self.advance();
