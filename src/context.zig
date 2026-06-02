@@ -1192,6 +1192,19 @@ test "iterator next() brand-checks its receiver" {
     try expectEvalStr("1", "var it = new Set([1, 2]).values(); String(it.next().value)");
 }
 
+test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
+    // A primitive key/value cannot be held weakly — it throws.
+    try std.testing.expectError(error.Throw, evalIn("new WeakMap().set(5, 1)"));
+    try std.testing.expectError(error.Throw, evalIn("new WeakSet().add('x')"));
+    // An object key is fine.
+    try std.testing.expect((try evalIn("var k = {}; var wm = new WeakMap(); wm.set(k, 1); wm.get(k) === 1")).boolean);
+    // Symbol.toStringTag on the collection prototypes.
+    try expectEvalStr("Map", "Map.prototype[Symbol.toStringTag]");
+    try expectEvalStr("Set", "Set.prototype[Symbol.toStringTag]");
+    try expectEvalStr("WeakMap", "WeakMap.prototype[Symbol.toStringTag]");
+    try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
+}
+
 test "Math: signed-zero, pow/hypot edge cases, prototype + toStringTag" {
     // max prefers +0, min prefers -0.
     try std.testing.expect((try evalIn("1 / Math.max(-0, 0)")).number == std.math.inf(f64));

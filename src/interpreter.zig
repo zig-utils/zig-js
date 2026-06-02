@@ -2768,6 +2768,13 @@ pub const Interpreter = struct {
 
     fn mapMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const self_v = Value{ .object = o };
+        // A WeakMap key (`set`/`getOrInsert`/`getOrInsertComputed`) must be a
+        // value that can be held weakly — an object or a (non-registered) symbol;
+        // a primitive throws before any insertion or callback runs.
+        if (o.is_weak and (eq(name, "set") or eq(name, "getOrInsert") or eq(name, "getOrInsertComputed"))) {
+            if (!canBeHeldWeakly(arg0(args)))
+                return self.throwError("TypeError", "Invalid value used as WeakMap key");
+        }
         if (eq(name, "set")) {
             const k = arg0(args);
             for (o.elements.items) |e| {
@@ -2849,6 +2856,10 @@ pub const Interpreter = struct {
 
     fn setMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const self_v = Value{ .object = o };
+        // A WeakSet value must be holdable weakly (object or non-registered
+        // symbol); a primitive throws before insertion.
+        if (o.is_weak and eq(name, "add") and !canBeHeldWeakly(arg0(args)))
+            return self.throwError("TypeError", "Invalid value used in WeakSet");
         if (eq(name, "add")) {
             for (o.elements.items) |e| {
                 if (value.sameValueZero(e, arg0(args))) return self_v;
@@ -10912,6 +10923,19 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (symbol_ns.getOwn("toStringTag")) |mtt| if (mtt == .object and mtt.object.is_symbol) {
         try math_obj.setOwn(a, root_shape, mtt.object.sym_key, .{ .string = "Math" });
         try math_obj.setAttr(a, mtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+    };
+
+    // `Symbol.toStringTag` on the collection prototypes ({!w,!e,c}), so
+    // `Map.prototype[Symbol.toStringTag] === "Map"` etc. and a subclass's
+    // `Object.prototype.toString` reports the right tag.
+    if (symbol_ns.getOwn("toStringTag")) |stt| if (stt == .object and stt.object.is_symbol) {
+        const tk = stt.object.sym_key;
+        inline for (.{ "Map", "Set", "WeakMap", "WeakSet" }) |nm| {
+            if (env.get(nm)) |cv| if (cv == .object) if (cv.object.getOwn("prototype")) |pv| if (pv == .object) {
+                try pv.object.setOwn(a, root_shape, tk, .{ .string = nm });
+                try pv.object.setAttr(a, tk, .{ .writable = false, .enumerable = false, .configurable = true });
+            };
+        }
     };
 
     // Function.prototype[Symbol.hasInstance] — a {!w,!e,!c} method backing the
