@@ -12196,6 +12196,27 @@ fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8
     return nfFormatOne(self, try durUnitNf(self, locale, style, unit_singular, sign_never), .{ .number = num });
 }
 
+/// Format a combined fractional value (a decimal string like "444.055006") for a
+/// unit whose resolved style is standalone (long/short/narrow): a unit-style
+/// NumberFormat with trunc rounding and the fractional-digit bounds. The decimal
+/// string is fed verbatim so precision matches the conformance reference, which
+/// formats the same constructed string.
+fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, dec: []const u8, style: []const u8, unit_singular: []const u8, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
+    const ro = (try self.newObject()).object;
+    try self.setProp(ro, "style", .{ .string = "unit" });
+    try self.setProp(ro, "unit", .{ .string = unit_singular });
+    try self.setProp(ro, "unitDisplay", .{ .string = style });
+    try self.setProp(ro, "minimumFractionDigits", .{ .number = if (fd) |f| @floatFromInt(f) else 0 });
+    try self.setProp(ro, "maximumFractionDigits", .{ .number = if (fd) |f| @floatFromInt(f) else 9 });
+    try self.setProp(ro, "roundingMode", .{ .string = "trunc" });
+    if (sign_never) try self.setProp(ro, "signDisplay", .{ .string = "never" });
+    const nf = (try self.newObject()).object;
+    try self.setProp(nf, "\x00intl", .{ .string = "NumberFormat" });
+    try self.setProp(nf, "\x00locale", .{ .string = locale });
+    try self.setProp(nf, "\x00opts", .{ .object = ro });
+    return nfFormatOne(self, .{ .object = nf }, .{ .string = dec });
+}
+
 fn durFracDigits(ov: ?Value) ?usize {
     if (ov) |o| if (o == .object) if (o.object.getOwn("fractionalDigits")) |f| if (f == .number) return @intFromFloat(f.number);
     return null;
@@ -12302,11 +12323,16 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
             // when the overall duration is negative (DurationToFractional / -0).
             const fnum = if (is_first and uval == 0 and dur_neg) -@as(f64, 0.0) else uval;
             const min_int: usize = if (std.mem.eql(u8, style, "2-digit")) 2 else 1;
+            const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
             const s = if (combine) blk: {
                 const fd = durFracDigits(ov);
-                break :blk try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
+                const dec = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
+                // A standalone-styled combine unit renders the fractional value
+                // with its unit name ("444.055006 millisecond"); numeric/2-digit
+                // units stay bare digits for the ":"-joined run.
+                if (numeric) break :blk dec;
+                break :blk try durFmtCombineUnit(self, locale, dec, style, u[0 .. u.len - 1], sign_never, fd);
             } else try durFmtVal(self, locale, fnum, style, u[0 .. u.len - 1], sign_never);
-            const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
             // Once a numeric run starts (need_sep latches), every later unit
             // appends to it with ":" — even standalone ones (digital
             // "4:5:6:7 millisecond").
