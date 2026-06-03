@@ -10606,6 +10606,144 @@ fn intlBrandOk(this: Value, service: []const u8) bool {
 }
 
 /// Format a Number for Intl.NumberFormat — `en`-style grouping with commas.
+const en_months_long = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+const en_months_short = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+const en_months_narrow = [_][]const u8{ "J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D" };
+const en_days_long = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+const en_days_short = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
+
+/// `Intl.DateTimeFormat.prototype.format` for the `en` locale (UTC, ISO calendar).
+/// Covers the common component options; locale-specific extras (dayPeriod, era,
+/// timeZoneName, non-en patterns) are not modeled.
+fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.format on incompatible receiver");
+    // The value to format: undefined → "now" (deterministic epoch 0); else a
+    // time value, TimeClip'd.
+    const ms: f64 = if (args.len == 0 or args[0] == .undefined) 0 else try self.toNumberV(args[0]);
+    if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
+
+    const day_ms: i64 = 86_400_000;
+    const total_ms: i64 = @intFromFloat(@floor(ms));
+    const epoch_days = @divFloor(total_ms, day_ms);
+    var tod = @mod(total_ms, day_ms);
+    if (tod < 0) tod += day_ms;
+    const civ = tCivilFromDays(epoch_days);
+    const hour24: u8 = @intCast(@divFloor(tod, 3_600_000));
+    const minute: u8 = @intCast(@divFloor(@mod(tod, 3_600_000), 60_000));
+    const second: u8 = @intCast(@divFloor(@mod(tod, 60_000), 1000));
+    const wday = isoDayOfWeek(civ.y, civ.m, civ.d) % 7; // 0=Sun..6=Sat
+
+    // Read the component options (or the default: numeric year/month/day).
+    var o_weekday: []const u8 = "";
+    var o_year: []const u8 = "";
+    var o_month: []const u8 = "";
+    var o_day: []const u8 = "";
+    var o_hour: []const u8 = "";
+    var o_minute: []const u8 = "";
+    var o_second: []const u8 = "";
+    var hour12 = true;
+    var any_comp = false;
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+        const get = struct {
+            fn s(slf: *Interpreter, obj: Value, k: []const u8) EvalError![]const u8 {
+                const v = try slf.getProperty(obj, k);
+                return if (v == .string) v.string else "";
+            }
+        }.s;
+        o_weekday = try get(self, ov, "weekday");
+        o_year = try get(self, ov, "year");
+        o_month = try get(self, ov, "month");
+        o_day = try get(self, ov, "day");
+        o_hour = try get(self, ov, "hour");
+        o_minute = try get(self, ov, "minute");
+        o_second = try get(self, ov, "second");
+        any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len > 0;
+        const h12 = try self.getProperty(ov, "hour12");
+        const hc = try self.getProperty(ov, "hourCycle");
+        if (h12 == .boolean) hour12 = h12.boolean else if (hc == .string) hour12 = std.mem.eql(u8, hc.string, "h11") or std.mem.eql(u8, hc.string, "h12");
+    };
+    if (!any_comp) {
+        o_year = "numeric";
+        o_month = "numeric";
+        o_day = "numeric";
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // Weekday prefix.
+    if (o_weekday.len > 0) {
+        const name = if (eq(o_weekday, "narrow")) en_days_narrow[wday] else if (eq(o_weekday, "short")) en_days_short[wday] else en_days_long[wday];
+        try buf.appendSlice(self.arena, name);
+    }
+    // Date part. Numeric month → "M/D/YYYY"; long/short month → "Month D, YYYY".
+    const have_date = o_year.len > 0 or o_month.len > 0 or o_day.len > 0;
+    if (have_date) {
+        if (buf.items.len > 0) try buf.appendSlice(self.arena, ", ");
+        const m_idx = civ.m - 1;
+        const month_textual = o_month.len > 0 and !eq(o_month, "numeric") and !eq(o_month, "2-digit");
+        if (month_textual) {
+            const mn = if (eq(o_month, "narrow")) en_months_narrow[m_idx] else if (eq(o_month, "short")) en_months_short[m_idx] else en_months_long[m_idx];
+            try buf.appendSlice(self.arena, mn);
+            if (o_day.len > 0) try tfmt(self, &buf, " {d}", .{civ.d});
+            if (o_year.len > 0) try tfmt(self, &buf, ", {s}", .{try fmtYear(self, civ.y, o_year)});
+        } else {
+            // All-numeric "M/D/Y" (only the requested parts, slash-separated).
+            var first = true;
+            if (o_month.len > 0) {
+                try appendNum(self, &buf, &first, '/', civ.m, eq(o_month, "2-digit"));
+            }
+            if (o_day.len > 0) {
+                try appendNum(self, &buf, &first, '/', civ.d, eq(o_day, "2-digit"));
+            }
+            if (o_year.len > 0) {
+                if (!first) try buf.append(self.arena, '/');
+                first = false;
+                try buf.appendSlice(self.arena, try fmtYear(self, civ.y, o_year));
+            }
+        }
+    }
+    // Time part: "h:mm:ss AM/PM" (or 24-hour).
+    const have_time = o_hour.len > 0 or o_minute.len > 0 or o_second.len > 0;
+    if (have_time) {
+        if (buf.items.len > 0) try buf.appendSlice(self.arena, ", ");
+        var h = hour24;
+        var ap: []const u8 = "";
+        if (hour12) {
+            ap = if (h < 12) " AM" else " PM";
+            h = h % 12;
+            if (h == 0) h = 12;
+        }
+        if (o_hour.len > 0) {
+            if (eq(o_hour, "2-digit")) try tfmt(self, &buf, "{d:0>2}", .{h}) else try tfmt(self, &buf, "{d}", .{h});
+        }
+        if (o_minute.len > 0) {
+            if (o_hour.len > 0) try buf.append(self.arena, ':');
+            try tfmt(self, &buf, "{d:0>2}", .{minute});
+        }
+        if (o_second.len > 0) {
+            if (o_hour.len > 0 or o_minute.len > 0) try buf.append(self.arena, ':');
+            try tfmt(self, &buf, "{d:0>2}", .{second});
+        }
+        try buf.appendSlice(self.arena, ap);
+    }
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn fmtYear(self: *Interpreter, y: i64, fmt: []const u8) EvalError![]const u8 {
+    if (std.mem.eql(u8, fmt, "2-digit")) {
+        const yy: u8 = @intCast(@mod(y, 100));
+        return std.fmt.allocPrint(self.arena, "{d:0>2}", .{yy});
+    }
+    return std.fmt.allocPrint(self.arena, "{d}", .{y});
+}
+
+fn appendNum(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), first: *bool, sep: u8, v: anytype, two_digit: bool) EvalError!void {
+    if (!first.*) try buf.append(self.arena, sep);
+    first.* = false;
+    if (two_digit) try tfmt(self, buf, "{d:0>2}", .{v}) else try tfmt(self, buf, "{d}", .{v});
+}
+
 /// Per-currency display info: the en symbol and the ISO 4217 default fraction
 /// digits. Unknown currencies fall back to the code with 2 digits.
 const CurrencyInfo = struct { symbol: []const u8, digits: u8 };
@@ -10923,6 +11061,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "DateTimeFormat", 0, intlServiceConstructorFn("DateTimeFormat"), tag);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DateTimeFormat"));
+        try setNative(a, rs, p, "format", 1, intlDateTimeFormatFn);
     }
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "Collator", 0, intlServiceConstructorFn("Collator"), tag);
