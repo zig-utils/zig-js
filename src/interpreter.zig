@@ -10237,8 +10237,97 @@ fn arrayBufferIsViewFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 
 /// Canonicalize a single BCP-47 tag (case-normalize the subtags). Returns null
 /// for a structurally invalid tag.
+/// IsStructurallyValidLanguageTag (UTS-35 unicode_locale_id, the subset Intl
+/// requires): language [-script] [-region] variant* extension* [-x privateuse].
+/// Rejects extlang, grandfathered, malformed, and duplicate subtags/singletons.
+fn isStructurallyValidLanguageTag(tag: []const u8) bool {
+    if (tag.len == 0 or tag[0] == '-' or tag[tag.len - 1] == '-') return false;
+    const isA = std.ascii.isAlphabetic;
+    const isD = std.ascii.isDigit;
+    const isAN = std.ascii.isAlphanumeric;
+    // Only ASCII alphanumerics and '-' (rejects underscores, non-ASCII, '*', NUL, space).
+    for (tag) |c| if (c != '-' and !isAN(c)) return false;
+
+    const Helper = struct {
+        fn allAlpha(s: []const u8) bool {
+            for (s) |c| if (!isA(c)) return false;
+            return s.len > 0;
+        }
+        fn allDigit(s: []const u8) bool {
+            for (s) |c| if (!isD(c)) return false;
+            return s.len > 0;
+        }
+        fn isVariant(s: []const u8) bool {
+            // 5-8 alphanum, or 4 chars with a leading digit.
+            if (s.len >= 5 and s.len <= 8) return true;
+            if (s.len == 4 and isD(s[0])) return true;
+            return false;
+        }
+    };
+
+    var it = std.mem.splitScalar(u8, tag, '-');
+    const lang = it.next().?;
+    // language: 2-3 or 5-8 ALPHA (no extlang, no 4-alpha, no numeric).
+    if (!Helper.allAlpha(lang)) return false;
+    if (!((lang.len >= 2 and lang.len <= 3) or (lang.len >= 5 and lang.len <= 8))) return false;
+
+    var have_script = false;
+    var have_region = false;
+    var in_variants = false;
+    var variants: [16][]const u8 = undefined;
+    var nvar: usize = 0;
+    // Extension state: 0 = in language-id; 'x' = private use; else current singleton.
+    var ext: u8 = 0;
+    var ext_count: usize = 0;
+    var seen_singletons: [40]u8 = undefined;
+    var nsing: usize = 0;
+
+    while (it.next()) |s| {
+        if (s.len == 0) return false; // empty subtag (double dash)
+        if (s.len == 1) {
+            // A singleton starts a (private-use or other) extension.
+            if (ext != 0 and ext != 'x' and ext_count == 0) return false; // previous singleton had no subtags
+            const sl = std.ascii.toLower(s[0]);
+            if (ext == 'x') return false; // nothing follows private-use except its own subtags
+            for (seen_singletons[0..nsing]) |p| if (p == sl) return false; // duplicate singleton
+            seen_singletons[nsing] = sl;
+            nsing += 1;
+            ext = sl;
+            ext_count = 0;
+            continue;
+        }
+        if (ext == 'x') {
+            if (s.len < 1 or s.len > 8) return false; // private-use subtag: 1-8 alnum
+            ext_count += 1;
+            continue;
+        }
+        if (ext != 0) {
+            if (s.len < 2 or s.len > 8) return false; // extension subtag: 2-8 alnum
+            ext_count += 1;
+            continue;
+        }
+        // Still in the language-id: script, then region, then variants.
+        if (!have_script and !have_region and !in_variants and s.len == 4 and Helper.allAlpha(s)) {
+            have_script = true;
+        } else if (!have_region and !in_variants and ((s.len == 2 and Helper.allAlpha(s)) or (s.len == 3 and Helper.allDigit(s)))) {
+            have_region = true;
+        } else if (Helper.isVariant(s)) {
+            for (variants[0..nvar]) |v| if (std.ascii.eqlIgnoreCase(v, s)) return false; // duplicate variant
+            if (nvar < variants.len) {
+                variants[nvar] = s;
+                nvar += 1;
+            }
+            in_variants = true;
+        } else return false;
+    }
+    // A trailing singleton must have had at least one subtag.
+    if (ext != 0 and ext_count == 0) return false;
+    return true;
+}
+
 fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
     if (tag.len == 0) return null;
+    if (!isStructurallyValidLanguageTag(tag)) return null;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     var first = true;
     var idx: usize = 0;
