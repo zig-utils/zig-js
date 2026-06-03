@@ -12066,29 +12066,85 @@ fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
     return vals;
 }
 
+/// The resolved per-unit style for a DurationFormat unit (matching what
+/// resolvedOptions reports): the explicit option, else the base style — with
+/// "digital" making hours/minutes/seconds "numeric".
+fn durUnitStyle(ov: ?Value, base: []const u8, unit: []const u8) []const u8 {
+    if (ov) |o| if (o == .object) if (o.object.getOwn(unit)) |s| if (s == .string) return s.string;
+    if (std.mem.eql(u8, base, "digital")) {
+        if (std.mem.eql(u8, unit, "hours") or std.mem.eql(u8, unit, "minutes") or std.mem.eql(u8, unit, "seconds")) return "numeric";
+        return "short";
+    }
+    return base;
+}
+
+/// Format one duration unit value via a NumberFormat instance, mirroring the
+/// reference algorithm: standalone styles use style:"unit"; numeric/2-digit use
+/// plain digits (useGrouping:false, +2-digit padding); non-first units suppress
+/// the sign. Returns the formatted string.
+fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError![]const u8 {
+    const ro = (try self.newObject()).object;
+    const standalone = !std.mem.eql(u8, style, "numeric") and !std.mem.eql(u8, style, "2-digit");
+    if (standalone) {
+        try self.setProp(ro, "style", .{ .string = "unit" });
+        try self.setProp(ro, "unit", .{ .string = unit_singular });
+        try self.setProp(ro, "unitDisplay", .{ .string = style });
+    } else {
+        try self.setProp(ro, "useGrouping", .{ .boolean = false });
+        if (std.mem.eql(u8, style, "2-digit")) try self.setProp(ro, "minimumIntegerDigits", .{ .number = 2 });
+    }
+    if (sign_never) try self.setProp(ro, "signDisplay", .{ .string = "never" });
+    const nf = (try self.newObject()).object;
+    try self.setProp(nf, "\x00intl", .{ .string = "NumberFormat" });
+    try self.setProp(nf, "\x00locale", .{ .string = locale });
+    try self.setProp(nf, "\x00opts", .{ .object = ro });
+    return nfFormatOne(self, .{ .object = nf }, .{ .number = num });
+}
+
 fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DurationFormat")) return self.throwError("TypeError", "Intl.DurationFormat.prototype.format on incompatible receiver");
     const d = if (args.len > 0) args[0] else Value.undefined;
     const vals = try durationToRecord(self, d);
-    var style: []const u8 = "short";
-    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
-        if (ov.object.getOwn("style")) |s| style = s.string;
+    var base: []const u8 = "short";
+    const ov = this.object.getOwn("\x00opts");
+    if (ov) |o| if (o == .object) if (o.object.getOwn("style")) |s| if (s == .string) {
+        base = s.string;
     };
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const locale = if (this.object.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
+
+    // Build the list of formatted items. Consecutive numeric/2-digit units join
+    // with ":" into one item (digital style); standalone units are separate
+    // items joined with ", " (en ListFormat type:unit). Mirrors the spec.
+    var items: std.ArrayListUnmanaged([]const u8) = .empty;
+    var need_sep = false; // previous unit was numeric/2-digit
+    var first = true;
     inline for (duration_units, 0..) |u, i| {
-        const n: f64 = vals[i];
-        if (n != 0) {
-            if (buf.items.len > 0) try buf.appendSlice(self.arena, ", ");
-            const mag = @abs(n);
-            const numstr = try rtfGroup(self, (try nfRound(self, mag, false, 1, 0, 0, null, null, false, "auto", 1, "halfExpand")).int_str);
-            if (n < 0) try buf.append(self.arena, '-');
-            try buf.appendSlice(self.arena, numstr);
-            try buf.append(self.arena, ' ');
-            try buf.appendSlice(self.arena, durationUnitName(u, style, mag != 1));
+        const uval = vals[i];
+        const style = durUnitStyle(ov, base, u);
+        const display = blk: {
+            if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) break :blk dv.string;
+            break :blk "auto";
+        };
+        if (uval != 0 or !std.mem.eql(u8, display, "auto")) {
+            const sign_never = !first;
+            first = false;
+            const s = try durFmtVal(self, locale, uval, style, u[0 .. u.len - 1], sign_never);
+            const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
+            if (numeric and need_sep and items.items.len > 0) {
+                items.items[items.items.len - 1] = try std.fmt.allocPrint(self.arena, "{s}:{s}", .{ items.items[items.items.len - 1], s });
+            } else {
+                try items.append(self.arena, s);
+            }
+            need_sep = numeric;
         }
     }
-    if (buf.items.len == 0) try buf.appendSlice(self.arena, durationUnitName("seconds", style, true)); // empty duration → "0 sec"-ish
+    // Join the items with ", " (en ListFormat type:"unit").
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (items.items, 0..) |it, idx| {
+        if (idx != 0) try buf.appendSlice(self.arena, ", ");
+        try buf.appendSlice(self.arena, it);
+    }
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
