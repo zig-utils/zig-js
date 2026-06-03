@@ -746,6 +746,14 @@ fn evalIn(src: []const u8) !value.Value {
     return ctx.evaluate(src);
 }
 
+/// Assert `src` is rejected at parse time (an early error / SyntaxError) — the
+/// evaluation returns an error rather than a value.
+fn expectParseError(src: []const u8) !void {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    if (ctx.evaluate(src)) |_| return error.ExpectedParseError else |_| {}
+}
+
 /// Evaluate `src` and assert its string completion value, while the context (and
 /// thus the string's backing arena) is still alive.
 fn expectEvalStr(expected: []const u8, src: []const u8) !void {
@@ -1291,6 +1299,18 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("Set", "Set.prototype[Symbol.toStringTag]");
     try expectEvalStr("WeakMap", "WeakMap.prototype[Symbol.toStringTag]");
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
+}
+
+test "numeric separators: valid between digits, rejected when misplaced" {
+    // Valid: a `_` between two digits of the radix.
+    try std.testing.expectEqual(@as(f64, 1000), (try evalIn("1_000")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("0b1_0")).number);
+    try std.testing.expectEqual(@as(f64, 31), (try evalIn("0x1_F")).number);
+    try std.testing.expectEqual(@as(f64, 10.01), (try evalIn("1_0.0_1")).number);
+    try std.testing.expectEqual(@as(f64, 1e10), (try evalIn("1e1_0")).number);
+    // Misplaced separators are early errors.
+    for ([_][]const u8{ "_1", "1_", "1__0", "0x_1", "0b1_", "1_.5", "1._5", "1_e3", "1e_3", "0_1", "0_8" }) |bad|
+        try expectParseError(bad);
 }
 
 test "Math.sumPrecise sums exactly" {

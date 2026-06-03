@@ -564,6 +564,7 @@ pub const Lexer = struct {
                 self.i += 2;
                 const ds = self.i;
                 while (self.i < self.src.len and (isRadixDigit(self.src[self.i], r) or self.src[self.i] == '_')) self.i += 1;
+                if (!separatorsValid(self.src[ds..self.i], r)) return LexError.InvalidNumber;
                 const cleaned = try stripSeparators(self.arena, self.src[ds..self.i]);
                 const n = std.fmt.parseInt(u128, cleaned, r) catch return LexError.InvalidNumber;
                 if (self.peek() == 'n') {
@@ -583,6 +584,13 @@ pub const Lexer = struct {
             if (self.peek() == '+' or self.peek() == '-') self.i += 1;
             while (self.i < self.src.len and (std.ascii.isDigit(self.src[self.i]) or self.src[self.i] == '_')) self.i += 1;
         }
+        // Decimal separators must sit between two decimal digits — `.`, `e`,
+        // signs, and the `n` suffix are not digits, so e.g. `1_.5`, `1_e3`, `1_n`
+        // are rejected. A `0`-prefixed legacy literal admits no separators at all.
+        if (!separatorsValid(self.src[start..self.i], 10)) return LexError.InvalidNumber;
+        if (self.src[start] == '0' and self.i - start > 1 and
+            (std.ascii.isDigit(self.src[start + 1]) or self.src[start + 1] == '_') and
+            std.mem.indexOfScalar(u8, self.src[start..self.i], '_') != null) return LexError.InvalidNumber;
         if (self.peek() == 'n') {
             // `123n` — a decimal BigInt literal (no fraction/exponent allowed).
             const digits = try stripSeparators(self.arena, self.src[start..self.i]);
@@ -919,6 +927,18 @@ fn isRadixDigit(c: u8, radix: u8) bool {
         else => return false,
     };
     return v < radix;
+}
+
+/// A numeric separator `_` is legal only *between* two digits of the literal's
+/// radix — never leading/trailing, doubled (`1__0`), adjacent to the radix
+/// prefix (`0x_1`), or next to a `.`/`e`/sign/`n` (those aren't radix digits).
+fn separatorsValid(s: []const u8, radix: u8) bool {
+    for (s, 0..) |c, i| {
+        if (c != '_') continue;
+        if (i == 0 or i + 1 >= s.len) return false;
+        if (!isRadixDigit(s[i - 1], radix) or !isRadixDigit(s[i + 1], radix)) return false;
+    }
+    return true;
 }
 
 /// Strip `_` numeric separators, trimming a trailing BigInt `n` too. Returns a
