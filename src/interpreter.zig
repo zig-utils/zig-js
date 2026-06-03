@@ -10764,6 +10764,37 @@ fn nfValidateOptions(self: *Interpreter, raw: Value) EvalError!void {
     try numRange(self, raw, "maximumFractionDigits", 0, 100);
     try numRange(self, raw, "minimumSignificantDigits", 1, 21);
     try numRange(self, raw, "maximumSignificantDigits", 1, 21);
+
+    const oneOf = struct {
+        fn check(s: *Interpreter, opts: Value, name: []const u8, allowed: []const []const u8) EvalError!void {
+            const v = try s.getProperty(opts, name);
+            if (v == .undefined) return;
+            const str = try s.toStringV(v);
+            for (allowed) |a| if (std.mem.eql(u8, str, a)) return;
+            return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "invalid value for option {s}", .{name}));
+        }
+    }.check;
+    try oneOf(self, raw, "style", &.{ "decimal", "percent", "currency", "unit" });
+    try oneOf(self, raw, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" });
+    try oneOf(self, raw, "currencySign", &.{ "standard", "accounting" });
+    try oneOf(self, raw, "notation", &.{ "standard", "scientific", "engineering", "compact" });
+    try oneOf(self, raw, "compactDisplay", &.{ "short", "long" });
+    try oneOf(self, raw, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" });
+    try oneOf(self, raw, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
+    try oneOf(self, raw, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
+    try oneOf(self, raw, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
+
+    // roundingIncrement must be one of the spec's allowed step values.
+    const riv = try self.getProperty(raw, "roundingIncrement");
+    if (riv != .undefined) {
+        const n = try self.toNumberV(riv);
+        const allowed = [_]f64{ 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000 };
+        var ok = false;
+        for (allowed) |a| if (n == a) {
+            ok = true;
+        };
+        if (!ok) return self.throwError("RangeError", "invalid roundingIncrement");
+    }
 }
 
 /// services that allow it (NumberFormat/DateTimeFormat/Collator).
@@ -11371,7 +11402,28 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 var sign_display: []const u8 = "auto";
                 var currency: ?[]const u8 = null;
                 var currency_display: []const u8 = "symbol";
+                var notation: []const u8 = "standard";
+                var compact_display: []const u8 = "short";
+                var rounding_mode: []const u8 = "halfExpand";
+                var rounding_priority: []const u8 = "auto";
+                var trailing_zero: []const u8 = "auto";
+                var rounding_increment: f64 = 1;
+                var numbering_system: []const u8 = "latn";
                 if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+                    const nsv = try self.getProperty(ov, "numberingSystem");
+                    if (nsv == .string) numbering_system = try std.ascii.allocLowerString(self.arena, nsv.string);
+                    const nv = try self.getProperty(ov, "notation");
+                    if (nv == .string) notation = nv.string;
+                    const cdv = try self.getProperty(ov, "compactDisplay");
+                    if (cdv == .string) compact_display = cdv.string;
+                    const rmv = try self.getProperty(ov, "roundingMode");
+                    if (rmv == .string) rounding_mode = rmv.string;
+                    const rpv = try self.getProperty(ov, "roundingPriority");
+                    if (rpv == .string) rounding_priority = rpv.string;
+                    const tzv = try self.getProperty(ov, "trailingZeroDisplay");
+                    if (tzv == .string) trailing_zero = tzv.string;
+                    const riv = try self.getProperty(ov, "roundingIncrement");
+                    if (riv != .undefined) rounding_increment = @trunc(try self.toNumberV(riv));
                     const sv = try self.getProperty(ov, "style");
                     if (sv == .string) {
                         style = sv.string;
@@ -11403,7 +11455,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     const sd = try self.getProperty(ov, "signDisplay");
                     if (sd == .string) sign_display = sd.string;
                 };
-                try self.setProp(o, "numberingSystem", .{ .string = "latn" });
+                try self.setProp(o, "numberingSystem", .{ .string = numbering_system });
                 try self.setProp(o, "style", .{ .string = style });
                 if (currency) |c| {
                     try self.setProp(o, "currency", .{ .string = c });
@@ -11414,12 +11466,13 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "minimumFractionDigits", .{ .number = min_frac });
                 try self.setProp(o, "maximumFractionDigits", .{ .number = max_frac });
                 try self.setProp(o, "useGrouping", grouping);
-                try self.setProp(o, "notation", .{ .string = "standard" });
+                try self.setProp(o, "notation", .{ .string = notation });
+                if (std.mem.eql(u8, notation, "compact")) try self.setProp(o, "compactDisplay", .{ .string = compact_display });
                 try self.setProp(o, "signDisplay", .{ .string = sign_display });
-                try self.setProp(o, "roundingIncrement", .{ .number = 1 });
-                try self.setProp(o, "roundingMode", .{ .string = "halfExpand" });
-                try self.setProp(o, "roundingPriority", .{ .string = "auto" });
-                try self.setProp(o, "trailingZeroDisplay", .{ .string = "auto" });
+                try self.setProp(o, "roundingIncrement", .{ .number = rounding_increment });
+                try self.setProp(o, "roundingMode", .{ .string = rounding_mode });
+                try self.setProp(o, "roundingPriority", .{ .string = rounding_priority });
+                try self.setProp(o, "trailingZeroDisplay", .{ .string = trailing_zero });
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 try self.setProp(o, "usage", .{ .string = "sort" });
                 try self.setProp(o, "sensitivity", .{ .string = "variant" });
