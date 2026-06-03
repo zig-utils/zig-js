@@ -11758,7 +11758,9 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             const udv = try self.getProperty(o, "unitDisplay");
             const ud: []const u8 = if (udv == .string) udv.string else "short";
             unit_space = !std.mem.eql(u8, ud, "narrow");
-            unit_suffix = numberFormatUnitName(unit, ud);
+            // en cardinal plural: singular only for an exact magnitude of 1.
+            const plural = !(@abs(n) == 1.0);
+            unit_suffix = try numberFormatUnitName(self, unit, ud, plural);
         }
         const mi = try self.getProperty(o, "minimumIntegerDigits");
         if (mi != .undefined) min_int = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(mi)))));
@@ -11914,7 +11916,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
 /// en unit display name for NumberFormat style:unit. The handful of units the
 /// test corpus formats exactly are tabled; any other (sanctioned) unit returns
 /// a non-empty fallback so the output differs from the plain number.
-fn numberFormatUnitName(unit: []const u8, display: []const u8) []const u8 {
+fn numberFormatUnitName(self: *Interpreter, unit: []const u8, display: []const u8, plural: bool) value.HostError![]const u8 {
     const long = std.mem.eql(u8, display, "long");
     const T = struct { u: []const u8, sh: []const u8, lo: []const u8 };
     const table = [_]T{
@@ -11923,8 +11925,10 @@ fn numberFormatUnitName(unit: []const u8, display: []const u8) []const u8 {
         .{ .u = "kilometer-per-hour", .sh = "km/h", .lo = "kilometers per hour" },
     };
     for (table) |t| if (std.mem.eql(u8, unit, t.u)) return if (long) t.lo else t.sh;
-    // Fallback: the identifier itself — non-empty, so the formatted result
-    // differs from the bare number (units.js only checks that it differs).
+    // Fallback: the identifier itself, pluralized with "s" for the en "other"
+    // category (year->years, day->days, second->seconds, ...). Non-empty, so the
+    // formatted result differs from the bare number.
+    if (plural and unit.len > 0) return std.fmt.allocPrint(self.arena, "{s}s", .{unit});
     return unit;
 }
 
