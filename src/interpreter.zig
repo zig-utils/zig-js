@@ -6354,8 +6354,17 @@ pub const Interpreter = struct {
     /// Mathematical comparison of two BigInt/Number operands (for `< <= > >=`),
     /// returning negative/zero/positive. (Lossy for BigInts beyond 2^53.)
     fn bigCmp(l: Value, r: Value) f64 {
-        const lf: f64 = if (l == .object and l.object.is_bigint) @floatFromInt(l.object.bigint) else l.toNumber();
-        const rf: f64 = if (r == .object and r.object.is_bigint) @floatFromInt(r.object.bigint) else r.toNumber();
+        // BigInt vs BigInt: compare the i128 values exactly (an f64 round-trip
+        // loses precision past 2^53, e.g. 9007199254740992000n vs ...991999n).
+        const l_big = l == .object and l.object.is_bigint;
+        const r_big = r == .object and r.object.is_bigint;
+        if (l_big and r_big) {
+            const a = l.object.bigint;
+            const b = r.object.bigint;
+            return if (a < b) -1 else if (a > b) 1 else 0;
+        }
+        const lf: f64 = if (l_big) @floatFromInt(l.object.bigint) else l.toNumber();
+        const rf: f64 = if (r_big) @floatFromInt(r.object.bigint) else r.toNumber();
         return lf - rf;
     }
 
@@ -11624,9 +11633,17 @@ fn nfRound(self: *Interpreter, mag: f64, neg: bool, min_int: usize, min_frac: us
     // Fixed (fraction-digit) path with optional rounding increment. Rounding is
     // done with at most 18 fraction digits (u64 range; further digits are zero
     // at f64 precision), then the string is padded out to min_frac.
-    const eff: usize = @min(max_frac, 18);
+    // Cap the fraction scaling so `mag * 10^eff` stays within u64 (a large
+    // integer magnitude has no representable fraction anyway; the dropped digits
+    // are zero and get padded back below).
+    var eff: usize = @min(max_frac, 18);
     var scale: f64 = 1;
-    for (0..eff) |_| scale *= 10;
+    while (true) {
+        scale = 1;
+        for (0..eff) |_| scale *= 10;
+        if (eff == 0 or mag * scale < 9.0e18) break;
+        eff -= 1;
+    }
     const scaled = mag * scale;
     const rinc_f: f64 = @floatFromInt(rinc);
     const r: u64 = if (rinc > 1) @intFromFloat(roundMag(scaled / rinc_f, neg, mode) * rinc_f) else @intFromFloat(roundMag(scaled, neg, mode));
@@ -12089,8 +12106,20 @@ fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
     }
     const two32: f64 = 4294967296.0;
     if (@abs(vals[0]) >= two32 or @abs(vals[1]) >= two32 or @abs(vals[2]) >= two32) return self.throwError("RangeError", "duration value out of range");
+    // IsValidDurationRecord: abs(normalizedSeconds) must be < 2^53. The sum loses
+    // precision in f64 right at the boundary, so a coarse f64 check rejects
+    // clearly-oversized values (and guards the i128 conversion from overflow),
+    // then the exact total in nanoseconds (i128) decides the boundary case.
     const norm_sec = vals[3] * 86400 + vals[4] * 3600 + vals[5] * 60 + vals[6] + vals[7] / 1000 + vals[8] / 1_000_000 + vals[9] / 1_000_000_000;
-    if (@abs(norm_sec) >= 9007199254740992.0) return self.throwError("RangeError", "duration value out of range");
+    if (@abs(norm_sec) >= 18014398509481984.0) return self.throwError("RangeError", "duration value out of range"); // 2^54
+    const f2i = struct {
+        fn c(x: f64) i128 {
+            return @intFromFloat(x);
+        }
+    }.c;
+    const total_ns: i128 = f2i(vals[3]) * 86_400_000_000_000 + f2i(vals[4]) * 3_600_000_000_000 + f2i(vals[5]) * 60_000_000_000 + f2i(vals[6]) * 1_000_000_000 + f2i(vals[7]) * 1_000_000 + f2i(vals[8]) * 1_000 + f2i(vals[9]);
+    const abs_ns: i128 = if (total_ns < 0) -total_ns else total_ns;
+    if (abs_ns >= 9007199254740992 * 1_000_000_000) return self.throwError("RangeError", "duration value out of range"); // 2^53 seconds
     return vals;
 }
 
