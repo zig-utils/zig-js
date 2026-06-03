@@ -10773,6 +10773,17 @@ fn localeStringOption(self: *Interpreter, opts: Value, key: []const u8, kind: Lo
     return low;
 }
 
+/// WeekdayToString: a numeric firstDayOfWeek ("0"/"7"→"sun", "1".."6"→mon..sat)
+/// maps to its CLDR weekday code; any other string is returned unchanged.
+fn weekdayToString(s: []const u8) []const u8 {
+    const map = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
+    if (s.len == 1) {
+        if (s[0] >= '1' and s[0] <= '7') return map[s[0] - '1'];
+        if (s[0] == '0') return "sun";
+    }
+    return s;
+}
+
 fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -10803,6 +10814,13 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
         const numeric_v = try self.getProperty(opts, "numeric");
         const kn: ?[]const u8 = if (numeric_v == .undefined) null else if (numeric_v.toBoolean()) "true" else "false";
         const nu = try localeStringOption(self, opts, "numberingSystem", .type, &.{});
+        // firstDayOfWeek → -u-fw- (numeric weekday mapped, then validated as a type).
+        const fw_v = try self.getProperty(opts, "firstDayOfWeek");
+        const fw: ?[]const u8 = if (fw_v == .undefined) null else blk: {
+            const mapped = weekdayToString(try self.toStringV(fw_v));
+            if (!localeSubtagValid(.type, mapped)) return self.throwError("RangeError", "invalid firstDayOfWeek");
+            break :blk mapped;
+        };
 
         // Rebuild: base subtags (with overrides), then sorted -u- keywords. The
         // base is the language-id up to the first singleton subtag.
@@ -10860,7 +10878,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
         }
         // Merge -u- keywords (option overrides input tag), emit in key order.
         const keys = [_]struct { k: []const u8, v: ?[]const u8 }{
-            .{ .k = "ca", .v = ca }, .{ .k = "co", .v = co },  .{ .k = "fw", .v = null },
+            .{ .k = "ca", .v = ca }, .{ .k = "co", .v = co },  .{ .k = "fw", .v = fw },
             .{ .k = "hc", .v = hc }, .{ .k = "kf", .v = kf },  .{ .k = "kn", .v = kn },
             .{ .k = "nu", .v = nu },
         };
