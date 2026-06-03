@@ -13196,9 +13196,11 @@ fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     // CanonicalizeLocaleList(locales) first (throws on a structurally invalid tag).
     const arr = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
-    // SupportedLocales: validate the localeMatcher option (RangeError otherwise).
-    if (args.len > 1 and args[1] != .undefined and args[1] == .object) {
-        const lm = try self.getProperty(args[1], "localeMatcher");
+    // SupportedLocales: if options is not undefined, ToObject it (TypeError for
+    // null) and validate the localeMatcher option (RangeError otherwise).
+    if (args.len > 1 and args[1] != .undefined) {
+        const opts: Value = .{ .object = try self.toObject(args[1]) };
+        const lm = try self.getProperty(opts, "localeMatcher");
         if (lm != .undefined) {
             const s = try self.toStringV(lm);
             if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
