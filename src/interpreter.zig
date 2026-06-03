@@ -12082,7 +12082,8 @@ fn durUnitStyle(ov: ?Value, base: []const u8, unit: []const u8) []const u8 {
 /// reference algorithm: standalone styles use style:"unit"; numeric/2-digit use
 /// plain digits (useGrouping:false, +2-digit padding); non-first units suppress
 /// the sign. Returns the formatted string.
-fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError![]const u8 {
+/// Build the NumberFormat instance used to format one duration unit's value.
+fn durUnitNf(self: *Interpreter, locale: []const u8, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError!Value {
     const ro = (try self.newObject()).object;
     const standalone = !std.mem.eql(u8, style, "numeric") and !std.mem.eql(u8, style, "2-digit");
     if (standalone) {
@@ -12098,7 +12099,11 @@ fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8
     try self.setProp(nf, "\x00intl", .{ .string = "NumberFormat" });
     try self.setProp(nf, "\x00locale", .{ .string = locale });
     try self.setProp(nf, "\x00opts", .{ .object = ro });
-    return nfFormatOne(self, .{ .object = nf }, .{ .number = num });
+    return .{ .object = nf };
+}
+
+fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError![]const u8 {
+    return nfFormatOne(self, try durUnitNf(self, locale, style, unit_singular, sign_never), .{ .number = num });
 }
 
 fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -12148,16 +12153,66 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
+const DurPart = struct { typ: []const u8, value: []const u8, unit: ?[]const u8 };
+
 fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DurationFormat")) return self.throwError("TypeError", "Intl.DurationFormat.prototype.formatToParts on incompatible receiver");
-    const sv = try intlDurationFormatFn(ctx, this, args);
-    // Approximate: a single "literal" part carrying the whole string.
+    const d = if (args.len > 0) args[0] else Value.undefined;
+    const vals = try durationToRecord(self, d);
+    var base: []const u8 = "short";
+    const ov = this.object.getOwn("\x00opts");
+    if (ov) |o| if (o == .object) if (o.object.getOwn("style")) |s| if (s == .string) {
+        base = s.string;
+    };
+    const locale = if (this.object.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
+
+    // Each group is one ListFormat "element" (a unit, or a ":"-joined numeric run).
+    var groups: std.ArrayListUnmanaged(std.ArrayListUnmanaged(DurPart)) = .empty;
+    var need_sep = false;
+    var first = true;
+    inline for (duration_units, 0..) |u, i| {
+        const uval = vals[i];
+        const style = durUnitStyle(ov, base, u);
+        const display = blk: {
+            if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) break :blk dv.string;
+            break :blk "auto";
+        };
+        if (uval != 0 or !std.mem.eql(u8, display, "auto")) {
+            const sign_never = !first;
+            first = false;
+            const sing = u[0 .. u.len - 1];
+            const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, style, sing, sign_never), &.{.{ .number = uval }});
+            const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
+            var grp: *std.ArrayListUnmanaged(DurPart) = undefined;
+            if (numeric and need_sep and groups.items.len > 0) {
+                grp = &groups.items[groups.items.len - 1];
+                try grp.append(self.arena, .{ .typ = "literal", .value = ":", .unit = null });
+            } else {
+                try groups.append(self.arena, .empty);
+                grp = &groups.items[groups.items.len - 1];
+            }
+            for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
+            need_sep = numeric;
+        }
+    }
+    // Flatten: ", " literal (en ListFormat type:unit) between element groups.
     const arr = (try self.newArray()).object;
-    const o = (try self.newObject()).object;
-    try self.setProp(o, "type", .{ .string = "literal" });
-    try self.setProp(o, "value", sv);
-    try arr.elements.append(self.arena, .{ .object = o });
+    for (groups.items, 0..) |grp, gi| {
+        if (gi != 0) {
+            const lo = (try self.newObject()).object;
+            try self.setProp(lo, "type", .{ .string = "literal" });
+            try self.setProp(lo, "value", .{ .string = ", " });
+            try arr.elements.append(self.arena, .{ .object = lo });
+        }
+        for (grp.items) |p| {
+            const o = (try self.newObject()).object;
+            try self.setProp(o, "type", .{ .string = p.typ });
+            try self.setProp(o, "value", .{ .string = p.value });
+            if (p.unit) |un| try self.setProp(o, "unit", .{ .string = un });
+            try arr.elements.append(self.arena, .{ .object = o });
+        }
+    }
     return .{ .object = arr };
 }
 
