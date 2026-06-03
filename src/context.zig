@@ -1346,6 +1346,23 @@ test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     try expectEvalStr("1,2,3", "[...new Set([1, 2, 3])].join(',')");
 }
 
+test "__lookupGetter__/__lookupSetter__ walk the chain, proxy-aware" {
+    // Returns the accessor's getter; a data property yields undefined.
+    try std.testing.expect((try evalIn("var o = { get x() { return 1; } }; o.__lookupGetter__('x') === Object.getOwnPropertyDescriptor(o, 'x').get")).boolean);
+    try std.testing.expect((try evalIn("({ a: 1 }).__lookupGetter__('a')")) == .undefined);
+    // Walks the prototype chain to find an inherited accessor.
+    try std.testing.expect((try evalIn(
+        \\var proto = { get y() { return 2; } };
+        \\var o = Object.create(proto);
+        \\o.__lookupGetter__('y') === Object.getOwnPropertyDescriptor(proto, 'y').get
+    )).boolean);
+    // A throwing [[GetOwnProperty]] trap propagates.
+    try std.testing.expectError(error.Throw, evalIn(
+        \\var p = new Proxy({}, { getOwnPropertyDescriptor() { throw new TypeError('x'); } });
+        \\p.__lookupGetter__('z');
+    ));
+}
+
 test "__defineGetter__/__defineSetter__ honor DefinePropertyOrThrow" {
     // Success: installs an accessor.
     try std.testing.expectEqual(@as(f64, 5), (try evalIn(

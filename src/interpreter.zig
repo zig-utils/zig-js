@@ -4521,13 +4521,26 @@ pub const Interpreter = struct {
                         return Value.undefined;
                     }
                     if (eq(name, "__lookupGetter__") or eq(name, "__lookupSetter__")) {
-                        const key = try self.keyOf(arg0(args));
+                        // Spec walk: at each level take [[GetOwnProperty]](key); if it
+                        // exists, return its accessor get/set (or undefined for a data
+                        // property); else step [[GetPrototypeOf]]. Both steps are
+                        // proxy-aware, so a throwing trap propagates (per the err tests).
+                        const key = try self.keyOf(arg0(args)); // ToPropertyKey once
+                        const key_v = self.keyToValue(key);
                         const want_get = eq(name, "__lookupGetter__");
-                        var cur: ?*value.Object = o;
-                        while (cur) |c| {
-                            if (c.getAccessor(key)) |acc| return (if (want_get) acc.get else acc.set) orelse Value.undefined;
-                            if (c.getOwn(key) != null) return Value.undefined; // shadowed by a data prop
-                            cur = c.proto;
+                        var cur: Value = recv;
+                        while (cur == .object) {
+                            const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ cur, key_v });
+                            if (desc == .object) {
+                                const d = desc.object;
+                                if (d.getOwn("get") != null or d.getOwn("set") != null)
+                                    return (if (want_get) d.getOwn("get") else d.getOwn("set")) orelse Value.undefined;
+                                return Value.undefined; // a data property shadows
+                            }
+                            const c = cur.object;
+                            cur = if (c.proxy_handler != null or c.proxy_revoked)
+                                try self.proxyGetProto(c)
+                            else if (c.proto) |p| Value{ .object = p } else Value.null;
                         }
                         return Value.undefined;
                     }
