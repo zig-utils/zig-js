@@ -109,6 +109,18 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
         return self.throwError("SyntaxError", "Function: invalid parameters or body");
     const prog = parser.parseProgram() catch
         return self.throwError("SyntaxError", "Function: invalid parameters or body");
+    // Create the function in the Function constructor's own realm (so its
+    // closure — and thus [[Realm]] — is that realm), then restore.
+    const nt = self.new_target;
+    const saved_env = self.env;
+    var swapped = false;
+    if (nt == .object and nt.object.native_ctor and nt.object.private_data != null) {
+        self.env = @ptrCast(@alignCast(nt.object.private_data.?));
+        swapped = true;
+    }
+    defer if (swapped) {
+        self.env = saved_env;
+    };
     return self.eval(prog);
 }
 

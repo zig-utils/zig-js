@@ -2027,6 +2027,13 @@ pub const Interpreter = struct {
     }
 
     pub fn construct(self: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
+        return self.constructNT(callee, args, callee);
+    }
+
+    /// [[Construct]] with an explicit NewTarget (Reflect.construct / subclassing):
+    /// `new_target` drives the new instance's prototype and the `new.target` seen
+    /// by the constructor; `callee` is the function actually invoked.
+    pub fn constructNT(self: *Interpreter, callee: Value, args: []const Value, new_target: Value) EvalError!Value {
         if (callee != .object) return self.throwError("TypeError", "value is not a constructor");
         const obj = callee.object;
         if (obj.proxy_handler != null or obj.proxy_revoked) {
@@ -2034,19 +2041,20 @@ pub const Interpreter = struct {
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.object.elements.append(self.arena, a);
-                const res = try self.callValueWithThis(trap, &.{ .{ .object = target }, arr, callee }, .{ .object = obj.proxy_handler.? });
+                const res = try self.callValueWithThis(trap, &.{ .{ .object = target }, arr, new_target }, .{ .object = obj.proxy_handler.? });
                 // The [[Construct]] trap must return an Object (9.5.14 step 9).
                 if (res != .object or res.object.is_symbol or res.object.is_bigint)
                     return self.throwError("TypeError", "proxy 'construct' trap must return an object");
                 return res;
             }
-            return self.construct(.{ .object = target }, args);
+            return self.constructNT(.{ .object = target }, args, new_target);
         }
         if (obj.bound) |erased| {
             // `new (fn.bind(...))(...)`: construct the target with bound args
             // prepended (the bound `this` is ignored by `new`, per spec).
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            return self.construct(bf.target, try self.concatArgs(bf.args, args));
+            const nt = if (std.meta.eql(new_target, callee)) bf.target else new_target;
+            return self.constructNT(bf.target, try self.concatArgs(bf.args, args), nt);
         }
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
         if (obj.native) |nf| {
@@ -2056,7 +2064,7 @@ pub const Interpreter = struct {
             // so e.g. `new Number(x)` boxes a wrapper object while `Number(x)`
             // returns a primitive.
             const saved_nt = self.new_target;
-            self.new_target = callee;
+            self.new_target = new_target;
             defer self.new_target = saved_nt;
             return nf(@ptrCast(self), .undefined, args); // native ctor (Array, Map, RegExp, ...)
         }
@@ -2065,8 +2073,11 @@ pub const Interpreter = struct {
             // Arrow / async / generator functions are not constructors.
             if (func.is_arrow or func.is_async or func.is_generator)
                 return self.throwError("TypeError", "value is not a constructor");
-            const this_val = try self.newInstance(obj);
-            const ret = try self.callFunctionNT(func, args, this_val, callee); // new.target = the constructor
+            // OrdinaryCreateFromConstructor: the instance proto comes from NewTarget.
+            const inst = try self.arena.create(value.Object);
+            inst.* = .{ .ctor_ref = obj, .proto = if (new_target == .object) try self.protoObject(new_target.object) else try self.protoObject(obj) };
+            const this_val = Value{ .object = inst };
+            const ret = try self.callFunctionNT(func, args, this_val, new_target);
             return if (ret == .object) ret else this_val;
         }
         return self.throwError("TypeError", "value is not a constructor");
@@ -2149,6 +2160,33 @@ pub const Interpreter = struct {
 
     /// The `.prototype` object of a constructor, creating it on first use (every
     /// function/class has one; instances proto to it).
+    /// GetPrototypeFromConstructor(ctor, %Intl.<service>.prototype%): the
+    /// constructor's own `prototype` when it is an object, else the intrinsic
+    /// prototype of the constructor's *realm* (recovered from a JS function's
+    /// closure root environment), so cross-realm `Reflect.construct` derives the
+    /// proto from the NewTarget's realm. Falls back to the current realm.
+    pub fn ctorRealmProto(self: *Interpreter, ctor: *value.Object, service: []const u8) EvalError!*value.Object {
+        const p = try self.getProperty(.{ .object = ctor }, "prototype");
+        if (p == .object and !p.object.is_symbol) return p.object;
+        if (ctor.js_func) |jf| {
+            const fnp: *Function = @ptrCast(@alignCast(jf));
+            var env: ?*Environment = fnp.closure;
+            while (env) |e| {
+                // The realm's intrinsics live on its global object (globalThis).
+                const g: ?*value.Object = if (e.get("globalThis")) |gt| (if (gt == .object) gt.object else null) else null;
+                if (g) |gobj| {
+                    if (gobj.getOwn("Intl")) |intl| if (intl == .object)
+                        if (intl.object.getOwn(service)) |sv| if (sv == .object)
+                            if (sv.object.getOwn("prototype")) |pp| if (pp == .object) return pp.object;
+                    break;
+                }
+                if (e.parent == null) break;
+                env = e.parent;
+            }
+        }
+        return try self.protoObject(ctor);
+    }
+
     pub fn protoObject(self: *Interpreter, ctor: *value.Object) EvalError!*value.Object {
         if (ctor.getOwn("prototype")) |p| {
             if (p == .object) return p.object;
@@ -7350,7 +7388,8 @@ fn reflectConstructFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (args.len > 2 and !isConstructorValue(args[2]))
         return self.throwError("TypeError", "Reflect.construct newTarget is not a constructor");
     const list = try createListFromArrayLike(self, if (args.len > 1) args[1] else .undefined);
-    return self.construct(target, list);
+    const new_target = if (args.len > 2) args[2] else target;
+    return self.constructNT(target, list, new_target);
 }
 
 /// `Reflect.getOwnPropertyDescriptor(target, key)` — like the Object.* form but
@@ -11139,7 +11178,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     }
 
     const o = (try self.newObject()).object;
-    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target == .object) o.proto = try self.ctorRealmProto(self.new_target.object, "Locale");
     try self.setProp(o, "\x00locale", .{ .string = canon });
     try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
     return .{ .object = o };
@@ -11727,7 +11766,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             const o = blk: {
                 if (self.new_target == .object) {
                     const oo = (try self.newObject()).object;
-                    oo.proto = try self.protoObject(self.new_target.object);
+                    oo.proto = try self.ctorRealmProto(self.new_target.object, service);
                     break :blk oo;
                 }
                 if (!can_call) return self.throwError("TypeError", "Constructor Intl." ++ service ++ " requires 'new'");
@@ -15247,7 +15286,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         }
     }
     const function_ns = try a.create(value.Object);
-    function_ns.* = .{ .native = builtins.functionConstructor, .native_ctor = true, .proto = func_proto };
+    // The realm's global env is recorded so a dynamically-created function
+    // (`new realm.Function()`) captures *that* realm's scope as its closure —
+    // giving it the right [[Realm]] for GetPrototypeFromConstructor.
+    function_ns.* = .{ .native = builtins.functionConstructor, .native_ctor = true, .proto = func_proto, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, function_ns, "Function", 1);
     try function_ns.setOwn(a, root_shape, "prototype", .{ .object = func_proto });
     try function_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
