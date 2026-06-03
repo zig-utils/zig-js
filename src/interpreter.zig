@@ -12653,10 +12653,27 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
         }
         return .{ .end = end, .word_like = false };
     }
-    // word: a maximal run of one category (word-like vs not).
+    // word: a maximal run of one category (word-like vs not). A "." or ","
+    // between two digits stays inside the numeric word (UAX#29 WB11/WB12), so
+    // "1.23" is one segment rather than "1", ".", "23".
     const cat = segWordCat(str, pos);
     var end = pos;
-    while (end < len and segWordCat(str, end) == cat) end += segUtf8Len(str[end]);
+    if (cat) {
+        while (end < len) {
+            if (segWordCat(str, end)) {
+                end += segUtf8Len(str[end]);
+                continue;
+            }
+            const c = str[end];
+            if ((c == '.' or c == ',') and end > pos and end + 1 < len and std.ascii.isDigit(str[end - 1]) and std.ascii.isDigit(str[end + 1])) {
+                end += 1;
+                continue;
+            }
+            break;
+        }
+    } else {
+        while (end < len and !segWordCat(str, end)) end += segUtf8Len(str[end]);
+    }
     return .{ .end = end, .word_like = cat };
 }
 
@@ -13332,7 +13349,14 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
             if (env.get("Symbol")) |sym| if (sym == .object) if (sym.object.getOwn("iterator")) |it| if (it == .object and it.object.is_symbol) break :blk it.object.sym_key;
             break :blk null;
         };
-        if (iter_key) |sk| try setNative(a, rs, seg_proto, sk, 0, intlSegmentsIteratorFn);
+        if (iter_key) |sk| {
+            try setNative(a, rs, seg_proto, sk, 0, intlSegmentsIteratorFn);
+            // A symbol-keyed method's name is "[<description>]", not the internal key.
+            if (seg_proto.getOwn(sk)) |mv| if (mv == .object) {
+                try mv.object.setOwn(a, rs, "name", .{ .string = "[Symbol.iterator]" });
+                try mv.object.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+            };
+        }
         try env.put("\x00SegmentsProto", .{ .object = seg_proto });
         // %SegmentIterator.prototype% (proto %IteratorPrototype%): next + tag.
         const seg_iter_proto = try a.create(value.Object);
