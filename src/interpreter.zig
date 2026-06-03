@@ -11184,6 +11184,12 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 } else {
                     try self.setProp(ro, "style", .{ .string = base });
                 }
+                // An explicit non-numeric style after a numeric/2-digit unit is invalid.
+                var rstyles: [10][]const u8 = undefined;
+                var rdisplays: [10][]const u8 = undefined;
+                if (durResolveUnits(.{ .object = ro }, base, &rstyles, &rdisplays)) {
+                    return self.throwError("RangeError", "invalid duration unit style following a numeric unit");
+                }
                 try self.setProp(o, "\x00opts", .{ .object = ro });
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (args.len > 1 and args[1] == .object) {
@@ -12091,6 +12097,59 @@ fn durUnitStyle(ov: ?Value, base: []const u8, unit: []const u8) []const u8 {
     return base;
 }
 
+/// GetDurationUnitOptions for every unit, in order, tracking prevStyle. Fills
+/// `styles`/`displays` with the resolved per-unit style and display, applying:
+///   - digital defaults (h/m/s numeric + display "always"; rest short + "auto"),
+///   - the prevStyle cascade (a unit after a numeric/2-digit one defaults to
+///     numeric, or 2-digit for minutes/seconds), and
+///   - the 2-digit promotion of an explicit/defaulted numeric minutes/seconds
+///     that follows a numeric/2-digit unit.
+/// Returns true if an explicit non-numeric style follows a numeric/2-digit unit
+/// (a RangeError condition the constructor must surface).
+fn durResolveUnits(ov: ?Value, base: []const u8, styles: *[10][]const u8, displays: *[10][]const u8) bool {
+    const digital = std.mem.eql(u8, base, "digital");
+    var prev_numlike = false;
+    var conflict = false;
+    inline for (duration_units, 0..) |u, i| {
+        const is_ymwd = std.mem.eql(u8, u, "years") or std.mem.eql(u8, u, "months") or std.mem.eql(u8, u, "weeks") or std.mem.eql(u8, u, "days");
+        const is_ms = std.mem.eql(u8, u, "minutes") or std.mem.eql(u8, u, "seconds");
+        const is_hms = is_ms or std.mem.eql(u8, u, "hours");
+        var explicit: ?[]const u8 = null;
+        if (ov) |o| if (o == .object) if (o.object.getOwn(u)) |s| if (s == .string) {
+            explicit = s.string;
+        };
+        var style: []const u8 = undefined;
+        var display_default: []const u8 = "always";
+        if (explicit) |e| {
+            style = e;
+        } else if (digital) {
+            if (!is_hms) display_default = "auto";
+            style = if (is_ymwd) "short" else "numeric";
+        } else {
+            display_default = "auto";
+            if (prev_numlike) {
+                style = if (is_ms) "2-digit" else "numeric";
+            } else style = base;
+        }
+        var display: []const u8 = display_default;
+        if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) {
+            display = dv.string;
+        };
+        if (prev_numlike) {
+            const numlike = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
+            if (!numlike) {
+                conflict = true;
+            } else if (is_ms) {
+                style = "2-digit";
+            }
+        }
+        styles[i] = style;
+        displays[i] = display;
+        prev_numlike = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
+    }
+    return conflict;
+}
+
 /// Format one duration unit value via a NumberFormat instance, mirroring the
 /// reference algorithm: standalone styles use style:"unit"; numeric/2-digit use
 /// plain digits (useGrouping:false, +2-digit padding); non-first units suppress
@@ -12144,7 +12203,7 @@ fn durCombines(ov: ?Value, base: []const u8, unit: []const u8) bool {
 /// exact fractional value (integer arithmetic, no f64 precision loss), formatted
 /// as a digit string truncated to `max_f` fraction digits then trimmed to
 /// `min_f`. A leading "-" is added only when this is the sign-bearing unit.
-fn durCombineFrac(self: *Interpreter, vals: [10]f64, unit: []const u8, max_f: usize, min_f: usize, sign_never: bool) value.HostError![]const u8 {
+fn durCombineFrac(self: *Interpreter, vals: [10]f64, unit: []const u8, max_f: usize, min_f: usize, sign_never: bool, min_int: usize) value.HostError![]const u8 {
     const sec: i128 = @intFromFloat(vals[6]);
     const ms: i128 = @intFromFloat(vals[7]);
     const us: i128 = @intFromFloat(vals[8]);
@@ -12172,9 +12231,11 @@ fn durCombineFrac(self: *Interpreter, vals: [10]f64, unit: []const u8, max_f: us
     while (fdig.len < exp) fdig = try std.fmt.allocPrint(self.arena, "0{s}", .{fdig});
     var flen: usize = @min(fdig.len, max_f); // trunc rounding
     while (flen > min_f and fdig[flen - 1] == '0') flen -= 1;
+    var idig = try std.fmt.allocPrint(self.arena, "{d}", .{q});
+    while (idig.len < min_int) idig = try std.fmt.allocPrint(self.arena, "0{s}", .{idig});
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (neg and !sign_never) try buf.append(self.arena, '-');
-    try buf.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{q}));
+    try buf.appendSlice(self.arena, idig);
     if (flen > 0) {
         try buf.append(self.arena, '.');
         try buf.appendSlice(self.arena, fdig[0..flen]);
@@ -12204,13 +12265,13 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
         for (vals) |vv| if (vv < 0) break :blk true;
         break :blk false;
     };
+    var styles: [10][]const u8 = undefined;
+    var displays: [10][]const u8 = undefined;
+    _ = durResolveUnits(ov, base, &styles, &displays);
     inline for (duration_units, 0..) |u, i| {
         const uval = vals[i];
-        const style = durUnitStyle(ov, base, u);
-        const display = blk: {
-            if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) break :blk dv.string;
-            break :blk "auto";
-        };
+        const style = styles[i];
+        const display = displays[i];
         const combine = durCombines(ov, base, u);
         const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
         if (shown) {
@@ -12220,9 +12281,10 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
             // First displayed unit bears the sign; a zero first unit shows "-0"
             // when the overall duration is negative (DurationToFractional / -0).
             const fnum = if (is_first and uval == 0 and dur_neg) -@as(f64, 0.0) else uval;
+            const min_int: usize = if (std.mem.eql(u8, style, "2-digit")) 2 else 1;
             const s = if (combine) blk: {
                 const fd = durFracDigits(ov);
-                break :blk try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never);
+                break :blk try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
             } else try durFmtVal(self, locale, fnum, style, u[0 .. u.len - 1], sign_never);
             const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
             // Once a numeric run starts (need_sep latches), every later unit
@@ -12268,13 +12330,13 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
         for (vals) |vv| if (vv < 0) break :blk true;
         break :blk false;
     };
+    var styles: [10][]const u8 = undefined;
+    var displays: [10][]const u8 = undefined;
+    _ = durResolveUnits(ov, base, &styles, &displays);
     inline for (duration_units, 0..) |u, i| {
         const uval = vals[i];
-        const style = durUnitStyle(ov, base, u);
-        const display = blk: {
-            if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) break :blk dv.string;
-            break :blk "auto";
-        };
+        const style = styles[i];
+        const display = displays[i];
         const combine = durCombines(ov, base, u);
         const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
         if (shown) {
@@ -12296,7 +12358,8 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             if (combine) {
                 // Parse the exact "[-]int[.frac]" combine string into typed parts.
                 const fd = durFracDigits(ov);
-                var s = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never);
+                const min_int: usize = if (std.mem.eql(u8, style, "2-digit")) 2 else 1;
+                var s = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
                 if (s.len > 0 and s[0] == '-') {
                     try grp.append(self.arena, .{ .typ = "minusSign", .value = "-", .unit = sing });
                     s = s[1..];
@@ -13012,12 +13075,14 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 const base = if (dget(ro, "style")) |st| st.string else "short";
                 try self.setProp(o, "numberingSystem", dget(ro, "numberingSystem") orelse .{ .string = "latn" });
                 try self.setProp(o, "style", .{ .string = base });
-                // Per-unit defaults: each unit's style follows the base ("digital"
-                // makes hours/minutes/seconds numeric); display defaults to "auto".
-                inline for (duration_units) |u| {
-                    const dflt: []const u8 = durUnitStyle(null, base, u);
-                    try self.setProp(o, u, dget(ro, u) orelse .{ .string = dflt });
-                    try self.setProp(o, u ++ "Display", dget(ro, u ++ "Display") orelse .{ .string = "auto" });
+                // Resolved per-unit style/display via GetDurationUnitOptions
+                // (prevStyle cascade, digital defaults, 2-digit promotion).
+                var styles: [10][]const u8 = undefined;
+                var displays: [10][]const u8 = undefined;
+                _ = durResolveUnits(ro, base, &styles, &displays);
+                inline for (duration_units, 0..) |u, i| {
+                    try self.setProp(o, u, .{ .string = styles[i] });
+                    try self.setProp(o, u ++ "Display", .{ .string = displays[i] });
                 }
                 if (dget(ro, "fractionalDigits")) |fd| try self.setProp(o, "fractionalDigits", fd);
             }
