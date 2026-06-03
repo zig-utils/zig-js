@@ -134,6 +134,24 @@ pub const Parser = struct {
         return null;
     }
 
+    /// Keywords that can NEVER be a binding identifier, in any mode (the
+    /// unconditional ReservedWords). Excludes the contextual ones — `let`,
+    /// `yield`, `await`, `static`, `async`, `of`, `get`/`set`, `implements`,
+    /// `undefined`, `eval`/`arguments`, … — which are legal binding names in at
+    /// least some contexts, so this never false-rejects them.
+    fn isAlwaysReservedBinding(text: []const u8) bool {
+        const words = [_][]const u8{
+            "break",      "case",     "catch",   "class",   "const",   "continue",
+            "debugger",   "default",  "delete",  "do",      "else",    "enum",
+            "export",     "extends",  "false",   "finally", "for",     "function",
+            "if",         "import",   "in",      "instanceof", "new",   "null",
+            "return",     "super",    "switch",  "this",    "throw",   "true",
+            "try",        "typeof",   "var",     "void",    "while",   "with",
+        };
+        for (words) |w| if (std.mem.eql(u8, text, w)) return true;
+        return false;
+    }
+
     fn isReservedWord(text: []const u8) bool {
         const words = [_][]const u8{
             "true",     "false",   "null",     "undefined", "this",  "typeof",
@@ -675,6 +693,9 @@ pub const Parser = struct {
         while (true) {
             const name_tok = self.advance();
             if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
+            // A reserved word may not be a binding name — including when spelled
+            // with `\u` escapes (the lexer hands us the decoded text).
+            if (isAlwaysReservedBinding(name_tok.text)) return ParseError.UnexpectedToken;
             // Strict mode forbids `eval`/`arguments` as binding names.
             if (self.strict and isEvalOrArguments(name_tok.text)) return ParseError.UnexpectedToken;
             var init_expr: ?*Node = null;

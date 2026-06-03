@@ -1301,6 +1301,20 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
 }
 
+test "reserved words may not be binding identifiers" {
+    try expectParseError("var if = 1;");
+    try expectParseError("var return = 2;");
+    try expectParseError("let class = 1;");
+    try expectParseError("const while = 1;");
+    try expectParseError("var enum = 1;");
+    try expectParseError("var \\u0069\\u0066 = 1;"); // `var if` spelled with \u escapes
+    // Contextual keywords ARE valid binding names in sloppy mode (must parse).
+    _ = try evalIn("var let = 1;");
+    _ = try evalIn("var yield = 2;");
+    _ = try evalIn("var async = 3;");
+    _ = try evalIn("var of = 4, get = 5, set = 6, as = 7, from = 8;");
+}
+
 test "destructuring assignment: a rest element must be last" {
     try expectParseError("0, [...x, y] = [];");
     try expectParseError("0, [...x, ...y] = [];");
