@@ -10736,6 +10736,36 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r: DtfOptions) EvalErro
     try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
 }
 
+/// Validate the Intl.NumberFormat options bag at construction time (the engine
+/// otherwise formats lazily): currency style requires a well-formed currency
+/// code, and the digit-count options must be in range (RangeError otherwise).
+fn nfValidateOptions(self: *Interpreter, raw: Value) EvalError!void {
+    const numRange = struct {
+        fn check(s: *Interpreter, opts: Value, name: []const u8, lo: f64, hi: f64) EvalError!void {
+            const v = try s.getProperty(opts, name);
+            if (v == .undefined) return;
+            const n = try s.toNumberV(v);
+            // GetNumberOption: NaN or out of [lo, hi] is a RangeError.
+            if (std.math.isNan(n) or n < lo or n > hi) return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "{s} value is out of range", .{name}));
+        }
+    }.check;
+    const sv = try self.getProperty(raw, "style");
+    if (sv == .string and std.mem.eql(u8, sv.string, "currency")) {
+        const cv = try self.getProperty(raw, "currency");
+        if (cv == .undefined) return self.throwError("TypeError", "currency code is required with style \"currency\"");
+        const code = try self.toStringV(cv);
+        // A well-formed currency code is exactly three ASCII letters.
+        if (code.len != 3 or !std.ascii.isAlphabetic(code[0]) or !std.ascii.isAlphabetic(code[1]) or !std.ascii.isAlphabetic(code[2])) {
+            return self.throwError("RangeError", "invalid currency code");
+        }
+    }
+    try numRange(self, raw, "minimumIntegerDigits", 1, 21);
+    try numRange(self, raw, "minimumFractionDigits", 0, 100);
+    try numRange(self, raw, "maximumFractionDigits", 0, 100);
+    try numRange(self, raw, "minimumSignificantDigits", 1, 21);
+    try numRange(self, raw, "maximumSignificantDigits", 1, 21);
+}
+
 /// services that allow it (NumberFormat/DateTimeFormat/Collator).
 fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
     return struct {
@@ -10776,6 +10806,12 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const raw = if (args.len > 1) args[1] else Value.undefined;
                 const r = try dtfProcessOptions(self, raw);
                 try dtfStoreOptions(self, o, r);
+            } else if (comptime std.mem.eql(u8, service, "NumberFormat")) {
+                if (args.len > 1 and args[1] == .object) {
+                    try nfValidateOptions(self, args[1]);
+                    try self.setProp(o, "\x00opts", args[1]);
+                    try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+                }
             } else if (args.len > 1 and args[1] == .object) {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
