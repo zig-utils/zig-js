@@ -13414,7 +13414,24 @@ fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
     if (std.math.isNan(n)) return .{ .string = "other" };
     const fd = pluralFracDigits(this);
-    const ops = pluralOperands(n, fd.min, fd.max);
+    var ops = pluralOperands(n, fd.min, fd.max);
+    // The exponent operand (e/c) for scientific/engineering/compact notation.
+    var notation: []const u8 = "standard";
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) if (ov.object.getOwn("notation")) |nv| if (nv == .string) {
+        notation = nv.string;
+    };
+    const absn = @abs(n);
+    if (absn != 0 and std.math.isFinite(absn) and !std.mem.eql(u8, notation, "standard")) {
+        const oom = orderOfMagnitude(absn);
+        ops.e = @floatFromInt(if (std.mem.eql(u8, notation, "scientific"))
+            oom
+        else if (std.mem.eql(u8, notation, "engineering"))
+            @divFloor(oom, 3) * 3
+        else if (oom >= 3) // compact: a multiple-of-three magnitude >= 1000
+            @divFloor(oom, 3) * 3
+        else
+            @as(i32, 0));
+    }
     return .{ .string = pluralCategory(pluralRulesFor(this), ops) };
 }
 
