@@ -1301,6 +1301,23 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
 }
 
+test "duplicate lexical declarations are early errors" {
+    // Same-scope let/const/class duplicates, and async/generator-function dups.
+    try expectParseError("{ let x; let x; }");
+    try expectParseError("{ let x; const x; }");
+    try expectParseError("{ class C {} let C; }");
+    try expectParseError("{ async function f() {} async function f() {} }");
+    try expectParseError("{ function* g() {} let g; }");
+    try expectParseError("switch (0) { case 1: let y; break; default: let y; }");
+    // Valid (must NOT be rejected): shadowing in a nested/sibling scope, var
+    // redeclaration, and — per Annex B — two *plain* function declarations in a
+    // sloppy block.
+    _ = try evalIn("let x = 1; { let x = 2; } x");
+    _ = try evalIn("{ let a = 1; } { let a = 2; }");
+    try std.testing.expect((try evalIn("var v = 1; var v = 2; v")).number == 2);
+    _ = try evalIn("{ function f() { return 1; } function f() { return 2; } f(); }");
+}
+
 test "numeric separators: valid between digits, rejected when misplaced" {
     // Valid: a `_` between two digits of the radix.
     try std.testing.expectEqual(@as(f64, 1000), (try evalIn("1_000")).number);

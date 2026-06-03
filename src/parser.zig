@@ -192,7 +192,89 @@ pub const Parser = struct {
         while (!self.check(.eof)) {
             try stmts.append(self.arena, try self.parseStatement());
         }
+        // Early error: no duplicate lexically-declared names in a scope.
+        try self.checkLexicalDupes(stmts.items, false);
         return self.alloc(.{ .program = stmts.items });
+    }
+
+    /// Early-error check (13.2.1.1 et al.): a scope's lexically-declared names
+    /// (`let`/`const`/`class`, plus block-level `function`s) must be unique. This
+    /// flags only *same-scope* duplicates — always a SyntaxError — so valid
+    /// shadowing in nested scopes is never rejected. `funcs_lexical` is true for a
+    /// block/switch scope (where a function declaration is lexical) and false for
+    /// a function-body/script top level (where it is var-scoped). Incomplete
+    /// traversal only misses errors; it never produces a false positive.
+    fn checkLexicalDupes(self: *Parser, stmts: []const *Node, funcs_lexical: bool) ParseError!void {
+        // name → is the declaration "rigid"? A let/const/class — or an async/
+        // generator function — is rigid: any same-name collision is an error.
+        // Two *plain* function declarations in a sloppy block are allowed
+        // (Annex B.3.3), so a collision is reported only when a rigid one is
+        // involved — which keeps the check free of false positives.
+        var seen: std.StringHashMapUnmanaged(bool) = .empty;
+        for (stmts) |s| {
+            switch (s.*) {
+                .var_decl => |d| if (d.kind != .@"var") try self.addDecl(&seen, d.name, true),
+                .decl_group => |g| for (g) |d2| {
+                    if (d2.* == .var_decl and d2.var_decl.kind != .@"var") try self.addDecl(&seen, d2.var_decl.name, true);
+                },
+                .func_decl => |fnode| if (funcs_lexical and fnode.name.len > 0)
+                    try self.addDecl(&seen, fnode.name, fnode.is_async or fnode.is_generator),
+                else => {},
+            }
+        }
+        for (stmts) |s| try self.recurseScope(s);
+    }
+
+    fn addDecl(self: *Parser, seen: *std.StringHashMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
+        if (seen.get(name)) |existing_rigid| {
+            // A collision is an early error unless BOTH are plain functions.
+            if (rigid or existing_rigid) return ParseError.UnexpectedToken;
+            return; // plain-function vs plain-function: allowed
+        }
+        try seen.put(self.arena, name, rigid);
+    }
+
+    /// Descend into a statement's nested scopes, running `checkLexicalDupes` at
+    /// each new lexical scope.
+    fn recurseScope(self: *Parser, node: *Node) ParseError!void {
+        switch (node.*) {
+            .block => |b| try self.checkLexicalDupes(b, true),
+            .if_stmt => |i| {
+                try self.recurseScope(i.consequent);
+                if (i.alternate) |a| try self.recurseScope(a);
+            },
+            .while_stmt => |w| try self.recurseScope(w.body),
+            .do_while_stmt => |w| try self.recurseScope(w.body),
+            .for_stmt => |f| try self.recurseScope(f.body),
+            .for_in => |f| try self.recurseScope(f.body),
+            .labeled_stmt => |l| try self.recurseScope(l.body),
+            .try_stmt => |t| {
+                try self.recurseScope(t.block);
+                if (t.catch_block) |c| try self.recurseScope(c);
+                if (t.finally_block) |fb| try self.recurseScope(fb);
+            },
+            .switch_stmt => |sw| {
+                // The whole switch is one lexical (block) scope spanning all cases.
+                var combined: std.ArrayListUnmanaged(*Node) = .empty;
+                for (sw.cases) |cs| try combined.appendSlice(self.arena, cs.body);
+                try self.checkLexicalDupes(combined.items, true);
+            },
+            .func_decl => |fnode| try self.recurseFnBody(fnode),
+            // A class/function used as an initializer carries its own body scopes.
+            .var_decl => |d| if (d.init) |ini| try self.recurseScope(ini),
+            .function => |fnode| try self.recurseFnBody(fnode),
+            .class_expr => |c| for (c.members) |m| {
+                if (m.func) |mf| if (mf.* == .function) try self.recurseFnBody(mf.function);
+            },
+            .expr_stmt => |e| try self.recurseScope(e),
+            else => {},
+        }
+    }
+
+    /// A function body is a fresh function scope: its top-level function
+    /// declarations are var-scoped (not lexical), so `funcs_lexical = false`.
+    fn recurseFnBody(self: *Parser, fnode: *ast.FunctionNode) ParseError!void {
+        if (fnode.body.* == .block) try self.checkLexicalDupes(fnode.body.block, false);
     }
 
     /// Parse the token stream as a Module: a Module is always strict, and its
