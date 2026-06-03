@@ -10943,6 +10943,21 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 }
                 try self.setProp(o, "\x00opts", .{ .object = ro });
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            } else if (comptime std.mem.eql(u8, service, "Collator")) {
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                const ro = (try self.newObject()).object;
+                if (raw == .object) {
+                    if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| try self.setProp(ro, "usage", .{ .string = u });
+                    _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+                    const num = try self.getProperty(raw, "numeric");
+                    if (num != .undefined) try self.setProp(ro, "numeric", .{ .boolean = num.toBoolean() });
+                    if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| try self.setProp(ro, "caseFirst", .{ .string = cf });
+                    if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |se| try self.setProp(ro, "sensitivity", .{ .string = se });
+                    const ip = try self.getProperty(raw, "ignorePunctuation");
+                    if (ip != .undefined) try self.setProp(ro, "ignorePunctuation", .{ .boolean = ip.toBoolean() });
+                }
+                try self.setProp(o, "\x00opts", .{ .object = ro });
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (args.len > 1 and args[1] == .object) {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
@@ -11986,12 +12001,21 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "roundingPriority", .{ .string = rounding_priority });
                 try self.setProp(o, "trailingZeroDisplay", .{ .string = trailing_zero });
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
-                try self.setProp(o, "usage", .{ .string = "sort" });
-                try self.setProp(o, "sensitivity", .{ .string = "variant" });
-                try self.setProp(o, "ignorePunctuation", .{ .boolean = false });
+                // Reflect the normalized options over the spec defaults, in the
+                // resolvedOptions field order.
+                const rv: ?Value = this.object.getOwn("\x00opts");
+                const cget = struct {
+                    fn s(src: ?Value, k: []const u8) ?Value {
+                        if (src) |v| if (v == .object) if (v.object.getOwn(k)) |x| return x;
+                        return null;
+                    }
+                }.s;
+                try self.setProp(o, "usage", cget(rv, "usage") orelse .{ .string = "sort" });
+                try self.setProp(o, "sensitivity", cget(rv, "sensitivity") orelse .{ .string = "variant" });
+                try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse .{ .boolean = false });
                 try self.setProp(o, "collation", .{ .string = "default" });
-                try self.setProp(o, "numeric", .{ .boolean = false });
-                try self.setProp(o, "caseFirst", .{ .string = "false" });
+                try self.setProp(o, "numeric", cget(rv, "numeric") orelse .{ .boolean = false });
+                try self.setProp(o, "caseFirst", cget(rv, "caseFirst") orelse .{ .string = "false" });
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
                 try self.setProp(o, "numberingSystem", .{ .string = "latn" });
                 try self.setProp(o, "type", .{ .string = "cardinal" });
