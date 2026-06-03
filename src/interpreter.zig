@@ -12389,6 +12389,15 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
         canon = try std.ascii.allocUpperString(self.arena, code);
     } else if (std.mem.eql(u8, typ, "language")) {
         if (!dtfWellFormedType(code) and !(code.len >= 2 and code.len <= 3 and allAlpha(code))) return self.throwError("RangeError", "invalid language code");
+    } else if (std.mem.eql(u8, typ, "calendar")) {
+        if (!dtfWellFormedType(code)) return self.throwError("RangeError", "invalid calendar code");
+    } else if (std.mem.eql(u8, typ, "dateTimeField")) {
+        const fields = [_][]const u8{ "era", "year", "quarter", "month", "weekOfYear", "weekday", "day", "dayPeriod", "hour", "minute", "second", "timeZoneName" };
+        var ok = false;
+        for (fields) |f| if (std.mem.eql(u8, code, f)) {
+            ok = true;
+        };
+        if (!ok) return self.throwError("RangeError", "invalid dateTimeField");
     }
     if (std.mem.eql(u8, fallback, "none")) return .undefined;
     return .{ .string = canon };
