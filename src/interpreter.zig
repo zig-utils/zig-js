@@ -11730,6 +11730,63 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
+/// Format one value to a string via the shared parts builder.
+fn nfFormatOne(self: *Interpreter, this: Value, v: Value) value.HostError![]const u8 {
+    const parts = try nfBuildParts(self, this, &.{v});
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
+    return buf.toOwnedSlice(self.arena);
+}
+
+/// `Intl.NumberFormat.prototype.formatRange(start, end)` — en. Disjoint values
+/// give "<start> – <end>"; values that format identically collapse to "~<x>".
+/// (The shared-affix collapsing of partially-equal values is not modeled.)
+fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatRange on incompatible receiver");
+    if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "formatRange requires two defined arguments");
+    const x = try self.toNumberV(args[0]);
+    const y = try self.toNumberV(args[1]);
+    if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRange arguments must not be NaN");
+    const xs = try nfFormatOne(self, this, args[0]);
+    const ys = try nfFormatOne(self, this, args[1]);
+    if (std.mem.eql(u8, xs, ys)) return .{ .string = try std.fmt.allocPrint(self.arena, "~{s}", .{xs}) };
+    return .{ .string = try std.fmt.allocPrint(self.arena, "{s} \u{2013} {s}", .{ xs, ys }) };
+}
+
+fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatRangeToParts on incompatible receiver");
+    if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "formatRangeToParts requires two defined arguments");
+    const x = try self.toNumberV(args[0]);
+    const y = try self.toNumberV(args[1]);
+    if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRangeToParts arguments must not be NaN");
+    // Emit the start value's parts (source "startRange"), a shared literal
+    // separator, then the end value's parts ("endRange").
+    const arr = (try self.newArray()).object;
+    const emit = struct {
+        fn one(s: *Interpreter, a: *value.Object, prts: []const NfPart, src: []const u8) value.HostError!void {
+            for (prts) |p| {
+                const po = (try s.newObject()).object;
+                try s.setProp(po, "type", .{ .string = p.typ });
+                try s.setProp(po, "value", .{ .string = p.value });
+                try s.setProp(po, "source", .{ .string = src });
+                try a.elements.append(s.arena, .{ .object = po });
+            }
+        }
+    }.one;
+    const xp = try nfBuildParts(self, this, &.{args[0]});
+    try emit(self, arr, xp.items, "startRange");
+    const lo = (try self.newObject()).object;
+    try self.setProp(lo, "type", .{ .string = "literal" });
+    try self.setProp(lo, "value", .{ .string = "\u{2013}" });
+    try self.setProp(lo, "source", .{ .string = "shared" });
+    try arr.elements.append(self.arena, .{ .object = lo });
+    const yp = try nfBuildParts(self, this, &.{args[1]});
+    try emit(self, arr, yp.items, "endRange");
+    return .{ .object = arr };
+}
+
 fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatToParts on incompatible receiver");
@@ -12588,6 +12645,8 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         const p = try Svc.install(a, rs, env, ns, object_proto, "NumberFormat", 0, intlServiceConstructorFn("NumberFormat"), tag);
         try installIntlFormat(a, rs, p, "NumberFormat", intlNumberFormatFn);
         try setNative(a, rs, p, "formatToParts", 1, intlNumberFormatToPartsFn);
+        try setNative(a, rs, p, "formatRange", 2, intlNumberFormatRangeFn);
+        try setNative(a, rs, p, "formatRangeToParts", 2, intlNumberFormatRangeToPartsFn);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("NumberFormat"));
     }
     {
