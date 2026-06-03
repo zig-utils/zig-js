@@ -12577,7 +12577,22 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var parts: std.ArrayListUnmanaged(LfPart) = .empty;
     const v = if (args.len > 0) args[0] else Value.undefined;
     if (v == .undefined) return parts;
-    const list = try self.iterableOrArrayLikeToList(v);
+    // StringListFromIterable: drain the iterator, type-checking each value and
+    // closing the iterator on the first non-string (the list is not fully
+    // consumed past the offending element).
+    var strs: std.ArrayListUnmanaged([]const u8) = .empty;
+    const it = try self.iteratorOf(v);
+    while (true) {
+        const r = try self.callMethod(it, "next", &.{});
+        if ((try self.getProperty(r, "done")).toBoolean()) break;
+        const nv = try self.getProperty(r, "value");
+        if (nv != .string) {
+            self.iteratorClose(it) catch {};
+            return self.throwError("TypeError", "Intl.ListFormat: list items must be strings");
+        }
+        try strs.append(self.arena, nv.string);
+    }
+    const list = strs.items;
     var typ: []const u8 = "conjunction";
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
         const tv = try self.getProperty(ov, "type");
@@ -12589,12 +12604,11 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     const pair: []const u8 = if (is_unit) ", " else if (is_disj) " or " else " and ";
     const final: []const u8 = if (is_unit) ", " else if (is_disj) ", or " else ", and ";
     for (list, 0..) |item, i| {
-        if (item != .string) return self.throwError("TypeError", "Intl.ListFormat: list items must be strings");
         if (i != 0) {
             const sep = if (i == list.len - 1) (if (list.len == 2) pair else final) else ", ";
             try parts.append(self.arena, .{ .typ = "literal", .value = sep });
         }
-        try parts.append(self.arena, .{ .typ = "element", .value = item.string });
+        try parts.append(self.arena, .{ .typ = "element", .value = item });
     }
     return parts;
 }
