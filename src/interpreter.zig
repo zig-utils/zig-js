@@ -2618,6 +2618,20 @@ pub const Interpreter = struct {
         const t = o.date_ms;
         const nan = std.math.nan(f64);
         if (eq(name, "getTime") or eq(name, "valueOf")) return Value{ .number = t };
+        // toLocale{,Date,Time}String(locales, options) === new Intl.DateTimeFormat
+        // (locales, options).format(this), with the method's required/defaults.
+        if (eq(name, "toLocaleString") or eq(name, "toLocaleDateString") or eq(name, "toLocaleTimeString")) {
+            if (std.math.isNan(t)) return Value{ .string = "Invalid Date" };
+            const defaults: DtfDefaults = if (eq(name, "toLocaleDateString")) .date else if (eq(name, "toLocaleTimeString")) .time else .all;
+            const dtf = (try self.newObject()).object;
+            try self.setProp(dtf, "\x00intl", .{ .string = "DateTimeFormat" });
+            const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
+            const loc = if (locs.elements.items.len > 0) locs.elements.items[0].string else "en";
+            try self.setProp(dtf, "\x00locale", .{ .string = loc });
+            const r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else .undefined, defaults);
+            try dtfStoreOptions(self, dtf, r);
+            return try intlDateTimeFormatFn(@ptrCast(self), .{ .object = dtf }, &.{.{ .number = t }});
+        }
         if (eq(name, "setTime")) {
             var nt = try self.toNumberV(arg0(args));
             if (@abs(nt) > 8.64e15) nt = nan;
@@ -10758,7 +10772,13 @@ const DtfOptions = struct {
 /// constructor-options-order test asserts the observed getter sequence). Throws
 /// RangeError on out-of-range values and TypeError on a dateStyle/timeStyle vs
 /// explicit-component conflict.
+const DtfDefaults = enum { date, time, all };
+
 fn dtfProcessOptions(self: *Interpreter, raw: Value) EvalError!DtfOptions {
+    return dtfProcessOptionsKind(self, raw, .date);
+}
+
+fn dtfProcessOptionsKind(self: *Interpreter, raw: Value, defaults: DtfDefaults) EvalError!DtfOptions {
     var r = DtfOptions{};
     // Read options only when an options object was supplied; the required/default
     // logic below still runs for `new Intl.DateTimeFormat()` (no options).
@@ -10804,11 +10824,19 @@ fn dtfProcessOptions(self: *Interpreter, raw: Value) EvalError!DtfOptions {
     if ((r.date_style.len > 0 or r.time_style.len > 0) and has_comp) {
         return self.throwError("TypeError", "dateStyle/timeStyle may not be used with explicit date-time component options");
     }
-    // Default the date components to numeric when nothing was requested.
+    // Default the components to numeric when nothing was requested, per the
+    // required/defaults kind (date → y/m/d; time → h/m/s; all → both).
     if (!has_comp and r.date_style.len == 0 and r.time_style.len == 0) {
-        r.year = "numeric";
-        r.month = "numeric";
-        r.day = "numeric";
+        if (defaults == .date or defaults == .all) {
+            r.year = "numeric";
+            r.month = "numeric";
+            r.day = "numeric";
+        }
+        if (defaults == .time or defaults == .all) {
+            r.hour = "numeric";
+            r.minute = "numeric";
+            r.second = "numeric";
+        }
     }
     return r;
 }
