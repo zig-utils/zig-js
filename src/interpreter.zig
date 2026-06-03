@@ -13519,8 +13519,28 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     try self.setProp(o, "currencySign", .{ .string = "standard" });
                 }
                 try self.setProp(o, "minimumIntegerDigits", .{ .number = min_int });
-                try self.setProp(o, "minimumFractionDigits", .{ .number = min_frac });
-                try self.setProp(o, "maximumFractionDigits", .{ .number = max_frac });
+                // Significant-digits resolution: with the default ("auto") rounding
+                // priority a set of significant digits replaces the fraction
+                // digits; morePrecision/lessPrecision reports both.
+                const nfopts = this.object.getOwn("\x00opts");
+                const sig_get = struct {
+                    fn s(src: ?Value, k: []const u8) ?f64 {
+                        if (src) |v| if (v == .object) if (v.object.getOwn(k)) |x| if (x == .number) return x.number;
+                        return null;
+                    }
+                }.s;
+                const min_sig = sig_get(nfopts, "minimumSignificantDigits");
+                const max_sig = sig_get(nfopts, "maximumSignificantDigits");
+                const has_sig = min_sig != null or max_sig != null;
+                const both = !std.mem.eql(u8, rounding_priority, "auto");
+                if (!has_sig or both) {
+                    try self.setProp(o, "minimumFractionDigits", .{ .number = min_frac });
+                    try self.setProp(o, "maximumFractionDigits", .{ .number = max_frac });
+                }
+                if (has_sig) {
+                    try self.setProp(o, "minimumSignificantDigits", .{ .number = min_sig orelse 1 });
+                    try self.setProp(o, "maximumSignificantDigits", .{ .number = max_sig orelse 21 });
+                }
                 try self.setProp(o, "useGrouping", grouping);
                 try self.setProp(o, "notation", .{ .string = notation });
                 if (std.mem.eql(u8, notation, "compact")) try self.setProp(o, "compactDisplay", .{ .string = compact_display });
