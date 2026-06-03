@@ -11025,9 +11025,12 @@ fn currencyInfo(code: []const u8) CurrencyInfo {
     return .{ .symbol = code, .digits = 2 };
 }
 
-fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.format on incompatible receiver");
+/// One element of a NumberFormat formatToParts result.
+const NfPart = struct { typ: []const u8, value: []const u8 };
+
+/// Build the formatted parts for an Intl.NumberFormat value (en-style algorithm,
+/// CLDR symbols). Shared by `format` (joins the values) and `formatToParts`.
+fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(NfPart) {
     var n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
 
     // Resolve the fraction/integer-digit and style options (en-style algorithm,
@@ -11151,19 +11154,31 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     // pattern does (en "($1.00)"); others (de) just use the minus sign.
     const acct = accounting and syms.accounting_parens and (cur_prefix.len > 0 or cur_suffix.len > 0);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var parts: std.ArrayListUnmanaged(NfPart) = .empty;
+    const push = struct {
+        fn p(s: *Interpreter, list: *std.ArrayListUnmanaged(NfPart), typ: []const u8, v: []const u8) EvalError!void {
+            try list.append(s.arena, .{ .typ = typ, .value = v });
+        }
+    }.p;
     // Sign/accounting wrap, then the currency prefix (en places the symbol before
     // the number; standard sign before the symbol: "-$1.00", accounting "($1.00)").
-    if (acct and show_neg) try buf.append(self.arena, '(') else if (show_neg) try buf.appendSlice(self.arena, syms.minus) else if (show_pos) try buf.append(self.arena, '+');
-    try buf.appendSlice(self.arena, cur_prefix);
+    if (acct and show_neg) try push(self, &parts, "literal", "(") else if (show_neg) try push(self, &parts, "minusSign", syms.minus) else if (show_pos) try push(self, &parts, "plusSign", "+");
+    if (cur_prefix.len > 0) try push(self, &parts, "currency", cur_prefix);
     if (!finite) {
-        try buf.appendSlice(self.arena, if (is_nan) syms.nan else syms.infinity);
+        try push(self, &parts, if (is_nan) "nan" else "infinity", if (is_nan) syms.nan else syms.infinity);
     } else {
+        // Integer digits, split into "integer" runs separated by "group" parts.
         const first_group = digits.len % 3;
+        var run: std.ArrayListUnmanaged(u8) = .empty;
         for (digits, 0..) |c, i| {
-            if (use_grouping and i != 0 and (i % 3) == first_group) try buf.appendSlice(self.arena, syms.group);
-            try buf.append(self.arena, c);
+            if (use_grouping and i != 0 and (i % 3) == first_group) {
+                try push(self, &parts, "integer", try run.toOwnedSlice(self.arena));
+                try push(self, &parts, "group", syms.group);
+                run = .empty;
+            }
+            try run.append(self.arena, c);
         }
+        try push(self, &parts, "integer", try run.toOwnedSlice(self.arena));
     }
     // Fraction digits: between min_frac and max_frac (trailing zeros beyond
     // min_frac trimmed).
@@ -11188,14 +11203,37 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         var flen: usize = fb.items.len;
         while (flen > min_frac and fb.items[flen - 1] == '0') flen -= 1;
         if (flen > 0) {
-            try buf.appendSlice(self.arena, syms.decimal);
-            try buf.appendSlice(self.arena, fb.items[0..flen]);
+            try push(self, &parts, "decimal", syms.decimal);
+            try push(self, &parts, "fraction", try self.arena.dupe(u8, fb.items[0..flen]));
         }
     }
-    if (is_percent) try buf.appendSlice(self.arena, syms.percent);
-    try buf.appendSlice(self.arena, cur_suffix);
-    if (acct and show_neg) try buf.append(self.arena, ')');
+    if (is_percent) try push(self, &parts, "percentSign", syms.percent);
+    if (cur_suffix.len > 0) try push(self, &parts, "currency", cur_suffix);
+    if (acct and show_neg) try push(self, &parts, "literal", ")");
+    return parts;
+}
+
+fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.format on incompatible receiver");
+    const parts = try nfBuildParts(self, this, args);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatToParts on incompatible receiver");
+    const parts = try nfBuildParts(self, this, args);
+    const arr = (try self.newArray()).object;
+    for (parts.items) |p| {
+        const o = (try self.newObject()).object;
+        try self.setProp(o, "type", .{ .string = p.typ });
+        try self.setProp(o, "value", .{ .string = p.value });
+        try arr.elements.append(self.arena, .{ .object = o });
+    }
+    return .{ .object = arr };
 }
 
 fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -11419,6 +11457,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "NumberFormat", 0, intlServiceConstructorFn("NumberFormat"), tag);
         try setNative(a, rs, p, "format", 1, intlNumberFormatFn);
+        try setNative(a, rs, p, "formatToParts", 1, intlNumberFormatToPartsFn);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("NumberFormat"));
     }
     {
