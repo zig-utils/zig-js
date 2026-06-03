@@ -1476,6 +1476,10 @@ pub const Parser = struct {
             return self.alloc(.new_target_expr);
         }
         var callee = try self.parsePrimary();
+        // `new import(...)` is a SyntaxError: an ImportCall is a CallExpression,
+        // not a valid MemberExpression operand for `new`. (`import.meta` parses to
+        // `.import_meta`, so `new import.meta.x()` is unaffected.)
+        if (callee.* == .import_call) return ParseError.UnexpectedToken;
         while (true) {
             if (self.match(.dot)) {
                 const name = self.advance();

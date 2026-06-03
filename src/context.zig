@@ -1301,6 +1301,15 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
 }
 
+test "new import(...) is an early error" {
+    try expectParseError("new import('x')");
+    try expectParseError("do { new import(''); } while (false)");
+    try expectParseError("new import('x').then");
+    // Ordinary `new` still works (import.meta, which is `.import_meta`, is untouched).
+    try std.testing.expect((try evalIn("(new Object()) instanceof Object")).boolean);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(1, 2, 3).length")).number);
+}
+
 test "delete of a private member is an early error" {
     try expectParseError("class C { #x = 1; m() { delete this.#x; } }");
     try expectParseError("class C { #x = 1; m() { delete (this.#x); } }"); // parenthesized (covered)
