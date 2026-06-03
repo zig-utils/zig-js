@@ -11092,6 +11092,149 @@ fn currencyInfo(code: []const u8) CurrencyInfo {
     return .{ .symbol = code, .digits = 2 };
 }
 
+/// Round a non-negative magnitude `m` to an integer per an ECMA-402 rounding
+/// mode (directed modes are sign-aware via `neg`). Ties are decided on the
+/// f64 fractional remainder — which matches the spec, since the value being
+/// formatted is already the nearest f64 to the source decimal.
+fn roundMag(m: f64, neg: bool, mode: []const u8) f64 {
+    const low = @floor(m);
+    const frac = m - low;
+    if (frac == 0) return low;
+    const eqs = std.mem.eql;
+    const up = blk: {
+        if (eqs(u8, mode, "ceil")) break :blk !neg;
+        if (eqs(u8, mode, "floor")) break :blk neg;
+        if (eqs(u8, mode, "expand")) break :blk true;
+        if (eqs(u8, mode, "trunc")) break :blk false;
+        if (frac < 0.5) break :blk false;
+        if (frac > 0.5) break :blk true;
+        if (eqs(u8, mode, "halfCeil")) break :blk !neg;
+        if (eqs(u8, mode, "halfFloor")) break :blk neg;
+        if (eqs(u8, mode, "halfTrunc")) break :blk false;
+        if (eqs(u8, mode, "halfEven")) break :blk @mod(low, 2) != 0;
+        break :blk true; // halfExpand (default) — ties away from zero
+    };
+    return if (up) low + 1 else low;
+}
+
+const NfRound = struct { int_str: []const u8, frac_str: []const u8, is_zero: bool };
+
+/// The integer power of ten just below `m` (m > 0): floor(log10(m)), corrected
+/// for the float error that makes log10 of an exact power of ten land low.
+fn orderOfMagnitude(m: f64) i32 {
+    var e: i32 = @intFromFloat(@floor(std.math.log10(m)));
+    if (powi10(e + 1) <= m) e += 1;
+    if (powi10(e) > m) e -= 1;
+    return e;
+}
+
+fn powi10(e: i32) f64 {
+    return std.math.pow(f64, 10, @floatFromInt(e));
+}
+
+/// Round `mag` (>= 0) to a decimal string per the NumberFormat digit options:
+/// significant digits (when set / chosen by roundingPriority) else fraction
+/// digits, with a rounding increment and rounding mode. Returns the integer and
+/// (trimmed) fraction digit strings.
+fn nfRound(self: *Interpreter, mag: f64, neg: bool, min_int: usize, min_frac: usize, max_frac: usize, min_sig: ?usize, max_sig: ?usize, frac_set: bool, priority: []const u8, rinc: u64, mode: []const u8) EvalError!NfRound {
+    const Inner = struct {
+        // Build int/frac strings from an unsigned integer `r` whose decimal
+        // point sits `scale_exp` places from its right end (scale_exp may be < 0).
+        fn fromScaled(s: *Interpreter, r: u64, scale_exp: i32, lo_frac: usize, hi_frac: ?usize) EvalError!struct { i: []const u8, f: []const u8 } {
+            var rs = try std.fmt.allocPrint(s.arena, "{d}", .{r});
+            var int_str: []const u8 = undefined;
+            var frac: std.ArrayListUnmanaged(u8) = .empty;
+            if (scale_exp <= 0) {
+                // Integer; append the trailing zeros the negative exponent implies.
+                var pad = -scale_exp;
+                while (pad > 0) : (pad -= 1) rs = try std.fmt.allocPrint(s.arena, "{s}0", .{rs});
+                int_str = rs;
+            } else {
+                const se: usize = @intCast(scale_exp);
+                if (se >= rs.len) {
+                    int_str = "0";
+                    var lead = se - rs.len;
+                    while (lead > 0) : (lead -= 1) try frac.append(s.arena, '0');
+                    try frac.appendSlice(s.arena, rs);
+                } else {
+                    int_str = rs[0 .. rs.len - se];
+                    try frac.appendSlice(s.arena, rs[rs.len - se ..]);
+                }
+            }
+            // Trim trailing zeros down to lo_frac; pad up to lo_frac; cap at hi_frac.
+            var flen = frac.items.len;
+            if (hi_frac) |hf| while (flen > hf) {
+                flen -= 1;
+            };
+            while (flen > lo_frac and frac.items[flen - 1] == '0') flen -= 1;
+            var fb: std.ArrayListUnmanaged(u8) = .empty;
+            try fb.appendSlice(s.arena, frac.items[0..flen]);
+            while (fb.items.len < lo_frac) try fb.append(s.arena, '0');
+            return .{ .i = int_str, .f = try fb.toOwnedSlice(s.arena) };
+        }
+    };
+
+    const use_sig = max_sig != null and (std.mem.eql(u8, priority, "auto") or !frac_set);
+    // morePrecision/lessPrecision with both sig+frac set is approximated as the
+    // significant-digit result (the common case in the corpus uses one or auto).
+    if (use_sig or (max_sig != null and !std.mem.eql(u8, priority, "auto"))) {
+        const msig = max_sig.?;
+        const lsig = min_sig orelse 1;
+        if (mag == 0) {
+            var fb: std.ArrayListUnmanaged(u8) = .empty;
+            var k: usize = 1;
+            while (k < lsig) : (k += 1) try fb.append(self.arena, '0');
+            return .{ .int_str = "0", .frac_str = try fb.toOwnedSlice(self.arena), .is_zero = true };
+        }
+        const e = orderOfMagnitude(mag);
+        // Cap the scaling so the scaled magnitude stays within u64; rounding
+        // beyond ~18 digits is identity at f64 precision anyway.
+        const scale_exp: i32 = @min(@as(i32, @intCast(msig)) - 1 - e, 18);
+        const scaled = if (scale_exp >= 0) mag * powi10(scale_exp) else mag / powi10(-scale_exp);
+        const r: u64 = @intFromFloat(roundMag(scaled, neg, mode));
+        // Rounding up can add a digit (9.99 -> 10.0); the decimal point keeps the
+        // same scale_exp, so fromScaled handles the extra integer digit.
+        // Significant mode shows at least lsig digits: lo_frac forces trailing zeros.
+        const lo_frac: usize = blk: {
+            // significant digits already in the integer part:
+            const int_sig: i32 = e + 1;
+            const need: i32 = @as(i32, @intCast(lsig)) - int_sig;
+            break :blk if (need > 0) @intCast(need) else 0;
+        };
+        const res = try Inner.fromScaled(self, r, scale_exp, lo_frac, null);
+        var int_str = res.i;
+        while (int_str.len < min_int) int_str = try std.fmt.allocPrint(self.arena, "0{s}", .{int_str});
+        return .{ .int_str = int_str, .frac_str = res.f, .is_zero = false };
+    }
+
+    // Fixed (fraction-digit) path with optional rounding increment. Rounding is
+    // done with at most 18 fraction digits (u64 range; further digits are zero
+    // at f64 precision), then the string is padded out to min_frac.
+    const eff: usize = @min(max_frac, 18);
+    var scale: f64 = 1;
+    for (0..eff) |_| scale *= 10;
+    const scaled = mag * scale;
+    const rinc_f: f64 = @floatFromInt(rinc);
+    const r: u64 = if (rinc > 1) @intFromFloat(roundMag(scaled / rinc_f, neg, mode) * rinc_f) else @intFromFloat(roundMag(scaled, neg, mode));
+    const divi: u64 = @intFromFloat(scale);
+    const int_part: u64 = if (divi == 0) r else r / divi;
+    const frac_part: u64 = if (divi == 0) 0 else r % divi;
+    var int_str = try std.fmt.allocPrint(self.arena, "{d}", .{int_part});
+    while (int_str.len < min_int) int_str = try std.fmt.allocPrint(self.arena, "0{s}", .{int_str});
+    var fb: std.ArrayListUnmanaged(u8) = .empty;
+    if (max_frac > 0) {
+        const fs = try std.fmt.allocPrint(self.arena, "{d}", .{frac_part});
+        var pad = eff;
+        while (pad > fs.len) : (pad -= 1) try fb.append(self.arena, '0');
+        try fb.appendSlice(self.arena, fs);
+        while (fb.items.len < max_frac) try fb.append(self.arena, '0'); // digits beyond u64 precision are zero
+        var flen = fb.items.len;
+        while (flen > min_frac and fb.items[flen - 1] == '0') flen -= 1;
+        fb.items.len = flen;
+    }
+    return .{ .int_str = int_str, .frac_str = try fb.toOwnedSlice(self.arena), .is_zero = (int_part == 0 and frac_part == 0) };
+}
+
 /// One element of a NumberFormat formatToParts result.
 const NfPart = struct { typ: []const u8, value: []const u8 };
 
@@ -11113,10 +11256,30 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var cur_symbol: []const u8 = ""; // the bare currency symbol, when display=symbol (placement is locale-dependent)
     var sign_display: []const u8 = "auto";
     var accounting = false;
+    var min_sig: ?usize = null;
+    var max_sig: ?usize = null;
+    var frac_set = false;
+    var rounding_mode: []const u8 = "halfExpand";
+    var rounding_priority: []const u8 = "auto";
+    var rounding_increment: u64 = 1;
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
         const o = ov;
         const sd = try self.getProperty(o, "signDisplay");
         if (sd == .string) sign_display = sd.string;
+        const rmv = try self.getProperty(o, "roundingMode");
+        if (rmv == .string) rounding_mode = rmv.string;
+        const rpv = try self.getProperty(o, "roundingPriority");
+        if (rpv == .string) rounding_priority = rpv.string;
+        const riv = try self.getProperty(o, "roundingIncrement");
+        if (riv != .undefined) rounding_increment = @intFromFloat(@trunc(try self.toNumberV(riv)));
+        const msd = try self.getProperty(o, "minimumSignificantDigits");
+        if (msd != .undefined) min_sig = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(msd)))));
+        const xsd = try self.getProperty(o, "maximumSignificantDigits");
+        if (xsd != .undefined) {
+            const xs: usize = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(xsd)))));
+            max_sig = @max(xs, min_sig orelse 1);
+        }
+        if (min_sig != null and max_sig == null) max_sig = 21;
         const csgn = try self.getProperty(o, "currencySign");
         if (csgn == .string and std.mem.eql(u8, csgn.string, "accounting")) accounting = true;
         const sv = try self.getProperty(o, "style");
@@ -11150,10 +11313,12 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         if (mnf != .undefined) {
             min_frac = @intFromFloat(@max(0, @min(100, @trunc(try self.toNumberV(mnf)))));
             if (max_frac < min_frac) max_frac = min_frac;
+            frac_set = true;
         }
         if (mxf != .undefined) {
             max_frac = @intFromFloat(@max(0, @min(100, @trunc(try self.toNumberV(mxf)))));
             if (max_frac < min_frac) min_frac = max_frac;
+            frac_set = true;
         }
         const ug = try self.getProperty(o, "useGrouping");
         if (ug == .boolean and !ug.boolean) use_grouping = false;
@@ -11170,28 +11335,21 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     // parts with exact integer arithmetic (extracting fraction digits from the
     // float directly loses precision, e.g. 1234567.89).
     var digits: []const u8 = "";
-    var frac_int: u64 = 0;
-    var divi: u64 = 0;
-    var in_range = false;
-    var rounded: f64 = 0;
+    var frac_str: []const u8 = "";
     var is_zero = false;
     if (is_nan) {
         is_zero = true; // NaN suppresses the exceptZero/negative sign (but not "always")
     } else if (finite) {
         const mag = @abs(n);
-        var scale: f64 = 1;
-        for (0..max_frac) |_| scale *= 10;
-        const scaled_f = @round(mag * scale);
-        rounded = scaled_f / scale; // for the is-zero test only
-        in_range = scaled_f <= 1.8e19;
-        const scaled_int: u64 = if (in_range) @intFromFloat(scaled_f) else 0;
-        divi = @intFromFloat(scale);
-        const int_part: u64 = if (in_range) (if (divi == 0) scaled_int else scaled_int / divi) else @intFromFloat(@floor(rounded));
-        frac_int = if (in_range and divi != 0) scaled_int % divi else 0;
-        is_zero = rounded == 0;
-        digits = try std.fmt.allocPrint(self.arena, "{d}", .{int_part});
-        // Pad the integer part to minimumIntegerDigits.
-        while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
+        if (mag >= 9.0e18) {
+            // Beyond u64 precision: format as an integer (fraction is negligible).
+            digits = try std.fmt.allocPrint(self.arena, "{d:.0}", .{mag});
+        } else {
+            const r = try nfRound(self, mag, neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
+            digits = r.int_str;
+            frac_str = r.frac_str;
+            is_zero = r.is_zero;
+        }
     }
 
     // SignDisplay: decide whether a negative or positive indicator shows.
@@ -11247,32 +11405,10 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         }
         try push(self, &parts, "integer", try run.toOwnedSlice(self.arena));
     }
-    // Fraction digits: between min_frac and max_frac (trailing zeros beyond
-    // min_frac trimmed).
-    if (finite and max_frac > 0) {
-        // The fraction digits are `frac_int` zero-padded to max_frac (in range);
-        // otherwise fall back to float extraction for very large magnitudes.
-        var fb: std.ArrayListUnmanaged(u8) = .empty;
-        if (in_range and divi != 0) {
-            const s = try std.fmt.allocPrint(self.arena, "{d}", .{frac_int});
-            var pad = max_frac;
-            while (pad > s.len) : (pad -= 1) try fb.append(self.arena, '0');
-            try fb.appendSlice(self.arena, s);
-        } else {
-            var f = rounded - @floor(rounded);
-            for (0..max_frac) |_| {
-                f *= 10;
-                const d: u8 = @intFromFloat(@floor(f + 1e-9));
-                try fb.append(self.arena, '0' + @as(u8, @min(d, 9)));
-                f -= @floor(f + 1e-9);
-            }
-        }
-        var flen: usize = fb.items.len;
-        while (flen > min_frac and fb.items[flen - 1] == '0') flen -= 1;
-        if (flen > 0) {
-            try push(self, &parts, "decimal", syms.decimal);
-            try push(self, &parts, "fraction", try self.arena.dupe(u8, fb.items[0..flen]));
-        }
+    // Fraction digits (already rounded/trimmed by nfRound).
+    if (finite and frac_str.len > 0) {
+        try push(self, &parts, "decimal", syms.decimal);
+        try push(self, &parts, "fraction", frac_str);
     }
     if (is_percent) try push(self, &parts, "percentSign", syms.percent);
     if (cur_suffix.len > 0) try push(self, &parts, "currency", cur_suffix);
