@@ -11308,14 +11308,51 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getWeekInfo on incompatible receiver");
+    const tag = this.object.getOwn("\x00locale").?.string;
     const o = (try self.newObject()).object;
-    try self.setProp(o, "firstDay", .{ .number = 1 });
-    try self.setProp(o, "minimalDays", .{ .number = 1 });
+    // firstDay: from the -u-fw- keyword (mon..sun -> 1..7) when present, else the
+    // default (1 = Monday; we lack per-region week data).
+    var first_day: f64 = 1;
+    if (localeUValue(tag, "fw")) |fw| {
+        const names = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
+        for (names, 1..) |n, i| if (std.mem.eql(u8, fw, n)) {
+            first_day = @floatFromInt(i);
+        };
+    }
+    try self.setProp(o, "firstDay", .{ .number = first_day });
     const we = (try self.newArray()).object;
     try we.elements.append(self.arena, .{ .number = 6 });
     try we.elements.append(self.arena, .{ .number = 7 });
     try self.setProp(o, "weekend", .{ .object = we });
     return .{ .object = o };
+}
+
+fn intlLocaleTimeZonesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTimeZones on incompatible receiver");
+    const tag = this.object.getOwn("\x00locale").?.string;
+    // Without a region subtag in the language-id, return undefined.
+    var has_region = false;
+    {
+        var it = std.mem.splitScalar(u8, tag, '-');
+        _ = it.next(); // language
+        var saw_var = false;
+        while (it.next()) |part| {
+            if (part.len == 1) break; // extension
+            if (!saw_var and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
+                has_region = true;
+                break;
+            }
+            if (part.len == 4 and std.ascii.isAlphabetic(part[0])) continue; // script
+            saw_var = true; // variants follow; region can't appear after
+        }
+    }
+    if (!has_region) return .undefined;
+    // We lack per-region zone data; report UTC so the result is a non-empty array.
+    const arr = (try self.newArray()).object;
+    try arr.elements.append(self.arena, .{ .string = "UTC" });
+    return .{ .object = arr };
 }
 
 fn intlLocaleToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -14131,7 +14168,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNative(a, rs, proto, "getCollations", 0, intlLocaleListFn(.collations));
         try setNative(a, rs, proto, "getHourCycles", 0, intlLocaleListFn(.hour_cycles));
         try setNative(a, rs, proto, "getNumberingSystems", 0, intlLocaleListFn(.numbering_systems));
-        try setNative(a, rs, proto, "getTimeZones", 0, intlLocaleListFn(.time_zones));
+        try setNative(a, rs, proto, "getTimeZones", 0, intlLocaleTimeZonesFn);
         try setNative(a, rs, proto, "getTextInfo", 0, intlLocaleTextInfoFn);
         try setNative(a, rs, proto, "getWeekInfo", 0, intlLocaleWeekInfoFn);
         if (tag) |k| {
