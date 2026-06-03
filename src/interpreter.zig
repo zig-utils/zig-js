@@ -6147,7 +6147,7 @@ pub const Interpreter = struct {
         // also avoids looping back through method dispatch.
         const names: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
         var user_tried: u8 = 0;
-        for (names) |m| {
+        outer: for (names) |m| {
             // OrdinaryToPrimitive resolves each method via `Get(O, name)`, so an
             // *accessor* `valueOf`/`toString` getter is run (and its abrupt
             // completion must propagate — `{ get valueOf() { throw } }`). A data
@@ -6155,6 +6155,7 @@ pub const Interpreter = struct {
             // native prototype thunks / non-callable shadows are left to the
             // built-in coercion below (calling them would loop through dispatch).
             var method: ?Value = null;
+            var native_ts = false; // toString resolved to a callable native thunk
             var cur: ?*value.Object = o;
             while (cur) |c| : (cur = c.proto) {
                 if (c.getAccessor(m)) |acc| {
@@ -6164,10 +6165,17 @@ pub const Interpreter = struct {
                     break;
                 }
                 if (c.getOwn(m)) |fv| {
-                    if (fv == .object and fv.object.js_func != null) method = fv;
+                    if (fv == .object and fv.object.js_func != null) method = fv
+                    // A callable native `toString` thunk yields a primitive string
+                    // (the built-in coercion below); it must run at *this* position
+                    // in the hint order — so stop here rather than trying a later
+                    // user `valueOf` (e.g. String({ valueOf() {…} }) is
+                    // "[object Object]", not the valueOf result).
+                    else if (std.mem.eql(u8, m, "toString") and fv.isCallable()) native_ts = true;
                     break; // native thunk or non-callable shadow → built-in coercion
                 }
             }
+            if (native_ts) break :outer;
             if (method) |fnv| {
                 if (fnv.isCallable()) {
                     user_tried += 1;
