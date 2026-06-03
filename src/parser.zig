@@ -1615,8 +1615,11 @@ pub const Parser = struct {
     }
 
     fn concatExpr(self: *Parser, node: ?*Node, expr: *Node) ParseError!*Node {
-        if (node) |n| return self.alloc(.{ .binary = .{ .op = .add, .left = n, .right = expr } });
-        return expr;
+        // A template substitution is ToString'd (string hint), not coerced via
+        // `+` (default hint) — so `${ {valueOf,toString} }` uses toString.
+        const coerced = try self.alloc(.{ .unary = .{ .op = .to_string, .operand = expr } });
+        if (node) |n| return self.alloc(.{ .binary = .{ .op = .add, .left = n, .right = coerced } });
+        return coerced;
     }
 
     fn parseObjectLiteral(self: *Parser) ParseError!*Node {

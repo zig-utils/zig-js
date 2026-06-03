@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const UnaryOp = enum { neg, pos, not, typeof, bit_not, void_op };
+pub const UnaryOp = enum { neg, pos, not, typeof, bit_not, void_op, to_string };
 
 pub const BinaryOp = enum {
     add,

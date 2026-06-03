@@ -57,6 +57,7 @@ pub const Op = enum(u8) {
     typeof_op,
     bit_not,
     void_op,
+    to_string,
 
     // --- binary (pop rhs, pop lhs, push result) ---
     add,

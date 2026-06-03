@@ -554,6 +554,7 @@ pub const Compiler = struct {
                     .typeof => .typeof_op,
                     .bit_not => .bit_not,
                     .void_op => .void_op,
+                    .to_string => .to_string,
                 }, 0);
             },
             .binary => |b| {

@@ -6072,6 +6072,7 @@ pub const Interpreter = struct {
             .typeof => .{ .string = v.typeOf() },
             .bit_not => .{ .number = @floatFromInt(~v.toInt32()) },
             .void_op => .undefined,
+            .to_string => .{ .string = try self.toStringV(v) }, // template-substitution ToString
         };
     }
 

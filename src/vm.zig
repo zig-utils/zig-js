@@ -261,6 +261,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 _ = stack.pop().?;
                 try stack.append(vm.arena, .undefined);
             },
+            .to_string => {
+                const v = stack.pop().?;
+                try stack.append(vm.arena, .{ .string = try vm.toStringV(v) });
+            },
 
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
