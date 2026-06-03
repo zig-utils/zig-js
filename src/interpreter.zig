@@ -9,6 +9,7 @@ const promise = @import("promise.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
+const cldr_numbers = @import("cldr_numbers.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -10747,19 +10748,10 @@ fn appendNum(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), first: *bool,
 /// Per-locale decimal/grouping separators (a compact CLDR subset keyed by the
 /// language subtag). Most locales group with "," and decimal with "." (the en
 /// default); the table lists the common exceptions used by the test corpus.
-const NumSym = struct { group: []const u8, decimal: []const u8 };
-fn localeNumberSymbols(locale: []const u8) NumSym {
-    const lang = if (std.mem.indexOfScalar(u8, locale, '-')) |i| locale[0..i] else locale;
-    const pairs = .{
-        .{ "de", ".", "," }, .{ "es", ".", "," }, .{ "it", ".", "," },
-        .{ "nl", ".", "," }, .{ "da", ".", "," }, .{ "tr", ".", "," },
-        .{ "pt", ".", "," }, .{ "id", ".", "," },
-        .{ "fr", "\u{202f}", "," }, .{ "ru", "\u{202f}", "," }, .{ "hu", "\u{202f}", "," },
-        .{ "pl", "\u{00a0}", "," }, .{ "cs", "\u{00a0}", "," }, .{ "sv", "\u{00a0}", "," },
-        .{ "fi", "\u{00a0}", "," },
-    };
-    inline for (pairs) |p| if (std.mem.eql(u8, lang, p[0])) return .{ .group = p[1], .decimal = p[2] };
-    return .{ .group = ",", .decimal = "." };
+/// Per-locale number symbols + currency-symbol placement, from CLDR (generated
+/// table in cldr_numbers.zig; ~50 locales, language-subtag fallback).
+fn localeNumberSymbols(locale: []const u8) cldr_numbers.NumSym {
+    return cldr_numbers.lookup(locale);
 }
 
 /// Per-currency display info: the en symbol and the ISO 4217 default fraction
@@ -10794,6 +10786,7 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     var use_grouping = true;
     var cur_prefix: []const u8 = ""; // currency symbol/code prefix (en places before)
     var cur_suffix: []const u8 = "";
+    var cur_symbol: []const u8 = ""; // the bare currency symbol, when display=symbol (placement is locale-dependent)
     var sign_display: []const u8 = "auto";
     var accounting = false;
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
@@ -10821,7 +10814,9 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
                 // "1.00 US dollars" — approximate (lowercased code as the name).
                 cur_suffix = try std.fmt.allocPrint(self.arena, " {s}", .{code});
             } else {
-                cur_prefix = info.symbol;
+                // symbol display: placement (before/after the number) is decided
+                // once we know the locale's currency pattern (see symbol_before).
+                cur_symbol = info.symbol;
             }
         }
         const mi = try self.getProperty(o, "minimumIntegerDigits");
@@ -10841,29 +10836,41 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         if (ug == .string and std.mem.eql(u8, ug.string, "false")) use_grouping = false;
     };
 
-    if (std.math.isNan(n)) return .{ .string = "NaN" };
-    const neg = std.math.signbit(n);
-    if (std.math.isInf(n)) return .{ .string = if (neg) (if (is_percent) "-∞%" else "-∞") else (if (is_percent) "∞%" else "∞") };
-    if (is_percent) n *= 100;
-    const mag = @abs(n);
-    // Round to max_frac fraction digits, then split into integer and fraction
+    const is_nan = std.math.isNan(n);
+    const is_inf = std.math.isInf(n);
+    const finite = !is_nan and !is_inf;
+    const neg = !is_nan and std.math.signbit(n);
+    if (is_percent and finite) n *= 100;
+    // Build the unsigned magnitude. NaN and Infinity have fixed glyphs (and still
+    // take a signDisplay indicator); finite values split into integer and fraction
     // parts with exact integer arithmetic (extracting fraction digits from the
     // float directly loses precision, e.g. 1234567.89).
-    var scale: f64 = 1;
-    for (0..max_frac) |_| scale *= 10;
-    const scaled_f = @round(mag * scale);
-    const rounded = scaled_f / scale; // for the is-zero test only
-    const in_range = scaled_f <= 1.8e19;
-    const scaled_int: u64 = if (in_range) @intFromFloat(scaled_f) else 0;
-    const divi: u64 = @intFromFloat(scale);
-    const int_part: u64 = if (in_range) (if (divi == 0) scaled_int else scaled_int / divi) else @intFromFloat(@floor(rounded));
-    const frac_int: u64 = if (in_range and divi != 0) scaled_int % divi else 0;
-    var digits = try std.fmt.allocPrint(self.arena, "{d}", .{int_part});
-    // Pad the integer part to minimumIntegerDigits.
-    while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
+    var digits: []const u8 = "";
+    var frac_int: u64 = 0;
+    var divi: u64 = 0;
+    var in_range = false;
+    var rounded: f64 = 0;
+    var is_zero = false;
+    if (is_nan) {
+        is_zero = true; // NaN suppresses the exceptZero/negative sign (but not "always")
+    } else if (finite) {
+        const mag = @abs(n);
+        var scale: f64 = 1;
+        for (0..max_frac) |_| scale *= 10;
+        const scaled_f = @round(mag * scale);
+        rounded = scaled_f / scale; // for the is-zero test only
+        in_range = scaled_f <= 1.8e19;
+        const scaled_int: u64 = if (in_range) @intFromFloat(scaled_f) else 0;
+        divi = @intFromFloat(scale);
+        const int_part: u64 = if (in_range) (if (divi == 0) scaled_int else scaled_int / divi) else @intFromFloat(@floor(rounded));
+        frac_int = if (in_range and divi != 0) scaled_int % divi else 0;
+        is_zero = rounded == 0;
+        digits = try std.fmt.allocPrint(self.arena, "{d}", .{int_part});
+        // Pad the integer part to minimumIntegerDigits.
+        while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
+    }
 
     // SignDisplay: decide whether a negative or positive indicator shows.
-    const is_zero = rounded == 0;
     var show_neg = neg; // "auto"
     var show_pos = false;
     if (std.mem.eql(u8, sign_display, "always")) {
@@ -10879,23 +10886,34 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         show_neg = neg and !is_zero;
         show_pos = false;
     }
-    const acct = accounting and cur_prefix.len > 0;
     const locale = if (this.object.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
     const syms = localeNumberSymbols(locale);
+    // Place the currency symbol before or after the number per the locale's CLDR
+    // pattern (e.g. en "$1.00" vs de "1,00\u{a0}\u{20ac}").
+    if (cur_symbol.len > 0) {
+        if (syms.symbol_before) cur_prefix = cur_symbol else cur_suffix = try std.fmt.allocPrint(self.arena, "\u{00a0}{s}", .{cur_symbol});
+    }
+    // Accounting negatives wrap in parentheses only in locales whose accounting
+    // pattern does (en "($1.00)"); others (de) just use the minus sign.
+    const acct = accounting and syms.accounting_parens and (cur_prefix.len > 0 or cur_suffix.len > 0);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     // Sign/accounting wrap, then the currency prefix (en places the symbol before
     // the number; standard sign before the symbol: "-$1.00", accounting "($1.00)").
-    if (acct and show_neg) try buf.append(self.arena, '(') else if (show_neg) try buf.append(self.arena, '-') else if (show_pos) try buf.append(self.arena, '+');
+    if (acct and show_neg) try buf.append(self.arena, '(') else if (show_neg) try buf.appendSlice(self.arena, syms.minus) else if (show_pos) try buf.append(self.arena, '+');
     try buf.appendSlice(self.arena, cur_prefix);
-    const first_group = digits.len % 3;
-    for (digits, 0..) |c, i| {
-        if (use_grouping and i != 0 and (i % 3) == first_group) try buf.appendSlice(self.arena, syms.group);
-        try buf.append(self.arena, c);
+    if (!finite) {
+        try buf.appendSlice(self.arena, if (is_nan) syms.nan else syms.infinity);
+    } else {
+        const first_group = digits.len % 3;
+        for (digits, 0..) |c, i| {
+            if (use_grouping and i != 0 and (i % 3) == first_group) try buf.appendSlice(self.arena, syms.group);
+            try buf.append(self.arena, c);
+        }
     }
     // Fraction digits: between min_frac and max_frac (trailing zeros beyond
     // min_frac trimmed).
-    if (max_frac > 0) {
+    if (finite and max_frac > 0) {
         // The fraction digits are `frac_int` zero-padded to max_frac (in range);
         // otherwise fall back to float extraction for very large magnitudes.
         var fb: std.ArrayListUnmanaged(u8) = .empty;
@@ -10920,7 +10938,7 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
             try buf.appendSlice(self.arena, fb.items[0..flen]);
         }
     }
-    if (is_percent) try buf.append(self.arena, '%');
+    if (is_percent) try buf.appendSlice(self.arena, syms.percent);
     try buf.appendSlice(self.arena, cur_suffix);
     if (acct and show_neg) try buf.append(self.arena, ')');
     return .{ .string = try buf.toOwnedSlice(self.arena) };
