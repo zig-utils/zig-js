@@ -12388,7 +12388,11 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
         if (code.len != 3 or !allAlpha(code)) return self.throwError("RangeError", "invalid currency code");
         canon = try std.ascii.allocUpperString(self.arena, code);
     } else if (std.mem.eql(u8, typ, "language")) {
-        if (!dtfWellFormedType(code) and !(code.len >= 2 and code.len <= 3 and allAlpha(code))) return self.throwError("RangeError", "invalid language code");
+        // A unicode_language_id: structurally valid AND no extension (singleton)
+        // subtag (DisplayNames language codes are not full locale tags).
+        if (!isStructurallyValidLanguageTag(code)) return self.throwError("RangeError", "invalid language code");
+        var lit = std.mem.splitScalar(u8, code, '-');
+        while (lit.next()) |s| if (s.len == 1) return self.throwError("RangeError", "language code may not contain an extension");
     } else if (std.mem.eql(u8, typ, "calendar")) {
         if (!dtfWellFormedType(code)) return self.throwError("RangeError", "invalid calendar code");
     } else if (std.mem.eql(u8, typ, "dateTimeField")) {
