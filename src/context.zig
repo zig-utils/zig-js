@@ -1301,6 +1301,15 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
 }
 
+test "destructuring assignment: a rest element must be last" {
+    try expectParseError("0, [...x, y] = [];");
+    try expectParseError("0, [...x, ...y] = [];");
+    try expectParseError("0, ({ ...r, b } = {});");
+    // Valid: the rest element IS last.
+    _ = try evalIn("var a, b; 0, [a, ...b] = [1, 2, 3];");
+    _ = try evalIn("var a, r; 0, ({ a, ...r } = { a: 1, c: 2 });");
+}
+
 test "new import(...) is an early error" {
     try expectParseError("new import('x')");
     try expectParseError("do { new import(''); } while (false)");

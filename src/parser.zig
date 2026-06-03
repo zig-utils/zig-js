@@ -537,6 +537,9 @@ pub const Parser = struct {
                 var out: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
                 var rest: ?*Node = null;
                 for (elems) |e| {
+                    // A rest element (`...x`) must be last: nothing — not another
+                    // element, elision, or rest — may follow it.
+                    if (rest != null) return ParseError.InvalidAssignmentTarget;
                     if (e.* == .elision) {
                         try out.append(self.arena, .{}); // elision / hole in `[ , a ] = …`
                     } else if (e.* == .spread) {
@@ -551,14 +554,21 @@ pub const Parser = struct {
             },
             .object_lit => |props| {
                 var out: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
+                var rest_name: ?[]const u8 = null;
+                var seen_spread = false;
                 for (props) |p| {
-                    if (p.value.* == .assign) {
+                    // An object rest property (`...rest`) must be the last member.
+                    if (seen_spread) return ParseError.InvalidAssignmentTarget;
+                    if (p.is_spread) {
+                        seen_spread = true;
+                        if (p.value.* == .identifier) rest_name = p.value.identifier;
+                    } else if (p.value.* == .assign) {
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value.assign.target), .default = p.value.assign.value });
                     } else {
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value) });
                     }
                 }
-                return self.alloc(.{ .obj_pattern = .{ .props = out.items, .rest = null } });
+                return self.alloc(.{ .obj_pattern = .{ .props = out.items, .rest = rest_name } });
             },
             else => return ParseError.InvalidAssignmentTarget,
         }
