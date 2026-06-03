@@ -10550,20 +10550,54 @@ fn localeUValue(tag: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-/// GetOption(options, key) coerced to a lowercase string, validated against an
-/// allowed set when `allowed` is non-empty. Returns null if absent/undefined.
-fn localeStringOption(self: *Interpreter, opts: Value, key: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
+const LocaleOptKind = enum { set, language, script, region, type };
+
+fn localeSubtagValid(kind: LocaleOptKind, s: []const u8) bool {
+    const isAlpha = struct {
+        fn f(t: []const u8) bool {
+            for (t) |c| if (!std.ascii.isAlphabetic(c)) return false;
+            return true;
+        }
+    }.f;
+    const isDigit = struct {
+        fn f(t: []const u8) bool {
+            for (t) |c| if (!std.ascii.isDigit(c)) return false;
+            return true;
+        }
+    }.f;
+    return switch (kind) {
+        .set => true,
+        .language => ((s.len >= 2 and s.len <= 3) or (s.len >= 5 and s.len <= 8)) and isAlpha(s),
+        .script => s.len == 4 and isAlpha(s),
+        .region => (s.len == 2 and isAlpha(s)) or (s.len == 3 and isDigit(s)),
+        .type => blk: {
+            // One or more 3-8 alphanumeric subtags (a well-formed Unicode type).
+            if (s.len == 0) break :blk false;
+            var it = std.mem.splitScalar(u8, s, '-');
+            while (it.next()) |sub| {
+                if (sub.len < 3 or sub.len > 8) break :blk false;
+                for (sub) |c| if (!std.ascii.isAlphanumeric(c)) break :blk false;
+            }
+            break :blk true;
+        },
+    };
+}
+
+/// GetOption(options, key). For a fixed allowed `set` the raw value is matched
+/// case-sensitively (so "Upper"/"H12" are rejected). For structural kinds
+/// (language/script/region/type) the value is validated against its Unicode
+/// production (RangeError otherwise) and returned lowercased for canonicalization.
+/// Returns null if absent/undefined.
+fn localeStringOption(self: *Interpreter, opts: Value, key: []const u8, kind: LocaleOptKind, allowed: []const []const u8) EvalError!?[]const u8 {
     const v = try self.getProperty(opts, key);
     if (v == .undefined) return null;
     const raw = try self.toStringV(v);
-    const low = try std.ascii.allocLowerString(self.arena, raw);
-    if (allowed.len > 0) {
-        var ok = false;
-        for (allowed) |a| if (std.mem.eql(u8, low, a)) {
-            ok = true;
-        };
-        if (!ok) return self.throwError("RangeError", "invalid Intl.Locale option");
+    if (kind == .set) {
+        for (allowed) |a| if (std.mem.eql(u8, raw, a)) return a;
+        return self.throwError("RangeError", "invalid Intl.Locale option");
     }
+    const low = try std.ascii.allocLowerString(self.arena, raw);
+    if (!localeSubtagValid(kind, low)) return self.throwError("RangeError", "invalid Intl.Locale option");
     return low;
 }
 
@@ -10584,15 +10618,15 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (optsv != .undefined) {
         const opts = Value{ .object = try self.toObject(optsv) };
         // language/script/region replace the corresponding base subtags.
-        const language = try localeStringOption(self, opts, "language", &.{});
-        const script = try localeStringOption(self, opts, "script", &.{});
-        const region = try localeStringOption(self, opts, "region", &.{});
+        const language = try localeStringOption(self, opts, "language", .language, &.{});
+        const script = try localeStringOption(self, opts, "script", .script, &.{});
+        const region = try localeStringOption(self, opts, "region", .region, &.{});
         // -u- keyword options.
-        const ca = try localeStringOption(self, opts, "calendar", &.{});
-        const co = try localeStringOption(self, opts, "collation", &.{});
-        const hc = try localeStringOption(self, opts, "hourCycle", &.{ "h11", "h12", "h23", "h24" });
-        const kf = try localeStringOption(self, opts, "caseFirst", &.{ "upper", "lower", "false" });
-        const nu = try localeStringOption(self, opts, "numberingSystem", &.{});
+        const ca = try localeStringOption(self, opts, "calendar", .type, &.{});
+        const co = try localeStringOption(self, opts, "collation", .type, &.{});
+        const hc = try localeStringOption(self, opts, "hourCycle", .set, &.{ "h11", "h12", "h23", "h24" });
+        const kf = try localeStringOption(self, opts, "caseFirst", .set, &.{ "upper", "lower", "false" });
+        const nu = try localeStringOption(self, opts, "numberingSystem", .type, &.{});
         const numeric_v = try self.getProperty(opts, "numeric");
         const kn: ?[]const u8 = if (numeric_v == .undefined) null else if (numeric_v.toBoolean()) "true" else "false";
 
