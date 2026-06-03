@@ -10606,6 +10606,23 @@ fn intlBrandOk(this: Value, service: []const u8) bool {
 }
 
 /// Format a Number for Intl.NumberFormat — `en`-style grouping with commas.
+/// Per-currency display info: the en symbol and the ISO 4217 default fraction
+/// digits. Unknown currencies fall back to the code with 2 digits.
+const CurrencyInfo = struct { symbol: []const u8, digits: u8 };
+fn currencyInfo(code: []const u8) CurrencyInfo {
+    const pairs = .{
+        .{ "USD", "$", 2 },  .{ "EUR", "€", 2 },   .{ "GBP", "£", 2 },
+        .{ "JPY", "¥", 0 },  .{ "CNY", "CN¥", 2 }, .{ "INR", "₹", 2 },
+        .{ "KRW", "₩", 0 },  .{ "RUB", "₽", 2 },   .{ "BRL", "R$", 2 },
+        .{ "CAD", "CA$", 2 }, .{ "AUD", "A$", 2 },  .{ "CHF", "CHF", 2 },
+        .{ "HKD", "HK$", 2 }, .{ "NZD", "NZ$", 2 }, .{ "MXN", "MX$", 2 },
+        .{ "BHD", "BHD", 3 }, .{ "KWD", "KWD", 3 }, .{ "OMR", "OMR", 3 },
+        .{ "CLP", "CLP", 0 }, .{ "VND", "₫", 0 },   .{ "TWD", "NT$", 2 },
+    };
+    inline for (pairs) |p| if (std.mem.eql(u8, code, p[0])) return .{ .symbol = p[1], .digits = p[2] };
+    return .{ .symbol = code, .digits = 2 };
+}
+
 fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.format on incompatible receiver");
@@ -10619,12 +10636,31 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     var max_frac: usize = 3;
     var is_percent = false;
     var use_grouping = true;
+    var cur_prefix: []const u8 = ""; // currency symbol/code prefix (en places before)
+    var cur_suffix: []const u8 = "";
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
         const o = ov;
         const sv = try self.getProperty(o, "style");
         if (sv == .string and std.mem.eql(u8, sv.string, "percent")) {
             is_percent = true;
             max_frac = 0;
+        } else if (sv == .string and std.mem.eql(u8, sv.string, "currency")) {
+            const cv = try self.getProperty(o, "currency");
+            const code = if (cv == .string) try std.ascii.allocUpperString(self.arena, cv.string) else "USD";
+            const info = currencyInfo(code);
+            min_frac = info.digits;
+            max_frac = info.digits;
+            const disp = try self.getProperty(o, "currencyDisplay");
+            const ds: []const u8 = if (disp == .string) disp.string else "symbol";
+            if (std.mem.eql(u8, ds, "code")) {
+                // "USD 1.00"
+                cur_prefix = try std.fmt.allocPrint(self.arena, "{s}\u{00a0}", .{code});
+            } else if (std.mem.eql(u8, ds, "name")) {
+                // "1.00 US dollars" — approximate (lowercased code as the name).
+                cur_suffix = try std.fmt.allocPrint(self.arena, " {s}", .{code});
+            } else {
+                cur_prefix = info.symbol;
+            }
         }
         const mi = try self.getProperty(o, "minimumIntegerDigits");
         if (mi != .undefined) min_int = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(mi)))));
@@ -10658,7 +10694,10 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
+    // Sign then the currency prefix (en places the symbol before the number,
+    // standard sign before the symbol: "-$1.00").
     if (neg and rounded != 0) try buf.append(self.arena, '-');
+    try buf.appendSlice(self.arena, cur_prefix);
     const first_group = digits.len % 3;
     for (digits, 0..) |c, i| {
         if (use_grouping and i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
@@ -10684,6 +10723,7 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         }
     }
     if (is_percent) try buf.append(self.arena, '%');
+    try buf.appendSlice(self.arena, cur_suffix);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -10745,11 +10785,22 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 var min_frac: f64 = 0;
                 var max_frac: f64 = 3;
                 var grouping: Value = .{ .string = "auto" };
+                var currency: ?[]const u8 = null;
+                var currency_display: []const u8 = "symbol";
                 if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
                     const sv = try self.getProperty(ov, "style");
                     if (sv == .string) {
                         style = sv.string;
                         if (std.mem.eql(u8, style, "percent")) max_frac = 0;
+                        if (std.mem.eql(u8, style, "currency")) {
+                            const cv = try self.getProperty(ov, "currency");
+                            currency = if (cv == .string) try std.ascii.allocUpperString(self.arena, cv.string) else "USD";
+                            const cd = try self.getProperty(ov, "currencyDisplay");
+                            if (cd == .string) currency_display = cd.string;
+                            const dig: f64 = @floatFromInt(currencyInfo(currency.?).digits);
+                            min_frac = dig;
+                            max_frac = dig;
+                        }
                     }
                     const mi = try self.getProperty(ov, "minimumIntegerDigits");
                     if (mi != .undefined) min_int = @max(1, @min(21, @trunc(try self.toNumberV(mi))));
@@ -10768,6 +10819,11 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 };
                 try self.setProp(o, "numberingSystem", .{ .string = "latn" });
                 try self.setProp(o, "style", .{ .string = style });
+                if (currency) |c| {
+                    try self.setProp(o, "currency", .{ .string = c });
+                    try self.setProp(o, "currencyDisplay", .{ .string = currency_display });
+                    try self.setProp(o, "currencySign", .{ .string = "standard" });
+                }
                 try self.setProp(o, "minimumIntegerDigits", .{ .number = min_int });
                 try self.setProp(o, "minimumFractionDigits", .{ .number = min_frac });
                 try self.setProp(o, "maximumFractionDigits", .{ .number = max_frac });
