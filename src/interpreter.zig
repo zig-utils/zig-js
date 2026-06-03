@@ -11048,6 +11048,59 @@ fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
     return ro;
 }
 
+/// InitializePluralRules option reading, in spec order (localeMatcher, type,
+/// notation, compactDisplay, then SetNumberFormatDigitOptions). Validates and
+/// stores the normalized values; throwing getters propagate because every option
+/// is read.
+fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
+    const ro = (try self.newObject()).object;
+    if (raw == .undefined) return ro;
+    if (raw != .object) return self.throwError("TypeError", "options must be an object");
+    const H = struct {
+        fn str(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
+            const v = try s.getProperty(opts, name);
+            if (v == .undefined) return null;
+            const sval = try s.toStringV(v);
+            for (allowed) |a| if (std.mem.eql(u8, sval, a)) {
+                try s.setProp(dst, name, .{ .string = a });
+                return a;
+            };
+            return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "invalid value for option {s}", .{name}));
+        }
+        fn num(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, lo: f64, hi: f64) EvalError!void {
+            const v = try s.getProperty(opts, name);
+            if (v == .undefined) return;
+            const n = @trunc(try s.toNumberV(v));
+            if (std.math.isNan(n) or n < lo or n > hi) return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "{s} value is out of range", .{name}));
+            try s.setProp(dst, name, .{ .number = n });
+        }
+    };
+    _ = try self.getProperty(raw, "localeMatcher"); // read & discard
+    _ = try H.str(self, raw, ro, "type", &.{ "cardinal", "ordinal" });
+    _ = try H.str(self, raw, ro, "notation", &.{ "standard", "scientific", "engineering", "compact" });
+    _ = try H.str(self, raw, ro, "compactDisplay", &.{ "short", "long" });
+    try H.num(self, raw, ro, "minimumIntegerDigits", 1, 21);
+    try H.num(self, raw, ro, "minimumFractionDigits", 0, 100);
+    try H.num(self, raw, ro, "maximumFractionDigits", 0, 100);
+    try H.num(self, raw, ro, "minimumSignificantDigits", 1, 21);
+    try H.num(self, raw, ro, "maximumSignificantDigits", 1, 21);
+    const riv = try self.getProperty(raw, "roundingIncrement");
+    if (riv != .undefined) {
+        const n = @trunc(try self.toNumberV(riv));
+        const allowed = [_]f64{ 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000 };
+        var ok = false;
+        for (allowed) |a| if (n == a) {
+            ok = true;
+        };
+        if (!ok) return self.throwError("RangeError", "invalid roundingIncrement");
+        try self.setProp(ro, "roundingIncrement", .{ .number = n });
+    }
+    _ = try H.str(self, raw, ro, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
+    _ = try H.str(self, raw, ro, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
+    _ = try H.str(self, raw, ro, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
+    return ro;
+}
+
 /// The ten Intl.DurationFormat units, in resolvedOptions / format order.
 const duration_units = [_][]const u8{ "years", "months", "weeks", "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds" };
 
@@ -11199,6 +11252,11 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 if (durResolveUnits(.{ .object = ro }, base, &rstyles, &rdisplays)) {
                     return self.throwError("RangeError", "invalid duration unit style following a numeric unit");
                 }
+                try self.setProp(o, "\x00opts", .{ .object = ro });
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                const ro = try prProcessOptions(self, raw);
                 try self.setProp(o, "\x00opts", .{ .object = ro });
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (args.len > 1 and args[1] == .object) {
@@ -13119,19 +13177,43 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "numeric", cget(rv, "numeric") orelse .{ .boolean = false });
                 try self.setProp(o, "caseFirst", cget(rv, "caseFirst") orelse .{ .string = "false" });
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
-                try self.setProp(o, "numberingSystem", .{ .string = "latn" });
-                try self.setProp(o, "type", .{ .string = "cardinal" });
-                try self.setProp(o, "minimumIntegerDigits", .{ .number = 1 });
-                try self.setProp(o, "minimumFractionDigits", .{ .number = 0 });
-                try self.setProp(o, "maximumFractionDigits", .{ .number = 3 });
+                // Spec key order: locale (set above), type, notation,
+                // minimumIntegerDigits, then significant-OR-fraction digits,
+                // pluralCategories, rounding*, trailingZeroDisplay. No
+                // numberingSystem.
+                const ro: ?Value = this.object.getOwn("\x00opts");
+                const pg = struct {
+                    fn s(src: ?Value, k: []const u8) ?Value {
+                        if (src) |v| if (v == .object) if (v.object.getOwn(k)) |x| return x;
+                        return null;
+                    }
+                }.s;
+                try self.setProp(o, "type", pg(ro, "type") orelse .{ .string = "cardinal" });
+                const pr_notation: []const u8 = if (pg(ro, "notation")) |n| n.string else "standard";
+                try self.setProp(o, "notation", .{ .string = pr_notation });
+                // compactDisplay is reported only when notation is "compact".
+                if (std.mem.eql(u8, pr_notation, "compact")) {
+                    try self.setProp(o, "compactDisplay", pg(ro, "compactDisplay") orelse .{ .string = "short" });
+                }
+                try self.setProp(o, "minimumIntegerDigits", .{ .number = if (pg(ro, "minimumIntegerDigits")) |v| v.number else 1 });
+                if (pg(ro, "minimumSignificantDigits") != null or pg(ro, "maximumSignificantDigits") != null) {
+                    try self.setProp(o, "minimumSignificantDigits", .{ .number = if (pg(ro, "minimumSignificantDigits")) |v| v.number else 1 });
+                    try self.setProp(o, "maximumSignificantDigits", .{ .number = if (pg(ro, "maximumSignificantDigits")) |v| v.number else 21 });
+                } else {
+                    const minf: f64 = if (pg(ro, "minimumFractionDigits")) |v| v.number else 0;
+                    var maxf: f64 = if (pg(ro, "maximumFractionDigits")) |v| v.number else @max(minf, 3);
+                    if (maxf < minf) maxf = minf;
+                    try self.setProp(o, "minimumFractionDigits", .{ .number = minf });
+                    try self.setProp(o, "maximumFractionDigits", .{ .number = maxf });
+                }
                 const cats = (try self.newArray()).object;
                 try cats.elements.append(self.arena, .{ .string = "one" });
                 try cats.elements.append(self.arena, .{ .string = "other" });
                 try self.setProp(o, "pluralCategories", .{ .object = cats });
-                try self.setProp(o, "roundingIncrement", .{ .number = 1 });
-                try self.setProp(o, "roundingMode", .{ .string = "halfExpand" });
-                try self.setProp(o, "roundingPriority", .{ .string = "auto" });
-                try self.setProp(o, "trailingZeroDisplay", .{ .string = "auto" });
+                try self.setProp(o, "roundingIncrement", pg(ro, "roundingIncrement") orelse .{ .number = 1 });
+                try self.setProp(o, "roundingMode", pg(ro, "roundingMode") orelse .{ .string = "halfExpand" });
+                try self.setProp(o, "roundingPriority", pg(ro, "roundingPriority") orelse .{ .string = "auto" });
+                try self.setProp(o, "trailingZeroDisplay", pg(ro, "trailingZeroDisplay") orelse .{ .string = "auto" });
             } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
                 // Reflect the normalized options (stored under \x00opts at
                 // construction) in the spec's resolvedOptions property order.
