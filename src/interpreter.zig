@@ -11738,19 +11738,48 @@ fn durationUnitName(unit: []const u8, style: []const u8, plural: bool) []const u
 /// `Intl.DurationFormat.prototype.format(duration)` — en. Joins the non-zero
 /// units as "<n> <unit>" with ", " (a pragmatic approximation; exact CLDR
 /// list/unit patterns are not modeled).
+/// ToDurationRecord + IsValidDurationRecord: read the ten unit fields, each an
+/// integer (RangeError otherwise); at least one must be present (TypeError);
+/// signs must agree, years/months/weeks stay under 2^32, and the combined
+/// seconds magnitude under 2^53.
+fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
+    if (d != .object) return self.throwError("TypeError", "duration must be an object");
+    var vals = std.mem.zeroes([10]f64);
+    var any = false;
+    var sign: f64 = 0;
+    inline for (duration_units, 0..) |u, i| {
+        const v = try self.getProperty(d, u);
+        if (v != .undefined) {
+            any = true;
+            const n = try self.toNumberV(v);
+            if (!std.math.isFinite(n) or @trunc(n) != n) return self.throwError("RangeError", "duration field must be an integer");
+            vals[i] = n;
+            if (n != 0) {
+                const s: f64 = if (n < 0) -1 else 1;
+                if (sign == 0) sign = s else if (sign != s) return self.throwError("RangeError", "duration fields must have a consistent sign");
+            }
+        }
+    }
+    if (!any) return self.throwError("TypeError", "duration object has no recognized fields");
+    const two32: f64 = 4294967296.0;
+    if (@abs(vals[0]) >= two32 or @abs(vals[1]) >= two32 or @abs(vals[2]) >= two32) return self.throwError("RangeError", "duration value out of range");
+    const norm_sec = vals[3] * 86400 + vals[4] * 3600 + vals[5] * 60 + vals[6] + vals[7] / 1000 + vals[8] / 1_000_000 + vals[9] / 1_000_000_000;
+    if (@abs(norm_sec) >= 9007199254740992.0) return self.throwError("RangeError", "duration value out of range");
+    return vals;
+}
+
 fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DurationFormat")) return self.throwError("TypeError", "Intl.DurationFormat.prototype.format on incompatible receiver");
     const d = if (args.len > 0) args[0] else Value.undefined;
-    if (d != .object) return self.throwError("TypeError", "DurationFormat.format requires a duration object");
+    const vals = try durationToRecord(self, d);
     var style: []const u8 = "short";
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
         if (ov.object.getOwn("style")) |s| style = s.string;
     };
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    inline for (duration_units) |u| {
-        const v = try self.getProperty(d, u);
-        const n: f64 = if (v == .undefined) 0 else try self.toNumberV(v);
+    inline for (duration_units, 0..) |u, i| {
+        const n: f64 = vals[i];
         if (n != 0) {
             if (buf.items.len > 0) try buf.appendSlice(self.arena, ", ");
             const mag = @abs(n);
