@@ -10752,7 +10752,9 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r: DtfOptions) EvalErro
 /// exactly once and bad values throw at construction).
 fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
     const ro = (try self.newObject()).object;
-    if (raw != .object) return ro;
+    // GetOptionsObject: undefined → no options; a non-object value → TypeError.
+    if (raw == .undefined) return ro;
+    if (raw != .object) return self.throwError("TypeError", "options must be an object");
 
     const H = struct {
         // GetOption(string) with an allowed set; stores the canonical value when
@@ -10788,6 +10790,11 @@ fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
     const style = (try H.str(self, raw, ro, "style", &.{ "decimal", "percent", "currency", "unit" })) orelse "decimal";
     const cv = try self.getProperty(raw, "currency");
     const cur_code: ?[]const u8 = if (cv == .undefined) null else try self.toStringV(cv);
+    // A present currency is validated regardless of style (IsWellFormedCurrencyCode
+    // = exactly three ASCII letters).
+    if (cur_code) |code| {
+        if (code.len != 3 or !std.ascii.isAlphabetic(code[0]) or !std.ascii.isAlphabetic(code[1]) or !std.ascii.isAlphabetic(code[2])) return self.throwError("RangeError", "invalid currency code");
+    }
     const cdisp = try H.str(self, raw, ro, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" });
     const csign = try H.str(self, raw, ro, "currencySign", &.{ "standard", "accounting" });
     const uv = try self.getProperty(raw, "unit");
@@ -10795,9 +10802,7 @@ fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
     const udisp = try H.str(self, raw, ro, "unitDisplay", &.{ "short", "long", "narrow" });
     if (std.mem.eql(u8, style, "currency")) {
         if (cur_code == null) return self.throwError("TypeError", "currency code is required with style \"currency\"");
-        const code = cur_code.?;
-        if (code.len != 3 or !std.ascii.isAlphabetic(code[0]) or !std.ascii.isAlphabetic(code[1]) or !std.ascii.isAlphabetic(code[2])) return self.throwError("RangeError", "invalid currency code");
-        try self.setProp(ro, "currency", .{ .string = try std.ascii.allocUpperString(self.arena, code) });
+        try self.setProp(ro, "currency", .{ .string = try std.ascii.allocUpperString(self.arena, cur_code.?) });
         if (cdisp == null) try self.setProp(ro, "currencyDisplay", .{ .string = "symbol" });
         if (csign == null) try self.setProp(ro, "currencySign", .{ .string = "standard" });
     } else if (std.mem.eql(u8, style, "unit")) {
@@ -10827,9 +10832,15 @@ fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
     _ = try H.str(self, raw, ro, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
     _ = try H.str(self, raw, ro, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
     _ = try H.str(self, raw, ro, "compactDisplay", &.{ "short", "long" });
+    // GetBooleanOrStringNumberFormatOption: boolean true resolves to "always",
+    // false to false; a string must be one of min2/auto/always (RangeError else).
     const ug = try self.getProperty(raw, "useGrouping");
-    if (ug != .undefined) {
-        if (ug == .boolean) try self.setProp(ro, "useGrouping", .{ .boolean = ug.boolean }) else try self.setProp(ro, "useGrouping", .{ .string = try self.toStringV(ug) });
+    if (ug == .boolean) {
+        if (ug.boolean) try self.setProp(ro, "useGrouping", .{ .string = "always" }) else try self.setProp(ro, "useGrouping", .{ .boolean = false });
+    } else if (ug != .undefined) {
+        const s = try self.toStringV(ug);
+        if (!std.mem.eql(u8, s, "min2") and !std.mem.eql(u8, s, "auto") and !std.mem.eql(u8, s, "always")) return self.throwError("RangeError", "invalid value for option useGrouping");
+        try self.setProp(ro, "useGrouping", .{ .string = s });
     }
     _ = try H.str(self, raw, ro, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" });
     return ro;
