@@ -12083,8 +12083,10 @@ fn durMinutesRequired(ov: ?Value, need_sep: bool, unit: []const u8, vals: [10]f6
 fn durUnitStyle(ov: ?Value, base: []const u8, unit: []const u8) []const u8 {
     if (ov) |o| if (o == .object) if (o.object.getOwn(unit)) |s| if (s == .string) return s.string;
     if (std.mem.eql(u8, base, "digital")) {
-        if (std.mem.eql(u8, unit, "hours") or std.mem.eql(u8, unit, "minutes") or std.mem.eql(u8, unit, "seconds")) return "numeric";
-        return "short";
+        // hours/minutes/seconds and the sub-second units are numeric (sub-seconds
+        // combine into the seconds fraction); years/months/weeks/days are short.
+        if (std.mem.eql(u8, unit, "years") or std.mem.eql(u8, unit, "months") or std.mem.eql(u8, unit, "weeks") or std.mem.eql(u8, unit, "days")) return "short";
+        return "numeric";
     }
     return base;
 }
@@ -12117,6 +12119,69 @@ fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8
     return nfFormatOne(self, try durUnitNf(self, locale, style, unit_singular, sign_never), .{ .number = num });
 }
 
+fn durFracDigits(ov: ?Value) ?usize {
+    if (ov) |o| if (o == .object) if (o.object.getOwn("fractionalDigits")) |f| if (f == .number) return @intFromFloat(f.number);
+    return null;
+}
+
+/// The combined sub-second total for `unit` is non-zero (so it must display even
+/// when the unit's own value is 0, e.g. seconds 0 with milliseconds present).
+fn durCombineNonzero(vals: [10]f64, unit: []const u8) bool {
+    const lo: usize = if (std.mem.eql(u8, unit, "seconds")) 6 else if (std.mem.eql(u8, unit, "milliseconds")) 7 else 8;
+    var k = lo;
+    while (k < 10) : (k += 1) if (vals[k] != 0) return true;
+    return false;
+}
+
+/// Whether `unit` (seconds/milliseconds/microseconds) combines its sub-second
+/// units into a fractional value — i.e. the next-finer unit is "numeric".
+fn durCombines(ov: ?Value, base: []const u8, unit: []const u8) bool {
+    const next: []const u8 = if (std.mem.eql(u8, unit, "seconds")) "milliseconds" else if (std.mem.eql(u8, unit, "milliseconds")) "microseconds" else if (std.mem.eql(u8, unit, "microseconds")) "nanoseconds" else return false;
+    return std.mem.eql(u8, durUnitStyle(ov, base, next), "numeric");
+}
+
+/// DurationToFractional: combine `unit` with its finer sub-second units into one
+/// exact fractional value (integer arithmetic, no f64 precision loss), formatted
+/// as a digit string truncated to `max_f` fraction digits then trimmed to
+/// `min_f`. A leading "-" is added only when this is the sign-bearing unit.
+fn durCombineFrac(self: *Interpreter, vals: [10]f64, unit: []const u8, max_f: usize, min_f: usize, sign_never: bool) value.HostError![]const u8 {
+    const sec: i128 = @intFromFloat(vals[6]);
+    const ms: i128 = @intFromFloat(vals[7]);
+    const us: i128 = @intFromFloat(vals[8]);
+    const ns: i128 = @intFromFloat(vals[9]);
+    var exp: usize = 9;
+    var total: i128 = 0;
+    if (std.mem.eql(u8, unit, "seconds")) {
+        exp = 9;
+        total = sec * 1_000_000_000 + ms * 1_000_000 + us * 1_000 + ns;
+    } else if (std.mem.eql(u8, unit, "milliseconds")) {
+        exp = 6;
+        total = ms * 1_000_000 + us * 1_000 + ns;
+    } else {
+        exp = 3;
+        total = us * 1_000 + ns;
+    }
+    const neg = total < 0;
+    const at: i128 = if (neg) -total else total;
+    var e10: i128 = 1;
+    for (0..exp) |_| e10 *= 10;
+    const q = @divTrunc(at, e10);
+    const fr = @rem(at, e10);
+    // Fraction digits: `fr` left-padded to `exp`, truncated to max_f, trimmed to min_f.
+    var fdig = try std.fmt.allocPrint(self.arena, "{d}", .{fr});
+    while (fdig.len < exp) fdig = try std.fmt.allocPrint(self.arena, "0{s}", .{fdig});
+    var flen: usize = @min(fdig.len, max_f); // trunc rounding
+    while (flen > min_f and fdig[flen - 1] == '0') flen -= 1;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    if (neg and !sign_never) try buf.append(self.arena, '-');
+    try buf.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{q}));
+    if (flen > 0) {
+        try buf.append(self.arena, '.');
+        try buf.appendSlice(self.arena, fdig[0..flen]);
+    }
+    return buf.toOwnedSlice(self.arena);
+}
+
 fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DurationFormat")) return self.throwError("TypeError", "Intl.DurationFormat.prototype.format on incompatible receiver");
@@ -12142,10 +12207,15 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
             if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) break :blk dv.string;
             break :blk "auto";
         };
-        if (uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals)) {
+        const combine = durCombines(ov, base, u);
+        const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
+        if (shown) {
             const sign_never = !first;
             first = false;
-            const s = try durFmtVal(self, locale, uval, style, u[0 .. u.len - 1], sign_never);
+            const s = if (combine) blk: {
+                const fd = durFracDigits(ov);
+                break :blk try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never);
+            } else try durFmtVal(self, locale, uval, style, u[0 .. u.len - 1], sign_never);
             const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
             // Once a numeric run starts (need_sep latches), every later unit
             // appends to it with ":" — even standalone ones (digital
@@ -12157,6 +12227,7 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
                 if (numeric) need_sep = true;
             }
         }
+        if (combine and shown) break; // sub-seconds folded into this unit; done
     }
     // Join the items with ", " (en ListFormat type:"unit").
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -12192,11 +12263,12 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) break :blk dv.string;
             break :blk "auto";
         };
-        if (uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals)) {
+        const combine = durCombines(ov, base, u);
+        const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
+        if (shown) {
             const sign_never = !first;
             first = false;
             const sing = u[0 .. u.len - 1];
-            const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, style, sing, sign_never), &.{.{ .number = uval }});
             const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
             var grp: *std.ArrayListUnmanaged(DurPart) = undefined;
             if (need_sep and groups.items.len > 0) {
@@ -12207,8 +12279,27 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
                 grp = &groups.items[groups.items.len - 1];
                 if (numeric) need_sep = true;
             }
-            for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
+            if (combine) {
+                // Parse the exact "[-]int[.frac]" combine string into typed parts.
+                const fd = durFracDigits(ov);
+                var s = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never);
+                if (s.len > 0 and s[0] == '-') {
+                    try grp.append(self.arena, .{ .typ = "minusSign", .value = "-", .unit = sing });
+                    s = s[1..];
+                }
+                if (std.mem.indexOfScalar(u8, s, '.')) |dot| {
+                    try grp.append(self.arena, .{ .typ = "integer", .value = s[0..dot], .unit = sing });
+                    try grp.append(self.arena, .{ .typ = "decimal", .value = ".", .unit = sing });
+                    try grp.append(self.arena, .{ .typ = "fraction", .value = s[dot + 1 ..], .unit = sing });
+                } else {
+                    try grp.append(self.arena, .{ .typ = "integer", .value = s, .unit = sing });
+                }
+            } else {
+                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, style, sing, sign_never), &.{.{ .number = uval }});
+                for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
+            }
         }
+        if (combine and shown) break;
     }
     // Flatten: ", " literal (en ListFormat type:unit) between element groups.
     const arr = (try self.newArray()).object;
@@ -12910,7 +13001,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // Per-unit defaults: each unit's style follows the base ("digital"
                 // makes hours/minutes/seconds numeric); display defaults to "auto".
                 inline for (duration_units) |u| {
-                    const dflt: []const u8 = if (std.mem.eql(u8, base, "digital") and (std.mem.eql(u8, u, "hours") or std.mem.eql(u8, u, "minutes") or std.mem.eql(u8, u, "seconds"))) "numeric" else if (std.mem.eql(u8, base, "digital")) "short" else base;
+                    const dflt: []const u8 = durUnitStyle(null, base, u);
                     try self.setProp(o, u, dget(ro, u) orelse .{ .string = dflt });
                     try self.setProp(o, u ++ "Display", dget(ro, u ++ "Display") orelse .{ .string = "auto" });
                 }
