@@ -10386,6 +10386,11 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     var ext_count: usize = 0;
     var seen_singletons: [40]u8 = undefined;
     var nsing: usize = 0;
+    // -t- transform extension: track its tlang's variants for duplicate detection.
+    var t_in_tlang = false;
+    var t_lang_seen = false;
+    var tvariants: [16][]const u8 = undefined;
+    var ntvar: usize = 0;
 
     while (it.next()) |s| {
         if (s.len == 0) return false; // empty subtag (double dash)
@@ -10405,11 +10410,32 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
             nsing += 1;
             ext = sl;
             ext_count = 0;
+            if (sl == 't') {
+                t_in_tlang = true;
+                t_lang_seen = false;
+                ntvar = 0;
+            }
             continue;
         }
         if (ext != 0) {
             if (s.len < 2 or s.len > 8) return false; // extension subtag: 2-8 alnum
             ext_count += 1;
+            // The -t- tlang (language[-script][-region][-variant…]) precedes the
+            // tfields; a tfield key (2 chars: ALPHA DIGIT) ends it. Variants in
+            // the tlang must be unique.
+            if (ext == 't' and t_in_tlang) {
+                if (s.len == 2 and std.ascii.isAlphabetic(s[0]) and std.ascii.isDigit(s[1])) {
+                    t_in_tlang = false;
+                } else if (!t_lang_seen) {
+                    t_lang_seen = true; // the tlang language subtag
+                } else if (Helper.isVariant(s)) {
+                    for (tvariants[0..ntvar]) |v| if (std.ascii.eqlIgnoreCase(v, s)) return false;
+                    if (ntvar < tvariants.len) {
+                        tvariants[ntvar] = s;
+                        ntvar += 1;
+                    }
+                }
+            }
             continue;
         }
         // Still in the language-id: script, then region, then variants.
