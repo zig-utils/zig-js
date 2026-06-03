@@ -11940,6 +11940,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var o_minute: []const u8 = "";
     var o_second: []const u8 = "";
     var o_frac: usize = 0; // fractionalSecondDigits (1-3) or 0
+    var o_day_period: []const u8 = ""; // flexible dayPeriod width (long/short/narrow)
     var hour12 = true;
     var any_comp = false;
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
@@ -11956,10 +11957,11 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_hour = try get(self, ov, "hour");
         o_minute = try get(self, ov, "minute");
         o_second = try get(self, ov, "second");
+        o_day_period = try get(self, ov, "dayPeriod");
         if (ov.object.getOwn("fractionalSecondDigits")) |f| if (f == .number) {
             o_frac = @intFromFloat(f.number);
         };
-        any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len > 0;
+        any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_frac > 0;
         const hc = try get(self, ov, "hourCycle");
         const h12 = try self.getProperty(ov, "hour12");
         if (h12 == .boolean) hour12 = h12.boolean else if (hc.len > 0) hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
@@ -12042,13 +12044,19 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         }
     }
     // Time part: "h:mm:ss AM/PM" (or 24-hour).
-    const have_time = o_hour.len > 0 or o_minute.len > 0 or o_second.len > 0;
+    const have_clock = o_hour.len > 0 or o_minute.len > 0 or o_second.len > 0;
+    const have_time = have_clock or o_day_period.len > 0;
     if (have_time) {
         if (parts.items.len > 0) try P.lit(self, &parts, ", ");
         var h = hour24;
         var ap: []const u8 = "";
-        if (hour12 and o_hour.len > 0) {
+        if (o_day_period.len > 0) {
+            // A flexible dayPeriod (en) replaces AM/PM.
+            ap = enDayPeriod(hour24, o_day_period);
+        } else if (hour12 and o_hour.len > 0) {
             ap = if (h < 12) "AM" else "PM";
+        }
+        if (hour12 and o_hour.len > 0) {
             h = h % 12;
             if (h == 0) h = 12;
         }
@@ -12071,11 +12079,21 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             try parts.append(self.arena, .{ .typ = "fractionalSecond", .value = try self.arena.dupe(u8, mbuf[0..o_frac]) });
         }
         if (ap.len > 0) {
-            try P.lit(self, &parts, " ");
+            if (have_clock) try P.lit(self, &parts, " ");
             try parts.append(self.arena, .{ .typ = "dayPeriod", .value = ap });
         }
     }
     return parts;
+}
+
+/// en flexible day period for an hour (minute 0): noon at 12, morning 6–11,
+/// afternoon 13–17, evening 18–20, else night ("n" is narrow noon).
+fn enDayPeriod(h: u8, width: []const u8) []const u8 {
+    if (h == 12) return if (std.mem.eql(u8, width, "narrow")) "n" else "noon";
+    if (h >= 6 and h < 12) return "in the morning";
+    if (h >= 13 and h < 18) return "in the afternoon";
+    if (h >= 18 and h < 21) return "in the evening";
+    return "at night";
 }
 
 fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
