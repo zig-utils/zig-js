@@ -10776,8 +10776,14 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     var use_grouping = true;
     var cur_prefix: []const u8 = ""; // currency symbol/code prefix (en places before)
     var cur_suffix: []const u8 = "";
+    var sign_display: []const u8 = "auto";
+    var accounting = false;
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
         const o = ov;
+        const sd = try self.getProperty(o, "signDisplay");
+        if (sd == .string) sign_display = sd.string;
+        const csgn = try self.getProperty(o, "currencySign");
+        if (csgn == .string and std.mem.eql(u8, csgn.string, "accounting")) accounting = true;
         const sv = try self.getProperty(o, "style");
         if (sv == .string and std.mem.eql(u8, sv.string, "percent")) {
             is_percent = true;
@@ -10831,10 +10837,29 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     // Pad the integer part to minimumIntegerDigits.
     while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
 
+    // SignDisplay: decide whether a negative or positive indicator shows.
+    const is_zero = rounded == 0;
+    var show_neg = neg; // "auto"
+    var show_pos = false;
+    if (std.mem.eql(u8, sign_display, "always")) {
+        show_neg = neg;
+        show_pos = !neg;
+    } else if (std.mem.eql(u8, sign_display, "never")) {
+        show_neg = false;
+        show_pos = false;
+    } else if (std.mem.eql(u8, sign_display, "exceptZero")) {
+        show_neg = neg and !is_zero;
+        show_pos = !neg and !is_zero;
+    } else if (std.mem.eql(u8, sign_display, "negative")) {
+        show_neg = neg and !is_zero;
+        show_pos = false;
+    }
+    const acct = accounting and cur_prefix.len > 0;
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    // Sign then the currency prefix (en places the symbol before the number,
-    // standard sign before the symbol: "-$1.00").
-    if (neg and rounded != 0) try buf.append(self.arena, '-');
+    // Sign/accounting wrap, then the currency prefix (en places the symbol before
+    // the number; standard sign before the symbol: "-$1.00", accounting "($1.00)").
+    if (acct and show_neg) try buf.append(self.arena, '(') else if (show_neg) try buf.append(self.arena, '-') else if (show_pos) try buf.append(self.arena, '+');
     try buf.appendSlice(self.arena, cur_prefix);
     const first_group = digits.len % 3;
     for (digits, 0..) |c, i| {
@@ -10862,6 +10887,7 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     }
     if (is_percent) try buf.append(self.arena, '%');
     try buf.appendSlice(self.arena, cur_suffix);
+    if (acct and show_neg) try buf.append(self.arena, ')');
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -10923,6 +10949,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 var min_frac: f64 = 0;
                 var max_frac: f64 = 3;
                 var grouping: Value = .{ .string = "auto" };
+                var sign_display: []const u8 = "auto";
                 var currency: ?[]const u8 = null;
                 var currency_display: []const u8 = "symbol";
                 if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
@@ -10954,6 +10981,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     }
                     const ug = try self.getProperty(ov, "useGrouping");
                     if (ug == .boolean) grouping = .{ .boolean = ug.boolean } else if (ug == .string) grouping = .{ .string = ug.string };
+                    const sd = try self.getProperty(ov, "signDisplay");
+                    if (sd == .string) sign_display = sd.string;
                 };
                 try self.setProp(o, "numberingSystem", .{ .string = "latn" });
                 try self.setProp(o, "style", .{ .string = style });
@@ -10967,7 +10996,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "maximumFractionDigits", .{ .number = max_frac });
                 try self.setProp(o, "useGrouping", grouping);
                 try self.setProp(o, "notation", .{ .string = "standard" });
-                try self.setProp(o, "signDisplay", .{ .string = "auto" });
+                try self.setProp(o, "signDisplay", .{ .string = sign_display });
                 try self.setProp(o, "roundingIncrement", .{ .number = 1 });
                 try self.setProp(o, "roundingMode", .{ .string = "halfExpand" });
                 try self.setProp(o, "roundingPriority", .{ .string = "auto" });
