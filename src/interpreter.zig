@@ -12047,24 +12047,42 @@ fn durationUnitName(unit: []const u8, style: []const u8, plural: bool) []const u
 /// signs must agree, years/months/weeks stay under 2^32, and the combined
 /// seconds magnitude under 2^53.
 fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
-    if (d != .object) return self.throwError("TypeError", "duration must be an object");
     var vals = std.mem.zeroes([10]f64);
-    var any = false;
-    var sign: f64 = 0;
-    inline for (duration_units, 0..) |u, i| {
-        const v = try self.getProperty(d, u);
-        if (v != .undefined) {
-            any = true;
-            const n = try self.toNumberV(v);
-            if (!std.math.isFinite(n) or @trunc(n) != n) return self.throwError("RangeError", "duration field must be an integer");
-            vals[i] = if (n == 0) 0 else n; // normalize -0 to +0 (ToIntegerIfIntegral)
-            if (n != 0) {
-                const s: f64 = if (n < 0) -1 else 1;
-                if (sign == 0) sign = s else if (sign != s) return self.throwError("RangeError", "duration fields must have a consistent sign");
+    if (tIsTemporal(d, .duration)) {
+        // A Temporal.Duration: read its internal slots, not the (tauntable)
+        // prototype getters.
+        vals = d.object.temporal.?.dur;
+        for (&vals) |*p| if (p.* == 0) {
+            p.* = 0;
+        };
+    } else if (d == .string) {
+        // ToDurationRecord(string): ParseTemporalDurationString (RangeError on
+        // malformed input). Signs are already consistent by construction.
+        vals = try parseDurationString(self, d.string);
+        for (&vals) |*p| if (p.* == 0) {
+            p.* = 0; // normalize -0 to +0
+        };
+    } else if (d == .object) {
+        var any = false;
+        var sign: f64 = 0;
+        inline for (duration_units, 0..) |u, i| {
+            const v = try self.getProperty(d, u);
+            if (v != .undefined) {
+                any = true;
+                const n = try self.toNumberV(v);
+                if (!std.math.isFinite(n) or @trunc(n) != n) return self.throwError("RangeError", "duration field must be an integer");
+                vals[i] = if (n == 0) 0 else n; // normalize -0 to +0 (ToIntegerIfIntegral)
+                if (n != 0) {
+                    const s: f64 = if (n < 0) -1 else 1;
+                    if (sign == 0) sign = s else if (sign != s) return self.throwError("RangeError", "duration fields must have a consistent sign");
+                }
             }
         }
+        if (!any) return self.throwError("TypeError", "duration object has no recognized fields");
+    } else {
+        // Numbers, booleans, bigint, null, undefined, symbol are not durations.
+        return self.throwError("TypeError", "duration must be an object or string");
     }
-    if (!any) return self.throwError("TypeError", "duration object has no recognized fields");
     const two32: f64 = 4294967296.0;
     if (@abs(vals[0]) >= two32 or @abs(vals[1]) >= two32 or @abs(vals[2]) >= two32) return self.throwError("RangeError", "duration value out of range");
     const norm_sec = vals[3] * 86400 + vals[4] * 3600 + vals[5] * 60 + vals[6] + vals[7] / 1000 + vals[8] / 1_000_000 + vals[9] / 1_000_000_000;
