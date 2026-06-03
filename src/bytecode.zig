@@ -131,7 +131,9 @@ pub const Op = enum(u8) {
     push_handler, // operand a: catch-block PC (or u32 max = none), b: finally-block PC (or none)
     pop_handler, // discard the topmost handler (on normal exit from a try block)
     push_completion, // operand a: completion kind (0 = normal); push [undefined, kind] for a finally block
-    end_finally, // pop a completion [value, kind] left by a finally: rethrow (1) / return (2) / continue (0)
+    end_finally, // pop a completion [value, kind] left by a finally: rethrow (1) / return (2) / break (3) / continue (4) / fall-through (0)
+    abrupt_break, // operand a: the loop's break target PC (patched like a normal break jump); run enclosing finally(s) first, then jump there
+    abrupt_continue, // operand a: the loop's continue target PC; run enclosing finally(s) first, then jump there
 
     halt, // end program; result is the accumulator
 };

@@ -252,16 +252,17 @@ pub const Compiler = struct {
             .for_stmt => |f| try self.compileFor(f.init, f.cond, f.update, f.body),
             .break_stmt => |label| {
                 if (label != null) return error.Unsupported; // labeled break → tree-walk
-                if (self.finally_depth > 0) return error.Unsupported; // break across finally → tree-walk
                 const loop = self.currentLoop() orelse return error.Unsupported;
-                const j = try self.chunk.emit(.jump, 0);
+                // Across a finally, the finally must run before the jump:
+                // `abrupt_break` unwinds the handler stack running each enclosing
+                // finally, then jumps to the (patched) break target.
+                const j = try self.chunk.emit(if (self.finally_depth > 0) .abrupt_break else .jump, 0);
                 try loop.breaks.append(self.arena, j);
             },
             .continue_stmt => |label| {
                 if (label != null) return error.Unsupported; // labeled continue → tree-walk
-                if (self.finally_depth > 0) return error.Unsupported; // continue across finally → tree-walk
                 const loop = self.currentContinueLoop() orelse return error.Unsupported;
-                const j = try self.chunk.emit(.jump, 0);
+                const j = try self.chunk.emit(if (self.finally_depth > 0) .abrupt_continue else .jump, 0);
                 try loop.continues.append(self.arena, j);
             },
             .switch_stmt => |sw| try self.compileSwitch(sw.disc, sw.cases),

@@ -64,7 +64,24 @@ pub const Handler = struct {
 
 /// A finally block's completion kind (the `kind` half of the record left on the
 /// stack for `end_finally`): fall through, re-throw, or return.
-const Completion = enum(u8) { normal = 0, throw = 1, ret = 2 };
+const Completion = enum(u8) { normal = 0, throw = 1, ret = 2, break_ = 3, continue_ = 4 };
+
+/// Unwind `exec.handlers` (innermost-first) to the next `finally`, carrying an
+/// abrupt completion `[cval, kind]` so the finally runs and `end_finally`
+/// re-propagates it. Returns the finally's PC, or null if none remains (the
+/// caller performs the terminal action: return / jump-to-target / re-throw).
+fn unwindToFinally(vm: *Interpreter, exec: *Exec, cval: Value, kind: Completion) !?u32 {
+    while (exec.handlers.items.len > 0) {
+        const h = exec.handlers.pop().?;
+        if (h.finally_pc != Handler.none) {
+            exec.stack.shrinkRetainingCapacity(h.stack_depth);
+            try exec.stack.append(vm.arena, cval);
+            try exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(kind)) });
+            return h.finally_pc;
+        }
+    }
+    return null;
+}
 
 /// A suspended `function*` activation: its compiled body, persistent execution
 /// state, and the `Environment` its body resolves names against (a child of the
@@ -407,25 +424,19 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .ret => return stack.pop().?,
             .ret_undef => return .undefined,
             .abrupt_return => {
-                // A return completion that must run enclosing `finally` blocks
-                // (mirrors `genResume`'s `.return_` unwinding). Pop handlers until
-                // a `finally` is found; run it carrying a "return" completion so
-                // `end_finally` completes the return once the finally finishes.
+                // A return that must run enclosing `finally` blocks first: unwind
+                // to the nearest finally carrying a "return" completion (which
+                // `end_finally` re-propagates), or return directly if none.
                 const rv = stack.pop().?;
-                var fin: ?u32 = null;
-                while (exec.handlers.items.len > 0) {
-                    const h = exec.handlers.pop().?;
-                    if (h.finally_pc != Handler.none) {
-                        stack.shrinkRetainingCapacity(h.stack_depth);
-                        fin = h.finally_pc;
-                        break;
-                    }
-                }
-                if (fin) |fpc| {
-                    try stack.append(vm.arena, rv);
-                    try stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
-                    ip = fpc;
-                } else return rv;
+                if (try unwindToFinally(vm, exec, rv, .ret)) |fpc| ip = fpc else return rv;
+            },
+            .abrupt_break, .abrupt_continue => {
+                // A break/continue that crosses a `finally`: run the enclosing
+                // finally(s) first, then jump to the (patched) loop target. The
+                // target PC rides through as the completion value.
+                const kind: Completion = if (inst.op == .abrupt_break) .break_ else .continue_;
+                const target: Value = .{ .number = @floatFromInt(inst.a) };
+                if (try unwindToFinally(vm, exec, target, kind)) |fpc| ip = fpc else ip = inst.a;
             },
 
             .gen_yield, .await_op, .gen_yield_star => {
@@ -504,7 +515,15 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         vm.exception = cval;
                         return error.Throw; // re-thrown to the next handler
                     },
-                    .ret => return cval, // the finally completes the abrupt return
+                    // An abrupt completion re-propagates through any *further*
+                    // enclosing finally before terminating, so nested finallys all
+                    // run (return value / break-or-continue target rides as cval).
+                    .ret => {
+                        if (try unwindToFinally(vm, exec, cval, .ret)) |fpc| ip = fpc else return cval;
+                    },
+                    .break_, .continue_ => {
+                        if (try unwindToFinally(vm, exec, cval, kind)) |fpc| ip = fpc else ip = @intFromFloat(cval.number);
+                    },
                 }
             },
 
