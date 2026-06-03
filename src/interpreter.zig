@@ -11299,8 +11299,11 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var rounding_mode: []const u8 = "halfExpand";
     var rounding_priority: []const u8 = "auto";
     var rounding_increment: u64 = 1;
+    var notation: []const u8 = "standard";
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
         const o = ov;
+        const nv = try self.getProperty(o, "notation");
+        if (nv == .string) notation = nv.string;
         const sd = try self.getProperty(o, "signDisplay");
         if (sd == .string) sign_display = sd.string;
         const rmv = try self.getProperty(o, "roundingMode");
@@ -11371,11 +11374,25 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     // take a signDisplay indicator); finite values split into integer and fraction
     // parts with exact integer arithmetic (extracting fraction digits from the
     // float directly loses precision, e.g. 1234567.89).
+    const sci = std.mem.eql(u8, notation, "scientific") or std.mem.eql(u8, notation, "engineering");
+    var exponent: i32 = 0; // scientific/engineering exponent, appended as "E<exp>"
     var digits: []const u8 = "";
     var frac_str: []const u8 = "";
     var is_zero = false;
     if (is_nan) {
         is_zero = true; // NaN suppresses the exceptZero/negative sign (but not "always")
+    } else if (finite and sci) {
+        // Scientific: one integer digit; engineering: exponent is a multiple of 3.
+        var mant = @abs(n);
+        if (mant != 0) {
+            const e = orderOfMagnitude(mant);
+            exponent = if (std.mem.eql(u8, notation, "engineering")) @divFloor(e, 3) * 3 else e;
+            mant = mant / powi10(exponent);
+        }
+        const r = try nfRound(self, mant, neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
+        digits = r.int_str;
+        frac_str = r.frac_str;
+        is_zero = (@abs(n) == 0);
     } else if (finite) {
         const mag = @abs(n);
         if (mag >= 9.0e18) {
@@ -11429,11 +11446,13 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     if (!finite) {
         try push(self, &parts, if (is_nan) "nan" else "infinity", if (is_nan) syms.nan else syms.infinity);
     } else {
-        // Integer digits, split into "integer" runs separated by "group" parts.
+        // Integer digits, split into "integer" runs separated by "group" parts
+        // (scientific/engineering notation never groups the mantissa).
+        const group_ok = use_grouping and !sci;
         const first_group = digits.len % 3;
         var run: std.ArrayListUnmanaged(u8) = .empty;
         for (digits, 0..) |c, i| {
-            if (use_grouping and i != 0 and (i % 3) == first_group) {
+            if (group_ok and i != 0 and (i % 3) == first_group) {
                 try push(self, &parts, "integer", try run.toOwnedSlice(self.arena));
                 try push(self, &parts, "group", syms.group);
                 run = .empty;
@@ -11446,6 +11465,13 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     if (finite and frac_str.len > 0) {
         try push(self, &parts, "decimal", syms.decimal);
         try push(self, &parts, "fraction", frac_str);
+    }
+    // Scientific/engineering exponent: "E" <minus?> <digits>.
+    if (finite and sci) {
+        try push(self, &parts, "exponentSeparator", "E");
+        if (exponent < 0) try push(self, &parts, "exponentMinusSign", "-");
+        const eabs: u64 = @intCast(@abs(exponent));
+        try push(self, &parts, "exponentInteger", try std.fmt.allocPrint(self.arena, "{d}", .{eabs}));
     }
     if (is_percent) try push(self, &parts, "percentSign", syms.percent);
     if (cur_suffix.len > 0) try push(self, &parts, "currency", cur_suffix);
