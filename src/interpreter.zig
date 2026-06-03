@@ -11236,6 +11236,44 @@ fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) 
     return .{ .object = arr };
 }
 
+/// `get Intl.{Number,DateTime}Format.prototype.format`: per spec `format` is an
+/// accessor whose getter returns a function bound to this formatter instance,
+/// created lazily and cached (so `nf.format === nf.format`). The bound function
+/// has name "" and length 1. The underlying formatter is stored on the
+/// prototype under the hidden `\x00fmtimpl` key.
+fn intlFormatGetterFn(comptime service: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (!intlBrandOk(this, service)) return self.throwError("TypeError", "get Intl." ++ service ++ ".prototype.format called on incompatible receiver");
+            if (this.object.getOwn("\x00boundFormat")) |b| return b;
+            const impl = try self.getProperty(this, "\x00fmtimpl");
+            if (impl != .object) return self.throwError("TypeError", "missing format implementation");
+            const bound = try self.makeBound(impl.object, this, &.{});
+            const ro: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
+            try bound.object.setOwn(self.arena, self.root_shape, "name", .{ .string = "" });
+            try bound.object.setAttr(self.arena, "name", ro);
+            try bound.object.setOwn(self.arena, self.root_shape, "length", .{ .number = 1 });
+            try bound.object.setAttr(self.arena, "length", ro);
+            try self.setProp(this.object, "\x00boundFormat", bound);
+            try this.object.setAttr(self.arena, "\x00boundFormat", .{ .writable = false, .enumerable = false, .configurable = false });
+            return bound;
+        }
+    }.call;
+}
+
+/// Install the `format` accessor (getter returning a cached bound function) and
+/// the hidden `\x00fmtimpl` formatter it binds, on an Intl service prototype.
+fn installIntlFormat(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime service: []const u8, impl_fn: value.NativeFn) EvalError!void {
+    const impl = try a.create(value.Object);
+    impl.* = .{ .native = impl_fn };
+    try installNativeProps(a, rs, impl, "format", 1);
+    try proto.setOwn(a, rs, "\x00fmtimpl", .{ .object = impl });
+    try proto.setAttr(a, "\x00fmtimpl", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setNativeGetter(a, rs, proto, "format", intlFormatGetterFn(service));
+}
+
 fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "Collator")) return self.throwError("TypeError", "Intl.Collator.prototype.compare on incompatible receiver");
@@ -11456,14 +11494,14 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
 
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "NumberFormat", 0, intlServiceConstructorFn("NumberFormat"), tag);
-        try setNative(a, rs, p, "format", 1, intlNumberFormatFn);
+        try installIntlFormat(a, rs, p, "NumberFormat", intlNumberFormatFn);
         try setNative(a, rs, p, "formatToParts", 1, intlNumberFormatToPartsFn);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("NumberFormat"));
     }
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "DateTimeFormat", 0, intlServiceConstructorFn("DateTimeFormat"), tag);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DateTimeFormat"));
-        try setNative(a, rs, p, "format", 1, intlDateTimeFormatFn);
+        try installIntlFormat(a, rs, p, "DateTimeFormat", intlDateTimeFormatFn);
         try setNative(a, rs, p, "formatToParts", 1, intlDateTimeFormatToPartsFn);
     }
     {
