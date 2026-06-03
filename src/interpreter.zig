@@ -13329,8 +13329,19 @@ fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) v
             if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
         }
     }
-    // No CLDR data: report every requested locale as supported.
-    return .{ .object = arr };
+    // Report requested locales as supported, except those whose primary
+    // language subtag is an ISO 639 "no linguistic content" code (zxx/mul/mis),
+    // for which no locale data could ever exist.
+    const out = (try self.newArray()).object;
+    for (arr.elements.items) |lv| {
+        if (lv != .string) continue;
+        const tag = lv.string;
+        const end = std.mem.indexOfScalar(u8, tag, '-') orelse tag.len;
+        const lang = tag[0..end];
+        if (std.mem.eql(u8, lang, "zxx") or std.mem.eql(u8, lang, "mul") or std.mem.eql(u8, lang, "mis")) continue;
+        try out.elements.append(self.arena, lv);
+    }
+    return .{ .object = out };
 }
 
 /// Install the `Intl` namespace and its services.
