@@ -1066,10 +1066,17 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
             try agPumpNext(vm, g);
         },
         .returned => |v| {
+            // AsyncGeneratorAwaitReturn: await the return value, then resolve the
+            // request as a done result (the front request stays queued until the
+            // await callback settles it).
             g.done = true;
-            try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, true));
-            _ = g.requests.orderedRemove(0);
-            try agDrainDone(vm, g);
+            const ap = try promise.newPromise(vm);
+            try promise.resolve(vm, @ptrCast(@alignCast(ap.promise.?)), v);
+            const onf = try vm.arena.create(value.Object);
+            onf.* = .{ .native = agReturnFulfill, .private_data = @ptrCast(g) };
+            const onr = try vm.arena.create(value.Object);
+            onr.* = .{ .native = agReturnReject, .private_data = @ptrCast(g) };
+            _ = try promise.then(vm, @ptrCast(@alignCast(ap.promise.?)), .{ .object = onf }, .{ .object = onr });
         },
         .threw => |e| {
             g.done = true;
@@ -1098,6 +1105,33 @@ fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
             .send => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promise.?)), try makeIterResult(vm, .undefined, true)),
         }
     }
+}
+
+/// AsyncGeneratorAwaitReturn fulfilled: the (awaited) return value resolves the
+/// front request as a done iterator result, then any queued requests drain.
+fn agReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    if (g.requests.items.len == 0) return .undefined;
+    const front = g.requests.items[0].result;
+    try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else .undefined, true));
+    _ = g.requests.orderedRemove(0);
+    try agDrainDone(vm, g);
+    return .undefined;
+}
+
+/// AsyncGeneratorAwaitReturn rejected: the await threw → reject the front request.
+fn agReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    if (g.requests.items.len == 0) return .undefined;
+    const front = g.requests.items[0].result;
+    try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), if (args.len > 0) args[0] else .undefined);
+    _ = g.requests.orderedRemove(0);
+    try agDrainDone(vm, g);
+    return .undefined;
 }
 
 fn agOnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
