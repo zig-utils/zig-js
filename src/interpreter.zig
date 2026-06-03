@@ -11666,6 +11666,26 @@ fn nfRound(self: *Interpreter, mag: f64, neg: bool, min_int: usize, min_frac: us
     return .{ .int_str = int_str, .frac_str = try fb.toOwnedSlice(self.arena), .is_zero = (int_part == 0 and frac_part == 0) };
 }
 
+/// ResolveLocale numbering for resolvedOptions: a supported `numberingSystem`
+/// option wins; otherwise a supported `-u-nu-` extension; otherwise "latn". The
+/// resolved locale keeps `-u-nu-<sys>` only when the value came from a supported
+/// extension equal to the resolved system. Sets `locale` + `numberingSystem` on
+/// `out`.
+fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8, opt_ns: ?[]const u8) value.HostError!void {
+    const ext_ns = localeUValue(tag, "nu");
+    const ext_ok = if (ext_ns) |e| numbering_systems.digits(e) != null else false;
+    const opt_ok = if (opt_ns) |p| numbering_systems.digits(p) != null else false;
+    const ns: []const u8 = if (opt_ok) opt_ns.? else if (ext_ok) ext_ns.? else "latn";
+    const keep_ext = ext_ok and std.mem.eql(u8, ext_ns.?, ns);
+    const lang_base = if (std.mem.indexOf(u8, tag, "-u-")) |u| tag[0..u] else tag;
+    const rloc: []const u8 = if (keep_ext)
+        try std.fmt.allocPrint(self.arena, "{s}-u-nu-{s}", .{ lang_base, ns })
+    else
+        lang_base;
+    try self.setProp(out, "locale", .{ .string = rloc });
+    try self.setProp(out, "numberingSystem", .{ .string = ns });
+}
+
 /// Resolve the numbering system for an Intl formatter: the `numberingSystem`
 /// option wins, else the locale's `-u-nu-` extension, else "latn" — but only a
 /// system we have digit data for (unknown ones fall back to "latn").
@@ -13029,7 +13049,11 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     const sd = try self.getProperty(ov, "signDisplay");
                     if (sd == .string) sign_display = sd.string;
                 };
-                try self.setProp(o, "numberingSystem", .{ .string = numbering_system });
+                _ = numbering_system;
+                // Resolve locale + numberingSystem from option and -u-nu- (the
+                // reported values; formatting output stays option-only above).
+                const nf_ns: ?[]const u8 = if (this.object.getOwn("\x00opts")) |ov| (if (ov == .object) (if (ov.object.getOwn("numberingSystem")) |n| (if (n == .string) n.string else null) else null) else null) else null;
+                try intlResolveNumbering(self, o, loc.string, nf_ns);
                 try self.setProp(o, "style", .{ .string = style });
                 if (currency) |c| {
                     try self.setProp(o, "currency", .{ .string = c });
@@ -13091,7 +13115,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 const cal = get(self, ro, "calendar");
                 try self.setProp(o, "calendar", if (cal) |c| .{ .string = c.string } else .{ .string = "gregory" });
                 const ns = get(self, ro, "numberingSystem");
-                try self.setProp(o, "numberingSystem", if (ns) |c| .{ .string = c.string } else .{ .string = "latn" });
+                try intlResolveNumbering(self, o, loc.string, if (ns) |c| c.string else null);
                 const tz = get(self, ro, "timeZone");
                 try self.setProp(o, "timeZone", if (tz) |c| .{ .string = c.string } else .{ .string = "UTC" });
                 // Component / style fields are reflected only when set, in order.
@@ -13121,7 +13145,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 };
                 try self.setProp(o, "style", .{ .string = style });
                 try self.setProp(o, "numeric", .{ .string = numeric });
-                try self.setProp(o, "numberingSystem", .{ .string = "latn" });
+                const rtf_ns: ?[]const u8 = if (this.object.getOwn("\x00opts")) |ov| (if (ov == .object) (if (ov.object.getOwn("numberingSystem")) |n| (if (n == .string) n.string else null) else null) else null) else null;
+                try intlResolveNumbering(self, o, loc.string, rtf_ns);
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
                 var typ: []const u8 = "conjunction";
                 var style: []const u8 = "long";
@@ -13158,26 +13183,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     }
                 }.s;
                 const base = if (dget(ro, "style")) |st| st.string else "short";
-                // ResolveLocale numbering: a supported option wins; otherwise a
-                // supported -u-nu- extension; otherwise "latn". The resolved
-                // locale keeps -u-nu- only when the value came from a supported
-                // extension (i.e. it equals the resolved system).
-                {
-                    const tag = loc.string;
-                    const ext_ns = localeUValue(tag, "nu");
-                    const ext_ok = if (ext_ns) |e| numbering_systems.digits(e) != null else false;
-                    const opt_ns: ?[]const u8 = if (dget(ro, "numberingSystem")) |n| n.string else null;
-                    const opt_ok = if (opt_ns) |p| numbering_systems.digits(p) != null else false;
-                    const ns: []const u8 = if (opt_ok) opt_ns.? else if (ext_ok) ext_ns.? else "latn";
-                    const keep_ext = ext_ok and std.mem.eql(u8, ext_ns.?, ns);
-                    const lang_base = if (std.mem.indexOf(u8, tag, "-u-")) |u| tag[0..u] else tag;
-                    const rloc: []const u8 = if (keep_ext)
-                        try std.fmt.allocPrint(self.arena, "{s}-u-nu-{s}", .{ lang_base, ns })
-                    else
-                        lang_base;
-                    try self.setProp(o, "locale", .{ .string = rloc });
-                    try self.setProp(o, "numberingSystem", .{ .string = ns });
-                }
+                try intlResolveNumbering(self, o, loc.string, if (dget(ro, "numberingSystem")) |n| n.string else null);
                 try self.setProp(o, "style", .{ .string = base });
                 // Resolved per-unit style/display via GetDurationUnitOptions
                 // (prevStyle cascade, digital defaults, 2-digit promotion).
