@@ -10904,6 +10904,18 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 }
                 try self.setProp(o, "\x00opts", .{ .object = ro });
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
+                // Validate type/style and store a normalized options bag.
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                if (raw != .undefined and raw != .object) return self.throwError("TypeError", "options must be an object");
+                const ro = (try self.newObject()).object;
+                if (raw == .object) {
+                    _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+                    if (try dtfGetStr(self, raw, "type", &.{ "conjunction", "disjunction", "unit" }, null)) |t| try self.setProp(ro, "type", .{ .string = t });
+                    if (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, null)) |s| try self.setProp(ro, "style", .{ .string = s });
+                }
+                try self.setProp(o, "\x00opts", .{ .object = ro });
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (args.len > 1 and args[1] == .object) {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
@@ -11585,21 +11597,59 @@ fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     return .{ .string = if (n == 1) "one" else "other" };
 }
 
-fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "ListFormat")) return self.throwError("TypeError", "Intl.ListFormat.prototype.format on incompatible receiver");
+/// One element of a ListFormat result: an "element" (a list item) or a
+/// "literal" (the connector text between items).
+const LfPart = struct { typ: []const u8, value: []const u8 };
+
+/// Build the ListFormat parts for `args[0]` (en). The connectors depend on the
+/// instance's `type` (conjunction "and" / disjunction "or" / unit none).
+fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(LfPart) {
+    var parts: std.ArrayListUnmanaged(LfPart) = .empty;
     const v = if (args.len > 0) args[0] else Value.undefined;
-    if (v == .undefined) return .{ .string = "" };
+    if (v == .undefined) return parts;
     const list = try self.iterableOrArrayLikeToList(v);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var typ: []const u8 = "conjunction";
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+        const tv = try self.getProperty(ov, "type");
+        if (tv == .string) typ = tv.string;
+    };
+    // en long connectors: pair (two items) / final (≥3) / middle.
+    const is_unit = std.mem.eql(u8, typ, "unit");
+    const is_disj = std.mem.eql(u8, typ, "disjunction");
+    const pair: []const u8 = if (is_unit) ", " else if (is_disj) " or " else " and ";
+    const final: []const u8 = if (is_unit) ", " else if (is_disj) ", or " else ", and ";
     for (list, 0..) |item, i| {
         if (item != .string) return self.throwError("TypeError", "Intl.ListFormat: list items must be strings");
         if (i != 0) {
-            if (i == list.len - 1) try buf.appendSlice(self.arena, if (list.len == 2) " and " else ", and ") else try buf.appendSlice(self.arena, ", ");
+            const sep = if (i == list.len - 1) (if (list.len == 2) pair else final) else ", ";
+            try parts.append(self.arena, .{ .typ = "literal", .value = sep });
         }
-        try buf.appendSlice(self.arena, item.string);
+        try parts.append(self.arena, .{ .typ = "element", .value = item.string });
     }
+    return parts;
+}
+
+fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "ListFormat")) return self.throwError("TypeError", "Intl.ListFormat.prototype.format on incompatible receiver");
+    const parts = try lfBuildParts(self, this, args);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn intlListFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "ListFormat")) return self.throwError("TypeError", "Intl.ListFormat.prototype.formatToParts on incompatible receiver");
+    const parts = try lfBuildParts(self, this, args);
+    const arr = (try self.newArray()).object;
+    for (parts.items) |p| {
+        const o = (try self.newObject()).object;
+        try self.setProp(o, "type", .{ .string = p.typ });
+        try self.setProp(o, "value", .{ .string = p.value });
+        try arr.elements.append(self.arena, .{ .object = o });
+    }
+    return .{ .object = arr };
 }
 
 /// The eight relative-time units, with their long-form names and the
@@ -11905,6 +11955,17 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "style", .{ .string = style });
                 try self.setProp(o, "numeric", .{ .string = numeric });
                 try self.setProp(o, "numberingSystem", .{ .string = "latn" });
+            } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
+                var typ: []const u8 = "conjunction";
+                var style: []const u8 = "long";
+                if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+                    const tv = try self.getProperty(ov, "type");
+                    if (tv == .string) typ = tv.string;
+                    const sv = try self.getProperty(ov, "style");
+                    if (sv == .string) style = sv.string;
+                };
+                try self.setProp(o, "type", .{ .string = typ });
+                try self.setProp(o, "style", .{ .string = style });
             }
             return .{ .object = o };
         }
@@ -11995,6 +12056,8 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "ListFormat", 0, intlServiceConstructorFn("ListFormat"), tag);
         try setNative(a, rs, p, "format", 1, intlListFormatFn);
+        try setNative(a, rs, p, "formatToParts", 1, intlListFormatToPartsFn);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("ListFormat"));
     }
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "RelativeTimeFormat", 0, intlServiceConstructorFn("RelativeTimeFormat"), tag);
