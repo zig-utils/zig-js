@@ -11629,6 +11629,19 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     return parts;
 }
 
+/// `Intl.PluralRules.prototype.selectRange(start, end)` — both must be
+/// non-NaN numbers (RangeError otherwise). The en plural range is always
+/// "other".
+fn intlPluralSelectRangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "PluralRules")) return self.throwError("TypeError", "Intl.PluralRules.prototype.selectRange on incompatible receiver");
+    if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "selectRange requires two arguments");
+    const start = try self.toNumberV(args[0]);
+    const end = try self.toNumberV(args[1]);
+    if (std.math.isNan(start) or std.math.isNan(end)) return self.throwError("RangeError", "selectRange arguments must not be NaN");
+    return .{ .string = "other" };
+}
+
 fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "ListFormat")) return self.throwError("TypeError", "Intl.ListFormat.prototype.format on incompatible receiver");
@@ -12051,6 +12064,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "PluralRules", 0, intlServiceConstructorFn("PluralRules"), tag);
         try setNative(a, rs, p, "select", 1, intlPluralSelectFn);
+        try setNative(a, rs, p, "selectRange", 2, intlPluralSelectRangeFn);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("PluralRules"));
     }
     {
