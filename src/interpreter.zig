@@ -15851,6 +15851,27 @@ const TimeZone = struct { name: []const u8, offset_ns: i64 };
 
 /// Parse a time-zone identifier: "UTC", a numeric offset ("+05:00"), or an IANA
 /// name. Returns the canonical name and the fixed UTC offset in ns.
+/// `ZonedDateTime.prototype.getTimeZoneTransition(direction)`. `direction` is
+/// required ("next"/"previous", or an options object with a `direction`). Fixed-
+/// offset / UTC zones have no transitions → null; named zones are modeled
+/// without DST data, so also null.
+fn temporalZdtGetTimeZoneTransitionFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .zoned_date_time)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const d = if (args.len > 0) args[0] else Value.undefined;
+    if (d == .undefined) return self.throwError("TypeError", "getTimeZoneTransition requires a direction");
+    const dir: []const u8 = if (d == .string) d.string else blk: {
+        if (d == .object) {
+            const dv = try self.getProperty(d, "direction");
+            if (dv == .undefined) return self.throwError("RangeError", "direction is required");
+            break :blk if (dv == .string) dv.string else "";
+        }
+        return self.throwError("TypeError", "invalid direction");
+    };
+    if (!std.mem.eql(u8, dir, "next") and !std.mem.eql(u8, dir, "previous")) return self.throwError("RangeError", "invalid direction");
+    return .null; // no DST transition data modeled
+}
+
 fn parseTimeZone(self: *Interpreter, s: []const u8) EvalError!TimeZone {
     if (s.len == 0) return self.throwError("RangeError", "invalid time zone");
     if (std.ascii.eqlIgnoreCase(s, "utc")) return .{ .name = "UTC", .offset_ns = 0 };
@@ -16593,6 +16614,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "withTimeZone", 1, temporalZdtWithTimeZoneFn);
         try setNative(a, rs, p, "withCalendar", 1, temporalZdtWithCalendarFn);
         try setNative(a, rs, p, "startOfDay", 0, temporalZdtStartOfDayFn);
+        try setNative(a, rs, p, "getTimeZoneTransition", 1, temporalZdtGetTimeZoneTransitionFn);
         if (ns.getOwn("ZonedDateTime")) |c| if (c == .object) {
             try setNative(a, rs, c.object, "from", 1, temporalZdtFromFn);
             try setNative(a, rs, c.object, "compare", 2, temporalZdtCompareFn);
