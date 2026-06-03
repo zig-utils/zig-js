@@ -10744,6 +10744,24 @@ fn appendNum(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), first: *bool,
     if (two_digit) try tfmt(self, buf, "{d:0>2}", .{v}) else try tfmt(self, buf, "{d}", .{v});
 }
 
+/// Per-locale decimal/grouping separators (a compact CLDR subset keyed by the
+/// language subtag). Most locales group with "," and decimal with "." (the en
+/// default); the table lists the common exceptions used by the test corpus.
+const NumSym = struct { group: []const u8, decimal: []const u8 };
+fn localeNumberSymbols(locale: []const u8) NumSym {
+    const lang = if (std.mem.indexOfScalar(u8, locale, '-')) |i| locale[0..i] else locale;
+    const pairs = .{
+        .{ "de", ".", "," }, .{ "es", ".", "," }, .{ "it", ".", "," },
+        .{ "nl", ".", "," }, .{ "da", ".", "," }, .{ "tr", ".", "," },
+        .{ "pt", ".", "," }, .{ "id", ".", "," },
+        .{ "fr", "\u{202f}", "," }, .{ "ru", "\u{202f}", "," }, .{ "hu", "\u{202f}", "," },
+        .{ "pl", "\u{00a0}", "," }, .{ "cs", "\u{00a0}", "," }, .{ "sv", "\u{00a0}", "," },
+        .{ "fi", "\u{00a0}", "," },
+    };
+    inline for (pairs) |p| if (std.mem.eql(u8, lang, p[0])) return .{ .group = p[1], .decimal = p[2] };
+    return .{ .group = ",", .decimal = "." };
+}
+
 /// Per-currency display info: the en symbol and the ISO 4217 default fraction
 /// digits. Unknown currencies fall back to the code with 2 digits.
 const CurrencyInfo = struct { symbol: []const u8, digits: u8 };
@@ -10828,11 +10846,18 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (std.math.isInf(n)) return .{ .string = if (neg) (if (is_percent) "-∞%" else "-∞") else (if (is_percent) "∞%" else "∞") };
     if (is_percent) n *= 100;
     const mag = @abs(n);
-    // Round to max_frac fraction digits.
+    // Round to max_frac fraction digits, then split into integer and fraction
+    // parts with exact integer arithmetic (extracting fraction digits from the
+    // float directly loses precision, e.g. 1234567.89).
     var scale: f64 = 1;
     for (0..max_frac) |_| scale *= 10;
-    const rounded = @round(mag * scale) / scale;
-    const int_part: u64 = @intFromFloat(@floor(rounded));
+    const scaled_f = @round(mag * scale);
+    const rounded = scaled_f / scale; // for the is-zero test only
+    const in_range = scaled_f <= 1.8e19;
+    const scaled_int: u64 = if (in_range) @intFromFloat(scaled_f) else 0;
+    const divi: u64 = @intFromFloat(scale);
+    const int_part: u64 = if (in_range) (if (divi == 0) scaled_int else scaled_int / divi) else @intFromFloat(@floor(rounded));
+    const frac_int: u64 = if (in_range and divi != 0) scaled_int % divi else 0;
     var digits = try std.fmt.allocPrint(self.arena, "{d}", .{int_part});
     // Pad the integer part to minimumIntegerDigits.
     while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
@@ -10855,6 +10880,8 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         show_pos = false;
     }
     const acct = accounting and cur_prefix.len > 0;
+    const locale = if (this.object.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
+    const syms = localeNumberSymbols(locale);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     // Sign/accounting wrap, then the currency prefix (en places the symbol before
@@ -10863,25 +10890,33 @@ fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     try buf.appendSlice(self.arena, cur_prefix);
     const first_group = digits.len % 3;
     for (digits, 0..) |c, i| {
-        if (use_grouping and i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
+        if (use_grouping and i != 0 and (i % 3) == first_group) try buf.appendSlice(self.arena, syms.group);
         try buf.append(self.arena, c);
     }
     // Fraction digits: between min_frac and max_frac (trailing zeros beyond
     // min_frac trimmed).
     if (max_frac > 0) {
-        const frac = rounded - @floor(rounded);
+        // The fraction digits are `frac_int` zero-padded to max_frac (in range);
+        // otherwise fall back to float extraction for very large magnitudes.
         var fb: std.ArrayListUnmanaged(u8) = .empty;
-        var f = frac;
-        for (0..max_frac) |_| {
-            f *= 10;
-            const d: u8 = @intFromFloat(@floor(f + 1e-9));
-            try fb.append(self.arena, '0' + @as(u8, @min(d, 9)));
-            f -= @floor(f + 1e-9);
+        if (in_range and divi != 0) {
+            const s = try std.fmt.allocPrint(self.arena, "{d}", .{frac_int});
+            var pad = max_frac;
+            while (pad > s.len) : (pad -= 1) try fb.append(self.arena, '0');
+            try fb.appendSlice(self.arena, s);
+        } else {
+            var f = rounded - @floor(rounded);
+            for (0..max_frac) |_| {
+                f *= 10;
+                const d: u8 = @intFromFloat(@floor(f + 1e-9));
+                try fb.append(self.arena, '0' + @as(u8, @min(d, 9)));
+                f -= @floor(f + 1e-9);
+            }
         }
         var flen: usize = fb.items.len;
         while (flen > min_frac and fb.items[flen - 1] == '0') flen -= 1;
         if (flen > 0) {
-            try buf.append(self.arena, '.');
+            try buf.appendSlice(self.arena, syms.decimal);
             try buf.appendSlice(self.arena, fb.items[0..flen]);
         }
     }
