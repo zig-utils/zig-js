@@ -11301,6 +11301,71 @@ fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
     return .{ .object = arr };
 }
 
+/// Range separator shared by DateTimeFormat formatRange/formatRangeToParts (the
+/// en-US tests derive the separator from formatRangeToParts' shared literal, so
+/// the only requirement is that both use the same value).
+const dtf_range_sep = " \u{2013} ";
+
+fn dtfFormatOne(self: *Interpreter, this: Value, v: Value) value.HostError![]const u8 {
+    const parts = try dtfBuildParts(self, this, &.{v});
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
+    return buf.toOwnedSlice(self.arena);
+}
+
+/// `Intl.DateTimeFormat.prototype.formatRange(start, end)` — en. Equal-formatting
+/// dates collapse to the single date; otherwise "<start> – <end>" (no
+/// shared-field collapsing).
+fn intlDateTimeFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatRange on incompatible receiver");
+    if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "formatRange requires two defined arguments");
+    const xs = try dtfFormatOne(self, this, args[0]); // dtfBuildParts TimeClips (RangeError on bad value)
+    const ys = try dtfFormatOne(self, this, args[1]);
+    if (std.mem.eql(u8, xs, ys)) return .{ .string = xs };
+    return .{ .string = try std.fmt.allocPrint(self.arena, "{s}{s}{s}", .{ xs, dtf_range_sep, ys }) };
+}
+
+fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatRangeToParts on incompatible receiver");
+    if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "formatRangeToParts requires two defined arguments");
+    const xp = try dtfBuildParts(self, this, &.{args[0]});
+    const yp = try dtfBuildParts(self, this, &.{args[1]});
+    const arr = (try self.newArray()).object;
+    const emit = struct {
+        fn one(s: *Interpreter, a: *value.Object, prts: []const DtfPart, src: []const u8) value.HostError!void {
+            for (prts) |p| {
+                const o = (try s.newObject()).object;
+                try s.setProp(o, "type", .{ .string = p.typ });
+                try s.setProp(o, "value", .{ .string = p.value });
+                try s.setProp(o, "source", .{ .string = src });
+                try a.elements.append(s.arena, .{ .object = o });
+            }
+        }
+    }.one;
+    // Equal-formatting dates: a single date with every part source "shared".
+    var same = xp.items.len == yp.items.len;
+    if (same) for (xp.items, 0..) |p, i| {
+        if (!std.mem.eql(u8, p.value, yp.items[i].value)) {
+            same = false;
+            break;
+        }
+    };
+    if (same) {
+        try emit(self, arr, xp.items, "shared");
+        return .{ .object = arr };
+    }
+    try emit(self, arr, xp.items, "startRange");
+    const lo = (try self.newObject()).object;
+    try self.setProp(lo, "type", .{ .string = "literal" });
+    try self.setProp(lo, "value", .{ .string = dtf_range_sep });
+    try self.setProp(lo, "source", .{ .string = "shared" });
+    try arr.elements.append(self.arena, .{ .object = lo });
+    try emit(self, arr, yp.items, "endRange");
+    return .{ .object = arr };
+}
+
 fn fmtYear(self: *Interpreter, y: i64, fmt: []const u8) EvalError![]const u8 {
     if (std.mem.eql(u8, fmt, "2-digit")) {
         const yy: u8 = @intCast(@mod(y, 100));
@@ -12654,6 +12719,8 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DateTimeFormat"));
         try installIntlFormat(a, rs, p, "DateTimeFormat", intlDateTimeFormatFn);
         try setNative(a, rs, p, "formatToParts", 1, intlDateTimeFormatToPartsFn);
+        try setNative(a, rs, p, "formatRange", 2, intlDateTimeFormatRangeFn);
+        try setNative(a, rs, p, "formatRangeToParts", 2, intlDateTimeFormatRangeToPartsFn);
     }
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "Collator", 0, intlServiceConstructorFn("Collator"), tag);
