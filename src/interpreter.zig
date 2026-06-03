@@ -10654,16 +10654,42 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
             var rl: [8]u8 = undefined;
             for (region, 0..) |c, i| rl[i] = std.ascii.toLower(c);
             if (cldr_locale.territoryAlias(rl[0..region.len])) |r| {
-                // A multi-region replacement (e.g. SU) takes its first member.
-                const sp = std.mem.indexOfScalar(u8, r, ' ') orelse r.len;
-                region = std.ascii.allocUpperString(a, r[0..sp]) catch return null;
+                if (std.mem.indexOfScalar(u8, r, ' ') == null) {
+                    region = std.ascii.allocUpperString(a, r) catch return null;
+                } else {
+                    // Multiple replacements (e.g. SU): pick the member implied by
+                    // the maximized language+script, else the first.
+                    var chosen: []const u8 = r[0 .. std.mem.indexOfScalar(u8, r, ' ').?];
+                    var slo: [8]u8 = undefined;
+                    for (script, 0..) |c, i| slo[i] = std.ascii.toLower(c);
+                    if (cldrMaximize(a, .{ .l = lang, .s = slo[0..script.len] })) |mx| {
+                        if (mx.r.len > 0) {
+                            var toks = std.mem.splitScalar(u8, r, ' ');
+                            while (toks.next()) |tok| if (std.mem.eql(u8, tok, mx.r)) {
+                                chosen = tok;
+                                break;
+                            };
+                        }
+                    }
+                    region = std.ascii.allocUpperString(a, chosen) catch return null;
+                }
             }
         }
         {
-            // Apply variant aliases; an empty replacement drops the variant.
+            // Apply variant aliases. A variant may also be canonicalized via a
+            // "und-<variant>" languageAlias (e.g. und-arevela->und drops it,
+            // und-polytoni->und-polyton renames); an empty result drops it.
             var nv: std.ArrayListUnmanaged([]const u8) = .empty;
             for (variants.items) |v| {
-                const rep = cldr_locale.variantAlias(v) orelse v;
+                var rep: []const u8 = v;
+                if (cldr_locale.variantAlias(v)) |r| {
+                    rep = r;
+                } else {
+                    const undkey = std.fmt.allocPrint(a, "und-{s}", .{v}) catch return null;
+                    if (cldr_locale.languageAlias(undkey)) |la| {
+                        rep = if (std.mem.indexOfScalar(u8, la, '-')) |d| la[d + 1 ..] else "";
+                    }
+                }
                 if (rep.len > 0) nv.append(a, a.dupe(u8, rep) catch return null) catch return null;
             }
             variants = nv;
