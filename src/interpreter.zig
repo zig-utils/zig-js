@@ -10576,6 +10576,22 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
 /// Canonicalize one extension's subtag body (already lowercased). For `-u-`:
 /// sort attributes, sort keywords by key, and drop a "true" type (bare key).
 /// For `-t-`: keep the tlang then sort tfields by key. Others: subtags as-is.
+/// Map a few stable deprecated `-u-` keyword values to their canonical form
+/// (UTS-35 §3.2.1). Only the common, data-stable aliases are covered; unknown
+/// values pass through unchanged.
+fn canonUKeywordValue(key: []const u8, val: []const u8) []const u8 {
+    const A = struct { k: []const u8, from: []const u8, to: []const u8 };
+    const table = [_]A{
+        .{ .k = "ca", .from = "islamicc", .to = "islamic-civil" },
+        .{ .k = "ca", .from = "ethiopic-amete-alem", .to = "ethioaa" },
+        .{ .k = "ca", .from = "gregorian", .to = "gregory" },
+        .{ .k = "ms", .from = "imperial", .to = "uksystem" },
+        .{ .k = "tz", .from = "cnckg", .to = "cnsha" },
+    };
+    for (table) |e| if (std.mem.eql(u8, key, e.k) and std.mem.eql(u8, val, e.from)) return e.to;
+    return val;
+}
+
 fn canonExtBody(a: std.mem.Allocator, sing: u8, subs: [][]const u8) ?[]const u8 {
     var b: std.ArrayListUnmanaged(u8) = .empty;
     if (sing == 'u') {
@@ -10593,8 +10609,9 @@ fn canonExtBody(a: std.mem.Allocator, sing: u8, subs: [][]const u8) ?[]const u8 
                 if (vbuf.items.len > 0) vbuf.append(a, '-') catch return null;
                 vbuf.appendSlice(a, subs[i]) catch return null;
             }
-            var val = vbuf.toOwnedSlice(a) catch return null;
+            var val: []const u8 = vbuf.toOwnedSlice(a) catch return null;
             if (std.mem.eql(u8, val, "true")) val = ""; // a "true" type is omitted
+            val = canonUKeywordValue(key, val); // deprecated-value aliases (UTS-35)
             var dup = false; // a repeated keyword key: the first occurrence wins
             for (kws.items) |k| if (std.mem.eql(u8, k.key, key)) {
                 dup = true;
