@@ -11688,6 +11688,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var cur_prefix: []const u8 = ""; // currency symbol/code prefix (en places before)
     var cur_suffix: []const u8 = "";
     var cur_symbol: []const u8 = ""; // the bare currency symbol, when display=symbol (placement is locale-dependent)
+    var cur_code: []const u8 = ""; // the ISO currency code (for locale-dependent symbol selection)
     var unit_suffix: []const u8 = ""; // " <unit name>" appended for style:unit
     var unit_space = true; // narrow unitDisplay drops the space
     var sign_display: []const u8 = "auto";
@@ -11740,9 +11741,10 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
                 // "1.00 US dollars" — approximate (lowercased code as the name).
                 cur_suffix = try std.fmt.allocPrint(self.arena, " {s}", .{code});
             } else {
-                // symbol display: placement (before/after the number) is decided
-                // once we know the locale's currency pattern (see symbol_before).
+                // symbol display: placement (before/after the number) and the
+                // exact symbol are decided once we know the locale (see below).
                 cur_symbol = info.symbol;
+                cur_code = code;
             }
         } else if (sv == .string and std.mem.eql(u8, sv.string, "unit")) {
             const uv = try self.getProperty(o, "unit");
@@ -11830,6 +11832,8 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     }
     const locale = if (this.object.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
     const syms = localeNumberSymbols(locale);
+    // USD's symbol is "$" only in en-based locales; elsewhere CLDR uses "US$".
+    if (std.mem.eql(u8, cur_code, "USD") and !(locale.len >= 2 and locale[0] == 'e' and locale[1] == 'n')) cur_symbol = "US$";
     // Place the currency symbol before or after the number per the locale's CLDR
     // pattern (e.g. en "$1.00" vs de "1,00\u{a0}\u{20ac}").
     if (cur_symbol.len > 0) {
