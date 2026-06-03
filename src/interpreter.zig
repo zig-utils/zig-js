@@ -10891,6 +10891,19 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const ro = try nfProcessOptions(self, raw);
                 try self.setProp(o, "\x00opts", .{ .object = ro });
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
+                // Validate style/numeric and store a normalized options bag.
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                if (raw != .undefined and raw != .object) return self.throwError("TypeError", "options must be an object");
+                const ro = (try self.newObject()).object;
+                if (raw == .object) {
+                    _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+                    if (try dtfGetType(self, raw, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", .{ .string = ns });
+                    if (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, null)) |s| try self.setProp(ro, "style", .{ .string = s });
+                    if (try dtfGetStr(self, raw, "numeric", &.{ "always", "auto" }, null)) |nu| try self.setProp(ro, "numeric", .{ .string = nu });
+                }
+                try self.setProp(o, "\x00opts", .{ .object = ro });
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (args.len > 1 and args[1] == .object) {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
@@ -11589,6 +11602,94 @@ fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
+/// The eight relative-time units, with their long-form names and the
+/// numeric-"auto" exception terms (en). A null past/future term means the unit
+/// has no special word there, so the numeric form ("in 1 hour") is used.
+const RtfUnitInfo = struct {
+    singular: []const u8,
+    past: ?[]const u8, // value -1
+    present: []const u8, // value 0 / -0
+    future: ?[]const u8, // value +1
+};
+fn rtfUnitInfo(unit: []const u8) ?RtfUnitInfo {
+    // Accept the singular or plural ("second"/"seconds") spelling.
+    const table = [_]struct { k: []const u8, i: RtfUnitInfo }{
+        .{ .k = "second", .i = .{ .singular = "second", .past = null, .present = "now", .future = null } },
+        .{ .k = "minute", .i = .{ .singular = "minute", .past = null, .present = "this minute", .future = null } },
+        .{ .k = "hour", .i = .{ .singular = "hour", .past = null, .present = "this hour", .future = null } },
+        .{ .k = "day", .i = .{ .singular = "day", .past = "yesterday", .present = "today", .future = "tomorrow" } },
+        .{ .k = "week", .i = .{ .singular = "week", .past = "last week", .present = "this week", .future = "next week" } },
+        .{ .k = "month", .i = .{ .singular = "month", .past = "last month", .present = "this month", .future = "next month" } },
+        .{ .k = "quarter", .i = .{ .singular = "quarter", .past = "last quarter", .present = "this quarter", .future = "next quarter" } },
+        .{ .k = "year", .i = .{ .singular = "year", .past = "last year", .present = "this year", .future = "next year" } },
+    };
+    for (table) |t| {
+        if (std.mem.eql(u8, unit, t.k)) return t.i;
+        // plural form: singular + "s"
+        if (unit.len == t.k.len + 1 and std.mem.startsWith(u8, unit, t.k) and unit[unit.len - 1] == 's') return t.i;
+    }
+    return null;
+}
+
+/// Format a non-negative magnitude as an en decimal string with grouping
+/// (",") and up to 3 fraction digits — the number part of a relative-time
+/// phrase ("1,000").
+fn rtfNumber(self: *Interpreter, mag: f64) EvalError![]const u8 {
+    const r = try nfRound(self, mag, false, 1, 0, 3, null, null, false, "auto", 1, "halfExpand");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const first_group = r.int_str.len % 3;
+    for (r.int_str, 0..) |c, i| {
+        if (i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
+        try buf.append(self.arena, c);
+    }
+    if (r.frac_str.len > 0) {
+        try buf.append(self.arena, '.');
+        try buf.appendSlice(self.arena, r.frac_str);
+    }
+    return buf.toOwnedSlice(self.arena);
+}
+
+/// `Intl.RelativeTimeFormat.prototype.format(value, unit)` for en (long style).
+/// numeric:"auto" substitutes relative terms ("yesterday"/"tomorrow"/"now")
+/// for ±1/0; otherwise "in N units" / "N units ago".
+fn intlRelativeTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "RelativeTimeFormat")) return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.format on incompatible receiver");
+    const valnum = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    if (!std.math.isFinite(valnum)) return self.throwError("RangeError", "value must be finite");
+    const unit_v = if (args.len > 1) args[1] else Value.undefined;
+    const unit_s = try self.toStringV(unit_v);
+    const info = rtfUnitInfo(unit_s) orelse return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid unit '{s}'", .{unit_s}));
+
+    var numeric: []const u8 = "always";
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+        const nv = try self.getProperty(ov, "numeric");
+        if (nv == .string) numeric = nv.string;
+    };
+    const neg = std.math.signbit(valnum); // -0 formats as past
+
+    // numeric:"auto" — relative terms for an exact -1/0/1.
+    if (std.mem.eql(u8, numeric, "auto") and valnum == @trunc(valnum) and @abs(valnum) <= 1) {
+        if (valnum == 1) {
+            if (info.future) |w| return .{ .string = w };
+        } else if (valnum == -1) {
+            if (info.past) |w| return .{ .string = w };
+        } else {
+            return .{ .string = info.present };
+        }
+    }
+
+    const mag = @abs(valnum);
+    const num = try rtfNumber(self, mag);
+    const plural = mag != 1;
+    const unit_name = if (plural) try std.fmt.allocPrint(self.arena, "{s}s", .{info.singular}) else info.singular;
+    const s = if (neg)
+        try std.fmt.allocPrint(self.arena, "{s} {s} ago", .{ num, unit_name })
+    else
+        try std.fmt.allocPrint(self.arena, "in {s} {s}", .{ num, unit_name });
+    return .{ .string = s };
+}
+
 fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -11735,6 +11836,18 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 inline for (.{ "weekday", "era", "year", "month", "day", "dayPeriod", "hour", "minute", "second", "fractionalSecondDigits", "timeZoneName", "dateStyle", "timeStyle" }) |k| {
                     if (get(self, ro, k)) |v| try self.setProp(o, k, v);
                 }
+            } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
+                var style: []const u8 = "long";
+                var numeric: []const u8 = "always";
+                if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+                    const sv = try self.getProperty(ov, "style");
+                    if (sv == .string) style = sv.string;
+                    const nv = try self.getProperty(ov, "numeric");
+                    if (nv == .string) numeric = nv.string;
+                };
+                try self.setProp(o, "style", .{ .string = style });
+                try self.setProp(o, "numeric", .{ .string = numeric });
+                try self.setProp(o, "numberingSystem", .{ .string = "latn" });
             }
             return .{ .object = o };
         }
@@ -11817,7 +11930,12 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         const p = try Svc.install(a, rs, env, ns, object_proto, "ListFormat", 0, intlServiceConstructorFn("ListFormat"), tag);
         try setNative(a, rs, p, "format", 1, intlListFormatFn);
     }
-    inline for (.{ "RelativeTimeFormat", "DisplayNames", "Segmenter" }) |svc| {
+    {
+        const p = try Svc.install(a, rs, env, ns, object_proto, "RelativeTimeFormat", 0, intlServiceConstructorFn("RelativeTimeFormat"), tag);
+        try setNative(a, rs, p, "format", 2, intlRelativeTimeFormatFn);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("RelativeTimeFormat"));
+    }
+    inline for (.{ "DisplayNames", "Segmenter" }) |svc| {
         _ = try Svc.install(a, rs, env, ns, object_proto, svc, 0, intlServiceConstructorFn(svc), tag);
     }
 
