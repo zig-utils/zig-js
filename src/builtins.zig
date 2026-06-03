@@ -532,7 +532,7 @@ pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostErr
     const self = interp(ctx);
     // GetIterator(items): a non-iterable argument is a TypeError.
     const iter = try self.iteratorOf(arg(args, 0));
-    var acc = [_]u32{0} ** SUM_WORDS;
+    var acc = std.mem.zeroes([SUM_WORDS]u32);
     var count: usize = 0;
     var has_nan = false;
     var has_pos_inf = false;
