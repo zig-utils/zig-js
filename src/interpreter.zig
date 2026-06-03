@@ -11751,6 +11751,41 @@ fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8,
     try self.setProp(out, "numberingSystem", .{ .string = ns });
 }
 
+/// ResolveLocale for Collator's relevant extension keys kn (numeric) and kf
+/// (caseFirst): an option wins over the `-u-` value; the keyword stays in the
+/// resolved locale only when it came from the extension and wasn't overridden by
+/// a differing option. Returns the resolved values and sets `locale` on `out`.
+/// (The `co`/collation key needs per-locale CLDR data, so it is dropped here.)
+fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8, opt_num: ?bool, opt_kf: ?[]const u8) value.HostError!struct { numeric: bool, case_first: []const u8 } {
+    const kn_ext = localeUValue(tag, "kn");
+    const ext_num: ?bool = if (kn_ext) |v| !std.mem.eql(u8, v, "false") else null;
+    const numeric: bool = if (opt_num) |o| o else (ext_num orelse false);
+    const keep_kn = ext_num != null and (opt_num == null or opt_num.? == ext_num.?);
+
+    const kf_raw = localeUValue(tag, "kf");
+    const ext_kf: ?[]const u8 = if (kf_raw) |v| (if (std.mem.eql(u8, v, "upper") or std.mem.eql(u8, v, "lower") or std.mem.eql(u8, v, "false")) v else null) else null;
+    const case_first: []const u8 = if (opt_kf) |o| o else (ext_kf orelse "false");
+    const keep_kf = ext_kf != null and (opt_kf == null or std.mem.eql(u8, opt_kf.?, ext_kf.?));
+
+    const base = if (std.mem.indexOf(u8, tag, "-u-")) |u| tag[0..u] else tag;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.appendSlice(self.arena, base);
+    var any_kw = false;
+    // Canonical key order: kf before kn.
+    if (keep_kf) {
+        try buf.appendSlice(self.arena, "-u-kf-");
+        try buf.appendSlice(self.arena, case_first);
+        any_kw = true;
+    }
+    if (keep_kn) {
+        try buf.appendSlice(self.arena, if (any_kw) "-kn" else "-u-kn");
+        if (!numeric) try buf.appendSlice(self.arena, "-false");
+        any_kw = true;
+    }
+    try self.setProp(out, "locale", .{ .string = try buf.toOwnedSlice(self.arena) });
+    return .{ .numeric = numeric, .case_first = case_first };
+}
+
 /// Resolve the numbering system for an Intl formatter: the `numberingSystem`
 /// option wins, else the locale's `-u-nu-` extension, else "latn" — but only a
 /// system we have digit data for (unknown ones fall back to "latn").
@@ -13177,12 +13212,17 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                         return null;
                     }
                 }.s;
+                // numeric/caseFirst resolve from option or the -u-kn/-u-kf
+                // extension, and may rewrite the resolved locale.
+                const opt_num: ?bool = if (cget(rv, "numeric")) |n| n.boolean else null;
+                const opt_kf: ?[]const u8 = if (cget(rv, "caseFirst")) |c| c.string else null;
+                const res = try collatorResolveLocale(self, o, loc.string, opt_num, opt_kf);
                 try self.setProp(o, "usage", cget(rv, "usage") orelse .{ .string = "sort" });
                 try self.setProp(o, "sensitivity", cget(rv, "sensitivity") orelse .{ .string = "variant" });
                 try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse .{ .boolean = false });
                 try self.setProp(o, "collation", .{ .string = "default" });
-                try self.setProp(o, "numeric", cget(rv, "numeric") orelse .{ .boolean = false });
-                try self.setProp(o, "caseFirst", cget(rv, "caseFirst") orelse .{ .string = "false" });
+                try self.setProp(o, "numeric", .{ .boolean = res.numeric });
+                try self.setProp(o, "caseFirst", .{ .string = res.case_first });
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
                 // Spec key order: locale (set above), type, notation,
                 // minimumIntegerDigits, then significant-OR-fraction digits,
