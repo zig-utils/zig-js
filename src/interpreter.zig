@@ -11631,34 +11631,23 @@ fn rtfUnitInfo(unit: []const u8) ?RtfUnitInfo {
     return null;
 }
 
-/// Format a non-negative magnitude as an en decimal string with grouping
-/// (",") and up to 3 fraction digits — the number part of a relative-time
-/// phrase ("1,000").
-fn rtfNumber(self: *Interpreter, mag: f64) EvalError![]const u8 {
-    const r = try nfRound(self, mag, false, 1, 0, 3, null, null, false, "auto", 1, "halfExpand");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const first_group = r.int_str.len % 3;
-    for (r.int_str, 0..) |c, i| {
-        if (i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
-        try buf.append(self.arena, c);
-    }
-    if (r.frac_str.len > 0) {
-        try buf.append(self.arena, '.');
-        try buf.appendSlice(self.arena, r.frac_str);
-    }
-    return buf.toOwnedSlice(self.arena);
-}
+/// The pieces of a relative-time result: either a single relative `term`
+/// (numeric:"auto" for ±1/0) or a numeric phrase — a `prefix` literal, the
+/// grouped number (`int_str`/`frac_str`, tagged with the singular `unit`), and
+/// a `suffix` literal.
+const RtfResult = struct {
+    term: ?[]const u8 = null,
+    prefix: []const u8 = "",
+    int_str: []const u8 = "",
+    frac_str: []const u8 = "",
+    suffix: []const u8 = "",
+    unit: []const u8 = "",
+};
 
-/// `Intl.RelativeTimeFormat.prototype.format(value, unit)` for en (long style).
-/// numeric:"auto" substitutes relative terms ("yesterday"/"tomorrow"/"now")
-/// for ±1/0; otherwise "in N units" / "N units ago".
-fn intlRelativeTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "RelativeTimeFormat")) return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.format on incompatible receiver");
+fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostError!RtfResult {
     const valnum = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
     if (!std.math.isFinite(valnum)) return self.throwError("RangeError", "value must be finite");
-    const unit_v = if (args.len > 1) args[1] else Value.undefined;
-    const unit_s = try self.toStringV(unit_v);
+    const unit_s = try self.toStringV(if (args.len > 1) args[1] else Value.undefined);
     const info = rtfUnitInfo(unit_s) orelse return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid unit '{s}'", .{unit_s}));
 
     var numeric: []const u8 = "always";
@@ -11668,26 +11657,94 @@ fn intlRelativeTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) v
     };
     const neg = std.math.signbit(valnum); // -0 formats as past
 
-    // numeric:"auto" — relative terms for an exact -1/0/1.
     if (std.mem.eql(u8, numeric, "auto") and valnum == @trunc(valnum) and @abs(valnum) <= 1) {
         if (valnum == 1) {
-            if (info.future) |w| return .{ .string = w };
+            if (info.future) |w| return .{ .term = w };
         } else if (valnum == -1) {
-            if (info.past) |w| return .{ .string = w };
+            if (info.past) |w| return .{ .term = w };
         } else {
-            return .{ .string = info.present };
+            return .{ .term = info.present };
         }
     }
 
     const mag = @abs(valnum);
-    const num = try rtfNumber(self, mag);
+    const r = try nfRound(self, mag, false, 1, 0, 3, null, null, false, "auto", 1, "halfExpand");
     const plural = mag != 1;
     const unit_name = if (plural) try std.fmt.allocPrint(self.arena, "{s}s", .{info.singular}) else info.singular;
-    const s = if (neg)
-        try std.fmt.allocPrint(self.arena, "{s} {s} ago", .{ num, unit_name })
-    else
-        try std.fmt.allocPrint(self.arena, "in {s} {s}", .{ num, unit_name });
-    return .{ .string = s };
+    // en long patterns: future "in {0} <unit>", past "{0} <unit> ago".
+    return .{
+        .int_str = r.int_str,
+        .frac_str = r.frac_str,
+        .unit = info.singular,
+        .prefix = if (neg) "" else "in ",
+        .suffix = if (neg) try std.fmt.allocPrint(self.arena, " {s} ago", .{unit_name}) else try std.fmt.allocPrint(self.arena, " {s}", .{unit_name}),
+    };
+}
+
+fn intlRelativeTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "RelativeTimeFormat")) return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.format on incompatible receiver");
+    const r = try rtfCompute(self, this, args);
+    if (r.term) |t| return .{ .string = t };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.appendSlice(self.arena, r.prefix);
+    try buf.appendSlice(self.arena, try rtfGroup(self, r.int_str));
+    if (r.frac_str.len > 0) {
+        try buf.append(self.arena, '.');
+        try buf.appendSlice(self.arena, r.frac_str);
+    }
+    try buf.appendSlice(self.arena, r.suffix);
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+/// Group an integer digit string with "," every three digits (en).
+fn rtfGroup(self: *Interpreter, int_str: []const u8) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const first_group = int_str.len % 3;
+    for (int_str, 0..) |c, i| {
+        if (i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
+        try buf.append(self.arena, c);
+    }
+    return buf.toOwnedSlice(self.arena);
+}
+
+fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "RelativeTimeFormat")) return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.formatToParts on incompatible receiver");
+    const r = try rtfCompute(self, this, args);
+    const arr = (try self.newArray()).object;
+    const addPart = struct {
+        fn p(s: *Interpreter, a: *value.Object, typ: []const u8, v: []const u8, unit: ?[]const u8) EvalError!void {
+            const o = (try s.newObject()).object;
+            try s.setProp(o, "type", .{ .string = typ });
+            try s.setProp(o, "value", .{ .string = v });
+            if (unit) |u| try s.setProp(o, "unit", .{ .string = try std.fmt.allocPrint(s.arena, "{s}", .{u}) });
+            try a.elements.append(s.arena, .{ .object = o });
+        }
+    }.p;
+    if (r.term) |t| {
+        try addPart(self, arr, "literal", t, null);
+        return .{ .object = arr };
+    }
+    if (r.prefix.len > 0) try addPart(self, arr, "literal", r.prefix, null);
+    // Number, split into integer/group parts, each tagged with the unit.
+    const first_group = r.int_str.len % 3;
+    var run: std.ArrayListUnmanaged(u8) = .empty;
+    for (r.int_str, 0..) |c, i| {
+        if (i != 0 and (i % 3) == first_group) {
+            try addPart(self, arr, "integer", try run.toOwnedSlice(self.arena), r.unit);
+            try addPart(self, arr, "group", ",", r.unit);
+            run = .empty;
+        }
+        try run.append(self.arena, c);
+    }
+    try addPart(self, arr, "integer", try run.toOwnedSlice(self.arena), r.unit);
+    if (r.frac_str.len > 0) {
+        try addPart(self, arr, "decimal", ".", r.unit);
+        try addPart(self, arr, "fraction", r.frac_str, r.unit);
+    }
+    if (r.suffix.len > 0) try addPart(self, arr, "literal", r.suffix, null);
+    return .{ .object = arr };
 }
 
 fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
@@ -11933,6 +11990,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "RelativeTimeFormat", 0, intlServiceConstructorFn("RelativeTimeFormat"), tag);
         try setNative(a, rs, p, "format", 2, intlRelativeTimeFormatFn);
+        try setNative(a, rs, p, "formatToParts", 2, intlRelativeTimeFormatToPartsFn);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("RelativeTimeFormat"));
     }
     inline for (.{ "DisplayNames", "Segmenter" }) |svc| {
