@@ -1365,6 +1365,10 @@ pub const Parser = struct {
             const operand = try self.parseUnary();
             // Strict mode: `delete` of an unqualified identifier is a SyntaxError.
             if (self.strict and operand.* == .identifier) return ParseError.UnexpectedToken;
+            // `delete` of a private member reference (`delete obj.#x`, even when
+            // parenthesized) is always an early SyntaxError.
+            if (operand.* == .member and operand.member.property.len > 0 and operand.member.property[0] == '#')
+                return ParseError.UnexpectedToken;
             return self.alloc(.{ .delete_expr = operand });
         }
         const op: ?ast.UnaryOp = switch (t.kind) {

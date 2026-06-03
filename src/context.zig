@@ -1301,6 +1301,15 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
 }
 
+test "delete of a private member is an early error" {
+    try expectParseError("class C { #x = 1; m() { delete this.#x; } }");
+    try expectParseError("class C { #x = 1; m() { delete (this.#x); } }"); // parenthesized (covered)
+    // Deleting a public property — even of an object reached through a private
+    // field — is allowed.
+    _ = try evalIn("class C { #x = {}; m() { return delete this.#x.y; } }");
+    try std.testing.expect((try evalIn("delete ({ a: 1 }).a")).boolean);
+}
+
 test "duplicate lexical declarations are early errors" {
     // Same-scope let/const/class duplicates, and async/generator-function dups.
     try expectParseError("{ let x; let x; }");
