@@ -11,6 +11,7 @@ const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
 const cldr_numbers = @import("cldr_numbers.zig");
 const numbering_systems = @import("numbering_systems.zig");
+const cldr_locale = @import("cldr_locale.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -10461,6 +10462,99 @@ fn lowerDup(a: std.mem.Allocator, s: []const u8) []const u8 {
     return std.ascii.allocLowerString(a, s) catch s;
 }
 
+const ReparsedLangId = struct {
+    lang: []const u8,
+    script: []const u8 = "",
+    region: []const u8 = "",
+    variants: std.ArrayListUnmanaged([]const u8) = .empty,
+};
+
+/// A lowercased (language, script, region) triple for the likely-subtags
+/// algorithm; empty fields are absent.
+const Triple = struct { l: []const u8, s: []const u8 = "", r: []const u8 = "" };
+
+fn parseTriple(s: []const u8) Triple {
+    var t: Triple = .{ .l = "" };
+    var it = std.mem.splitScalar(u8, s, '-');
+    t.l = it.next() orelse "";
+    while (it.next()) |part| {
+        if (t.s.len == 0 and t.r.len == 0 and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
+            t.s = part;
+        } else if (t.r.len == 0 and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
+            t.r = part;
+        }
+    }
+    return t;
+}
+
+fn tripleEql(x: Triple, y: Triple) bool {
+    return std.mem.eql(u8, x.l, y.l) and std.mem.eql(u8, x.s, y.s) and std.mem.eql(u8, x.r, y.r);
+}
+
+/// Look up the maximal triple for `t` per the Add-Likely-Subtags search order.
+fn cldrLookupLikely(a: std.mem.Allocator, t: Triple) ?Triple {
+    const l = if (t.l.len == 0) "und" else t.l;
+    if (t.s.len > 0 and t.r.len > 0) {
+        if (cldr_locale.likely(std.fmt.allocPrint(a, "{s}-{s}-{s}", .{ l, t.s, t.r }) catch return null)) |v| return parseTriple(v);
+    }
+    if (t.r.len > 0) {
+        if (cldr_locale.likely(std.fmt.allocPrint(a, "{s}-{s}", .{ l, t.r }) catch return null)) |v| return parseTriple(v);
+    }
+    if (t.s.len > 0) {
+        if (cldr_locale.likely(std.fmt.allocPrint(a, "{s}-{s}", .{ l, t.s }) catch return null)) |v| return parseTriple(v);
+    }
+    if (cldr_locale.likely(l)) |v| return parseTriple(v);
+    if (t.s.len > 0) {
+        if (cldr_locale.likely(std.fmt.allocPrint(a, "und-{s}", .{t.s}) catch return null)) |v| return parseTriple(v);
+    }
+    return null;
+}
+
+/// AddLikelySubtags: fill in missing script/region (and language) from CLDR.
+fn cldrMaximize(a: std.mem.Allocator, t: Triple) ?Triple {
+    const m = cldrLookupLikely(a, t) orelse return null;
+    return .{
+        .l = if (t.l.len > 0 and !std.mem.eql(u8, t.l, "und")) t.l else m.l,
+        .s = if (t.s.len > 0) t.s else m.s,
+        .r = if (t.r.len > 0) t.r else m.r,
+    };
+}
+
+/// RemoveLikelySubtags: the shortest triple that maximizes back to the same.
+fn cldrMinimize(a: std.mem.Allocator, t: Triple) ?Triple {
+    const max = cldrMaximize(a, t) orelse return null;
+    const tries = [_]Triple{
+        .{ .l = max.l },
+        .{ .l = max.l, .r = max.r },
+        .{ .l = max.l, .s = max.s },
+    };
+    for (tries) |cand| {
+        if (cldrMaximize(a, cand)) |cm| if (tripleEql(cm, max)) return cand;
+    }
+    return max;
+}
+
+/// Split a (lowercased) language-id replacement into language/script/region/
+/// variants with canonical casing — used after an alias substitution.
+fn cldrReparse(a: std.mem.Allocator, s: []const u8) ?ReparsedLangId {
+    var r: ReparsedLangId = .{ .lang = "" };
+    var it = std.mem.splitScalar(u8, s, '-');
+    r.lang = lowerDup(a, it.next() orelse return null);
+    while (it.next()) |part| {
+        if (r.script.len == 0 and r.region.len == 0 and r.variants.items.len == 0 and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
+            const sc = a.alloc(u8, 4) catch return null;
+            sc[0] = std.ascii.toUpper(part[0]);
+            for (1..4) |i| sc[i] = std.ascii.toLower(part[i]);
+            r.script = sc;
+        } else if (r.region.len == 0 and r.variants.items.len == 0 and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
+            r.region = std.ascii.allocUpperString(a, part) catch return null;
+        } else {
+            r.variants.append(a, lowerDup(a, part)) catch return null;
+        }
+    }
+    return r;
+}
+
 /// CanonicalizeUnicodeLocaleId (UTS-35): structural validation, then subtag
 /// casing, alphabetical variant sorting, `-u-`/`-t-` keyword canonicalization
 /// (attributes sorted, keywords sorted by key, a "true" type dropped to a bare
@@ -10501,6 +10595,78 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
             region = std.ascii.allocUpperString(a, part) catch return null;
         } else {
             variants.append(a, lowerDup(a, part)) catch return null;
+        }
+    }
+    // --- CLDR alias substitution (CanonicalizeLanguageTag) ---
+    {
+        // Ordered lowercased base subtags, for grandfathered/legacy matching.
+        var subs: std.ArrayListUnmanaged([]const u8) = .empty;
+        subs.append(a, lang) catch return null;
+        if (script.len > 0) subs.append(a, lowerDup(a, script)) catch return null;
+        if (region.len > 0) subs.append(a, lowerDup(a, region)) catch return null;
+        for (variants.items) |v| subs.append(a, v) catch return null;
+        // A grandfathered/redundant alias matches the longest prefix of the
+        // language-id (>=2 subtags); the remaining subtags are kept (e.g.
+        // "art-lojban-fonipa" -> "jbo-fonipa").
+        var matched = false;
+        var k = subs.items.len;
+        while (k >= 2) : (k -= 1) {
+            var key: std.ArrayListUnmanaged(u8) = .empty;
+            for (subs.items[0..k], 0..) |s, i| {
+                if (i != 0) key.append(a, '-') catch return null;
+                key.appendSlice(a, s) catch return null;
+            }
+            if (cldr_locale.languageAlias(key.items)) |repl| {
+                var nb: std.ArrayListUnmanaged(u8) = .empty;
+                nb.appendSlice(a, repl) catch return null;
+                for (subs.items[k..]) |s| {
+                    nb.append(a, '-') catch return null;
+                    nb.appendSlice(a, s) catch return null;
+                }
+                const rp = cldrReparse(a, nb.items) orelse return null;
+                lang = rp.lang;
+                script = rp.script;
+                region = rp.region;
+                variants = rp.variants;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) if (cldr_locale.languageAlias(lang)) |repl| {
+            // Replace just the language subtag; a replacement script/region fills
+            // in only when the tag had none.
+            const rp = cldrReparse(a, repl) orelse return null;
+            lang = rp.lang;
+            if (script.len == 0 and rp.script.len > 0) script = rp.script;
+            if (region.len == 0 and rp.region.len > 0) region = rp.region;
+        };
+        if (script.len > 0) {
+            var sl: [8]u8 = undefined;
+            for (script, 0..) |c, i| sl[i] = std.ascii.toLower(c);
+            if (cldr_locale.scriptAlias(sl[0..script.len])) |r| {
+                const ns = a.alloc(u8, r.len) catch return null;
+                @memcpy(ns, r);
+                if (ns.len > 0) ns[0] = std.ascii.toUpper(ns[0]);
+                script = ns;
+            }
+        }
+        if (region.len > 0) {
+            var rl: [8]u8 = undefined;
+            for (region, 0..) |c, i| rl[i] = std.ascii.toLower(c);
+            if (cldr_locale.territoryAlias(rl[0..region.len])) |r| {
+                // A multi-region replacement (e.g. SU) takes its first member.
+                const sp = std.mem.indexOfScalar(u8, r, ' ') orelse r.len;
+                region = std.ascii.allocUpperString(a, r[0..sp]) catch return null;
+            }
+        }
+        {
+            // Apply variant aliases; an empty replacement drops the variant.
+            var nv: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (variants.items) |v| {
+                const rep = cldr_locale.variantAlias(v) orelse v;
+                if (rep.len > 0) nv.append(a, a.dupe(u8, rep) catch return null) catch return null;
+            }
+            variants = nv;
         }
     }
     // Variants are sorted alphabetically (UTS-35 canonical order).
@@ -11012,18 +11178,72 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
     }.call;
 }
 
-/// `Intl.Locale.prototype.maximize`/`minimize` — without CLDR likely-subtags
-/// data we return a Locale for the same tag (a correct identity for fully-
-/// specified tags; the structural contract — returns an Intl.Locale — holds).
-fn intlLocaleTransformFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
-    const o = (try self.newObject()).object;
-    o.proto = this.object.proto;
-    try self.setProp(o, "\x00locale", this.object.getOwn("\x00locale").?);
-    try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
-    return .{ .object = o };
+/// `Intl.Locale.prototype.maximize`/`minimize` — Add/Remove Likely Subtags on
+/// the language-id (variants and extensions are preserved), then canonicalize.
+fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+            const a = self.arena;
+            const tag = this.object.getOwn("\x00locale").?.string;
+            // Split off the base language-id (up to the first singleton) and tail.
+            var base_end: usize = tag.len;
+            {
+                var bit = std.mem.splitScalar(u8, tag, '-');
+                var off: usize = 0;
+                while (bit.next()) |part| {
+                    if (part.len == 1) {
+                        base_end = if (off == 0) 0 else off - 1;
+                        break;
+                    }
+                    off += part.len + 1;
+                }
+            }
+            const base = tag[0..base_end];
+            const tail = tag[base_end..]; // "-u-…" etc. (leading '-' or empty)
+            // Parse base into lowercased lang/script/region plus variants.
+            var t: Triple = .{ .l = "" };
+            var variants: std.ArrayListUnmanaged([]const u8) = .empty;
+            {
+                var bit = std.mem.splitScalar(u8, base, '-');
+                t.l = lowerDup(a, bit.next() orelse "");
+                while (bit.next()) |part| {
+                    if (t.s.len == 0 and t.r.len == 0 and variants.items.len == 0 and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
+                        t.s = lowerDup(a, part);
+                    } else if (t.r.len == 0 and variants.items.len == 0 and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
+                        t.r = lowerDup(a, part);
+                    } else {
+                        try variants.append(a, lowerDup(a, part));
+                    }
+                }
+            }
+            const res = (if (kind == .max) cldrMaximize(a, t) else cldrMinimize(a, t)) orelse t;
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            try buf.appendSlice(a, res.l);
+            if (res.s.len > 0) {
+                try buf.appendSlice(a, "-");
+                try buf.append(a, std.ascii.toUpper(res.s[0]));
+                try buf.appendSlice(a, res.s[1..]);
+            }
+            if (res.r.len > 0) {
+                try buf.appendSlice(a, "-");
+                try buf.appendSlice(a, try std.ascii.allocUpperString(a, res.r));
+            }
+            for (variants.items) |v| {
+                try buf.append(a, '-');
+                try buf.appendSlice(a, v);
+            }
+            try buf.appendSlice(a, tail);
+            const canon = canonicalizeLocaleTag(a, buf.items) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+            const o = (try self.newObject()).object;
+            o.proto = this.object.proto;
+            try self.setProp(o, "\x00locale", .{ .string = canon });
+            try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+            return .{ .object = o };
+        }
+    }.call;
 }
 
 /// Locale info methods returning an array of one default (getCalendars →
@@ -13879,8 +14099,8 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNativeGetter(a, rs, proto, "numberingSystem", intlLocaleGetter(.numbering_system));
         try setNativeGetter(a, rs, proto, "firstDayOfWeek", intlLocaleGetter(.first_day_of_week));
         try setNative(a, rs, proto, "toString", 0, intlLocaleToStringFn);
-        try setNative(a, rs, proto, "maximize", 0, intlLocaleTransformFn);
-        try setNative(a, rs, proto, "minimize", 0, intlLocaleTransformFn);
+        try setNative(a, rs, proto, "maximize", 0, intlLocaleTransformFn(.max));
+        try setNative(a, rs, proto, "minimize", 0, intlLocaleTransformFn(.min));
         try setNative(a, rs, proto, "getCalendars", 0, intlLocaleListFn(.calendars));
         try setNative(a, rs, proto, "getCollations", 0, intlLocaleListFn(.collations));
         try setNative(a, rs, proto, "getHourCycles", 0, intlLocaleListFn(.hour_cycles));
