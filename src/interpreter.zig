@@ -12272,7 +12272,9 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
         const uval = vals[i];
         const style = styles[i];
         const display = displays[i];
-        const combine = durCombines(ov, base, u);
+        // seconds/milliseconds/microseconds fold their finer units into a
+        // fraction when the next-finer unit resolved to a numeric style.
+        const combine = (i == 6 or i == 7 or i == 8) and std.mem.eql(u8, styles[i + 1], "numeric");
         const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
         if (shown) {
             const sign_never = !first;
@@ -12337,7 +12339,9 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
         const uval = vals[i];
         const style = styles[i];
         const display = displays[i];
-        const combine = durCombines(ov, base, u);
+        // seconds/milliseconds/microseconds fold their finer units into a
+        // fraction when the next-finer unit resolved to a numeric style.
+        const combine = (i == 6 or i == 7 or i == 8) and std.mem.eql(u8, styles[i + 1], "numeric");
         const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
         if (shown) {
             const sign_never = !first;
