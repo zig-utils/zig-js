@@ -396,6 +396,182 @@ pub fn mathHypot(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     return .{ .number = @sqrt(sum) };
 }
 
+// ---- Math.sumPrecise (ES2025): maximally-precise summation -----------------
+//
+// Each finite double is added *exactly* into a fixed-point superaccumulator —
+// a two's-complement integer equal to (exact sum) × 2^1074 (1074 = the bit
+// offset of the smallest subnormal). A double `m × 2^e` contributes its 53-bit
+// mantissa at bit position `e + 1074`, so no intermediate value overflows (the
+// `[1e308, 1e308, …, -1e308, -1e308]` cancellation is exact), and the result is
+// converted to f64 with a single round-to-nearest-even at the end.
+const SUM_WORDS = 72; // u32 limbs ≈ 2304 bits; max |sum| ≈ 2^2098 scaled, ample headroom
+
+/// Add `mantissa` (≤53 significant bits) shifted left by `bitpos` into the
+/// little-endian two's-complement accumulator, subtracting when `neg`.
+fn sumAddShifted(acc: *[SUM_WORDS]u32, mantissa: u64, bitpos: usize, neg: bool) void {
+    const word = bitpos / 32;
+    const off: u7 = @intCast(bitpos % 32);
+    const wide: u128 = @as(u128, mantissa) << off; // spans ≤3 limbs
+    const parts = [3]u32{ @truncate(wide), @truncate(wide >> 32), @truncate(wide >> 64) };
+    if (!neg) {
+        var carry: u64 = 0;
+        var i: usize = 0;
+        while (word + i < SUM_WORDS) : (i += 1) {
+            const add: u64 = (if (i < 3) parts[i] else 0) + carry;
+            const s = @as(u64, acc[word + i]) + add;
+            acc[word + i] = @truncate(s);
+            carry = s >> 32;
+            if (i >= 3 and carry == 0) break;
+        }
+    } else {
+        var borrow: u64 = 0;
+        var i: usize = 0;
+        while (word + i < SUM_WORDS) : (i += 1) {
+            const sub: u64 = (if (i < 3) parts[i] else 0) + borrow;
+            const cur = @as(u64, acc[word + i]);
+            if (cur >= sub) {
+                acc[word + i] = @truncate(cur - sub);
+                borrow = 0;
+            } else {
+                acc[word + i] = @truncate(cur + (@as(u64, 1) << 32) - sub);
+                borrow = 1;
+            }
+            if (i >= 3 and borrow == 0) break;
+        }
+    }
+}
+
+/// Add one finite double exactly (its zero contributes nothing — handled by the caller).
+fn sumAddDouble(acc: *[SUM_WORDS]u32, x: f64) void {
+    const bits: u64 = @bitCast(x);
+    const neg = (bits >> 63) == 1;
+    const biased = (bits >> 52) & 0x7FF;
+    const frac = bits & 0xFFFFFFFFFFFFF;
+    // Subnormal: mantissa = frac, LSB at 2^-1074 (bit 0). Normal: implicit bit
+    // set, LSB at bit (biased - 1) of the scaled accumulator.
+    const mantissa: u64 = if (biased == 0) frac else (frac | (@as(u64, 1) << 52));
+    const bitpos: usize = if (biased == 0) 0 else @intCast(biased - 1);
+    sumAddShifted(acc, mantissa, bitpos, neg);
+}
+
+/// Up to 64 bits of the magnitude starting at bit `start`.
+fn sumReadBits(acc: *const [SUM_WORDS]u32, start: usize, n: u32) u64 {
+    const w = start / 32;
+    const off: u7 = @intCast(start % 32);
+    var v: u128 = 0;
+    var k: usize = 0;
+    while (k < 3 and w + k < SUM_WORDS) : (k += 1) v |= @as(u128, acc[w + k]) << @as(u7, @intCast(k * 32));
+    v >>= off;
+    const mask: u128 = if (n >= 64) ~@as(u64, 0) else (@as(u128, 1) << @as(u7, @intCast(n))) - 1;
+    return @truncate(v & mask);
+}
+
+/// Any set bit strictly below position `p`?
+fn sumAnyBitBelow(acc: *const [SUM_WORDS]u32, p: usize) bool {
+    const w = p / 32;
+    const off = p % 32;
+    var i: usize = 0;
+    while (i < w) : (i += 1) if (acc[i] != 0) return true;
+    if (off > 0 and w < SUM_WORDS) {
+        const mask = (@as(u32, 1) << @as(u5, @intCast(off))) - 1;
+        if (acc[w] & mask != 0) return true;
+    }
+    return false;
+}
+
+/// Convert the accumulator (exact sum × 2^1074, two's complement) to the nearest
+/// f64 (ties to even); ±Infinity on overflow. Returns +0 for a zero magnitude
+/// (the caller decides the zero sign). Mutates `acc` (negates in place if needed).
+fn sumRoundToF64(acc: *[SUM_WORDS]u32) f64 {
+    const neg = (acc[SUM_WORDS - 1] >> 31) == 1;
+    if (neg) { // two's-complement negate → magnitude
+        var carry: u64 = 1;
+        for (acc) |*w| {
+            const s = @as(u64, ~w.*) + carry;
+            w.* = @truncate(s);
+            carry = s >> 32;
+        }
+    }
+    // Highest set bit.
+    var msb: isize = -1;
+    var wi: isize = SUM_WORDS - 1;
+    while (wi >= 0) : (wi -= 1) {
+        const w = acc[@intCast(wi)];
+        if (w != 0) {
+            msb = wi * 32 + (31 - @as(isize, @clz(w)));
+            break;
+        }
+    }
+    if (msb < 0) return 0; // zero magnitude
+    const L: usize = @intCast(msb + 1);
+    var mantissa: u64 = undefined;
+    var shift: usize = undefined; // low bits dropped
+    if (L <= 53) {
+        mantissa = sumReadBits(acc, 0, 64);
+        shift = 0;
+    } else {
+        shift = L - 53;
+        const top54 = sumReadBits(acc, shift - 1, 54);
+        const guard = top54 & 1;
+        mantissa = top54 >> 1; // 53 bits
+        const sticky = sumAnyBitBelow(acc, shift - 1);
+        if (guard == 1 and (sticky or (mantissa & 1) == 1)) {
+            mantissa += 1;
+            if (mantissa == (@as(u64, 1) << 53)) { // carry out of 53 bits
+                mantissa >>= 1;
+                shift += 1;
+            }
+        }
+    }
+    const val = std.math.ldexp(@as(f64, @floatFromInt(mantissa)), @as(i32, @intCast(shift)) - 1074);
+    return if (neg) -val else val;
+}
+
+pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    // GetIterator(items): a non-iterable argument is a TypeError.
+    const iter = try self.iteratorOf(arg(args, 0));
+    var acc = [_]u32{0} ** SUM_WORDS;
+    var count: usize = 0;
+    var has_nan = false;
+    var has_pos_inf = false;
+    var has_neg_inf = false;
+    var all_neg_zero = true; // an exact-zero result is -0 only if every element was -0
+    while (true) {
+        const r = try self.callMethod(iter, "next", &.{});
+        if (r != .object) return self.throwError("TypeError", "iterator.next() did not return an object");
+        if ((try self.getProperty(r, "done")).toBoolean()) break;
+        const v = try self.getProperty(r, "value");
+        if (v != .number) {
+            self.iteratorClose(iter) catch {};
+            return self.throwError("TypeError", "Math.sumPrecise: every element must be a Number");
+        }
+        count += 1;
+        const x = v.number;
+        if (std.math.isNan(x)) {
+            has_nan = true;
+            all_neg_zero = false;
+            continue;
+        }
+        if (std.math.isInf(x)) {
+            if (x > 0) has_pos_inf = true else has_neg_inf = true;
+            all_neg_zero = false;
+            continue;
+        }
+        if (!(x == 0 and std.math.signbit(x))) all_neg_zero = false;
+        if (x != 0) sumAddDouble(&acc, x);
+    }
+    if (count == 0) return .{ .number = -0.0 };
+    if (has_nan) return .{ .number = std.math.nan(f64) };
+    if (has_pos_inf and has_neg_inf) return .{ .number = std.math.nan(f64) };
+    if (has_pos_inf) return .{ .number = std.math.inf(f64) };
+    if (has_neg_inf) return .{ .number = -std.math.inf(f64) };
+    const result = sumRoundToF64(&acc);
+    if (result == 0) return .{ .number = if (all_neg_zero) -0.0 else 0.0 };
+    return .{ .number = result };
+}
+
 pub fn mathClz32(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = ctx;
     _ = this;

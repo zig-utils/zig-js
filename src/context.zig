@@ -1293,6 +1293,26 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
 }
 
+test "Math.sumPrecise sums exactly" {
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn("Math.sumPrecise([1, 2, 3])")).number);
+    // Exact summation survives intermediate overflow + cancellation.
+    try std.testing.expectEqual(@as(f64, 0.30000000000000004), (try evalIn(
+        \\Math.sumPrecise([1e308, 1e308, 0.1, 0.1, 1e30, 0.1, -1e30, -1e308, -1e308])
+    )).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Math.sumPrecise([1e308, -1e308])")).number);
+    // Special values.
+    try std.testing.expect(std.math.isNan((try evalIn("Math.sumPrecise([NaN, 1])")).number));
+    try std.testing.expect(std.math.isNan((try evalIn("Math.sumPrecise([Infinity, -Infinity])")).number));
+    try std.testing.expect((try evalIn("Math.sumPrecise([Infinity, 1])")).number == std.math.inf(f64));
+    // Empty is -0; a finite cancellation is +0; all -0 is -0.
+    try std.testing.expect((try evalIn("1 / Math.sumPrecise([])")).number == -std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.sumPrecise([0.1, -0.1])")).number == std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.sumPrecise([-0, -0])")).number == -std.math.inf(f64));
+    // A non-Number element and a non-iterable argument both throw.
+    try std.testing.expectError(error.Throw, evalIn("Math.sumPrecise([1, '2'])"));
+    try std.testing.expectError(error.Throw, evalIn("Math.sumPrecise(5)"));
+}
+
 test "Math.f16round rounds to binary16" {
     try std.testing.expect((try evalIn("typeof Math.f16round === 'function'")).boolean);
     try std.testing.expectEqual(@as(f64, 1.5), (try evalIn("Math.f16round(1.5)")).number); // exact in f16
