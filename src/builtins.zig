@@ -64,7 +64,17 @@ pub fn stringFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
 pub fn numberFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const ip = interp(ctx);
-    const n: f64 = if (args.len == 0) 0 else args[0].toNumber();
+    const n: f64 = if (args.len == 0) 0 else blk: {
+        const v = args[0];
+        // ToNumeric: an object coerces via ToPrimitive(number) (valueOf/@@toPrimitive)
+        // — e.g. a Date yields its time value; a Symbol is a TypeError. A BigInt
+        // operand converts to the nearest Number (Number(10n) === 10).
+        if (v == .object and !v.object.is_bigint) {
+            if (v.object.is_symbol) return ip.throwError("TypeError", "Cannot convert a Symbol value to a number");
+            break :blk (try ip.toPrimitive(v, .number)).toNumber();
+        }
+        break :blk v.toNumber();
+    };
     if (ip.new_target != .undefined) return ip.makeWrapper(.{ .number = n });
     return .{ .number = n };
 }
