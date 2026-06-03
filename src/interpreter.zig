@@ -6126,10 +6126,15 @@ pub const Interpreter = struct {
             if (hint == .string) return .{ .string = try p.toString(self.arena) };
             return p;
         }
-        // A Date with the built-in valueOf coerces to its time value for a number
-        // hint (`Number(date)`, `+date`, `date - date`); string/default hints fall
-        // through to the date string below (Date's default hint is "string").
-        if (o.is_date and hint == .number) return .{ .number = o.date_ms };
+        // A Date with the built-in coercion: a number hint (`Number(date)`,
+        // `+date`, `date - date`) yields its time value; string/default hints
+        // (Date's default hint is "string": `\`${date}\``, `date + ""`) yield the
+        // built-in Date toString, which OrdinaryToPrimitive above skipped as a
+        // native thunk.
+        if (o.is_date) {
+            if (hint == .number) return .{ .number = o.date_ms };
+            return (try self.dateMethod(o, "toString", &.{})) orelse .{ .string = "Invalid Date" };
+        }
         // The built-in "[object …]" / array-join / Date / error fallback is the
         // result of the *built-in* `toString`; it is only reachable when
         // `toString` still resolves to that built-in. If it is shadowed — by a
