@@ -999,6 +999,18 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
                 } else return .{ .returned = val };
             },
         }
+    } else switch (kind) {
+        // Not yet started: `next` runs the body from the top, but `return`/`throw`
+        // complete the generator immediately without ever executing the body.
+        .send => {},
+        .return_ => {
+            g.done = true;
+            return .{ .returned = val };
+        },
+        .throw_ => {
+            g.done = true;
+            return .{ .threw = val };
+        },
     }
     g.started = true;
     g.suspended = false;
