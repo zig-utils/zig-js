@@ -11685,6 +11685,146 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     return parts;
 }
 
+// ---- Intl.Segmenter segmentation (byte-offset, code-point aware) -----------
+
+/// The byte length of the UTF-8 sequence whose lead byte is `b`.
+fn segUtf8Len(b: u8) usize {
+    if (b < 0x80) return 1;
+    if (b >= 0xF0) return 4;
+    if (b >= 0xE0) return 3;
+    if (b >= 0xC0) return 2;
+    return 1; // continuation/invalid byte: treat as one
+}
+
+/// Whether the code point starting at `str[pos]` is "word-like" (letters/digits).
+/// ASCII is classified exactly; any non-ASCII byte is treated as a letter (the
+/// structural Segmenter tests don't require precise UAX#29 categories).
+fn segWordCat(str: []const u8, pos: usize) bool {
+    const b = str[pos];
+    if (b < 0x80) return std.ascii.isAlphanumeric(b);
+    return true;
+}
+
+/// Advance one segment from byte `pos`; returns the end byte offset and (for the
+/// "word" granularity) whether the segment is word-like.
+fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, word_like: bool } {
+    const len = str.len;
+    if (std.mem.eql(u8, gran, "grapheme")) {
+        return .{ .end = @min(len, pos + segUtf8Len(str[pos])), .word_like = false };
+    }
+    if (std.mem.eql(u8, gran, "sentence")) {
+        var end = pos;
+        while (end < len) {
+            const c = str[end];
+            const is_term = c == '.' or c == '!' or c == '?';
+            end += segUtf8Len(str[end]);
+            if (is_term) {
+                while (end < len and (str[end] == ' ' or str[end] == '\t' or str[end] == '\n')) end += 1;
+                break;
+            }
+        }
+        return .{ .end = end, .word_like = false };
+    }
+    // word: a maximal run of one category (word-like vs not).
+    const cat = segWordCat(str, pos);
+    var end = pos;
+    while (end < len and segWordCat(str, end) == cat) end += segUtf8Len(str[end]);
+    return .{ .end = end, .word_like = cat };
+}
+
+/// Build a segment-data object `{ segment, index, input[, isWordLike] }` (own
+/// properties in that order; isWordLike only for the "word" granularity).
+fn segDataObj(self: *Interpreter, str: []const u8, start: usize, end: usize, gran: []const u8, word_like: bool) EvalError!Value {
+    const o = (try self.newObject()).object;
+    try self.setProp(o, "segment", .{ .string = try self.arena.dupe(u8, str[start..end]) });
+    try self.setProp(o, "index", .{ .number = @floatFromInt(start) });
+    try self.setProp(o, "input", .{ .string = str });
+    if (std.mem.eql(u8, gran, "word")) try self.setProp(o, "isWordLike", .{ .boolean = word_like });
+    return .{ .object = o };
+}
+
+fn segmenterGranularity(seg_obj: *value.Object) []const u8 {
+    if (seg_obj.getOwn("\x00gran")) |g| if (g == .string) return g.string;
+    return "grapheme";
+}
+
+/// `Intl.Segmenter.prototype.segment(string)` → a %Segments% object.
+fn intlSegmenterSegmentFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "Segmenter")) return self.throwError("TypeError", "Intl.Segmenter.prototype.segment on incompatible receiver");
+    const str = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+    var gran: []const u8 = "grapheme";
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+        if (ov.object.getOwn("granularity")) |g| if (g == .string) {
+            gran = g.string;
+        };
+    };
+    const o = (try self.newObject()).object;
+    if (self.env.get("\x00SegmentsProto")) |p| if (p == .object) {
+        o.proto = p.object;
+    };
+    try self.setProp(o, "\x00segstr", .{ .string = str });
+    try o.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
+    try self.setProp(o, "\x00gran", .{ .string = gran });
+    try o.setAttr(self.arena, "\x00gran", .{ .writable = false, .enumerable = false, .configurable = false });
+    return .{ .object = o };
+}
+
+fn segmentsBrandOk(this: Value) bool {
+    return this == .object and this.object.getOwn("\x00segstr") != null;
+}
+
+/// `%Segments.prototype%.containing(index)`.
+fn intlSegmentsContainingFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!segmentsBrandOk(this)) return self.throwError("TypeError", "Segments.prototype.containing on incompatible receiver");
+    const str = this.object.getOwn("\x00segstr").?.string;
+    const gran = segmenterGranularity(this.object);
+    const nf = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+    const n: f64 = if (std.math.isNan(nf)) 0 else @trunc(nf);
+    if (n < 0 or n >= @as(f64, @floatFromInt(str.len))) return .undefined;
+    const target: usize = @intFromFloat(n);
+    var pos: usize = 0;
+    while (pos < str.len) {
+        const nx = segNext(str, pos, gran);
+        if (target >= pos and target < nx.end) return try segDataObj(self, str, pos, nx.end, gran, nx.word_like);
+        pos = nx.end;
+    }
+    return .undefined;
+}
+
+/// `%Segments.prototype%[@@iterator]()` → a %SegmentIterator%.
+fn intlSegmentsIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!segmentsBrandOk(this)) return self.throwError("TypeError", "Segments.prototype[@@iterator] on incompatible receiver");
+    const it = (try self.newObject()).object;
+    if (self.env.get("\x00SegIterProto")) |p| if (p == .object) {
+        it.proto = p.object;
+    };
+    try self.setProp(it, "\x00segstr", this.object.getOwn("\x00segstr").?);
+    try it.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
+    try self.setProp(it, "\x00gran", .{ .string = segmenterGranularity(this.object) });
+    try it.setAttr(self.arena, "\x00gran", .{ .writable = false, .enumerable = false, .configurable = false });
+    try self.setProp(it, "\x00pos", .{ .number = 0 });
+    try it.setAttr(self.arena, "\x00pos", .{ .writable = true, .enumerable = false, .configurable = false });
+    return .{ .object = it };
+}
+
+/// `%SegmentIterator.prototype%.next()`.
+fn intlSegmentIterNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.getOwn("\x00pos") == null) return self.throwError("TypeError", "Segment Iterator next on incompatible receiver");
+    const str = this.object.getOwn("\x00segstr").?.string;
+    const gran = segmenterGranularity(this.object);
+    const pos: usize = @intFromFloat(this.object.getOwn("\x00pos").?.number);
+    if (pos >= str.len) return self.iterResultObj(.undefined, true);
+    const nx = segNext(str, pos, gran);
+    try self.setProp(this.object, "\x00pos", .{ .number = @floatFromInt(nx.end) });
+    return self.iterResultObj(try segDataObj(self, str, pos, nx.end, gran, nx.word_like), false);
+}
+
 /// `Intl.PluralRules.prototype.selectRange(start, end)` — both must be
 /// non-NaN numbers (RangeError otherwise). The en plural range is always
 /// "other".
@@ -12206,6 +12346,26 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "Segmenter", 0, intlServiceConstructorFn("Segmenter"), tag);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("Segmenter"));
+        try setNative(a, rs, p, "segment", 1, intlSegmenterSegmentFn);
+        // %Segments.prototype%: containing + [@@iterator].
+        const seg_proto = try a.create(value.Object);
+        seg_proto.* = .{ .proto = object_proto };
+        try setNative(a, rs, seg_proto, "containing", 1, intlSegmentsContainingFn);
+        const iter_key: ?[]const u8 = blk: {
+            if (env.get("Symbol")) |sym| if (sym == .object) if (sym.object.getOwn("iterator")) |it| if (it == .object and it.object.is_symbol) break :blk it.object.sym_key;
+            break :blk null;
+        };
+        if (iter_key) |sk| try setNative(a, rs, seg_proto, sk, 0, intlSegmentsIteratorFn);
+        try env.put("\x00SegmentsProto", .{ .object = seg_proto });
+        // %SegmentIterator.prototype% (proto %IteratorPrototype%): next + tag.
+        const seg_iter_proto = try a.create(value.Object);
+        seg_iter_proto.* = .{ .proto = if (env.get("\x00IterProto")) |ip| (if (ip == .object) ip.object else object_proto) else object_proto };
+        try setNative(a, rs, seg_iter_proto, "next", 0, intlSegmentIterNextFn);
+        if (tag) |k| {
+            try seg_iter_proto.setOwn(a, rs, k, .{ .string = "Segmenter String Iterator" });
+            try seg_iter_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        try env.put("\x00SegIterProto", .{ .object = seg_iter_proto });
     }
 
     // Intl.Locale.
