@@ -12069,6 +12069,17 @@ fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
 /// The resolved per-unit style for a DurationFormat unit (matching what
 /// resolvedOptions reports): the explicit option, else the base style — with
 /// "digital" making hours/minutes/seconds "numeric".
+/// Digital style displays a zero "minutes" when a numeric "hours" precedes and
+/// seconds (or sub-seconds) will be shown — "1:00:03" rather than "1:03".
+fn durMinutesRequired(ov: ?Value, need_sep: bool, unit: []const u8, vals: [10]f64) bool {
+    if (!std.mem.eql(u8, unit, "minutes") or !need_sep) return false;
+    var sd: []const u8 = "auto";
+    if (ov) |o| if (o == .object) if (o.object.getOwn("secondsDisplay")) |s| if (s == .string) {
+        sd = s.string;
+    };
+    return std.mem.eql(u8, sd, "always") or vals[6] != 0 or vals[7] != 0 or vals[8] != 0 or vals[9] != 0;
+}
+
 fn durUnitStyle(ov: ?Value, base: []const u8, unit: []const u8) []const u8 {
     if (ov) |o| if (o == .object) if (o.object.getOwn(unit)) |s| if (s == .string) return s.string;
     if (std.mem.eql(u8, base, "digital")) {
@@ -12131,17 +12142,20 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
             if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) break :blk dv.string;
             break :blk "auto";
         };
-        if (uval != 0 or !std.mem.eql(u8, display, "auto")) {
+        if (uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals)) {
             const sign_never = !first;
             first = false;
             const s = try durFmtVal(self, locale, uval, style, u[0 .. u.len - 1], sign_never);
             const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
-            if (numeric and need_sep and items.items.len > 0) {
+            // Once a numeric run starts (need_sep latches), every later unit
+            // appends to it with ":" — even standalone ones (digital
+            // "4:5:6:7 millisecond").
+            if (need_sep and items.items.len > 0) {
                 items.items[items.items.len - 1] = try std.fmt.allocPrint(self.arena, "{s}:{s}", .{ items.items[items.items.len - 1], s });
             } else {
                 try items.append(self.arena, s);
+                if (numeric) need_sep = true;
             }
-            need_sep = numeric;
         }
     }
     // Join the items with ", " (en ListFormat type:"unit").
@@ -12178,22 +12192,22 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             if (ov) |o| if (o == .object) if (o.object.getOwn(u ++ "Display")) |dv| if (dv == .string) break :blk dv.string;
             break :blk "auto";
         };
-        if (uval != 0 or !std.mem.eql(u8, display, "auto")) {
+        if (uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals)) {
             const sign_never = !first;
             first = false;
             const sing = u[0 .. u.len - 1];
             const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, style, sing, sign_never), &.{.{ .number = uval }});
             const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
             var grp: *std.ArrayListUnmanaged(DurPart) = undefined;
-            if (numeric and need_sep and groups.items.len > 0) {
+            if (need_sep and groups.items.len > 0) {
                 grp = &groups.items[groups.items.len - 1];
                 try grp.append(self.arena, .{ .typ = "literal", .value = ":", .unit = null });
             } else {
                 try groups.append(self.arena, .empty);
                 grp = &groups.items[groups.items.len - 1];
+                if (numeric) need_sep = true;
             }
             for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
-            need_sep = numeric;
         }
     }
     // Flatten: ", " literal (en ListFormat type:unit) between element groups.
