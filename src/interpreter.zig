@@ -13112,10 +13112,12 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 var style: []const u8 = "long";
                 var numeric: []const u8 = "always";
                 if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
-                    const sv = try self.getProperty(ov, "style");
-                    if (sv == .string) style = sv.string;
-                    const nv = try self.getProperty(ov, "numeric");
-                    if (nv == .string) numeric = nv.string;
+                    if (ov.object.getOwn("style")) |sv| if (sv == .string) {
+                        style = sv.string;
+                    };
+                    if (ov.object.getOwn("numeric")) |nv| if (nv == .string) {
+                        numeric = nv.string;
+                    };
                 };
                 try self.setProp(o, "style", .{ .string = style });
                 try self.setProp(o, "numeric", .{ .string = numeric });
@@ -13124,10 +13126,12 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 var typ: []const u8 = "conjunction";
                 var style: []const u8 = "long";
                 if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
-                    const tv = try self.getProperty(ov, "type");
-                    if (tv == .string) typ = tv.string;
-                    const sv = try self.getProperty(ov, "style");
-                    if (sv == .string) style = sv.string;
+                    if (ov.object.getOwn("type")) |tv| if (tv == .string) {
+                        typ = tv.string;
+                    };
+                    if (ov.object.getOwn("style")) |sv| if (sv == .string) {
+                        style = sv.string;
+                    };
                 };
                 try self.setProp(o, "type", .{ .string = typ });
                 try self.setProp(o, "style", .{ .string = style });
