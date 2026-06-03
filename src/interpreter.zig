@@ -10736,65 +10736,94 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r: DtfOptions) EvalErro
     try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
 }
 
-/// Validate the Intl.NumberFormat options bag at construction time (the engine
-/// otherwise formats lazily): currency style requires a well-formed currency
-/// code, and the digit-count options must be in range (RangeError otherwise).
-fn nfValidateOptions(self: *Interpreter, raw: Value) EvalError!void {
-    const numRange = struct {
-        fn check(s: *Interpreter, opts: Value, name: []const u8, lo: f64, hi: f64) EvalError!void {
-            const v = try s.getProperty(opts, name);
-            if (v == .undefined) return;
-            const n = try s.toNumberV(v);
-            // GetNumberOption: NaN or out of [lo, hi] is a RangeError.
-            if (std.math.isNan(n) or n < lo or n > hi) return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "{s} value is out of range", .{name}));
-        }
-    }.check;
-    const sv = try self.getProperty(raw, "style");
-    if (sv == .string and std.mem.eql(u8, sv.string, "currency")) {
-        const cv = try self.getProperty(raw, "currency");
-        if (cv == .undefined) return self.throwError("TypeError", "currency code is required with style \"currency\"");
-        const code = try self.toStringV(cv);
-        // A well-formed currency code is exactly three ASCII letters.
-        if (code.len != 3 or !std.ascii.isAlphabetic(code[0]) or !std.ascii.isAlphabetic(code[1]) or !std.ascii.isAlphabetic(code[2])) {
-            return self.throwError("RangeError", "invalid currency code");
-        }
-    }
-    try numRange(self, raw, "minimumIntegerDigits", 1, 21);
-    try numRange(self, raw, "minimumFractionDigits", 0, 100);
-    try numRange(self, raw, "maximumFractionDigits", 0, 100);
-    try numRange(self, raw, "minimumSignificantDigits", 1, 21);
-    try numRange(self, raw, "maximumSignificantDigits", 1, 21);
+/// Read, validate, and normalize the Intl.NumberFormat options bag ONCE at
+/// construction, in the exact spec order (constructor-option-read-order asserts
+/// the observed getter sequence). Returns a plain object carrying the canonical
+/// values, which both `format` and `resolvedOptions` read (so user getters fire
+/// exactly once and bad values throw at construction).
+fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
+    const ro = (try self.newObject()).object;
+    if (raw != .object) return ro;
 
-    const oneOf = struct {
-        fn check(s: *Interpreter, opts: Value, name: []const u8, allowed: []const []const u8) EvalError!void {
+    const H = struct {
+        // GetOption(string) with an allowed set; stores the canonical value when
+        // present (RangeError otherwise). Returns the value or null.
+        fn str(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
             const v = try s.getProperty(opts, name);
-            if (v == .undefined) return;
-            const str = try s.toStringV(v);
-            for (allowed) |a| if (std.mem.eql(u8, str, a)) return;
+            if (v == .undefined) return null;
+            const sval = try s.toStringV(v);
+            for (allowed) |a| if (std.mem.eql(u8, sval, a)) {
+                try s.setProp(dst, name, .{ .string = a });
+                return a;
+            };
             return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "invalid value for option {s}", .{name}));
         }
-    }.check;
-    try oneOf(self, raw, "style", &.{ "decimal", "percent", "currency", "unit" });
-    try oneOf(self, raw, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" });
-    try oneOf(self, raw, "currencySign", &.{ "standard", "accounting" });
-    try oneOf(self, raw, "notation", &.{ "standard", "scientific", "engineering", "compact" });
-    try oneOf(self, raw, "compactDisplay", &.{ "short", "long" });
-    try oneOf(self, raw, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" });
-    try oneOf(self, raw, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
-    try oneOf(self, raw, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
-    try oneOf(self, raw, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
+        // GetNumberOption in [lo, hi]; stores the integer value when present.
+        fn num(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, lo: f64, hi: f64) EvalError!void {
+            const v = try s.getProperty(opts, name);
+            if (v == .undefined) return;
+            const n = @trunc(try s.toNumberV(v));
+            if (std.math.isNan(n) or n < lo or n > hi) return s.throwError("RangeError", try std.fmt.allocPrint(s.arena, "{s} value is out of range", .{name}));
+            try s.setProp(dst, name, .{ .number = n });
+        }
+    };
 
-    // roundingIncrement must be one of the spec's allowed step values.
+    _ = try self.getProperty(raw, "localeMatcher"); // read & discard (validated as a string elsewhere)
+    const nsv = try self.getProperty(raw, "numberingSystem");
+    if (nsv != .undefined) {
+        const ns = try std.ascii.allocLowerString(self.arena, try self.toStringV(nsv));
+        if (!dtfWellFormedType(ns)) return self.throwError("RangeError", "invalid numberingSystem");
+        try self.setProp(ro, "numberingSystem", .{ .string = ns });
+    }
+    // SetNumberFormatUnitOptions: style, then currency*/unit* (all read).
+    const style = (try H.str(self, raw, ro, "style", &.{ "decimal", "percent", "currency", "unit" })) orelse "decimal";
+    const cv = try self.getProperty(raw, "currency");
+    const cur_code: ?[]const u8 = if (cv == .undefined) null else try self.toStringV(cv);
+    const cdisp = try H.str(self, raw, ro, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" });
+    const csign = try H.str(self, raw, ro, "currencySign", &.{ "standard", "accounting" });
+    const uv = try self.getProperty(raw, "unit");
+    const unit: ?[]const u8 = if (uv == .undefined) null else try self.toStringV(uv);
+    const udisp = try H.str(self, raw, ro, "unitDisplay", &.{ "short", "long", "narrow" });
+    if (std.mem.eql(u8, style, "currency")) {
+        if (cur_code == null) return self.throwError("TypeError", "currency code is required with style \"currency\"");
+        const code = cur_code.?;
+        if (code.len != 3 or !std.ascii.isAlphabetic(code[0]) or !std.ascii.isAlphabetic(code[1]) or !std.ascii.isAlphabetic(code[2])) return self.throwError("RangeError", "invalid currency code");
+        try self.setProp(ro, "currency", .{ .string = try std.ascii.allocUpperString(self.arena, code) });
+        if (cdisp == null) try self.setProp(ro, "currencyDisplay", .{ .string = "symbol" });
+        if (csign == null) try self.setProp(ro, "currencySign", .{ .string = "standard" });
+    } else if (std.mem.eql(u8, style, "unit")) {
+        if (unit == null) return self.throwError("TypeError", "unit is required with style \"unit\"");
+        try self.setProp(ro, "unit", .{ .string = unit.? });
+        if (udisp == null) try self.setProp(ro, "unitDisplay", .{ .string = "short" });
+    }
+    // notation, then SetNumberFormatDigitOptions, then compactDisplay/useGrouping/signDisplay.
+    _ = try H.str(self, raw, ro, "notation", &.{ "standard", "scientific", "engineering", "compact" });
+    try H.num(self, raw, ro, "minimumIntegerDigits", 1, 21);
+    try H.num(self, raw, ro, "minimumFractionDigits", 0, 100);
+    try H.num(self, raw, ro, "maximumFractionDigits", 0, 100);
+    try H.num(self, raw, ro, "minimumSignificantDigits", 1, 21);
+    try H.num(self, raw, ro, "maximumSignificantDigits", 1, 21);
     const riv = try self.getProperty(raw, "roundingIncrement");
     if (riv != .undefined) {
-        const n = try self.toNumberV(riv);
+        const n = @trunc(try self.toNumberV(riv));
         const allowed = [_]f64{ 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000 };
         var ok = false;
         for (allowed) |a| if (n == a) {
             ok = true;
         };
         if (!ok) return self.throwError("RangeError", "invalid roundingIncrement");
+        try self.setProp(ro, "roundingIncrement", .{ .number = n });
     }
+    _ = try H.str(self, raw, ro, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
+    _ = try H.str(self, raw, ro, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
+    _ = try H.str(self, raw, ro, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
+    _ = try H.str(self, raw, ro, "compactDisplay", &.{ "short", "long" });
+    const ug = try self.getProperty(raw, "useGrouping");
+    if (ug != .undefined) {
+        if (ug == .boolean) try self.setProp(ro, "useGrouping", .{ .boolean = ug.boolean }) else try self.setProp(ro, "useGrouping", .{ .string = try self.toStringV(ug) });
+    }
+    _ = try H.str(self, raw, ro, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" });
+    return ro;
 }
 
 /// services that allow it (NumberFormat/DateTimeFormat/Collator).
@@ -10838,11 +10867,10 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const r = try dtfProcessOptions(self, raw);
                 try dtfStoreOptions(self, o, r);
             } else if (comptime std.mem.eql(u8, service, "NumberFormat")) {
-                if (args.len > 1 and args[1] == .object) {
-                    try nfValidateOptions(self, args[1]);
-                    try self.setProp(o, "\x00opts", args[1]);
-                    try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
-                }
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                const ro = try nfProcessOptions(self, raw);
+                try self.setProp(o, "\x00opts", .{ .object = ro });
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (args.len > 1 and args[1] == .object) {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
