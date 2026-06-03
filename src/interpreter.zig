@@ -10559,6 +10559,183 @@ fn intlLocaleToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value
 
 /// A generic Intl service constructor: stores the resolved locale, marks the
 /// brand with `\x00intl` = `service`, and supports `new`-less call for the few
+/// A well-formed Unicode locale extension type: one or more 3–8-alphanumeric
+/// segments joined by "-". Used to validate the `calendar`/`numberingSystem`
+/// options (GetOption rejects malformed types with a RangeError).
+fn dtfWellFormedType(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var it = std.mem.splitScalar(u8, s, '-');
+    while (it.next()) |seg| {
+        if (seg.len < 3 or seg.len > 8) return false;
+        for (seg) |c| if (!std.ascii.isAlphanumeric(c)) return false;
+    }
+    return true;
+}
+
+/// GetOption(opts, name, "string", «allowed», fallback): read a property,
+/// ToString-coerce it (running getters/toString), and require membership in
+/// `allowed` (RangeError otherwise). Returns the canonical allowed string, or
+/// `fallback` when the property is undefined.
+fn dtfGetStr(self: *Interpreter, opts: Value, name: []const u8, allowed: []const []const u8, fallback: ?[]const u8) EvalError!?[]const u8 {
+    const v = try self.getProperty(opts, name);
+    if (v == .undefined) return fallback;
+    const s = try self.toStringV(v);
+    for (allowed) |a| if (std.mem.eql(u8, s, a)) return a;
+    return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid value '{s}' for option {s}", .{ s, name }));
+}
+
+/// GetOption for a free-form Unicode type value (calendar/numberingSystem):
+/// ToString then well-formedness check.
+fn dtfGetType(self: *Interpreter, opts: Value, name: []const u8) EvalError!?[]const u8 {
+    const v = try self.getProperty(opts, name);
+    if (v == .undefined) return null;
+    const s = try self.toStringV(v);
+    // The well-formedness check runs on the raw value (so a non-ASCII char like
+    // U+0130 İ rejects); the canonical form is then ASCII-lowercased.
+    if (!dtfWellFormedType(s)) return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid value for option {s}", .{name}));
+    return try std.ascii.allocLowerString(self.arena, s);
+}
+
+/// The calendar types a full implementation reports from AvailableCalendars.
+/// An unsupported (or not-yet-adopted) request falls back to the locale default.
+const dtf_available_calendars = [_][]const u8{
+    "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory",
+    "hebrew", "indian", "islamic-civil", "islamic-tbla", "islamic-umalqura",
+    "iso8601", "japanese", "persian", "roc",
+};
+
+/// CanonicalizeUValue("ca", …) plus the AvailableCalendars fallback: apply the
+/// well-known aliases, resolve the deprecated "islamic"/"islamic-rgsa" types,
+/// and drop anything we don't model to the default "gregory".
+fn dtfCanonCalendar(cal: []const u8) []const u8 {
+    const aliases = .{
+        .{ "islamicc", "islamic-civil" },
+        .{ "ethiopic-amete-alem", "ethioaa" },
+        .{ "gregorian", "gregory" },
+    };
+    var c = cal;
+    inline for (aliases) |a| if (std.mem.eql(u8, c, a[0])) {
+        c = a[1];
+    };
+    if (std.mem.eql(u8, c, "islamic") or std.mem.eql(u8, c, "islamic-rgsa")) c = "islamic-civil";
+    for (dtf_available_calendars) |ac| if (std.mem.eql(u8, c, ac)) return c;
+    return "gregory";
+}
+
+/// The processed DateTimeFormat options: the canonical string for each set
+/// component option (empty = not set), plus the cross-cutting fields.
+const DtfOptions = struct {
+    weekday: []const u8 = "",
+    era: []const u8 = "",
+    year: []const u8 = "",
+    month: []const u8 = "",
+    day: []const u8 = "",
+    day_period: []const u8 = "",
+    hour: []const u8 = "",
+    minute: []const u8 = "",
+    second: []const u8 = "",
+    frac_sec: ?u8 = null,
+    time_zone_name: []const u8 = "",
+    date_style: []const u8 = "",
+    time_style: []const u8 = "",
+    calendar: []const u8 = "",
+    numbering_system: []const u8 = "",
+    hour12: ?bool = null,
+    hour_cycle: []const u8 = "",
+    time_zone: []const u8 = "UTC",
+};
+
+/// Process and validate the options bag for Intl.DateTimeFormat per
+/// CreateDateTimeFormat, reading properties in the exact spec order (the
+/// constructor-options-order test asserts the observed getter sequence). Throws
+/// RangeError on out-of-range values and TypeError on a dateStyle/timeStyle vs
+/// explicit-component conflict.
+fn dtfProcessOptions(self: *Interpreter, raw: Value) EvalError!DtfOptions {
+    var r = DtfOptions{};
+    // Read options only when an options object was supplied; the required/default
+    // logic below still runs for `new Intl.DateTimeFormat()` (no options).
+    if (raw == .object) {
+        const style3 = [_][]const u8{ "long", "short", "narrow" };
+        const numeric2 = [_][]const u8{ "2-digit", "numeric" };
+        _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+        if (try dtfGetType(self, raw, "calendar")) |c| r.calendar = c;
+        if (try dtfGetType(self, raw, "numberingSystem")) |c| r.numbering_system = c;
+        const h12v = try self.getProperty(raw, "hour12");
+        if (h12v != .undefined) r.hour12 = h12v.toBoolean();
+        if (try dtfGetStr(self, raw, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, null)) |c| r.hour_cycle = c;
+        const tzv = try self.getProperty(raw, "timeZone");
+        if (tzv != .undefined) r.time_zone = try self.toStringV(tzv);
+        if (try dtfGetStr(self, raw, "weekday", &style3, null)) |c| r.weekday = c;
+        if (try dtfGetStr(self, raw, "era", &style3, null)) |c| r.era = c;
+        if (try dtfGetStr(self, raw, "year", &numeric2, null)) |c| r.year = c;
+        if (try dtfGetStr(self, raw, "month", &.{ "2-digit", "numeric", "long", "short", "narrow" }, null)) |c| r.month = c;
+        if (try dtfGetStr(self, raw, "day", &numeric2, null)) |c| r.day = c;
+        if (try dtfGetStr(self, raw, "dayPeriod", &style3, null)) |c| r.day_period = c;
+        if (try dtfGetStr(self, raw, "hour", &numeric2, null)) |c| r.hour = c;
+        if (try dtfGetStr(self, raw, "minute", &numeric2, null)) |c| r.minute = c;
+        if (try dtfGetStr(self, raw, "second", &numeric2, null)) |c| r.second = c;
+        const fsdv = try self.getProperty(raw, "fractionalSecondDigits");
+        if (fsdv != .undefined) {
+            const n = try self.toNumberV(fsdv);
+            if (std.math.isNan(n) or n < 1 or n > 3) return self.throwError("RangeError", "fractionalSecondDigits must be between 1 and 3");
+            r.frac_sec = @intFromFloat(@floor(n));
+        }
+        if (try dtfGetStr(self, raw, "timeZoneName", &.{ "short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric" }, null)) |c| r.time_zone_name = c;
+        _ = try dtfGetStr(self, raw, "formatMatcher", &.{ "basic", "best fit" }, "best fit");
+        if (try dtfGetStr(self, raw, "dateStyle", &.{ "full", "long", "medium", "short" }, null)) |c| r.date_style = c;
+        if (try dtfGetStr(self, raw, "timeStyle", &.{ "full", "long", "medium", "short" }, null)) |c| r.time_style = c;
+    }
+    // Canonicalize the time zone (we only model UTC) and map the deprecated
+    // "islamic"/"islamic-rgsa" calendars to a concrete available fallback.
+    if (std.ascii.eqlIgnoreCase(r.time_zone, "UTC") or std.ascii.eqlIgnoreCase(r.time_zone, "Etc/UTC") or std.ascii.eqlIgnoreCase(r.time_zone, "Etc/GMT")) r.time_zone = "UTC";
+    if (r.calendar.len > 0) r.calendar = dtfCanonCalendar(r.calendar);
+
+    // dateStyle/timeStyle cannot be combined with explicit component options.
+    const has_comp = r.weekday.len + r.era.len + r.year.len + r.month.len + r.day.len +
+        r.day_period.len + r.hour.len + r.minute.len + r.second.len + r.time_zone_name.len > 0 or r.frac_sec != null;
+    if ((r.date_style.len > 0 or r.time_style.len > 0) and has_comp) {
+        return self.throwError("TypeError", "dateStyle/timeStyle may not be used with explicit date-time component options");
+    }
+    // Default the date components to numeric when nothing was requested.
+    if (!has_comp and r.date_style.len == 0 and r.time_style.len == 0) {
+        r.year = "numeric";
+        r.month = "numeric";
+        r.day = "numeric";
+    }
+    return r;
+}
+
+/// Build the normalized options object that the instance stores under
+/// `\x00opts` (read by both `format` and `resolvedOptions`).
+fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r: DtfOptions) EvalError!void {
+    const ro = (try self.newObject()).object;
+    const S = struct {
+        fn put(s: *Interpreter, obj: *value.Object, k: []const u8, v: []const u8) EvalError!void {
+            if (v.len > 0) try s.setProp(obj, k, .{ .string = v });
+        }
+    };
+    try S.put(self, ro, "weekday", r.weekday);
+    try S.put(self, ro, "era", r.era);
+    try S.put(self, ro, "year", r.year);
+    try S.put(self, ro, "month", r.month);
+    try S.put(self, ro, "day", r.day);
+    try S.put(self, ro, "dayPeriod", r.day_period);
+    try S.put(self, ro, "hour", r.hour);
+    try S.put(self, ro, "minute", r.minute);
+    try S.put(self, ro, "second", r.second);
+    if (r.frac_sec) |f| try self.setProp(ro, "fractionalSecondDigits", .{ .number = @floatFromInt(f) });
+    try S.put(self, ro, "timeZoneName", r.time_zone_name);
+    try S.put(self, ro, "dateStyle", r.date_style);
+    try S.put(self, ro, "timeStyle", r.time_style);
+    try S.put(self, ro, "calendar", r.calendar);
+    try S.put(self, ro, "numberingSystem", r.numbering_system);
+    try S.put(self, ro, "hourCycle", r.hour_cycle);
+    try S.put(self, ro, "timeZone", r.time_zone);
+    if (r.hour12) |h| try self.setProp(ro, "hour12", .{ .boolean = h });
+    try self.setProp(o, "\x00opts", .{ .object = ro });
+    try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+}
+
 /// services that allow it (NumberFormat/DateTimeFormat/Collator).
 fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
     return struct {
@@ -10592,8 +10769,15 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
             try self.setProp(o, "\x00locale", .{ .string = resolved });
             try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
-            // Keep the options object (if any) for resolvedOptions.
-            if (args.len > 1 and args[1] == .object) {
+            // DateTimeFormat validates and normalizes its options eagerly (so
+            // bad values throw at construction and resolvedOptions can reflect
+            // canonical values); other services keep the raw options bag.
+            if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                const r = try dtfProcessOptions(self, raw);
+                try dtfStoreOptions(self, o, r);
+            } else if (args.len > 1 and args[1] == .object) {
+                // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             }
@@ -10661,9 +10845,28 @@ fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
         o_minute = try get(self, ov, "minute");
         o_second = try get(self, ov, "second");
         any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len > 0;
+        const hc = try get(self, ov, "hourCycle");
         const h12 = try self.getProperty(ov, "hour12");
-        const hc = try self.getProperty(ov, "hourCycle");
-        if (h12 == .boolean) hour12 = h12.boolean else if (hc == .string) hour12 = std.mem.eql(u8, hc.string, "h11") or std.mem.eql(u8, hc.string, "h12");
+        if (h12 == .boolean) hour12 = h12.boolean else if (hc.len > 0) hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
+        // dateStyle/timeStyle expand to a representative set of components (an
+        // en approximation; the localized patterns/time-zone parts are not
+        // modeled). Both can't combine with explicit components (enforced at
+        // construction), so it's safe to overwrite here.
+        const ds = try get(self, ov, "dateStyle");
+        const tstyle = try get(self, ov, "timeStyle");
+        if (ds.len > 0) {
+            any_comp = true;
+            o_weekday = if (eq(ds, "full")) "long" else "";
+            o_month = if (eq(ds, "short")) "numeric" else if (eq(ds, "medium")) "short" else "long";
+            o_day = "numeric";
+            o_year = if (eq(ds, "short")) "2-digit" else "numeric";
+        }
+        if (tstyle.len > 0) {
+            any_comp = true;
+            o_hour = "numeric";
+            o_minute = "2-digit";
+            o_second = if (eq(tstyle, "short")) "" else "2-digit";
+        }
     };
     if (!any_comp) {
         o_year = "numeric";
@@ -11076,9 +11279,36 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "roundingPriority", .{ .string = "auto" });
                 try self.setProp(o, "trailingZeroDisplay", .{ .string = "auto" });
             } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
-                try self.setProp(o, "numberingSystem", .{ .string = "latn" });
-                try self.setProp(o, "calendar", .{ .string = "iso8601" });
-                try self.setProp(o, "timeZone", .{ .string = "UTC" });
+                // Reflect the normalized options (stored under \x00opts at
+                // construction) in the spec's resolvedOptions property order.
+                const ro: ?Value = this.object.getOwn("\x00opts");
+                const get = struct {
+                    fn s(slf: *Interpreter, src: ?Value, k: []const u8) ?Value {
+                        _ = slf;
+                        if (src) |sv| if (sv == .object) if (sv.object.getOwn(k)) |v| return v;
+                        return null;
+                    }
+                }.s;
+                const cal = get(self, ro, "calendar");
+                try self.setProp(o, "calendar", if (cal) |c| .{ .string = c.string } else .{ .string = "gregory" });
+                const ns = get(self, ro, "numberingSystem");
+                try self.setProp(o, "numberingSystem", if (ns) |c| .{ .string = c.string } else .{ .string = "latn" });
+                const tz = get(self, ro, "timeZone");
+                try self.setProp(o, "timeZone", if (tz) |c| .{ .string = c.string } else .{ .string = "UTC" });
+                // Component / style fields are reflected only when set, in order.
+                const has_style = get(self, ro, "dateStyle") != null or get(self, ro, "timeStyle") != null;
+                const has_time = get(self, ro, "hour") != null or has_style;
+                if (has_time) {
+                    if (get(self, ro, "hourCycle")) |hc| {
+                        try self.setProp(o, "hourCycle", hc);
+                        try self.setProp(o, "hour12", .{ .boolean = std.mem.eql(u8, hc.string, "h11") or std.mem.eql(u8, hc.string, "h12") });
+                    } else if (get(self, ro, "hour12")) |h| {
+                        try self.setProp(o, "hour12", h);
+                    }
+                }
+                inline for (.{ "weekday", "era", "year", "month", "day", "dayPeriod", "hour", "minute", "second", "fractionalSecondDigits", "timeZoneName", "dateStyle", "timeStyle" }) |k| {
+                    if (get(self, ro, k)) |v| try self.setProp(o, k, v);
+                }
             }
             return .{ .object = o };
         }
