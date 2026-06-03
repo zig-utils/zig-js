@@ -11207,6 +11207,13 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 if (raw == .object) {
                     if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| try self.setProp(ro, "usage", .{ .string = u });
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+                    // collation: a well-formed Unicode collation type, else RangeError.
+                    const cov = try self.getProperty(raw, "collation");
+                    if (cov != .undefined) {
+                        const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringV(cov));
+                        if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
+                        try self.setProp(ro, "collation", .{ .string = cstr });
+                    }
                     const num = try self.getProperty(raw, "numeric");
                     if (num != .undefined) try self.setProp(ro, "numeric", .{ .boolean = num.toBoolean() });
                     if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| try self.setProp(ro, "caseFirst", .{ .string = cf });
