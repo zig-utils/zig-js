@@ -10798,12 +10798,20 @@ const en_days_long = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", 
 const en_days_short = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
 
-/// `Intl.DateTimeFormat.prototype.format` for the `en` locale (UTC, ISO calendar).
-/// Covers the common component options; locale-specific extras (dayPeriod, era,
-/// timeZoneName, non-en patterns) are not modeled.
-fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.format on incompatible receiver");
+/// One element of a DateTimeFormat formatToParts result: a field `type`
+/// ("weekday"/"year"/…/"literal") and its formatted `value`.
+const DtfPart = struct { typ: []const u8, value: []const u8 };
+
+/// Build the formatted parts for an Intl.DateTimeFormat (en locale, UTC, ISO
+/// calendar). Shared by `format` (joins the values) and `formatToParts`. Covers
+/// the common component options; locale-specific extras (era, timeZoneName,
+/// non-en patterns) are not modeled.
+fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(DtfPart) {
+    // A Temporal.ZonedDateTime must be formatted via its own toLocaleString
+    // (it carries a time zone the formatter would have to reconcile) — reject it.
+    if (args.len > 0 and tIsTemporal(args[0], .zoned_date_time)) {
+        return self.throwError("TypeError", "Intl.DateTimeFormat does not support Temporal.ZonedDateTime; use Temporal.ZonedDateTime.prototype.toLocaleString");
+    }
     // The value to format: undefined → "now" (deterministic epoch 0); else a
     // time value, TimeClip'd.
     const ms: f64 = if (args.len == 0 or args[0] == .undefined) 0 else try self.toNumberV(args[0]);
@@ -10874,64 +10882,107 @@ fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
         o_day = "numeric";
     }
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var parts: std.ArrayListUnmanaged(DtfPart) = .empty;
+    const P = struct {
+        fn lit(s: *Interpreter, p: *std.ArrayListUnmanaged(DtfPart), v: []const u8) EvalError!void {
+            try p.append(s.arena, .{ .typ = "literal", .value = v });
+        }
+        fn num(s: *Interpreter, p: *std.ArrayListUnmanaged(DtfPart), typ: []const u8, v: u64, two: bool) EvalError!void {
+            const str = if (two) try std.fmt.allocPrint(s.arena, "{d:0>2}", .{v}) else try std.fmt.allocPrint(s.arena, "{d}", .{v});
+            try p.append(s.arena, .{ .typ = typ, .value = str });
+        }
+    };
+
     // Weekday prefix.
     if (o_weekday.len > 0) {
         const name = if (eq(o_weekday, "narrow")) en_days_narrow[wday] else if (eq(o_weekday, "short")) en_days_short[wday] else en_days_long[wday];
-        try buf.appendSlice(self.arena, name);
+        try parts.append(self.arena, .{ .typ = "weekday", .value = name });
     }
     // Date part. Numeric month → "M/D/YYYY"; long/short month → "Month D, YYYY".
     const have_date = o_year.len > 0 or o_month.len > 0 or o_day.len > 0;
     if (have_date) {
-        if (buf.items.len > 0) try buf.appendSlice(self.arena, ", ");
+        if (parts.items.len > 0) try P.lit(self, &parts, ", ");
         const m_idx = civ.m - 1;
         const month_textual = o_month.len > 0 and !eq(o_month, "numeric") and !eq(o_month, "2-digit");
         if (month_textual) {
             const mn = if (eq(o_month, "narrow")) en_months_narrow[m_idx] else if (eq(o_month, "short")) en_months_short[m_idx] else en_months_long[m_idx];
-            try buf.appendSlice(self.arena, mn);
-            if (o_day.len > 0) try tfmt(self, &buf, " {d}", .{civ.d});
-            if (o_year.len > 0) try tfmt(self, &buf, ", {s}", .{try fmtYear(self, civ.y, o_year)});
+            try parts.append(self.arena, .{ .typ = "month", .value = mn });
+            if (o_day.len > 0) {
+                try P.lit(self, &parts, " ");
+                try P.num(self, &parts, "day", civ.d, false);
+            }
+            if (o_year.len > 0) {
+                try P.lit(self, &parts, ", ");
+                try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, civ.y, o_year) });
+            }
         } else {
             // All-numeric "M/D/Y" (only the requested parts, slash-separated).
             var first = true;
             if (o_month.len > 0) {
-                try appendNum(self, &buf, &first, '/', civ.m, eq(o_month, "2-digit"));
+                try P.num(self, &parts, "month", civ.m, eq(o_month, "2-digit"));
+                first = false;
             }
             if (o_day.len > 0) {
-                try appendNum(self, &buf, &first, '/', civ.d, eq(o_day, "2-digit"));
+                if (!first) try P.lit(self, &parts, "/");
+                first = false;
+                try P.num(self, &parts, "day", civ.d, eq(o_day, "2-digit"));
             }
             if (o_year.len > 0) {
-                if (!first) try buf.append(self.arena, '/');
+                if (!first) try P.lit(self, &parts, "/");
                 first = false;
-                try buf.appendSlice(self.arena, try fmtYear(self, civ.y, o_year));
+                try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, civ.y, o_year) });
             }
         }
     }
     // Time part: "h:mm:ss AM/PM" (or 24-hour).
     const have_time = o_hour.len > 0 or o_minute.len > 0 or o_second.len > 0;
     if (have_time) {
-        if (buf.items.len > 0) try buf.appendSlice(self.arena, ", ");
+        if (parts.items.len > 0) try P.lit(self, &parts, ", ");
         var h = hour24;
         var ap: []const u8 = "";
         if (hour12) {
-            ap = if (h < 12) " AM" else " PM";
+            ap = if (h < 12) "AM" else "PM";
             h = h % 12;
             if (h == 0) h = 12;
         }
-        if (o_hour.len > 0) {
-            if (eq(o_hour, "2-digit")) try tfmt(self, &buf, "{d:0>2}", .{h}) else try tfmt(self, &buf, "{d}", .{h});
-        }
+        if (o_hour.len > 0) try P.num(self, &parts, "hour", h, eq(o_hour, "2-digit"));
         if (o_minute.len > 0) {
-            if (o_hour.len > 0) try buf.append(self.arena, ':');
-            try tfmt(self, &buf, "{d:0>2}", .{minute});
+            if (o_hour.len > 0) try P.lit(self, &parts, ":");
+            try P.num(self, &parts, "minute", minute, true);
         }
         if (o_second.len > 0) {
-            if (o_hour.len > 0 or o_minute.len > 0) try buf.append(self.arena, ':');
-            try tfmt(self, &buf, "{d:0>2}", .{second});
+            if (o_hour.len > 0 or o_minute.len > 0) try P.lit(self, &parts, ":");
+            try P.num(self, &parts, "second", second, true);
         }
-        try buf.appendSlice(self.arena, ap);
+        if (ap.len > 0) {
+            try P.lit(self, &parts, " ");
+            try parts.append(self.arena, .{ .typ = "dayPeriod", .value = ap });
+        }
     }
+    return parts;
+}
+
+fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.format on incompatible receiver");
+    const parts = try dtfBuildParts(self, this, args);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatToParts on incompatible receiver");
+    const parts = try dtfBuildParts(self, this, args);
+    const arr = (try self.newArray()).object;
+    for (parts.items) |p| {
+        const o = (try self.newObject()).object;
+        try self.setProp(o, "type", .{ .string = p.typ });
+        try self.setProp(o, "value", .{ .string = p.value });
+        try arr.elements.append(self.arena, .{ .object = o });
+    }
+    return .{ .object = arr };
 }
 
 fn fmtYear(self: *Interpreter, y: i64, fmt: []const u8) EvalError![]const u8 {
@@ -11374,6 +11425,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         const p = try Svc.install(a, rs, env, ns, object_proto, "DateTimeFormat", 0, intlServiceConstructorFn("DateTimeFormat"), tag);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DateTimeFormat"));
         try setNative(a, rs, p, "format", 1, intlDateTimeFormatFn);
+        try setNative(a, rs, p, "formatToParts", 1, intlDateTimeFormatToPartsFn);
     }
     {
         const p = try Svc.install(a, rs, env, ns, object_proto, "Collator", 0, intlServiceConstructorFn("Collator"), tag);
