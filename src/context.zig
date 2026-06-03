@@ -1293,6 +1293,17 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try expectEvalStr("WeakSet", "WeakSet.prototype[Symbol.toStringTag]");
 }
 
+test "Math.f16round rounds to binary16" {
+    try std.testing.expect((try evalIn("typeof Math.f16round === 'function'")).boolean);
+    try std.testing.expectEqual(@as(f64, 1.5), (try evalIn("Math.f16round(1.5)")).number); // exact in f16
+    try std.testing.expectEqual(@as(f64, 65504), (try evalIn("Math.f16round(65504)")).number); // max f16
+    try std.testing.expect((try evalIn("Math.f16round(65536)")).number == std.math.inf(f64)); // overflows f16
+    try std.testing.expect(std.math.isNan((try evalIn("Math.f16round(NaN)")).number));
+    try std.testing.expect((try evalIn("Math.f16round(Infinity)")).number == std.math.inf(f64));
+    // 1.337 is not representable; rounds to the nearest binary16 value.
+    try std.testing.expectEqual(@as(f64, 1.3369140625), (try evalIn("Math.f16round(1.337)")).number);
+}
+
 test "Math: signed-zero, pow/hypot edge cases, prototype + toStringTag" {
     // max prefers +0, min prefers -0.
     try std.testing.expect((try evalIn("1 / Math.max(-0, 0)")).number == std.math.inf(f64));

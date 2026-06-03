@@ -367,6 +367,9 @@ pub const mfns = struct {
     pub fn fround(x: f64) f64 {
         return @floatCast(@as(f32, @floatCast(x))); // round to nearest float32
     }
+    pub fn f16round(x: f64) f64 {
+        return @floatCast(@as(f16, @floatCast(x))); // round to nearest binary16 (ES2025)
+    }
 };
 
 pub fn mathAtan2(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

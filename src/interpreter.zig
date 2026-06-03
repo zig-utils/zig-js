@@ -13640,6 +13640,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, math_obj, "log1p", 1, builtins.unaryMath(builtins.mfns.log1p));
     try setNative(a, root_shape, math_obj, "cbrt", 1, builtins.unaryMath(builtins.mfns.cbrt));
     try setNative(a, root_shape, math_obj, "fround", 1, builtins.unaryMath(builtins.mfns.fround));
+    try setNative(a, root_shape, math_obj, "f16round", 1, builtins.unaryMath(builtins.mfns.f16round));
     try setNative(a, root_shape, math_obj, "atan2", 2, builtins.mathAtan2);
     try setNative(a, root_shape, math_obj, "hypot", 2, builtins.mathHypot);
     try setNative(a, root_shape, math_obj, "clz32", 1, builtins.mathClz32);
