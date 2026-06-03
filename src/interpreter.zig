@@ -10935,6 +10935,9 @@ fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
     return ro;
 }
 
+/// The ten Intl.DurationFormat units, in resolvedOptions / format order.
+const duration_units = [_][]const u8{ "years", "months", "weeks", "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds" };
+
 /// services that allow it (NumberFormat/DateTimeFormat/Collator).
 fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
     return struct {
@@ -11044,6 +11047,38 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |se| try self.setProp(ro, "sensitivity", .{ .string = se });
                     const ip = try self.getProperty(raw, "ignorePunctuation");
                     if (ip != .undefined) try self.setProp(ro, "ignorePunctuation", .{ .boolean = ip.toBoolean() });
+                }
+                try self.setProp(o, "\x00opts", .{ .object = ro });
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                if (raw != .undefined and raw != .object) return self.throwError("TypeError", "options must be an object");
+                const ro = (try self.newObject()).object;
+                var base: []const u8 = "short";
+                if (raw == .object) {
+                    _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+                    if (try dtfGetType(self, raw, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", .{ .string = ns });
+                    base = (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow", "digital" }, "short")).?;
+                    try self.setProp(ro, "style", .{ .string = base });
+                    // Per-unit style + display options (validated; defaults derived below).
+                    const time_units = [_][]const u8{ "hours", "minutes", "seconds" };
+                    inline for (duration_units) |u| {
+                        const is_time = for (time_units) |t| {
+                            if (std.mem.eql(u8, u, t)) break true;
+                        } else false;
+                        const allowed: []const []const u8 = if (is_time) &.{ "long", "short", "narrow", "numeric", "2-digit" } else &.{ "long", "short", "narrow", "numeric" };
+                        if (try dtfGetStr(self, raw, u, allowed, null)) |v| try self.setProp(ro, u, .{ .string = v });
+                        const dkey = u ++ "Display";
+                        if (try dtfGetStr(self, raw, dkey, &.{ "always", "auto" }, null)) |d| try self.setProp(ro, dkey, .{ .string = d });
+                    }
+                    const fd = try self.getProperty(raw, "fractionalDigits");
+                    if (fd != .undefined) {
+                        const n = @trunc(try self.toNumberV(fd));
+                        if (std.math.isNan(n) or n < 0 or n > 9) return self.throwError("RangeError", "fractionalDigits out of range");
+                        try self.setProp(ro, "fractionalDigits", .{ .number = n });
+                    }
+                } else {
+                    try self.setProp(ro, "style", .{ .string = base });
                 }
                 try self.setProp(o, "\x00opts", .{ .object = ro });
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -11674,6 +11709,75 @@ fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) 
 /// created lazily and cached (so `nf.format === nf.format`). The bound function
 /// has name "" and length 1. The underlying formatter is stored on the
 /// prototype under the hidden `\x00fmtimpl` key.
+/// en unit names for Intl.DurationFormat by style (singular/plural). "digital"
+/// reuses the short forms for the date units.
+fn durationUnitName(unit: []const u8, style: []const u8, plural: bool) []const u8 {
+    const long = std.mem.eql(u8, style, "long");
+    const narrow = std.mem.eql(u8, style, "narrow");
+    const T = struct { u: []const u8, lo: []const u8, lp: []const u8, sh: []const u8, na: []const u8 };
+    const table = [_]T{
+        .{ .u = "years", .lo = "year", .lp = "years", .sh = "yr", .na = "y" },
+        .{ .u = "months", .lo = "month", .lp = "months", .sh = "mth", .na = "m" },
+        .{ .u = "weeks", .lo = "week", .lp = "weeks", .sh = "wk", .na = "w" },
+        .{ .u = "days", .lo = "day", .lp = "days", .sh = "day", .na = "d" },
+        .{ .u = "hours", .lo = "hour", .lp = "hours", .sh = "hr", .na = "h" },
+        .{ .u = "minutes", .lo = "minute", .lp = "minutes", .sh = "min", .na = "min" },
+        .{ .u = "seconds", .lo = "second", .lp = "seconds", .sh = "sec", .na = "s" },
+        .{ .u = "milliseconds", .lo = "millisecond", .lp = "milliseconds", .sh = "ms", .na = "ms" },
+        .{ .u = "microseconds", .lo = "microsecond", .lp = "microseconds", .sh = "\xce\xbcs", .na = "\xce\xbcs" },
+        .{ .u = "nanoseconds", .lo = "nanosecond", .lp = "nanoseconds", .sh = "ns", .na = "ns" },
+    };
+    for (table) |t| if (std.mem.eql(u8, unit, t.u)) {
+        if (narrow) return t.na;
+        if (long) return if (plural) t.lp else t.lo;
+        return t.sh;
+    };
+    return unit;
+}
+
+/// `Intl.DurationFormat.prototype.format(duration)` — en. Joins the non-zero
+/// units as "<n> <unit>" with ", " (a pragmatic approximation; exact CLDR
+/// list/unit patterns are not modeled).
+fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "DurationFormat")) return self.throwError("TypeError", "Intl.DurationFormat.prototype.format on incompatible receiver");
+    const d = if (args.len > 0) args[0] else Value.undefined;
+    if (d != .object) return self.throwError("TypeError", "DurationFormat.format requires a duration object");
+    var style: []const u8 = "short";
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+        if (ov.object.getOwn("style")) |s| style = s.string;
+    };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    inline for (duration_units) |u| {
+        const v = try self.getProperty(d, u);
+        const n: f64 = if (v == .undefined) 0 else try self.toNumberV(v);
+        if (n != 0) {
+            if (buf.items.len > 0) try buf.appendSlice(self.arena, ", ");
+            const mag = @abs(n);
+            const numstr = try rtfGroup(self, (try nfRound(self, mag, false, 1, 0, 0, null, null, false, "auto", 1, "halfExpand")).int_str);
+            if (n < 0) try buf.append(self.arena, '-');
+            try buf.appendSlice(self.arena, numstr);
+            try buf.append(self.arena, ' ');
+            try buf.appendSlice(self.arena, durationUnitName(u, style, mag != 1));
+        }
+    }
+    if (buf.items.len == 0) try buf.appendSlice(self.arena, durationUnitName("seconds", style, true)); // empty duration → "0 sec"-ish
+    return .{ .string = try buf.toOwnedSlice(self.arena) };
+}
+
+fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "DurationFormat")) return self.throwError("TypeError", "Intl.DurationFormat.prototype.formatToParts on incompatible receiver");
+    const sv = try intlDurationFormatFn(ctx, this, args);
+    // Approximate: a single "literal" part carrying the whole string.
+    const arr = (try self.newArray()).object;
+    const o = (try self.newObject()).object;
+    try self.setProp(o, "type", .{ .string = "literal" });
+    try self.setProp(o, "value", sv);
+    try arr.elements.append(self.arena, .{ .object = o });
+    return .{ .object = arr };
+}
+
 /// `get Intl.<service>.prototype.<prop>`: per spec `format`/`compare` are
 /// accessors whose getter returns a function bound to this instance, created
 /// lazily and cached (so `c.compare === c.compare`). The bound function has
@@ -12327,6 +12431,25 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     if (ov.object.getOwn("granularity")) |g| granularity = g.string;
                 };
                 try self.setProp(o, "granularity", .{ .string = granularity });
+            } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
+                const ro: ?Value = this.object.getOwn("\x00opts");
+                const dget = struct {
+                    fn s(src: ?Value, k: []const u8) ?Value {
+                        if (src) |v| if (v == .object) if (v.object.getOwn(k)) |x| return x;
+                        return null;
+                    }
+                }.s;
+                const base = if (dget(ro, "style")) |st| st.string else "short";
+                try self.setProp(o, "numberingSystem", dget(ro, "numberingSystem") orelse .{ .string = "latn" });
+                try self.setProp(o, "style", .{ .string = base });
+                // Per-unit defaults: each unit's style follows the base ("digital"
+                // makes hours/minutes/seconds numeric); display defaults to "auto".
+                inline for (duration_units) |u| {
+                    const dflt: []const u8 = if (std.mem.eql(u8, base, "digital") and (std.mem.eql(u8, u, "hours") or std.mem.eql(u8, u, "minutes") or std.mem.eql(u8, u, "seconds"))) "numeric" else if (std.mem.eql(u8, base, "digital")) "short" else base;
+                    try self.setProp(o, u, dget(ro, u) orelse .{ .string = dflt });
+                    try self.setProp(o, u ++ "Display", dget(ro, u ++ "Display") orelse .{ .string = "auto" });
+                }
+                if (dget(ro, "fractionalDigits")) |fd| try self.setProp(o, "fractionalDigits", fd);
             }
             return .{ .object = o };
         }
@@ -12455,6 +12578,12 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
             try seg_iter_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
         try env.put("\x00SegIterProto", .{ .object = seg_iter_proto });
+    }
+    {
+        const p = try Svc.install(a, rs, env, ns, object_proto, "DurationFormat", 0, intlServiceConstructorFn("DurationFormat"), tag);
+        try setNative(a, rs, p, "format", 1, intlDurationFormatFn);
+        try setNative(a, rs, p, "formatToParts", 1, intlDurationFormatToPartsFn);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DurationFormat"));
     }
 
     // Intl.Locale.
