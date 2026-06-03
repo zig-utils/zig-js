@@ -1346,6 +1346,25 @@ test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     try expectEvalStr("1,2,3", "[...new Set([1, 2, 3])].join(',')");
 }
 
+test "__defineGetter__/__defineSetter__ honor DefinePropertyOrThrow" {
+    // Success: installs an accessor.
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn(
+        \\var o = {}; o.__defineGetter__('x', function () { return 5; }); o.x
+    )).number);
+    // Redefining a non-configurable property throws.
+    try std.testing.expectError(error.Throw, evalIn(
+        \\var o = Object.defineProperty({}, 'a', { value: 1, configurable: false });
+        \\o.__defineGetter__('a', function () {});
+    ));
+    // Defining a new property on a non-extensible object throws.
+    try std.testing.expectError(error.Throw, evalIn(
+        \\var o = Object.preventExtensions({});
+        \\o.__defineSetter__('b', function () {});
+    ));
+    // A non-callable getter throws.
+    try std.testing.expectError(error.Throw, evalIn("({}).__defineGetter__('a', 42)"));
+}
+
 test "plain objects inherit from Object.prototype" {
     // The [[Prototype]] of a plain object / object literal is Object.prototype.
     try std.testing.expect((try evalIn("Object.getPrototypeOf({}) === Object.prototype")).boolean);

@@ -775,7 +775,7 @@ fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?
     return try self.getProperty(.{ .object = d }, name);
 }
 
-fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!void {
+pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!void {
     // Materialize the descriptor once over the prototype chain (a field may be
     // inherited or itself an accessor), into a plain own-property record the
     // rest of this function reads via `getOwn`.

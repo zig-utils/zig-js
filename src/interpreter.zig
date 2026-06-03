@@ -4509,11 +4509,15 @@ pub const Interpreter = struct {
                         // ToPropertyKey(P): a Symbol key is honored and a thrown
                         // valueOf/toString propagates.
                         const key = try self.keyOf(arg0(args));
-                        if (eq(name, "__defineGetter__"))
-                            try o.setAccessor(self.arena, key, f, null)
-                        else
-                            try o.setAccessor(self.arena, key, null, f);
-                        try o.setAttr(self.arena, key, .{ .enumerable = true, .configurable = true });
+                        // DefinePropertyOrThrow with { get|set, enumerable, configurable }:
+                        // route through the shared descriptor machinery so a
+                        // non-configurable existing property or a non-extensible
+                        // object throws a TypeError (not a silent overwrite).
+                        const desc = (try self.newObject()).object;
+                        try desc.setOwn(self.arena, self.root_shape, if (eq(name, "__defineGetter__")) "get" else "set", f);
+                        try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+                        try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+                        try builtins.defineOne(self, o, key, desc);
                         return Value.undefined;
                     }
                     if (eq(name, "__lookupGetter__") or eq(name, "__lookupSetter__")) {
