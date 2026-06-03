@@ -10916,6 +10916,23 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 }
                 try self.setProp(o, "\x00opts", .{ .object = ro });
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
+                // options is required; `type` is required. Read in spec order.
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                if (raw != .object) return self.throwError("TypeError", "options must be an object");
+                const ro = (try self.newObject()).object;
+                _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+                const style = (try dtfGetStr(self, raw, "style", &.{ "narrow", "short", "long" }, "long")).?;
+                try self.setProp(ro, "style", .{ .string = style });
+                const typ = try dtfGetStr(self, raw, "type", &.{ "language", "region", "script", "currency", "calendar", "dateTimeField" }, null);
+                if (typ == null) return self.throwError("TypeError", "DisplayNames requires the type option");
+                try self.setProp(ro, "type", .{ .string = typ.? });
+                const fallback = (try dtfGetStr(self, raw, "fallback", &.{ "code", "none" }, "code")).?;
+                try self.setProp(ro, "fallback", .{ .string = fallback });
+                const ld = (try dtfGetStr(self, raw, "languageDisplay", &.{ "dialect", "standard" }, "dialect")).?;
+                if (std.mem.eql(u8, typ.?, "language")) try self.setProp(ro, "languageDisplay", .{ .string = ld });
+                try self.setProp(o, "\x00opts", .{ .object = ro });
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (args.len > 1 and args[1] == .object) {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
@@ -11642,6 +11659,46 @@ fn intlPluralSelectRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     return .{ .string = "other" };
 }
 
+/// `Intl.DisplayNames.prototype.of(code)` — validates the code's structure for
+/// the configured type (RangeError otherwise). With no CLDR name data the name
+/// is always "not found": fallback "none" returns undefined, "code" returns the
+/// canonicalized code.
+fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!intlBrandOk(this, "DisplayNames")) return self.throwError("TypeError", "Intl.DisplayNames.prototype.of on incompatible receiver");
+    const code = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+    var typ: []const u8 = "language";
+    var fallback: []const u8 = "code";
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+        if (ov.object.getOwn("type")) |t| typ = t.string;
+        if (ov.object.getOwn("fallback")) |f| fallback = f.string;
+    };
+    const allAlpha = struct {
+        fn f(s: []const u8) bool {
+            for (s) |c| if (!std.ascii.isAlphabetic(c)) return false;
+            return s.len > 0;
+        }
+    }.f;
+    var canon: []const u8 = code;
+    if (std.mem.eql(u8, typ, "region")) {
+        const digits = blk: {
+            for (code) |c| if (!std.ascii.isDigit(c)) break :blk false;
+            break :blk code.len == 3;
+        };
+        if (!((code.len == 2 and allAlpha(code)) or digits)) return self.throwError("RangeError", "invalid region code");
+        canon = try std.ascii.allocUpperString(self.arena, code);
+    } else if (std.mem.eql(u8, typ, "script")) {
+        if (code.len != 4 or !allAlpha(code)) return self.throwError("RangeError", "invalid script code");
+    } else if (std.mem.eql(u8, typ, "currency")) {
+        if (code.len != 3 or !allAlpha(code)) return self.throwError("RangeError", "invalid currency code");
+        canon = try std.ascii.allocUpperString(self.arena, code);
+    } else if (std.mem.eql(u8, typ, "language")) {
+        if (!dtfWellFormedType(code) and !(code.len >= 2 and code.len <= 3 and allAlpha(code))) return self.throwError("RangeError", "invalid language code");
+    }
+    if (std.mem.eql(u8, fallback, "none")) return .undefined;
+    return .{ .string = canon };
+}
+
 fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "ListFormat")) return self.throwError("TypeError", "Intl.ListFormat.prototype.format on incompatible receiver");
@@ -11979,6 +12036,14 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 };
                 try self.setProp(o, "type", .{ .string = typ });
                 try self.setProp(o, "style", .{ .string = style });
+            } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
+                // Reflect the normalized record (locale, then the Table-6 order).
+                const ro: ?Value = this.object.getOwn("\x00opts");
+                if (ro) |rv| if (rv == .object) {
+                    inline for (.{ "style", "type", "fallback", "languageDisplay" }) |k| {
+                        if (rv.object.getOwn(k)) |val| try self.setProp(o, k, val);
+                    }
+                };
             }
             return .{ .object = o };
         }
@@ -12079,8 +12144,13 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNative(a, rs, p, "formatToParts", 2, intlRelativeTimeFormatToPartsFn);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("RelativeTimeFormat"));
     }
-    inline for (.{ "DisplayNames", "Segmenter" }) |svc| {
-        _ = try Svc.install(a, rs, env, ns, object_proto, svc, 0, intlServiceConstructorFn(svc), tag);
+    {
+        const p = try Svc.install(a, rs, env, ns, object_proto, "DisplayNames", 0, intlServiceConstructorFn("DisplayNames"), tag);
+        try setNative(a, rs, p, "of", 1, intlDisplayNamesOfFn);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DisplayNames"));
+    }
+    {
+        _ = try Svc.install(a, rs, env, ns, object_proto, "Segmenter", 0, intlServiceConstructorFn("Segmenter"), tag);
     }
 
     // Intl.Locale.
