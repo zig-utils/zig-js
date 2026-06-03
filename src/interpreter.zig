@@ -12200,6 +12200,10 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
     var items: std.ArrayListUnmanaged([]const u8) = .empty;
     var need_sep = false; // previous unit was numeric/2-digit
     var first = true;
+    const dur_neg = blk: {
+        for (vals) |vv| if (vv < 0) break :blk true;
+        break :blk false;
+    };
     inline for (duration_units, 0..) |u, i| {
         const uval = vals[i];
         const style = durUnitStyle(ov, base, u);
@@ -12211,11 +12215,15 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
         const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
         if (shown) {
             const sign_never = !first;
+            const is_first = first;
             first = false;
+            // First displayed unit bears the sign; a zero first unit shows "-0"
+            // when the overall duration is negative (DurationToFractional / -0).
+            const fnum = if (is_first and uval == 0 and dur_neg) -@as(f64, 0.0) else uval;
             const s = if (combine) blk: {
                 const fd = durFracDigits(ov);
                 break :blk try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never);
-            } else try durFmtVal(self, locale, uval, style, u[0 .. u.len - 1], sign_never);
+            } else try durFmtVal(self, locale, fnum, style, u[0 .. u.len - 1], sign_never);
             const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
             // Once a numeric run starts (need_sep latches), every later unit
             // appends to it with ":" — even standalone ones (digital
@@ -12256,6 +12264,10 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
     var groups: std.ArrayListUnmanaged(std.ArrayListUnmanaged(DurPart)) = .empty;
     var need_sep = false;
     var first = true;
+    const dur_neg = blk: {
+        for (vals) |vv| if (vv < 0) break :blk true;
+        break :blk false;
+    };
     inline for (duration_units, 0..) |u, i| {
         const uval = vals[i];
         const style = durUnitStyle(ov, base, u);
@@ -12267,7 +12279,9 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
         const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
         if (shown) {
             const sign_never = !first;
+            const is_first = first;
             first = false;
+            const fnum = if (is_first and uval == 0 and dur_neg) -@as(f64, 0.0) else uval;
             const sing = u[0 .. u.len - 1];
             const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
             var grp: *std.ArrayListUnmanaged(DurPart) = undefined;
@@ -12295,7 +12309,7 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
                     try grp.append(self.arena, .{ .typ = "integer", .value = s, .unit = sing });
                 }
             } else {
-                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, style, sing, sign_never), &.{.{ .number = uval }});
+                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, style, sing, sign_never), &.{.{ .number = fnum }});
                 for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
             }
         }
