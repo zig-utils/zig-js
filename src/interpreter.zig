@@ -11939,6 +11939,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var o_hour: []const u8 = "";
     var o_minute: []const u8 = "";
     var o_second: []const u8 = "";
+    var o_frac: usize = 0; // fractionalSecondDigits (1-3) or 0
     var hour12 = true;
     var any_comp = false;
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
@@ -11955,6 +11956,9 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_hour = try get(self, ov, "hour");
         o_minute = try get(self, ov, "minute");
         o_second = try get(self, ov, "second");
+        if (ov.object.getOwn("fractionalSecondDigits")) |f| if (f == .number) {
+            o_frac = @intFromFloat(f.number);
+        };
         any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len > 0;
         const hc = try get(self, ov, "hourCycle");
         const h12 = try self.getProperty(ov, "hour12");
@@ -12043,7 +12047,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (parts.items.len > 0) try P.lit(self, &parts, ", ");
         var h = hour24;
         var ap: []const u8 = "";
-        if (hour12) {
+        if (hour12 and o_hour.len > 0) {
             ap = if (h < 12) "AM" else "PM";
             h = h % 12;
             if (h == 0) h = 12;
@@ -12056,6 +12060,15 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (o_second.len > 0) {
             if (o_hour.len > 0 or o_minute.len > 0) try P.lit(self, &parts, ":");
             try P.num(self, &parts, "second", second, true);
+        }
+        // fractionalSecondDigits: the first N digits of the millisecond (the
+        // sub-second is truncated, not rounded), after the seconds.
+        if (o_frac > 0 and o_second.len > 0) {
+            const millis: u32 = @intCast(@mod(tod, 1000));
+            var mbuf: [3]u8 = .{ '0', '0', '0' };
+            _ = std.fmt.bufPrint(&mbuf, "{d:0>3}", .{millis}) catch {};
+            try P.lit(self, &parts, ".");
+            try parts.append(self.arena, .{ .typ = "fractionalSecond", .value = try self.arena.dupe(u8, mbuf[0..o_frac]) });
         }
         if (ap.len > 0) {
             try P.lit(self, &parts, " ");
