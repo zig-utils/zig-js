@@ -10389,21 +10389,22 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
 
     while (it.next()) |s| {
         if (s.len == 0) return false; // empty subtag (double dash)
+        // Inside private-use, every subtag (including length-1) is a private-use
+        // subtag, not a new singleton.
+        if (ext == 'x') {
+            if (s.len < 1 or s.len > 8) return false; // private-use subtag: 1-8 alnum
+            ext_count += 1;
+            continue;
+        }
         if (s.len == 1) {
             // A singleton starts a (private-use or other) extension.
-            if (ext != 0 and ext != 'x' and ext_count == 0) return false; // previous singleton had no subtags
+            if (ext != 0 and ext_count == 0) return false; // previous singleton had no subtags
             const sl = std.ascii.toLower(s[0]);
-            if (ext == 'x') return false; // nothing follows private-use except its own subtags
             for (seen_singletons[0..nsing]) |p| if (p == sl) return false; // duplicate singleton
             seen_singletons[nsing] = sl;
             nsing += 1;
             ext = sl;
             ext_count = 0;
-            continue;
-        }
-        if (ext == 'x') {
-            if (s.len < 1 or s.len > 8) return false; // private-use subtag: 1-8 alnum
-            ext_count += 1;
             continue;
         }
         if (ext != 0) {
@@ -10430,36 +10431,179 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     return true;
 }
 
+fn lowerDup(a: std.mem.Allocator, s: []const u8) []const u8 {
+    return std.ascii.allocLowerString(a, s) catch s;
+}
+
+/// CanonicalizeUnicodeLocaleId (UTS-35): structural validation, then subtag
+/// casing, alphabetical variant sorting, `-u-`/`-t-` keyword canonicalization
+/// (attributes sorted, keywords sorted by key, a "true" type dropped to a bare
+/// key), and extension reordering (singletons alphabetical, private-use last).
+/// CLDR-data-driven steps (legacy/grandfathered replacement beyond the simple
+/// table, subtag aliases, likely-subtags) are not applied.
 fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
     if (tag.len == 0) return null;
     if (!isStructurallyValidLanguageTag(tag)) return null;
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    var first = true;
-    var idx: usize = 0;
-    var in_ext = false; // true once a singleton subtag (-u-/-t-/-x-/…) is seen
+
+    // language-id: language [-script] [-region] [-variant...]
+    var lang: []const u8 = "";
+    var script: []const u8 = "";
+    var region: []const u8 = "";
+    var variants: std.ArrayListUnmanaged([]const u8) = .empty;
+    // Extensions, each a singleton char plus its canonicalized body (no leading
+    // '-'); private-use captured separately so it can be emitted last.
+    const Ext = struct { sing: u8, body: []const u8 };
+    var exts: std.ArrayListUnmanaged(Ext) = .empty;
+    var priv: []const u8 = ""; // the "x-..." private-use sequence (lowercased)
+
     var it = std.mem.splitScalar(u8, tag, '-');
-    while (it.next()) |part| : (idx += 1) {
-        if (part.len == 0 or part.len > 8) return null;
-        for (part) |c| if (!std.ascii.isAlphanumeric(c)) return null;
-        if (!first) out.append(a, '-') catch return null;
-        if (part.len == 1) in_ext = true; // singleton starts an extension
-        // Subtag casing: extension subtags and the language stay lowercase; a
-        // 4-char script is Titlecased and a 2-char region UPPERCASED — but only
-        // in the language-id part, never inside an extension.
-        if (idx == 0 or in_ext) {
-            if (idx == 0 and (part.len < 2 or part.len > 8)) return null;
-            for (part) |c| out.append(a, std.ascii.toLower(c)) catch return null;
-        } else if (part.len == 4 and std.ascii.isAlphabetic(part[0])) {
-            out.append(a, std.ascii.toUpper(part[0])) catch return null;
-            for (part[1..]) |c| out.append(a, std.ascii.toLower(c)) catch return null;
-        } else if (part.len == 2 and std.ascii.isAlphabetic(part[0])) {
-            for (part) |c| out.append(a, std.ascii.toUpper(c)) catch return null;
-        } else {
-            for (part) |c| out.append(a, std.ascii.toLower(c)) catch return null;
+    lang = lowerDup(a, it.next().?);
+
+    // Walk the language-id subtags.
+    var pending: ?[]const u8 = null; // first subtag of an extension/private-use
+    while (it.next()) |part| {
+        if (part.len == 1) {
+            pending = part;
+            break;
         }
-        first = false;
+        if (script.len == 0 and region.len == 0 and variants.items.len == 0 and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
+            script = a.alloc(u8, 4) catch return null;
+            @memcpy(@constCast(script), part);
+            @constCast(script)[0] = std.ascii.toUpper(part[0]);
+            for (1..4) |i| @constCast(script)[i] = std.ascii.toLower(part[i]);
+        } else if (region.len == 0 and variants.items.len == 0 and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
+            region = std.ascii.allocUpperString(a, part) catch return null;
+        } else {
+            variants.append(a, lowerDup(a, part)) catch return null;
+        }
+    }
+    // Variants are sorted alphabetically (UTS-35 canonical order).
+    std.sort.pdq([]const u8, variants.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+
+    // Extensions: each singleton followed by its subtags, until the next singleton.
+    while (pending) |sing_str| {
+        const sing = std.ascii.toLower(sing_str[0]);
+        var subs: std.ArrayListUnmanaged([]const u8) = .empty;
+        pending = null;
+        while (it.next()) |part| {
+            // Within private-use every subtag (incl. length-1) belongs to it;
+            // elsewhere a length-1 subtag starts the next extension.
+            if (part.len == 1 and sing != 'x') {
+                pending = part;
+                break;
+            }
+            subs.append(a, lowerDup(a, part)) catch return null;
+        }
+        if (sing == 'x') {
+            var b: std.ArrayListUnmanaged(u8) = .empty;
+            b.appendSlice(a, "x") catch return null;
+            for (subs.items) |s| {
+                b.append(a, '-') catch return null;
+                b.appendSlice(a, s) catch return null;
+            }
+            priv = b.toOwnedSlice(a) catch return null;
+            break; // private-use ends the tag
+        }
+        const body = canonExtBody(a, sing, subs.items) orelse return null;
+        exts.append(a, .{ .sing = sing, .body = body }) catch return null;
+    }
+    // Sort extensions by singleton (private-use is held out and emitted last).
+    std.sort.pdq(Ext, exts.items, {}, struct {
+        fn lt(_: void, x: Ext, y: Ext) bool {
+            return x.sing < y.sing;
+        }
+    }.lt);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    out.appendSlice(a, lang) catch return null;
+    if (script.len > 0) {
+        out.append(a, '-') catch return null;
+        out.appendSlice(a, script) catch return null;
+    }
+    if (region.len > 0) {
+        out.append(a, '-') catch return null;
+        out.appendSlice(a, region) catch return null;
+    }
+    for (variants.items) |v| {
+        out.append(a, '-') catch return null;
+        out.appendSlice(a, v) catch return null;
+    }
+    for (exts.items) |e| {
+        out.append(a, '-') catch return null;
+        out.append(a, e.sing) catch return null;
+        if (e.body.len > 0) {
+            out.append(a, '-') catch return null;
+            out.appendSlice(a, e.body) catch return null;
+        }
+    }
+    if (priv.len > 0) {
+        out.append(a, '-') catch return null;
+        out.appendSlice(a, priv) catch return null;
     }
     return out.toOwnedSlice(a) catch null;
+}
+
+/// Canonicalize one extension's subtag body (already lowercased). For `-u-`:
+/// sort attributes, sort keywords by key, and drop a "true" type (bare key).
+/// For `-t-`: keep the tlang then sort tfields by key. Others: subtags as-is.
+fn canonExtBody(a: std.mem.Allocator, sing: u8, subs: [][]const u8) ?[]const u8 {
+    var b: std.ArrayListUnmanaged(u8) = .empty;
+    if (sing == 'u') {
+        // Attributes (3-8 alnum) come before the first 2-char key.
+        var attrs: std.ArrayListUnmanaged([]const u8) = .empty;
+        const KW = struct { key: []const u8, val: []const u8 };
+        var kws: std.ArrayListUnmanaged(KW) = .empty;
+        var i: usize = 0;
+        while (i < subs.len and subs[i].len != 2) : (i += 1) attrs.append(a, subs[i]) catch return null;
+        while (i < subs.len) {
+            const key = subs[i];
+            i += 1;
+            var vbuf: std.ArrayListUnmanaged(u8) = .empty;
+            while (i < subs.len and subs[i].len != 2) : (i += 1) {
+                if (vbuf.items.len > 0) vbuf.append(a, '-') catch return null;
+                vbuf.appendSlice(a, subs[i]) catch return null;
+            }
+            var val = vbuf.toOwnedSlice(a) catch return null;
+            if (std.mem.eql(u8, val, "true")) val = ""; // a "true" type is omitted
+            var dup = false; // a repeated keyword key: the first occurrence wins
+            for (kws.items) |k| if (std.mem.eql(u8, k.key, key)) {
+                dup = true;
+            };
+            if (!dup) kws.append(a, .{ .key = key, .val = val }) catch return null;
+        }
+        std.sort.pdq([]const u8, attrs.items, {}, struct {
+            fn lt(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.lessThan(u8, x, y);
+            }
+        }.lt);
+        std.sort.pdq(KW, kws.items, {}, struct {
+            fn lt(_: void, x: KW, y: KW) bool {
+                return std.mem.lessThan(u8, x.key, y.key);
+            }
+        }.lt);
+        for (attrs.items) |at| {
+            if (b.items.len > 0) b.append(a, '-') catch return null;
+            b.appendSlice(a, at) catch return null;
+        }
+        for (kws.items) |kw| {
+            if (b.items.len > 0) b.append(a, '-') catch return null;
+            b.appendSlice(a, kw.key) catch return null;
+            if (kw.val.len > 0) {
+                b.append(a, '-') catch return null;
+                b.appendSlice(a, kw.val) catch return null;
+            }
+        }
+    } else {
+        for (subs) |s| {
+            if (b.items.len > 0) b.append(a, '-') catch return null;
+            b.appendSlice(a, s) catch return null;
+        }
+    }
+    return b.toOwnedSlice(a) catch null;
 }
 
 /// CanonicalizeLocaleList: a string → [tag]; an array → each element ToString'd,
@@ -10467,8 +10611,11 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
 fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object {
     const arr = (try self.newArray()).object;
     if (v == .undefined) return arr;
-    if (v == .string) {
-        const c = canonicalizeLocaleTag(self.arena, v.string) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+    // A string or a single Intl.Locale is wrapped as a one-element list (its
+    // [[Locale]] slot is used; toString is not observed).
+    if (v == .string or (v == .object and v.object.getOwn("\x00locale") != null)) {
+        const s = if (v == .string) v.string else v.object.getOwn("\x00locale").?.string;
+        const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
         try arr.elements.append(self.arena, .{ .string = c });
         return arr;
     }
@@ -10478,7 +10625,12 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     while (i < len) : (i += 1) {
         const ev = try self.getProperty(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
         if (ev != .string and ev != .object) return self.throwError("TypeError", "Intl: locale must be a string or object");
-        const s = try self.toStringV(ev);
+        // An Intl.Locale element contributes its [[Locale]] slot directly (its
+        // toString must not be observed).
+        const s = if (ev == .object and ev.object.getOwn("\x00locale") != null)
+            ev.object.getOwn("\x00locale").?.string
+        else
+            try self.toStringV(ev);
         const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
         var dup = false;
         for (arr.elements.items) |e| if (std.mem.eql(u8, e.string, c)) {
@@ -10559,7 +10711,7 @@ fn localeUValue(tag: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-const LocaleOptKind = enum { set, language, script, region, type };
+const LocaleOptKind = enum { set, language, script, region, type, variants };
 
 fn localeSubtagValid(kind: LocaleOptKind, s: []const u8) bool {
     const isAlpha = struct {
@@ -10585,6 +10737,17 @@ fn localeSubtagValid(kind: LocaleOptKind, s: []const u8) bool {
             var it = std.mem.splitScalar(u8, s, '-');
             while (it.next()) |sub| {
                 if (sub.len < 3 or sub.len > 8) break :blk false;
+                for (sub) |c| if (!std.ascii.isAlphanumeric(c)) break :blk false;
+            }
+            break :blk true;
+        },
+        .variants => blk: {
+            // One or more variant subtags (5-8 alnum, or 4 with a leading digit).
+            if (s.len == 0) break :blk false;
+            var it = std.mem.splitScalar(u8, s, '-');
+            while (it.next()) |sub| {
+                const ok = (sub.len >= 5 and sub.len <= 8) or (sub.len == 4 and std.ascii.isDigit(sub[0]));
+                if (!ok) break :blk false;
                 for (sub) |c| if (!std.ascii.isAlphanumeric(c)) break :blk false;
             }
             break :blk true;
@@ -10626,27 +10789,56 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const optsv = if (args.len > 1) args[1] else Value.undefined;
     if (optsv != .undefined) {
         const opts = Value{ .object = try self.toObject(optsv) };
-        // language/script/region replace the corresponding base subtags.
+        // ApplyOptionsToTag reads language, script, region, variants in order.
         const language = try localeStringOption(self, opts, "language", .language, &.{});
         const script = try localeStringOption(self, opts, "script", .script, &.{});
         const region = try localeStringOption(self, opts, "region", .region, &.{});
+        const variants_opt = try localeStringOption(self, opts, "variants", .variants, &.{});
         // -u- keyword options.
         const ca = try localeStringOption(self, opts, "calendar", .type, &.{});
         const co = try localeStringOption(self, opts, "collation", .type, &.{});
         const hc = try localeStringOption(self, opts, "hourCycle", .set, &.{ "h11", "h12", "h23", "h24" });
         const kf = try localeStringOption(self, opts, "caseFirst", .set, &.{ "upper", "lower", "false" });
-        const nu = try localeStringOption(self, opts, "numberingSystem", .type, &.{});
+        // numeric is read before numberingSystem (GetOption order).
         const numeric_v = try self.getProperty(opts, "numeric");
         const kn: ?[]const u8 = if (numeric_v == .undefined) null else if (numeric_v.toBoolean()) "true" else "false";
+        const nu = try localeStringOption(self, opts, "numberingSystem", .type, &.{});
 
-        // Rebuild: base subtags (with overrides), then sorted -u- keywords.
-        const base0 = if (std.mem.indexOf(u8, canon, "-u-")) |k| canon[0..k] else canon;
+        // Rebuild: base subtags (with overrides), then sorted -u- keywords. The
+        // base is the language-id up to the first singleton subtag.
+        var base_end: usize = canon.len;
+        {
+            var sb = std.mem.splitScalar(u8, canon, '-');
+            var off: usize = 0;
+            while (sb.next()) |part| {
+                if (part.len == 1) {
+                    base_end = if (off == 0) 0 else off - 1;
+                    break;
+                }
+                off += part.len + 1;
+            }
+        }
+        const base0 = canon[0..base_end];
         var bit = std.mem.splitScalar(u8, base0, '-');
         const orig_lang = bit.next() orelse "";
         var orig_script: []const u8 = "";
         var orig_region: []const u8 = "";
-        while (bit.next()) |part| {
-            if (part.len == 4 and std.ascii.isAlphabetic(part[0])) orig_script = part else if (part.len == 2 or part.len == 3) orig_region = part;
+        var orig_variants: std.ArrayListUnmanaged(u8) = .empty;
+        {
+            var hs = false;
+            var hr = false;
+            while (bit.next()) |part| {
+                if (!hs and !hr and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
+                    orig_script = part;
+                    hs = true;
+                } else if (!hr and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
+                    orig_region = part;
+                    hr = true;
+                } else {
+                    if (orig_variants.items.len > 0) try orig_variants.append(self.arena, '-');
+                    try orig_variants.appendSlice(self.arena, part);
+                }
+            }
         }
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         try buf.appendSlice(self.arena, if (language) |l| l else orig_lang);
@@ -10659,6 +10851,12 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
         if (use_region.len > 0) {
             try buf.append(self.arena, '-');
             try buf.appendSlice(self.arena, use_region);
+        }
+        // Variants: the option replaces the tag's variants; else keep the tag's.
+        const use_variants = if (variants_opt) |v| v else orig_variants.items;
+        if (use_variants.len > 0) {
+            try buf.append(self.arena, '-');
+            try buf.appendSlice(self.arena, use_variants);
         }
         // Merge -u- keywords (option overrides input tag), emit in key order.
         const keys = [_]struct { k: []const u8, v: ?[]const u8 }{
@@ -10693,7 +10891,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     return .{ .object = o };
 }
 
-const LocaleField = enum { base_name, language, script, region, calendar, case_first, collation, hour_cycle, numeric, numbering_system, first_day_of_week };
+const LocaleField = enum { base_name, language, script, region, variants, calendar, case_first, collation, hour_cycle, numeric, numbering_system, first_day_of_week };
 fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -10712,17 +10910,42 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
                 .first_day_of_week => return if (localeUValue(tag, "fw")) |v| .{ .string = v } else .undefined,
                 else => {},
             }
-            // baseName is the tag up to any "-u-"/"-x-" extension; the language/
-            // script/region are its first matching subtags.
-            const base = if (std.mem.indexOf(u8, tag, "-u-")) |k| tag[0..k] else tag;
+            // baseName (GetLocaleBaseName) is the language-id prefix: everything
+            // up to the first singleton ("-X-") subtag. language/script/region/
+            // variants are its components.
+            var base_end: usize = tag.len;
+            {
+                var bit = std.mem.splitScalar(u8, tag, '-');
+                var off: usize = 0;
+                while (bit.next()) |part| {
+                    if (part.len == 1) {
+                        base_end = if (off == 0) 0 else off - 1; // drop the joining '-'
+                        break;
+                    }
+                    off += part.len + 1;
+                }
+            }
+            const base = tag[0..base_end];
             if (f == .base_name) return .{ .string = base };
             var it = std.mem.splitScalar(u8, base, '-');
             const lang = it.next() orelse "";
             if (f == .language) return .{ .string = lang };
+            var have_script = false;
+            var have_region = false;
+            var variants: std.ArrayListUnmanaged(u8) = .empty;
             while (it.next()) |part| {
-                if (f == .script and part.len == 4 and std.ascii.isAlphabetic(part[0])) return .{ .string = part };
-                if (f == .region and (part.len == 2 or part.len == 3)) return .{ .string = part };
+                if (!have_script and !have_region and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
+                    have_script = true;
+                    if (f == .script) return .{ .string = part };
+                } else if (!have_region and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
+                    have_region = true;
+                    if (f == .region) return .{ .string = part };
+                } else {
+                    if (variants.items.len > 0) try variants.append(self.arena, '-');
+                    try variants.appendSlice(self.arena, part);
+                }
             }
+            if (f == .variants) return if (variants.items.len > 0) .{ .string = try variants.toOwnedSlice(self.arena) } else .undefined;
             return .undefined;
         }
     }.call;
@@ -13566,6 +13789,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNativeGetter(a, rs, proto, "language", intlLocaleGetter(.language));
         try setNativeGetter(a, rs, proto, "script", intlLocaleGetter(.script));
         try setNativeGetter(a, rs, proto, "region", intlLocaleGetter(.region));
+        try setNativeGetter(a, rs, proto, "variants", intlLocaleGetter(.variants));
         try setNativeGetter(a, rs, proto, "calendar", intlLocaleGetter(.calendar));
         try setNativeGetter(a, rs, proto, "caseFirst", intlLocaleGetter(.case_first));
         try setNativeGetter(a, rs, proto, "collation", intlLocaleGetter(.collation));
