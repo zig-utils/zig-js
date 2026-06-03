@@ -11921,7 +11921,8 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
 
     const day_ms: i64 = 86_400_000;
-    const total_ms: i64 = @intFromFloat(@floor(ms));
+    // TimeClip truncates toward zero (ToIntegerOrInfinity), so format(-0.9) is 0.
+    const total_ms: i64 = @intFromFloat(@trunc(ms));
     const epoch_days = @divFloor(total_ms, day_ms);
     var tod = @mod(total_ms, day_ms);
     if (tod < 0) tod += day_ms;
