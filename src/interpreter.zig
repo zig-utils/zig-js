@@ -11464,7 +11464,9 @@ fn dtfProcessOptions(self: *Interpreter, raw: Value) EvalError!DtfOptions {
     return dtfProcessOptionsKind(self, raw, .date);
 }
 
-fn dtfProcessOptionsKind(self: *Interpreter, raw: Value, defaults: DtfDefaults) EvalError!DtfOptions {
+fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, defaults: DtfDefaults) EvalError!DtfOptions {
+    // CoerceOptionsToObject: undefined -> none; null -> TypeError; primitive -> boxed.
+    const raw: Value = if (raw_in == .undefined) Value.undefined else .{ .object = try self.toObject(raw_in) };
     var r = DtfOptions{};
     // Read options only when an options object was supplied; the required/default
     // logic below still runs for `new Intl.DateTimeFormat()` (no options).
