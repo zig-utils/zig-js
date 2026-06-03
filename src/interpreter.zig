@@ -10933,6 +10933,16 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 if (std.mem.eql(u8, typ.?, "language")) try self.setProp(ro, "languageDisplay", .{ .string = ld });
                 try self.setProp(o, "\x00opts", .{ .object = ro });
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
+                const raw = if (args.len > 1) args[1] else Value.undefined;
+                if (raw != .undefined and raw != .object) return self.throwError("TypeError", "options must be an object");
+                const ro = (try self.newObject()).object;
+                if (raw == .object) {
+                    _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+                    if (try dtfGetStr(self, raw, "granularity", &.{ "grapheme", "word", "sentence" }, null)) |g| try self.setProp(ro, "granularity", .{ .string = g });
+                }
+                try self.setProp(o, "\x00opts", .{ .object = ro });
+                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (args.len > 1 and args[1] == .object) {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
@@ -12044,6 +12054,12 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                         if (rv.object.getOwn(k)) |val| try self.setProp(o, k, val);
                     }
                 };
+            } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
+                var granularity: []const u8 = "grapheme";
+                if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+                    if (ov.object.getOwn("granularity")) |g| granularity = g.string;
+                };
+                try self.setProp(o, "granularity", .{ .string = granularity });
             }
             return .{ .object = o };
         }
@@ -12150,7 +12166,8 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DisplayNames"));
     }
     {
-        _ = try Svc.install(a, rs, env, ns, object_proto, "Segmenter", 0, intlServiceConstructorFn("Segmenter"), tag);
+        const p = try Svc.install(a, rs, env, ns, object_proto, "Segmenter", 0, intlServiceConstructorFn("Segmenter"), tag);
+        try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("Segmenter"));
     }
 
     // Intl.Locale.
