@@ -11803,8 +11803,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
                 // Validate style/numeric and store a normalized options bag.
-                const raw = if (args.len > 1) args[1] else Value.undefined;
-                if (raw != .undefined and raw != .object) return self.throwError("TypeError", "options must be an object");
+                const raw_arg = if (args.len > 1) args[1] else Value.undefined;
+                // RelativeTimeFormat uses CoerceOptionsToObject (primitive -> boxed).
+                const raw: Value = if (raw_arg == .undefined) Value.undefined else .{ .object = try self.toObject(raw_arg) };
                 const ro = (try self.newObject()).object;
                 if (raw == .object) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
@@ -11817,7 +11818,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
                 // Validate type/style and store a normalized options bag.
                 const raw = if (args.len > 1) args[1] else Value.undefined;
-                if (raw != .undefined and raw != .object) return self.throwError("TypeError", "options must be an object");
+                // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
+                // BigInt, which are .object-tagged primitives) -> TypeError.
+                if (raw != .undefined and !(raw == .object and !raw.object.is_symbol and !raw.object.is_bigint)) return self.throwError("TypeError", "options must be an object");
                 const ro = (try self.newObject()).object;
                 if (raw == .object) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
@@ -11845,7 +11848,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
                 const raw = if (args.len > 1) args[1] else Value.undefined;
-                if (raw != .undefined and raw != .object) return self.throwError("TypeError", "options must be an object");
+                // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
+                // BigInt, which are .object-tagged primitives) -> TypeError.
+                if (raw != .undefined and !(raw == .object and !raw.object.is_symbol and !raw.object.is_bigint)) return self.throwError("TypeError", "options must be an object");
                 const ro = (try self.newObject()).object;
                 if (raw == .object) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
@@ -11877,7 +11882,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undefined;
-                if (raw != .undefined and raw != .object) return self.throwError("TypeError", "options must be an object");
+                // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
+                // BigInt, which are .object-tagged primitives) -> TypeError.
+                if (raw != .undefined and !(raw == .object and !raw.object.is_symbol and !raw.object.is_bigint)) return self.throwError("TypeError", "options must be an object");
                 const ro = (try self.newObject()).object;
                 var base: []const u8 = "short";
                 if (raw == .object) {
