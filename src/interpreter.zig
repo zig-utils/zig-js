@@ -12051,7 +12051,7 @@ fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
             any = true;
             const n = try self.toNumberV(v);
             if (!std.math.isFinite(n) or @trunc(n) != n) return self.throwError("RangeError", "duration field must be an integer");
-            vals[i] = n;
+            vals[i] = if (n == 0) 0 else n; // normalize -0 to +0 (ToIntegerIfIntegral)
             if (n != 0) {
                 const s: f64 = if (n < 0) -1 else 1;
                 if (sign == 0) sign = s else if (sign != s) return self.throwError("RangeError", "duration fields must have a consistent sign");
