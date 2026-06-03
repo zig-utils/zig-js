@@ -12,6 +12,7 @@ const unicode_case = @import("unicode_case.zig");
 const cldr_numbers = @import("cldr_numbers.zig");
 const numbering_systems = @import("numbering_systems.zig");
 const cldr_locale = @import("cldr_locale.zig");
+const cldr_plurals = @import("cldr_plurals.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -13269,12 +13270,152 @@ fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     } };
 }
 
+/// LDML plural-rule operands derived from a number formatted with the given
+/// fraction-digit bounds: n (value), i (integer part), v/f (fraction digits with
+/// trailing zeros — count/value), w/t (without trailing zeros), e (exponent).
+const PluralOperands = struct { n: f64, i: f64, v: f64, w: f64, f: f64, t: f64, e: f64 };
+
+fn pluralOperands(num: f64, min_frac: usize, max_frac: usize) PluralOperands {
+    const abs = @abs(num);
+    if (!std.math.isFinite(abs)) return .{ .n = abs, .i = abs, .v = 0, .w = 0, .f = 0, .t = 0, .e = 0 };
+    var scale: f64 = 1;
+    for (0..max_frac) |_| scale *= 10;
+    const scaled = @round(abs * scale); // value * 10^maxFrac, rounded
+    const n = if (scale == 0) abs else scaled / scale;
+    const ipart = @floor(n);
+    // Fraction digits (integer 0..scale-1), padded to max_frac.
+    const frac_int: u64 = if (scale == 0) 0 else @intFromFloat(@round((n - ipart) * scale));
+    var fbuf: [20]u8 = undefined;
+    const fs = std.fmt.bufPrint(&fbuf, "{d}", .{frac_int}) catch "0";
+    var digits: [40]u8 = undefined;
+    var dlen: usize = 0;
+    while (dlen + fs.len < max_frac) : (dlen += 1) digits[dlen] = '0'; // left-pad
+    for (fs) |c| {
+        digits[dlen] = c;
+        dlen += 1;
+    }
+    if (max_frac == 0) dlen = 0;
+    // Displayed width: trim trailing zeros down to min_frac.
+    var v = dlen;
+    while (v > min_frac and digits[v - 1] == '0') v -= 1;
+    // Without trailing zeros at all.
+    var w = v;
+    while (w > 0 and digits[w - 1] == '0') w -= 1;
+    const f: f64 = if (v == 0) 0 else @floatFromInt(std.fmt.parseInt(u64, digits[0..v], 10) catch 0);
+    const t: f64 = if (w == 0) 0 else @floatFromInt(std.fmt.parseInt(u64, digits[0..w], 10) catch 0);
+    return .{ .n = n, .i = ipart, .v = @floatFromInt(v), .w = @floatFromInt(w), .f = f, .t = t, .e = 0 };
+}
+
+fn pluralOperandValue(c: u8, ops: PluralOperands) f64 {
+    return switch (c) {
+        'n' => ops.n,
+        'i' => ops.i,
+        'v' => ops.v,
+        'w' => ops.w,
+        'f' => ops.f,
+        't' => ops.t,
+        'e', 'c' => ops.e,
+        else => 0,
+    };
+}
+
+/// Does `val` satisfy the LDML range-list (e.g. "3..10" or "0,1")? A range only
+/// matches an integral value within [lo, hi].
+fn pluralRangeListMatch(list: []const u8, val: f64) bool {
+    var items = std.mem.splitScalar(u8, list, ',');
+    while (items.next()) |item| {
+        if (std.mem.indexOf(u8, item, "..")) |dd| {
+            const lo = std.fmt.parseFloat(f64, item[0..dd]) catch continue;
+            const hi = std.fmt.parseFloat(f64, item[dd + 2 ..]) catch continue;
+            if (val == @floor(val) and val >= lo and val <= hi) return true;
+        } else {
+            const x = std.fmt.parseFloat(f64, item) catch continue;
+            if (val == x) return true;
+        }
+    }
+    return false;
+}
+
+/// Evaluate one LDML relation: "operand [% mod] (= | !=) range-list".
+fn pluralEvalRel(rel: []const u8, ops: PluralOperands) bool {
+    var toks = std.mem.tokenizeScalar(u8, rel, ' ');
+    const opnd = toks.next() orelse return false;
+    var val = pluralOperandValue(opnd[0], ops);
+    var nxt = toks.next() orelse return false;
+    if (std.mem.eql(u8, nxt, "%")) {
+        const m = std.fmt.parseFloat(f64, toks.next() orelse return false) catch return false;
+        if (m != 0) val = @rem(val, m);
+        nxt = toks.next() orelse return false;
+    }
+    const list = toks.next() orelse return false;
+    const isin = pluralRangeListMatch(list, val);
+    return if (std.mem.eql(u8, nxt, "!=")) !isin else isin;
+}
+
+/// Evaluate an LDML plural condition (and/or of relations); "" is always true.
+fn pluralEvalCond(cond: []const u8, ops: PluralOperands) bool {
+    if (cond.len == 0) return true;
+    var ors = std.mem.splitSequence(u8, cond, " or ");
+    while (ors.next()) |term| {
+        var all = true;
+        var ands = std.mem.splitSequence(u8, term, " and ");
+        while (ands.next()) |rel| {
+            if (!pluralEvalRel(rel, ops)) {
+                all = false;
+                break;
+            }
+        }
+        if (all) return true;
+    }
+    return false;
+}
+
+/// PluralRuleSelect: the first category whose rule matches, else "other".
+fn pluralCategory(rules: []const cldr_plurals.Rule, ops: PluralOperands) []const u8 {
+    for (rules) |r| {
+        if (r.cond.len > 0 and pluralEvalCond(r.cond, ops)) return r.cat;
+    }
+    return "other";
+}
+
+/// The language subtag (lowercased) of a stored locale tag.
+fn localeLanguage(tag: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, tag, '-') orelse tag.len;
+    return tag[0..end];
+}
+
+fn pluralRulesFor(this: Value) []const cldr_plurals.Rule {
+    const tag = if (this.object.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
+    const lang = localeLanguage(tag);
+    const is_ordinal = if (this.object.getOwn("\x00opts")) |ov| (ov == .object and ov.object.getOwn("type") != null and ov.object.getOwn("type").? == .string and std.mem.eql(u8, ov.object.getOwn("type").?.string, "ordinal")) else false;
+    const rules = if (is_ordinal) cldr_plurals.ordinal(lang) else cldr_plurals.cardinal(lang);
+    // Fall back to English cardinal (one/other) when a language has no data.
+    return rules orelse (cldr_plurals.cardinal("en") orelse &.{});
+}
+
+fn pluralFracDigits(this: Value) struct { min: usize, max: usize } {
+    var min: usize = 0;
+    var max: usize = 3;
+    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+        if (ov.object.getOwn("minimumFractionDigits")) |m| if (m == .number) {
+            min = @intFromFloat(m.number);
+        };
+        if (ov.object.getOwn("maximumFractionDigits")) |m| if (m == .number) {
+            max = @intFromFloat(m.number);
+        };
+    };
+    if (max < min) max = min;
+    return .{ .min = min, .max = max };
+}
+
 fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "PluralRules")) return self.throwError("TypeError", "Intl.PluralRules.prototype.select on incompatible receiver");
     const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
-    // English cardinal rule: 1 → "one", everything else → "other".
-    return .{ .string = if (n == 1) "one" else "other" };
+    if (std.math.isNan(n)) return .{ .string = "other" };
+    const fd = pluralFracDigits(this);
+    const ops = pluralOperands(n, fd.min, fd.max);
+    return .{ .string = pluralCategory(pluralRulesFor(this), ops) };
 }
 
 /// One element of a ListFormat result: an "element" (a list item) or a
@@ -13883,9 +14024,17 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     try self.setProp(o, "minimumFractionDigits", .{ .number = minf });
                     try self.setProp(o, "maximumFractionDigits", .{ .number = maxf });
                 }
+                // pluralCategories: the categories the locale's rules define,
+                // in CLDR order (zero, one, two, few, many, other).
                 const cats = (try self.newArray()).object;
-                try cats.elements.append(self.arena, .{ .string = "one" });
-                try cats.elements.append(self.arena, .{ .string = "other" });
+                const order = [_][]const u8{ "zero", "one", "two", "few", "many", "other" };
+                const prules = pluralRulesFor(this);
+                for (order) |cat| {
+                    for (prules) |r| if (std.mem.eql(u8, r.cat, cat)) {
+                        try cats.elements.append(self.arena, .{ .string = cat });
+                        break;
+                    };
+                }
                 try self.setProp(o, "pluralCategories", .{ .object = cats });
                 try self.setProp(o, "roundingIncrement", pg(ro, "roundingIncrement") orelse .{ .number = 1 });
                 try self.setProp(o, "roundingMode", pg(ro, "roundingMode") orelse .{ .string = "halfExpand" });
