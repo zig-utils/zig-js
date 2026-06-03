@@ -11914,8 +11914,17 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
 fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    // No CLDR data: report every requested locale as supported.
+    // CanonicalizeLocaleList(locales) first (throws on a structurally invalid tag).
     const arr = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
+    // SupportedLocales: validate the localeMatcher option (RangeError otherwise).
+    if (args.len > 1 and args[1] != .undefined and args[1] == .object) {
+        const lm = try self.getProperty(args[1], "localeMatcher");
+        if (lm != .undefined) {
+            const s = try self.toStringV(lm);
+            if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
+        }
+    }
+    // No CLDR data: report every requested locale as supported.
     return .{ .object = arr };
 }
 
