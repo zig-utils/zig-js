@@ -1346,6 +1346,26 @@ test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     try expectEvalStr("1,2,3", "[...new Set([1, 2, 3])].join(',')");
 }
 
+test "plain objects inherit from Object.prototype" {
+    // The [[Prototype]] of a plain object / object literal is Object.prototype.
+    try std.testing.expect((try evalIn("Object.getPrototypeOf({}) === Object.prototype")).boolean);
+    try std.testing.expect((try evalIn("({}).__proto__ === Object.prototype")).boolean);
+    // Inherited Object.prototype methods resolve through the chain (as values and calls).
+    try std.testing.expect((try evalIn("typeof ({}).hasOwnProperty === 'function'")).boolean);
+    try std.testing.expect((try evalIn("({ a: 1 }).hasOwnProperty('a')")).boolean);
+    try std.testing.expect((try evalIn("'toString' in {}")).boolean);
+    try expectEvalStr("[object Object]", "({}).toString()");
+    // Object.prototype.valueOf returns the object itself.
+    try std.testing.expect((try evalIn("var o = {}; o.valueOf() === o")).boolean);
+    // A user toString on the chain still wins.
+    try expectEvalStr("hi", "var o = { toString() { return 'hi'; } }; o.toString()");
+    // Object.create(null) keeps a null prototype; for-in over {} sees no inherited keys.
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Object.create(null)) === null")).boolean);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("var n = 0; for (var k in {}) n++; n")).number);
+    // Class/function .prototype objects inherit from Object.prototype too.
+    try std.testing.expect((try evalIn("function F() {} Object.getPrototypeOf(F.prototype) === Object.prototype")).boolean);
+}
+
 test "Symbol() and Symbol.for() ToString their argument" {
     // A `{toString}` object is honored as the description / registry key.
     try expectEvalStr("k", "Symbol({ toString() { return 'k'; } }).description");

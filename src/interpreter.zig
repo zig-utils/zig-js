@@ -2138,7 +2138,10 @@ pub const Interpreter = struct {
     /// (object shapes) have one seam to hook.
     pub fn newObject(self: *Interpreter) EvalError!Value {
         const obj = try self.arena.create(value.Object);
-        obj.* = .{};
+        // An ordinary object's [[Prototype]] is %Object.prototype%. Callers that
+        // need a null-proto object (`Object.create(null)`, dictionary holders)
+        // overwrite `obj.proto` right after this returns.
+        obj.* = .{ .proto = self.objectProto() };
         return .{ .object = obj };
     }
 
@@ -2337,6 +2340,19 @@ pub const Interpreter = struct {
         const av = self.env.get("Array") orelse return null;
         if (av != .object) return null;
         const p = av.object.getOwn("prototype") orelse return null;
+        return if (p == .object) p.object else null;
+    }
+
+    /// `%Object.prototype%`, the [[Prototype]] of an ordinary plain object —
+    /// resolved through the live `Object` binding so it's the *current realm's*
+    /// prototype (mirrors `arrayProto`/`functionProto`). Null during the early
+    /// bootstrap window before `Object` is installed (then a plain object is
+    /// created proto-less, which is fine — the intrinsics wire their protos
+    /// explicitly and don't go through `newObject`).
+    fn objectProto(self: *Interpreter) ?*value.Object {
+        const ov = self.env.get("Object") orelse return null;
+        if (ov != .object) return null;
+        const p = ov.object.getOwn("prototype") orelse return null;
         return if (p == .object) p.object else null;
     }
 
@@ -4550,11 +4566,21 @@ pub const Interpreter = struct {
                 // wins, so defer to it when present.
                 if (o.getOwn(name) == null and eq(name, "toString")) {
                     var p = o.proto;
+                    // A *user* `toString` on the chain wins; `Object.prototype`'s
+                    // own `objectProtoToStringFn` (now reachable since plain objects
+                    // link to it) is NOT an override — fall through to it directly.
                     const proto_defined = while (p) |pp| : (p = pp.proto) {
-                        if (pp.getOwn(name) != null) break true;
+                        if (pp.getOwn(name)) |tv| {
+                            if (!(tv == .object and tv.object.native == objectProtoToStringFn)) break true;
+                        }
                     } else false;
                     if (!proto_defined) return try objectProtoToStringFn(@ptrCast(self), recv, args);
                 }
+                // `Object.prototype.valueOf` for an ordinary object returns the
+                // object itself (ToObject(this)). Reached only after the kind
+                // dispatch above (Date/Array/Map/… handle their own valueOf) and
+                // only for a non-wrapper (a wrapper delegates to its `.prim` below).
+                if (o.getOwn(name) == null and o.prim == null and eq(name, "valueOf")) return recv;
                 // A primitive-wrapper object (`new Number/String/Boolean`)
                 // delegates unmatched methods to its boxed primitive, so
                 // `(new Number(5)).valueOf()`, `.toFixed(2)`, `.charAt(0)`, … work.
@@ -6923,10 +6949,29 @@ fn protoGetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 /// Setter for `Object.prototype.__proto__` — sets the prototype to an object or
 /// null; any other value is silently ignored (per spec).
 fn protoSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = ctx;
-    if (this != .object) return .undefined;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    // RequireObjectCoercible(this).
+    if (this == .undefined or this == .null)
+        return self.throwError("TypeError", "Object.prototype.__proto__ setter called on null or undefined");
     const v = if (args.len > 0) args[0] else .undefined;
-    if (v == .object) this.object.proto = v.object else if (v == .null) this.object.proto = null;
+    // Only an Object or null is a candidate prototype; anything else is a no-op.
+    if (v != .object and v != .null) return .undefined;
+    if (this != .object) return .undefined; // a primitive `this` has no own [[Prototype]]
+    const o = this.object;
+    const new_proto: ?*value.Object = if (v == .object) v.object else null;
+    if (o.proto == new_proto) return .undefined; // unchanged: always succeeds
+    // OrdinarySetPrototypeOf rejects setting the prototype of a non-extensible
+    // object, or any change that would form a [[Prototype]] cycle — the `__proto__`
+    // setter turns that false result into a TypeError. (Without this, `Object.
+    // prototype.__proto__ = {}` would loop, since the fresh `{}` chains back to
+    // Object.prototype, and a later property walk would spin forever.)
+    if (!o.extensible)
+        return self.throwError("TypeError", "Cannot set prototype of a non-extensible object");
+    var cur = new_proto;
+    while (cur) |c| : (cur = c.proto) {
+        if (c == o) return self.throwError("TypeError", "Cyclic __proto__ value");
+    }
+    o.proto = new_proto;
     return .undefined;
 }
 
