@@ -12919,6 +12919,16 @@ fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8
     return .{ .numeric = numeric, .case_first = case_first };
 }
 
+/// Whether a locale uses the South-Asian (lakh/crore) digit grouping
+/// "#,##,##0" — a 3-digit primary group then 2-digit secondary groups.
+fn nfIndicGrouping(locale: []const u8) bool {
+    const t = parseTriple(locale);
+    if (std.ascii.eqlIgnoreCase(t.r, "IN")) return true;
+    const langs = [_][]const u8{ "as", "bn", "gu", "hi", "kn", "ml", "mr", "ne", "or", "pa", "ta", "te", "ur" };
+    for (langs) |l| if (std.ascii.eqlIgnoreCase(t.l, l)) return true;
+    return false;
+}
+
 /// Resolve the numbering system for an Intl formatter: the `numberingSystem`
 /// option wins, else the locale's `-u-nu-` extension, else "latn" — but only a
 /// system we have digit data for (unknown ones fall back to "latn").
@@ -13149,10 +13159,17 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             digits.len >= 5
         else
             true);
-        const first_group = digits.len % 3;
+        // South-Asian locales group as 3 then 2,2,… ("#,##,##0"); others as 3,3,….
+        const indic = nfIndicGrouping(locale);
+        const n_dig = digits.len;
         var run: std.ArrayListUnmanaged(u8) = .empty;
         for (digits, 0..) |c, i| {
-            if (group_ok and i != 0 and (i % 3) == first_group) {
+            const rem = n_dig - i; // digits at and to the right of position i
+            const at_boundary = if (indic)
+                (rem == 3 or (rem > 3 and (rem - 3) % 2 == 0))
+            else
+                (rem % 3 == 0);
+            if (group_ok and i != 0 and at_boundary) {
                 try push(self, &parts, "integer", try run.toOwnedSlice(self.arena));
                 try push(self, &parts, "group", syms.group);
                 run = .empty;
