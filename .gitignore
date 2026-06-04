@@ -10,3 +10,4 @@ bun.lock
 bun.lockb
 /pantry
 pantry.lock
+.claude/scheduled_tasks.lock

@@ -30,6 +30,9 @@ const Meta = struct {
     negative: bool = false,
     raw: bool = false,
     only_strict: bool = false,
+    async_: bool = false,
+    module: bool = false,
+    neg_parse: bool = false,
     includes: [12][]const u8 = undefined,
     includes_n: usize = 0,
 };
@@ -75,7 +78,18 @@ pub fn main(init: std.process.Init) !void {
 
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
-    const run_mode = if (args.next()) |m| std.mem.eql(u8, m, "run") else false;
+    const first = args.next();
+    // `file <abs-path>`: eval ONE test exactly like the runner (harness +
+    // includes + async-done + module), printing outcome/print-buffer/exception.
+    if (first != null and std.mem.eql(u8, first.?, "file")) {
+        const fpath = args.next() orelse {
+            std.debug.print("usage: diag file <path>\n", .{});
+            return;
+        };
+        try fileMode(gpa, io, root, fpath);
+        return;
+    }
+    const run_mode = if (first) |m| std.mem.eql(u8, m, "run") else false;
     // Optional third arg overrides the subtree (e.g. `test/built-ins/Symbol`).
     const subtree = args.next() orelse sub;
 
@@ -107,6 +121,155 @@ pub fn main(init: std.process.Init) !void {
             parseOne(gpa, out, io, &wbuf, src, entry.path);
         }
     }
+}
+
+fn fmeta(src: []const u8) Meta {
+    var r: Meta = .{};
+    const start = std.mem.indexOf(u8, src, "/*---") orelse return r;
+    const end_rel = std.mem.indexOf(u8, src[start..], "---*/") orelse return r;
+    const front = src[start .. start + end_rel];
+    if (std.mem.indexOf(u8, front, "flags:")) |fi| {
+        const le = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
+        const flags = front[fi..le];
+        if (std.mem.indexOf(u8, flags, "async") != null) r.async_ = true;
+        if (std.mem.indexOf(u8, flags, "module") != null) r.module = true;
+        if (std.mem.indexOf(u8, flags, "raw") != null) r.raw = true;
+        if (std.mem.indexOf(u8, flags, "onlyStrict") != null) r.only_strict = true;
+    }
+    if (std.mem.indexOf(u8, front, "negative:") != null) {
+        r.negative = true;
+        if (std.mem.indexOf(u8, front, "phase: parse") != null or std.mem.indexOf(u8, front, "phase:parse") != null) r.neg_parse = true;
+    }
+    if (std.mem.indexOf(u8, front, "includes:")) |ii| {
+        const after = front[ii + "includes:".len ..];
+        const nl = std.mem.indexOfScalar(u8, after, '\n') orelse after.len;
+        if (std.mem.indexOfScalar(u8, after, '[')) |lb| if (lb < nl) {
+            const rb = std.mem.indexOfScalarPos(u8, after, lb, ']') orelse after.len;
+            var it = std.mem.tokenizeAny(u8, after[lb + 1 .. rb], ", \t\r");
+            while (it.next()) |name| if (r.includes_n < r.includes.len) {
+                r.includes[r.includes_n] = name;
+                r.includes_n += 1;
+            };
+        };
+    }
+    return r;
+}
+
+var g_mod_io: std.Io = undefined;
+var g_mod_gpa: std.mem.Allocator = undefined;
+fn dgModLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+    _ = ctx;
+    const dir = std.fs.path.dirname(referrer) orelse ".";
+    const joined = std.fs.path.resolve(g_mod_gpa, &.{ dir, specifier }) catch return null;
+    out_path.* = joined;
+    return std.Io.Dir.cwd().readFileAlloc(g_mod_io, joined, g_mod_gpa, .limited(1 << 20)) catch null;
+}
+
+fn fileMode(gpa: std.mem.Allocator, io: std.Io, root: []const u8, fpath: []const u8) !void {
+    const src = std.Io.Dir.cwd().readFileAlloc(io, fpath, gpa, .limited(1 << 20)) catch {
+        std.debug.print("cannot read {s}\n", .{fpath});
+        return;
+    };
+    const m = fmeta(src);
+    const ctx = js.Context.create(gpa) catch return;
+    defer ctx.destroy();
+
+    if (m.module) {
+        // Install harness in global scope, then evaluate as module.
+        if (!m.raw) {
+            var hbuf: std.ArrayListUnmanaged(u8) = .empty;
+            if (readHarness(gpa, io, root, "sta.js")) |sta| {
+                hbuf.appendSlice(gpa, sta) catch {};
+                hbuf.append(gpa, '\n') catch {};
+            }
+            if (readHarness(gpa, io, root, "assert.js")) |ass| {
+                hbuf.appendSlice(gpa, ass) catch {};
+                hbuf.append(gpa, '\n') catch {};
+            }
+            var i: usize = 0;
+            while (i < m.includes_n) : (i += 1) {
+                if (readHarness(gpa, io, root, m.includes[i])) |inc| {
+                    hbuf.appendSlice(gpa, inc) catch {};
+                    hbuf.append(gpa, '\n') catch {};
+                }
+            }
+            _ = ctx.evaluate(hbuf.items) catch {};
+        }
+        g_mod_io = io;
+        g_mod_gpa = gpa;
+        const mh = js.Context.ModuleHost{ .ctx = @ptrFromInt(@alignOf(usize)), .load = dgModLoad };
+        if (ctx.evaluateModule(fpath, src, mh)) |_| {
+            std.debug.print("OUTCOME: {s}\n", .{if (m.negative) "FAIL(neg-not-thrown)" else "PASS"});
+        } else |err| reportErr(ctx, err, m);
+        dumpBuf(ctx);
+        return;
+    }
+
+    var full: std.ArrayListUnmanaged(u8) = .empty;
+    if (m.only_strict and !m.raw) full.appendSlice(gpa, "\"use strict\";\n") catch {};
+    if (!m.raw) {
+        if (readHarness(gpa, io, root, "sta.js")) |sta| {
+            full.appendSlice(gpa, sta) catch {};
+            full.append(gpa, '\n') catch {};
+        }
+        if (readHarness(gpa, io, root, "assert.js")) |ass| {
+            full.appendSlice(gpa, ass) catch {};
+            full.append(gpa, '\n') catch {};
+        }
+        var i: usize = 0;
+        while (i < m.includes_n) : (i += 1) {
+            if (readHarness(gpa, io, root, m.includes[i])) |inc| {
+                full.appendSlice(gpa, inc) catch {};
+                full.append(gpa, '\n') catch {};
+            }
+        }
+        if (m.async_) {
+            if (readHarness(gpa, io, root, "doneprintHandle.js")) |dph| {
+                full.appendSlice(gpa, dph) catch {};
+                full.append(gpa, '\n') catch {};
+            }
+        }
+    }
+    full.appendSlice(gpa, src) catch {};
+    if (ctx.evaluate(full.items)) |_| {
+        if (m.negative) {
+            std.debug.print("OUTCOME: FAIL(neg-not-thrown)\n", .{});
+        } else if (m.async_) {
+            const done = std.mem.indexOf(u8, ctx.print_buffer.items, "Test262:AsyncTestComplete") != null;
+            std.debug.print("OUTCOME: {s}\n", .{if (done) "PASS" else "FAIL(async-not-done)"});
+        } else std.debug.print("OUTCOME: PASS\n", .{});
+    } else |err| reportErr(ctx, err, m);
+    dumpBuf(ctx);
+}
+
+fn reportErr(ctx: *js.Context, err: anyerror, m: anytype) void {
+    if (m.negative) {
+        const ok = if (m.neg_parse) err != error.Throw else err == error.Throw;
+        std.debug.print("OUTCOME: {s} (neg, err={s})\n", .{ if (ok) "PASS" else "FAIL", @errorName(err) });
+        return;
+    }
+    var name: []const u8 = "?";
+    var msg: []const u8 = "";
+    if (ctx.exception) |ex| {
+        if (ex == .object) {
+            const o = ex.object;
+            if (o.error_name.len > 0) name = o.error_name;
+            if (o.getOwn("name")) |nv| if (nv == .string) {
+                name = nv.string;
+            };
+            if (o.getOwn("message")) |mv| if (mv == .string) {
+                msg = mv.string;
+            };
+        } else if (ex == .string) {
+            name = "(string)";
+            msg = ex.string;
+        } else name = @tagName(ex);
+    }
+    std.debug.print("OUTCOME: FAIL err={s} | {s}: {s}\n", .{ @errorName(err), name, msg });
+}
+
+fn dumpBuf(ctx: *js.Context) void {
+    if (ctx.print_buffer.items.len > 0) std.debug.print("PRINT: {s}\n", .{ctx.print_buffer.items});
 }
 
 fn readHarness(gpa: std.mem.Allocator, io: std.Io, root: []const u8, name: []const u8) ?[]const u8 {

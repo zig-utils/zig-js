@@ -12084,6 +12084,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var o_second: []const u8 = "";
     var o_frac: usize = 0; // fractionalSecondDigits (1-3) or 0
     var o_day_period: []const u8 = ""; // flexible dayPeriod width (long/short/narrow)
+    var o_tzname: []const u8 = ""; // timeZoneName width (long/short/...)
     var hour12 = true;
     var any_comp = false;
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
@@ -12101,13 +12102,21 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_minute = try get(self, ov, "minute");
         o_second = try get(self, ov, "second");
         o_day_period = try get(self, ov, "dayPeriod");
+        o_tzname = try get(self, ov, "timeZoneName");
         if (ov.object.getOwn("fractionalSecondDigits")) |f| if (f == .number) {
             o_frac = @intFromFloat(f.number);
         };
-        any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_frac > 0;
+        any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
         const hc = try get(self, ov, "hourCycle");
         const h12 = try self.getProperty(ov, "hour12");
-        if (h12 == .boolean) hour12 = h12.boolean else if (hc.len > 0) hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
+        if (h12 == .boolean) {
+            hour12 = h12.boolean;
+        } else if (hc.len > 0) {
+            hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
+        } else if (this.object.getOwn("\x00locale")) |lv| if (lv == .string) {
+            // No explicit hour12/hourCycle: honor the locale's -u-hc keyword.
+            if (localeUValue(lv.string, "hc")) |lhc| hour12 = std.mem.eql(u8, lhc, "h11") or std.mem.eql(u8, lhc, "h12");
+        };
         // dateStyle/timeStyle expand to a representative set of components (an
         // en approximation; the localized patterns/time-zone parts are not
         // modeled). Both can't combine with explicit components (enforced at
@@ -12126,6 +12135,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             o_hour = "numeric";
             o_minute = "2-digit";
             o_second = if (eq(tstyle, "short")) "" else "2-digit";
+            o_tzname = if (eq(tstyle, "full")) "long" else if (eq(tstyle, "long")) "short" else "";
         }
     };
     if (!any_comp) {
@@ -12188,7 +12198,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     }
     // Time part: "h:mm:ss AM/PM" (or 24-hour).
     const have_clock = o_hour.len > 0 or o_minute.len > 0 or o_second.len > 0;
-    const have_time = have_clock or o_day_period.len > 0;
+    const have_time = have_clock or o_day_period.len > 0 or o_tzname.len > 0;
     if (have_time) {
         if (parts.items.len > 0) try P.lit(self, &parts, ", ");
         var h = hour24;
@@ -12224,6 +12234,19 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (ap.len > 0) {
             if (have_clock) try P.lit(self, &parts, " ");
             try parts.append(self.arena, .{ .typ = "dayPeriod", .value = ap });
+        }
+        if (o_tzname.len > 0) {
+            // UTC time zone only (the engine has no zone database yet).
+            const tzn: []const u8 = if (eq(o_tzname, "long"))
+                "Coordinated Universal Time"
+            else if (eq(o_tzname, "longOffset") or eq(o_tzname, "shortOffset"))
+                "GMT"
+            else if (eq(o_tzname, "longGeneric"))
+                "Coordinated Universal Time"
+            else
+                "UTC"; // "short", "shortGeneric"
+            if (have_clock or ap.len > 0) try P.lit(self, &parts, " ");
+            try parts.append(self.arena, .{ .typ = "timeZoneName", .value = tzn });
         }
     }
     return parts;

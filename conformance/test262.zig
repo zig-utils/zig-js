@@ -512,6 +512,12 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
         };
         const abs_path = std.fs.path.join(gpa, &.{ path, entry.path }) catch entry.basename;
         const o = runOne(gpa, io, &harness, abs_path, src);
+        if (o == .fail_negative or o == .fail_runtime or o == .fail_parse) {
+            var xb: [512]u8 = undefined;
+            if (std.fmt.bufPrint(&xb, "XF\t{s}\t{s}\n", .{ @tagName(o), entry.path })) |xl| {
+                out.writeStreamingAll(io, xl) catch {};
+            } else |_| {}
+        }
         gpa.free(src);
         emit(out, io, &line_buf, idx, o);
     }
@@ -602,6 +608,10 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, exe: []const u8, sub: []cons
             if (line.len == 0) continue;
             if (std.mem.eql(u8, line, "DONE")) {
                 done = true;
+                continue;
+            }
+            if (std.mem.startsWith(u8, line, "XF\t")) {
+                std.debug.print("{s}\n", .{line});
                 continue;
             }
             const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
