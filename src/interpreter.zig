@@ -13,6 +13,7 @@ const cldr_numbers = @import("cldr_numbers.zig");
 const numbering_systems = @import("numbering_systems.zig");
 const cldr_locale = @import("cldr_locale.zig");
 const cldr_plurals = @import("cldr_plurals.zig");
+const cldr_timedata = @import("cldr_timedata.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -11574,9 +11575,42 @@ fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, defaults: DtfDefault
     return r;
 }
 
+/// Resolve the effective hour cycle (CreateDateTimeFormat steps 24-26): an
+/// explicit hour12 picks the locale's 12-/24-hour variant; else an explicit
+/// hourCycle option or the locale's -u-hc keyword; else the territory default.
+/// `locale` is the resolved BCP-47 tag; opt_hc/opt_h12 come from the options.
+fn dtfResolveHourCycle(self: *Interpreter, locale: []const u8, opt_hc: []const u8, opt_h12: ?bool) []const u8 {
+    const t = parseTriple(locale);
+    var region: []const u8 = t.r;
+    if (region.len == 0) {
+        if (cldrMaximize(self.arena, t)) |m| region = m.r;
+    }
+    if (region.len == 0) region = "001";
+    var rbuf: [8]u8 = undefined;
+    const rl = if (region.len <= rbuf.len) std.ascii.lowerString(rbuf[0..region.len], region) else region;
+    const hcd = cldr_timedata.forRegion(rl);
+    if (opt_h12) |b| return if (b) hcd.h12 else hcd.h24;
+    if (opt_hc.len > 0) return opt_hc;
+    if (localeUValue(locale, "hc")) |e| return e;
+    return hcd.def;
+}
+
 /// Build the normalized options object that the instance stores under
 /// `\x00opts` (read by both `format` and `resolvedOptions`).
-fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r: DtfOptions) EvalError!void {
+fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalError!void {
+    var r = r_in;
+    // Resolve the hour cycle whenever the pattern carries an hour (an explicit
+    // hour component or a timeStyle); otherwise [[HourCycle]] is undefined and
+    // resolvedOptions omits hourCycle/hour12.
+    if (r.hour.len > 0 or r.time_style.len > 0) {
+        const loc = if (o.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
+        const hc = dtfResolveHourCycle(self, loc, r.hour_cycle, r.hour12);
+        r.hour_cycle = hc;
+        r.hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
+    } else {
+        r.hour_cycle = "";
+        r.hour12 = null;
+    }
     const ro = (try self.newObject()).object;
     const S = struct {
         fn put(s: *Interpreter, obj: *value.Object, k: []const u8, v: []const u8) EvalError!void {
