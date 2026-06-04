@@ -10750,6 +10750,16 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
             }
         }
         {
+            // Multi-variant CLDR aliases that current CLDR has split into
+            // single-variant entries: collapse the known sequence in place.
+            // "hepburn-heploc" -> "alalc97".
+            var ci: usize = 0;
+            while (ci + 1 < variants.items.len) : (ci += 1) {
+                if (std.mem.eql(u8, variants.items[ci], "hepburn") and std.mem.eql(u8, variants.items[ci + 1], "heploc")) {
+                    variants.items[ci] = "alalc97";
+                    _ = variants.orderedRemove(ci + 1);
+                }
+            }
             // Apply variant aliases. A variant may also be canonicalized via a
             // "und-<variant>" languageAlias (e.g. und-arevela->und drops it,
             // und-polytoni->und-polyton renames); an empty result drops it.
