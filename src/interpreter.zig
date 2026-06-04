@@ -12976,6 +12976,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var cur_symbol: []const u8 = ""; // the bare currency symbol, when display=symbol (placement is locale-dependent)
     var cur_code: []const u8 = ""; // the ISO currency code (for locale-dependent symbol selection)
     var unit_suffix: []const u8 = ""; // " <unit name>" appended for style:unit
+    var compact_suffix: []const u8 = ""; // compact scale suffix ("K"/" million"…)
     var unit_space = true; // narrow unitDisplay drops the space
     var sign_display: []const u8 = "auto";
     var accounting = false;
@@ -12986,10 +12987,13 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var rounding_priority: []const u8 = "auto";
     var rounding_increment: u64 = 1;
     var notation: []const u8 = "standard";
+    var compact_display: []const u8 = "short";
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
         const o = ov;
         const nv = try self.getProperty(o, "notation");
         if (nv == .string) notation = nv.string;
+        const cdv = try self.getProperty(o, "compactDisplay");
+        if (cdv == .string) compact_display = cdv.string;
         const sd = try self.getProperty(o, "signDisplay");
         if (sd == .string) sign_display = sd.string;
         const rmv = try self.getProperty(o, "roundingMode");
@@ -13094,6 +13098,28 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         digits = r.int_str;
         frac_str = r.frac_str;
         is_zero = (@abs(n) == 0);
+    } else if (finite and std.mem.eql(u8, notation, "compact") and @abs(n) != 0) {
+        // Compact notation: scale by the largest power-of-1000 (up to 10^12),
+        // then round to max(2, integer-digits-of-scaled) significant digits
+        // (CLDR's "morePrecision" of 2 significant vs 0 fraction digits), and
+        // append the scale suffix.
+        const mag = @abs(n);
+        const e = orderOfMagnitude(mag);
+        const cexp: i32 = if (e >= 3) @min(@divFloor(e, 3) * 3, 12) else 0;
+        const scaled = if (cexp > 0) mag / powi10(cexp) else mag;
+        const sig: usize = @intCast(@max(2, (e - cexp) + 1));
+        const r = try nfRound(self, scaled, neg, min_int, 0, 0, 1, sig, false, "auto", 1, rounding_mode);
+        digits = r.int_str;
+        frac_str = r.frac_str;
+        is_zero = r.is_zero;
+        const long = std.mem.eql(u8, compact_display, "long");
+        compact_suffix = switch (cexp) {
+            3 => if (long) "thousand" else "K",
+            6 => if (long) "million" else "M",
+            9 => if (long) "billion" else "B",
+            12 => if (long) "trillion" else "T",
+            else => "",
+        };
     } else if (finite) {
         const mag = @abs(n);
         if (mag >= 9.0e18) {
@@ -13189,6 +13215,11 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         if (exponent < 0) try push(self, &parts, "exponentMinusSign", "-");
         const eabs: u64 = @intCast(@abs(exponent));
         try push(self, &parts, "exponentInteger", try std.fmt.allocPrint(self.arena, "{d}", .{eabs}));
+    }
+    if (compact_suffix.len > 0) {
+        // The long form ("million") is space-separated; the short form ("M") is not.
+        if (std.mem.eql(u8, compact_display, "long")) try push(self, &parts, "literal", " ");
+        try push(self, &parts, "compact", compact_suffix);
     }
     if (is_percent) try push(self, &parts, "percentSign", syms.percent);
     if (cur_suffix.len > 0) try push(self, &parts, "currency", cur_suffix);
