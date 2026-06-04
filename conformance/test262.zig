@@ -221,6 +221,8 @@ fn parseMeta(src: []const u8) Meta {
     const front = src[start .. start + end_rel];
 
     if (std.mem.indexOf(u8, front, "includes:")) |ii| parseIncludes(&meta, front[ii + "includes:".len ..]);
+    if (std.mem.indexOf(u8, front, "tail-call-optimization") != null)
+        meta.unsupported_flag = true;
     if (std.mem.indexOf(u8, front, "flags:")) |fi| {
         const line_end = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
         const line = front[fi..line_end];
@@ -387,14 +389,41 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []con
 
 /// Host state for the module loader: read a fixture relative to the importing
 /// module's path (resolving `.`/`..` so the same file dedups to one path).
-const ModHost = struct { gpa: std.mem.Allocator, io: std.Io };
+const ModHost = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    paths: std.ArrayListUnmanaged([]const u8) = .empty,
+    sources: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    fn deinit(self: *ModHost) void {
+        for (self.paths.items) |p| self.gpa.free(p);
+        for (self.sources.items) |s| self.gpa.free(s);
+        self.paths.deinit(self.gpa);
+        self.sources.deinit(self.gpa);
+    }
+};
 
 fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
     const h: *ModHost = @ptrCast(@alignCast(ctx));
     const dir = std.fs.path.dirname(referrer) orelse ".";
     const joined = std.fs.path.resolve(h.gpa, &.{ dir, specifier }) catch return null;
+    const source = std.Io.Dir.cwd().readFileAlloc(h.io, joined, h.gpa, .limited(1 << 20)) catch {
+        h.gpa.free(joined);
+        return null;
+    };
+    h.paths.append(h.gpa, joined) catch {
+        h.gpa.free(source);
+        h.gpa.free(joined);
+        return null;
+    };
+    h.sources.append(h.gpa, source) catch {
+        h.paths.items.len -= 1;
+        h.gpa.free(source);
+        h.gpa.free(joined);
+        return null;
+    };
     out_path.* = joined;
-    return std.Io.Dir.cwd().readFileAlloc(h.io, joined, h.gpa, .limited(1 << 20)) catch null;
+    return source;
 }
 
 /// Run a `flags: [module]` test: install the harness in the global scope, then
@@ -422,6 +451,7 @@ fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []
         _ = ctx.evaluate(hbuf.items) catch {};
     }
     var host = ModHost{ .gpa = gpa, .io = io };
+    defer host.deinit();
     const mh = js.Context.ModuleHost{ .ctx = &host, .load = modLoad };
     if (ctx.evaluateModule(abs_path, src, mh)) |_| {
         return if (meta.negative) .fail_negative else .pass;
@@ -745,6 +775,12 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, exe: []con
 
         // The worker crashed (or timed out). Blame the next unreported test.
         const crasher = if (max_idx) |m| m + 1 else next;
+        if (pathAtIndex(gpa, io, root, sub, crasher)) |crash_path| {
+            defer gpa.free(crash_path);
+            std.debug.print("  (worker crashed for {s} at {d}: {s})\n", .{ sub, crasher, crash_path });
+        } else {
+            std.debug.print("  (worker crashed for {s} at {d})\n", .{ sub, crasher });
+        }
         stats.add(.fail_other);
         next = crasher + 1; // strictly increases → guaranteed progress
     }

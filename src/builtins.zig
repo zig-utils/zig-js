@@ -1020,7 +1020,7 @@ pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_o
     if (target.proxy_handler != null or target.proxy_revoked) {
         if (target.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
         const handler = target.proxy_handler.?;
-        const tgt = target.proxy_target.?;
+        const tgt = target.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
         const trap = try self.getProperty(.{ .object = handler }, "defineProperty");
         if (trap == .undefined or trap == .null) return defineOne(self, tgt, key, d);
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
@@ -1485,7 +1485,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     if (o.proxy_handler != null or o.proxy_revoked) {
         if (o.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
         const handler = o.proxy_handler.?;
-        const tgt = o.proxy_target.?;
+        const tgt = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
         const trap = try self.getProperty(.{ .object = handler }, "getOwnPropertyDescriptor");
         if (trap == .undefined or trap == .null)
             return objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ .{ .object = tgt }, arg(args, 1) });

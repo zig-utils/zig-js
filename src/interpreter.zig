@@ -1757,7 +1757,7 @@ pub const Interpreter = struct {
         if (callee != .object) return self.throwError("TypeError", "value is not a function");
         const obj = callee.object;
         if (obj.proxy_handler != null or obj.proxy_revoked) {
-            const target = obj.proxy_target.?;
+            const target = obj.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'apply' on a proxy that has been revoked");
             if (try self.proxyTrap(obj, "apply")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.object.elements.append(self.arena, a);
@@ -2091,7 +2091,7 @@ pub const Interpreter = struct {
         if (callee != .object) return self.throwError("TypeError", "value is not a constructor");
         const obj = callee.object;
         if (obj.proxy_handler != null or obj.proxy_revoked) {
-            const target = obj.proxy_target.?;
+            const target = obj.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'construct' on a proxy that has been revoked");
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.object.elements.append(self.arena, a);
@@ -3776,7 +3776,7 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxy_target.?;
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'get' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "get")) |trap| {
             const res = try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key), receiver }, .{ .object = o.proxy_handler.? });
             // [[Get]] invariant (9.5.8): a non-configurable non-writable data
@@ -3800,7 +3800,7 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxy_target.?;
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'set' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "set")) |trap| {
             const ok = (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key), v, receiver }, .{ .object = o.proxy_handler.? })).toBoolean();
             // [[Set]] invariant (9.5.9): a successful set can't disagree with a
@@ -3823,7 +3823,7 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxy_target.?;
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'has' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "has")) |trap| {
             const b = (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key) }, .{ .object = o.proxy_handler.? })).toBoolean();
             // [[HasProperty]] invariant (9.5.7): can't hide a non-configurable
@@ -3843,7 +3843,7 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxy_target.?;
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'deleteProperty' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "deleteProperty")) |trap| {
             const b = (try self.callValueWithThis(trap, &.{ .{ .object = target }, self.keyToValue(key) }, .{ .object = o.proxy_handler.? })).toBoolean();
             // [[Delete]] invariant (9.5.10): can't report deleting a
@@ -3889,7 +3889,7 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
-        const target = o.proxy_target.?;
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'ownKeys' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "ownKeys")) |trap| {
             const res = try self.callValueWithThis(trap, &.{.{ .object = target }}, .{ .object = o.proxy_handler.? });
             if (res != .object or !res.object.is_array) return self.throwError("TypeError", "ownKeys trap must return an array");
