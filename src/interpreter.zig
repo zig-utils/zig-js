@@ -11605,6 +11605,37 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r: DtfOptions) EvalErro
     try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
 }
 
+/// The single units sanctioned for use in ECMAScript (ECMA-402). A unit
+/// identifier is one of these, or "<x>-per-<y>" with both sanctioned.
+const sanctioned_units = [_][]const u8{
+    "acre",          "bit",          "byte",        "celsius",   "centimeter",
+    "day",           "degree",       "fahrenheit",  "fluid-ounce", "foot",
+    "gallon",        "gigabit",      "gigabyte",    "gram",      "hectare",
+    "hour",          "inch",         "kilobit",     "kilobyte",  "kilogram",
+    "kilometer",     "liter",        "megabit",     "megabyte",  "meter",
+    "microsecond",   "mile",         "mile-scandinavian", "milliliter", "millimeter",
+    "millisecond",   "minute",       "month",       "nanosecond", "ounce",
+    "percent",       "petabyte",     "pound",       "second",    "stone",
+    "terabit",       "terabyte",     "week",        "yard",      "year",
+};
+
+fn isSanctionedSingleUnit(u: []const u8) bool {
+    for (sanctioned_units) |s| if (std.mem.eql(u8, u, s)) return true;
+    return false;
+}
+
+/// IsWellFormedUnitIdentifier: a sanctioned single unit, or "<a>-per-<b>" where
+/// both a and b are sanctioned single units.
+fn isWellFormedUnitIdentifier(u: []const u8) bool {
+    if (isSanctionedSingleUnit(u)) return true;
+    if (std.mem.indexOf(u8, u, "-per-")) |p| {
+        const a = u[0..p];
+        const b = u[p + 5 ..];
+        return isSanctionedSingleUnit(a) and isSanctionedSingleUnit(b) and std.mem.indexOf(u8, b, "-per-") == null;
+    }
+    return false;
+}
+
 /// Read, validate, and normalize the Intl.NumberFormat options bag ONCE at
 /// construction, in the exact spec order (constructor-option-read-order asserts
 /// the observed getter sequence). Returns a plain object carrying the canonical
@@ -11660,8 +11691,12 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     const uv = try self.getProperty(raw, "unit");
     const unit: ?[]const u8 = if (uv == .undefined) null else try self.toStringV(uv);
     const udisp = try H.str(self, raw, ro, "unitDisplay", &.{ "short", "long", "narrow" });
+    // A missing currency under style:"currency" is a TypeError (takes precedence
+    // over the unit check); a present-but-malformed unit is a RangeError for any
+    // style.
+    if (std.mem.eql(u8, style, "currency") and cur_code == null) return self.throwError("TypeError", "currency code is required with style \"currency\"");
+    if (unit) |u| if (!isWellFormedUnitIdentifier(u)) return self.throwError("RangeError", "invalid unit identifier");
     if (std.mem.eql(u8, style, "currency")) {
-        if (cur_code == null) return self.throwError("TypeError", "currency code is required with style \"currency\"");
         try self.setProp(ro, "currency", .{ .string = try std.ascii.allocUpperString(self.arena, cur_code.?) });
         if (cdisp == null) try self.setProp(ro, "currencyDisplay", .{ .string = "symbol" });
         if (csign == null) try self.setProp(ro, "currencySign", .{ .string = "standard" });
@@ -14158,6 +14193,12 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     try self.setProp(o, "currency", .{ .string = c });
                     try self.setProp(o, "currencyDisplay", .{ .string = currency_display });
                     try self.setProp(o, "currencySign", .{ .string = "standard" });
+                }
+                if (std.mem.eql(u8, style, "unit")) {
+                    if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
+                        if (ov.object.getOwn("unit")) |u| try self.setProp(o, "unit", u);
+                        try self.setProp(o, "unitDisplay", ov.object.getOwn("unitDisplay") orelse .{ .string = "short" });
+                    };
                 }
                 try self.setProp(o, "minimumIntegerDigits", .{ .number = min_int });
                 // Significant-digits resolution: with the default ("auto") rounding
