@@ -2680,13 +2680,14 @@ pub const Interpreter = struct {
         // (locales, options).format(this), with the method's required/defaults.
         if (eq(name, "toLocaleString") or eq(name, "toLocaleDateString") or eq(name, "toLocaleTimeString")) {
             if (std.math.isNan(t)) return Value{ .string = "Invalid Date" };
+            const required: DtfRequired = if (eq(name, "toLocaleDateString")) .date else if (eq(name, "toLocaleTimeString")) .time else .any;
             const defaults: DtfDefaults = if (eq(name, "toLocaleDateString")) .date else if (eq(name, "toLocaleTimeString")) .time else .all;
             const dtf = (try self.newObject()).object;
             try self.setProp(dtf, "\x00intl", .{ .string = "DateTimeFormat" });
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
             const loc = if (locs.elements.items.len > 0) locs.elements.items[0].string else "en";
             try self.setProp(dtf, "\x00locale", .{ .string = loc });
-            const r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else .undefined, defaults);
+            const r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else .undefined, required, defaults);
             try dtfStoreOptions(self, dtf, r);
             return try intlDateTimeFormatFn(@ptrCast(self), .{ .object = dtf }, &.{.{ .number = t }});
         }
@@ -11510,12 +11511,14 @@ const DtfOptions = struct {
 /// RangeError on out-of-range values and TypeError on a dateStyle/timeStyle vs
 /// explicit-component conflict.
 const DtfDefaults = enum { date, time, all };
+const DtfRequired = enum { any, date, time };
 
 fn dtfProcessOptions(self: *Interpreter, raw: Value) EvalError!DtfOptions {
-    return dtfProcessOptionsKind(self, raw, .date);
+    // Intl.DateTimeFormat: required = "any", defaults = "date".
+    return dtfProcessOptionsKind(self, raw, .any, .date);
 }
 
-fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, defaults: DtfDefaults) EvalError!DtfOptions {
+fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequired, defaults: DtfDefaults) EvalError!DtfOptions {
     // CoerceOptionsToObject: undefined -> none; null -> TypeError; primitive -> boxed.
     const raw: Value = if (raw_in == .undefined) Value.undefined else .{ .object = try self.toObject(raw_in) };
     var r = DtfOptions{};
@@ -11563,9 +11566,16 @@ fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, defaults: DtfDefault
     if ((r.date_style.len > 0 or r.time_style.len > 0) and has_comp) {
         return self.throwError("TypeError", "dateStyle/timeStyle may not be used with explicit date-time component options");
     }
-    // Default the components to numeric when nothing was requested, per the
-    // required/defaults kind (date → y/m/d; time → h/m/s; all → both).
-    if (!has_comp and r.date_style.len == 0 and r.time_style.len == 0) {
+    // ToDateTimeOptions: needDefaults is decided by `required` (whether the
+    // relevant component group was supplied), and the defaults that get added
+    // are governed by `defaults`. So e.g. toLocaleDateString (required=date,
+    // defaults=date) with only time components still adds the date defaults.
+    const has_date_comp = r.weekday.len + r.year.len + r.month.len + r.day.len + r.era.len > 0;
+    const has_time_comp = r.hour.len + r.minute.len + r.second.len + r.day_period.len > 0 or r.frac_sec != null;
+    var need_defaults = true;
+    if ((required == .any or required == .date) and has_date_comp) need_defaults = false;
+    if ((required == .any or required == .time) and has_time_comp) need_defaults = false;
+    if (need_defaults and r.date_style.len == 0 and r.time_style.len == 0) {
         if (defaults == .date or defaults == .all) {
             r.year = "numeric";
             r.month = "numeric";
