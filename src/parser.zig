@@ -128,7 +128,7 @@ pub const Parser = struct {
 
     /// A label after `break`/`continue` on the same logical line.
     fn optionalLabel(self: *Parser) ?[]const u8 {
-        if (self.check(.identifier) and !isReservedWord(self.cur().text)) {
+        if (self.check(.identifier) and !self.isForbiddenLabelName(self.cur().text)) {
             return self.advance().text;
         }
         return null;
@@ -159,12 +159,45 @@ pub const Parser = struct {
             "var",      "let",     "const",    "if",        "else",  "while",
             "do",       "for",     "switch",   "case",      "default", "break",
             "continue", "throw",   "try",      "catch",     "finally", "delete",
-            "class",    "extends", "super",    "yield",
+            "class",    "enum",    "export",   "extends",   "import", "super",
+            "yield",
         };
         for (words) |w| {
             if (std.mem.eql(u8, text, w)) return true;
         }
         return false;
+    }
+
+    fn isStrictReservedBinding(text: []const u8) bool {
+        const words = [_][]const u8{
+            "implements", "interface", "let",     "package", "private",
+            "protected",  "public",    "static",  "yield",
+        };
+        for (words) |w| if (std.mem.eql(u8, text, w)) return true;
+        return false;
+    }
+
+    fn isForbiddenBindingName(self: *Parser, text: []const u8) bool {
+        return isAlwaysReservedBinding(text) or
+            (self.strict and (isStrictReservedBinding(text) or isEvalOrArguments(text)));
+    }
+
+    fn isForbiddenLabelName(self: *Parser, text: []const u8) bool {
+        return isAlwaysReservedBinding(text) or (self.strict and isStrictReservedBinding(text));
+    }
+
+    fn isEscapedReservedWord(self: *Parser, t: Token) bool {
+        return t.kind == .identifier and t.escaped_identifier and
+            (isAlwaysReservedBinding(t.text) or (self.strict and isStrictReservedBinding(t.text)));
+    }
+
+    fn letDeclAhead(self: *Parser) bool {
+        if (!isKeyword(self.cur(), "let")) return false;
+        return switch (self.peekKind(1)) {
+            .lbrace, .lbracket => true,
+            .identifier => !isReservedWord(self.tokens[self.pos + 1].text),
+            else => false,
+        };
     }
 
     fn alloc(self: *Parser, node: Node) ParseError!*Node {
@@ -470,8 +503,9 @@ pub const Parser = struct {
         }
         const t = self.cur();
         if (t.kind == .identifier) {
+            if (self.isEscapedReservedWord(t)) return ParseError.UnexpectedToken;
             if (std.mem.eql(u8, t.text, "var")) return self.parseVarDecl(.@"var");
-            if (std.mem.eql(u8, t.text, "let")) return self.parseVarDecl(.let);
+            if (std.mem.eql(u8, t.text, "let") and self.letDeclAhead()) return self.parseVarDecl(.let);
             if (std.mem.eql(u8, t.text, "const")) return self.parseVarDecl(.@"const");
             // `using x = e, …;` (explicit resource management): a block-scoped,
             // initializer-required declaration — parsed like `const` (disposal at
@@ -533,7 +567,7 @@ pub const Parser = struct {
                 return self.alloc(.{ .continue_stmt = label });
             }
             // Labeled statement: `label: stmt` (identifier directly followed by `:`).
-            if (self.peekKind(1) == .colon and !isReservedWord(t.text)) {
+            if (self.peekKind(1) == .colon and !self.isForbiddenLabelName(t.text)) {
                 _ = self.advance(); // label
                 _ = self.advance(); // ':'
                 const body = try self.parseStatement();
@@ -579,7 +613,10 @@ pub const Parser = struct {
                     if (seen_spread) return ParseError.InvalidAssignmentTarget;
                     if (p.is_spread) {
                         seen_spread = true;
-                        if (p.value.* == .identifier) rest_name = p.value.identifier;
+                        if (p.value.* == .identifier) {
+                            if (self.isForbiddenBindingName(p.value.identifier)) return ParseError.UnexpectedToken;
+                            rest_name = p.value.identifier;
+                        }
                     } else if (p.value.* == .assign) {
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value.assign.target), .default = p.value.assign.value });
                     } else {
@@ -594,7 +631,11 @@ pub const Parser = struct {
 
     fn exprToTarget(self: *Parser, node: *Node) ParseError!*Node {
         return switch (node.*) {
-            .identifier, .member => node,
+            .identifier => {
+                if (self.isForbiddenBindingName(node.identifier)) return ParseError.UnexpectedToken;
+                return node;
+            },
+            .member => node,
             .array_lit, .object_lit => try self.litToPattern(node),
             else => ParseError.InvalidAssignmentTarget,
         };
@@ -608,6 +649,7 @@ pub const Parser = struct {
         if (self.check(.lbracket)) return self.parseArrayPattern();
         const name = self.advance();
         if (name.kind != .identifier) return ParseError.UnexpectedToken;
+        if (self.isForbiddenBindingName(name.text)) return ParseError.UnexpectedToken;
         return self.alloc(.{ .identifier = name.text });
     }
 
@@ -695,9 +737,7 @@ pub const Parser = struct {
             if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
             // A reserved word may not be a binding name — including when spelled
             // with `\u` escapes (the lexer hands us the decoded text).
-            if (isAlwaysReservedBinding(name_tok.text)) return ParseError.UnexpectedToken;
-            // Strict mode forbids `eval`/`arguments` as binding names.
-            if (self.strict and isEvalOrArguments(name_tok.text)) return ParseError.UnexpectedToken;
+            if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
             var init_expr: ?*Node = null;
             if (self.match(.assign)) {
                 init_expr = try self.parseAssignment();
@@ -785,7 +825,7 @@ pub const Parser = struct {
         if (isKeyword(self.cur(), "var")) {
             decl_kind = .@"var";
             _ = self.advance();
-        } else if (isKeyword(self.cur(), "let")) {
+        } else if (self.letDeclAhead()) {
             decl_kind = .let;
             _ = self.advance();
         } else if (isKeyword(self.cur(), "const")) {
@@ -826,7 +866,7 @@ pub const Parser = struct {
             // empty initializer
         } else if (isKeyword(self.cur(), "var")) {
             init_node = try self.parseVarDecl(.@"var"); // consumes the ';'
-        } else if (isKeyword(self.cur(), "let")) {
+        } else if (self.letDeclAhead()) {
             init_node = try self.parseVarDecl(.let);
         } else if (isKeyword(self.cur(), "const")) {
             init_node = try self.parseVarDecl(.@"const");
@@ -861,8 +901,11 @@ pub const Parser = struct {
         }
         if (decl_kind != null) {
             // A declaration binds a single BindingIdentifier.
-            if (self.check(.identifier) and !isReservedWord(self.cur().text))
+            if (self.check(.identifier)) {
+                const name = self.cur().text;
+                if (self.isForbiddenBindingName(name)) return ParseError.UnexpectedToken;
                 return try self.alloc(.{ .identifier = self.advance().text });
+            }
             return null;
         }
         // Assignment form: a LeftHandSideExpression that must be a valid
@@ -967,6 +1010,7 @@ pub const Parser = struct {
             }
             const p = self.advance();
             if (p.kind != .identifier) return ParseError.UnexpectedToken;
+            if (self.isForbiddenBindingName(p.text)) return ParseError.UnexpectedToken;
             var default: ?*Node = null;
             if (!is_rest and self.match(.assign)) default = try self.parseAssignment();
             try params.append(self.arena, .{ .name = p.text, .default = default, .is_rest = is_rest });
@@ -999,6 +1043,7 @@ pub const Parser = struct {
             if (p.pattern != null) continue;
             if (std.mem.eql(u8, p.name, "eval") or std.mem.eql(u8, p.name, "arguments"))
                 return ParseError.UnexpectedToken;
+            if (isStrictReservedBinding(p.name)) return ParseError.UnexpectedToken;
             for (params[0..i]) |q| {
                 if (q.pattern == null and std.mem.eql(u8, q.name, p.name)) return ParseError.UnexpectedToken;
             }
@@ -1012,8 +1057,10 @@ pub const Parser = struct {
         const is_gen = self.match(.star); // `function*` / `async function*`
         const name_tok = self.advance();
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
+        if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
+        if (self.last_fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
@@ -1030,11 +1077,13 @@ pub const Parser = struct {
         if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "")) {
             // Optional name (anything that isn't the opening paren).
             if (!self.check(.lparen)) {
+                if (self.isForbiddenBindingName(self.cur().text)) return ParseError.UnexpectedToken;
                 name = self.advance().text;
             }
         }
         const params = try self.parseParamList();
         const body = try self.parseFnBody(is_gen, is_async);
+        if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
@@ -1928,6 +1977,7 @@ pub const Parser = struct {
 
     fn parsePrimary(self: *Parser) ParseError!*Node {
         if (self.check(.identifier)) {
+            if (self.isEscapedReservedWord(self.cur())) return ParseError.UnexpectedToken;
             const w = self.cur().text;
             if (std.mem.eql(u8, w, "function")) return self.parseFunctionExpr(false);
             if (std.mem.eql(u8, w, "async") and self.peekIsKeyword(1, "function")) return self.parseFunctionExpr(true);
@@ -1972,6 +2022,7 @@ pub const Parser = struct {
                 if (std.mem.eql(u8, t.text, "null")) return self.alloc(.null_lit);
                 if (std.mem.eql(u8, t.text, "undefined")) return self.alloc(.undefined_lit);
                 if (std.mem.eql(u8, t.text, "this")) return self.alloc(.this_expr);
+                if (isAlwaysReservedBinding(t.text) or (self.strict and isStrictReservedBinding(t.text))) return ParseError.UnexpectedToken;
                 return self.alloc(.{ .identifier = t.text });
             },
             else => return ParseError.UnexpectedToken,

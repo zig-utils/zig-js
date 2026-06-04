@@ -88,6 +88,8 @@ pub const Token = struct {
     /// A `123n` BigInt literal — `bigint` holds the exact value.
     is_bigint: bool = false,
     bigint: i128 = 0,
+    /// True when an IdentifierName token contained at least one `\u` escape.
+    escaped_identifier: bool = false,
 };
 
 pub const LexError = error{ UnexpectedCharacter, UnterminatedString, InvalidNumber, OutOfMemory };
@@ -102,6 +104,7 @@ pub const Lexer = struct {
     /// start of a regex literal).
     prev_kind: TokenKind = .eof,
     prev_text: []const u8 = "",
+    last_identifier_escaped: bool = false,
     /// A stack of brace kinds (true = object literal `{`, false = block `{`), to
     /// resolve the `}`-then-`/` ambiguity: `{…} / x` divides an object literal,
     /// whereas a block `}` allows a regex.
@@ -234,6 +237,7 @@ pub const Lexer = struct {
             first = false;
         }
         const raw = self.src[start..self.i];
+        self.last_identifier_escaped = needs_decode;
         return if (needs_decode) self.decodeIdent(raw) else raw;
     }
 
@@ -337,7 +341,8 @@ pub const Lexer = struct {
         }
         // Identifiers / keywords — ASCII, Unicode letters, or `\u` escapes.
         if (self.identStartHere()) {
-            return .{ .kind = .identifier, .text = try self.lexIdentName(), .pos = start };
+            const name = try self.lexIdentName();
+            return .{ .kind = .identifier, .text = name, .pos = start, .escaped_identifier = self.last_identifier_escaped };
         }
         // Private names (#ident) for class private members; the name after the
         // `#` may itself use Unicode letters or `\u` escapes.
@@ -811,12 +816,14 @@ fn hexVal(c: u8) ?u8 {
     };
 }
 
-/// Append a UTF-8-encoded code point to `buf` (lone surrogates and out-of-range
-/// values fall back to a single raw byte so decoding never fails).
+/// Append a UTF-8-encoded code point to `buf`. Lone surrogates are emitted as
+/// WTF-8 so JS strings can preserve UTF-16 code units that are not scalar values.
 fn appendCodePoint(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u21) std.mem.Allocator.Error!void {
     var tmp: [4]u8 = undefined;
     const n = std.unicode.utf8Encode(cp, &tmp) catch {
-        try buf.append(arena, @truncate(cp));
+        try buf.append(arena, @intCast(0xE0 | (cp >> 12)));
+        try buf.append(arena, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try buf.append(arena, @intCast(0x80 | (cp & 0x3F)));
         return;
     };
     try buf.appendSlice(arena, tmp[0..n]);
@@ -898,6 +905,20 @@ pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
                 const d = hexVal(src[i + 4]);
                 if (a != null and b != null and c != null and d != null) {
                     const cp = (@as(u21, a.?) << 12) | (@as(u21, b.?) << 8) | (@as(u21, c.?) << 4) | d.?;
+                    if (cp >= 0xD800 and cp <= 0xDBFF and i + 10 < src.len and src[i + 5] == '\\' and src[i + 6] == 'u') {
+                        const e2 = hexVal(src[i + 7]);
+                        const f2 = hexVal(src[i + 8]);
+                        const g2 = hexVal(src[i + 9]);
+                        const h2 = hexVal(src[i + 10]);
+                        if (e2 != null and f2 != null and g2 != null and h2 != null) {
+                            const lo = (@as(u21, e2.?) << 12) | (@as(u21, f2.?) << 8) | (@as(u21, g2.?) << 4) | h2.?;
+                            if (lo >= 0xDC00 and lo <= 0xDFFF) {
+                                const full: u21 = 0x10000 + (((cp - 0xD800) << 10) | (lo - 0xDC00));
+                                try appendCodePoint(arena, buf, full);
+                                return i + 11;
+                            }
+                        }
+                    }
                     try appendCodePoint(arena, buf, cp);
                     return i + 5;
                 }
