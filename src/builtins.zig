@@ -1757,15 +1757,27 @@ const Stringifier = struct {
                     return self.throwError("TypeError", "Converting circular structure to JSON");
                 try st.stack.append(a, o);
                 defer _ = st.stack.pop();
-                if (o.is_array) try st.serializeArray(buf, o) else try st.serializeObject(buf, .{ .object = o });
+                const shape = try st.jsonShape(o);
+                if (shape.is_array) try st.serializeArray(buf, .{ .object = o }, shape) else try st.serializeObject(buf, .{ .object = o }, shape);
             },
         }
         return true;
     }
 
-    fn serializeArray(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), o: *value.Object) HostError!void {
+    fn jsonShape(st: *Stringifier, o: *value.Object) HostError!*value.Object {
+        var shape = o;
+        var guard: u32 = 0;
+        while (shape.proxy_handler != null or shape.proxy_revoked) {
+            guard += 1;
+            if (guard > 10000) return st.self.throwError("RangeError", "Maximum call stack size exceeded");
+            shape = shape.proxy_target orelse return st.self.throwError("TypeError", "Cannot stringify a revoked proxy");
+        }
+        return shape;
+    }
+
+    fn serializeArray(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, shape: *value.Object) HostError!void {
         const a = st.self.arena;
-        const len: usize = @max(o.elements.items.len, o.array_len);
+        const len: usize = @max(shape.elements.items.len, shape.array_len);
         if (len == 0) {
             try buf.appendSlice(a, "[]");
             return;
@@ -1778,23 +1790,23 @@ const Stringifier = struct {
             if (i != 0) try buf.append(a, ',');
             try st.newlineIndent(buf);
             const key = try std.fmt.allocPrint(a, "{d}", .{i});
-            if (!try st.serialize(buf, .{ .object = o }, key)) try buf.appendSlice(a, "null");
+            if (!try st.serialize(buf, holder, key)) try buf.appendSlice(a, "null");
         }
         st.indent.shrinkRetainingCapacity(outer);
         try st.newlineIndent(buf);
         try buf.append(a, ']');
     }
 
-    fn serializeObject(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), v: Value) HostError!void {
+    fn serializeObject(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), v: Value, shape: *value.Object) HostError!void {
         const self = st.self;
         const a = self.arena;
-        const o = v.object;
-        const keys = if (st.allow) |al| al else try o.enumerableKeys(a);
+        const keys = if (st.allow) |al| al else try self.objectOwnKeysList(v.object);
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
         var tmp: std.ArrayListUnmanaged(u8) = .empty;
         var count: usize = 0;
         for (keys) |k| {
+            if (value.isSymbolKey(k) or (st.allow == null and !shape.getAttr(k).enumerable)) continue;
             var member: std.ArrayListUnmanaged(u8) = .empty;
             if (!try st.serialize(&member, v, k)) continue; // omitted property
             if (count != 0) try tmp.append(a, ',');

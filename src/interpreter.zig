@@ -2604,12 +2604,12 @@ pub const Interpreter = struct {
         }
         if (eq(name, "exec")) {
             const input = try self.toStringV(arg0(args));
-            const flags = o.regex_flags;
-            const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
-            const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
             // RegExpBuiltinExec always reads/coerces `lastIndex`; it only uses it
             // as the search start for global/sticky regexps.
             const li = toLen(try self.toNumberV(try self.getProperty(.{ .object = o }, "lastIndex")));
+            const flags = o.regex_flags;
+            const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
+            const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
             const start = if (global or sticky) li else 0;
             if (start > input.len) {
                 if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -2684,9 +2684,17 @@ pub const Interpreter = struct {
         return value.strictEquals(a, b);
     }
 
+    fn advanceStringIndex(s: []const u8, index: usize, unicode: bool) usize {
+        if (!unicode or index >= s.len) return index + 1;
+        return index + if (utf8SeqLen(s, index) == 4) @as(usize, 2) else 1;
+    }
+
     fn regexpMatch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
         if (rx != .object) return self.throwError("TypeError", "RegExp.prototype[Symbol.match] called on a non-object");
-        if (!(try self.getProperty(rx, "global")).toBoolean()) return try self.regexpExecGeneric(rx, s);
+        const flags = try self.toStringV(try self.getProperty(rx, "flags"));
+        const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
+        if (!global) return try self.regexpExecGeneric(rx, s);
+        const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
 
         try self.setRegExpLikeLastIndex(rx, 0);
         const arr = try self.newArray();
@@ -2700,7 +2708,7 @@ pub const Interpreter = struct {
 
             if (match_s.len == 0) {
                 const li = toLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
-                try self.setRegExpLikeLastIndex(rx, @floatFromInt(@min(li + 1, s.len + 1)));
+                try self.setRegExpLikeLastIndex(rx, @floatFromInt(advanceStringIndex(s, li, full_unicode)));
             }
         }
     }

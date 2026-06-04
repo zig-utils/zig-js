@@ -932,6 +932,29 @@ test "RegExp search uses generic exec and restores lastIndex" {
     )).boolean);
 }
 
+test "RegExp match reads flags and observes lastIndex recompilation" {
+    try std.testing.expect((try evalIn(
+        \\var log = "";
+        \\var rx = {
+        \\  get flags() { log += "flags,"; return "g"; },
+        \\  set lastIndex(v) { log += "set:" + v + ","; },
+        \\  get exec() {
+        \\    return function(s) { return n++ === 0 ? ["x"] : null; };
+        \\  }
+        \\};
+        \\var n = 0;
+        \\var matched = RegExp.prototype[Symbol.match].call(rx, "x")[0] === "x";
+        \\var r = /a/;
+        \\r.lastIndex = { valueOf: function() { r.compile("a", "g"); return 0; } };
+        \\r[Symbol.match]("a");
+        \\matched && log === "flags,set:0," && r.lastIndex === 1
+    )).boolean);
+}
+
+test "JSON stringify preserves proxy array shape" {
+    try expectEvalStr("[\"a\",\"b\"]", "JSON.stringify(new Proxy(['a', 'b'], {}))");
+}
+
 test "object literal __proto__ sets ordinary object prototype" {
     try std.testing.expect((try evalIn(
         \\var p = { marker: 1 };
