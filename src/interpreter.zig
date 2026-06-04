@@ -2639,6 +2639,48 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// RegExpExec(R, S): use a callable `exec` method when present, validate its
+    /// result, otherwise fall back to the built-in matcher only for true RegExp
+    /// instances.
+    fn regexpExecGeneric(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
+        if (rx != .object) return self.throwError("TypeError", "RegExpExec receiver must be an object");
+        const exec = try self.getProperty(rx, "exec");
+        if (exec.isCallable()) {
+            const result = try self.callValueWithThis(exec, &.{.{ .string = s }}, rx);
+            if (result == .null or (result == .object and !result.object.is_symbol and !result.object.is_bigint)) return result;
+            return self.throwError("TypeError", "RegExp exec result must be an object or null");
+        }
+        if (rx.object.is_regex) return (try self.regexMethod(rx.object, "exec", &.{.{ .string = s }})).?;
+        return self.throwError("TypeError", "RegExp exec property is not callable");
+    }
+
+    fn setRegExpLikeLastIndex(self: *Interpreter, rx: Value, n: f64) EvalError!void {
+        if (rx == .object and rx.object.is_regex) return self.setRegExpLastIndex(rx.object, n);
+        if (rx == .object) return self.setProp(rx.object, "lastIndex", .{ .number = n });
+        return self.throwError("TypeError", "RegExp receiver must be an object");
+    }
+
+    fn regexpMatch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
+        if (rx != .object) return self.throwError("TypeError", "RegExp.prototype[Symbol.match] called on a non-object");
+        if (!(try self.getProperty(rx, "global")).toBoolean()) return try self.regexpExecGeneric(rx, s);
+
+        try self.setRegExpLikeLastIndex(rx, 0);
+        const arr = try self.newArray();
+        while (true) {
+            const result = try self.regexpExecGeneric(rx, s);
+            if (result == .null) return if (arr.object.elements.items.len == 0) Value.null else arr;
+
+            const match_v = try self.getProperty(result, "0");
+            const match_s = try self.toStringV(match_v);
+            try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, match_s) });
+
+            if (match_s.len == 0) {
+                const li = toLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
+                try self.setRegExpLikeLastIndex(rx, @floatFromInt(@min(li + 1, s.len + 1)));
+            }
+        }
+    }
+
     fn regexpToString(self: *Interpreter, this: Value) EvalError!Value {
         if (this != .object) return self.throwError("TypeError", "RegExp.prototype.toString called on a non-object");
         if (self.isRegExpProto(this.object)) return .{ .string = "/(?:)/" };
@@ -17096,6 +17138,11 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, name, "toString")) {
                 return try self.regexpToString(this);
             }
+            if (comptime std.mem.eql(u8, name, "test")) {
+                const str = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+                const r = try self.regexpExecGeneric(this, str);
+                return .{ .boolean = r != .null };
+            }
             if (this != .object or !this.object.is_regex) {
                 return self.throwError("TypeError", "RegExp.prototype." ++ name ++ " called on a non-RegExp");
             }
@@ -17116,6 +17163,9 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this != .object) return self.throwError("TypeError", "RegExp.prototype[Symbol." ++ op ++ "] called on a non-object");
             const str = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+            if (comptime std.mem.eql(u8, op, "match")) {
+                return try self.regexpMatch(this, str);
+            }
             if (comptime (std.mem.eql(u8, op, "replace") or std.mem.eql(u8, op, "split"))) {
                 const extra: Value = if (args.len > 1) args[1] else .undefined;
                 return (try self.stringMethod(str, op, &.{ this, extra })) orelse .undefined;

@@ -877,6 +877,39 @@ test "RegExp compile mutates before throwing on non-writable lastIndex" {
     )).boolean);
 }
 
+test "RegExp generic exec dispatch validates protocol results" {
+    try std.testing.expect((try evalIn(
+        \\var obj = { exec: function(s) { return function(){}; } };
+        \\var testOk = RegExp.prototype.test.call(obj, "") === true;
+        \\var re = /a/;
+        \\re.exec = null;
+        \\var regexpFallback = RegExp.prototype[Symbol.match].call(re, "foo") === null;
+        \\var nonCallableThrow = false;
+        \\try { RegExp.prototype[Symbol.match].call({ exec: null }, "foo"); }
+        \\catch (e) { nonCallableThrow = e.name === "TypeError"; }
+        \\var ret = {};
+        \\var objectReturn = RegExp.prototype[Symbol.match].call({
+        \\  get global() { return false; },
+        \\  exec: function(s) { return ret; }
+        \\}, "foo") === ret;
+        \\var primitiveThrow = false;
+        \\try {
+        \\  RegExp.prototype[Symbol.match].call({
+        \\    get global() { return false; },
+        \\    exec: function(s) { return 1; }
+        \\  }, "foo");
+        \\} catch (e) { primitiveThrow = e.name === "TypeError"; }
+        \\var symbolThrow = false;
+        \\try {
+        \\  RegExp.prototype[Symbol.match].call({
+        \\    get global() { return false; },
+        \\    exec: function(s) { return Symbol.iterator; }
+        \\  }, "foo");
+        \\} catch (e) { symbolThrow = e.name === "TypeError"; }
+        \\testOk && regexpFallback && nonCallableThrow && objectReturn && primitiveThrow && symbolThrow
+    )).boolean);
+}
+
 test "object literal __proto__ sets ordinary object prototype" {
     try std.testing.expect((try evalIn(
         \\var p = { marker: 1 };
