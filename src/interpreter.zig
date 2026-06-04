@@ -10936,18 +10936,20 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const key = try self.toStringV(if (args.len > 0) args[0] else .undefined);
     const arr = (try self.newArray()).object;
+    // Each list must be sorted ascending by code point and contain no
+    // duplicates (the source tables are kept sorted to satisfy this).
     const items: []const []const u8 = if (std.mem.eql(u8, key, "calendar"))
-        &.{"iso8601"}
+        &dtf_available_calendars
     else if (std.mem.eql(u8, key, "numberingSystem"))
-        &.{"latn"}
+        &numbering_systems.names
     else if (std.mem.eql(u8, key, "currency"))
-        &.{ "USD", "EUR", "GBP", "JPY" }
+        &supported_currencies
     else if (std.mem.eql(u8, key, "timeZone"))
         &.{"UTC"}
     else if (std.mem.eql(u8, key, "collation"))
-        &.{"default"}
+        &.{"emoji"}
     else if (std.mem.eql(u8, key, "unit"))
-        &.{ "meter", "second", "kilogram" }
+        &sanctioned_units
     else
         return self.throwError("RangeError", "Intl.supportedValuesOf: invalid key");
     for (items) |s| try arr.elements.append(self.arena, .{ .string = s });
@@ -11742,6 +11744,28 @@ fn isSanctionedSingleUnit(u: []const u8) bool {
     for (sanctioned_units) |s| if (std.mem.eql(u8, u, s)) return true;
     return false;
 }
+
+/// The ISO 4217 currency codes reported by Intl.supportedValuesOf("currency").
+/// Kept sorted ascending and unique (the spec only requires a well-formed,
+/// sorted, duplicate-free subset that Intl.DisplayNames can render).
+const supported_currencies = [_][]const u8{
+    "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN",
+    "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BRL",
+    "BSD", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLP", "CNY",
+    "COP", "CRC", "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP",
+    "ERN", "ETB", "EUR", "FJD", "FKP", "GBP", "GEL", "GHS", "GIP", "GMD",
+    "GNF", "GTQ", "GYD", "HKD", "HNL", "HTG", "HUF", "IDR", "ILS", "INR",
+    "IQD", "IRR", "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF",
+    "KPW", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR", "LRD", "LSL",
+    "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MUR",
+    "MVR", "MWK", "MXN", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK", "NPR",
+    "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR",
+    "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD",
+    "SHP", "SLE", "SOS", "SRD", "SSP", "STN", "SVC", "SYP", "SZL", "THB",
+    "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX",
+    "USD", "UYU", "UZS", "VED", "VES", "VND", "VUV", "WST", "XAF", "XCD",
+    "XOF", "XPF", "YER", "ZAR", "ZMW", "ZWG",
+};
 
 /// IsWellFormedUnitIdentifier: a sanctioned single unit, or "<a>-per-<b>" where
 /// both a and b are sanctioned single units.
@@ -14065,6 +14089,9 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
     } else if (std.mem.eql(u8, typ, "currency")) {
         if (code.len != 3 or !allAlpha(code)) return self.throwError("RangeError", "invalid currency code");
         canon = try std.ascii.allocUpperString(self.arena, code);
+        // The currencies enumerated by supportedValuesOf have a (stand-in) name,
+        // so they resolve even under fallback:"none".
+        for (supported_currencies) |c| if (std.mem.eql(u8, c, canon)) return .{ .string = canon };
     } else if (std.mem.eql(u8, typ, "language")) {
         // A unicode_language_id: structurally valid AND no extension (singleton)
         // subtag (DisplayNames language codes are not full locale tags).
@@ -14073,6 +14100,9 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
         while (lit.next()) |s| if (s.len == 1) return self.throwError("RangeError", "language code may not contain an extension");
     } else if (std.mem.eql(u8, typ, "calendar")) {
         if (!dtfWellFormedType(code)) return self.throwError("RangeError", "invalid calendar code");
+        // Calendars enumerated by supportedValuesOf resolve under fallback:"none".
+        const cc = dtfCanonCalendar(code);
+        if (dtfCalAvail(cc)) return .{ .string = cc };
     } else if (std.mem.eql(u8, typ, "dateTimeField")) {
         const fields = [_][]const u8{ "era", "year", "quarter", "month", "weekOfYear", "weekday", "day", "dayPeriod", "hour", "minute", "second", "timeZoneName" };
         var ok = false;

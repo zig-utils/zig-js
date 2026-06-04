@@ -85,6 +85,14 @@ const table = [_]Row{
     .{ .name = "wcho", .digits = "\xf0\x9e\x8b\xb0\xf0\x9e\x8b\xb1\xf0\x9e\x8b\xb2\xf0\x9e\x8b\xb3\xf0\x9e\x8b\xb4\xf0\x9e\x8b\xb5\xf0\x9e\x8b\xb6\xf0\x9e\x8b\xb7\xf0\x9e\x8b\xb8\xf0\x9e\x8b\xb9" },
 };
 
+/// All supported numbering-system names (those with simple digit mappings), in
+/// the table's sorted order. Used by Intl.supportedValuesOf("numberingSystem").
+pub const names = blk: {
+    var arr: [table.len][]const u8 = undefined;
+    for (table, 0..) |row, i| arr[i] = row.name;
+    break :blk arr;
+};
+
 /// The ten-digit string for a numbering system, or null if unknown/unsupported.
 pub fn digits(name: []const u8) ?[]const u8 {
     for (table) |row| if (std.mem.eql(u8, row.name, name)) return row.digits;
