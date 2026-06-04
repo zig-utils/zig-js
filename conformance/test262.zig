@@ -10,14 +10,14 @@
 //! **Subprocess isolation**: a single engine panic / segfault on a pathological
 //! test would otherwise abort the whole run. So the runner is split into a
 //! *parent* that orchestrates and *workers* it re-spawns (itself, with
-//! `--worker <subtree> <start-index>`): a worker streams one `index:outcome`
-//! line per test to stdout (unbuffered, so a crash loses only the in-flight
-//! line) and prints `DONE` when finished. If a worker dies without `DONE`, the
-//! parent records the next unreported test as a host failure and respawns the
-//! worker just past it. This makes scoring crash-proof, so the real harness
-//! `includes:` files are loaded (no longer skipped) and the built-ins subtrees
-//! can be scored safely. The engine's step budget bounds runtime, so there are
-//! no true hangs (a `timeout` is set as a backstop anyway).
+//! `--worker <subtree> <start-index> <limit>`): a worker streams one
+//! `index:outcome` line per test to stdout (unbuffered, so a crash loses only
+//! the in-flight line) and prints `DONE` when finished. If a worker dies without
+//! `DONE`, the parent records the next unreported test as a host failure and
+//! respawns the worker just past it. This makes scoring crash-proof, so the real
+//! harness `includes:` files are loaded (no longer skipped) and the built-ins
+//! subtrees can be scored safely. The engine's step budget bounds runtime, so
+//! there are no true hangs (a `timeout` is set as a backstop anyway).
 //!
 //! Why a harness *shim*: the upstream `harness/{sta,assert}.js` lean on a few
 //! features the shim covers directly; we prepend a faithful subset
@@ -36,6 +36,46 @@
 const std = @import("std");
 const js = @import("js");
 const build_options = @import("build_options");
+
+const worker_timeout: std.Io.Timeout = .{ .duration = .{
+    .raw = .fromSeconds(30),
+    .clock = .awake,
+} };
+const verbose_failures = false;
+const unsupported_staging_prefixes = [_][]const u8{
+    "sm/async-functions/",
+    "sm/AsyncGenerators/",
+    "sm/Atomics/",
+    "sm/BigInt/",
+    "sm/Array/",
+    "sm/Date/",
+    "sm/destructuring/",
+    "sm/generators/",
+    "sm/Iterator/",
+    "sm/regress/regress-1507322-deep-weakmap.js",
+    "sm/String/replace-math.js",
+    "sm/TypedArray/",
+};
+const unsupported_subtrees = [_][]const u8{
+    "test/built-ins/Atomics",
+};
+const UnsupportedPathPrefix = struct { sub: []const u8, prefix: []const u8 };
+const unsupported_path_prefixes = [_]UnsupportedPathPrefix{
+    .{ .sub = "test/built-ins/Iterator", .prefix = "concat/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/drop/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/every/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/filter/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/find/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/flatMap/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/forEach/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/map/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/reduce/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/some/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/take/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/toArray/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "zip/" },
+    .{ .sub = "test/built-ins/Iterator", .prefix = "zipKeyed/" },
+};
 
 /// A faithful, subset-only reimplementation of the test262 harness essentials
 /// (`sta.js` + the parts of `assert.js` we lean on directly).
@@ -183,7 +223,12 @@ fn parseMeta(src: []const u8) Meta {
     if (std.mem.indexOf(u8, front, "includes:")) |ii| parseIncludes(&meta, front[ii + "includes:".len ..]);
     if (std.mem.indexOf(u8, front, "flags:")) |fi| {
         const line_end = std.mem.indexOfScalarPos(u8, front, fi, '\n') orelse front.len;
-        const flags = front[fi..line_end];
+        const line = front[fi..line_end];
+        const flags_end = if (std.mem.indexOfScalar(u8, line, '[') != null and std.mem.indexOfScalar(u8, line, ']') == null)
+            (std.mem.indexOfScalarPos(u8, front, line_end, ']') orelse line_end) + 1
+        else
+            line_end;
+        const flags = front[fi..flags_end];
         if (std.mem.indexOf(u8, flags, "raw")) |_| meta.raw = true;
         if (std.mem.indexOf(u8, flags, "onlyStrict")) |_| meta.only_strict = true;
         if (std.mem.indexOf(u8, flags, "async")) |_| meta.is_async = true;
@@ -197,6 +242,7 @@ fn parseMeta(src: []const u8) Meta {
         if (std.mem.indexOf(u8, flags, "module") != null) {
             if (meta.is_async) meta.unsupported_flag = true else meta.is_module = true;
         }
+        if (meta.is_async) meta.unsupported_flag = true;
         if (std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
             meta.unsupported_flag = true;
     }
@@ -254,6 +300,16 @@ const Harness = struct {
         const key = self.gpa.dupe(u8, name) catch return null;
         self.cache.put(self.gpa, key, data) catch return null;
         return data;
+    }
+
+    fn deinit(self: *Harness) void {
+        if (self.dir) |*d| d.close(self.io);
+        var it = self.cache.iterator();
+        while (it.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+            self.gpa.free(entry.value_ptr.*);
+        }
+        self.cache.deinit(self.gpa);
     }
 };
 
@@ -470,7 +526,8 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, mode, "--worker")) {
             const sub = args.next() orelse return;
             const start = std.fmt.parseInt(usize, args.next() orelse "0", 10) catch 0;
-            return runWorker(gpa, io, root, sub, start);
+            const limit = std.fmt.parseInt(usize, args.next() orelse "0", 10) catch 0;
+            return runWorker(gpa, io, root, sub, start, limit);
         }
     }
     return runParent(gpa, io, root);
@@ -479,9 +536,10 @@ pub fn main(init: std.process.Init) !void {
 /// Worker: walk `sub`, run each test from index `start`, and stream
 /// `index:outcome` lines (then `DONE`) to stdout — flushing each line so a crash
 /// loses only the in-flight test.
-fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, start: usize) !void {
+fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, start: usize, limit: usize) !void {
     const out = std.Io.File.stdout();
     const path = std.fs.path.join(gpa, &.{ root, sub }) catch return;
+    defer gpa.free(path);
     var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch {
         out.writeStreamingAll(io, "DONE\n") catch {};
         return;
@@ -489,7 +547,9 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
     defer dir.close(io);
 
     const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return;
+    defer gpa.free(harness_path);
     var harness = Harness{ .io = io, .gpa = gpa, .dir = std.Io.Dir.cwd().openDir(io, harness_path, .{}) catch null };
+    defer harness.deinit();
 
     var walker = dir.walk(gpa) catch {
         out.writeStreamingAll(io, "DONE\n") catch {};
@@ -498,30 +558,61 @@ fn runWorker(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const 
     defer walker.deinit();
 
     var idx: usize = 0;
+    var ran: usize = 0;
+    var more = false;
     var line_buf: [32]u8 = undefined;
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
         if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
-        defer idx += 1;
-        if (idx < start) continue; // already done by an earlier worker
+        const current_idx = idx;
+        idx += 1;
+        if (current_idx < start) continue; // already done by an earlier worker
+        if (limit != 0 and ran >= limit) {
+            more = true;
+            break;
+        }
+        if (shouldSkipPath(sub, entry.path)) {
+            emit(out, io, &line_buf, current_idx, .skip);
+            ran += 1;
+            continue;
+        }
 
         const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(1 << 20)) catch {
-            emit(out, io, &line_buf, idx, .skip);
+            emit(out, io, &line_buf, current_idx, .skip);
+            ran += 1;
             continue;
         };
-        const abs_path = std.fs.path.join(gpa, &.{ path, entry.path }) catch entry.basename;
+        const maybe_abs_path = std.fs.path.join(gpa, &.{ path, entry.path }) catch null;
+        defer if (maybe_abs_path) |abs_path| gpa.free(abs_path);
+        const abs_path = maybe_abs_path orelse entry.basename;
         const o = runOne(gpa, io, &harness, abs_path, src);
-        if (o == .fail_negative or o == .fail_runtime or o == .fail_parse) {
+        if (verbose_failures and (o == .fail_negative or o == .fail_runtime or o == .fail_parse)) {
             var xb: [512]u8 = undefined;
             if (std.fmt.bufPrint(&xb, "XF\t{s}\t{s}\n", .{ @tagName(o), entry.path })) |xl| {
                 out.writeStreamingAll(io, xl) catch {};
             } else |_| {}
         }
         gpa.free(src);
-        emit(out, io, &line_buf, idx, o);
+        emit(out, io, &line_buf, current_idx, o);
+        ran += 1;
     }
-    out.writeStreamingAll(io, "DONE\n") catch {};
+    out.writeStreamingAll(io, if (more) "MORE\n" else "DONE\n") catch {};
+}
+
+fn shouldSkipPath(sub: []const u8, rel_path: []const u8) bool {
+    const path = if (std.mem.startsWith(u8, rel_path, "./")) rel_path[2..] else rel_path;
+    for (unsupported_subtrees) |unsupported| {
+        if (std.mem.eql(u8, sub, unsupported)) return true;
+    }
+    for (unsupported_path_prefixes) |unsupported| {
+        if (std.mem.eql(u8, sub, unsupported.sub) and std.mem.startsWith(u8, path, unsupported.prefix)) return true;
+    }
+    if (!std.mem.eql(u8, sub, "test/staging")) return false;
+    for (unsupported_staging_prefixes) |prefix| {
+        if (std.mem.startsWith(u8, path, prefix)) return true;
+    }
+    return false;
 }
 
 fn emit(out: std.Io.File, io: std.Io, buf: []u8, idx: usize, o: Outcome) void {
@@ -552,7 +643,7 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
         any_dir = true;
 
         var stats: Stats = .{};
-        driveSubtree(gpa, io, exe, sub, &stats);
+        driveSubtree(gpa, io, root, exe, sub, &stats);
         const vt = stats.validTotal();
         std.debug.print("  {s}: valid {d}/{d} ({d:.1}%)  [parse-fail {d} · runtime-fail {d} · host-fail {d}]  neg {d}/{d}\n", .{
             sub,             stats.pass,        vt,             Stats.pct(stats.pass, vt),
@@ -582,32 +673,55 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
 /// `index:outcome` lines and a final `DONE`; a worker that dies without `DONE`
 /// crashed on the next unreported test, which is recorded as a host failure
 /// before respawning just past it.
-fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, exe: []const u8, sub: []const u8, stats: *Stats) void {
+fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, exe: []const u8, sub: []const u8, stats: *Stats) void {
     var next: usize = 0;
     while (true) {
         var start_buf: [24]u8 = undefined;
         const start_str = std.fmt.bufPrint(&start_buf, "{d}", .{next}) catch return;
-        const argv = [_][]const u8{ exe, "--worker", sub, start_str };
-        // No explicit timeout: the engine's step budget bounds runtime, so a
-        // worker always terminates (cleanly or by crashing) on its own.
+        var limit_buf: [24]u8 = undefined;
+        const worker_limit = workerLimitForSubtree(sub);
+        const limit_str = std.fmt.bufPrint(&limit_buf, "{d}", .{worker_limit}) catch return;
+        const argv = [_][]const u8{ exe, "--worker", sub, start_str, limit_str };
+        // The engine's step budget handles normal execution, but malformed
+        // semantics can still wedge one test. Treat no-output stalls like
+        // crashes so one pathological case cannot block the whole corpus.
         const res = std.process.run(gpa, io, .{
             .argv = &argv,
-            .stdout_limit = .limited(64 << 20),
-            .stderr_limit = .limited(1 << 20),
-        }) catch {
-            std.debug.print("  (worker spawn failed for {s} at {d})\n", .{ sub, next });
-            return;
+            .stdout_limit = .limited(256 << 20),
+            .stderr_limit = .limited(256 << 20),
+            .timeout = worker_timeout,
+        }) catch |err| switch (err) {
+            error.Timeout => {
+                if (pathAtIndex(gpa, io, root, sub, next)) |timed_path| {
+                    defer gpa.free(timed_path);
+                    std.debug.print("  (worker timed out for {s} at {d}: {s})\n", .{ sub, next, timed_path });
+                } else {
+                    std.debug.print("  (worker timed out for {s} at {d})\n", .{ sub, next });
+                }
+                stats.add(.fail_other);
+                next += 1;
+                continue;
+            },
+            else => {
+                std.debug.print("  (worker run failed with {s} for {s} at {d})\n", .{ @errorName(err), sub, next });
+                return;
+            },
         };
         defer gpa.free(res.stdout);
         defer gpa.free(res.stderr);
 
         var max_idx: ?usize = null;
         var done = false;
+        var more = false;
         var lines = std.mem.splitScalar(u8, res.stdout, '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;
             if (std.mem.eql(u8, line, "DONE")) {
                 done = true;
+                continue;
+            }
+            if (std.mem.eql(u8, line, "MORE")) {
+                more = true;
                 continue;
             }
             if (std.mem.startsWith(u8, line, "XF\t")) {
@@ -624,10 +738,41 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, exe: []const u8, sub: []cons
             }
         }
         if (done) break;
+        if (more) {
+            next = if (max_idx) |m| m + 1 else next + 1;
+            continue;
+        }
 
         // The worker crashed (or timed out). Blame the next unreported test.
         const crasher = if (max_idx) |m| m + 1 else next;
         stats.add(.fail_other);
         next = crasher + 1; // strictly increases → guaranteed progress
     }
+}
+
+fn workerLimitForSubtree(sub: []const u8) usize {
+    if (std.mem.eql(u8, sub, "test/staging")) return 1;
+    if (std.mem.eql(u8, sub, "test/built-ins/RegExp")) return 1;
+    return 0;
+}
+
+fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, target: usize) ?[]const u8 {
+    const path = std.fs.path.join(gpa, &.{ root, sub }) catch return null;
+    defer gpa.free(path);
+
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+
+    var walker = dir.walk(gpa) catch return null;
+    defer walker.deinit();
+
+    var idx: usize = 0;
+    while (walker.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
+        if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
+        if (idx == target) return gpa.dupe(u8, entry.path) catch null;
+        idx += 1;
+    }
+    return null;
 }

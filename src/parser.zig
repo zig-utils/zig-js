@@ -1086,7 +1086,7 @@ pub const Parser = struct {
         if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
     }
 

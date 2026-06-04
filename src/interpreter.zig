@@ -588,12 +588,14 @@ pub const Interpreter = struct {
         return val;
     }
 
-    fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
+    fn makeErrorWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: ?*value.Object) EvalError!Value {
         const obj = try self.arena.create(value.Object);
         obj.* = .{ .is_error = true, .error_name = name };
         // Link to `<name>.prototype` so `name` (and `toString`) are inherited and
         // `instanceof` / `Object.getPrototypeOf` see a real chain.
-        if (self.env.get(name)) |ctor_v| {
+        if (proto) |p| {
+            obj.proto = p;
+        } else if (self.env.get(name)) |ctor_v| {
             if (ctor_v == .object) {
                 if (ctor_v.object.getOwn("prototype")) |proto_v| {
                     if (proto_v == .object) obj.proto = proto_v.object;
@@ -607,6 +609,10 @@ pub const Interpreter = struct {
             try obj.setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
         }
         return .{ .object = obj };
+    }
+
+    fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
+        return self.makeErrorWithProto(name, message, null);
     }
 
     /// Raise a JS exception of the given error class. Always returns
@@ -704,7 +710,7 @@ pub const Interpreter = struct {
                 // A *named* function expression binds its own name as an
                 // immutable binding in a fresh scope enclosing the body, so the
                 // body can refer to itself (recursion) and can't rebind the name.
-                if (fnode.name.len > 0 and !fnode.is_arrow) {
+                if (fnode.has_name_binding and !fnode.is_arrow) {
                     const fenv = try self.arena.create(Environment);
                     fenv.* = .{ .arena = self.arena, .parent = self.env };
                     const fv = try self.makeFunction(fnode, fenv);
@@ -1835,6 +1841,10 @@ pub const Interpreter = struct {
     }
 
     fn makeErrorWithArgs(self: *Interpreter, name: []const u8, args: []const Value) EvalError!Value {
+        return self.makeErrorWithArgsNT(name, args, .undefined);
+    }
+
+    fn makeErrorWithArgsNT(self: *Interpreter, name: []const u8, args: []const Value, new_target: Value) EvalError!Value {
         // AggregateError(errors, message, options) shifts message/options by one
         // and carries an own `errors` array built from the first (iterable) arg.
         const aggregate = std.mem.eql(u8, name, "AggregateError");
@@ -1850,14 +1860,12 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
             break :blk try prim.toString(self.arena);
         } else "";
-        const err = try self.makeError(name, msg);
+        const proto = if (new_target == .object) try self.ctorRealmIntrinsicProto(new_target.object, name) else null;
+        const err = try self.makeErrorWithProto(name, msg, proto);
 
         if (aggregate) {
             // `errors` is a fresh Array built from the (iterable) first argument.
-            const errs = if (args.len > 0)
-                try builtins.arrayFrom(@ptrCast(self), .undefined, args[0..1])
-            else
-                try self.newArray();
+            const errs = try self.iterableToArray(if (args.len > 0) args[0] else .undefined);
             try self.setProp(err.object, "errors", errs);
             try err.object.setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
         }
@@ -1883,6 +1891,17 @@ pub const Interpreter = struct {
             }
         }
         return err;
+    }
+
+    fn iterableToArray(self: *Interpreter, v: Value) EvalError!Value {
+        const arr = try self.newArray();
+        const it = try self.iteratorOf(v);
+        while (true) {
+            const step = try self.iterStep(it);
+            if (step.done) break;
+            try arr.object.elements.append(self.arena, step.value);
+        }
+        return arr;
     }
 
     fn callFunction(self: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
@@ -2091,7 +2110,7 @@ pub const Interpreter = struct {
             const nt = if (std.meta.eql(new_target, callee)) bf.target else new_target;
             return self.constructNT(bf.target, try self.concatArgs(bf.args, args), nt);
         }
-        if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
+        if (obj.error_ctor) |name| return self.makeErrorWithArgsNT(name, args, new_target);
         if (obj.native) |nf| {
             // Most built-ins aren't constructors; only flagged ones are `new`-able.
             if (!obj.native_ctor) return self.throwError("TypeError", "value is not a constructor");
@@ -2219,6 +2238,51 @@ pub const Interpreter = struct {
                 env = e.parent;
             }
         }
+        return try self.protoObject(ctor);
+    }
+
+    fn envIntrinsicProto(env: *Environment, intrinsic: []const u8) ?*value.Object {
+        if (env.get("globalThis")) |gt| {
+            if (gt == .object) {
+                if (gt.object.getOwn(intrinsic)) |ctor_v| {
+                    if (ctor_v == .object) {
+                        if (ctor_v.object.getOwn("prototype")) |proto_v| {
+                            if (proto_v == .object) return proto_v.object;
+                        }
+                    }
+                }
+            }
+        }
+        if (env.get(intrinsic)) |ctor_v| {
+            if (ctor_v == .object) {
+                if (ctor_v.object.getOwn("prototype")) |proto_v| {
+                    if (proto_v == .object) return proto_v.object;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// GetPrototypeFromConstructor for global intrinsics such as
+    /// `%AggregateError.prototype%`: own `newTarget.prototype` wins; otherwise
+    /// use the NewTarget realm's intrinsic prototype when that realm is known.
+    fn ctorRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!*value.Object {
+        const p = try self.getProperty(.{ .object = ctor }, "prototype");
+        if (p == .object and !p.object.is_symbol) return p.object;
+        if ((ctor.native_ctor or ctor.error_ctor != null) and ctor.private_data != null) {
+            const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
+            if (envIntrinsicProto(env, intrinsic)) |proto| return proto;
+        }
+        if (ctor.js_func) |jf| {
+            const fnp: *Function = @ptrCast(@alignCast(jf));
+            var env: ?*Environment = fnp.closure;
+            while (env) |e| {
+                if (envIntrinsicProto(e, intrinsic)) |proto| return proto;
+                if (e.parent == null) break;
+                env = e.parent;
+            }
+        }
+        if (envIntrinsicProto(self.env, intrinsic)) |proto| return proto;
         return try self.protoObject(ctor);
     }
 
@@ -2740,8 +2804,14 @@ pub const Interpreter = struct {
                     const u = cp - 0x10000;
                     const high: u16 = @intCast(0xD800 + (u >> 10));
                     const low: u16 = @intCast(0xDC00 + (u & 0x3FF));
-                    if (start <= units and units < end) try appendWtf8CodeUnit(buf, a, high);
-                    if (start <= units + 1 and units + 1 < end) try appendWtf8CodeUnit(buf, a, low);
+                    const include_high = start <= units and units < end;
+                    const include_low = start <= units + 1 and units + 1 < end;
+                    if (include_high and include_low) {
+                        try buf.appendSlice(a, s[i .. i + seq_len]);
+                    } else {
+                        if (include_high) try appendWtf8CodeUnit(buf, a, high);
+                        if (include_low) try appendWtf8CodeUnit(buf, a, low);
+                    }
                     units += seq_units;
                     i += seq_len;
                     continue;
@@ -2887,6 +2957,67 @@ pub const Interpreter = struct {
         }
         try appendUtf16Slice(&out, self.arena, s, accumulated, string_len);
         return .{ .string = try out.toOwnedSlice(self.arena) };
+    }
+
+    fn appendSplitSegment(self: *Interpreter, out: *std.ArrayListUnmanaged(Value), s: []const u8, start: usize, end: usize) EvalError!void {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        try appendUtf16Slice(&buf, self.arena, s, start, end);
+        try out.append(self.arena, .{ .string = try buf.toOwnedSlice(self.arena) });
+    }
+
+    fn regexpSplit(self: *Interpreter, rx: Value, s: []const u8, limit_value: Value) EvalError!Value {
+        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.split] called on a non-object");
+        const lim: usize = if (limit_value == .undefined) std.math.maxInt(u32) else value.Value.uint32FromF64(try self.toNumberV(limit_value));
+        const result = try self.newArray();
+        const out = &result.object.elements;
+        if (lim == 0) return result;
+
+        const default_ctor = self.env.get("RegExp") orelse .undefined;
+        const ctor = try self.speciesConstructor(rx, default_ctor);
+        const flags = try self.toStringV(try self.getProperty(rx, "flags"));
+        const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+        const splitter_flags = if (std.mem.indexOfScalar(u8, flags, 'y') != null) flags else try std.mem.concat(self.arena, u8, &.{ flags, "y" });
+        const splitter = try self.construct(ctor, &.{ rx, .{ .string = splitter_flags } });
+
+        const size = utf16LenOfString(s);
+        if (size == 0) {
+            const z = try self.regexpExecGeneric(splitter, s);
+            if (z == .null) try out.append(self.arena, .{ .string = s });
+            return result;
+        }
+
+        var p: usize = 0;
+        var q: usize = 0;
+        while (q < size) {
+            try self.setRegExpLikeLastIndex(splitter, @floatFromInt(q));
+            const z = try self.regexpExecGeneric(splitter, s);
+            if (z == .null) {
+                q = advanceStringIndex(s, q, full_unicode);
+                continue;
+            }
+
+            const e = toLen(try self.toNumberV(try self.getProperty(splitter, "lastIndex")));
+            if (e == p) {
+                q = advanceStringIndex(s, q, full_unicode);
+                continue;
+            }
+
+            try self.appendSplitSegment(out, s, p, q);
+            if (out.items.len >= lim) return result;
+
+            const length = toLen(try self.toNumberV(try self.getProperty(z, "length")));
+            var i: usize = 1;
+            while (i < length) : (i += 1) {
+                const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                try out.append(self.arena, try self.getProperty(z, key));
+                if (out.items.len >= lim) return result;
+            }
+
+            p = e;
+            q = p;
+        }
+        try self.appendSplitSegment(out, s, p, size);
+        return result;
     }
 
     fn regexpToString(self: *Interpreter, this: Value) EvalError!Value {
@@ -3178,8 +3309,8 @@ pub const Interpreter = struct {
     pub fn makeMap(self: *Interpreter, init_v: Value) EvalError!Value {
         const o = (try self.newObject()).object;
         o.is_map = true;
-        if (self.new_target == .object and self.new_target.object.getOwn("prototype") != null) {
-            o.proto = self.new_target.object.getOwn("prototype").?.object;
+        if (self.new_target == .object) {
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Map");
         } else if (self.env.get("Map")) |ctor| {
             if (ctor == .object) {
                 if (ctor.object.getOwn("prototype")) |p| {
@@ -3198,8 +3329,8 @@ pub const Interpreter = struct {
         o.is_set = true;
         // Proto from the in-flight constructor (`new Set`/`new WeakSet`), so a
         // WeakSet doesn't inherit Set.prototype; internal results default to Set.
-        if (self.new_target == .object and self.new_target.object.getOwn("prototype") != null) {
-            o.proto = self.new_target.object.getOwn("prototype").?.object;
+        if (self.new_target == .object) {
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Set");
         } else if (self.env.get("Set")) |ctor| {
             if (ctor == .object) {
                 if (ctor.object.getOwn("prototype")) |p| {
@@ -3247,7 +3378,7 @@ pub const Interpreter = struct {
             _ = try self.callValueWithThis(adder, &.{item}, self_v);
             return;
         }
-        if (item != .object) return self.throwError("TypeError", "Iterator value is not an entry object");
+        if (!builtins.isRealObject(item)) return self.throwError("TypeError", "Iterator value is not an entry object");
         const k = try self.getProperty(item, "0");
         const v = try self.getProperty(item, "1");
         _ = try self.callValueWithThis(adder, &.{ k, v }, self_v);
@@ -3303,7 +3434,13 @@ pub const Interpreter = struct {
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
-            for (o.elements.items) |e| _ = try self.callValueWithThis(cb, &.{ e.object.elements.items[1], e.object.elements.items[0], self_v }, arg(args, 1));
+            if (!cb.isCallable()) return self.throwError("TypeError", "Map.prototype.forEach callback is not callable");
+            var i: usize = 0;
+            while (i < o.elements.items.len) : (i += 1) {
+                const e = o.elements.items[i];
+                if (e != .object or e.object.elements.items.len < 2) continue;
+                _ = try self.callValueWithThis(cb, &.{ e.object.elements.items[1], e.object.elements.items[0], self_v }, arg(args, 1));
+            }
             return Value.undefined;
         }
         // Upsert proposal: return the existing value for `key`, else insert and
@@ -3375,7 +3512,12 @@ pub const Interpreter = struct {
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
-            for (o.elements.items) |e| _ = try self.callValueWithThis(cb, &.{ e, e, self_v }, arg(args, 1));
+            if (!cb.isCallable()) return self.throwError("TypeError", "Set.prototype.forEach callback is not callable");
+            var i: usize = 0;
+            while (i < o.elements.items.len) : (i += 1) {
+                const e = o.elements.items[i];
+                _ = try self.callValueWithThis(cb, &.{ e, e, self_v }, arg(args, 1));
+            }
             return Value.undefined;
         }
         // ES2024 set-operation methods. They take a set-like argument (the
@@ -5990,10 +6132,10 @@ pub const Interpreter = struct {
         // `replace`/`replaceAll` first check their first argument for the matching
         // `Symbol.*` method and, if it is callable, delegate to it (with `this` =
         // that argument and the string as the first parameter). RegExp instances
-        // keep the engine's native regex path (they carry no such own symbol).
+        // use the protocol for methods whose spec algorithms are implemented.
         if (self.stringProtocolSymbol(name)) |sym| {
             const sep = arg0(args);
-            const allow_regex_protocol = sep == .object and sep.object.is_regex and eq(name, "replace");
+            const allow_regex_protocol = sep == .object and sep.object.is_regex and (eq(name, "replace") or eq(name, "split"));
             if (sep == .object and !sep.object.is_symbol and (!sep.object.is_regex or allow_regex_protocol)) {
                 if (self.wellKnownSymbolKey(sym)) |key| {
                     const method = try self.getProperty(sep, key);
@@ -6987,6 +7129,7 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const executor = if (args.len > 0) args[0] else .undefined;
     if (!executor.isCallable()) return self.throwError("TypeError", "Promise resolver is not a function");
     const pobj = try promise.newPromise(self);
+    if (self.new_target == .object) pobj.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Promise");
     const pp = pobj.promise.?;
     const res_fn = try self.arena.create(value.Object);
     res_fn.* = .{ .native = promiseResolveClosure, .private_data = pp };
@@ -7440,10 +7583,10 @@ fn promiseRaceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     while (true) {
         const maybe = iterStep(self, iter) catch |err| return rejectAbrupt(self, cap, err);
         const el = maybe orelse break;
-        const pp = elementPromise(self, promise_resolve, this, el) catch |err| return closeAndReject(self, cap, iter, err);
+        const next = self.callValueWithThis(promise_resolve, &.{el}, this) catch |err| return closeAndReject(self, cap, iter, err);
         // The capability's resolve/reject settle the result; the first input to
         // fire wins (later settlements are no-ops on an already-settled promise).
-        _ = try promise.then(self, pp, cap.resolve, cap.reject);
+        _ = self.callMethod(next, "then", &.{ cap.resolve, cap.reject }) catch |err| return closeAndReject(self, cap, iter, err);
     }
     return cap.promise;
 }
@@ -16155,7 +16298,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     };
     for (error_names) |name| {
         const o = try a.create(value.Object);
-        o.* = .{ .error_ctor = name };
+        o.* = .{ .error_ctor = name, .private_data = @ptrCast(env) };
         // AggregateError(errors, message) has arity 2; SuppressedError(error,
         // suppressed, message) arity 3; the others (message) 1.
         const arity: usize = if (std.mem.eql(u8, name, "SuppressedError")) 3 else if (std.mem.eql(u8, name, "AggregateError")) 2 else 1;
@@ -16221,7 +16364,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, promise_proto, "catch", 1, promiseCatchFn);
     try setNative(a, root_shape, promise_proto, "finally", 1, promiseFinallyFn);
     const promise_ns = try a.create(value.Object);
-    promise_ns.* = .{ .native = promiseConstructorFn, .native_ctor = true };
+    promise_ns.* = .{ .native = promiseConstructorFn, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, promise_ns, "Promise", 1);
     try setNative(a, root_shape, promise_ns, "resolve", 1, promiseResolveStaticFn);
     try setNative(a, root_shape, promise_ns, "reject", 1, promiseRejectStaticFn);
@@ -16373,6 +16516,14 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // propertyHelper/verifyProperty (and many built-ins tests) depend on.
     const object_proto = try a.create(value.Object);
     object_proto.* = .{};
+    const early_ctors = [_][]const u8{ "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Boolean" };
+    for (early_ctors) |ctor_name| {
+        if (env.get(ctor_name)) |cv| if (cv == .object) {
+            if (cv.object.getOwn("prototype")) |pv| if (pv == .object and pv.object.proto == null) {
+                pv.object.proto = object_proto;
+            };
+        };
+    }
     try setProtoMethods(a, root_shape, object_proto, .{
         .{ "hasOwnProperty", 1 },        .{ "propertyIsEnumerable", 1 }, .{ "isPrototypeOf", 1 },
         .{ "valueOf", 0 },
@@ -16926,7 +17077,7 @@ fn defineGlobalFn(env: *Environment, rs: *Shape, name: []const u8, len: usize, f
 
 fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, is_ctor: bool, f: value.NativeFn) EvalError!void {
     const o = try env.arena.create(value.Object);
-    o.* = .{ .native = f, .native_ctor = is_ctor };
+    o.* = .{ .native = f, .native_ctor = is_ctor, .private_data = if (is_ctor) @ptrCast(env) else null };
     try installNativeProps(env.arena, rs, o, name, len);
     // A constructor's `.prototype` is an own, non-writable/-enumerable/
     // -configurable data property (so `getOwnPropertyDescriptor(C, "prototype")`
@@ -17441,8 +17592,8 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
                 return try self.regexpReplace(this, str, replace_value);
             }
             if (comptime std.mem.eql(u8, op, "split")) {
-                const extra: Value = if (args.len > 1) args[1] else .undefined;
-                return (try self.stringMethod(str, op, &.{ this, extra })) orelse .undefined;
+                const limit: Value = if (args.len > 1) args[1] else .undefined;
+                return try self.regexpSplit(this, str, limit);
             }
             return (try self.stringMethod(str, op, &.{this})) orelse .undefined;
         }
@@ -22222,6 +22373,7 @@ test "interpreter regex literals (zig-regex backed)" {
     try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "let m = /b/.exec('abc'); m.index")).number);
     // RegExp constructor
     try std.testing.expect((try evalSource(a, "new RegExp('a+').test('baaa')")).boolean);
+    try std.testing.expect((try evalSource(a, "Object.getPrototypeOf(RegExp.prototype) === Object.prototype")).boolean);
     // division still lexes correctly after a value
     try std.testing.expectEqual(@as(f64, 4), (try evalSource(a, "let x = 8; x / 2")).number);
 }
@@ -22409,6 +22561,15 @@ test "interpreter getters and setters" {
         \\class C { set half(x) { this.stored = x / 2; } }
         \\let c = new C(); c.half = 12; c.stored
     )).number);
+    try std.testing.expectEqualStrings("outer", (try evalSource(a,
+        \\let name = "outer";
+        \\let o = { get name() { return name; } };
+        \\o.name
+    )).string);
+    try std.testing.expect((try evalSource(a,
+        \\let f = function inner() { return inner === f; };
+        \\f()
+    )).boolean);
 }
 
 test "interpreter class extends and super" {

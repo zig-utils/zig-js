@@ -73,6 +73,9 @@ pub const FunctionNode = struct {
     is_expr_body: bool = false,
     /// Arrow functions don't get their own `arguments` (or `this`).
     is_arrow: bool = false,
+    /// Explicit named function expressions have an internal immutable self-name
+    /// binding. Method definitions and NamedEvaluation only set Function.name.
+    has_name_binding: bool = false,
     /// `function*` / `*method()` — calling it returns a generator object whose
     /// body runs lazily on the suspendable VM.
     is_generator: bool = false,

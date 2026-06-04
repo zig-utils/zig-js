@@ -119,7 +119,8 @@ pub const Context = struct {
     /// so behavior is identical either way — the VM just handles the hot subset.
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
         const a = self.arena();
-        var parser = try Parser.init(a, source);
+        const owned_source = try a.dupe(u8, source);
+        var parser = try Parser.init(a, owned_source);
         const prog = try parser.parseProgram();
         var machine = self.interpreter();
         // Top-level strictness from the program's directive prologue (the parser
@@ -209,7 +210,8 @@ pub const Context = struct {
         if (cache.get(path)) |m| return m;
         const a = self.arena();
 
-        var parser = try Parser.init(a, source);
+        const owned_source = try a.dupe(u8, source);
+        var parser = try Parser.init(a, owned_source);
         const prog = try parser.parseModule();
         const items = prog.program;
 
@@ -1222,6 +1224,23 @@ test "AggregateError" {
     try std.testing.expectEqual(@as(f64, 5), (try evalIn("new AggregateError([], 'm', { cause: 5 }).cause")).number);
     // `errors` is a non-enumerable own property.
     try std.testing.expect((try evalIn("new AggregateError([1]).hasOwnProperty('errors') && Object.keys(new AggregateError([1])).indexOf('errors') === -1")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var proto = {};
+        \\function Target() {}
+        \\Target.prototype = proto;
+        \\Object.getPrototypeOf(Reflect.construct(AggregateError, [[]], Target)) === proto
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\var Target = new other.Function();
+        \\Target.prototype = undefined;
+        \\Object.getPrototypeOf(Reflect.construct(AggregateError, [[]], Target)) === other.AggregateError.prototype
+    )).boolean);
+    try std.testing.expect((try evalIn("try { new AggregateError(); false } catch (e) { e instanceof TypeError }")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var bad = { [Symbol.iterator]() { return { next() { return undefined; } }; } };
+        \\try { new AggregateError(bad); false } catch (e) { e instanceof TypeError }
+    )).boolean);
 }
 
 test "Error cause option (ES2022)" {
@@ -1726,10 +1745,29 @@ test "Map/Set constructors take any iterable (AddEntriesFromIterable)" {
         \\function* g() { yield ['x', 3]; yield ['y', 4]; }
         \\var m = new Map(g()); m.get('x') + m.get('y')
     )).number);
+    try std.testing.expect((try evalIn(
+        \\function Target() {}
+        \\Target.prototype = null;
+        \\Object.getPrototypeOf(Reflect.construct(Map, [], Target)) === Map.prototype
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\other.Set.prototype.marker = true;
+        \\var s = Reflect.construct(Set, [], other.Set);
+        \\Object.getPrototypeOf(s) === other.Set.prototype && s.marker === true
+    )).boolean);
     // A non-object Map entry, a non-iterable argument, and a non-callable adder
     // each throw a TypeError.
     try std.testing.expectError(error.Throw, evalIn("new Map([1, 2])"));
     try std.testing.expectError(error.Throw, evalIn("new Map({})"));
+    try std.testing.expectError(error.Throw, evalIn(
+        \\var nextItem = Symbol('a');
+        \\var iterable = {};
+        \\iterable[Symbol.iterator] = function() {
+        \\  return { next: function() { return { value: nextItem, done: false }; }, return: function() {} };
+        \\};
+        \\new Map(iterable);
+    ));
     // The instance's own (possibly overridden) `set` is the adder.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn(
         \\var calls = 0;
@@ -1750,6 +1788,23 @@ test "Map/Set expose [Symbol.iterator]; Set keys === values" {
         \\var out = []; for (var e of m) out.push(e[0] + ',' + e[1]); out.join('|')
     );
     try expectEvalStr("1,2,3", "[...new Set([1, 2, 3])].join(',')");
+}
+
+test "Map/Set forEach tolerate deletion during iteration" {
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn(
+        \\var map = new Map();
+        \\map.set('foo', 0);
+        \\map.set('bar', 1);
+        \\var count = 0;
+        \\map.forEach(function(value, key) { if (count === 0) map.delete('bar'); count++; });
+        \\count
+    )).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn(
+        \\var set = new Set(['foo', 'bar']);
+        \\var count = 0;
+        \\set.forEach(function(value) { if (count === 0) set.delete('bar'); count++; });
+        \\count
+    )).number);
 }
 
 test "__lookupGetter__/__lookupSetter__ walk the chain, proxy-aware" {
@@ -2175,6 +2230,26 @@ test "async/await: suspendable runtime with spec ordering" {
         \\result
     )).number);
     try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\var C = new other.Function();
+        \\C.prototype = null;
+        \\Object.getPrototypeOf(Reflect.construct(Promise, [function() {}], C)) === other.Promise.prototype
+    )).boolean);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn(
+        \\var promise = new Promise(function() {});
+        \\var returnCount = 0;
+        \\var iter = {};
+        \\iter[Symbol.iterator] = function() {
+        \\  return {
+        \\    next: function() { return { done: false, value: promise }; },
+        \\    return: function() { returnCount += 1; return {}; }
+        \\  };
+        \\};
+        \\promise.then = function() { throw new Test262Error(); };
+        \\Promise.race(iter);
+        \\returnCount
+    )).number);
 }
 
 test "array destructuring over the iterator protocol (generator, Set, string, rest)" {

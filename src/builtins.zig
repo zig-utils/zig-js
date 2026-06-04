@@ -1865,9 +1865,32 @@ const Stringifier = struct {
     }
 };
 
+fn wtf8SurrogateAt(s: []const u8, i: usize) ?u21 {
+    if (i + 2 >= s.len or s[i] != 0xED) return null;
+    if (s[i + 1] < 0xA0 or s[i + 1] > 0xBF) return null;
+    if ((s[i + 2] & 0xC0) != 0x80) return null;
+    return (@as(u21, s[i] & 0x0F) << 12) | (@as(u21, s[i + 1] & 0x3F) << 6) | @as(u21, s[i + 2] & 0x3F);
+}
+
+fn appendJsonHex4(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u21) HostError!void {
+    const digits = "0123456789abcdef";
+    try buf.appendSlice(a, "\\u");
+    try buf.append(a, digits[(cp >> 12) & 0x0f]);
+    try buf.append(a, digits[(cp >> 8) & 0x0f]);
+    try buf.append(a, digits[(cp >> 4) & 0x0f]);
+    try buf.append(a, digits[cp & 0x0f]);
+}
+
 fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) HostError!void {
     try buf.append(a, '"');
-    for (s) |c| {
+    var i: usize = 0;
+    while (i < s.len) {
+        if (wtf8SurrogateAt(s, i)) |sur| {
+            try appendJsonHex4(a, buf, sur);
+            i += 3;
+            continue;
+        }
+        const c = s[i];
         switch (c) {
             '"' => try buf.appendSlice(a, "\\\""),
             '\\' => try buf.appendSlice(a, "\\\\"),
@@ -1880,6 +1903,7 @@ fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []
             0...7, 11, 14...31 => try buf.print(a, "\\u{x:0>4}", .{c}),
             else => try buf.append(a, c),
         }
+        i += 1;
     }
     try buf.append(a, '"');
 }
