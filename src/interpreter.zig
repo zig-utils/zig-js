@@ -11985,6 +11985,20 @@ fn intlBrandOk(this: Value, service: []const u8) bool {
     return this == .object and this.object.getOwn("\x00intl") != null and std.mem.eql(u8, this.object.getOwn("\x00intl").?.string, service);
 }
 
+/// UnwrapNumberFormat/DateTimeFormat/Collator: the branded receiver, or — for a
+/// legacy receiver that carries the instance under %Intl%.[[FallbackSymbol]] —
+/// that instance (the Get is proxy-aware). Null if neither resolves.
+fn unwrapIntlThis(self: *Interpreter, recv: Value, comptime service: []const u8) value.HostError!?Value {
+    if (intlBrandOk(recv, service)) return recv;
+    if (recv == .object) {
+        if (self.env.get("\x00IntlFallbackSym")) |fs| if (fs == .object) {
+            const inner = try self.getProperty(recv, fs.object.sym_key);
+            if (intlBrandOk(inner, service)) return inner;
+        };
+    }
+    return null;
+}
+
 /// Format a Number for Intl.NumberFormat — `en`-style grouping with commas.
 const en_months_long = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 const en_months_short = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -14060,10 +14074,10 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
 
 fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
     return struct {
-        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+        fn call(ctx: *anyopaque, this_recv: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!intlBrandOk(this, service)) return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
+            const this = (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
             const o = (try self.newObject()).object;
             const loc = this.object.getOwn("\x00locale") orelse Value{ .string = "en" };
             try self.setProp(o, "locale", loc);
