@@ -13554,6 +13554,8 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     const is_disj = std.mem.eql(u8, typ, "disjunction");
     const narrow = std.mem.eql(u8, style, "narrow");
     const short = std.mem.eql(u8, style, "short");
+    const lang = if (this.object.getOwn("\x00locale")) |lv| (if (lv == .string) localeLanguage(lv.string) else "en") else "en";
+    const es = std.mem.eql(u8, lang, "es");
     var middle: []const u8 = ", ";
     var pair: []const u8 = " and ";
     var final: []const u8 = ", and ";
@@ -13562,17 +13564,24 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             middle = " ";
             pair = " ";
             final = " ";
+        } else if (es) { // es unit: pair joins with "y"; long also ends with "y"
+            pair = " y ";
+            final = if (short) ", " else " y ";
         } else {
             pair = ", ";
             final = ", ";
         }
     } else if (is_disj) {
-        pair = " or ";
-        final = ", or ";
+        // es disjunction "o" (no comma before the final); en "or".
+        pair = if (es) " o " else " or ";
+        final = if (es) " o " else ", or ";
     } else if (narrow) { // conjunction
         middle = " ";
         pair = " ";
         final = " ";
+    } else if (es) { // es conjunction "y" (no comma before the final)
+        pair = " y ";
+        final = " y ";
     } else if (short) {
         pair = " & ";
         final = ", & ";
