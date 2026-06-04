@@ -10853,8 +10853,18 @@ fn canonUKeywordValue(key: []const u8, val: []const u8) []const u8 {
         .{ .k = "ca", .from = "gregorian", .to = "gregory" },
         .{ .k = "ms", .from = "imperial", .to = "uksystem" },
         .{ .k = "tz", .from = "cnckg", .to = "cnsha" },
+        // ks (collation strength) type aliases.
+        .{ .k = "ks", .from = "primary", .to = "level1" },
+        .{ .k = "ks", .from = "secondary", .to = "level2" },
+        .{ .k = "ks", .from = "tertiary", .to = "level3" },
+        .{ .k = "ks", .from = "quaternary", .to = "level4" },
+        .{ .k = "ks", .from = "quarternary", .to = "level4" },
+        .{ .k = "ks", .from = "identical", .to = "identic" },
     };
     for (table) |e| if (std.mem.eql(u8, key, e.k) and std.mem.eql(u8, val, e.from)) return e.to;
+    // Boolean keys map the type "yes" to "true" (which the caller then drops).
+    const bool_keys = [_][]const u8{ "kb", "kc", "kh", "kk", "kn" };
+    if (std.mem.eql(u8, val, "yes")) for (bool_keys) |bk| if (std.mem.eql(u8, key, bk)) return "true";
     return val;
 }
 
@@ -10876,8 +10886,8 @@ fn canonExtBody(a: std.mem.Allocator, sing: u8, subs: [][]const u8) ?[]const u8 
                 vbuf.appendSlice(a, subs[i]) catch return null;
             }
             var val: []const u8 = vbuf.toOwnedSlice(a) catch return null;
+            val = canonUKeywordValue(key, val); // deprecated-value aliases (UTS-35), incl. yes->true
             if (std.mem.eql(u8, val, "true")) val = ""; // a "true" type is omitted
-            val = canonUKeywordValue(key, val); // deprecated-value aliases (UTS-35)
             var dup = false; // a repeated keyword key: the first occurrence wins
             for (kws.items) |k| if (std.mem.eql(u8, k.key, key)) {
                 dup = true;
