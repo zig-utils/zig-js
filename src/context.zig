@@ -951,6 +951,47 @@ test "RegExp match reads flags and observes lastIndex recompilation" {
     )).boolean);
 }
 
+test "RegExp replace uses generic exec and UTF-16 positions" {
+    try std.testing.expect((try evalIn(
+        \\var n = 0;
+        \\var log = "";
+        \\var target = "---\uD83D\uDC38";
+        \\var rx = {
+        \\  get flags() { log += "flags,"; return "gu"; },
+        \\  get lastIndex() { return [, 3, 4][n]; },
+        \\  set lastIndex(v) {
+        \\    log += "set:" + v + ",";
+        \\    if (v !== [0, 5, 5][n]) throw new Error("bad lastIndex");
+        \\  },
+        \\  get exec() {
+        \\    return function(s) {
+        \\      if (s !== target) throw new Error("bad target");
+        \\      return n++ < 2 ? { 0: "", length: 1, index: 0, groups: undefined } : null;
+        \\    };
+        \\  }
+        \\};
+        \\RegExp.prototype[Symbol.replace].call(rx, target, "_");
+        \\log === "flags,set:0,set:5,set:5,"
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var args;
+        \\var rx2 = {
+        \\  flags: "",
+        \\  exec: function() { return { 0: "BC", 1: "B", length: 2, index: 1, groups: { name: "B" } }; }
+        \\};
+        \\RegExp.prototype[Symbol.replace].call(rx2, "aBC", function() { args = arguments; return "_"; });
+        \\args.length === 5 && args[0] === "BC" && args[1] === "B" &&
+        \\args[2] === 1 && args[3] === "aBC" && args[4].name === "B"
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var rx3 = {
+        \\  flags: "",
+        \\  exec: function() { return { 0: "x", length: 1, index: 0, groups: { a: "A" } }; }
+        \\};
+        \\RegExp.prototype[Symbol.replace].call(rx3, "x", "$<a>$&") === "Ax"
+    )).boolean);
+}
+
 test "JSON stringify preserves proxy array shape" {
     try expectEvalStr("[\"a\",\"b\"]", "JSON.stringify(new Proxy(['a', 'b'], {}))");
 }

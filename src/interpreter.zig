@@ -2696,13 +2696,94 @@ pub const Interpreter = struct {
         return value.strictEquals(a, b);
     }
 
+    fn jsStringSeqLen(s: []const u8, i: usize) usize {
+        if (wtf8SurrogateAt(s, i) != null) return 3;
+        return utf8SeqLen(s, i);
+    }
+
+    fn utf16LenOfSeq(s: []const u8, i: usize) usize {
+        if (wtf8SurrogateAt(s, i) != null) return 1;
+        return if (utf8SeqLen(s, i) == 4) @as(usize, 2) else 1;
+    }
+
+    fn utf16LenOfString(s: []const u8) usize {
+        var units: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) {
+            units += utf16LenOfSeq(s, i);
+            i += jsStringSeqLen(s, i);
+        }
+        return units;
+    }
+
+    fn appendWtf8CodeUnit(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, cu: u16) !void {
+        try buf.append(a, @intCast(0xE0 | (cu >> 12)));
+        try buf.append(a, @intCast(0x80 | ((cu >> 6) & 0x3F)));
+        try buf.append(a, @intCast(0x80 | (cu & 0x3F)));
+    }
+
+    fn appendUtf16Slice(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, start: usize, end: usize) !void {
+        if (start >= end) return;
+        var units: usize = 0;
+        var i: usize = 0;
+        while (i < s.len and units < end) {
+            const seq_len = jsStringSeqLen(s, i);
+            const seq_units = utf16LenOfSeq(s, i);
+            if (units + seq_units <= start) {
+                units += seq_units;
+                i += seq_len;
+                continue;
+            }
+            if (seq_units == 2 and seq_len == 4) {
+                const cp = std.unicode.utf8Decode(s[i .. i + seq_len]) catch 0;
+                if (cp > 0xFFFF) {
+                    const u = cp - 0x10000;
+                    const high: u16 = @intCast(0xD800 + (u >> 10));
+                    const low: u16 = @intCast(0xDC00 + (u & 0x3FF));
+                    if (start <= units and units < end) try appendWtf8CodeUnit(buf, a, high);
+                    if (start <= units + 1 and units + 1 < end) try appendWtf8CodeUnit(buf, a, low);
+                    units += seq_units;
+                    i += seq_len;
+                    continue;
+                }
+            }
+            if (units >= start and units < end) try buf.appendSlice(a, s[i .. i + seq_len]);
+            units += seq_units;
+            i += seq_len;
+        }
+    }
+
     fn advanceStringIndex(s: []const u8, index: usize, unicode: bool) usize {
-        if (!unicode or index >= s.len) return index + 1;
-        return index + if (utf8SeqLen(s, index) == 4) @as(usize, 2) else 1;
+        if (!unicode) return index + 1;
+        var units: usize = 0;
+        var b: usize = 0;
+        while (b < s.len) {
+            const seq_len = jsStringSeqLen(s, b);
+            const seq_units = utf16LenOfSeq(s, b);
+            if (index == units) {
+                if (seq_units == 2) return index + 2;
+                const first = wtf8SurrogateAt(s, b);
+                if (first != null and first.? >= 0xD800 and first.? <= 0xDBFF) {
+                    const next = b + seq_len;
+                    if (wtf8SurrogateAt(s, next)) |second| {
+                        if (second >= 0xDC00 and second <= 0xDFFF) return index + 2;
+                    }
+                }
+                return index + 1;
+            }
+            if (index < units + seq_units) return index + 1;
+            units += seq_units;
+            b += seq_len;
+        }
+        return index + 1;
+    }
+
+    fn isRegExpObjectValue(v: Value) bool {
+        return v == .object and !v.object.is_symbol and !v.object.is_bigint;
     }
 
     fn regexpMatch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
-        if (rx != .object) return self.throwError("TypeError", "RegExp.prototype[Symbol.match] called on a non-object");
+        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.match] called on a non-object");
         const flags = try self.toStringV(try self.getProperty(rx, "flags"));
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
         if (!global) return try self.regexpExecGeneric(rx, s);
@@ -2726,7 +2807,7 @@ pub const Interpreter = struct {
     }
 
     fn regexpSearch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
-        if (rx != .object) return self.throwError("TypeError", "RegExp.prototype[Symbol.search] called on a non-object");
+        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.search] called on a non-object");
         const previous_last_index = try self.getProperty(rx, "lastIndex");
         if (!regexpSameValue(previous_last_index, .{ .number = 0 })) try self.setRegExpLikeLastIndex(rx, 0);
         const result = try self.regexpExecGeneric(rx, s);
@@ -2735,6 +2816,77 @@ pub const Interpreter = struct {
         if (result == .null) return .{ .number = -1 };
         const index = try self.toNumberV(try self.getProperty(result, "index"));
         return .{ .number = @floatFromInt(toLen(index)) };
+    }
+
+    fn regexpReplace(self: *Interpreter, rx: Value, s: []const u8, replace_value: Value) EvalError!Value {
+        if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.replace] called on a non-object");
+        const functional_replace = replace_value.isCallable();
+        const replace_string = if (functional_replace) "" else try self.toStringV(replace_value);
+        const flags = try self.toStringV(try self.getProperty(rx, "flags"));
+        const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
+        const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+
+        if (global) try self.setRegExpLikeLastIndex(rx, 0);
+
+        var results: std.ArrayListUnmanaged(Value) = .empty;
+        while (true) {
+            const result = try self.regexpExecGeneric(rx, s);
+            if (result == .null) break;
+            try results.append(self.arena, result);
+            if (!global) break;
+
+            const match = try self.toStringV(try self.getProperty(result, "0"));
+            if (match.len == 0) {
+                const li = toLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
+                try self.setRegExpLikeLastIndex(rx, @floatFromInt(advanceStringIndex(s, li, full_unicode)));
+            }
+        }
+
+        const string_len = utf16LenOfString(s);
+        var accumulated: usize = 0;
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        for (results.items) |result| {
+            const length = toLen(try self.toNumberV(try self.getProperty(result, "length")));
+            const captures_len = if (length == 0) 0 else length - 1;
+            const matched = try self.toStringV(try self.getProperty(result, "0"));
+            const position = @min(toLen(try self.toNumberV(try self.getProperty(result, "index"))), string_len);
+
+            var captures: std.ArrayListUnmanaged(Value) = .empty;
+            var i: usize = 1;
+            while (i <= captures_len) : (i += 1) {
+                const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                const capture = try self.getProperty(result, key);
+                if (capture == .undefined) {
+                    try captures.append(self.arena, .undefined);
+                } else {
+                    try captures.append(self.arena, .{ .string = try self.toStringV(capture) });
+                }
+            }
+            const named_captures = try self.getProperty(result, "groups");
+
+            var replacement: []const u8 = "";
+            if (functional_replace) {
+                var call_args: std.ArrayListUnmanaged(Value) = .empty;
+                try call_args.append(self.arena, .{ .string = matched });
+                try call_args.appendSlice(self.arena, captures.items);
+                try call_args.append(self.arena, .{ .number = @floatFromInt(position) });
+                try call_args.append(self.arena, .{ .string = s });
+                if (named_captures != .undefined) try call_args.append(self.arena, named_captures);
+                replacement = try self.toStringV(try self.callValue(replace_value, call_args.items));
+            } else {
+                var repl_buf: std.ArrayListUnmanaged(u8) = .empty;
+                try self.getSubstitutionValues(&repl_buf, replace_string, matched, s, position, captures.items, named_captures);
+                replacement = try repl_buf.toOwnedSlice(self.arena);
+            }
+
+            if (position >= accumulated) {
+                try appendUtf16Slice(&out, self.arena, s, accumulated, position);
+                try out.appendSlice(self.arena, replacement);
+                accumulated = @min(position + utf16LenOfString(matched), string_len);
+            }
+        }
+        try appendUtf16Slice(&out, self.arena, s, accumulated, string_len);
+        return .{ .string = try out.toOwnedSlice(self.arena) };
     }
 
     fn regexpToString(self: *Interpreter, this: Value) EvalError!Value {
@@ -6266,6 +6418,76 @@ pub const Interpreter = struct {
                         i += consumed;
                     } else {
                         try buf.append(a, '$'); // not a valid group reference → literal `$`
+                    }
+                },
+                else => try buf.append(a, '$'),
+            }
+        }
+    }
+
+    fn getSubstitutionValues(
+        self: *Interpreter,
+        buf: *std.ArrayListUnmanaged(u8),
+        template: []const u8,
+        matched: []const u8,
+        str: []const u8,
+        position: usize,
+        captures: []const Value,
+        groups: Value,
+    ) EvalError!void {
+        const a = self.arena;
+        var i: usize = 0;
+        while (i < template.len) : (i += 1) {
+            if (template[i] != '$' or i + 1 >= template.len) {
+                try buf.append(a, template[i]);
+                continue;
+            }
+            switch (template[i + 1]) {
+                '$' => {
+                    try buf.append(a, '$');
+                    i += 1;
+                },
+                '&' => {
+                    try buf.appendSlice(a, matched);
+                    i += 1;
+                },
+                '`' => {
+                    try appendUtf16Slice(buf, a, str, 0, position);
+                    i += 1;
+                },
+                '\'' => {
+                    const end = position + utf16LenOfString(matched);
+                    try appendUtf16Slice(buf, a, str, @min(end, utf16LenOfString(str)), utf16LenOfString(str));
+                    i += 1;
+                },
+                '<' => {
+                    if (groups == .undefined) {
+                        try buf.append(a, '$');
+                        continue;
+                    }
+                    const close = std.mem.indexOfScalarPos(u8, template, i + 2, '>') orelse {
+                        try buf.append(a, '$');
+                        continue;
+                    };
+                    const gv = try self.getProperty(groups, template[i + 2 .. close]);
+                    if (gv != .undefined) try buf.appendSlice(a, try self.toStringV(gv));
+                    i = close;
+                },
+                '0'...'9' => {
+                    var idx: usize = template[i + 1] - '0';
+                    var consumed: usize = 1;
+                    if (i + 2 < template.len and template[i + 2] >= '0' and template[i + 2] <= '9') {
+                        const two = idx * 10 + (template[i + 2] - '0');
+                        if (two >= 1 and two <= captures.len) {
+                            idx = two;
+                            consumed = 2;
+                        }
+                    }
+                    if (idx >= 1 and idx <= captures.len) {
+                        if (captures[idx - 1] != .undefined) try buf.appendSlice(a, captures[idx - 1].string);
+                        i += consumed;
+                    } else {
+                        try buf.append(a, '$');
                     }
                 },
                 else => try buf.append(a, '$'),
@@ -17226,7 +17448,11 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, op, "search")) {
                 return try self.regexpSearch(this, str);
             }
-            if (comptime (std.mem.eql(u8, op, "replace") or std.mem.eql(u8, op, "split"))) {
+            if (comptime std.mem.eql(u8, op, "replace")) {
+                const replace_value: Value = if (args.len > 1) args[1] else .undefined;
+                return try self.regexpReplace(this, str, replace_value);
+            }
+            if (comptime std.mem.eql(u8, op, "split")) {
                 const extra: Value = if (args.len > 1) args[1] else .undefined;
                 return (try self.stringMethod(str, op, &.{ this, extra })) orelse .undefined;
             }
