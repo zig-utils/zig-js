@@ -14,6 +14,7 @@ const numbering_systems = @import("numbering_systems.zig");
 const cldr_locale = @import("cldr_locale.zig");
 const cldr_plurals = @import("cldr_plurals.zig");
 const cldr_timedata = @import("cldr_timedata.zig");
+const cldr_tzalias = @import("cldr_tzalias.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -10862,7 +10863,6 @@ fn canonUKeywordValue(key: []const u8, val: []const u8) []const u8 {
         .{ .k = "ca", .from = "ethiopic-amete-alem", .to = "ethioaa" },
         .{ .k = "ca", .from = "gregorian", .to = "gregory" },
         .{ .k = "ms", .from = "imperial", .to = "uksystem" },
-        .{ .k = "tz", .from = "cnckg", .to = "cnsha" },
         // ks (collation strength) type aliases.
         .{ .k = "ks", .from = "primary", .to = "level1" },
         .{ .k = "ks", .from = "secondary", .to = "level2" },
@@ -10881,6 +10881,10 @@ fn canonUKeywordValue(key: []const u8, val: []const u8) []const u8 {
         if (cldr_locale.subdivisionAlias(val)) |r| {
             return if (std.mem.indexOfScalar(u8, r, ' ')) |sp| r[0..sp] else r;
         }
+    }
+    // tz: a deprecated/alias time-zone value maps to its canonical BCP-47 type.
+    if (std.mem.eql(u8, key, "tz")) {
+        if (cldr_tzalias.canonical(val)) |r| return r;
     }
     return val;
 }
