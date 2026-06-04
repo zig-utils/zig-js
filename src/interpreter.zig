@@ -10429,11 +10429,16 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     var ext_count: usize = 0;
     var seen_singletons: [40]u8 = undefined;
     var nsing: usize = 0;
-    // -t- transform extension: track its tlang's variants for duplicate detection.
+    // -t- transform extension: parse its tlang (language[-script][-region]
+    // [-variant…]) so a malformed tlang (e.g. a 4-letter "language", a second
+    // script, or a duplicate variant) is rejected.
     var t_in_tlang = false;
-    var t_lang_seen = false;
+    var t_have_lang = false;
+    var t_have_script = false;
+    var t_have_region = false;
     var tvariants: [16][]const u8 = undefined;
     var ntvar: usize = 0;
+    var t_field_pending = false; // a -t- tfield key awaiting its value
 
     while (it.next()) |s| {
         if (s.len == 0) return false; // empty subtag (double dash)
@@ -10447,6 +10452,7 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
         if (s.len == 1) {
             // A singleton starts a (private-use or other) extension.
             if (ext != 0 and ext_count == 0) return false; // previous singleton had no subtags
+            if (ext == 't' and t_field_pending) return false; // -t- tfield key with no value
             const sl = std.ascii.toLower(s[0]);
             for (seen_singletons[0..nsing]) |p| if (p == sl) return false; // duplicate singleton
             seen_singletons[nsing] = sl;
@@ -10455,29 +10461,53 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
             ext_count = 0;
             if (sl == 't') {
                 t_in_tlang = true;
-                t_lang_seen = false;
+                t_have_lang = false;
+                t_have_script = false;
+                t_have_region = false;
                 ntvar = 0;
             }
             continue;
         }
         if (ext != 0) {
             if (s.len < 2 or s.len > 8) return false; // extension subtag: 2-8 alnum
+            // A -u- 2-char subtag is a keyword key, whose second character must
+            // be ALPHA (key = alphanum ALPHA); e.g. "c0"/"00" are invalid.
+            if (ext == 'u' and s.len == 2 and !isA(s[1])) return false;
             ext_count += 1;
             // The -t- tlang (language[-script][-region][-variant…]) precedes the
-            // tfields; a tfield key (2 chars: ALPHA DIGIT) ends it. Variants in
-            // the tlang must be unique.
-            if (ext == 't' and t_in_tlang) {
-                if (s.len == 2 and std.ascii.isAlphabetic(s[0]) and std.ascii.isDigit(s[1])) {
-                    t_in_tlang = false;
-                } else if (!t_lang_seen) {
-                    t_lang_seen = true; // the tlang language subtag
+            // tfields; a tfield key (2 chars: ALPHA DIGIT) ends it.
+            if (ext == 't' and !t_in_tlang) {
+                // In the tfields: key (2 chars: ALPHA DIGIT) then 1+ values
+                // (3-8 alnum). A key with no value, or two keys in a row, is
+                // invalid.
+                const is_key = s.len == 2 and isA(s[0]) and isD(s[1]);
+                if (is_key) {
+                    if (t_field_pending) return false; // previous key had no value
+                    t_field_pending = true;
+                } else {
+                    if (s.len < 3) return false; // a value is 3-8 alnum
+                    t_field_pending = false;
+                }
+            } else if (ext == 't' and t_in_tlang) {
+                const is_tfield_key = s.len == 2 and isA(s[0]) and isD(s[1]);
+                if (is_tfield_key) {
+                    t_in_tlang = false; // entering the tfields
+                    t_field_pending = true; // this key still needs a value
+                } else if (!t_have_lang) {
+                    // tlang language: 2-3 or 5-8 ALPHA.
+                    if (!(Helper.allAlpha(s) and ((s.len >= 2 and s.len <= 3) or (s.len >= 5 and s.len <= 8)))) return false;
+                    t_have_lang = true;
+                } else if (!t_have_script and !t_have_region and ntvar == 0 and s.len == 4 and Helper.allAlpha(s)) {
+                    t_have_script = true;
+                } else if (!t_have_region and ntvar == 0 and ((s.len == 2 and Helper.allAlpha(s)) or (s.len == 3 and Helper.allDigit(s)))) {
+                    t_have_region = true;
                 } else if (Helper.isVariant(s)) {
                     for (tvariants[0..ntvar]) |v| if (std.ascii.eqlIgnoreCase(v, s)) return false;
                     if (ntvar < tvariants.len) {
                         tvariants[ntvar] = s;
                         ntvar += 1;
                     }
-                }
+                } else return false;
             }
             continue;
         }
@@ -10497,6 +10527,8 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     }
     // A trailing singleton must have had at least one subtag.
     if (ext != 0 and ext_count == 0) return false;
+    // A trailing -t- tfield key must have had a value.
+    if (ext == 't' and t_field_pending) return false;
     return true;
 }
 
