@@ -10894,11 +10894,17 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         try arr.elements.append(self.arena, .{ .string = c });
         return arr;
     }
-    if (v != .object) return self.throwError("TypeError", "Intl: locales must be a string or an array");
-    const len = toLen((try self.toNumberV(try self.getProperty(v, "length"))));
+    // Anything else (incl. a primitive) is ToObject'd (null/undefined excluded
+    // above; a Symbol/BigInt/number/boolean becomes a wrapper, length 0).
+    const ov: Value = .{ .object = try self.toObject(v) };
+    const len = toLen((try self.toNumberV(try self.getProperty(ov, "length"))));
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const ev = try self.getProperty(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+        // CanonicalizeLocaleList checks HasProperty (honoring a Proxy `has` trap)
+        // before reading each index; a missing index is skipped.
+        const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        if (!try self.inOperator(.{ .string = key }, ov)) continue;
+        const ev = try self.getProperty(ov, key);
         if (ev != .string and ev != .object) return self.throwError("TypeError", "Intl: locale must be a string or object");
         // An Intl.Locale element contributes its [[Locale]] slot directly (its
         // toString must not be observed).
@@ -11673,7 +11679,10 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     try H.num(self, raw, ro, "maximumSignificantDigits", 1, 21);
     const riv = try self.getProperty(raw, "roundingIncrement");
     if (riv != .undefined) {
-        const n = @trunc(try self.toNumberV(riv));
+        // The exact value (not truncated) must be one of the sanctioned
+        // increments, so 5000.1 is rejected even though trunc(5000.1)=5000.
+        const n = try self.toNumberV(riv);
+        if (std.math.isNan(n) or n < 1 or n > 5000) return self.throwError("RangeError", "roundingIncrement out of range");
         const allowed = [_]f64{ 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000 };
         var ok = false;
         for (allowed) |a| if (n == a) {
@@ -11746,7 +11755,10 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
     try H.num(self, raw, ro, "maximumSignificantDigits", 1, 21);
     const riv = try self.getProperty(raw, "roundingIncrement");
     if (riv != .undefined) {
-        const n = @trunc(try self.toNumberV(riv));
+        // The exact value (not truncated) must be one of the sanctioned
+        // increments, so 5000.1 is rejected even though trunc(5000.1)=5000.
+        const n = try self.toNumberV(riv);
+        if (std.math.isNan(n) or n < 1 or n > 5000) return self.throwError("RangeError", "roundingIncrement out of range");
         const allowed = [_]f64{ 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000 };
         var ok = false;
         for (allowed) |a| if (n == a) {
