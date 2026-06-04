@@ -10865,6 +10865,13 @@ fn canonUKeywordValue(key: []const u8, val: []const u8) []const u8 {
     // Boolean keys map the type "yes" to "true" (which the caller then drops).
     const bool_keys = [_][]const u8{ "kb", "kc", "kh", "kk", "kn" };
     if (std.mem.eql(u8, val, "yes")) for (bool_keys) |bk| if (std.mem.eql(u8, key, bk)) return "true";
+    // The rg/sd keys carry subdivision ids: replace a deprecated id with the
+    // first of its CLDR replacements.
+    if (std.mem.eql(u8, key, "rg") or std.mem.eql(u8, key, "sd")) {
+        if (cldr_locale.subdivisionAlias(val)) |r| {
+            return if (std.mem.indexOfScalar(u8, r, ' ')) |sp| r[0..sp] else r;
+        }
+    }
     return val;
 }
 

@@ -65,6 +65,9 @@ out += table("script_alias", Object.entries(aliases.scriptAlias).map(([k, v]) =>
 out += table("territory_alias", Object.entries(aliases.territoryAlias).map(([k, v]) => [norm(k), norm(v._replacement)]));
 // variantAlias.
 out += table("variant_alias", Object.entries(aliases.variantAlias).map(([k, v]) => [norm(k), norm(v._replacement)]));
+// subdivisionAlias: deprecated subdivision id → one or more replacements (used
+// by the `-u-rg-`/`-u-sd-` keyword value canonicalization; caller picks first).
+out += table("subdivision_alias", Object.entries(aliases.subdivisionAlias).map(([k, v]) => [norm(k), norm(v._replacement)]));
 // likelySubtags: partial language-id → maximal language-id.
 out += table("likely_subtags", Object.entries(likely).map(([k, v]) => [norm(k), norm(v)]));
 
@@ -81,6 +84,10 @@ pub fn territoryAlias(key: []const u8) ?[]const u8 {
 }
 pub fn variantAlias(key: []const u8) ?[]const u8 {
     return lookup(&variant_alias, key);
+}
+/// The subdivision replacement (may be a space-separated list; caller picks).
+pub fn subdivisionAlias(key: []const u8) ?[]const u8 {
+    return lookup(&subdivision_alias, key);
 }
 pub fn likely(key: []const u8) ?[]const u8 {
     return lookup(&likely_subtags, key);
