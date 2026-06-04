@@ -11957,8 +11957,11 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                         if (cv.object.getOwn("prototype")) |pv| if (pv == .object) {
                             oo.proto = pv.object;
                             // OrdinaryHasInstance(service, this): is the service
-                            // prototype in `this`'s prototype chain?
-                            if (this == .object) {
+                            // prototype in `this`'s prototype chain? Only
+                            // NumberFormat/DateTimeFormat have the legacy
+                            // FallbackSymbol chaining; Collator ignores `this`.
+                            const can_chain = comptime (std.mem.eql(u8, service, "NumberFormat") or std.mem.eql(u8, service, "DateTimeFormat"));
+                            if (can_chain and this == .object) {
                                 var p: ?*value.Object = this.object.proto;
                                 while (p) |pp| : (p = pp.proto) if (pp == pv.object) {
                                     chain_this = this.object;
@@ -14416,7 +14419,13 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 const res = try collatorResolveLocale(self, o, loc.string, opt_num, opt_kf);
                 try self.setProp(o, "usage", cget(rv, "usage") orelse .{ .string = "sort" });
                 try self.setProp(o, "sensitivity", cget(rv, "sensitivity") orelse .{ .string = "variant" });
-                try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse .{ .boolean = false });
+                // ignorePunctuation defaults from locale data: Thai ("th") is the
+                // only locale whose CLDR default is true.
+                const ip_default = blk: {
+                    const lang = parseTriple(loc.string).l;
+                    break :blk std.mem.eql(u8, lang, "th");
+                };
+                try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse .{ .boolean = ip_default });
                 try self.setProp(o, "collation", .{ .string = "default" });
                 try self.setProp(o, "numeric", .{ .boolean = res.numeric });
                 try self.setProp(o, "caseFirst", .{ .string = res.case_first });
@@ -14689,7 +14698,8 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("RelativeTimeFormat"));
     }
     {
-        const p = try Svc.install(a, rs, env, ns, object_proto, "DisplayNames", 0, intlServiceConstructorFn("DisplayNames"), tag);
+        // Intl.DisplayNames is the one service constructor with length 2.
+        const p = try Svc.install(a, rs, env, ns, object_proto, "DisplayNames", 2, intlServiceConstructorFn("DisplayNames"), tag);
         try setNative(a, rs, p, "of", 1, intlDisplayNamesOfFn);
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("DisplayNames"));
     }
