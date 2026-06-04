@@ -2499,16 +2499,7 @@ pub const Interpreter = struct {
     /// `global`/`ignoreCase`/`multiline` booleans. Matching (test/exec) is
     /// dispatched in `regexMethod`, backed by zig-regex.
     pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
-        // Validate the flags: each must be one of `dgimsuvy` with no duplicates
-        // (RegExp construction reports a SyntaxError otherwise). `u` and `v` are
-        // also mutually exclusive.
-        var seen = std.mem.zeroes([128]bool);
-        for (flags) |f| {
-            if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f])
-                return self.throwError("SyntaxError", "Invalid regular expression flags");
-            seen[f] = true;
-        }
-        if (seen['u'] and seen['v']) return self.throwError("SyntaxError", "Invalid regular expression flags");
+        try self.validateRegExpFlags(flags);
         const o = (try self.newObject()).object;
         o.is_regex = true;
         // An empty pattern's [[OriginalSource]] is "(?:)" (so `//`, `new RegExp()`,
@@ -2529,6 +2520,24 @@ pub const Interpreter = struct {
         // methods recompile on demand).
         _ = try self.compileRegex(o);
         return .{ .object = o };
+    }
+
+    fn validateRegExpFlags(self: *Interpreter, flags: []const u8) EvalError!void {
+        // Each flag must be one of `dgimsuvy` with no duplicates. `u` and `v` are
+        // mutually exclusive.
+        var seen = std.mem.zeroes([128]bool);
+        for (flags) |f| {
+            if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f])
+                return self.throwError("SyntaxError", "Invalid regular expression flags");
+            seen[f] = true;
+        }
+        if (seen['u'] and seen['v']) return self.throwError("SyntaxError", "Invalid regular expression flags");
+    }
+
+    fn setRegExpLastIndex(self: *Interpreter, o: *value.Object, n: f64) EvalError!void {
+        if (o.getOwn("lastIndex") != null and !o.getAttr("lastIndex").writable)
+            return self.throwError("TypeError", "Cannot assign to read only property 'lastIndex'");
+        try self.setProp(o, "lastIndex", .{ .number = n });
     }
 
     fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!regex.Regex {
@@ -2563,30 +2572,55 @@ pub const Interpreter = struct {
             const r = (try self.regexMethod(o, "exec", args)).?;
             return Value{ .boolean = r != .null };
         }
+        if (eq(name, "compile")) {
+            var pattern: []const u8 = "";
+            var flags: []const u8 = "";
+            const pattern_v = if (args.len > 0) args[0] else Value.undefined;
+            const flags_v = if (args.len > 1) args[1] else Value.undefined;
+            if (pattern_v == .object and pattern_v.object.is_regex and flags_v == .undefined) {
+                pattern = pattern_v.object.regex_source;
+                flags = pattern_v.object.regex_flags;
+            } else {
+                if (pattern_v != .undefined) pattern = try self.toStringV(pattern_v);
+                if (flags_v != .undefined) flags = try self.toStringV(flags_v);
+            }
+            try self.validateRegExpFlags(flags);
+            const source = if (pattern.len == 0) "(?:)" else pattern;
+            const old_source = o.regex_source;
+            const old_flags = o.regex_flags;
+            o.regex_source = try self.arena.dupe(u8, source);
+            o.regex_flags = try self.arena.dupe(u8, flags);
+            _ = self.compileRegex(o) catch |err| {
+                o.regex_source = old_source;
+                o.regex_flags = old_flags;
+                return err;
+            };
+            try self.setRegExpLastIndex(o, 0);
+            return .{ .object = o };
+        }
         if (eq(name, "exec")) {
-            const input = try arg0(args).toString(self.arena);
+            const input = try self.toStringV(arg0(args));
             const flags = o.regex_flags;
             const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
             const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
-            // `lastIndex` is the search start only for global/sticky regexps.
-            const li: usize = if (global or sticky)
-                toLen((o.getOwn("lastIndex") orelse Value{ .number = 0 }).toNumber())
-            else
-                0;
-            if (li > input.len) {
-                if (global or sticky) try self.setProp(o, "lastIndex", .{ .number = 0 });
+            // RegExpBuiltinExec always reads/coerces `lastIndex`; it only uses it
+            // as the search start for global/sticky regexps.
+            const li = toLen(try self.toNumberV(try self.getProperty(.{ .object = o }, "lastIndex")));
+            const start = if (global or sticky) li else 0;
+            if (start > input.len) {
+                if (global or sticky) try self.setRegExpLastIndex(o, 0);
                 return Value.null;
             }
             var re = try self.compileRegex(o);
-            const found = re.find(input[li..]) catch null;
+            const found = re.find(input[start..]) catch null;
             if (found) |m| {
                 // Sticky matches must begin exactly at lastIndex.
                 if (sticky and m.start != 0) {
-                    try self.setProp(o, "lastIndex", .{ .number = 0 });
+                    try self.setRegExpLastIndex(o, 0);
                     return Value.null;
                 }
-                const mstart = li + m.start;
-                if (global or sticky) try self.setProp(o, "lastIndex", .{ .number = @floatFromInt(li + m.end) });
+                const mstart = start + m.start;
+                if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(start + m.end));
                 const arr = try self.newArray();
                 try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
                 for (0..m.captures.len) |i| try arr.object.elements.append(self.arena, try self.captureVal(m, i));
@@ -2596,7 +2630,7 @@ pub const Interpreter = struct {
                 try self.setProp(arr.object, "groups", if (groups) |g| .{ .object = g } else .undefined);
                 return arr;
             }
-            if (global or sticky) try self.setProp(o, "lastIndex", .{ .number = 0 });
+            if (global or sticky) try self.setRegExpLastIndex(o, 0);
             return Value.null;
         }
         if (eq(name, "toString")) {
@@ -17110,6 +17144,7 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     try setNativeGetter(a, rs, p, "hasIndices", regexFlagGetter('d'));
     try setNative(a, rs, p, "exec", 1, regexProtoMethod("exec"));
     try setNative(a, rs, p, "test", 1, regexProtoMethod("test"));
+    try setNative(a, rs, p, "compile", 2, regexProtoMethod("compile"));
     try setNative(a, rs, p, "toString", 0, regexProtoMethod("toString"));
     // The @@match/@@replace/@@search/@@split/@@matchAll methods are installed
     // later (after Symbol's well-known symbols exist) in installGlobalsInner.

@@ -840,6 +840,43 @@ test "RegExp flags and toString use generic canonical accessors" {
     )).boolean);
 }
 
+test "RegExp exec coerces and preserves lastIndex per spec" {
+    try std.testing.expect((try evalIn(
+        \\var called = 0;
+        \\var r = /./;
+        \\r.lastIndex = { valueOf: function() { called += 1; return 0; } };
+        \\r.exec(".");
+        \\r.lastIndex = { toString: function() { called += 1; return "0"; } };
+        \\r.exec(".");
+        \\r.lastIndex = { valueOf: function() { called += 1; return 0; }, toString: function() { called -= 10; } };
+        \\r.exec(".");
+        \\called === 3 && typeof r.lastIndex === "object"
+    )).boolean);
+}
+
+test "RegExp lastIndex writes throw when non-writable" {
+    try std.testing.expect((try evalIn(
+        \\var r = /0/g;
+        \\Object.freeze(r);
+        \\var testThrow = false;
+        \\try { r.test("abc000"); } catch (e) { testThrow = e.name === "TypeError"; }
+        \\var execThrow = false;
+        \\try { r.exec("abc000"); } catch (e) { execThrow = e.name === "TypeError"; }
+        \\testThrow && execThrow && r.lastIndex === 0
+    )).boolean);
+}
+
+test "RegExp compile mutates before throwing on non-writable lastIndex" {
+    try std.testing.expect((try evalIn(
+        \\var r = /foo/i;
+        \\Object.defineProperty(r, "lastIndex", { value: 42, writable: false });
+        \\var threw = false;
+        \\try { r.compile("^bar", "m"); } catch (e) { threw = e.name === "TypeError"; }
+        \\threw && r.source === "^bar" && r.multiline === true && r.ignoreCase === false &&
+        \\r.lastIndex === 42 && r.test("x\nbar") === true
+    )).boolean);
+}
+
 test "object literal __proto__ sets ordinary object prototype" {
     try std.testing.expect((try evalIn(
         \\var p = { marker: 1 };
