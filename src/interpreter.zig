@@ -12868,7 +12868,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var min_frac: usize = 0;
     var max_frac: usize = 3;
     var is_percent = false;
-    var use_grouping = true;
+    var group_mode: []const u8 = "auto"; // off | min2 | auto | always
     var cur_prefix: []const u8 = ""; // currency symbol/code prefix (en places before)
     var cur_suffix: []const u8 = "";
     var cur_symbol: []const u8 = ""; // the bare currency symbol, when display=symbol (placement is locale-dependent)
@@ -12954,9 +12954,14 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             if (max_frac < min_frac) min_frac = max_frac;
             frac_set = true;
         }
+        // useGrouping default is "min2" for compact notation, else "auto".
+        if (std.mem.eql(u8, notation, "compact")) group_mode = "min2";
         const ug = try self.getProperty(o, "useGrouping");
-        if (ug == .boolean and !ug.boolean) use_grouping = false;
-        if (ug == .string and std.mem.eql(u8, ug.string, "false")) use_grouping = false;
+        if (ug == .boolean) {
+            group_mode = if (ug.boolean) "always" else "off";
+        } else if (ug == .string) {
+            group_mode = if (std.mem.eql(u8, ug.string, "false")) "off" else ug.string;
+        }
     };
 
     const is_nan = std.math.isNan(n);
@@ -13044,7 +13049,14 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     } else {
         // Integer digits, split into "integer" runs separated by "group" parts
         // (scientific/engineering notation never groups the mantissa).
-        const group_ok = use_grouping and !sci;
+        // "min2" suppresses grouping until the integer part reaches 5 digits
+        // (minimumGroupingDigits = 2, group size 3); "off" never groups.
+        const group_ok = !sci and (if (std.mem.eql(u8, group_mode, "off"))
+            false
+        else if (std.mem.eql(u8, group_mode, "min2"))
+            digits.len >= 5
+        else
+            true);
         const first_group = digits.len % 3;
         var run: std.ArrayListUnmanaged(u8) = .empty;
         for (digits, 0..) |c, i| {
@@ -14465,7 +14477,13 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                         if (max_frac < min_frac) min_frac = max_frac;
                     }
                     const ug = try self.getProperty(ov, "useGrouping");
-                    if (ug == .boolean) grouping = .{ .boolean = ug.boolean } else if (ug == .string) grouping = .{ .string = ug.string };
+                    if (ug == .boolean) {
+                        grouping = .{ .boolean = ug.boolean };
+                    } else if (ug == .string) {
+                        grouping = .{ .string = ug.string };
+                    } else if (std.mem.eql(u8, notation, "compact")) {
+                        grouping = .{ .string = "min2" }; // compact default
+                    }
                     const sd = try self.getProperty(ov, "signDisplay");
                     if (sd == .string) sign_display = sd.string;
                 };
