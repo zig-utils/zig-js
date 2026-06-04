@@ -910,6 +910,28 @@ test "RegExp generic exec dispatch validates protocol results" {
     )).boolean);
 }
 
+test "RegExp search uses generic exec and restores lastIndex" {
+    try std.testing.expect((try evalIn(
+        \\var log = "";
+        \\var old = {};
+        \\var li = old;
+        \\var rx = {
+        \\  get lastIndex() { log += "get:lastIndex,"; return li; },
+        \\  set lastIndex(v) { li = v; log += v === 0 ? "set:zero," : "set:old,"; },
+        \\  get exec() {
+        \\    log += "get:exec,";
+        \\    return function(s) { log += "call:exec,"; return { index: 3 }; };
+        \\  }
+        \\};
+        \\var hit = RegExp.prototype[Symbol.search].call(rx, "abcdef") === 3;
+        \\var nonObjectThrow = false;
+        \\try { RegExp.prototype[Symbol.search].call(Symbol.iterator, "x"); }
+        \\catch (e) { nonObjectThrow = e.name === "TypeError"; }
+        \\hit && nonObjectThrow &&
+        \\log === "get:lastIndex,set:zero,get:exec,call:exec,get:lastIndex,set:old,"
+    )).boolean);
+}
+
 test "object literal __proto__ sets ordinary object prototype" {
     try std.testing.expect((try evalIn(
         \\var p = { marker: 1 };

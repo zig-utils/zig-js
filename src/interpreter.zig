@@ -2534,10 +2534,14 @@ pub const Interpreter = struct {
         if (seen['u'] and seen['v']) return self.throwError("SyntaxError", "Invalid regular expression flags");
     }
 
-    fn setRegExpLastIndex(self: *Interpreter, o: *value.Object, n: f64) EvalError!void {
+    fn setRegExpLastIndexValue(self: *Interpreter, o: *value.Object, v: Value) EvalError!void {
         if (o.getOwn("lastIndex") != null and !o.getAttr("lastIndex").writable)
             return self.throwError("TypeError", "Cannot assign to read only property 'lastIndex'");
-        try self.setProp(o, "lastIndex", .{ .number = n });
+        try self.setProp(o, "lastIndex", v);
+    }
+
+    fn setRegExpLastIndex(self: *Interpreter, o: *value.Object, n: f64) EvalError!void {
+        try self.setRegExpLastIndexValue(o, .{ .number = n });
     }
 
     fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!regex.Regex {
@@ -2655,9 +2659,29 @@ pub const Interpreter = struct {
     }
 
     fn setRegExpLikeLastIndex(self: *Interpreter, rx: Value, n: f64) EvalError!void {
-        if (rx == .object and rx.object.is_regex) return self.setRegExpLastIndex(rx.object, n);
-        if (rx == .object) return self.setProp(rx.object, "lastIndex", .{ .number = n });
+        try self.setRegExpLikeLastIndexValue(rx, .{ .number = n });
+    }
+
+    fn setRegExpLikeLastIndexValue(self: *Interpreter, rx: Value, v: Value) EvalError!void {
+        if (rx == .object and rx.object.is_regex) return self.setRegExpLastIndexValue(rx.object, v);
+        if (rx == .object) {
+            const was_strict = self.strict;
+            self.strict = true;
+            defer self.strict = was_strict;
+            return self.setMember(rx, "lastIndex", v);
+        }
         return self.throwError("TypeError", "RegExp receiver must be an object");
+    }
+
+    fn regexpSameValue(a: Value, b: Value) bool {
+        if (a == .number and b == .number) {
+            const x = a.number;
+            const y = b.number;
+            if (std.math.isNan(x) and std.math.isNan(y)) return true;
+            if (x == 0 and y == 0) return (1.0 / x) == (1.0 / y);
+            return x == y;
+        }
+        return value.strictEquals(a, b);
     }
 
     fn regexpMatch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
@@ -2679,6 +2703,18 @@ pub const Interpreter = struct {
                 try self.setRegExpLikeLastIndex(rx, @floatFromInt(@min(li + 1, s.len + 1)));
             }
         }
+    }
+
+    fn regexpSearch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
+        if (rx != .object) return self.throwError("TypeError", "RegExp.prototype[Symbol.search] called on a non-object");
+        const previous_last_index = try self.getProperty(rx, "lastIndex");
+        if (!regexpSameValue(previous_last_index, .{ .number = 0 })) try self.setRegExpLikeLastIndex(rx, 0);
+        const result = try self.regexpExecGeneric(rx, s);
+        const current_last_index = try self.getProperty(rx, "lastIndex");
+        if (!regexpSameValue(current_last_index, previous_last_index)) try self.setRegExpLikeLastIndexValue(rx, previous_last_index);
+        if (result == .null) return .{ .number = -1 };
+        const index = try self.toNumberV(try self.getProperty(result, "index"));
+        return .{ .number = @floatFromInt(toLen(index)) };
     }
 
     fn regexpToString(self: *Interpreter, this: Value) EvalError!Value {
@@ -16395,7 +16431,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         if (rc.object.getOwn("prototype")) |rp| if (rp == .object) {
             inline for (.{ "match", "search", "matchAll", "replace", "split" }) |op| {
                 if (symbol_ns.getOwn(op)) |sv| if (sv == .object and sv.object.is_symbol) {
-                    try setNative(a, root_shape, rp.object, sv.object.sym_key, 2, regexpSymbolMethod(op));
+                    const len: usize = if (comptime (std.mem.eql(u8, op, "replace") or std.mem.eql(u8, op, "split"))) 2 else 1;
+                    try installSymbolMethod(a, root_shape, rp.object, sv.object.sym_key, "[Symbol." ++ op ++ "]", len, regexpSymbolMethod(op));
                 };
             }
         };
@@ -17165,6 +17202,9 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             const str = try self.toStringV(if (args.len > 0) args[0] else .undefined);
             if (comptime std.mem.eql(u8, op, "match")) {
                 return try self.regexpMatch(this, str);
+            }
+            if (comptime std.mem.eql(u8, op, "search")) {
+                return try self.regexpSearch(this, str);
             }
             if (comptime (std.mem.eql(u8, op, "replace") or std.mem.eql(u8, op, "split"))) {
                 const extra: Value = if (args.len > 1) args[1] else .undefined;
