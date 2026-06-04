@@ -12380,21 +12380,52 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     if (args.len > 0 and tIsTemporal(args[0], .zoned_date_time)) {
         return self.throwError("TypeError", "Intl.DateTimeFormat does not support Temporal.ZonedDateTime; use Temporal.ZonedDateTime.prototype.toLocaleString");
     }
-    // The value to format: undefined → "now" (deterministic epoch 0); else a
-    // time value, TimeClip'd.
-    const ms: f64 = if (args.len == 0 or args[0] == .undefined) 0 else try self.toNumberV(args[0]);
-    if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
-
-    const day_ms: i64 = 86_400_000;
-    // TimeClip truncates toward zero (ToIntegerOrInfinity), so format(-0.9) is 0.
-    const total_ms: i64 = @intFromFloat(@trunc(ms));
-    const epoch_days = @divFloor(total_ms, day_ms);
-    var tod = @mod(total_ms, day_ms);
-    if (tod < 0) tod += day_ms;
-    const civ = tCivilFromDays(epoch_days);
-    const hour24: u8 = @intCast(@divFloor(tod, 3_600_000));
-    const minute: u8 = @intCast(@divFloor(@mod(tod, 3_600_000), 60_000));
-    const second: u8 = @intCast(@divFloor(@mod(tod, 60_000), 1000));
+    // The value to format. A Temporal PlainDate/Time/DateTime/YearMonth/MonthDay
+    // supplies its ISO fields directly (no TimeClip — its range exceeds Date's);
+    // an Instant uses its epoch nanoseconds; everything else is a TimeClip'd time
+    // value. `temporal_kind` (when set) restricts which components may be shown.
+    var temporal_kind: ?value.TemporalData.Kind = null;
+    var civ: Civil = .{ .y = 1970, .m = 1, .d = 1 };
+    var hour24: u8 = 0;
+    var minute: u8 = 0;
+    var second: u8 = 0;
+    var frac_ms: u32 = 0;
+    {
+        const t_obj: ?*value.TemporalData = if (args.len > 0 and args[0] == .object) args[0].object.temporal else null;
+        const direct = t_obj != null and switch (t_obj.?.kind) {
+            .plain_date, .plain_time, .plain_date_time, .plain_year_month, .plain_month_day => true,
+            else => false,
+        };
+        if (direct) {
+            const t = t_obj.?;
+            temporal_kind = t.kind;
+            civ = .{ .y = @as(i64, t.year), .m = t.month, .d = t.day };
+            hour24 = t.hour;
+            minute = t.minute;
+            second = t.second;
+            frac_ms = t.millisecond;
+        } else {
+            const is_instant = t_obj != null and t_obj.?.kind == .instant;
+            if (is_instant) temporal_kind = .instant;
+            const ms: f64 = if (is_instant)
+                @as(f64, @floatFromInt(@divFloor(t_obj.?.epoch_ns, 1_000_000)))
+            else if (args.len == 0 or args[0] == .undefined)
+                0
+            else
+                try self.toNumberV(args[0]);
+            if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
+            const day_ms: i64 = 86_400_000;
+            const total_ms: i64 = @intFromFloat(@trunc(ms));
+            const epoch_days = @divFloor(total_ms, day_ms);
+            var tod = @mod(total_ms, day_ms);
+            if (tod < 0) tod += day_ms;
+            civ = tCivilFromDays(epoch_days);
+            hour24 = @intCast(@divFloor(tod, 3_600_000));
+            minute = @intCast(@divFloor(@mod(tod, 3_600_000), 60_000));
+            second = @intCast(@divFloor(@mod(tod, 60_000), 1000));
+            frac_ms = @intCast(@mod(tod, 1000));
+        }
+    }
     const wday = isoDayOfWeek(civ.y, civ.m, civ.d) % 7; // 0=Sun..6=Sat
 
     // Read the component options (or the default: numeric year/month/day).
@@ -12465,6 +12496,41 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_year = "numeric";
         o_month = "numeric";
         o_day = "numeric";
+    }
+
+    // Restrict the components to those the Temporal value's type can provide; a
+    // requested component the type lacks is dropped, and if NOTHING the formatter
+    // wants overlaps the value's data model it is a TypeError.
+    if (temporal_kind) |tk| {
+        const has_date = tk == .plain_date or tk == .plain_date_time or tk == .instant;
+        const has_time = tk == .plain_time or tk == .plain_date_time or tk == .instant;
+        const a_year = has_date or tk == .plain_year_month;
+        const a_month = has_date or tk == .plain_year_month or tk == .plain_month_day;
+        const a_day = has_date or tk == .plain_month_day;
+        const a_tz = tk == .instant;
+        var req = false;
+        var kept = false;
+        const F = struct {
+            fn f(ok: bool, slot: *[]const u8, r: *bool, k: *bool) void {
+                if (slot.len == 0) return;
+                r.* = true;
+                if (ok) k.* = true else slot.* = "";
+            }
+        }.f;
+        F(a_year, &o_year, &req, &kept);
+        F(a_month, &o_month, &req, &kept);
+        F(a_day, &o_day, &req, &kept);
+        F(has_date, &o_weekday, &req, &kept);
+        F(has_time, &o_hour, &req, &kept);
+        F(has_time, &o_minute, &req, &kept);
+        F(has_time, &o_second, &req, &kept);
+        F(has_time, &o_day_period, &req, &kept);
+        F(a_tz, &o_tzname, &req, &kept);
+        if (o_frac > 0) {
+            req = true;
+            if (has_time) kept = true else o_frac = 0;
+        }
+        if (req and !kept) return self.throwError("TypeError", "Intl.DateTimeFormat: options do not overlap the Temporal value's fields");
     }
 
     var parts: std.ArrayListUnmanaged(DtfPart) = .empty;
@@ -12548,9 +12614,8 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         // fractionalSecondDigits: the first N digits of the millisecond (the
         // sub-second is truncated, not rounded), after the seconds.
         if (o_frac > 0 and o_second.len > 0) {
-            const millis: u32 = @intCast(@mod(tod, 1000));
             var mbuf: [3]u8 = .{ '0', '0', '0' };
-            _ = std.fmt.bufPrint(&mbuf, "{d:0>3}", .{millis}) catch {};
+            _ = std.fmt.bufPrint(&mbuf, "{d:0>3}", .{frac_ms}) catch {};
             try P.lit(self, &parts, ".");
             try parts.append(self.arena, .{ .typ = "fractionalSecond", .value = try self.arena.dupe(u8, mbuf[0..o_frac]) });
         }
