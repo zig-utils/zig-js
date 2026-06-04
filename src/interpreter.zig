@@ -13542,18 +13542,44 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     }
     const list = strs.items;
     var typ: []const u8 = "conjunction";
+    var style: []const u8 = "long";
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
         const tv = try self.getProperty(ov, "type");
         if (tv == .string) typ = tv.string;
+        const sv = try self.getProperty(ov, "style");
+        if (sv == .string) style = sv.string;
     };
-    // en long connectors: pair (two items) / final (≥3) / middle.
+    // en connectors by type+style: pair (two items) / final (≥3) / middle.
     const is_unit = std.mem.eql(u8, typ, "unit");
     const is_disj = std.mem.eql(u8, typ, "disjunction");
-    const pair: []const u8 = if (is_unit) ", " else if (is_disj) " or " else " and ";
-    const final: []const u8 = if (is_unit) ", " else if (is_disj) ", or " else ", and ";
+    const narrow = std.mem.eql(u8, style, "narrow");
+    const short = std.mem.eql(u8, style, "short");
+    var middle: []const u8 = ", ";
+    var pair: []const u8 = " and ";
+    var final: []const u8 = ", and ";
+    if (is_unit) {
+        if (narrow) {
+            middle = " ";
+            pair = " ";
+            final = " ";
+        } else {
+            pair = ", ";
+            final = ", ";
+        }
+    } else if (is_disj) {
+        pair = " or ";
+        final = ", or ";
+    } else if (narrow) { // conjunction
+        middle = " ";
+        pair = " ";
+        final = " ";
+    } else if (short) {
+        pair = " & ";
+        final = ", & ";
+    }
     for (list, 0..) |item, i| {
         if (i != 0) {
-            const sep = if (i == list.len - 1) (if (list.len == 2) pair else final) else ", ";
+            const sep = if (i == list.len - 1) (if (list.len == 2) pair else final) else middle;
             try parts.append(self.arena, .{ .typ = "literal", .value = sep });
         }
         try parts.append(self.arena, .{ .typ = "element", .value = item });
