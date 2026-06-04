@@ -14005,6 +14005,20 @@ const RtfResult = struct {
     unit: []const u8 = "",
 };
 
+/// en short/narrow relative-time unit names (singular/plural). Most units don't
+/// pluralize ("sec."), but day/quarter do ("days"/"qtrs.").
+fn rtfShortName(unit: []const u8, plural: bool) ?[]const u8 {
+    const T = struct { k: []const u8, s: []const u8, p: []const u8 };
+    const table = [_]T{
+        .{ .k = "second", .s = "sec.", .p = "sec." }, .{ .k = "minute", .s = "min.", .p = "min." },
+        .{ .k = "hour", .s = "hr.", .p = "hr." },     .{ .k = "day", .s = "day", .p = "days" },
+        .{ .k = "week", .s = "wk.", .p = "wk." },     .{ .k = "month", .s = "mo.", .p = "mo." },
+        .{ .k = "quarter", .s = "qtr.", .p = "qtrs." }, .{ .k = "year", .s = "yr.", .p = "yr." },
+    };
+    for (table) |t| if (std.mem.eql(u8, unit, t.k)) return if (plural) t.p else t.s;
+    return null;
+}
+
 fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostError!RtfResult {
     const valnum = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
     if (!std.math.isFinite(valnum)) return self.throwError("RangeError", "value must be finite");
@@ -14012,9 +14026,14 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
     const info = rtfUnitInfo(unit_s) orelse return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid unit '{s}'", .{unit_s}));
 
     var numeric: []const u8 = "always";
+    var style: []const u8 = "long";
     if (this.object.getOwn("\x00opts")) |ov| if (ov == .object) {
-        const nv = try self.getProperty(ov, "numeric");
-        if (nv == .string) numeric = nv.string;
+        if (ov.object.getOwn("numeric")) |nv| if (nv == .string) {
+            numeric = nv.string;
+        };
+        if (ov.object.getOwn("style")) |sv| if (sv == .string) {
+            style = sv.string;
+        };
     };
     const neg = std.math.signbit(valnum); // -0 formats as past
 
@@ -14031,7 +14050,13 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
     const mag = @abs(valnum);
     const r = try nfRound(self, mag, false, 1, 0, 3, null, null, false, "auto", 1, "halfExpand");
     const plural = mag != 1;
-    const unit_name = if (plural) try std.fmt.allocPrint(self.arena, "{s}s", .{info.singular}) else info.singular;
+    const short = std.mem.eql(u8, style, "short") or std.mem.eql(u8, style, "narrow");
+    const unit_name = if (short and rtfShortName(info.singular, plural) != null)
+        rtfShortName(info.singular, plural).?
+    else if (plural)
+        try std.fmt.allocPrint(self.arena, "{s}s", .{info.singular})
+    else
+        info.singular;
     // en long patterns: future "in {0} <unit>", past "{0} <unit> ago".
     return .{
         .int_str = r.int_str,
