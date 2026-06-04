@@ -11604,11 +11604,11 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r: DtfOptions) EvalErro
 /// the observed getter sequence). Returns a plain object carrying the canonical
 /// values, which both `format` and `resolvedOptions` read (so user getters fire
 /// exactly once and bad values throw at construction).
-fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
+fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     const ro = (try self.newObject()).object;
-    // GetOptionsObject: undefined → no options; a non-object value → TypeError.
-    if (raw == .undefined) return ro;
-    if (raw != .object) return self.throwError("TypeError", "options must be an object");
+    // CoerceOptionsToObject: undefined → none; null → TypeError; primitive → boxed.
+    if (raw_in == .undefined) return ro;
+    const raw: Value = .{ .object = try self.toObject(raw_in) };
 
     const H = struct {
         // GetOption(string) with an allowed set; stores the canonical value when
@@ -11686,15 +11686,23 @@ fn nfProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
     _ = try H.str(self, raw, ro, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" });
     _ = try H.str(self, raw, ro, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" });
     _ = try H.str(self, raw, ro, "compactDisplay", &.{ "short", "long" });
-    // GetBooleanOrStringNumberFormatOption: boolean true resolves to "always",
-    // false to false; a string must be one of min2/auto/always (RangeError else).
+    // GetBooleanOrStringNumberFormatOption: true -> "always"; a falsy value ->
+    // false; otherwise a string in {min2,auto,always} is kept, any other string
+    // falls back to the default ("auto", left unset) rather than throwing.
     const ug = try self.getProperty(raw, "useGrouping");
-    if (ug == .boolean) {
-        if (ug.boolean) try self.setProp(ro, "useGrouping", .{ .string = "always" }) else try self.setProp(ro, "useGrouping", .{ .boolean = false });
-    } else if (ug != .undefined) {
-        const s = try self.toStringV(ug);
-        if (!std.mem.eql(u8, s, "min2") and !std.mem.eql(u8, s, "auto") and !std.mem.eql(u8, s, "always")) return self.throwError("RangeError", "invalid value for option useGrouping");
-        try self.setProp(ro, "useGrouping", .{ .string = s });
+    if (ug != .undefined) {
+        if (ug == .boolean and ug.boolean) {
+            try self.setProp(ro, "useGrouping", .{ .string = "always" });
+        } else if (!ug.toBoolean()) {
+            try self.setProp(ro, "useGrouping", .{ .boolean = false });
+        } else {
+            const s = try self.toStringV(ug);
+            if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "false")) {
+                // The strings "true"/"false" fall back to the default ("auto").
+            } else if (std.mem.eql(u8, s, "min2") or std.mem.eql(u8, s, "auto") or std.mem.eql(u8, s, "always")) {
+                try self.setProp(ro, "useGrouping", .{ .string = s });
+            } else return self.throwError("RangeError", "invalid value for option useGrouping");
+        }
     }
     _ = try H.str(self, raw, ro, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" });
     return ro;
