@@ -12800,15 +12800,26 @@ fn nfFormatOne(self: *Interpreter, this: Value, v: Value) value.HostError![]cons
 /// `Intl.NumberFormat.prototype.formatRange(start, end)` — en. Disjoint values
 /// give "<start> – <end>"; values that format identically collapse to "~<x>".
 /// (The shared-affix collapsing of partially-equal values is not modeled.)
+/// Coerce a formatRange argument: a BigInt becomes its numeric value; other
+/// values pass through (nfFormatOne handles numbers and numeric strings).
+fn nfNumericArg(v: Value) Value {
+    if (v == .object and v.object.is_bigint) return .{ .number = @floatFromInt(v.object.bigint) };
+    return v;
+}
+
 fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatRange on incompatible receiver");
     if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "formatRange requires two defined arguments");
-    const x = try self.toNumberV(args[0]);
-    const y = try self.toNumberV(args[1]);
+    // formatRange takes Intl mathematical values: a BigInt is accepted (coerced
+    // to its numeric value), and start > end no longer throws.
+    const xv = nfNumericArg(args[0]);
+    const yv = nfNumericArg(args[1]);
+    const x = try self.toNumberV(xv);
+    const y = try self.toNumberV(yv);
     if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRange arguments must not be NaN");
-    const xs = try nfFormatOne(self, this, args[0]);
-    const ys = try nfFormatOne(self, this, args[1]);
+    const xs = try nfFormatOne(self, this, xv);
+    const ys = try nfFormatOne(self, this, yv);
     if (std.mem.eql(u8, xs, ys)) return .{ .string = try std.fmt.allocPrint(self.arena, "~{s}", .{xs}) };
     return .{ .string = try std.fmt.allocPrint(self.arena, "{s} \u{2013} {s}", .{ xs, ys }) };
 }
@@ -12817,8 +12828,10 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatRangeToParts on incompatible receiver");
     if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "formatRangeToParts requires two defined arguments");
-    const x = try self.toNumberV(args[0]);
-    const y = try self.toNumberV(args[1]);
+    const xv = nfNumericArg(args[0]);
+    const yv = nfNumericArg(args[1]);
+    const x = try self.toNumberV(xv);
+    const y = try self.toNumberV(yv);
     if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRangeToParts arguments must not be NaN");
     // Emit the start value's parts (source "startRange"), a shared literal
     // separator, then the end value's parts ("endRange").
@@ -12834,14 +12847,14 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
             }
         }
     }.one;
-    const xp = try nfBuildParts(self, this, &.{args[0]});
+    const xp = try nfBuildParts(self, this, &.{xv});
     try emit(self, arr, xp.items, "startRange");
     const lo = (try self.newObject()).object;
     try self.setProp(lo, "type", .{ .string = "literal" });
     try self.setProp(lo, "value", .{ .string = "\u{2013}" });
     try self.setProp(lo, "source", .{ .string = "shared" });
     try arr.elements.append(self.arena, .{ .object = lo });
-    const yp = try nfBuildParts(self, this, &.{args[1]});
+    const yp = try nfBuildParts(self, this, &.{yv});
     try emit(self, arr, yp.items, "endRange");
     return .{ .object = arr };
 }
