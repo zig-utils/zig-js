@@ -2498,6 +2498,14 @@ pub const Interpreter = struct {
     /// Build a `RegExp` instance with `source`/`flags`/`lastIndex` and the
     /// `global`/`ignoreCase`/`multiline` booleans. Matching (test/exec) is
     /// dispatched in `regexMethod`, backed by zig-regex.
+    pub fn regexpPrototypeFromNewTarget(self: *Interpreter) EvalError!?*value.Object {
+        if (self.new_target == .object) {
+            const p = try self.getProperty(self.new_target, "prototype");
+            if (p == .object and !p.object.is_symbol and !p.object.is_bigint) return p.object;
+        }
+        return null;
+    }
+
     pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
         try self.validateRegExpFlags(flags);
         const o = (try self.newObject()).object;
@@ -2512,7 +2520,9 @@ pub const Interpreter = struct {
         o.regex_flags = try self.arena.dupe(u8, flags);
         try self.setProp(o, "lastIndex", .{ .number = 0 });
         try o.setAttr(self.arena, "lastIndex", .{ .writable = true, .enumerable = false, .configurable = false });
-        if (self.env.get("RegExp")) |c| {
+        if (try self.regexpPrototypeFromNewTarget()) |p| {
+            o.proto = p;
+        } else if (self.env.get("RegExp")) |c| {
             if (c == .object) o.proto = try self.protoObject(c.object);
         }
         // Eagerly compile to validate the pattern — RegExp construction reports a
@@ -2581,9 +2591,11 @@ pub const Interpreter = struct {
             var flags: []const u8 = "";
             const pattern_v = if (args.len > 0) args[0] else Value.undefined;
             const flags_v = if (args.len > 1) args[1] else Value.undefined;
-            if (pattern_v == .object and pattern_v.object.is_regex and flags_v == .undefined) {
-                pattern = pattern_v.object.regex_source;
-                flags = pattern_v.object.regex_flags;
+            const pattern_is_regexp = try self.isRegExp(pattern_v);
+            if (pattern_is_regexp) {
+                if (flags_v != .undefined) return self.throwError("TypeError", "flags supplied with a RegExp pattern");
+                pattern = try self.toStringV(try self.getProperty(pattern_v, "source"));
+                flags = try self.toStringV(try self.getProperty(pattern_v, "flags"));
             } else {
                 if (pattern_v != .undefined) pattern = try self.toStringV(pattern_v);
                 if (flags_v != .undefined) flags = try self.toStringV(flags_v);
@@ -5801,7 +5813,7 @@ pub const Interpreter = struct {
 
     /// IsRegExp(v): true if `v` is an object whose `[Symbol.match]` is truthy
     /// (or, when that property is absent, has a [[RegExpMatcher]] — `is_regex`).
-    fn isRegExp(self: *Interpreter, v: Value) EvalError!bool {
+    pub fn isRegExp(self: *Interpreter, v: Value) EvalError!bool {
         if (v != .object) return false;
         if (self.wellKnownSymbolKey("match")) |mkey| {
             const m = try self.getProperty(v, mkey);

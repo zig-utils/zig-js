@@ -955,6 +955,24 @@ test "JSON stringify preserves proxy array shape" {
     try expectEvalStr("[\"a\",\"b\"]", "JSON.stringify(new Proxy(['a', 'b'], {}))");
 }
 
+test "RegExp constructor honors IsRegExp and flags rules" {
+    try std.testing.expect((try evalIn(
+        \\var re = /foo/my;
+        \\var same = RegExp(re) === re;
+        \\re.constructor = function() {};
+        \\var copied = RegExp(re);
+        \\var obj = { [Symbol.match]: true, source: "bar", flags: "i" };
+        \\var fromLike = RegExp(obj).toString() === "/bar/i";
+        \\obj.constructor = RegExp;
+        \\var returnedLike = RegExp(obj) === obj;
+        \\var compileOk = /a/.compile(/b/my).flags === "my";
+        \\var compileThrow = false;
+        \\try { /a/.compile(/b/my, "g"); } catch (e) { compileThrow = e.name === "TypeError"; }
+        \\same && copied !== re && copied.toString() === "/foo/my" &&
+        \\fromLike && returnedLike && compileOk && compileThrow
+    )).boolean);
+}
+
 test "object literal __proto__ sets ordinary object prototype" {
     try std.testing.expect((try evalIn(
         \\var p = { marker: 1 };

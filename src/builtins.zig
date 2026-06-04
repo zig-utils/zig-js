@@ -896,21 +896,46 @@ pub fn setFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value 
     return ip.makeSet(arg(args, 0));
 }
 
-/// `RegExp(pattern, flags)` / `new RegExp(...)`. Accepts a string source or an
-/// existing RegExp (copying its source).
+/// `RegExp(pattern, flags)` / `new RegExp(...)`.
 pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
     const a0 = arg(args, 0);
-    var pattern: []const u8 = "";
-    var src_flags: []const u8 = "";
-    if (a0 == .object and a0.object.is_regex) {
-        pattern = a0.object.regex_source;
-        src_flags = a0.object.regex_flags; // `new RegExp(re)` inherits re's flags
-    } else if (a0 != .undefined) {
-        pattern = try a0.toString(self.arena);
+    const flags_arg = arg(args, 1);
+    const pattern_is_regexp = try self.isRegExp(a0);
+    const regexp_ctor = self.env.get("RegExp") orelse .undefined;
+    const new_target = if (self.new_target == .undefined) regexp_ctor else self.new_target;
+
+    if (self.new_target == .undefined and pattern_is_regexp and flags_arg == .undefined) {
+        const ctor = try self.getProperty(a0, "constructor");
+        if (value.strictEquals(ctor, new_target)) return a0;
     }
-    const flags = if (arg(args, 1) != .undefined) try arg(args, 1).toString(self.arena) else src_flags;
+
+    var internal_pattern: ?[]const u8 = null;
+    var internal_flags: ?[]const u8 = null;
+    if (a0 == .object and a0.object.is_regex) {
+        internal_pattern = a0.object.regex_source;
+        internal_flags = a0.object.regex_flags;
+    }
+
+    if (self.new_target != .undefined) _ = try self.regexpPrototypeFromNewTarget();
+
+    const pattern: []const u8 = if (internal_pattern) |p|
+        p
+    else if (pattern_is_regexp)
+        try self.toStringV(try self.getProperty(a0, "source"))
+    else if (a0 == .undefined)
+        ""
+    else
+        try self.toStringV(a0);
+    const flags: []const u8 = if (flags_arg != .undefined)
+        try self.toStringV(flags_arg)
+    else if (internal_flags) |f|
+        f
+    else if (pattern_is_regexp)
+        try self.toStringV(try self.getProperty(a0, "flags"))
+    else
+        "";
     return self.makeRegex(pattern, flags);
 }
 
