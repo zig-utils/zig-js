@@ -10875,6 +10875,12 @@ fn canonUKeywordValue(key: []const u8, val: []const u8) []const u8 {
     return val;
 }
 
+/// Canonicalize a `-t-` transform tfield value (the stable CLDR type aliases).
+fn canonTFieldValue(key: []const u8, val: []const u8) []const u8 {
+    if (std.mem.eql(u8, key, "m0") and std.mem.eql(u8, val, "names")) return "prprname";
+    return val;
+}
+
 fn canonExtBody(a: std.mem.Allocator, sing: u8, subs: [][]const u8) ?[]const u8 {
     var b: std.ArrayListUnmanaged(u8) = .empty;
     if (sing == 'u') {
@@ -10921,6 +10927,71 @@ fn canonExtBody(a: std.mem.Allocator, sing: u8, subs: [][]const u8) ?[]const u8 
             if (kw.val.len > 0) {
                 b.append(a, '-') catch return null;
                 b.appendSlice(a, kw.val) catch return null;
+            }
+        }
+    } else if (sing == 't') {
+        // -t-: an optional tlang (language[-script][-region][-variant…], variants
+        // sorted) followed by tfields (key + value(s)) sorted by key. A tfield
+        // "true" value is kept (unlike -u-).
+        const isA = std.ascii.isAlphabetic;
+        const isD = std.ascii.isDigit;
+        const T = struct {
+            fn isKey(s: []const u8) bool {
+                return s.len == 2 and isA(s[0]) and isD(s[1]);
+            }
+        };
+        var i: usize = 0;
+        if (i < subs.len and !T.isKey(subs[i])) {
+            var langv = subs[i];
+            i += 1;
+            if (cldr_locale.languageAlias(langv)) |r| langv = parseTriple(r).l;
+            b.appendSlice(a, langv) catch return null;
+            if (i < subs.len and !T.isKey(subs[i]) and subs[i].len == 4 and isA(subs[i][0])) {
+                b.append(a, '-') catch return null;
+                b.appendSlice(a, subs[i]) catch return null;
+                i += 1;
+            }
+            if (i < subs.len and !T.isKey(subs[i]) and ((subs[i].len == 2 and isA(subs[i][0])) or (subs[i].len == 3 and isD(subs[i][0])))) {
+                b.append(a, '-') catch return null;
+                b.appendSlice(a, subs[i]) catch return null;
+                i += 1;
+            }
+            var tvars: std.ArrayListUnmanaged([]const u8) = .empty;
+            while (i < subs.len and !T.isKey(subs[i])) : (i += 1) tvars.append(a, subs[i]) catch return null;
+            std.sort.pdq([]const u8, tvars.items, {}, struct {
+                fn lt(_: void, x: []const u8, y: []const u8) bool {
+                    return std.mem.lessThan(u8, x, y);
+                }
+            }.lt);
+            for (tvars.items) |v| {
+                b.append(a, '-') catch return null;
+                b.appendSlice(a, v) catch return null;
+            }
+        }
+        const TF = struct { key: []const u8, val: []const u8 };
+        var tfs: std.ArrayListUnmanaged(TF) = .empty;
+        while (i < subs.len) {
+            const key = subs[i];
+            i += 1;
+            var vbuf: std.ArrayListUnmanaged(u8) = .empty;
+            while (i < subs.len and !T.isKey(subs[i])) : (i += 1) {
+                if (vbuf.items.len > 0) vbuf.append(a, '-') catch return null;
+                vbuf.appendSlice(a, subs[i]) catch return null;
+            }
+            const val = canonTFieldValue(key, vbuf.toOwnedSlice(a) catch return null);
+            tfs.append(a, .{ .key = key, .val = val }) catch return null;
+        }
+        std.sort.pdq(TF, tfs.items, {}, struct {
+            fn lt(_: void, x: TF, y: TF) bool {
+                return std.mem.lessThan(u8, x.key, y.key);
+            }
+        }.lt);
+        for (tfs.items) |tf| {
+            if (b.items.len > 0) b.append(a, '-') catch return null;
+            b.appendSlice(a, tf.key) catch return null;
+            if (tf.val.len > 0) {
+                b.append(a, '-') catch return null;
+                b.appendSlice(a, tf.val) catch return null;
             }
         }
     } else {
