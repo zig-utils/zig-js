@@ -13189,10 +13189,16 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
         }
         if (combine and shown) break; // sub-seconds folded into this unit; done
     }
-    // Join the items with ", " (en ListFormat type:"unit").
+    // Join the items as a type:"unit" list (locale + style aware; digital uses
+    // the short list style).
+    const lstyle = if (std.mem.eql(u8, base, "digital")) "short" else base;
+    const uc = unitConnectors(localeLanguage(locale), lstyle);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (items.items, 0..) |it, idx| {
-        if (idx != 0) try buf.appendSlice(self.arena, ", ");
+        if (idx != 0) {
+            const sep = if (idx == items.items.len - 1) (if (items.items.len == 2) uc.pair else uc.fin) else uc.mid;
+            try buf.appendSlice(self.arena, sep);
+        }
         try buf.appendSlice(self.arena, it);
     }
     return .{ .string = try buf.toOwnedSlice(self.arena) };
@@ -13270,13 +13276,16 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
         }
         if (combine and shown) break;
     }
-    // Flatten: ", " literal (en ListFormat type:unit) between element groups.
+    // Flatten: a type:"unit" list literal between element groups (locale/style aware).
+    const lstyle = if (std.mem.eql(u8, base, "digital")) "short" else base;
+    const uc = unitConnectors(localeLanguage(locale), lstyle);
     const arr = (try self.newArray()).object;
     for (groups.items, 0..) |grp, gi| {
         if (gi != 0) {
+            const sep = if (gi == groups.items.len - 1) (if (groups.items.len == 2) uc.pair else uc.fin) else uc.mid;
             const lo = (try self.newObject()).object;
             try self.setProp(lo, "type", .{ .string = "literal" });
-            try self.setProp(lo, "value", .{ .string = ", " });
+            try self.setProp(lo, "value", .{ .string = sep });
             try arr.elements.append(self.arena, .{ .object = lo });
         }
         for (grp.items) |p| {
@@ -13519,6 +13528,16 @@ fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 /// "literal" (the connector text between items).
 const LfPart = struct { typ: []const u8, value: []const u8 };
 
+/// type:"unit" list connectors (pair / middle / final) by language + style —
+/// shared by Intl.ListFormat and DurationFormat's unit joining: narrow joins
+/// with spaces; es joins with "y" (long ends with "y", short with ", ").
+const UnitConn = struct { pair: []const u8, mid: []const u8, fin: []const u8 };
+fn unitConnectors(lang: []const u8, style: []const u8) UnitConn {
+    if (std.mem.eql(u8, style, "narrow")) return .{ .pair = " ", .mid = " ", .fin = " " };
+    if (std.mem.eql(u8, lang, "es")) return .{ .pair = " y ", .mid = ", ", .fin = if (std.mem.eql(u8, style, "short")) ", " else " y " };
+    return .{ .pair = ", ", .mid = ", ", .fin = ", " };
+}
+
 /// Build the ListFormat parts for `args[0]` (en). The connectors depend on the
 /// instance's `type` (conjunction "and" / disjunction "or" / unit none).
 fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(LfPart) {
@@ -13560,17 +13579,10 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var pair: []const u8 = " and ";
     var final: []const u8 = ", and ";
     if (is_unit) {
-        if (narrow) {
-            middle = " ";
-            pair = " ";
-            final = " ";
-        } else if (es) { // es unit: pair joins with "y"; long also ends with "y"
-            pair = " y ";
-            final = if (short) ", " else " y ";
-        } else {
-            pair = ", ";
-            final = ", ";
-        }
+        const uc = unitConnectors(lang, style);
+        pair = uc.pair;
+        middle = uc.mid;
+        final = uc.fin;
     } else if (is_disj) {
         // es disjunction "o" (no comma before the final); en "or".
         pair = if (es) " o " else " or ";
