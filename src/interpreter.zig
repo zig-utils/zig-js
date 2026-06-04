@@ -11458,9 +11458,9 @@ const dtf_available_calendars = [_][]const u8{
     "iso8601", "japanese", "persian", "roc",
 };
 
-/// CanonicalizeUValue("ca", …) plus the AvailableCalendars fallback: apply the
-/// well-known aliases, resolve the deprecated "islamic"/"islamic-rgsa" types,
-/// and drop anything we don't model to the default "gregory".
+/// CanonicalizeUValue("ca", …): apply the well-known aliases and resolve the
+/// deprecated "islamic"/"islamic-rgsa" types. Unknown values are returned as-is
+/// (availability is decided separately by `dtfCalAvail`).
 fn dtfCanonCalendar(cal: []const u8) []const u8 {
     const aliases = .{
         .{ "islamicc", "islamic-civil" },
@@ -11472,8 +11472,13 @@ fn dtfCanonCalendar(cal: []const u8) []const u8 {
         c = a[1];
     };
     if (std.mem.eql(u8, c, "islamic") or std.mem.eql(u8, c, "islamic-rgsa")) c = "islamic-civil";
-    for (dtf_available_calendars) |ac| if (std.mem.eql(u8, c, ac)) return c;
-    return "gregory";
+    return c;
+}
+
+/// Whether a (canonicalized) calendar type is one we model / "available".
+fn dtfCalAvail(c: []const u8) bool {
+    for (dtf_available_calendars) |ac| if (std.mem.eql(u8, c, ac)) return true;
+    return false;
 }
 
 /// The processed DateTimeFormat options: the canonical string for each set
@@ -11595,16 +11600,85 @@ fn dtfResolveHourCycle(self: *Interpreter, locale: []const u8, opt_hc: []const u
     return hcd.def;
 }
 
+/// ResolveLocale for DateTimeFormat's relevant extension keys (ca, hc, nu): an
+/// option overrides a `-u-` keyword, but the keyword survives in the resolved
+/// locale only when it came from a supported extension and an option did not
+/// replace it with a different supported value. Returns the rebuilt locale plus
+/// the resolved calendar and numbering system.
+fn dtfResolveLocaleExt(
+    self: *Interpreter,
+    tag: []const u8,
+    opt_ca: []const u8,
+    raw_hc: []const u8,
+    raw_h12: ?bool,
+    opt_nu: []const u8,
+) EvalError!struct { loc: []const u8, calendar: []const u8, numbering_system: []const u8 } {
+    // ca: calendar
+    const ext_ca_raw = localeUValue(tag, "ca");
+    const ext_ca: ?[]const u8 = if (ext_ca_raw) |e| (if (dtfCalAvail(dtfCanonCalendar(e))) dtfCanonCalendar(e) else null) else null;
+    const ca_opt: ?[]const u8 = if (opt_ca.len > 0 and dtfCalAvail(opt_ca)) opt_ca else null;
+    const ca_val: []const u8 = ca_opt orelse (ext_ca orelse "gregory");
+    const keep_ca = ext_ca != null and (ca_opt == null or std.mem.eql(u8, ca_opt.?, ext_ca.?));
+
+    // hc: hour cycle. The hourCycle option only participates when hour12 is
+    // absent (CreateDateTimeFormat step 3 nulls it otherwise).
+    const ext_hc_raw = localeUValue(tag, "hc");
+    const hcValid = struct {
+        fn f(v: []const u8) bool {
+            return std.mem.eql(u8, v, "h11") or std.mem.eql(u8, v, "h12") or std.mem.eql(u8, v, "h23") or std.mem.eql(u8, v, "h24");
+        }
+    }.f;
+    const ext_hc: ?[]const u8 = if (ext_hc_raw) |e| (if (hcValid(e)) e else null) else null;
+    const hc_opt: ?[]const u8 = if (raw_hc.len > 0 and hcValid(raw_hc)) raw_hc else null;
+    // A present hour12 option (regardless of value) drops the -u-hc keyword, as
+    // does an hourCycle option that disagrees with the extension.
+    const keep_hc = ext_hc != null and raw_h12 == null and (hc_opt == null or std.mem.eql(u8, hc_opt.?, ext_hc.?));
+
+    // nu: numbering system.
+    const ext_nu = localeUValue(tag, "nu");
+    const ext_nu_ok = if (ext_nu) |e| numbering_systems.digits(e) != null else false;
+    const opt_nu_ok = opt_nu.len > 0 and numbering_systems.digits(opt_nu) != null;
+    const nu_val: []const u8 = if (opt_nu_ok) opt_nu else if (ext_nu_ok) ext_nu.? else "latn";
+    const keep_nu = ext_nu_ok and std.mem.eql(u8, ext_nu.?, nu_val);
+
+    const base = if (std.mem.indexOf(u8, tag, "-u-")) |u| tag[0..u] else tag;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.appendSlice(self.arena, base);
+    var any_kw = false;
+    // Canonical -u- key order is alphabetical: ca, hc, nu.
+    if (keep_ca) {
+        try buf.appendSlice(self.arena, if (any_kw) "-ca-" else "-u-ca-");
+        try buf.appendSlice(self.arena, ext_ca.?);
+        any_kw = true;
+    }
+    if (keep_hc) {
+        try buf.appendSlice(self.arena, if (any_kw) "-hc-" else "-u-hc-");
+        try buf.appendSlice(self.arena, ext_hc.?);
+        any_kw = true;
+    }
+    if (keep_nu) {
+        try buf.appendSlice(self.arena, if (any_kw) "-nu-" else "-u-nu-");
+        try buf.appendSlice(self.arena, nu_val);
+        any_kw = true;
+    }
+    return .{ .loc = try buf.toOwnedSlice(self.arena), .calendar = ca_val, .numbering_system = nu_val };
+}
+
 /// Build the normalized options object that the instance stores under
 /// `\x00opts` (read by both `format` and `resolvedOptions`).
 fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalError!void {
     var r = r_in;
+    const tag = if (o.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
+    // Resolve the ca/hc/nu locale extensions (rebuilds the resolved locale and
+    // fixes the effective calendar / numbering system).
+    const ext = try dtfResolveLocaleExt(self, tag, r.calendar, r.hour_cycle, r.hour12, r.numbering_system);
+    r.calendar = ext.calendar;
+    r.numbering_system = ext.numbering_system;
     // Resolve the hour cycle whenever the pattern carries an hour (an explicit
     // hour component or a timeStyle); otherwise [[HourCycle]] is undefined and
     // resolvedOptions omits hourCycle/hour12.
     if (r.hour.len > 0 or r.time_style.len > 0) {
-        const loc = if (o.getOwn("\x00locale")) |lv| (if (lv == .string) lv.string else "en") else "en";
-        const hc = dtfResolveHourCycle(self, loc, r.hour_cycle, r.hour12);
+        const hc = dtfResolveHourCycle(self, tag, r.hour_cycle, r.hour12);
         r.hour_cycle = hc;
         r.hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
     } else {
@@ -11612,6 +11686,7 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalE
         r.hour12 = null;
     }
     const ro = (try self.newObject()).object;
+    try self.setProp(ro, "\x00rloc", .{ .string = ext.loc });
     const S = struct {
         fn put(s: *Interpreter, obj: *value.Object, k: []const u8, v: []const u8) EvalError!void {
             if (v.len > 0) try s.setProp(obj, k, .{ .string = v });
@@ -14392,10 +14467,13 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                         return null;
                     }
                 }.s;
+                // The resolved locale (with surviving ca/hc/nu extensions) was
+                // computed at construction.
+                if (get(self, ro, "\x00rloc")) |rl| try self.setProp(o, "locale", rl);
                 const cal = get(self, ro, "calendar");
                 try self.setProp(o, "calendar", if (cal) |c| .{ .string = c.string } else .{ .string = "gregory" });
                 const ns = get(self, ro, "numberingSystem");
-                try intlResolveNumbering(self, o, loc.string, if (ns) |c| c.string else null);
+                try self.setProp(o, "numberingSystem", if (ns) |c| .{ .string = c.string } else .{ .string = "latn" });
                 const tz = get(self, ro, "timeZone");
                 try self.setProp(o, "timeZone", if (tz) |c| .{ .string = c.string } else .{ .string = "UTC" });
                 // Component / style fields are reflected only when set, in order.
