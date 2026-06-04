@@ -11780,9 +11780,13 @@ const duration_units = [_][]const u8{ "years", "months", "weeks", "days", "hours
 fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-            _ = this;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const can_call = comptime (std.mem.eql(u8, service, "NumberFormat") or std.mem.eql(u8, service, "DateTimeFormat") or std.mem.eql(u8, service, "Collator"));
+            // Legacy chaining: when called as a function on a receiver that is
+            // already an instance of the service, the new instance is hung off
+            // the receiver via %Intl%.[[FallbackSymbol]] and the receiver is
+            // returned (ChainNumberFormat / ChainDateTimeFormat / ChainCollator).
+            var chain_this: ?*value.Object = null;
             const o = blk: {
                 if (self.new_target == .object) {
                     const oo = (try self.newObject()).object;
@@ -11790,13 +11794,22 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     break :blk oo;
                 }
                 if (!can_call) return self.throwError("TypeError", "Constructor Intl." ++ service ++ " requires 'new'");
-                // Called as a function: `this` is ignored, a fresh instance is made
-                // with the service's own prototype (found via the Intl namespace).
+                // Called as a function: a fresh instance with the service's own
+                // prototype (found via the Intl namespace).
                 const oo = (try self.newObject()).object;
                 if (self.global_object) |g| if (g.getOwn("Intl")) |iv| if (iv == .object) {
                     if (iv.object.getOwn(service)) |cv| if (cv == .object) {
                         if (cv.object.getOwn("prototype")) |pv| if (pv == .object) {
                             oo.proto = pv.object;
+                            // OrdinaryHasInstance(service, this): is the service
+                            // prototype in `this`'s prototype chain?
+                            if (this == .object) {
+                                var p: ?*value.Object = this.object.proto;
+                                while (p) |pp| : (p = pp.proto) if (pp == pv.object) {
+                                    chain_this = this.object;
+                                    break;
+                                };
+                            }
                         };
                     };
                 };
@@ -11949,6 +11962,19 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+            }
+            if (chain_this) |ct| {
+                // DefinePropertyOrThrow(this, [[FallbackSymbol]], { value: o,
+                // writable/enumerable/configurable: false }); return this.
+                if (self.env.get("\x00IntlFallbackSym")) |fs| if (fs == .object) {
+                    if (ct.getOwn(fs.object.sym_key) != null) return self.throwError("TypeError", "Intl." ++ service ++ " already constructed on this object");
+                    // Register the symbol so keyToValue recovers it (with its
+                    // description) for getOwnPropertySymbols.
+                    try self.symbols.put(self.arena, fs.object.sym_key, fs.object);
+                    try ct.setOwn(self.arena, self.root_shape, fs.object.sym_key, .{ .object = o });
+                    try ct.setAttr(self.arena, fs.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
+                };
+                return .{ .object = ct };
             }
             return .{ .object = o };
         }
@@ -14364,6 +14390,14 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     }
     try setNative(a, rs, ns, "getCanonicalLocales", 1, intlGetCanonicalLocalesFn);
     try setNative(a, rs, ns, "supportedValuesOf", 1, intlSupportedValuesOfFn);
+    // %Intl%.[[FallbackSymbol]] — for the legacy "called as a function" chaining
+    // of NumberFormat/DateTimeFormat/Collator onto an existing receiver. It gets
+    // %Symbol.prototype% so its `description` accessor works.
+    const sym_proto: ?*value.Object = blk: {
+        if (env.get("Symbol")) |sv| if (sv == .object) if (sv.object.getOwn("prototype")) |p| if (p == .object) break :blk p.object;
+        break :blk null;
+    };
+    try env.put("\x00IntlFallbackSym", try makeSymbolObj(a, rs, "IntlLegacyConstructedSymbol", sym_proto));
 
     // Helper to register one Intl service constructor with a prototype.
     const Svc = struct {

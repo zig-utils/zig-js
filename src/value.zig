@@ -600,6 +600,15 @@ pub fn isSymbolKey(k: []const u8) bool {
     return k.len > 0 and k[0] == 0;
 }
 
+/// A key for an actual JS Symbol ("\x00s" + digits), as minted by makeSymbolObj
+/// — distinct from the engine's hidden internal slots ("\x00intl", "\x00opts",
+/// …), which are also NUL-prefixed but must not surface as symbols.
+pub fn isRealSymbolKey(k: []const u8) bool {
+    if (k.len < 3 or k[0] != 0 or k[1] != 's') return false;
+    for (k[2..]) |c| if (c < '0' or c > '9') return false;
+    return true;
+}
+
 /// If `k` is a canonical array-index string — a non-negative integer below
 /// 2**32-1 with no leading zeros or sign — return its numeric value, for the
 /// spec's integer-keys-ascending property ordering. Otherwise null.

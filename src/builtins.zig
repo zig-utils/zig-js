@@ -1401,7 +1401,7 @@ pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, this: Value, args: []const V
         // [[OwnPropertyKeys]] (proxy-aware: the ownKeys trap + its invariants run
         // here and may throw), then keep only the symbol keys.
         for (try self.objectOwnKeysList(o)) |k| {
-            if (value.isSymbolKey(k) and !value.isPrivateKey(k))
+            if (value.isRealSymbolKey(k))
                 try result.object.elements.append(self.arena, self.keyToValue(k));
         }
     }
