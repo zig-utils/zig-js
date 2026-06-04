@@ -11856,7 +11856,14 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
         }
     };
 
-    _ = try self.getProperty(raw, "localeMatcher"); // read & discard (validated as a string elsewhere)
+    // localeMatcher: validated against the allowed set, but not retained.
+    {
+        const lm = try self.getProperty(raw, "localeMatcher");
+        if (lm != .undefined) {
+            const s = try self.toStringV(lm);
+            if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
+        }
+    }
     const nsv = try self.getProperty(raw, "numberingSystem");
     if (nsv != .undefined) {
         const ns = try std.ascii.allocLowerString(self.arena, try self.toStringV(nsv));
@@ -11910,6 +11917,24 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
             ok = true;
         };
         if (!ok) return self.throwError("RangeError", "invalid roundingIncrement");
+        // A roundingIncrement other than 1 requires roundingType "fractionDigits":
+        // significant digits or a non-auto roundingPriority is a TypeError, and the
+        // resolved min/max fraction digits must be equal (RangeError otherwise).
+        if (n != 1) {
+            const has_sd = (try self.getProperty(raw, "minimumSignificantDigits")) != .undefined or
+                (try self.getProperty(raw, "maximumSignificantDigits")) != .undefined;
+            if (has_sd) return self.throwError("TypeError", "roundingIncrement is incompatible with significant-digits options");
+            const rp = try self.getProperty(raw, "roundingPriority");
+            if (rp != .undefined) {
+                const rps = try self.toStringV(rp);
+                if (std.mem.eql(u8, rps, "morePrecision") or std.mem.eql(u8, rps, "lessPrecision"))
+                    return self.throwError("TypeError", "roundingIncrement is incompatible with roundingPriority");
+            }
+            const mnf = try self.getProperty(raw, "minimumFractionDigits");
+            const mxf = try self.getProperty(raw, "maximumFractionDigits");
+            if (mnf != .undefined and mxf != .undefined and try self.toNumberV(mnf) != try self.toNumberV(mxf))
+                return self.throwError("RangeError", "roundingIncrement requires equal min/max fraction digits");
+        }
         try self.setProp(ro, "roundingIncrement", .{ .number = n });
     }
     _ = try H.str(self, raw, ro, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
@@ -11986,6 +12011,24 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
             ok = true;
         };
         if (!ok) return self.throwError("RangeError", "invalid roundingIncrement");
+        // A roundingIncrement other than 1 requires roundingType "fractionDigits":
+        // significant digits or a non-auto roundingPriority is a TypeError, and the
+        // resolved min/max fraction digits must be equal (RangeError otherwise).
+        if (n != 1) {
+            const has_sd = (try self.getProperty(raw, "minimumSignificantDigits")) != .undefined or
+                (try self.getProperty(raw, "maximumSignificantDigits")) != .undefined;
+            if (has_sd) return self.throwError("TypeError", "roundingIncrement is incompatible with significant-digits options");
+            const rp = try self.getProperty(raw, "roundingPriority");
+            if (rp != .undefined) {
+                const rps = try self.toStringV(rp);
+                if (std.mem.eql(u8, rps, "morePrecision") or std.mem.eql(u8, rps, "lessPrecision"))
+                    return self.throwError("TypeError", "roundingIncrement is incompatible with roundingPriority");
+            }
+            const mnf = try self.getProperty(raw, "minimumFractionDigits");
+            const mxf = try self.getProperty(raw, "maximumFractionDigits");
+            if (mnf != .undefined and mxf != .undefined and try self.toNumberV(mnf) != try self.toNumberV(mxf))
+                return self.throwError("RangeError", "roundingIncrement requires equal min/max fraction digits");
+        }
         try self.setProp(ro, "roundingIncrement", .{ .number = n });
     }
     _ = try H.str(self, raw, ro, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" });
