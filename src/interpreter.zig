@@ -17367,25 +17367,12 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     return .{ .string = try escapeRegexSource(self.arena, o.regex_source) };
 }
 
-fn canonicalRegexFlags(a: std.mem.Allocator, fl: []const u8) ![]const u8 {
-    var buf: [8]u8 = undefined;
-    var n: usize = 0;
-    for ("dgimsuvy") |c| {
-        if (std.mem.indexOfScalar(u8, fl, c) != null) {
-            buf[n] = c;
-            n += 1;
-        }
-    }
-    return a.dupe(u8, buf[0..n]);
-}
-
 fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-object");
     const o = this.object;
     if (self.isRegExpProto(o)) return .{ .string = "" };
-    if (o.is_regex) return .{ .string = try canonicalRegexFlags(self.arena, o.regex_flags) };
 
     var buf: [8]u8 = undefined;
     var n: usize = 0;
