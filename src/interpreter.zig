@@ -11081,7 +11081,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     else if (std.mem.eql(u8, key, "timeZone"))
         &.{"UTC"}
     else if (std.mem.eql(u8, key, "collation"))
-        &.{"emoji"}
+        &.{ "emoji", "eor" }
     else if (std.mem.eql(u8, key, "unit"))
         &sanctioned_units
     else
@@ -14651,7 +14651,22 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     break :blk std.mem.eql(u8, lang, "th");
                 };
                 try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse .{ .boolean = ip_default });
-                try self.setProp(o, "collation", .{ .string = "default" });
+                // collation: the `collation` option or a `-u-co-` keyword, when it
+                // names a collation we support everywhere (root tailorings);
+                // locale-specific collations need CLDR data and fall back to
+                // "default".
+                const coAvail = struct {
+                    fn ok(s: []const u8) bool {
+                        return std.mem.eql(u8, s, "emoji") or std.mem.eql(u8, s, "eor");
+                    }
+                }.ok;
+                var collation: []const u8 = "default";
+                if (cget(rv, "collation")) |c| {
+                    if (c == .string and coAvail(c.string)) collation = c.string;
+                } else if (localeUValue(loc.string, "co")) |c| {
+                    if (coAvail(c)) collation = c;
+                }
+                try self.setProp(o, "collation", .{ .string = collation });
                 try self.setProp(o, "numeric", .{ .boolean = res.numeric });
                 try self.setProp(o, "caseFirst", .{ .string = res.case_first });
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
