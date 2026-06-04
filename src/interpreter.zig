@@ -11643,6 +11643,7 @@ fn isWellFormedUnitIdentifier(u: []const u8) bool {
 /// exactly once and bad values throw at construction).
 fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     const ro = (try self.newObject()).object;
+    ro.proto = null; // an internal record — not affected by Object.prototype
     // CoerceOptionsToObject: undefined → none; null → TypeError; primitive → boxed.
     if (raw_in == .undefined) return ro;
     const raw: Value = .{ .object = try self.toObject(raw_in) };
