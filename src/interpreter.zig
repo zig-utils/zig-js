@@ -12678,6 +12678,22 @@ fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
 /// the only requirement is that both use the same value).
 const dtf_range_sep = " \u{2013} ";
 
+/// The "kind" of a formatRange argument: a Temporal kind, or null for a legacy
+/// time value (number/Date). The two arguments of formatRange must agree.
+fn dtfArgKind(v: Value) ?value.TemporalData.Kind {
+    if (v == .object and v.object.temporal != null) return v.object.temporal.?.kind;
+    return null;
+}
+
+/// FormatDateTimeRange step: the two arguments must be the same kind (both legacy
+/// time values, or the same Temporal type) — otherwise a TypeError.
+fn dtfRangeCheckKinds(self: *Interpreter, a: Value, b: Value) value.HostError!void {
+    const ka = dtfArgKind(a);
+    const kb = dtfArgKind(b);
+    const same = (ka == null and kb == null) or (ka != null and kb != null and ka.? == kb.?);
+    if (!same) return self.throwError("TypeError", "Intl.DateTimeFormat range: start and end must be the same type");
+}
+
 fn dtfFormatOne(self: *Interpreter, this: Value, v: Value) value.HostError![]const u8 {
     const parts = try dtfBuildParts(self, this, &.{v});
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -12692,6 +12708,7 @@ fn intlDateTimeFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatRange on incompatible receiver");
     if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "formatRange requires two defined arguments");
+    try dtfRangeCheckKinds(self, args[0], args[1]);
     const xs = try dtfFormatOne(self, this, args[0]); // dtfBuildParts TimeClips (RangeError on bad value)
     const ys = try dtfFormatOne(self, this, args[1]);
     if (std.mem.eql(u8, xs, ys)) return .{ .string = xs };
@@ -12702,6 +12719,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatRangeToParts on incompatible receiver");
     if (args.len < 2 or args[0] == .undefined or args[1] == .undefined) return self.throwError("TypeError", "formatRangeToParts requires two defined arguments");
+    try dtfRangeCheckKinds(self, args[0], args[1]);
     const xp = try dtfBuildParts(self, this, &.{args[0]});
     const yp = try dtfBuildParts(self, this, &.{args[1]});
     const arr = (try self.newArray()).object;
