@@ -204,7 +204,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .load_var_or_undef => {
                 const name = chunk.names.items[inst.a];
-                try stack.append(vm.arena, vm.env.get(name) orelse .undefined);
+                try stack.append(vm.arena, vm.env.get(name) orelse vm.globalProp(name) orelse .undefined);
             },
             .store_var => {
                 const name = chunk.names.items[inst.a];

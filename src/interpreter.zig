@@ -367,6 +367,9 @@ pub const Interpreter = struct {
     /// `new.target`: the constructor of the in-flight `new` call (undefined in a
     /// plain call). Inherited lexically by arrow functions.
     new_target: Value = .undefined,
+    /// Set only while invoking a syntactic `eval(...)` call. The eval native
+    /// uses this to distinguish direct eval from member/indirect eval.
+    direct_eval_call: bool = false,
     /// Active `with` scope objects (innermost last); bare identifiers consult
     /// these before the lexical environment.
     with_stack: std.ArrayListUnmanaged(*value.Object) = .empty,
@@ -451,6 +454,22 @@ pub const Interpreter = struct {
             if (ctor == .object) o.proto = try self.protoObject(ctor.object);
         }
         return o;
+    }
+
+    /// ToObject for property references whose base is a primitive. Symbol and
+    /// BigInt are represented as tagged objects in this engine, but still need
+    /// a fresh wrapper whose prototype comes from the executing realm.
+    fn boxPrimitiveBase(self: *Interpreter, v: Value) EvalError!*value.Object {
+        if (v == .object and (v.object.is_symbol or v.object.is_bigint)) {
+            const o = try self.arena.create(value.Object);
+            o.* = .{ .prim = v };
+            const ctor_name: []const u8 = if (v.object.is_symbol) "Symbol" else "BigInt";
+            if (self.env.get(ctor_name)) |ctor| {
+                if (ctor == .object) o.proto = try self.protoObject(ctor.object);
+            }
+            return o;
+        }
+        return self.toObject(v);
     }
 
     /// Resolve an identifier through the lexical environment chain, consulting
@@ -649,6 +668,17 @@ pub const Interpreter = struct {
                         const ok = try self.deleteOwn(o, target.identifier);
                         if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
                         break :blk .{ .boolean = ok };
+                    }
+                    if (self.env.get(target.identifier) != null) {
+                        if (self.strict) return self.throwError("TypeError", "Cannot delete binding");
+                        break :blk .{ .boolean = false };
+                    }
+                    if (self.global_object) |g| {
+                        if (objectHasOwn(g, target.identifier)) {
+                            const ok = try self.deleteOwn(g, target.identifier);
+                            if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
+                            break :blk .{ .boolean = ok };
+                        }
                     }
                 }
                 break :blk .{ .boolean = true };
@@ -1676,6 +1706,9 @@ pub const Interpreter = struct {
         const callee = try self.eval(callee_node);
         if (optional and (callee == .null or callee == .undefined)) return error.OptShortCircuit;
         const args = try self.evalArgs(arg_nodes);
+        const saved_direct_eval = self.direct_eval_call;
+        self.direct_eval_call = callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
+        defer self.direct_eval_call = saved_direct_eval;
         return self.callValue(callee, args);
     }
 
@@ -2447,6 +2480,11 @@ pub const Interpreter = struct {
             switch (p.accessor) {
                 .none => {
                     const pv = try self.eval(p.value);
+                    if (p.key_expr == null and std.mem.eql(u8, key, "__proto__")) {
+                        if (pv == .object) v.object.proto = pv.object;
+                        if (pv == .null) v.object.proto = null;
+                        continue;
+                    }
                     try self.maybeNameAnon(pv, p.value, key); // `{ x: function(){} }` ⇒ name "x"
                     try self.setProp(v.object, key, pv);
                 },
@@ -2562,11 +2600,17 @@ pub const Interpreter = struct {
             return Value.null;
         }
         if (eq(name, "toString")) {
-            const src = o.regex_source;
-            const flags = o.regex_flags;
-            return Value{ .string = try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }) };
+            return try self.regexpToString(.{ .object = o });
         }
         return null;
+    }
+
+    fn regexpToString(self: *Interpreter, this: Value) EvalError!Value {
+        if (this != .object) return self.throwError("TypeError", "RegExp.prototype.toString called on a non-object");
+        if (self.isRegExpProto(this.object)) return .{ .string = "/(?:)/" };
+        const src = try self.toStringV(try self.getProperty(this, "source"));
+        const flags = try self.toStringV(try self.getProperty(this, "flags"));
+        return .{ .string = try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }) };
     }
 
     const ms_per_day: i64 = 86400000;
@@ -3471,6 +3515,7 @@ pub const Interpreter = struct {
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         switch (recv) {
             .object => |o| {
+                if (o.is_symbol or o.is_bigint) return self.getPrimitiveMember(recv, key);
                 if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, recv);
                 if (moduleNsOf(o)) |ns| return moduleNsGet(self, ns, key);
                 // Legacy `caller`: a *non-strict ordinary* function (not strict,
@@ -3587,35 +3632,40 @@ pub const Interpreter = struct {
                 }
                 return .undefined;
             },
-            .string => |s| {
-                if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(s.len) };
-                if (arrayIndex(key)) |i| {
-                    if (i < s.len) return .{ .string = try self.arena.dupe(u8, s[i .. i + 1]) };
-                    return .undefined;
-                }
-                if (std.mem.eql(u8, key, "constructor")) {
-                    if (self.constructorOf(recv)) |ctor| return ctor;
-                }
-                // A symbol-keyed property (e.g. `"abc"[Symbol.iterator]`) resolves
-                // through String.prototype's chain. String-keyed methods keep their
-                // existing call-time dispatch, so only `@@`-keys are routed here.
-                if (value.isSymbolKey(key)) {
-                    if (self.env.get("String")) |sc| if (sc == .object)
-                        if (sc.object.getOwn("prototype")) |pv| if (pv == .object) {
-                            var cur: ?*value.Object = pv.object;
-                            while (cur) |c| : (cur = c.proto) if (c.getOwn(key)) |v| return v;
-                        };
-                }
-                return .undefined;
-            },
+            .string, .number, .boolean => return self.getPrimitiveMember(recv, key),
             .undefined, .null => return self.throwError("TypeError", "cannot read property of null or undefined"),
-            else => {
-                if (std.mem.eql(u8, key, "constructor")) {
-                    if (self.constructorOf(recv)) |ctor| return ctor;
+        }
+    }
+
+    /// [[Get]] on a primitive base: ToObject(base) for lookup, with the original
+    /// primitive as the receiver passed to inherited accessors/proxy traps.
+    fn getPrimitiveMember(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
+        if (recv == .string) {
+            const s = recv.string;
+            if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(s.len) };
+            if (arrayIndex(key)) |i| {
+                if (i < s.len) return .{ .string = try self.arena.dupe(u8, s[i .. i + 1]) };
+                return .undefined;
+            }
+        }
+        const boxed = try self.boxPrimitiveBase(recv);
+        var cur: ?*value.Object = boxed;
+        while (cur) |c| {
+            if (c.proxy_handler != null or c.proxy_revoked)
+                return self.proxyGet(c, key, recv);
+            if (c.getAccessor(key)) |acc| {
+                if (acc.get) |g| {
+                    if (g != .undefined) return self.callValueWithThis(g, &.{}, recv);
                 }
                 return .undefined;
-            },
+            }
+            if (c.getOwn(key)) |v| return v;
+            cur = self.effectiveProto(c);
         }
+        if (std.mem.eql(u8, key, "constructor")) {
+            if (self.constructorOf(recv)) |ctor| return ctor;
+        }
+        return .undefined;
     }
 
     /// The global constructor for a value's kind (`[].constructor === Array`).
@@ -3832,6 +3882,11 @@ pub const Interpreter = struct {
             if (self.strict) return self.throwError("TypeError", "Assignment to constant variable.");
             return;
         }
+        if (self.env.get(name) == null) {
+            if (self.strict and self.globalProp(name) == null)
+                return self.throwError("ReferenceError", name);
+            if (self.global_object) |g| return self.setMember(.{ .object = g }, name, v);
+        }
         try self.env.assign(name, v);
     }
 
@@ -3859,9 +3914,13 @@ pub const Interpreter = struct {
                     return;
                 }
                 // Strict mode forbids creating a global by assigning to an
-                // undeclared binding (sloppy mode silently creates one).
-                if (self.strict and self.env.get(name) == null and self.globalProp(name) == null)
-                    return self.throwError("ReferenceError", name);
+                // undeclared binding. Sloppy mode creates/configures a global
+                // object property, not a non-deletable `var` binding.
+                if (self.env.get(name) == null) {
+                    if (self.strict and self.globalProp(name) == null)
+                        return self.throwError("ReferenceError", name);
+                    if (self.global_object) |g| return self.setMember(.{ .object = g }, name, v);
+                }
                 try self.env.assign(name, v);
             },
             .member => |m| {
@@ -3894,13 +3953,12 @@ pub const Interpreter = struct {
     /// store (growing with holes); everything else is a named property. Shared
     /// by the tree-walker and the VM.
     pub fn setMember(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
+        if (recv == .object and (recv.object.is_symbol or recv.object.is_bigint))
+            return self.setPrimitiveMember(recv, key, v);
         if (recv != .object) {
-            // Setting a property on null/undefined always throws; on any other
-            // primitive (number/string/boolean) sloppy mode is a silent no-op
-            // while strict mode throws a TypeError.
             if (recv == .null or recv == .undefined)
                 return self.throwError("TypeError", "Cannot set property of null or undefined");
-            return if (self.strict) self.throwError("TypeError", "Cannot create property on a primitive") else {};
+            return self.setPrimitiveMember(recv, key, v);
         }
         const o = recv.object;
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxySet(o, key, v, recv);
@@ -4015,6 +4073,33 @@ pub const Interpreter = struct {
             return if (self.strict) self.throwError("TypeError", "Cannot add property, object is not extensible") else {};
         }
         try self.setProp(o, key, v);
+    }
+
+    /// [[Set]] on a primitive base: ToObject(base), then walk inherited setters
+    /// and Proxy set traps, but a data-property/no-property write ultimately
+    /// fails because the original receiver is not an Object. Sloppy code ignores
+    /// that false result; strict code throws.
+    fn setPrimitiveMember(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
+        const boxed = try self.boxPrimitiveBase(recv);
+        var cur: ?*value.Object = boxed;
+        while (cur) |c| {
+            if (c.proxy_handler != null or c.proxy_revoked)
+                return self.proxySet(c, key, v, recv);
+            if (c.getAccessor(key)) |acc| {
+                if (acc.set) |s| {
+                    if (s != .undefined) {
+                        _ = try self.callValueWithThis(s, &.{v}, recv);
+                        return;
+                    }
+                }
+                return if (self.strict) self.throwError("TypeError", "Cannot set property which has only a getter") else {};
+            }
+            if (c.getOwn(key)) |_| {
+                return if (self.strict) self.throwError("TypeError", "Cannot create property on a primitive") else {};
+            }
+            cur = self.effectiveProto(c);
+        }
+        return if (self.strict) self.throwError("TypeError", "Cannot create property on a primitive") else {};
     }
 
     /// `delete obj[key]`: remove an own property, returning whether the object
@@ -5973,9 +6058,8 @@ pub const Interpreter = struct {
         const o = (try self.newObject()).object;
         var it = re.named_captures.iterator();
         while (it.next()) |e| {
-            const idx = e.value_ptr.*; // 1-based capture index
-            const v: Value = if (idx >= 1 and idx <= m.captures.len)
-                try self.captureVal(m, idx - 1)
+            const v: Value = if (re.getNamedCapture(&m, e.key_ptr.*)) |capture|
+                .{ .string = try self.arena.dupe(u8, capture) }
             else
                 .undefined;
             try self.setProp(o, e.key_ptr.*, v);
@@ -6095,7 +6179,7 @@ pub const Interpreter = struct {
     fn evalUnary(self: *Interpreter, op: ast.UnaryOp, operand: *Node) EvalError!Value {
         // `typeof <unresolved identifier>` is "undefined" rather than a thrown
         // ReferenceError — the one context where an unbound name doesn't throw.
-        if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null)
+        if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null and self.globalProp(operand.identifier) == null)
             return .{ .string = "undefined" };
         const v = try self.eval(operand);
         // BigInt unary: `-`/`~` stay BigInt; unary `+` is a TypeError; `typeof`/
@@ -6490,14 +6574,9 @@ fn functionHasInstanceFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     return .{ .boolean = try self.ordinaryHasInstance(this.object, if (args.len > 0) args[0] else .undefined) };
 }
 
-/// The global `eval`. Direct eval: the program text is parsed and run in the
-/// *current* lexical environment (`self.env` at the call site — natives don't
-/// push a scope), so `eval("var x = 1")` and `eval("x")` see and mutate the
-/// caller's bindings, and function declarations introduced by the eval are
-/// visible after it. A non-string argument is returned unchanged (per spec).
-/// (Indirect eval's "run in the global scope" distinction isn't modeled yet —
-/// every eval runs where it's called; this is faithful for the common direct
-/// case and only differs for the rarer `(0, eval)(...)` form.)
+/// The global `eval`. Direct eval runs in the caller's lexical environment;
+/// member/indirect eval runs as global eval in the realm captured by the eval
+/// function object.
 fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -6505,11 +6584,38 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     if (args[0] != .string) return args[0]; // eval of a non-string is the identity
     const src = args[0].string;
     var parser = Parser.init(self.arena, src) catch return self.throwError("SyntaxError", "eval: invalid source");
-    // A direct eval (this engine runs eval code in the caller's scope) inherits
-    // the caller's strict mode, so the eval'd code's early errors — `var eval`,
-    // `eval = …`, `with`, duplicate params, … — are enforced under strict.
-    if (self.strict) parser.strict = true;
+    // Direct eval inherits the caller's strictness for early errors; indirect
+    // eval is global code in the eval function's realm and only becomes strict
+    // from its own directive prologue.
+    if (self.direct_eval_call and self.strict) parser.strict = true;
     const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "eval: parse error");
+
+    const saved_env = self.env;
+    const saved_this = self.this_value;
+    const saved_glob = self.global_object;
+    if (!self.direct_eval_call) {
+        const fnobj = self.active_native orelse return .undefined;
+        const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return .undefined));
+        self.env = genv;
+        if (genv.get("globalThis")) |gt| if (gt == .object) {
+            self.this_value = .{ .object = gt.object };
+            self.global_object = gt.object;
+        };
+    }
+
+    const eval_env = try self.arena.create(Environment);
+    eval_env.* = .{ .arena = self.arena, .parent = self.env };
+    self.env = eval_env;
+    defer {
+        self.env = saved_env;
+        self.this_value = saved_this;
+        self.global_object = saved_glob;
+    }
+
+    // Eval creates a fresh lexical environment for let/const/class declarations,
+    // while var/function declarations target the surrounding variable
+    // environment (the caller for direct eval, the realm global for indirect).
+    if (prog.* == .program) try self.hoistVarNames(prog.program);
     return self.eval(prog);
 }
 
@@ -15707,6 +15813,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Global functions.
     try defineGlobalFn(env, root_shape, "eval", 1, evalFn);
+    if (env.get("eval")) |ev| {
+        if (ev == .object) ev.object.private_data = @ptrCast(env);
+    }
     try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
     try defineGlobalFn(env, root_shape, "isNaN", 1, builtins.isNaNFn);
@@ -15719,6 +15828,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "unescape", 1, builtins.unescapeFn);
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
     try installRegExpProto(env, root_shape);
+    if (env.get("RegExp")) |re| {
+        if (re == .object) try setNative(a, root_shape, re.object, "escape", 1, regexpEscapeFn);
+    }
     try defineGlobalFnC(env, root_shape, "Map", 0, true, builtins.mapFn);
     if (env.get("Map")) |m| {
         if (m == .object) try setNative(a, root_shape, m.object, "groupBy", 2, mapGroupByFn);
@@ -16724,20 +16836,149 @@ fn setNativeGetter(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, comptim
 fn escapeRegexSource(a: std.mem.Allocator, src: []const u8) ![]const u8 {
     if (src.len == 0) return "(?:)";
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    var prev_bs = false;
-    for (src) |c| {
+    var i: usize = 0;
+    var in_class = false;
+    while (i < src.len) {
+        const c = src[i];
+        if (c == '\\' and i + 1 < src.len) {
+            switch (src[i + 1]) {
+                '\n' => {
+                    try buf.appendSlice(a, "\\n");
+                    i += 2;
+                    continue;
+                },
+                '\r' => {
+                    try buf.appendSlice(a, "\\r");
+                    i += if (i + 2 < src.len and src[i + 2] == '\n') 3 else 2;
+                    continue;
+                },
+                0xE2 => if (i + 3 < src.len and src[i + 2] == 0x80) {
+                    if (src[i + 3] == 0xA8) {
+                        try buf.appendSlice(a, "\\u2028");
+                        i += 4;
+                        continue;
+                    }
+                    if (src[i + 3] == 0xA9) {
+                        try buf.appendSlice(a, "\\u2029");
+                        i += 4;
+                        continue;
+                    }
+                },
+                else => {},
+            }
+        }
+        var escaped = false;
+        var j = i;
+        while (j > 0 and src[j - 1] == '\\') {
+            escaped = !escaped;
+            j -= 1;
+        }
         switch (c) {
             '/' => {
-                if (!prev_bs) try buf.append(a, '\\');
+                if (!in_class and !escaped) try buf.append(a, '\\');
                 try buf.append(a, '/');
             },
             '\n' => try buf.appendSlice(a, "\\n"),
             '\r' => try buf.appendSlice(a, "\\r"),
+            0xE2 => if (i + 2 < src.len and src[i + 1] == 0x80 and src[i + 2] == 0xA8) {
+                try buf.appendSlice(a, "\\u2028");
+                i += 3;
+                continue;
+            } else if (i + 2 < src.len and src[i + 1] == 0x80 and src[i + 2] == 0xA9) {
+                try buf.appendSlice(a, "\\u2029");
+                i += 3;
+                continue;
+            } else try buf.append(a, c),
             else => try buf.append(a, c),
         }
-        prev_bs = c == '\\' and !prev_bs;
+        if (!escaped) {
+            if (c == '[') in_class = true;
+            if (c == ']') in_class = false;
+        }
+        i += 1;
     }
     return buf.toOwnedSlice(a);
+}
+
+fn appendHex2(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, b: u8) !void {
+    const digits = "0123456789abcdef";
+    try buf.appendSlice(a, "\\x");
+    try buf.append(a, digits[b >> 4]);
+    try buf.append(a, digits[b & 0x0f]);
+}
+
+fn appendHex4(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, cp: u21) !void {
+    const digits = "0123456789abcdef";
+    try buf.appendSlice(a, "\\u");
+    try buf.append(a, digits[(cp >> 12) & 0x0f]);
+    try buf.append(a, digits[(cp >> 8) & 0x0f]);
+    try buf.append(a, digits[(cp >> 4) & 0x0f]);
+    try buf.append(a, digits[cp & 0x0f]);
+}
+
+fn wtf8SurrogateAt(s: []const u8, i: usize) ?u21 {
+    if (i + 2 >= s.len or s[i] != 0xED) return null;
+    if (s[i + 1] < 0xA0 or s[i + 1] > 0xBF) return null;
+    if ((s[i + 2] & 0xC0) != 0x80) return null;
+    return (@as(u21, s[i] & 0x0F) << 12) | (@as(u21, s[i + 1] & 0x3F) << 6) | @as(u21, s[i + 2] & 0x3F);
+}
+
+fn regexpEscapeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len == 0 or args[0] != .string)
+        return self.throwError("TypeError", "RegExp.escape requires a string");
+    const s = args[0].string;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    var first = true;
+    while (i < s.len) {
+        const b = s[i];
+        if (b < 0x80) {
+            if (first and std.ascii.isAlphanumeric(b)) {
+                try appendHex2(&out, self.arena, b);
+            } else switch (b) {
+                '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '/' => {
+                    try out.append(self.arena, '\\');
+                    try out.append(self.arena, b);
+                },
+                ',', '-', '=', '<', '>', '#', '&', '!', '%', ':', ';', '@', '~', '\'', '`', '"' => try appendHex2(&out, self.arena, b),
+                '\x0c' => try out.appendSlice(self.arena, "\\f"),
+                '\n' => try out.appendSlice(self.arena, "\\n"),
+                '\r' => try out.appendSlice(self.arena, "\\r"),
+                '\t' => try out.appendSlice(self.arena, "\\t"),
+                '\x0b' => try out.appendSlice(self.arena, "\\v"),
+                ' ' => try appendHex2(&out, self.arena, b),
+                else => try out.append(self.arena, b),
+            }
+            i += 1;
+        } else {
+            if (wtf8SurrogateAt(s, i)) |cp| {
+                try appendHex4(&out, self.arena, cp);
+                i += 3;
+            } else {
+                const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
+                if (i + len <= s.len and len > 1 and std.unicode.utf8ValidateSlice(s[i .. i + len])) {
+                    const cp = std.unicode.utf8Decode(s[i .. i + len]) catch 0;
+                    if (cp == 0x2028 or cp == 0x2029 or isJsTrimCp(cp)) {
+                        if (cp <= 0xFF) {
+                            try appendHex2(&out, self.arena, @intCast(cp));
+                        } else {
+                            try appendHex4(&out, self.arena, cp);
+                        }
+                    } else {
+                        try out.appendSlice(self.arena, s[i .. i + len]);
+                    }
+                    i += len;
+                } else {
+                    try out.append(self.arena, b);
+                    i += 1;
+                }
+            }
+        }
+        first = false;
+    }
+    return .{ .string = try out.toOwnedSlice(self.arena) };
 }
 
 /// A `RegExp.prototype` flag accessor (`global`/`ignoreCase`/…) — true iff the
@@ -16771,18 +17012,41 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     return .{ .string = try escapeRegexSource(self.arena, o.regex_source) };
 }
 
-fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-object");
-    const o = this.object;
-    if (!o.is_regex and !self.isRegExpProto(o)) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-RegExp");
-    const fl = if (o.is_regex) o.regex_flags else "";
+fn canonicalRegexFlags(a: std.mem.Allocator, fl: []const u8) ![]const u8 {
     var buf: [8]u8 = undefined;
     var n: usize = 0;
     for ("dgimsuvy") |c| {
         if (std.mem.indexOfScalar(u8, fl, c) != null) {
             buf[n] = c;
+            n += 1;
+        }
+    }
+    return a.dupe(u8, buf[0..n]);
+}
+
+fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-object");
+    const o = this.object;
+    if (self.isRegExpProto(o)) return .{ .string = "" };
+    if (o.is_regex) return .{ .string = try canonicalRegexFlags(self.arena, o.regex_flags) };
+
+    var buf: [8]u8 = undefined;
+    var n: usize = 0;
+    const specs = [_]struct { c: u8, name: []const u8 }{
+        .{ .c = 'd', .name = "hasIndices" },
+        .{ .c = 'g', .name = "global" },
+        .{ .c = 'i', .name = "ignoreCase" },
+        .{ .c = 'm', .name = "multiline" },
+        .{ .c = 's', .name = "dotAll" },
+        .{ .c = 'u', .name = "unicode" },
+        .{ .c = 'v', .name = "unicodeSets" },
+        .{ .c = 'y', .name = "sticky" },
+    };
+    for (specs) |spec| {
+        if ((try self.getProperty(this, spec.name)).toBoolean()) {
+            buf[n] = spec.c;
             n += 1;
         }
     }
@@ -16795,9 +17059,10 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (comptime std.mem.eql(u8, name, "toString")) {
+                return try self.regexpToString(this);
+            }
             if (this != .object or !this.object.is_regex) {
-                if (eq(name, "toString") and this == .object and self.isRegExpProto(this.object))
-                    return .{ .string = "/(?:)/" };
                 return self.throwError("TypeError", "RegExp.prototype." ++ name ++ " called on a non-RegExp");
             }
             return (try self.regexMethod(this.object, name, args)) orelse .undefined;

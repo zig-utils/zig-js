@@ -737,6 +737,129 @@ test "context persists globals across evaluations" {
     try std.testing.expectEqual(@as(f64, 42), v.number);
 }
 
+test "direct eval keeps lexical declarations local but hoists var" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    try std.testing.expect((try ctx.evaluate(
+        \\let outside = 23;
+        \\eval('let outside;');
+        \\eval('"use strict"; let strictOnly = 3;');
+        \\eval('var visible = 5;');
+        \\typeof strictOnly === 'undefined' && visible === 5 && outside === 23
+    )).boolean);
+}
+
+test "primitive property assignment observes inherited proxy setters" {
+    try std.testing.expect((try evalIn(
+        \\var numberCount = 0, stringCount = 0, booleanCount = 0, symbolCount = 0;
+        \\Object.setPrototypeOf(Number.prototype, new Proxy({}, { set: function() { numberCount += 1; return true; } }));
+        \\0..test262 = null;
+        \\Object.setPrototypeOf(String.prototype, new Proxy({}, { set: function() { stringCount += 1; return true; } }));
+        \\"".test262 = null;
+        \\Object.setPrototypeOf(Boolean.prototype, new Proxy({}, { set: function() { booleanCount += 1; return true; } }));
+        \\true.test262 = null;
+        \\Object.setPrototypeOf(Symbol.prototype, new Proxy({}, { set: function() { symbolCount += 1; return true; } }));
+        \\Symbol().test262 = null;
+        \\numberCount === 1 && stringCount === 1 && booleanCount === 1 && symbolCount === 1
+    )).boolean);
+}
+
+test "primitive property retrieval walks wrapper prototypes" {
+    try std.testing.expect((try evalIn(
+        \\Number.prototype.test262 = "number prototype";
+        \\String.prototype.test262 = "string prototype";
+        \\Boolean.prototype.test262 = "boolean prototype";
+        \\Symbol.prototype.test262 = "symbol prototype";
+        \\1..test262 === "number prototype" &&
+        \\"".test262 === "string prototype" &&
+        \\true.test262 === "boolean prototype" &&
+        \\Symbol().test262 === "symbol prototype"
+    )).boolean);
+}
+
+test "indirect eval uses the callee realm global" {
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\other.Number.prototype.test262 = "number prototype";
+        \\other.value = 1;
+        \\var numberOk = other.eval("value.test262") === "number prototype";
+        \\other.Symbol.prototype.test262 = "symbol prototype";
+        \\other.value = Symbol();
+        \\numberOk && other.eval("value.test262") === "symbol prototype"
+    )).boolean);
+}
+
+test "delete distinguishes var bindings from sloppy global properties" {
+    try std.testing.expect((try evalIn(
+        \\var declared = {};
+        \\undeclared = {};
+        \\delete declared === false &&
+        \\typeof declared === "object" &&
+        \\delete undeclared === true &&
+        \\typeof undeclared === "undefined"
+    )).boolean);
+}
+
+test "RegExp.escape escapes pattern text" {
+    try expectEvalStr("\\x61bc", "RegExp.escape('abc')");
+    try expectEvalStr("\\x61\\.b\\/c\\x2dd", "RegExp.escape('a.b/c-d')");
+    try expectEvalStr("\\n\\x20\\xa0\\u2028", "RegExp.escape('\\n \\u00a0\\u2028')");
+    try expectEvalStr("\x00", "RegExp.escape('\\0')");
+    try expectEvalStr("\\ud800", "RegExp.escape('\\ud800')");
+    try expectEvalStr("\u{10000}", "RegExp.escape('\\ud800\\udc00')");
+    try std.testing.expect((try evalIn(
+        \\try { RegExp.escape(123); false } catch (e) { e.name === "TypeError" }
+    )).boolean);
+}
+
+test "RegExp source and toString escape line terminators canonically" {
+    try std.testing.expect((try evalIn(
+        \\function same(re, source) {
+        \\  return re.source === source &&
+        \\    eval("/" + re.source + "/").source === source &&
+        \\    re.toString() === "/" + source + "/";
+        \\}
+        \\same(/\\n/, "\\\\n") &&
+        \\same(RegExp("\\n"), "\\n") &&
+        \\same(RegExp("\\\n"), "\\n") &&
+        \\same(RegExp("/"), "\\/") &&
+        \\same(RegExp("\\/"), "\\/") &&
+        \\same(/[/]/, "[/]") &&
+        \\same(/[\/]/, "[\\/]")
+    )).boolean);
+}
+
+test "RegExp flags and toString use generic canonical accessors" {
+    try std.testing.expect((try evalIn(
+        \\/foo/igym.flags === "gimy" &&
+        \\/foo/igym.toString() === "/foo/gimy" &&
+        \\Object.getOwnPropertyDescriptor(RegExp.prototype, "flags").get.call({ sticky: 1, unicode: 1, global: 0 }) === "uy" &&
+        \\Object.getOwnPropertyDescriptor(RegExp.prototype, "flags").get.call({ __proto__: { multiline: true } }) === "m" &&
+        \\RegExp.prototype.toString.call({ source: "foo", flags: "bar" }) === "/foo/bar"
+    )).boolean);
+}
+
+test "object literal __proto__ sets ordinary object prototype" {
+    try std.testing.expect((try evalIn(
+        \\var p = { marker: 1 };
+        \\var o = { __proto__: p };
+        \\var n = { __proto__: null };
+        \\o.marker === 1 && !o.hasOwnProperty("marker") &&
+        \\Object.getPrototypeOf(o) === p &&
+        \\Object.getPrototypeOf(n) === null
+    )).boolean);
+}
+
+test "RegExp duplicate named captures use participating group" {
+    try std.testing.expect((try evalIn(
+        \\var m = /(?:(?:(?<a>x)|(?<a>y))\k<a>){2}/.exec("xxyy");
+        \\m[0] === "xxyy" && m[1] === undefined && m[2] === "y" &&
+        \\m.groups.a === "y" &&
+        \\"xxyy".replace(/(?:(?:(?<a>x)|(?<a>y))\k<a>)/, "2$<a>") === "2xyy"
+    )).boolean);
+}
+
 /// Evaluate `src` in a fresh context and return its completion value. Only safe
 /// for by-value results (numbers/booleans); a returned `.string` points into the
 /// context arena, so use `expectEvalStr` for those (it compares before teardown).
