@@ -5993,7 +5993,8 @@ pub const Interpreter = struct {
         // keep the engine's native regex path (they carry no such own symbol).
         if (self.stringProtocolSymbol(name)) |sym| {
             const sep = arg0(args);
-            if (sep == .object and !sep.object.is_regex and !sep.object.is_symbol) {
+            const allow_regex_protocol = sep == .object and sep.object.is_regex and eq(name, "replace");
+            if (sep == .object and !sep.object.is_symbol and (!sep.object.is_regex or allow_regex_protocol)) {
                 if (self.wellKnownSymbolKey(sym)) |key| {
                     const method = try self.getProperty(sep, key);
                     if (method == .object and method.object.isCallableObject()) {
