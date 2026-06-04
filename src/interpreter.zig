@@ -15753,6 +15753,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try installNativeProps(a, root_shape, date_ns, "Date", 7);
     try setNative(a, root_shape, date_ns, "now", 0, dateNow);
     try setNative(a, root_shape, date_ns, "UTC", 7, dateUTCFn);
+    try setNative(a, root_shape, date_ns, "parse", 1, dateParseFn);
     const date_proto = try a.create(value.Object);
     date_proto.* = .{ .proto = object_proto };
     try setDateProtoMethods(a, root_shape, date_proto, .{
@@ -20289,6 +20290,105 @@ fn symbolProto(self: *Interpreter) ?*value.Object {
 }
 
 /// `Date(...)` / `new Date(...)` → a Date object for the computed time.
+/// Parse an ECMA-262 Date Time String Format string to a time value (ms since
+/// epoch), or NaN. Handles YYYY[-MM[-DD]][THH:mm[:ss[.sss]]][Z|±HH:mm]; a
+/// date-only or zoneless date-time is interpreted as UTC (this engine has no
+/// local time zone).
+fn dateParseISO(s_in: []const u8) f64 {
+    const nan = std.math.nan(f64);
+    const s = std.mem.trim(u8, s_in, " \t\n\r\x0c\x0b");
+    if (s.len == 0) return nan;
+    var i: usize = 0;
+    const readN = struct {
+        fn f(str: []const u8, idx: *usize, count: usize) ?i64 {
+            if (idx.* + count > str.len) return null;
+            var v: i64 = 0;
+            for (str[idx.* .. idx.* + count]) |c| {
+                if (c < '0' or c > '9') return null;
+                v = v * 10 + (c - '0');
+            }
+            idx.* += count;
+            return v;
+        }
+    }.f;
+    var ysign: i64 = 1;
+    var ylen: usize = 4;
+    if (s[0] == '+') {
+        i += 1;
+        ylen = 6;
+    } else if (s[0] == '-') {
+        ysign = -1;
+        i += 1;
+        ylen = 6;
+    }
+    const yv = readN(s, &i, ylen) orelse return nan;
+    const year = ysign * yv;
+    var month: i64 = 1;
+    var day: i64 = 1;
+    if (i < s.len and s[i] == '-') {
+        i += 1;
+        month = readN(s, &i, 2) orelse return nan;
+        if (i < s.len and s[i] == '-') {
+            i += 1;
+            day = readN(s, &i, 2) orelse return nan;
+        }
+    }
+    var hour: i64 = 0;
+    var minute: i64 = 0;
+    var sec: i64 = 0;
+    var ms: i64 = 0;
+    if (i < s.len and (s[i] == 'T' or s[i] == 't')) {
+        i += 1;
+        hour = readN(s, &i, 2) orelse return nan;
+        if (i >= s.len or s[i] != ':') return nan;
+        i += 1;
+        minute = readN(s, &i, 2) orelse return nan;
+        if (minute > 59) return nan;
+        if (i < s.len and s[i] == ':') {
+            i += 1;
+            sec = readN(s, &i, 2) orelse return nan;
+            if (i < s.len and s[i] == '.') {
+                i += 1;
+                var fcount: usize = 0;
+                while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+                    if (fcount < 3) {
+                        ms = ms * 10 + (s[i] - '0');
+                        fcount += 1;
+                    }
+                }
+                if (fcount == 0) return nan;
+                while (fcount < 3) : (fcount += 1) ms *= 10;
+            }
+        }
+    }
+    if (i < s.len and (s[i] == 'Z' or s[i] == 'z')) {
+        i += 1;
+    } else if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+        const osign: i64 = if (s[i] == '-') -1 else 1;
+        i += 1;
+        const oh = readN(s, &i, 2) orelse return nan;
+        if (i < s.len and s[i] == ':') i += 1;
+        const om = readN(s, &i, 2) orelse return nan;
+        minute -= osign * (oh * 60 + om);
+    }
+    if (i != s.len) return nan;
+    if (month < 1 or month > 12 or day < 1 or day > 31) return nan;
+    if (hour > 24 or sec > 59) return nan;
+    if (hour == 24 and (minute != 0 or sec != 0 or ms != 0)) return nan;
+    const days = Interpreter.daysFromCivil(year, month, day);
+    const total = days * 86_400_000 + hour * 3_600_000 + minute * 60_000 + sec * 1000 + ms;
+    const f: f64 = @floatFromInt(total);
+    if (std.math.isNan(f) or @abs(f) > 8.64e15) return nan;
+    return f;
+}
+
+fn dateParseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const s = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+    return .{ .number = dateParseISO(s) };
+}
+
 fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -20307,7 +20407,7 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         if (args[0] == .object and args[0].object.is_date)
             return self.makeDate(args[0].object.date_ms);
         const prim = try self.toPrimitive(args[0], .default);
-        if (prim == .string) return self.makeDate(Interpreter.dateTimeFromArgs(&.{prim}));
+        if (prim == .string) return self.makeDate(dateParseISO(prim.string));
         return self.makeDate(prim.toNumber());
     }
     return self.makeDate(0);
