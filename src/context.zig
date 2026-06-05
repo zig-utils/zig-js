@@ -1132,6 +1132,29 @@ test "typeof on an undeclared identifier is \"undefined\" (no throw)" {
     )).boolean);
 }
 
+test "global undefined is an immutable binding, not a literal token" {
+    try std.testing.expect((try evalIn(
+        \\undefined = 5;
+        \\undefined === void 0
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var newProperty = undefined = 42;
+        \\newProperty === 42 && undefined === void 0
+    )).boolean);
+    try std.testing.expect((try evalIn("delete undefined === false")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var d = Object.getOwnPropertyDescriptor(globalThis, "undefined");
+        \\d.value === void 0 && !d.writable && !d.enumerable && !d.configurable
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\(function () { let undefined = 7; return undefined; })() === 7
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\(function (undefined) { undefined = 9; return undefined; })(1) === 9
+    )).boolean);
+    try std.testing.expectError(error.Throw, evalIn("let undefined;"));
+}
+
 test "function declarations are hoisted" {
     // Forward references work at program scope and inside function bodies.
     try std.testing.expectEqual(@as(f64, 5), (try evalIn("bar(); function bar() { return 5; }\nbar()")).number);

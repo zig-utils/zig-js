@@ -429,11 +429,45 @@ pub const Interpreter = struct {
         }
     }
 
+    fn checkRestrictedGlobalLexical(self: *Interpreter, name: []const u8) EvalError!void {
+        if (self.env.parent != null) return;
+        if (!eq(name, "undefined") and !eq(name, "NaN") and !eq(name, "Infinity")) return;
+        const g = self.global_object orelse return;
+        if (objectHasOwn(g, name) and !g.getAttr(name).configurable)
+            return self.throwError("SyntaxError", "Cannot declare restricted global property");
+    }
+
+    fn checkRestrictedGlobalLexicalPattern(self: *Interpreter, target: *Node) EvalError!void {
+        switch (target.*) {
+            .identifier => |name| try self.checkRestrictedGlobalLexical(name),
+            .obj_pattern => |p| {
+                for (p.props) |pr| try self.checkRestrictedGlobalLexicalPattern(pr.target);
+                if (p.rest) |r| try self.checkRestrictedGlobalLexical(r);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |e| if (e.target) |t| try self.checkRestrictedGlobalLexicalPattern(t);
+                if (p.rest) |r| try self.checkRestrictedGlobalLexicalPattern(r);
+            },
+            else => {},
+        }
+    }
+
     /// An own data property of the global object, used as the fallback for a
     /// bare global reference (`this.x = 1` at top level → bare `x`).
     pub fn globalProp(self: *Interpreter, name: []const u8) ?Value {
         const g = self.global_object orelse return null;
         return g.getOwn(name);
+    }
+
+    fn globalBindingObject(self: *Interpreter, name: []const u8) ?*value.Object {
+        const g = self.global_object orelse return null;
+        var env: ?*Environment = self.env;
+        while (env) |e| {
+            if (e.vars.contains(name))
+                return if (e.parent == null and objectHasOwn(g, name)) g else null;
+            env = e.parent;
+        }
+        return null;
     }
 
     /// ToObject(v): an object is returned as-is, a primitive is boxed into the
@@ -804,9 +838,15 @@ pub const Interpreter = struct {
                 if (d.kind == .@"var")
                     try self.globalDefine(d.name, v)
                 else if (d.kind == .@"const")
-                    try self.env.putConst(d.name, v)
+                    {
+                        try self.checkRestrictedGlobalLexical(d.name);
+                        try self.env.putConst(d.name, v);
+                    }
                 else
-                    try self.env.put(d.name, v);
+                    {
+                        try self.checkRestrictedGlobalLexical(d.name);
+                        try self.env.put(d.name, v);
+                    }
                 // A `using`/`await using` binding registers its resource for
                 // disposal when the enclosing scope exits.
                 if (d.dispose != 0) try self.addDisposable(v, d.dispose == 2);
@@ -1356,6 +1396,16 @@ pub const Interpreter = struct {
         // function-declaration hoist above (declare-if-absent, so it never
         // clobbers a hoisted function or parameter).
         if (self.env == self.env.varScope()) try self.hoistVarNames(stmts);
+        for (stmts) |s| switch (s.*) {
+            .var_decl => |d| if (d.kind != .@"var") try self.checkRestrictedGlobalLexical(d.name),
+            .decl_group => |group| for (group) |gs| switch (gs.*) {
+                .var_decl => |d| if (d.kind != .@"var") try self.checkRestrictedGlobalLexical(d.name),
+                else => {},
+            },
+            .destructure_decl => |d| if (d.kind != .@"var") try self.checkRestrictedGlobalLexicalPattern(d.pattern),
+            .class_expr => |c| if (c.name.len > 0) try self.checkRestrictedGlobalLexical(c.name),
+            else => {},
+        };
         // Temporal dead zone: `let`/`const` (and `class`) declarations are
         // hoisted into this scope as uninitialized bindings; reading one before
         // its declaration runs throws a ReferenceError.
@@ -4333,7 +4383,20 @@ pub const Interpreter = struct {
                 return self.throwError("ReferenceError", name);
             if (self.global_object) |g| return self.setMember(.{ .object = g }, name, v);
         }
+        if (self.globalBindingObject(name)) |g| {
+            try self.setMember(.{ .object = g }, name, v);
+            if (g.getOwn(name)) |nv| try self.env.assign(name, nv);
+            return;
+        }
         try self.env.assign(name, v);
+    }
+
+    pub fn defineLexicalVM(self: *Interpreter, name: []const u8, v: Value, is_const: bool) EvalError!void {
+        try self.checkRestrictedGlobalLexical(name);
+        if (is_const)
+            try self.env.putConst(name, v)
+        else
+            try self.env.put(name, v);
     }
 
     fn assignTo(self: *Interpreter, target: *Node, v: Value) EvalError!void {
@@ -4366,6 +4429,11 @@ pub const Interpreter = struct {
                     if (self.strict and self.globalProp(name) == null)
                         return self.throwError("ReferenceError", name);
                     if (self.global_object) |g| return self.setMember(.{ .object = g }, name, v);
+                }
+                if (self.globalBindingObject(name)) |g| {
+                    try self.setMember(.{ .object = g }, name, v);
+                    if (g.getOwn(name)) |nv| try self.env.assign(name, nv);
+                    return;
                 }
                 try self.env.assign(name, v);
             },

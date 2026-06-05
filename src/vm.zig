@@ -214,6 +214,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const name = chunk.names.items[inst.a];
                 try vm.globalDefine(name, stack.pop().?);
             },
+            .def_lex => {
+                const name = chunk.names.items[inst.a];
+                try vm.defineLexicalVM(name, stack.pop().?, inst.b == 2);
+            },
             .bind_pattern => {
                 // Reuse the tree-walker's destructuring over the live env (a=pattern
                 // index, b=mode: 0 var, 1 let, 2 const, 3 assign).

@@ -175,6 +175,10 @@ pub const Compiler = struct {
     /// Emit a definition of `name` (var/let/const/function decl) with its value
     /// already on the stack; consumes the value.
     fn emitDefine(self: *Compiler, name: []const u8) CompileError!void {
+        try self.emitDefineKind(name, .@"var");
+    }
+
+    fn emitDefineKind(self: *Compiler, name: []const u8, kind: ast.DeclKind) CompileError!void {
         switch (self.resolve(name)) {
             .local => |slot| {
                 _ = try self.chunk.emit(.store_local, slot);
@@ -184,7 +188,13 @@ pub const Compiler = struct {
                 _ = try self.chunk.emitAB(.store_upval, u.depth, u.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
-            .global => _ = try self.chunk.emit(.def_var, try self.chunk.addName(name)),
+            .global => {
+                const ni = try self.chunk.addName(name);
+                if (self.mode == .program and kind != .@"var")
+                    _ = try self.chunk.emitAB(.def_lex, ni, if (kind == .@"const") 2 else 1)
+                else
+                    _ = try self.chunk.emit(.def_var, ni);
+            },
         }
     }
 
@@ -217,7 +227,7 @@ pub const Compiler = struct {
                 } else {
                     _ = try self.chunk.emit(.load_undefined, 0);
                 }
-                try self.emitDefine(d.name);
+                try self.emitDefineKind(d.name, d.kind);
             },
             .func_decl => |fnode| {
                 const fi = try self.compileFunction(fnode, false);

@@ -154,7 +154,7 @@ pub const Parser = struct {
 
     fn isReservedWord(text: []const u8) bool {
         const words = [_][]const u8{
-            "true",     "false",   "null",     "undefined", "this",  "typeof",
+            "true",     "false",   "null",     "this",      "typeof",
             "void",     "new",     "in",       "instanceof", "function", "return",
             "var",      "let",     "const",    "if",        "else",  "while",
             "do",       "for",     "switch",   "case",      "default", "break",
@@ -2020,7 +2020,6 @@ pub const Parser = struct {
                 if (std.mem.eql(u8, t.text, "true")) return self.alloc(.{ .boolean = true });
                 if (std.mem.eql(u8, t.text, "false")) return self.alloc(.{ .boolean = false });
                 if (std.mem.eql(u8, t.text, "null")) return self.alloc(.null_lit);
-                if (std.mem.eql(u8, t.text, "undefined")) return self.alloc(.undefined_lit);
                 if (std.mem.eql(u8, t.text, "this")) return self.alloc(.this_expr);
                 if (isAlwaysReservedBinding(t.text) or (self.strict and isStrictReservedBinding(t.text))) return ParseError.UnexpectedToken;
                 return self.alloc(.{ .identifier = t.text });
