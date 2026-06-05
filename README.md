@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 33,666 / 41,664 (80.8%)**, with **156 parse failures**,
-> **7,842 runtime failures**, **0 host failures**, and **NEGATIVE 3,180 / 4,668 (68.1%)**.
+> The latest full run passes **VALID 33,681 / 41,664 (80.8%)**, with **156 parse failures**,
+> **7,827 runtime failures**, **0 host failures**, and **NEGATIVE 3,180 / 4,668 (68.1%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **33,666 / 41,664 (80.8%)** |
+| **valid** | can we run the program? (scored corpus) | **33,681 / 41,664 (80.8%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,180 / 4,668 (68.1%) |
 
 The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
@@ -67,8 +67,8 @@ Per area (valid):
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 12,656 / 14,285 (88.6%) | `Object` | 3,203 / 3,411 (93.9%) |
-| `Array` | 2,594 / 2,991 (86.7%) | `RegExp` | 1,459 / 1,687 (86.5%) |
+| `language` | 12,660 / 14,285 (88.6%) | `Object` | 3,203 / 3,411 (93.9%) |
+| `Array` | 2,595 / 2,991 (86.8%) | `RegExp` | 1,459 / 1,687 (86.5%) |
 | `String` | 1,063 / 1,223 (86.9%) | `TypedArray` | 1,207 / 1,446 (83.5%) |
 | `Temporal` | 3,209 / 4,603 (69.7%) | `intl402` | 1,426 / 3,341 (42.7%) |
 | `annexB` | 461 / 1,070 (43.1%) | `staging` | 571 / 991 (57.6%) |
@@ -77,6 +77,10 @@ Per area (valid):
 > `zig build test262` prints each subtree's pass rate plus `parse-fail`, `runtime-fail`, and
 > `host-fail` counts so the work stays data-driven. Bump the corpus with
 > `git submodule update --remote test262`.
+
+## Used By
+
+- [home-lang/craft](https://github.com/home-lang/craft)
 
 ## Two ways to use it
 

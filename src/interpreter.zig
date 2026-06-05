@@ -3464,6 +3464,12 @@ pub const Interpreter = struct {
         _ = try self.callValueWithThis(adder, &.{ k, v }, self_v);
     }
 
+    fn collectionIterKind(name: []const u8) u8 {
+        if (eq(name, "keys")) return 1;
+        if (eq(name, "entries")) return 2;
+        return 0; // values, and the default Set iterator
+    }
+
     fn mapMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const self_v = Value{ .object = o };
         // A WeakMap key (`set`/`getOrInsert`/`getOrInsertComputed`) must be a
@@ -3538,23 +3544,8 @@ pub const Interpreter = struct {
             _ = try self.mapMethod(o, "set", &.{ k, v });
             return v;
         }
-        if (eq(name, "keys") or eq(name, "values") or eq(name, "entries")) {
-            // Snapshot the current entries into an array and hand back its
-            // iterator (keys → key, values → value, entries → [key, value]).
-            const arr = (try self.newArray()).object;
-            for (o.elements.items) |e| {
-                const k = e.object.elements.items[0];
-                const v = e.object.elements.items[1];
-                const item: Value = if (eq(name, "keys")) k else if (eq(name, "values")) v else blk: {
-                    const pair = (try self.newArray()).object;
-                    try pair.elements.append(self.arena, k);
-                    try pair.elements.append(self.arena, v);
-                    break :blk .{ .object = pair };
-                };
-                try arr.elements.append(self.arena, item);
-            }
-            return try self.iteratorOf(.{ .object = arr });
-        }
+        if (eq(name, "keys") or eq(name, "values") or eq(name, "entries"))
+            return try self.makeCursorIteratorWithKind(self_v, collectionIterKind(name));
         return null;
     }
 
@@ -3662,20 +3653,8 @@ pub const Interpreter = struct {
                 return Value{ .boolean = true };
             }
         }
-        if (eq(name, "keys") or eq(name, "values") or eq(name, "entries")) {
-            // Set keys/values both yield the element; entries yields [v, v].
-            const arr = (try self.newArray()).object;
-            for (o.elements.items) |e| {
-                const item: Value = if (eq(name, "entries")) blk: {
-                    const pair = (try self.newArray()).object;
-                    try pair.elements.append(self.arena, e);
-                    try pair.elements.append(self.arena, e);
-                    break :blk .{ .object = pair };
-                } else e;
-                try arr.elements.append(self.arena, item);
-            }
-            return try self.iteratorOf(.{ .object = arr });
-        }
+        if (eq(name, "keys") or eq(name, "values") or eq(name, "entries"))
+            return try self.makeCursorIteratorWithKind(self_v, collectionIterKind(name));
         return null;
     }
 
@@ -5036,13 +5015,18 @@ pub const Interpreter = struct {
         return self.iteratorOf(v);
     }
 
-    /// Wrap an array/string in an iterator object: `__src` + `__i` own properties
-    /// plus a shared native `next` that reads/advances them.
+    /// Wrap an array/string/collection in an iterator object: `__src` + `__i`
+    /// own properties plus a shared native `next` that reads/advances them.
     fn makeCursorIterator(self: *Interpreter, src: Value) EvalError!Value {
+        return self.makeCursorIteratorWithKind(src, 0);
+    }
+
+    fn makeCursorIteratorWithKind(self: *Interpreter, src: Value, kind: u8) EvalError!Value {
         const it = try self.arena.create(value.Object);
         it.* = .{};
         try self.setProp(it, "__src", src);
         try self.setProp(it, "__i", .{ .number = 0 });
+        try self.setProp(it, "__kind", .{ .number = @floatFromInt(kind) });
         // Inherit the per-kind built-in iterator prototype (%ArrayIteratorPrototype%
         // etc.) — which carries `next`, the @@toStringTag, and (via
         // %IteratorPrototype%) the iterator-helper methods.
@@ -17185,7 +17169,11 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     // inherits the slot) has none — `next` must throw, not yield {done:true}.
     const src = o.getOwn("__src") orelse
         return self.throwError("TypeError", "next called on an incompatible receiver");
+    if (o.getOwn("__done")) |d| {
+        if (d.toBoolean()) return self.iterResultObj(.undefined, true);
+    }
     const i = toLen((o.getOwn("__i") orelse Value{ .number = 0 }).number);
+    const kind = if (o.getOwn("__kind")) |k| if (k == .number) toLen(k.number) else 0 else 0;
     var done = true;
     var val: Value = .undefined;
     var advance: usize = 1;
@@ -17197,9 +17185,26 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 val = try self.arrIndexGet(so, i);
                 done = false;
             }
-        } else if ((so.is_set or so.is_map) and i < so.elements.items.len) {
-            // Sets yield each element; Maps yield each stored `[k,v]` pair.
-            val = so.elements.items[i];
+        } else if (so.is_map and i < so.elements.items.len) {
+            const e = so.elements.items[i];
+            if (e == .object and e.object.elements.items.len >= 2) {
+                val = switch (kind) {
+                    1 => e.object.elements.items[0], // keys
+                    2 => e, // entries: the stored [key, value] pair
+                    else => e.object.elements.items[1], // values
+                };
+                done = false;
+            }
+        } else if (so.is_set and i < so.elements.items.len) {
+            const e = so.elements.items[i];
+            if (kind == 2) {
+                const pair = (try self.newArray()).object;
+                try pair.elements.append(self.arena, e);
+                try pair.elements.append(self.arena, e);
+                val = .{ .object = pair };
+            } else {
+                val = e;
+            }
             done = false;
         },
         .string => |s| if (i < s.len) {
@@ -17212,11 +17217,12 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         },
         else => {},
     }
-    if (!done) try self.setProp(o, "__i", .{ .number = @floatFromInt(i + advance) });
-    const res = try self.newObject();
-    try self.setMember(res, "value", val);
-    try self.setMember(res, "done", .{ .boolean = done });
-    return res;
+    if (done) {
+        try self.setProp(o, "__done", .{ .boolean = true });
+    } else {
+        try self.setProp(o, "__i", .{ .number = @floatFromInt(i + advance) });
+    }
+    return self.iterResultObj(val, done);
 }
 
 /// Install the `length` and `name` own properties on a function object, per the
@@ -22603,6 +22609,36 @@ test "interpreter Map and Set" {
     try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let s = new Set([1, 2, 2, 3, 3]); s.size")).number);
     try std.testing.expect((try evalSource(a, "let s = new Set(); s.add(7); s.has(7)")).boolean);
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let s = new Set([1, 2, 3]); let t = 0; s.forEach(function (v) { t += v; }); t")).number);
+    try std.testing.expect((try evalSource(a,
+        \\let m = new Map([[1, 11], [2, 22]]);
+        \\let mi = m[Symbol.iterator]();
+        \\let r = mi.next();
+        \\let ok = r.value[0] === 1 && r.value[1] === 11 && r.done === false;
+        \\m.set(3, 33);
+        \\r = mi.next();
+        \\ok = ok && r.value[0] === 2 && r.value[1] === 22 && r.done === false;
+        \\r = mi.next();
+        \\ok = ok && r.value[0] === 3 && r.value[1] === 33 && r.done === false;
+        \\ok = ok && mi.next().done === true;
+        \\m.set(4, 44);
+        \\ok = ok && mi.next().done === true;
+        \\ok
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let s = new Set([1, 2]);
+        \\let si = s.values();
+        \\let ok = si.next().value === 1;
+        \\s.add(3);
+        \\ok = ok && si.next().value === 2;
+        \\ok = ok && si.next().value === 3;
+        \\ok = ok && si.next().done === true;
+        \\s.add(4);
+        \\ok = ok && si.next().done === true;
+        \\let ei = s.entries();
+        \\let e = ei.next().value;
+        \\ok = ok && e[0] === 1 && e[1] === 1;
+        \\ok
+    )).boolean);
 }
 
 test "interpreter regex literals (zig-regex backed)" {
