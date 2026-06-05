@@ -1732,6 +1732,7 @@ test "new import(...) is an early error" {
 }
 
 test "delete of a private member is an early error" {
+    try expectParseError("({}).#x");
     try expectParseError("class C { #x = 1; m() { delete this.#x; } }");
     try expectParseError("class C { #x = 1; m() { delete (this.#x); } }"); // parenthesized (covered)
     // Deleting a public property — even of an object reached through a private
@@ -2806,6 +2807,11 @@ test "eval: direct eval runs in the caller's scope" {
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError; }
+        \\t
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var t = false, o = {};
+        \\try { eval('o.#f'); } catch (e) { t = e instanceof SyntaxError; }
         \\t
     )).boolean);
 }

@@ -1494,6 +1494,7 @@ pub const Parser = struct {
             if (self.match(.dot)) {
                 const name = self.advance();
                 if (name.kind != .identifier and name.kind != .private_name) return ParseError.UnexpectedToken;
+                if (name.kind == .private_name and !self.in_class) return ParseError.UnexpectedToken;
                 e = try self.alloc(.{ .member = .{ .object = e, .property = name.text } });
             } else if (self.match(.question_dot)) {
                 has_optional = true;
