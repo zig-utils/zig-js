@@ -1797,6 +1797,20 @@ test "Math: signed-zero, pow/hypot edge cases, prototype + toStringTag" {
     try std.testing.expect((try evalIn("1 / Math.min(0, -0)")).number == -std.math.inf(f64));
     // round of a value that rounds to zero keeps the operand's sign.
     try std.testing.expect((try evalIn("1 / Math.round(-0.5)")).number == -std.math.inf(f64));
+    try std.testing.expect((try evalIn(
+        \\var x = -(2 / Number.EPSILON - 1);
+        \\Math.round(x) === x
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var calls = 0;
+        \\Math.max(NaN, { valueOf: function() { calls++; } });
+        \\calls === 1
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var calls = 0;
+        \\Math.min(NaN, { valueOf: function() { calls++; } });
+        \\calls === 1
+    )).boolean);
     // pow: NaN exponent and (±1, ±Infinity) are NaN.
     try std.testing.expect(std.math.isNan((try evalIn("Math.pow(1, NaN)")).number));
     try std.testing.expect(std.math.isNan((try evalIn("Math.pow(-1, Infinity)")).number));

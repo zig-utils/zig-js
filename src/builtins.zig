@@ -243,6 +243,7 @@ pub fn mathRound(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     _ = this;
     const n = num1(args);
     if (std.math.isNan(n) or std.math.isInf(n) or n == 0) return .{ .number = n }; // preserves ±0
+    if (@abs(n) >= 0x1.0p52) return .{ .number = n };
     // Halves round toward +Infinity, but a value rounding to zero keeps the
     // sign of the operand: `Math.round(-0.5)` is -0, `Math.round(-0.4)` is -0.
     if (n > 0 and n < 0.5) return .{ .number = 0 };
@@ -283,24 +284,34 @@ pub fn mathMax(ctx: *anyopaque, this: Value, args: []const Value) HostError!Valu
     _ = this;
     const self = interp(ctx);
     var m: f64 = -std.math.inf(f64);
+    var saw_nan = false;
     for (args) |v| {
         const n = try self.toNumberV(v); // ToNumber per element, in order
-        if (std.math.isNan(n)) return .{ .number = n };
+        if (std.math.isNan(n)) {
+            saw_nan = true;
+            continue;
+        }
         // +0 is greater than -0: prefer +0 when both are zero.
         if (n > m or (n == 0 and m == 0 and std.math.signbit(m) and !std.math.signbit(n))) m = n;
     }
+    if (saw_nan) return .{ .number = std.math.nan(f64) };
     return .{ .number = m };
 }
 pub fn mathMin(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
     var m: f64 = std.math.inf(f64);
+    var saw_nan = false;
     for (args) |v| {
         const n = try self.toNumberV(v);
-        if (std.math.isNan(n)) return .{ .number = n };
+        if (std.math.isNan(n)) {
+            saw_nan = true;
+            continue;
+        }
         // -0 is less than +0: prefer -0 when both are zero.
         if (n < m or (n == 0 and m == 0 and !std.math.signbit(m) and std.math.signbit(n))) m = n;
     }
+    if (saw_nan) return .{ .number = std.math.nan(f64) };
     return .{ .number = m };
 }
 
