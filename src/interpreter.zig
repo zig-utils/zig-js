@@ -24,6 +24,7 @@ const Value = value.Value;
 pub const max_call_depth: u32 = 256;
 pub const max_steps: u64 = 100_000_000;
 const max_typed_array_bytes: usize = 1 << 30;
+const max_temporal_instant_ns: i128 = 8_640_000_000_000_000_000_000;
 
 /// Coerce a JS number to a length/index, clamping NaN/negative to 0 and huge
 /// values to a cap (so `@intFromFloat` never panics; oversized allocations then
@@ -18025,11 +18026,31 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         const dv = try self.getProperty(rv, "day");
         if (yv == .undefined or mv == .undefined or dv == .undefined)
             return self.throwError("TypeError", "relativeTo object must have year, month, and day");
+        const y = try temporalIntArg(self, yv, "year");
+        const m = try temporalIntArg(self, mv, "month");
+        const d = try temporalIntArg(self, dv, "day");
+        try checkIsoDate(self, y, m, d);
+        var vals: [6]f64 = .{ 0, 0, 0, 0, 0, 0 };
+        const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
+        const maxes = [_]f64{ 23, 59, 59, 999, 999, 999 };
+        for (names, 0..) |name, i| {
+            const tv = try self.getProperty(rv, name);
+            if (tv != .undefined) {
+                const n = try temporalIntArg(self, tv, name);
+                if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
+                vals[i] = n;
+            }
+        }
         return .{
-            .y = @intFromFloat(@trunc(try self.toNumberV(yv))),
-            .m = @intFromFloat(@trunc(try self.toNumberV(mv))),
-            .d = @intFromFloat(@trunc(try self.toNumberV(dv))),
-            .time_ns = 0,
+            .y = @intFromFloat(y),
+            .m = @intFromFloat(m),
+            .d = @intFromFloat(d),
+            .time_ns = @as(i128, @intFromFloat(vals[0])) * nsPerUnit(.hour) +
+                @as(i128, @intFromFloat(vals[1])) * nsPerUnit(.minute) +
+                @as(i128, @intFromFloat(vals[2])) * nsPerUnit(.second) +
+                @as(i128, @intFromFloat(vals[3])) * nsPerUnit(.millisecond) +
+                @as(i128, @intFromFloat(vals[4])) * nsPerUnit(.microsecond) +
+                @as(i128, @intFromFloat(vals[5])),
         };
     }
     return self.throwError("TypeError", "invalid relativeTo");
@@ -18399,8 +18420,20 @@ fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
         try buf.append(self.arena, 'T');
         if (d[4] != 0) try tfmt(self, &buf, "{d}H", .{@abs(d[4])});
         if (d[5] != 0) try tfmt(self, &buf, "{d}M", .{@abs(d[5])});
-        const frac_ns = @abs(d[7]) * 1_000_000 + @abs(d[8]) * 1_000 + @abs(d[9]);
-        const whole = @abs(d[6]);
+        var whole = @abs(d[6]);
+        var frac_ns = @as(f64, 0);
+        const ms = @abs(d[7]);
+        const us = @abs(d[8]);
+        const ns = @abs(d[9]);
+        if (!std.math.isFinite(ms) or !std.math.isFinite(us) or !std.math.isFinite(ns)) return self.throwError("RangeError", "duration value out of range");
+        whole += @floor(ms / 1_000) + @floor(us / 1_000_000) + @floor(ns / 1_000_000_000);
+        frac_ns += @mod(ms, 1_000) * 1_000_000;
+        frac_ns += @mod(us, 1_000_000) * 1_000;
+        frac_ns += @mod(ns, 1_000_000_000);
+        if (frac_ns >= 1_000_000_000) {
+            whole += @floor(frac_ns / 1_000_000_000);
+            frac_ns = @mod(frac_ns, 1_000_000_000);
+        }
         if (whole != 0 or frac_ns != 0 or (d[4] == 0 and d[5] == 0)) {
             if (frac_ns != 0) {
                 var fb: [9]u8 = undefined;
@@ -19070,6 +19103,7 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
             if (d > dim) d = dim; // constrain
             const epoch = tDaysFromCivil(y, @intCast(m), @intCast(d)) + @as(i64, @intFromFloat(sign * (dur[2] * 7 + dur[3])));
             const c = tCivilFromDays(epoch);
+            try checkIsoDate(self, @floatFromInt(c.y), @floatFromInt(c.m), @floatFromInt(c.d));
             const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
             o.temporal.?.year = @intCast(c.y);
             o.temporal.?.month = c.m;
@@ -19539,6 +19573,7 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
             var total: i64 = (@as(i64, t.year) * 12 + (t.month - 1)) + @as(i64, @intFromFloat(sign * (dur[0] * 12 + dur[1])));
             const ny = @divFloor(total, 12);
+            if (ny < -271821 or ny > 275760) return self.throwError("RangeError", "year out of range");
             total = @mod(total, 12);
             return makeYearMonth(self, ny, @intCast(total + 1));
         }
@@ -20247,6 +20282,7 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
             const day_carry = @divFloor(time_ns, 86_400_000_000_000);
             const epoch = tDaysFromCivil(c.y, c.m, c.d) + @as(i64, @intCast(day_carry));
             const cc = tCivilFromDays(epoch);
+            try checkIsoDate(self, @floatFromInt(cc.y), @floatFromInt(cc.m), @floatFromInt(cc.d));
             const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
             o.temporal.?.year = @intCast(cc.y);
             o.temporal.?.month = cc.m;
@@ -20655,6 +20691,8 @@ fn temporalInstantFromEpochFn(comptime unit_ns: i128) value.NativeFn {
                 o.temporal.?.epoch_ns = bv.object.bigint;
             } else {
                 const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
+                const max_units: f64 = @floatFromInt(@divFloor(max_temporal_instant_ns, unit_ns));
+                if (!std.math.isFinite(n) or @trunc(n) != n or @abs(n) > max_units) return self.throwError("RangeError", "epoch value out of range");
                 o.temporal.?.epoch_ns = @as(i128, @intFromFloat(@trunc(n))) * unit_ns;
             }
             return .{ .object = o };
