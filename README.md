@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 33,886 / 41,664 (81.3%)**, with **135 parse failures**,
-> **7,643 runtime failures**, **0 host failures**, and **NEGATIVE 3,180 / 4,668 (68.1%)**.
+> The latest full run passes **VALID 33,898 / 41,664 (81.4%)**, with **135 parse failures**,
+> **7,631 runtime failures**, **0 host failures**, and **NEGATIVE 3,180 / 4,668 (68.1%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **33,886 / 41,664 (81.3%)** |
+| **valid** | can we run the program? (scored corpus) | **33,898 / 41,664 (81.4%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,180 / 4,668 (68.1%) |
 
 The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
@@ -77,8 +77,8 @@ Per area (valid):
 | `WeakMap` | 141 / 141 (100%) | `WeakRef` | 25 / 29 (86.2%) |
 | `FinalizationRegistry` | 40 / 47 (85.1%) | `Temporal` | 3,209 / 4,603 (69.7%) |
 | `intl402` | 1,427 / 3,341 (42.7%) | `annexB` | 461 / 1,070 (43.1%) |
-| `staging` | 599 / 991 (60.4%) | `SharedArrayBuffer` | 88 / 104 (84.6%) |
-| `parseFloat` | 54 / 54 (100%) | `parseInt` | 45 / 55 (81.8%) |
+| `staging` | 601 / 991 (60.6%) | `SharedArrayBuffer` | 88 / 104 (84.6%) |
+| `parseFloat` | 54 / 54 (100%) | `parseInt` | 55 / 55 (100%) |
 | `decodeURI` | 54 / 55 (98.2%) | `decodeURIComponent` | 55 / 56 (98.2%) |
 | `encodeURI` | 29 / 31 (93.5%) | `encodeURIComponent` | 29 / 31 (93.5%) |
 | `ArrayBuffer` | 196 / 221 (88.7%) | `ThrowTypeError` | 14 / 14 (100%) |

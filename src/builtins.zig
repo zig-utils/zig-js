@@ -180,11 +180,18 @@ pub fn parseFloatFn(ctx: *anyopaque, this: Value, args: []const Value) HostError
 
 pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
-    const s = try arg(args, 0).toString(interp(ctx).arena);
-    var radix: u8 = 10;
-    if (args.len >= 2) {
-        const r = arg(args, 1).toNumber();
-        if (!std.math.isNan(r) and r >= 2 and r <= 36) radix = @intFromFloat(r);
+    const self = interp(ctx);
+    const s_prim = try self.toPrimitive(arg(args, 0), .string);
+    const s = try s_prim.toString(self.arena);
+    var radix: i32 = 10;
+    var strip_prefix = true;
+    if (args.len >= 2 and args[1] != .undefined) {
+        const r = @as(i32, @bitCast(Value.uint32FromF64(try self.toNumberV(args[1]))));
+        if (r != 0) {
+            if (r < 2 or r > 36) return .{ .number = std.math.nan(f64) };
+            radix = r;
+            strip_prefix = r == 16;
+        }
     }
     // Skip leading StrWhiteSpace (the full WhiteSpace+LineTerminator set, incl.
     // U+2028/U+2029 and non-ASCII spaces), not just the four ASCII blanks.
@@ -194,7 +201,7 @@ pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
         neg = s[i] == '-';
         i += 1;
     }
-    if ((radix == 16 or args.len < 2) and i + 1 < s.len and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
+    if (strip_prefix and i + 1 < s.len and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
         radix = 16;
         i += 2;
     }
@@ -202,7 +209,7 @@ pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
     var any = false;
     while (i < s.len) : (i += 1) {
         const d = digitValue(s[i]);
-        if (d == null or d.? >= radix) break;
+        if (d == null or @as(i32, d.?) >= radix) break;
         acc = acc * @as(f64, @floatFromInt(radix)) + @as(f64, @floatFromInt(d.?));
         any = true;
     }

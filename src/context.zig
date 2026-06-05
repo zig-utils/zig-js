@@ -2142,6 +2142,15 @@ test "parseFloat: Unicode whitespace, Infinity, and no numeric separators" {
     try std.testing.expectError(error.Throw, evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { throw 'error'; } })"));
 }
 
+test "parseInt radix coercion follows ToInt32" {
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', 4294967298)")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', -4294967294)")).number);
+    try std.testing.expect(std.math.isNan((try evalIn("parseInt('0', 1)")).number));
+    try std.testing.expect(std.math.isNan((try evalIn("parseInt('0', 37)")).number));
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('0x1', 0)")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', { valueOf: function() { return 2; }, toString: function() { throw 'error'; } })")).number);
+}
+
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
     try std.testing.expect((try evalIn("isFinite('0')")).boolean);
