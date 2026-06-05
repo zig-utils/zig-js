@@ -6810,8 +6810,8 @@ pub const Interpreter = struct {
         // `!`/`void` work as for any value.
         if (v == .object and v.object.is_bigint and (op == .neg or op == .pos or op == .bit_not)) {
             return switch (op) {
-                .neg => try self.makeBigInt(-%v.object.bigint),
-                .bit_not => try self.makeBigInt(~v.object.bigint),
+                .neg => try negateBigIntObject(self, v.object),
+                .bit_not => try bitNotBigIntObject(self, v.object),
                 .pos => self.throwError("TypeError", "Cannot convert a BigInt value to a number"),
                 else => unreachable,
             };
@@ -8532,6 +8532,46 @@ fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     return self.throwError("TypeError", "BigInt.prototype.valueOf requires that 'this' be a BigInt");
 }
 
+fn managedBigIntFromObject(arena: std.mem.Allocator, big: *value.Object) error{OutOfMemory}!std.math.big.int.Managed {
+    var out = try std.math.big.int.Managed.init(arena);
+    if (big.bigint_text) |s| {
+        out.setString(10, s) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+    } else {
+        try out.set(big.bigint);
+    }
+    return out;
+}
+
+fn makeBigIntFromManaged(self: *Interpreter, managed: *const std.math.big.int.Managed) EvalError!Value {
+    if (managed.toInt(i128)) |small| {
+        return self.makeBigInt(small);
+    } else |_| {}
+    const text = managed.toString(self.arena, 10, .lower) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
+    return self.makeBigIntText(text);
+}
+
+fn negateBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {
+    if (big.bigint_text == null) return self.makeBigInt(-%big.bigint);
+    var input = try managedBigIntFromObject(self.arena, big);
+    input.negate();
+    return makeBigIntFromManaged(self, &input);
+}
+
+fn bitNotBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {
+    if (big.bigint_text == null) return self.makeBigInt(~big.bigint);
+    var input = try managedBigIntFromObject(self.arena, big);
+    input.negate();
+    var out = try std.math.big.int.Managed.init(self.arena);
+    try out.addScalar(&input, -1);
+    return makeBigIntFromManaged(self, &out);
+}
+
 /// `BigInt.asIntN(bits, x)` / `asUintN(bits, x)` — wrap into a 2's-complement
 /// signed / unsigned `bits`-bit integer.
 fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
@@ -8547,20 +8587,13 @@ fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
             if (bits_int < 0 or bits_int > 9007199254740991.0) return self.throwError("RangeError", "BigInt.asIntN bit count is out of range");
             const bits_count: u64 = @intFromFloat(bits_int);
             const xv = try self.toBigIntValueImpl(if (args.len > 1) args[1] else .undefined, false);
-            const x = xv.object.bigint;
             if (bits_count == 0) return self.makeBigInt(if (signed) 0 else 0);
-            // For a field at least as wide as the i128 storage, a signed result is
-            // x unchanged and a non-negative unsigned result is x unchanged (a
-            // negative value in a ≥128-bit unsigned field exceeds i128 and isn't
-            // modeled).
-            if (bits_count >= 128) return self.makeBigInt(x);
-            const bits: u7 = @intCast(bits_count);
-            const mask: u128 = (@as(u128, 1) << bits) - 1;
-            var m: u128 = @as(u128, @bitCast(x)) & mask; // low `bits` bits = x mod 2^bits
-            if (signed and (m & (@as(u128, 1) << (bits - 1))) != 0) {
-                m |= ~mask; // sign-extend the high bits → a negative i128
-            }
-            return self.makeBigInt(@bitCast(m));
+            const bit_count: usize = std.math.cast(usize, bits_count) orelse
+                return self.throwError("RangeError", "BigInt.asIntN bit count is out of range");
+            var input = try managedBigIntFromObject(self.arena, xv.object);
+            var truncated = try std.math.big.int.Managed.init(self.arena);
+            try truncated.truncate(&input, if (signed) .signed else .unsigned, bit_count);
+            return makeBigIntFromManaged(self, &truncated);
         }
     }.call;
 }

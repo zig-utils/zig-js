@@ -1918,6 +1918,30 @@ test "Object boxes BigInt primitives through BigInt.prototype" {
     )).boolean);
 }
 
+test "BigInt.asIntN/asUintN wrap text-backed BigInts" {
+    try std.testing.expect((try evalIn(
+        \\-0x100000000000000000000000000000000n === BigInt('-340282366920938463463374607431768211456')
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\~0x100000000000000000000000000000000n === BigInt('-340282366920938463463374607431768211457')
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\BigInt.asUintN(200,
+        \\  0xbffffffffffffffffffffffffffffffffffffffffffffffffffn
+        \\) === 0x0ffffffffffffffffffffffffffffffffffffffffffffffffffn
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\BigInt.asIntN(200,
+        \\  0xcffffffffffffffffffffffffffffffffffffffffffffffffffn
+        \\) === -1n
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\BigInt.asIntN(201,
+        \\  0xc89e081df68b65fedb32cffea660e55df9605650a603ad5fc54n
+        \\) === 0x89e081df68b65fedb32cffea660e55df9605650a603ad5fc54n
+    )).boolean);
+}
+
 test "__lookupGetter__/__lookupSetter__ walk the chain, proxy-aware" {
     // Returns the accessor's getter; a data property yields undefined.
     try std.testing.expect((try evalIn("var o = { get x() { return 1; } }; o.__lookupGetter__('x') === Object.getOwnPropertyDescriptor(o, 'x').get")).boolean);
