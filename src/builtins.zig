@@ -1637,6 +1637,7 @@ pub fn stringFromCodePoint(ctx: *anyopaque, this: Value, args: []const Value) Ho
     _ = this;
     const self = interp(ctx);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.ensureTotalCapacity(self.arena, args.len * 4);
     for (args) |c| {
         const n = c.toNumber();
         if (std.math.isNan(n) or @trunc(n) != n or n < 0 or n > 0x10FFFF)
