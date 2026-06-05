@@ -1194,8 +1194,16 @@ test "built-in prototypes carry constructor; Boolean.prototype exists" {
     // Boolean.prototype now exists with constructor + generic toString/valueOf.
     try expectEvalStr("object", "typeof Boolean.prototype");
     try std.testing.expect((try evalIn("Boolean.prototype.constructor === Boolean")).boolean);
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Boolean)")).boolean);
+    try std.testing.expect((try evalIn("Object.prototype.isPrototypeOf(Boolean.prototype)")).boolean);
     try expectEvalStr("true", "Boolean.prototype.toString.call(true)");
     try std.testing.expect(!(try evalIn("Boolean.prototype.valueOf.call(false)")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\var C = new other.Function();
+        \\C.prototype = null;
+        \\Object.getPrototypeOf(Reflect.construct(Boolean, [], C)) === other.Boolean.prototype
+    )).boolean);
 }
 
 test "Symbol.prototype: toString / valueOf / chain" {

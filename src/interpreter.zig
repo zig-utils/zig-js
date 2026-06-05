@@ -2522,7 +2522,15 @@ pub const Interpreter = struct {
     pub fn makeWrapper(self: *Interpreter, p: Value) EvalError!Value {
         const o = try self.arena.create(value.Object);
         o.* = .{ .prim = p };
-        if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+        if (self.new_target == .object) {
+            const intrinsic: []const u8 = switch (p) {
+                .string => "String",
+                .number => "Number",
+                .boolean => "Boolean",
+                else => "Object",
+            };
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, intrinsic);
+        }
         return .{ .object = o };
     }
 
@@ -5122,6 +5130,65 @@ pub const Interpreter = struct {
     /// Dispatch `Array.prototype` / `String.prototype` methods (which aren't
     /// stored as own properties). Returns null when `name` isn't a recognized
     /// builtin for `recv`, so the caller falls back to a property lookup + call.
+    pub fn objectPrototypeMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
+        const o = try self.toObject(recv);
+        if (eq(name, "hasOwnProperty")) {
+            const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
+            if (isModuleNs(o)) return Value{ .boolean = (try moduleNsDesc(self, o, k)) != .undefined };
+            return Value{ .boolean = objectHasOwn(o, k) };
+        }
+        if (eq(name, "propertyIsEnumerable")) {
+            const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
+            if (isModuleNs(o)) {
+                _ = try moduleNsDesc(self, o, k);
+                return Value{ .boolean = moduleNsEnumerable(o, k) };
+            }
+            const enumerable = objectHasOwn(o, k) and o.getAttr(k).enumerable and
+                !(o.is_array and std.mem.eql(u8, k, "length"));
+            return Value{ .boolean = enumerable };
+        }
+        if (eq(name, "isPrototypeOf")) {
+            var cur: ?*value.Object = if (args.len > 0 and args[0] == .object) args[0].object.proto else null;
+            while (cur) |c| {
+                if (c == o) return Value{ .boolean = true };
+                cur = c.proto;
+            }
+            return Value{ .boolean = false };
+        }
+        if (eq(name, "__defineGetter__") or eq(name, "__defineSetter__")) {
+            const f = arg(args, 1);
+            if (!f.isCallable()) return self.throwError("TypeError", "Object.prototype.__define[GS]etter__: Expecting function");
+            const key = try self.keyOf(arg0(args));
+            const desc = (try self.newObject()).object;
+            try desc.setOwn(self.arena, self.root_shape, if (eq(name, "__defineGetter__")) "get" else "set", f);
+            try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+            try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+            try builtins.defineOne(self, o, key, desc);
+            return Value.undefined;
+        }
+        if (eq(name, "__lookupGetter__") or eq(name, "__lookupSetter__")) {
+            const key = try self.keyOf(arg0(args));
+            const key_v = self.keyToValue(key);
+            const want_get = eq(name, "__lookupGetter__");
+            var cur: Value = recv;
+            while (cur == .object) {
+                const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ cur, key_v });
+                if (desc == .object) {
+                    const d = desc.object;
+                    if (d.getOwn("get") != null or d.getOwn("set") != null)
+                        return (if (want_get) d.getOwn("get") else d.getOwn("set")) orelse Value.undefined;
+                    return Value.undefined;
+                }
+                const c = cur.object;
+                cur = if (c.proxy_handler != null or c.proxy_revoked)
+                    try self.proxyGetProto(c)
+                else if (c.proto) |p| Value{ .object = p } else Value.null;
+            }
+            return Value.undefined;
+        }
+        return null;
+    }
+
     pub fn builtinMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
         switch (recv) {
             .object => |o| {
@@ -16905,6 +16972,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // and its `constructor`/`toString`/`valueOf` are still observable).
     if (env.get("Boolean")) |bv| {
         if (bv == .object) {
+            bv.object.proto = func_proto;
             const boolean_proto = try a.create(value.Object);
             // Boolean.prototype is a Boolean Exotic Object with [[BooleanData]]
             // = false, so brand-checked methods (`Boolean.prototype.toString()`,
@@ -17461,6 +17529,7 @@ fn protoMethod(comptime name: []const u8) value.NativeFn {
             // is installed separately, not through here.
             if (this == .null or this == .undefined)
                 return self.throwError("TypeError", "Cannot convert undefined or null to object");
+            if (try self.objectPrototypeMethod(this, name, args)) |r| return r;
             return (try self.builtinMethod(this, name, args)) orelse .undefined;
         }
     }.call;
