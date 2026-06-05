@@ -17151,6 +17151,29 @@ fn utf8SeqLen(s: []const u8, i: usize) usize {
     return if (std.unicode.utf8ValidateSlice(s[i .. i + n])) n else 1;
 }
 
+fn isHighSurrogate(cp: u21) bool {
+    return cp >= 0xD800 and cp <= 0xDBFF;
+}
+
+fn isLowSurrogate(cp: u21) bool {
+    return cp >= 0xDC00 and cp <= 0xDFFF;
+}
+
+/// String Iterator operates over JS UTF-16 code points. Most engine strings are
+/// UTF-8, but lone surrogates are preserved as WTF-8; a high+low WTF-8 pair
+/// created by concatenation must be yielded as one iteration result.
+fn stringIteratorSeqLen(s: []const u8, i: usize) usize {
+    if (wtf8SurrogateAt(s, i)) |first| {
+        if (isHighSurrogate(first)) {
+            if (wtf8SurrogateAt(s, i + 3)) |second| {
+                if (isLowSurrogate(second)) return 6;
+            }
+        }
+        return 3;
+    }
+    return utf8SeqLen(s, i);
+}
+
 fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -17180,9 +17203,10 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
             done = false;
         },
         .string => |s| if (i < s.len) {
-            // A String iterator yields one Unicode code point (1–4 UTF-8 bytes),
-            // not one byte — `for (c of "é")` must yield "é", not its lead byte.
-            advance = utf8SeqLen(s, i);
+            // A String iterator yields one JS code point, not one byte. That is
+            // normally one UTF-8 scalar, but can also be a WTF-8 surrogate pair
+            // when two UTF-16 code units were concatenated at runtime.
+            advance = stringIteratorSeqLen(s, i);
             val = .{ .string = try self.arena.dupe(u8, s[i .. i + advance]) };
             done = false;
         },
@@ -22515,6 +22539,21 @@ test "interpreter String.prototype methods" {
     try std.testing.expectEqualStrings("abab", (try evalSource(a, "'ab'.repeat(2)")).string);
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + 'a-b-c'.split('-')")).string);
     try std.testing.expectEqualStrings("hi", (try evalSource(a, "'  hi  '.trim()")).string);
+    try std.testing.expect((try evalSource(a,
+        \\let lo = '\uD834';
+        \\let hi = '\uDF06';
+        \\let pair = lo + hi;
+        \\let it = ('a' + pair + 'b' + lo + pair + hi + lo)[Symbol.iterator]();
+        \\let ok = it.next().value === 'a';
+        \\ok = ok && it.next().value === pair;
+        \\ok = ok && it.next().value === 'b';
+        \\ok = ok && it.next().value === lo;
+        \\ok = ok && it.next().value === pair;
+        \\ok = ok && it.next().value === hi;
+        \\ok = ok && it.next().value === lo;
+        \\ok = ok && it.next().done === true;
+        \\ok
+    )).boolean);
 }
 
 test "interpreter numeric literals (separators, binary/octal) and optional chaining" {
