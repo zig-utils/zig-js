@@ -1,23 +1,21 @@
 # zig-js
 
-A **homegrown JavaScript engine in pure Zig** — and a **drop-in replacement for the
-JavaScriptCore C API**. No JSC, no V8, no external C libraries.
+A **homegrown JavaScript engine in pure Zig** and a **JavaScriptCore C API-compatible**
+runtime library. No JSC, no V8, no external C libraries.
 
-It exists to give [`craft`](../../Tools/craft)'s "Loom" web engine and
-[`Home/lang`](../../Home/lang)'s Bun-port runtime a single, dependency-free JS engine they
-both own. lang's `packages/runtime/src/jsc/extern_fns.zig` declares the system JavaScriptCore
-C API; link `zig-js` instead and those call sites work unchanged.
+`zig-js` is meant to be a small, embeddable JavaScript engine for Zig applications, tools,
+experiments, and runtimes that want to own their JS stack. It can be imported directly as a Zig
+module or linked in place of `JavaScriptCore.framework` when a host already targets the
+JavaScriptCore C API.
 
-> Status: **maturing.** A spec-tracking engine with two execution tiers — a tree-walking
+> Status: **maturing.** A spec-tracking engine with two execution tiers: a tree-walking
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
-> hot subset *and* generators / async functions / async generators. It runs the **real
-> tc39/test262 corpus** against the upstream harness (`sta.js` + `assert.js` + `includes:`):
-> `zig build test262` now scores the **entire** corpus — `language/`, `annexB/`, `intl402/`,
-> `staging/`, and every `built-ins/*` area — and currently passes **VALID 33,231 / 48,411 (68.6%)**
-> (including ES modules + top-level await), while `zig build conformance` keeps a 33/33
-> always-green smoke suite. The headline is dragged down by whole subsystems that are only
-> partially implemented (Temporal, Intl/`intl402`); the implemented areas score
-> far higher — see the per-area table below.
+> hot subset plus generators, async functions, and async generators. It runs the **real
+> tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
+> The latest full run passes **VALID 33,664 / 41,664 (80.8%)**, with **156 parse failures**,
+> **7,844 runtime failures**, **0 host failures**, and **NEGATIVE 3,180 / 4,668 (68.1%)**.
+> `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
+> skipped by the runner while module, async-harness, and include-loading support is completed.
 >
 > Implemented language + runtime: closures, arrow functions, **classes** (fields, private members,
 > getters/setters, `static`, `super`, derived constructors), **destructuring** (array/object,
@@ -45,46 +43,40 @@ C API; link `zig-js` instead and those call sites work unchanged.
 > Tier-2 nearly doubled compute/call-heavy code; tier-3 brought object-property churn from the
 > 1.33× laggard up to 1.73× (objects no longer allocate a per-instance hashmap, and repeat
 > property access is an inline-cache hit). The tree-walker remains the correctness oracle and the
-> fallback for not-yet-lowered constructs. See craft's `docs/architecture/web-engine-plan.md`.
+> fallback for not-yet-lowered constructs.
 
 ## Conformance progress
 
 Measured by `zig build test262` against the pinned [tc39/test262](https://github.com/tc39/test262)
-submodule, over `language/` plus the implemented built-in subtrees. The score is split on two
-honest axes — **valid** tests measure whether we can *run* a program; **negative** tests measure
-*strictness* (rejecting invalid input). Mixing them flatters a weak parser (it "passes" negatives by
-failing to parse valid code too), so they're kept apart:
+submodule. The score is split on two honest axes: **valid** tests measure whether we can *run* a
+program; **negative** tests measure *strictness* (rejecting invalid input). Mixing them flatters a
+weak parser because it can "pass" negatives by failing to parse valid code too, so they're kept
+apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (whole corpus) | **33,231 / 48,411 (68.6%)** |
-| negative | do we reject invalid input? (early errors — partial) | 1,717 / 4,669 (36.8%) |
+| **valid** | can we run the program? (scored corpus) | **33,664 / 41,664 (80.8%)** |
+| negative | do we reject invalid input? (early errors - partial) | 3,180 / 4,668 (68.1%) |
 
-The whole-corpus rate is held down by partially-implemented subsystems (Temporal 958/4603,
-`intl402` 13.4% — both lacking CLDR/time-zone data and the harder calendar arithmetic); the
-implemented areas score much higher.
+The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
+protocols, or unloadable includes. The valid failures are concentrated in partially implemented
+subsystems such as `intl402`, Annex B behavior, Temporal edge cases, and the remaining built-in
+surface.
 
 Per area (valid):
 
-| area | passing | | area | passing |
-| ---- | ------: | - | ---- | ------: |
-| `language` (incl. modules) | 16,477 / 19,104 (86.2%) | | `Math` | 299 / 327 (91.4%) |
-| `Object` | 3,135 / 3,411 (91.9%) | | `Date` | 520 / 594 (87.5%) |
-| `Array` | 2,545 / 3,081 (82.6%) | | `Function` | 449 / 509 (88.2%) |
-| `String` | 1,047 / 1,223 (85.6%) | | `Promise` | 561 / 677 (82.9%) |
-| `Number` | 319 / 340 (93.8%) | | `BigInt` | 72 / 77 (93.5%) |
-| `RegExp` | 704 / 1,687 (41.7%) | | `TypedArray` | 952 / 1,446 (65.8%) |
-| `DataView` | 483 / 561 (86.1%) | | `Iterator` | 251 / 514 (48.8%) |
-| `Temporal` | 958 / 4,603 (20.8%) | | `intl402` | 448 / 3,341 (13.4%) |
-| `Map`/`Set` | 87–90% | | `Reflect`/`Proxy` | 48–70% |
+| area | passing | area | passing |
+| ---- | ------: | ---- | ------: |
+| `language` | 12,655 / 14,285 (88.6%) | `Object` | 3,203 / 3,411 (93.9%) |
+| `Array` | 2,594 / 2,991 (86.7%) | `RegExp` | 1,459 / 1,687 (86.5%) |
+| `String` | 1,063 / 1,223 (86.9%) | `TypedArray` | 1,207 / 1,446 (83.5%) |
+| `Temporal` | 3,209 / 4,603 (69.7%) | `intl402` | 1,426 / 3,341 (42.7%) |
+| `annexB` | 461 / 1,070 (43.1%) | `staging` | 571 / 991 (57.6%) |
+| `SharedArrayBuffer` | 88 / 104 (84.6%) | `ThrowTypeError` | 14 / 14 (100%) |
 
-> `zig build test262` prints the per-subtree pass rate plus a `parse-fail` / `runtime-fail` split so
-> the work stays data-driven. The runtime drives the **async** corpus (the `$DONE` protocol) and the
-> **ES-module** corpus (parse → link → dependency-order evaluation, live bindings, live namespace
-> objects, top-level await), and scores both. The biggest remaining gaps are whole subsystems:
-> **Temporal** calendar/time-zone arithmetic (ZonedDateTime, `until`/`since`/`round`), **Intl**
-> locale data (CLDR), async-generator helper identity, and full Unicode case mapping. Bump the
-> corpus with `git submodule update --remote test262`.
+> `zig build test262` prints each subtree's pass rate plus `parse-fail`, `runtime-fail`, and
+> `host-fail` counts so the work stays data-driven. Bump the corpus with
+> `git submodule update --remote test262`.
 
 ## Two ways to use it
 
@@ -122,7 +114,7 @@ Implemented C-API symbols: context lifecycle (`JSGlobalContextCreate/Release/Ret
 `JSObjectCallAsFunction`/`CallAsConstructor` drive the interpreter, so JS functions and the
 built-in `Error` constructors are callable across the C boundary; thrown JS values surface as
 the C-API `exception` out-param. `JSObjectMakeDeferredPromise` raises a `NotImplemented`
-exception until promises land.
+exception until deferred-promise C API plumbing lands.
 
 ## Language coverage
 
@@ -177,6 +169,38 @@ are *only* on the VM (their bodies must suspend/resume), driven by the microtask
 - `src/jsstring.zig` — refcounted `JSStringRef` backing
 - `src/c_api.zig` — the exported JavaScriptCore C-API symbols
 - `src/root.zig` — `@import("js")` entry point
+
+## Multithreading roadmap
+
+Today, a `Context` is single-thread-affine: the interpreter, VM, global object graph, environments,
+microtask queue, and arena-backed allocation model assume one mutating thread. The first
+multithreaded target should be isolated JavaScript agents, not shared mutable ordinary objects.
+
+To get there:
+
+- **Thread-affinity contract**: make `Context` ownership explicit, reject accidental cross-thread
+  use, and document which C API handles are local to an agent.
+- **Worker agents**: run one `Context` per OS thread with its own global object, realms, job queues,
+  allocator state, and module loader hooks.
+- **Structured clone and transfer**: implement `structuredClone`, message passing, ArrayBuffer
+  transfer/detach, and the host hooks needed for worker lifecycle and cancellation.
+- **Shared memory baseline**: finish `SharedArrayBuffer`, typed-array views over shared storage,
+  `Atomics`, `Atomics.wait`/`notify`, and the real test262 `$262.agent` harness.
+- **Heap and lifetime model**: replace or contain the current arena model before shared lifetimes
+  leak between agents. A future GC needs clear rooting, write-barrier, and cross-agent ownership
+  rules.
+- **Scheduler and queues**: separate per-agent microtask queues from host task queues, define
+  blocking behavior for waits, and keep promise jobs deterministic inside each agent.
+- **Concurrency tests**: add stress tests for transfer/detach races, shared typed-array atomics,
+  worker teardown, and host callback reentrancy before optimizing.
+
+The [TC39 structs proposal](https://github.com/tc39/proposal-structs) is worth tracking here. It is
+currently Stage 2 and proposes fixed-layout structs, shared structs, and higher-level
+synchronization primitives (`Atomics.Mutex` and `Atomics.Condition`). Shared structs are especially
+relevant because they are designed to be communicated between agents without copying while only
+referencing primitives or other shared structs. That makes them a good future data model for
+parallel JS, but they should come after the baseline worker, structured clone, `SharedArrayBuffer`,
+and `Atomics` stack is correct.
 
 ## Build & test
 
