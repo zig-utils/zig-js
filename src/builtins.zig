@@ -2183,36 +2183,57 @@ fn hexVal(c: u8) ?u8 {
     };
 }
 
+fn isHighSurrogateCp(cp: u21) bool {
+    return cp >= 0xD800 and cp <= 0xDBFF;
+}
+
+fn isLowSurrogateCp(cp: u21) bool {
+    return cp >= 0xDC00 and cp <= 0xDFFF;
+}
+
+fn appendUriEscapedByte(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), b: u8) std.mem.Allocator.Error!void {
+    try buf.append(arena, '%');
+    try buf.append(arena, hexDigit(b >> 4));
+    try buf.append(arena, hexDigit(b & 0xF));
+}
+
+fn appendUriEscapedCodePoint(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u21) std.mem.Allocator.Error!void {
+    var tmp: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &tmp) catch unreachable;
+    for (tmp[0..n]) |b| try appendUriEscapedByte(arena, buf, b);
+}
+
 /// Encode (24.5.2.1): ToString, then percent-escape every byte not in the
 /// `unescaped` set. `component` excludes the reserved set (encodeURIComponent).
 fn uriEncode(self: *Interpreter, v: Value, comptime component: bool) HostError!Value {
     const s = try self.toStringV(v);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
-    while (i < s.len) : (i += 1) {
+    while (i < s.len) {
         const b = s[i];
         const keep = b < 0x80 and (std.mem.indexOfScalar(u8, uri_unreserved, b) != null or
             (!component and std.mem.indexOfScalar(u8, uri_reserved, b) != null));
         if (keep) {
             try buf.append(self.arena, b);
-        } else {
-            // A non-ASCII byte must be part of a well-formed UTF-8 sequence; a
-            // lone/invalid byte is a URIError.
-            if (b >= 0x80) {
+            i += 1;
+        } else if (b >= 0x80) {
+            if (wtf8SurrogateAt(s, i)) |lead| {
+                if (!isHighSurrogateCp(lead)) return self.throwError("URIError", "URI malformed");
+                const trail = wtf8SurrogateAt(s, i + 3) orelse return self.throwError("URIError", "URI malformed");
+                if (!isLowSurrogateCp(trail)) return self.throwError("URIError", "URI malformed");
+                const cp: u21 = 0x10000 + ((lead - 0xD800) << 10) + (trail - 0xDC00);
+                try appendUriEscapedCodePoint(self.arena, &buf, cp);
+                i += 6;
+            } else {
                 const n = std.unicode.utf8ByteSequenceLength(b) catch return self.throwError("URIError", "URI malformed");
                 if (i + n > s.len) return self.throwError("URIError", "URI malformed");
                 _ = std.unicode.utf8Decode(s[i .. i + n]) catch return self.throwError("URIError", "URI malformed");
-                for (s[i .. i + n]) |bb| {
-                    try buf.append(self.arena, '%');
-                    try buf.append(self.arena, hexDigit(bb >> 4));
-                    try buf.append(self.arena, hexDigit(bb & 0xF));
-                }
-                i += n - 1;
-            } else {
-                try buf.append(self.arena, '%');
-                try buf.append(self.arena, hexDigit(b >> 4));
-                try buf.append(self.arena, hexDigit(b & 0xF));
+                for (s[i .. i + n]) |bb| try appendUriEscapedByte(self.arena, &buf, bb);
+                i += n;
             }
+        } else {
+            try appendUriEscapedByte(self.arena, &buf, b);
+            i += 1;
         }
     }
     return .{ .string = try buf.toOwnedSlice(self.arena) };
@@ -2258,8 +2279,15 @@ fn uriDecode(self: *Interpreter, v: Value, comptime full: bool) HostError!Value 
                 bytes[k] = bk;
                 j += 3;
             }
-            _ = std.unicode.utf8Decode(bytes[0..n]) catch return self.throwError("URIError", "URI malformed");
-            try buf.appendSlice(self.arena, bytes[0..n]);
+            const cp = std.unicode.utf8Decode(bytes[0..n]) catch return self.throwError("URIError", "URI malformed");
+            if (cp > 0xFFFF) {
+                const high: u21 = 0xD800 + ((cp - 0x10000) >> 10);
+                const low: u21 = 0xDC00 + ((cp - 0x10000) & 0x3FF);
+                try appendCodePointWtf8(self.arena, &buf, high);
+                try appendCodePointWtf8(self.arena, &buf, low);
+            } else {
+                try buf.appendSlice(self.arena, bytes[0..n]);
+            }
             i = j;
         }
     }

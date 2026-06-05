@@ -538,7 +538,6 @@ test "String generics + .constructor + match/search" {
     try expectEvalStr("abc", "'abc'.normalize()");
 }
 
-
 test "Array.prototype generics on array-likes" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\var o = { length: 3, 0: 1, 1: 2, 2: 3 };
@@ -2149,6 +2148,15 @@ test "parseInt radix coercion follows ToInt32" {
     try std.testing.expect(std.math.isNan((try evalIn("parseInt('0', 37)")).number));
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('0x1', 0)")).number);
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', { valueOf: function() { return 2; }, toString: function() { throw 'error'; } })")).number);
+}
+
+test "URI encode/decode handles surrogate pairs" {
+    try expectEvalStr("%F0%90%80%80", "encodeURI(String.fromCharCode(0xD800, 0xDC00))");
+    try expectEvalStr("%F4%8F%BF%BF", "encodeURIComponent(String.fromCharCode(0xDBFF, 0xDFFF))");
+    try std.testing.expect((try evalIn("decodeURI('%F0%90%80%80') === String.fromCharCode(0xD800, 0xDC00)")).boolean);
+    try std.testing.expect((try evalIn("decodeURIComponent('%F4%8F%BF%BF') === String.fromCharCode(0xDBFF, 0xDFFF)")).boolean);
+    try std.testing.expectError(error.Throw, evalIn("encodeURI(String.fromCharCode(0xD800))"));
+    try std.testing.expectError(error.Throw, evalIn("encodeURIComponent(String.fromCharCode(0xDC00))"));
 }
 
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
