@@ -1819,11 +1819,12 @@ pub const Interpreter = struct {
         // { writable: false, enumerable: false, configurable: true }.
         const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
         const tgt_len = (try self.getProperty(.{ .object = target }, "length")).toNumber();
-        const bound_len = if (std.math.isNan(tgt_len)) 0 else blk: {
-            const n = @as(i64, @intFromFloat(@trunc(tgt_len))) - @as(i64, @intCast(bound_args.len));
-            break :blk if (n < 0) @as(i64, 0) else n;
+        const bound_len: f64 = if (std.math.isNan(tgt_len)) 0 else blk: {
+            const len_int = @trunc(tgt_len);
+            const bound_count: f64 = @floatFromInt(bound_args.len);
+            break :blk if (len_int <= bound_count) 0 else len_int - bound_count;
         };
-        try obj.setOwn(self.arena, self.root_shape, "length", .{ .number = @floatFromInt(bound_len) });
+        try obj.setOwn(self.arena, self.root_shape, "length", .{ .number = bound_len });
         try obj.setAttr(self.arena, "length", ro_attr);
         const tgt_name = try self.getProperty(.{ .object = target }, "name");
         const base_name = if (tgt_name == .string) tgt_name.string else "";
