@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 33,763 / 41,664 (81.0%)**, with **135 parse failures**,
-> **7,766 runtime failures**, **0 host failures**, and **NEGATIVE 3,180 / 4,668 (68.1%)**.
+> The latest full run passes **VALID 33,773 / 41,664 (81.1%)**, with **135 parse failures**,
+> **7,756 runtime failures**, **0 host failures**, and **NEGATIVE 3,180 / 4,668 (68.1%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **33,763 / 41,664 (81.0%)** |
+| **valid** | can we run the program? (scored corpus) | **33,773 / 41,664 (81.1%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,180 / 4,668 (68.1%) |
 
 The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
@@ -72,8 +72,10 @@ Per area (valid):
 | `String` | 1,063 / 1,223 (86.9%) | `TypedArray` | 1,216 / 1,446 (84.1%) |
 | `Map` | 204 / 204 (100%) | `Set` | 363 / 383 (94.8%) |
 | `BigInt` | 77 / 77 (100%) | `Symbol` | 98 / 98 (100%) |
+| `WeakSet` | 85 / 85 (100%) | `WeakMap` | 140 / 141 (99.3%) |
+| `WeakRef` | 25 / 29 (86.2%) | `FinalizationRegistry` | 40 / 47 (85.1%) |
 | `Temporal` | 3,209 / 4,603 (69.7%) | `intl402` | 1,427 / 3,341 (42.7%) |
-| `annexB` | 461 / 1,070 (43.1%) | `staging` | 578 / 991 (58.3%) |
+| `annexB` | 461 / 1,070 (43.1%) | `staging` | 579 / 991 (58.4%) |
 | `SharedArrayBuffer` | 88 / 104 (84.6%) | `ThrowTypeError` | 14 / 14 (100%) |
 
 > `zig build test262` prints each subtree's pass rate plus `parse-fail`, `runtime-fail`, and

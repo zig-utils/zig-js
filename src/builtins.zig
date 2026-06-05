@@ -881,6 +881,13 @@ pub fn setFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value 
     return ip.makeSet(arg(args, 0));
 }
 
+pub fn weakSetFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const ip = interp(ctx);
+    if (ip.new_target == .undefined) return ip.throwError("TypeError", "Constructor Set/WeakSet requires 'new'");
+    return ip.makeWeakSet(arg(args, 0));
+}
+
 /// `RegExp(pattern, flags)` / `new RegExp(...)`.
 pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;

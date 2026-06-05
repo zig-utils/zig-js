@@ -3411,12 +3411,20 @@ pub const Interpreter = struct {
 
     /// Build a `Set`, optionally populated from an iterable of values.
     pub fn makeSet(self: *Interpreter, init_v: Value) EvalError!Value {
+        return self.makeSetWithIntrinsic(init_v, "Set");
+    }
+
+    pub fn makeWeakSet(self: *Interpreter, init_v: Value) EvalError!Value {
+        return self.makeSetWithIntrinsic(init_v, "WeakSet");
+    }
+
+    fn makeSetWithIntrinsic(self: *Interpreter, init_v: Value, intrinsic: []const u8) EvalError!Value {
         const o = (try self.newObject()).object;
         o.is_set = true;
         // Proto from the in-flight constructor (`new Set`/`new WeakSet`), so a
         // WeakSet doesn't inherit Set.prototype; internal results default to Set.
         if (self.new_target == .object) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Set");
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, intrinsic);
         } else if (self.env.get("Set")) |ctor| {
             if (ctor == .object) {
                 if (ctor.object.getOwn("prototype")) |p| {
@@ -9982,7 +9990,9 @@ fn installFunctionKinds(env: *Environment, rs: *Shape) EvalError!void {
 
 /// CanBeHeldWeakly(v): an Object or a Symbol (a BigInt or a primitive is not).
 fn canBeHeldWeakly(v: Value) bool {
-    return v == .object and !v.object.is_bigint;
+    if (v != .object or v.object.is_bigint) return false;
+    if (v.object.is_symbol and v.object.getOwn("\x00forKey") != null) return false;
+    return true;
 }
 
 fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -16576,7 +16586,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFnC(env, root_shape, "Set", 0, true, builtins.setFn);
     try installSetProto(env, root_shape);
     try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.mapFn);
-    try defineGlobalFnC(env, root_shape, "WeakSet", 0, true, builtins.setFn);
+    try defineGlobalFnC(env, root_shape, "WeakSet", 0, true, builtins.weakSetFn);
     // WeakMap/WeakSet instances reuse the Map/Set internals (is_map/is_set), but
     // their prototypes are distinct and carry only the weak subset as real own
     // methods (so `typeof WeakMap.prototype.set === "function"`, `.call`, and

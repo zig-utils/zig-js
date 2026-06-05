@@ -1664,8 +1664,16 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     // A primitive key/value cannot be held weakly — it throws.
     try std.testing.expectError(error.Throw, evalIn("new WeakMap().set(5, 1)"));
     try std.testing.expectError(error.Throw, evalIn("new WeakSet().add('x')"));
+    try std.testing.expectError(error.Throw, evalIn("new WeakSet().add(Symbol.for('registered'))"));
+    try std.testing.expect((try evalIn("var s = Symbol('plain'); var ws = new WeakSet(); ws.add(s); ws.has(s)")).boolean);
     // An object key is fine.
     try std.testing.expect((try evalIn("var k = {}; var wm = new WeakMap(); wm.set(k, 1); wm.get(k) === 1")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\var C = new other.Function();
+        \\C.prototype = null;
+        \\Object.getPrototypeOf(Reflect.construct(WeakSet, [], C)) === other.WeakSet.prototype
+    )).boolean);
     // Symbol.toStringTag on the collection prototypes.
     try expectEvalStr("Map", "Map.prototype[Symbol.toStringTag]");
     try expectEvalStr("Set", "Set.prototype[Symbol.toStringTag]");
