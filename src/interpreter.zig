@@ -3464,12 +3464,6 @@ pub const Interpreter = struct {
         _ = try self.callValueWithThis(adder, &.{ k, v }, self_v);
     }
 
-    fn collectionIterKind(name: []const u8) u8 {
-        if (eq(name, "keys")) return 1;
-        if (eq(name, "entries")) return 2;
-        return 0; // values, and the default Set iterator
-    }
-
     fn mapMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const self_v = Value{ .object = o };
         // A WeakMap key (`set`/`getOrInsert`/`getOrInsertComputed`) must be a
@@ -10313,6 +10307,12 @@ fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*
     return o;
 }
 
+fn collectionIterKind(name: []const u8) u8 {
+    if (eq(name, "keys")) return 1;
+    if (eq(name, "entries")) return 2;
+    return 0; // values, and the default Set / typed-array iterator
+}
+
 /// %TypedArray%.prototype methods. The receiver is a typed array; element reads
 /// go through the buffer (`taRead`), writes coerce via ToNumber + `taWrite`.
 fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
@@ -10562,25 +10562,8 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     if (eq(name, "toString")) {
         return try typedArrayMethod(self, o, "join", &.{});
     }
-    if (eq(name, "keys") or eq(name, "values") or eq(name, "entries")) {
-        // Materialize a plain array and return its iterator (good enough for
-        // for-of / spread over a typed array).
-        const arr = (try self.newArray()).object;
-        var i: usize = 0;
-        while (i < len) : (i += 1) {
-            if (eq(name, "keys")) {
-                try arr.elements.append(self.arena, .{ .number = @floatFromInt(i) });
-            } else if (eq(name, "values")) {
-                try arr.elements.append(self.arena, try self.taLoad(ta, i));
-            } else {
-                const pair = (try self.newArray()).object;
-                try pair.elements.append(self.arena, .{ .number = @floatFromInt(i) });
-                try pair.elements.append(self.arena, try self.taLoad(ta, i));
-                try arr.elements.append(self.arena, .{ .object = pair });
-            }
-        }
-        return try self.iteratorOf(.{ .object = arr });
-    }
+    if (eq(name, "keys") or eq(name, "values") or eq(name, "entries"))
+        return try self.makeCursorIteratorWithKind(recv, collectionIterKind(name));
     return null;
 }
 
@@ -17185,6 +17168,22 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 val = try self.arrIndexGet(so, i);
                 done = false;
             }
+        } else if (so.typed_array) |ta| {
+            const len = ta.currentLength() orelse
+                return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
+            if (i < len) {
+                val = switch (kind) {
+                    1 => .{ .number = @floatFromInt(i) }, // keys
+                    2 => blk: {
+                        const pair = (try self.newArray()).object;
+                        try pair.elements.append(self.arena, .{ .number = @floatFromInt(i) });
+                        try pair.elements.append(self.arena, try self.taLoad(ta, i));
+                        break :blk .{ .object = pair };
+                    },
+                    else => try self.taLoad(ta, i), // values
+                };
+                done = false;
+            }
         } else if (so.is_map and i < so.elements.items.len) {
             const e = so.elements.items[i];
             if (e == .object and e.object.elements.items.len >= 2) {
@@ -17898,6 +17897,11 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
             try installNativeProps(a, rs, g, "get [Symbol.toStringTag]", 0);
             try ta_proto.setAccessor(a, tt.object.sym_key, .{ .object = g }, null);
             try ta_proto.setAttr(a, tt.object.sym_key, .{ .enumerable = false, .configurable = true });
+        };
+        if (sym.object.getOwn("iterator")) |it| if (it == .object and it.object.is_symbol) {
+            const values_fn = ta_proto.getOwn("values") orelse Value.undefined;
+            try ta_proto.setOwn(a, rs, it.object.sym_key, values_fn);
+            try ta_proto.setAttr(a, it.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
         };
     };
 
@@ -22637,6 +22641,35 @@ test "interpreter Map and Set" {
         \\let ei = s.entries();
         \\let e = ei.next().value;
         \\ok = ok && e[0] === 1 && e[1] === 1;
+        \\ok
+    )).boolean);
+}
+
+test "interpreter TypedArray iterators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let ta = new Uint8Array([3, 1, 2]);
+        \\let ok = ta[Symbol.iterator] === Uint8Array.prototype.values;
+        \\let it = ta[Symbol.iterator]();
+        \\ok = ok && it.next().value === 3;
+        \\ok = ok && it.next().value === 1;
+        \\ok = ok && it.next().value === 2;
+        \\ok = ok && it.next().done === true;
+        \\let keys = ta.keys();
+        \\ok = ok && keys.next().value === 0 && keys.next().value === 1;
+        \\let entries = ta.entries();
+        \\let e = entries.next().value;
+        \\ok = ok && e[0] === 0 && e[1] === 3;
+        \\ok
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let ta = new Uint8Array([9, 8]);
+        \\let it = ta.values();
+        \\let ok = it.next().value === 9;
+        \\$262.detachArrayBuffer(ta.buffer);
+        \\try { it.next(); ok = false; } catch (e) { ok = ok && e.name === 'TypeError'; }
         \\ok
     )).boolean);
 }
