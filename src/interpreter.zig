@@ -23,6 +23,7 @@ const Value = value.Value;
 /// crashing the process (stack overflow / runaway loop).
 pub const max_call_depth: u32 = 256;
 pub const max_steps: u64 = 100_000_000;
+const max_typed_array_bytes: usize = 1 << 30;
 
 /// Coerce a JS number to a length/index, clamping NaN/negative to 0 and huge
 /// values to a cap (so `@intFromFloat` never panics; oversized allocations then
@@ -4787,6 +4788,10 @@ pub const Interpreter = struct {
         return o;
     }
 
+    fn typedArrayLengthLimit(size: usize) usize {
+        return @min(std.math.maxInt(usize) / size, max_typed_array_bytes / size);
+    }
+
     /// Construct a typed array of `kind` from the constructor arguments: a
     /// length, an `(buffer, byteOffset?, length?)` view, or a copy of a typed
     /// array / array-like / iterable.
@@ -4840,7 +4845,12 @@ pub const Interpreter = struct {
         if (a0 == .object) {
             // new TA(arrayLike | iterable): collect the values, then coerce + copy
             // (ToBigInt for a BigInt view, ToNumber otherwise).
-            const list = try self.iterableOrArrayLikeToList(a0);
+            const list = if (self.isIterable(a0)) try self.iterableOrArrayLikeToList(a0) else blk: {
+                const len = toLen(try self.toNumberV(try self.getProperty(a0, "length")));
+                if (len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
+                break :blk try self.arrayLikeToListLen(a0, len);
+            };
+            if (list.len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
             ta.* = .{ .buffer = try self.makeArrayBuffer(list.len * size), .byte_offset = 0, .length = list.len, .kind = kind };
             var i: usize = 0;
             while (i < list.len) : (i += 1) try self.taStore(ta, i, list[i]);
@@ -4848,7 +4858,8 @@ pub const Interpreter = struct {
         }
         // new TA(length)
         const len_f = if (a0 == .undefined) 0 else try self.toNumberV(a0);
-        if (len_f < 0 or @trunc(len_f) != len_f) return self.throwError("RangeError", "invalid typed array length");
+        const max_len_f: f64 = @floatFromInt(typedArrayLengthLimit(size));
+        if (!std.math.isFinite(len_f) or len_f < 0 or @trunc(len_f) != len_f or len_f > max_len_f) return self.throwError("RangeError", "invalid typed array length");
         const length: usize = @intFromFloat(len_f);
         ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
         return .{ .object = o };
@@ -4895,6 +4906,17 @@ pub const Interpreter = struct {
         }
         // Array-like: read 0..ToLength(length).
         const len = toLen((try self.toNumberV(try self.getProperty(v, "length"))));
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            var kb: [24]u8 = undefined;
+            const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+            try out.append(self.arena, try self.getProperty(v, k));
+        }
+        return out.items;
+    }
+
+    fn arrayLikeToListLen(self: *Interpreter, v: Value, len: usize) EvalError![]Value {
+        var out: std.ArrayListUnmanaged(Value) = .empty;
         var i: usize = 0;
         while (i < len) : (i += 1) {
             var kb: [24]u8 = undefined;
@@ -10248,9 +10270,13 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     const recv = Value{ .object = o };
     const cb_this: Value = if (args.len > 1) args[1] else .undefined;
     if (eq(name, "at")) {
-        var idx = if (args.len > 0) @as(i64, @intFromFloat(@trunc((try self.toNumberV(args[0]))))) else 0;
+        const n = if (args.len > 0) try self.toNumberV(args[0]) else 0;
+        const rel = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
+        if (std.math.isInf(rel)) return Value.undefined;
+        const len_f: f64 = @floatFromInt(len);
+        if (rel < -len_f or rel >= len_f) return Value.undefined;
+        var idx: i64 = @intFromFloat(rel);
         if (idx < 0) idx += @as(i64, @intCast(len));
-        if (idx < 0 or idx >= len) return Value.undefined;
         return try self.taLoad(ta, @intCast(idx));
     }
     if (eq(name, "join") or eq(name, "toLocaleString")) {
@@ -10381,7 +10407,11 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const target = try relIndex(self, if (args.len > 0) args[0] else .undefined, len, 0);
         const start = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, 0);
         const end = try relIndex(self, if (args.len > 2) args[2] else .undefined, len, @floatFromInt(len));
-        const count = @min(if (end > start) end - start else 0, len - target);
+        const live_len = ta.currentLength() orelse return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
+        const count = @min(
+            @min(if (end > start) end - start else 0, len - target),
+            @min(if (target < live_len) live_len - target else 0, if (start < live_len) live_len - start else 0),
+        );
         if (count > 0) {
             const esz = ta.kind.byteSize();
             const bytes = ta.buffer.array_buffer.?.data;
@@ -10409,12 +10439,18 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         return .{ .object = result };
     }
     if (eq(name, "with")) {
-        const rel = if (args.len > 0) try self.toNumberV(args[0]) else 0;
-        const idx: i64 = if (rel < 0) @as(i64, @intCast(len)) + @as(i64, @intFromFloat(@trunc(rel))) else @intFromFloat(@trunc(rel));
+        const rel_num = if (args.len > 0) try self.toNumberV(args[0]) else 0;
+        const rel = if (std.math.isNan(rel_num)) @as(f64, 0) else @trunc(rel_num);
+        const len_f: f64 = @floatFromInt(len);
+        const in_bounds = !std.math.isInf(rel) and rel >= -len_f and rel < len_f;
+        const idx: i64 = if (in_bounds)
+            if (rel < 0) @as(i64, @intCast(len)) + @as(i64, @intFromFloat(rel)) else @intFromFloat(rel)
+        else
+            0;
         const v = if (args.len > 1) args[1] else Value.undefined;
         // The value coerces (and can throw) before the bounds check.
         const cv = if (ta.kind.isBigInt()) try self.toBigIntValueImpl(v, false) else Value{ .number = try self.toNumberV(v) };
-        if (idx < 0 or idx >= len) return self.throwError("RangeError", "Invalid typed array index");
+        if (!in_bounds or idx < 0 or idx >= len) return self.throwError("RangeError", "Invalid typed array index");
         const result = try newTypedArray(self, ta.kind, len);
         var i: usize = 0;
         while (i < len) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, i));
@@ -10444,16 +10480,18 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     }
     if (eq(name, "set")) {
         const src = if (args.len > 0) args[0] else Value.undefined;
-        const offset: usize = if (args.len > 1) @intFromFloat(@trunc(@max(0, try self.toNumberV(args[1])))) else 0;
+        const offset_u64 = if (args.len > 1) try toIndexArg(self, args[1]) else 0;
+        if (offset_u64 > std.math.maxInt(usize)) return self.throwError("RangeError", "offset is out of bounds");
+        const offset: usize = @intCast(offset_u64);
         if (src == .object and src.object.typed_array != null) {
             const s = src.object.typed_array.?;
             if (s.kind.isBigInt() != ta.kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when setting a TypedArray");
-            if (offset + s.length > len) return self.throwError("RangeError", "offset is out of bounds");
+            if (offset > len or s.length > len - offset) return self.throwError("RangeError", "offset is out of bounds");
             var i: usize = 0;
             while (i < s.length) : (i += 1) try self.taStore(ta, offset + i, try self.taLoad(s, i));
         } else if (src == .object) {
             const list = try self.iterableOrArrayLikeToList(src);
-            if (offset + list.len > len) return self.throwError("RangeError", "offset is out of bounds");
+            if (offset > len or list.len > len - offset) return self.throwError("RangeError", "offset is out of bounds");
             for (list, 0..) |x, i| try self.taStore(ta, offset + i, x);
         }
         return Value.undefined;
