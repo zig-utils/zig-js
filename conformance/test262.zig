@@ -789,7 +789,7 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, exe: []con
 fn workerLimitForSubtree(sub: []const u8) usize {
     if (std.mem.eql(u8, sub, "test/staging")) return 1;
     if (std.mem.eql(u8, sub, "test/built-ins/RegExp")) return 1;
-    return 0;
+    return 10;
 }
 
 fn pathAtIndex(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, target: usize) ?[]const u8 {
