@@ -2148,6 +2148,19 @@ test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     try std.testing.expectError(error.Throw, evalIn("isNaN(Symbol())"));
 }
 
+test "Number string conversion trims ECMAScript whitespace" {
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Number('\\u00A0\\u1680\\u2000\\u2028\\u2029\\u202F\\u205F\\u3000')")).number);
+    try std.testing.expectEqual(@as(f64, 1234567890), (try evalIn(
+        \\Number('\u000B\u00A0\u1680\u20001234567890\u2028\u2029\u202F\u205F\u3000')
+    )).number);
+    try std.testing.expect((try evalIn(
+        \\Number('\u00A0\u2000Infinity\u202F') === Infinity
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\Number('\u00A0\u2000-Infinity\u202F') === -Infinity
+    )).boolean);
+}
+
 test "strict arguments.callee is the %ThrowTypeError% poison pill" {
     // Reading or writing `arguments.callee` in a strict function throws TypeError,
     // and its accessor get is the single shared %ThrowTypeError% intrinsic.

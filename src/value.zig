@@ -860,13 +860,40 @@ pub fn numberToString(arena: std.mem.Allocator, n: f64) ![]const u8 {
     return out.toOwnedSlice(arena);
 }
 
-/// Parse a string to a number per a simplified ToNumber(string): trims ASCII
-/// whitespace, empty string is 0, otherwise float parse or NaN.
+fn isStringNumberWhitespace(cp: u21) bool {
+    return switch (cp) {
+        0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF => true,
+        0x2000...0x200A => true,
+        else => false,
+    };
+}
+
+fn trimStringNumberWhitespace(s: []const u8) []const u8 {
+    var view = std.unicode.Utf8View.initUnchecked(s);
+    var it = view.iterator();
+    var start: usize = 0;
+    var end: usize = 0;
+    var seen_non_ws = false;
+    const base = @intFromPtr(s.ptr);
+    while (it.nextCodepointSlice()) |slice| {
+        const cp = std.unicode.utf8Decode(slice) catch return std.mem.trim(u8, s, " \t\n\r\x0b\x0c");
+        if (isStringNumberWhitespace(cp)) continue;
+        const off = @intFromPtr(slice.ptr) - base;
+        if (!seen_non_ws) {
+            start = off;
+            seen_non_ws = true;
+        }
+        end = off + slice.len;
+    }
+    if (!seen_non_ws) return s[0..0];
+    return s[start..end];
+}
+
+/// Parse a string to a number per ToNumber(string): trims ECMAScript
+/// StrWhiteSpace, empty string is 0, otherwise float parse or NaN.
 pub fn stringToNumber(s: []const u8) f64 {
     const nan = std.math.nan(f64);
-    // StringToNumber trims leading/trailing StrWhiteSpace (the ASCII set here);
-    // an empty/all-whitespace string is +0.
-    const trimmed = std.mem.trim(u8, s, " \t\n\r\x0b\x0c");
+    const trimmed = trimStringNumberWhitespace(s);
     if (trimmed.len == 0) return 0;
     // Numeric separators (`_`) are a *source* lexical feature and never valid in
     // a runtime ToNumber(String) — `Number("1_0")` is NaN, not 10. (Zig's
