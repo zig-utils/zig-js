@@ -1828,6 +1828,39 @@ test "Map/Set forEach tolerate deletion during iteration" {
         \\set.forEach(function(value) { if (count === 0) set.delete('bar'); count++; });
         \\count
     )).number);
+    try expectEvalStr("foo:0|bar:1|foo:baz",
+        \\var map = new Map([['foo', 0], ['bar', 1]]);
+        \\var out = [];
+        \\map.forEach(function(value, key) {
+        \\  out.push(key + ':' + value);
+        \\  if (key === 'foo' && value === 0) {
+        \\    map.delete('foo');
+        \\    map.set('foo', 'baz');
+        \\  }
+        \\});
+        \\out.join('|')
+    );
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn(
+        \\var map = new Map([['foo', 0], ['bar', 1]]);
+        \\map.delete('foo');
+        \\map.set('foo', 'baz');
+        \\map.size
+    )).number);
+}
+
+test "Map getOrInsertComputed validates callback and canonicalizes keys" {
+    try std.testing.expect((try evalIn(
+        \\var ok = false;
+        \\var map = new Map([[1, 'present']]);
+        \\try { map.getOrInsertComputed(1, 1); } catch (e) { ok = e instanceof TypeError; }
+        \\ok
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var seen;
+        \\var map = new Map();
+        \\map.getOrInsertComputed(-0, function(key) { seen = 1 / key; return 'value'; });
+        \\seen === Infinity && map.has(+0) && map.has(-0)
+    )).boolean);
 }
 
 test "__lookupGetter__/__lookupSetter__ walk the chain, proxy-aware" {

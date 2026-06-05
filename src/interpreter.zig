@@ -3466,6 +3466,7 @@ pub const Interpreter = struct {
 
     fn mapMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const self_v = Value{ .object = o };
+        const key = canonicalCollectionKey(arg0(args));
         // A WeakMap key (`set`/`getOrInsert`/`getOrInsertComputed`) must be a
         // value that can be held weakly — an object or a (non-registered) symbol;
         // a primitive throws before any insertion or callback runs.
@@ -3474,37 +3475,36 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "Invalid value used as WeakMap key");
         }
         if (eq(name, "set")) {
-            const k = arg0(args);
             for (o.elements.items) |e| {
-                if (value.sameValueZero(e.object.elements.items[0], k)) {
-                    e.object.elements.items[1] = arg(args, 1);
+                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) {
+                    entry.elements.items[1] = arg(args, 1);
                     return self_v;
-                }
+                };
             }
             const pair = (try self.newArray()).object;
-            try pair.elements.append(self.arena, k);
+            try pair.elements.append(self.arena, key);
             try pair.elements.append(self.arena, arg(args, 1));
             try o.elements.append(self.arena, .{ .object = pair });
             return self_v;
         }
         if (eq(name, "get")) {
             for (o.elements.items) |e| {
-                if (value.sameValueZero(e.object.elements.items[0], arg0(args))) return e.object.elements.items[1];
+                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) return entry.elements.items[1];
             }
             return Value.undefined;
         }
         if (eq(name, "has")) {
             for (o.elements.items) |e| {
-                if (value.sameValueZero(e.object.elements.items[0], arg0(args))) return Value{ .boolean = true };
+                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) return Value{ .boolean = true };
             }
             return Value{ .boolean = false };
         }
         if (eq(name, "delete")) {
-            for (o.elements.items, 0..) |e, i| {
-                if (value.sameValueZero(e.object.elements.items[0], arg0(args))) {
-                    _ = o.elements.orderedRemove(i);
+            for (o.elements.items) |e| {
+                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) {
+                    entry.elements.clearRetainingCapacity();
                     return Value{ .boolean = true };
-                }
+                };
             }
             return Value{ .boolean = false };
         }
@@ -3526,16 +3526,18 @@ pub const Interpreter = struct {
         // Upsert proposal: return the existing value for `key`, else insert and
         // return a default (`getOrInsert`) or a computed value (`getOrInsertComputed`).
         if (eq(name, "getOrInsert") or eq(name, "getOrInsertComputed")) {
-            const k = arg0(args);
+            const cb = if (eq(name, "getOrInsertComputed")) cb: {
+                const candidate = arg(args, 1);
+                if (!candidate.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed: callback is not a function");
+                break :cb candidate;
+            } else Value.undefined;
             for (o.elements.items) |e| {
-                if (value.sameValueZero(e.object.elements.items[0], k)) return e.object.elements.items[1];
+                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) return entry.elements.items[1];
             }
             const v = if (eq(name, "getOrInsertComputed")) blk: {
-                const cb = arg(args, 1);
-                if (!cb.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed: callback is not a function");
-                break :blk try self.callValue(cb, &.{k});
+                break :blk try self.callValue(cb, &.{key});
             } else arg(args, 1);
-            _ = try self.mapMethod(o, "set", &.{ k, v });
+            _ = try self.mapMethod(o, "set", &.{ key, v });
             return v;
         }
         if (eq(name, "keys") or eq(name, "values") or eq(name, "entries"))
@@ -3549,22 +3551,23 @@ pub const Interpreter = struct {
         // symbol); a primitive throws before insertion.
         if (o.is_weak and eq(name, "add") and !canBeHeldWeakly(arg0(args)))
             return self.throwError("TypeError", "Invalid value used in WeakSet");
+        const key = canonicalCollectionKey(arg0(args));
         if (eq(name, "add")) {
             for (o.elements.items) |e| {
-                if (value.sameValueZero(e, arg0(args))) return self_v;
+                if (value.sameValueZero(e, key)) return self_v;
             }
-            try o.elements.append(self.arena, arg0(args));
+            try o.elements.append(self.arena, key);
             return self_v;
         }
         if (eq(name, "has")) {
             for (o.elements.items) |e| {
-                if (value.sameValueZero(e, arg0(args))) return Value{ .boolean = true };
+                if (value.sameValueZero(e, key)) return Value{ .boolean = true };
             }
             return Value{ .boolean = false };
         }
         if (eq(name, "delete")) {
             for (o.elements.items, 0..) |e, i| {
-                if (value.sameValueZero(e, arg0(args))) {
+                if (value.sameValueZero(e, key)) {
                     _ = o.elements.orderedRemove(i);
                     return Value{ .boolean = true };
                 }
@@ -17109,6 +17112,23 @@ fn stringIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     return self.makeCursorIterator(.{ .string = try self.toStringV(this) });
 }
 
+fn canonicalCollectionKey(v: Value) Value {
+    return if (v == .number and v.number == 0) Value{ .number = 0 } else v;
+}
+
+fn liveMapEntry(v: Value) ?*value.Object {
+    if (v != .object or v.object.elements.items.len < 2) return null;
+    return v.object;
+}
+
+fn liveMapEntryCount(o: *value.Object) usize {
+    var n: usize = 0;
+    for (o.elements.items) |entry| {
+        if (liveMapEntry(entry) != null) n += 1;
+    }
+    return n;
+}
+
 /// The byte length of the well-formed UTF-8 sequence starting at `s[i]`; 1 for a
 /// lone/invalid byte (so iteration always progresses without ever decoding past
 /// the end of the string).
@@ -17184,15 +17204,18 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 };
                 done = false;
             }
-        } else if (so.is_map and i < so.elements.items.len) {
-            const e = so.elements.items[i];
-            if (e == .object and e.object.elements.items.len >= 2) {
+        } else if (so.is_map) {
+            var j = i;
+            while (j < so.elements.items.len) : (j += 1) {
+                const entry = liveMapEntry(so.elements.items[j]) orelse continue;
                 val = switch (kind) {
-                    1 => e.object.elements.items[0], // keys
-                    2 => e, // entries: the stored [key, value] pair
-                    else => e.object.elements.items[1], // values
+                    1 => entry.elements.items[0], // keys
+                    2 => .{ .object = entry }, // entries: the stored [key, value] pair
+                    else => entry.elements.items[1], // values
                 };
                 done = false;
+                advance = j + 1 - i;
+                break;
             }
         } else if (so.is_set and i < so.elements.items.len) {
             const e = so.elements.items[i];
@@ -17516,7 +17539,8 @@ fn collectionSizeGetter(comptime is_set_kind: bool) value.NativeFn {
             const ok = this == .object and !this.object.is_weak and
                 (if (is_set_kind) this.object.is_set else this.object.is_map);
             if (!ok) return self.throwError("TypeError", if (is_set_kind) "Set.prototype.size getter called on a non-Set" else "Map.prototype.size getter called on a non-Map");
-            return .{ .number = @floatFromInt(this.object.elements.items.len) };
+            const size = if (is_set_kind) this.object.elements.items.len else liveMapEntryCount(this.object);
+            return .{ .number = @floatFromInt(size) };
         }
     }.call;
 }
@@ -22610,6 +22634,27 @@ test "interpreter Map and Set" {
     try std.testing.expectEqual(@as(f64, 2), (try evalSource(a, "let m = new Map(); m.set('a', 1); m.set('b', 2); m.size")).number);
     try std.testing.expect((try evalSource(a, "let m = new Map(); m.set('k', 1); m.has('k')")).boolean);
     try std.testing.expectEqual(@as(f64, 1), (try evalSource(a, "let m = new Map([['a', 1], ['b', 2]]); m.delete('b'); m.size")).number);
+    try std.testing.expectEqualStrings("foo:0|bar:1|foo:baz", (try evalSource(a,
+        \\let m = new Map([['foo', 0], ['bar', 1]]);
+        \\let out = [];
+        \\m.forEach(function(value, key) {
+        \\  out.push(key + ':' + value);
+        \\  if (key === 'foo' && value === 0) { m.delete('foo'); m.set('foo', 'baz'); }
+        \\});
+        \\out.join('|')
+    )).string);
+    try std.testing.expect((try evalSource(a,
+        \\let ok = false;
+        \\let m = new Map([[1, 'present']]);
+        \\try { m.getOrInsertComputed(1, 1); } catch (e) { ok = e instanceof TypeError; }
+        \\ok
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let seen;
+        \\let m = new Map();
+        \\m.getOrInsertComputed(-0, function(key) { seen = 1 / key; return 'value'; });
+        \\seen === Infinity && m.get(+0) === 'value'
+    )).boolean);
     try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let s = new Set([1, 2, 2, 3, 3]); s.size")).number);
     try std.testing.expect((try evalSource(a, "let s = new Set(); s.add(7); s.has(7)")).boolean);
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let s = new Set([1, 2, 3]); let t = 0; s.forEach(function (v) { t += v; }); t")).number);
