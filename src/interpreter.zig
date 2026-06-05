@@ -3281,15 +3281,29 @@ pub const Interpreter = struct {
     pub fn dateTimeFromArgs(args: []const Value) f64 {
         if (args.len == 0) return 0; // (a real clock isn't wired; epoch is deterministic)
         if (args.len == 1) return args[0].toNumber();
-        const y: i64 = @intFromFloat(@trunc(args[0].toNumber()));
-        const mo: i64 = @intFromFloat(@trunc(args[1].toNumber()));
-        const d: i64 = if (args.len > 2) @intFromFloat(@trunc(args[2].toNumber())) else 1;
-        const h: i64 = if (args.len > 3) @intFromFloat(@trunc(args[3].toNumber())) else 0;
-        const mi: i64 = if (args.len > 4) @intFromFloat(@trunc(args[4].toNumber())) else 0;
-        const s: i64 = if (args.len > 5) @intFromFloat(@trunc(args[5].toNumber())) else 0;
-        const millis: i64 = if (args.len > 6) @intFromFloat(@trunc(args[6].toNumber())) else 0;
+        const nan = std.math.nan(f64);
+        const fields = [_]f64{
+            args[0].toNumber(),
+            args[1].toNumber(),
+            if (args.len > 2) args[2].toNumber() else 1,
+            if (args.len > 3) args[3].toNumber() else 0,
+            if (args.len > 4) args[4].toNumber() else 0,
+            if (args.len > 5) args[5].toNumber() else 0,
+            if (args.len > 6) args[6].toNumber() else 0,
+        };
+        for (fields) |f| {
+            if (!std.math.isFinite(f) or @abs(f) > 1e9) return nan;
+        }
+        const y: i64 = @intFromFloat(@trunc(fields[0]));
+        const mo: i64 = @intFromFloat(@trunc(fields[1]));
+        const d: i64 = @intFromFloat(@trunc(fields[2]));
+        const h: i64 = @intFromFloat(@trunc(fields[3]));
+        const mi: i64 = @intFromFloat(@trunc(fields[4]));
+        const s: i64 = @intFromFloat(@trunc(fields[5]));
+        const millis: i64 = @intFromFloat(@trunc(fields[6]));
         const days = daysFromCivil(y, mo + 1, d);
-        return @floatFromInt(days * ms_per_day + h * 3600000 + mi * 60000 + s * 1000 + millis);
+        const t: f64 = @floatFromInt(days * ms_per_day + h * 3600000 + mi * 60000 + s * 1000 + millis);
+        return if (@abs(t) > 8.64e15) nan else t;
     }
 
     /// Build a `Map`, optionally populated from an iterable of `[k,v]` pairs.
@@ -5870,7 +5884,7 @@ pub const Interpreter = struct {
             return Value{ .object = o };
         }
         if (eq(name, "splice")) {
-            const len = items.len;
+            const len = ilen;
             const start = try relIndex(self, arg0(args), len, 0);
             const del: usize = if (args.len <= 1) len - start else blk: {
                 const d = arg(args, 1).toNumber();
@@ -5882,13 +5896,27 @@ pub const Interpreter = struct {
             const rra = removed.object.is_array;
             var i: usize = 0;
             while (i < del) : (i += 1) {
-                if (rra) try removed.object.elements.append(self.arena, items[start + i]) else try self.arrayResultPush(removed, i, items[start + i]);
+                const v = if (self.arrIndexPresent(o, start + i)) try self.arrIndexGet(o, start + i) else Value.undefined;
+                if (rra) try removed.object.elements.append(self.arena, v) else try self.arrayResultPush(removed, i, v);
             }
             i = 0;
-            while (i < del) : (i += 1) _ = o.elements.orderedRemove(start);
+            while (i < del) : (i += 1) {
+                if (o.is_array and start < o.elements.items.len) {
+                    _ = o.elements.orderedRemove(start);
+                } else {
+                    const idx = try std.fmt.allocPrint(self.arena, "{d}", .{start + i});
+                    _ = try self.deleteOwn(o, idx);
+                }
+            }
             const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
             var j: usize = inserts.len;
-            while (j > 0) : (j -= 1) try o.elements.insert(self.arena, start, inserts[j - 1]);
+            while (j > 0) : (j -= 1) {
+                if (o.is_array and start <= o.elements.items.len) {
+                    try o.elements.insert(self.arena, start, inserts[j - 1]);
+                } else {
+                    try self.arraySetIndexThrowing(o, start + (j - 1), inserts[j - 1]);
+                }
+            }
             return removed;
         }
         if (eq(name, "copyWithin")) {
@@ -5908,12 +5936,14 @@ pub const Interpreter = struct {
                 from += count - 1;
                 to += count - 1;
             }
-            while (count > 0) : (count -= 1) {
+            while (count > 0) {
                 const tk = try std.fmt.allocPrint(self.arena, "{d}", .{to});
                 if (self.arrIndexPresent(o, from))
                     try self.setMember(.{ .object = o }, tk, try self.arrIndexGet(o, from))
                 else
                     _ = try self.deleteOwn(o, tk);
+                count -= 1;
+                if (count == 0) break;
                 if (backward) {
                     from -= 1;
                     to -= 1;
@@ -10177,8 +10207,11 @@ fn arrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, blen, 0);
     const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
     const count = if (end > start) end - start else 0;
-    const out = try self.makeArrayBuffer(count);
-    @memcpy(out.array_buffer.?.data[0..count], ab.data[start .. start + count]);
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const src_len = ab.data.len;
+    const safe_count = if (start >= src_len) 0 else @min(count, src_len - start);
+    const out = try self.makeArrayBuffer(safe_count);
+    @memcpy(out.array_buffer.?.data[0..safe_count], ab.data[start .. start + safe_count]);
     return .{ .object = out };
 }
 
@@ -10939,8 +10972,10 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
     const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
     const count = if (end > start) end - start else 0;
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
-    const out = try self.makeArrayBuffer(count);
-    @memcpy(out.array_buffer.?.data[0..count], ab.data[start .. start + count]);
+    const src_len = ab.data.len;
+    const safe_count = if (start >= src_len) 0 else @min(count, src_len - start);
+    const out = try self.makeArrayBuffer(safe_count);
+    @memcpy(out.array_buffer.?.data[0..safe_count], ab.data[start .. start + safe_count]);
     out.array_buffer.?.immutable = true;
     return .{ .object = out };
 }
