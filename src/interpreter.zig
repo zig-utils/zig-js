@@ -22366,8 +22366,18 @@ fn toFixed(arena: std.mem.Allocator, n: f64, d: usize) ![]const u8 {
     if (std.math.isNan(n)) return "NaN";
     if (std.math.isInf(n)) return if (n < 0) "-Infinity" else "Infinity";
     const neg = n < 0;
-    const scale = std.math.pow(f64, 10, @floatFromInt(d));
+    const abs_n = @abs(n);
     const u64_max_f = @as(f64, @floatFromInt(std.math.maxInt(u64)));
+    if (abs_n >= 1e21) return value.numberToString(arena, n);
+    if (d > 18 and @trunc(n) == n and abs_n < u64_max_f) {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        if (neg) try out.append(arena, '-');
+        try out.print(arena, "{d}", .{@as(u64, @intFromFloat(abs_n))});
+        try out.append(arena, '.');
+        try out.appendNTimes(arena, '0', d);
+        return out.items;
+    }
+    const scale = std.math.pow(f64, 10, @floatFromInt(d));
     if (std.math.isInf(scale) or scale >= u64_max_f) return value.numberToString(arena, n);
     const scaled_f = @round(@abs(n) * scale);
     if (std.math.isInf(scaled_f) or scaled_f >= u64_max_f) return value.numberToString(arena, n); // too big for fixed-point
@@ -23062,6 +23072,7 @@ test "interpreter number/boolean primitive methods" {
     try std.testing.expectEqualStrings("1010", (try evalSource(a, "(10).toString(2)")).string);
     try std.testing.expectEqualStrings("3.14", (try evalSource(a, "(3.14159).toFixed(2)")).string);
     try std.testing.expectEqualStrings("5.00", (try evalSource(a, "(5).toFixed(2)")).string);
+    try std.testing.expectEqualStrings("3.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", (try evalSource(a, "(3).toFixed(100)")).string);
     try std.testing.expectEqualStrings("0e+0", (try evalSource(a, "(-0).toExponential(0)")).string);
     try std.testing.expectEqualStrings("0.00e+0", (try evalSource(a, "(-0).toExponential(2)")).string);
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "(7).valueOf()")).number);
