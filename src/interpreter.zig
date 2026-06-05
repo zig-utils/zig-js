@@ -470,18 +470,20 @@ pub const Interpreter = struct {
         return null;
     }
 
-    /// ToObject(v): an object is returned as-is, a primitive is boxed into the
-    /// matching wrapper (whose prototype is that constructor's `.prototype`), and
-    /// null/undefined throw a TypeError. Used by `with` (and anywhere the spec
-    /// says "ToObject").
+    /// ToObject(v): an ordinary object is returned as-is, a primitive is boxed
+    /// into the matching wrapper (whose prototype is that constructor's
+    /// `.prototype`), and null/undefined throw a TypeError. BigInt/Symbol are
+    /// represented as object-tagged primitives internally, so they still need
+    /// fresh wrappers here.
     pub fn toObject(self: *Interpreter, v: Value) EvalError!*value.Object {
-        if (v == .object) return v.object;
+        if (v == .object and !v.object.is_symbol and !v.object.is_bigint) return v.object;
         if (v == .null or v == .undefined)
             return self.throwError("TypeError", "Cannot convert undefined or null to object");
         const ctor_name: []const u8 = switch (v) {
             .string => "String",
             .number => "Number",
             .boolean => "Boolean",
+            .object => |o| if (o.is_symbol) "Symbol" else if (o.is_bigint) "BigInt" else unreachable,
             else => unreachable,
         };
         const o = try self.arena.create(value.Object);
@@ -492,19 +494,8 @@ pub const Interpreter = struct {
         return o;
     }
 
-    /// ToObject for property references whose base is a primitive. Symbol and
-    /// BigInt are represented as tagged objects in this engine, but still need
-    /// a fresh wrapper whose prototype comes from the executing realm.
+    /// ToObject for property references whose base is a primitive.
     fn boxPrimitiveBase(self: *Interpreter, v: Value) EvalError!*value.Object {
-        if (v == .object and (v.object.is_symbol or v.object.is_bigint)) {
-            const o = try self.arena.create(value.Object);
-            o.* = .{ .prim = v };
-            const ctor_name: []const u8 = if (v.object.is_symbol) "Symbol" else "BigInt";
-            if (self.env.get(ctor_name)) |ctor| {
-                if (ctor == .object) o.proto = try self.protoObject(ctor.object);
-            }
-            return o;
-        }
         return self.toObject(v);
     }
 
@@ -2507,13 +2498,16 @@ pub const Interpreter = struct {
                 const t = std.mem.trim(u8, s, " \t\r\n\x0b\x0c\u{00a0}\u{feff}");
                 if (t.len == 0) return self.makeBigInt(0);
                 if (t.len > 2 and t[0] == '0' and (t[1] == 'x' or t[1] == 'X')) {
-                    return self.makeBigInt(std.fmt.parseInt(i128, t[2..], 16) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
+                    return self.makeBigIntText((try canonicalBigIntRadixString(self.arena, t[2..], 16)) orelse
+                        return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
                 }
                 if (t.len > 2 and t[0] == '0' and (t[1] == 'o' or t[1] == 'O')) {
-                    return self.makeBigInt(std.fmt.parseInt(i128, t[2..], 8) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
+                    return self.makeBigIntText((try canonicalBigIntRadixString(self.arena, t[2..], 8)) orelse
+                        return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
                 }
                 if (t.len > 2 and t[0] == '0' and (t[1] == 'b' or t[1] == 'B')) {
-                    return self.makeBigInt(std.fmt.parseInt(i128, t[2..], 2) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
+                    return self.makeBigIntText((try canonicalBigIntRadixString(self.arena, t[2..], 2)) orelse
+                        return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
                 }
                 return self.makeBigIntText((try canonicalBigIntDecimalString(self.arena, t)) orelse
                     return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
@@ -6905,6 +6899,8 @@ pub const Interpreter = struct {
         // also avoids looping back through method dispatch.
         const names: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
         var user_tried: u8 = 0;
+        var builtin_wrapper_value_of = false;
+        var builtin_to_string = false;
         outer: for (names) |m| {
             // OrdinaryToPrimitive resolves each method via `Get(O, name)`, so an
             // *accessor* `valueOf`/`toString` getter is run (and its abrupt
@@ -6913,7 +6909,6 @@ pub const Interpreter = struct {
             // native prototype thunks / non-callable shadows are left to the
             // built-in coercion below (calling them would loop through dispatch).
             var method: ?Value = null;
-            var native_ts = false; // toString resolved to a callable native thunk
             var cur: ?*value.Object = o;
             while (cur) |c| : (cur = c.proto) {
                 if (c.getAccessor(m)) |acc| {
@@ -6924,16 +6919,21 @@ pub const Interpreter = struct {
                 }
                 if (c.getOwn(m)) |fv| {
                     if (fv == .object and fv.object.js_func != null) method = fv
+                    // Primitive wrappers' native valueOf is a spec builtin that
+                    // produces the boxed primitive at this position in the
+                    // OrdinaryToPrimitive order, so do not continue to a later
+                    // user toString accessor for default/number hints.
+                    else if (std.mem.eql(u8, m, "valueOf") and o.prim != null and fv.isCallable()) builtin_wrapper_value_of = true
                     // A callable native `toString` thunk yields a primitive string
                     // (the built-in coercion below); it must run at *this* position
                     // in the hint order — so stop here rather than trying a later
                     // user `valueOf` (e.g. String({ valueOf() {…} }) is
                     // "[object Object]", not the valueOf result).
-                    else if (std.mem.eql(u8, m, "toString") and fv.isCallable()) native_ts = true;
+                    else if (std.mem.eql(u8, m, "toString") and fv.isCallable()) builtin_to_string = true;
                     break; // native thunk or non-callable shadow → built-in coercion
                 }
             }
-            if (native_ts) break :outer;
+            if (builtin_wrapper_value_of or builtin_to_string) break :outer;
             if (method) |fnv| {
                 if (fnv.isCallable()) {
                     user_tried += 1;
@@ -6957,8 +6957,9 @@ pub const Interpreter = struct {
         // where it stringifies (so `new Number(5) + 1 === 6` but `String hint`
         // gives "5").
         if (o.prim) |p| {
-            if (hint == .string) return .{ .string = try p.toString(self.arena) };
-            return p;
+            if (builtin_wrapper_value_of) return p;
+            if (builtin_to_string) return .{ .string = try p.toString(self.arena) };
+            return self.throwError("TypeError", "Cannot convert object to primitive value");
         }
         // A Date with the built-in coercion: a number hint (`Number(date)`,
         // `+date`, `date - date`) yields its time value; string/default hints
@@ -8460,9 +8461,43 @@ fn canonicalBigIntDecimalString(arena: std.mem.Allocator, raw: []const u8) error
     return out;
 }
 
-/// `BigInt(value)` — NumberToBigInt for an integral Number, else ToBigInt; not a
-/// constructor. ToPrimitive(number) is applied to an object argument first
-/// (handled inside `toBigIntValueImpl`).
+fn canonicalBigIntRadixString(arena: std.mem.Allocator, digits: []const u8, radix: u8) error{OutOfMemory}!?[]const u8 {
+    if (digits.len == 0) return null;
+    var non_zero = false;
+    for (digits) |c| {
+        const d = std.fmt.charToDigit(c, radix) catch return null;
+        if (d != 0) non_zero = true;
+    }
+    if (!non_zero) return "0";
+    if (std.fmt.parseInt(i128, digits, radix)) |n| {
+        const out: []const u8 = try std.fmt.allocPrint(arena, "{d}", .{n});
+        return out;
+    } else |_| {}
+
+    var decimal: std.ArrayListUnmanaged(u8) = .empty; // little-endian decimal digits
+    try decimal.append(arena, 0);
+    for (digits) |c| {
+        const digit = std.fmt.charToDigit(c, radix) catch unreachable;
+        var carry: u16 = digit;
+        for (decimal.items) |*decimal_digit| {
+            const value_ = @as(u16, decimal_digit.*) * radix + carry;
+            decimal_digit.* = @intCast(value_ % 10);
+            carry = value_ / 10;
+        }
+        while (carry > 0) {
+            try decimal.append(arena, @intCast(carry % 10));
+            carry /= 10;
+        }
+    }
+    while (decimal.items.len > 1 and decimal.items[decimal.items.len - 1] == 0) decimal.items.len -= 1;
+    var out = try arena.alloc(u8, decimal.items.len);
+    for (decimal.items, 0..) |d, i| out[out.len - 1 - i] = '0' + d;
+    return out;
+}
+
+/// `BigInt(value)` — NumberToBigInt for an integral Number, else ToBigInt.
+/// It has [[Construct]] so IsConstructor(BigInt) is true, but `new BigInt`
+/// throws before argument coercion.
 fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -17094,7 +17129,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // ArrayBuffer + typed arrays last, after Object.prototype exists.
     try installTypedArrays(env, root_shape);
 
-    // BigInt (a callable, non-constructor) + its prototype/statics.
+    // BigInt is callable and has [[Construct]] for IsConstructor probes, but
+    // the constructor path throws inside bigIntFn.
     {
         const bi_proto = try a.create(value.Object);
         bi_proto.* = .{ .proto = object_proto };
@@ -17110,7 +17146,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             };
         };
         const bi_ns = try a.create(value.Object);
-        bi_ns.* = .{ .native = bigIntFn };
+        bi_ns.* = .{ .native = bigIntFn, .native_ctor = true };
         try installNativeProps(a, root_shape, bi_ns, "BigInt", 1);
         try setNative(a, root_shape, bi_ns, "asIntN", 2, bigIntAsIntNFn(true));
         try setNative(a, root_shape, bi_ns, "asUintN", 2, bigIntAsIntNFn(false));

@@ -813,24 +813,9 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
     _ = this;
     const self = interp(ctx);
     const v = arg(args, 0);
-    if (v == .object) return v;
+    if (v == .object and !v.object.is_bigint and !v.object.is_symbol) return v;
     if (v == .undefined or v == .null) return self.newObject();
-    // ToObject of a primitive boxes it into the matching wrapper, whose
-    // prototype is that primitive constructor's `.prototype` (so e.g.
-    // `new Object("s").constructor === String`). Note this is *not* the
-    // in-flight `new.target` (always Object here), so makeWrapper isn't right.
-    const ctor_name: []const u8 = switch (v) {
-        .string => "String",
-        .number => "Number",
-        .boolean => "Boolean",
-        else => return self.newObject(),
-    };
-    const o = try self.arena.create(value.Object);
-    o.* = .{ .prim = v };
-    if (self.env.get(ctor_name)) |ctor| {
-        if (ctor == .object) o.proto = try self.protoObject(ctor.object);
-    }
-    return .{ .object = o };
+    return .{ .object = try self.toObject(v) };
 }
 
 pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

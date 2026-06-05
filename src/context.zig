@@ -1877,6 +1877,47 @@ test "oversized BigInt literals preserve identity for keyed collections" {
     )).boolean);
 }
 
+test "BigInt constructor parses oversized radix strings and rejects construction early" {
+    try std.testing.expect((try evalIn(
+        \\var bits = '1';
+        \\for (var i = 0; i < 128; i++) bits += '0';
+        \\var decimal = '340282366920938463463374607431768211456';
+        \\BigInt('0b' + bits) === BigInt(decimal) && BigInt('0B' + bits) === BigInt(decimal)
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var probed = false;
+        \\try { Reflect.construct(function() {}, [], BigInt); probed = true; } catch (e) {}
+        \\var touched = false;
+        \\var threw = false;
+        \\try { new BigInt({ valueOf: function() { touched = true; return 1; } }); }
+        \\catch (e) { threw = e instanceof TypeError; }
+        \\probed && threw && !touched
+    )).boolean);
+}
+
+test "Object boxes BigInt primitives through BigInt.prototype" {
+    try std.testing.expect((try evalIn(
+        \\var boxed = Object(1n);
+        \\boxed !== 1n && Object.getPrototypeOf(boxed) === BigInt.prototype
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var original = BigInt.prototype.toString;
+        \\var gets = 0;
+        \\var calls = 0;
+        \\Object.defineProperty(BigInt.prototype, 'toString', {
+        \\  configurable: true,
+        \\  get: function() {
+        \\    gets++;
+        \\    return function() { calls++; return original.call(this) + 'foo'; };
+        \\  }
+        \\});
+        \\var out = `${Object(1n)}`;
+        \\delete BigInt.prototype.toString;
+        \\Object.defineProperty(BigInt.prototype, 'toString', { configurable: true, writable: true, value: original });
+        \\out === '1foo' && gets === 1 && calls === 1
+    )).boolean);
+}
+
 test "__lookupGetter__/__lookupSetter__ walk the chain, proxy-aware" {
     // Returns the accessor's getter; a data property yields undefined.
     try std.testing.expect((try evalIn("var o = { get x() { return 1; } }; o.__lookupGetter__('x') === Object.getOwnPropertyDescriptor(o, 'x').get")).boolean);
