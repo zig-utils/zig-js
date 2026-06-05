@@ -1217,6 +1217,39 @@ test "Symbol.prototype: toString / valueOf / chain" {
     )).boolean);
 }
 
+test "Symbol constructor probes and ordinary wrapper coercion" {
+    try std.testing.expect((try evalIn(
+        \\var probed = false;
+        \\try { Reflect.construct(function() {}, [], Symbol); probed = true; } catch (e) {}
+        \\var touched = false;
+        \\var threw = false;
+        \\try { new Symbol({ toString: function() { touched = true; return 'x'; } }); }
+        \\catch (e) { threw = e instanceof TypeError; }
+        \\probed && threw && !touched
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\Object.defineProperty(Symbol.prototype, Symbol.toPrimitive, { configurable: true, value: null });
+        \\var result = `${Object(Symbol())}`;
+        \\var threw = false;
+        \\try { +Object(Symbol()); } catch (e) { threw = e instanceof TypeError; }
+        \\var related = false;
+        \\try { Object(Symbol()) <= ''; } catch (e) { related = e instanceof TypeError; }
+        \\delete Symbol.prototype[Symbol.toPrimitive];
+        \\result === 'Symbol()' && threw && related
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\delete Symbol.prototype[Symbol.toPrimitive];
+        \\var gets = 0;
+        \\var valueOfFunction = function() { gets += 100; return 123; };
+        \\Object.defineProperty(Symbol.prototype, 'valueOf', {
+        \\  configurable: true,
+        \\  get: function() { gets++; return valueOfFunction; }
+        \\});
+        \\var str = ''.concat(Object(Symbol()));
+        \\str === 'Symbol()' && gets === 0
+    )).boolean);
+}
+
 test "Error.prototype.stack accessor" {
     // An accessor on Error.prototype with get/set named "get stack"/"set stack".
     try expectEvalStr("function", "typeof Object.getOwnPropertyDescriptor(Error.prototype, 'stack').get");

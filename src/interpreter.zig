@@ -6958,7 +6958,13 @@ pub const Interpreter = struct {
         // gives "5").
         if (o.prim) |p| {
             if (builtin_wrapper_value_of) return p;
-            if (builtin_to_string) return .{ .string = try p.toString(self.arena) };
+            if (builtin_to_string) {
+                if (p == .object and p.object.is_symbol) {
+                    const ds = p.object.sym_desc orelse "";
+                    return .{ .string = try std.mem.concat(self.arena, u8, &.{ "Symbol(", ds, ")" }) };
+                }
+                return .{ .string = try p.toString(self.arena) };
+            }
             return self.throwError("TypeError", "Cannot convert object to primitive value");
         }
         // A Date with the built-in coercion: a number hint (`Number(date)`,
@@ -7062,10 +7068,10 @@ pub const Interpreter = struct {
             .div => .{ .number = l.toNumber() / r.toNumber() },
             .mod => .{ .number = @mod(l.toNumber(), r.toNumber()) },
             .pow => .{ .number = std.math.pow(f64, l.toNumber(), r.toNumber()) },
-            .lt => .{ .boolean = try lessThan(l, r) },
-            .le => .{ .boolean = !(try lessThan(r, l)) and !relationalNaN(l, r) },
-            .gt => .{ .boolean = try lessThan(r, l) },
-            .ge => .{ .boolean = !(try lessThan(l, r)) and !relationalNaN(l, r) },
+            .lt => .{ .boolean = try lessThan(self, l, r) },
+            .le => .{ .boolean = !(try lessThan(self, r, l)) and !relationalNaN(l, r) },
+            .gt => .{ .boolean = try lessThan(self, r, l) },
+            .ge => .{ .boolean = !(try lessThan(self, l, r)) and !relationalNaN(l, r) },
             .eq => .{ .boolean = value.looseEquals(l, r) },
             .neq => .{ .boolean = !value.looseEquals(l, r) },
             .eq_strict => .{ .boolean = value.strictEquals(l, r) },
@@ -16950,9 +16956,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try number_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, number_proto, number_ns);
 
-    // Symbol — callable (returns a fresh symbol) with the well-known symbols.
+    // Symbol is callable and has [[Construct]] for IsConstructor probes, but
+    // the constructor path throws inside symbolFn.
     const symbol_ns = try a.create(value.Object);
-    symbol_ns.* = .{ .native = symbolFn };
+    symbol_ns.* = .{ .native = symbolFn, .native_ctor = true };
     try installNativeProps(a, root_shape, symbol_ns, "Symbol", 0);
     // Symbol.prototype: toString/valueOf/constructor, protoing to Object.prototype.
     const symbol_proto = try a.create(value.Object);
@@ -22113,10 +22120,12 @@ fn dateNow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
     return .{ .number = 0 };
 }
 
-/// `Symbol([description])` — returns a fresh unique symbol (not constructable).
+/// `Symbol([description])` — returns a fresh unique symbol. It has [[Construct]]
+/// for IsConstructor probes, but `new Symbol` throws before argument coercion.
 fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target != .undefined) return self.throwError("TypeError", "Symbol is not a constructor");
     // `description` is ToString'd (honoring a `{toString}`/`{valueOf}` object);
     // a Symbol description is a TypeError, and `undefined` means none.
     const desc: ?[]const u8 = if (args.len > 0 and args[0] != .undefined)
@@ -22170,10 +22179,12 @@ fn symbolKeyForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 
 /// Abstract Relational Comparison (subset): string<string is lexicographic,
 /// everything else compares as numbers.
-fn lessThan(a: Value, b: Value) EvalError!bool {
+fn lessThan(self: *Interpreter, a: Value, b: Value) EvalError!bool {
     if (a == .string and b == .string) {
         return std.mem.order(u8, a.string, b.string) == .lt;
     }
+    if ((a == .object and a.object.is_symbol) or (b == .object and b.object.is_symbol))
+        return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
     const x = a.toNumber();
     const y = b.toNumber();
     if (std.math.isNan(x) or std.math.isNan(y)) return false;
