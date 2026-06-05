@@ -874,6 +874,13 @@ pub fn mapFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value 
     return ip.makeMap(arg(args, 0));
 }
 
+pub fn weakMapFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const ip = interp(ctx);
+    if (ip.new_target == .undefined) return ip.throwError("TypeError", "Constructor Map/WeakMap requires 'new'");
+    return ip.makeWeakMap(arg(args, 0));
+}
+
 pub fn setFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const ip = interp(ctx);

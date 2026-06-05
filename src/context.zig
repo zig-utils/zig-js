@@ -1672,6 +1672,7 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
         \\var other = $262.createRealm().global;
         \\var C = new other.Function();
         \\C.prototype = null;
+        \\Object.getPrototypeOf(Reflect.construct(WeakMap, [], C)) === other.WeakMap.prototype &&
         \\Object.getPrototypeOf(Reflect.construct(WeakSet, [], C)) === other.WeakSet.prototype
     )).boolean);
     // Symbol.toStringTag on the collection prototypes.

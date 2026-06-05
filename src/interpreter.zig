@@ -3393,10 +3393,18 @@ pub const Interpreter = struct {
     }
 
     pub fn makeMap(self: *Interpreter, init_v: Value) EvalError!Value {
+        return self.makeMapWithIntrinsic(init_v, "Map");
+    }
+
+    pub fn makeWeakMap(self: *Interpreter, init_v: Value) EvalError!Value {
+        return self.makeMapWithIntrinsic(init_v, "WeakMap");
+    }
+
+    fn makeMapWithIntrinsic(self: *Interpreter, init_v: Value, intrinsic: []const u8) EvalError!Value {
         const o = (try self.newObject()).object;
         o.is_map = true;
         if (self.new_target == .object) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Map");
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, intrinsic);
         } else if (self.env.get("Map")) |ctor| {
             if (ctor == .object) {
                 if (ctor.object.getOwn("prototype")) |p| {
@@ -16585,7 +16593,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try installMapProto(env, root_shape);
     try defineGlobalFnC(env, root_shape, "Set", 0, true, builtins.setFn);
     try installSetProto(env, root_shape);
-    try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.mapFn);
+    try defineGlobalFnC(env, root_shape, "WeakMap", 0, true, builtins.weakMapFn);
     try defineGlobalFnC(env, root_shape, "WeakSet", 0, true, builtins.weakSetFn);
     // WeakMap/WeakSet instances reuse the Map/Set internals (is_map/is_set), but
     // their prototypes are distinct and carry only the weak subset as real own
