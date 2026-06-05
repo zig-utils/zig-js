@@ -2058,7 +2058,14 @@ pub const Interpreter = struct {
             // throws, but `Object.getOwnPropertyDescriptor(arguments, "callee").
             // get` returns the shared intrinsic (its identity and properties are
             // what test262 probes).
-            if (func.is_strict) {
+            var non_simple_params = false;
+            for (func.params) |p| {
+                if (p.default != null or p.is_rest or p.pattern != null) {
+                    non_simple_params = true;
+                    break;
+                }
+            }
+            if (func.is_strict or non_simple_params) {
                 if (self.throwTypeError()) |tte| {
                     try args_obj.object.setAccessor(self.arena, "callee", .{ .object = tte }, .{ .object = tte });
                     try args_obj.object.setAttr(self.arena, "callee", .{ .enumerable = false, .configurable = false });
@@ -2555,6 +2562,9 @@ pub const Interpreter = struct {
     /// `Function.prototype.caller` during setup — reused by the strict
     /// `arguments.callee` and `arguments.caller` poison-pill accessors.
     pub fn throwTypeError(self: *Interpreter) ?*value.Object {
+        if (self.env.get("\x00ThrowTypeError")) |v| {
+            if (v == .object) return v.object;
+        }
         const fp = self.functionProto() orelse return null;
         const acc = fp.getAccessor("caller") orelse return null;
         if (acc.get) |g| if (g == .object) return g.object;
@@ -16772,11 +16782,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // chain to here and throws (the "restricted properties").
     {
         const tte = try a.create(value.Object);
-        tte.* = .{ .native = throwTypeErrorFn };
+        tte.* = .{ .native = throwTypeErrorFn, .private_data = @ptrCast(env) };
         try installFunctionProps(a, root_shape, tte, &.{}, "");
+        tte.extensible = false;
         // %ThrowTypeError% is itself frozen: length/name non-writable & non-configurable.
         try tte.setAttr(a, "length", .{ .writable = false, .enumerable = false, .configurable = false });
         try tte.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = false });
+        try env.put("\x00ThrowTypeError", .{ .object = tte });
         for ([_][]const u8{ "caller", "arguments" }) |pname| {
             try func_proto.setAccessor(a, pname, .{ .object = tte }, .{ .object = tte });
             try func_proto.setAttr(a, pname, .{ .enumerable = false, .configurable = true });
@@ -17321,6 +17333,11 @@ fn throwTypeErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const saved_env = self.env;
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
+    }
+    defer self.env = saved_env;
     return self.throwError("TypeError", "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
 }
 
