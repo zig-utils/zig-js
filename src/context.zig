@@ -2159,6 +2159,41 @@ test "URI encode/decode handles surrogate pairs" {
     try std.testing.expectError(error.Throw, evalIn("encodeURIComponent(String.fromCharCode(0xDC00))"));
 }
 
+test "DataView constructor observes NewTarget prototype side effects" {
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\var C = new other.Function();
+        \\C.prototype = null;
+        \\var view = Reflect.construct(DataView, [new ArrayBuffer(0), 0], C);
+        \\Object.getPrototypeOf(view) === other.DataView.prototype
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var buffer = new ArrayBuffer(8);
+        \\var called = false;
+        \\var byteOffset = { valueOf: function() { called = true; return 0; } };
+        \\var newTarget = function() {}.bind(null);
+        \\Object.defineProperty(newTarget, "prototype", { get: function() { $262.detachArrayBuffer(buffer); return DataView.prototype; } });
+        \\var ok = false;
+        \\try { Reflect.construct(DataView, [buffer, byteOffset], newTarget); } catch (e) { ok = e instanceof TypeError; }
+        \\ok && called
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var buffer = new ArrayBuffer(3, { maxByteLength: 3 });
+        \\var newTarget = function() {}.bind(null);
+        \\Object.defineProperty(newTarget, "prototype", { get: function() { buffer.resize(2); } });
+        \\var view = Reflect.construct(DataView, [buffer, 2], newTarget);
+        \\view.byteLength === 0
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var buffer = new ArrayBuffer(3, { maxByteLength: 3 });
+        \\var newTarget = function() {}.bind(null);
+        \\Object.defineProperty(newTarget, "prototype", { get: function() { buffer.resize(2); } });
+        \\var ok = false;
+        \\try { Reflect.construct(DataView, [buffer, 1, 2], newTarget); } catch (e) { ok = e instanceof RangeError; }
+        \\ok
+    )).boolean);
+}
+
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
     try std.testing.expect((try evalIn("isFinite('0')")).boolean);

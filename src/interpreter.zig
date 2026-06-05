@@ -8732,18 +8732,20 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const track = (args.len <= 2 or args[2] == .undefined) and ab.max_byte_length != null;
     if (args.len > 2 and args[2] != .undefined) {
         const vl = try toIndexArg(self, args[2]);
-        if (@as(u64, @intCast(offset)) + vl > buf_len) return self.throwError("RangeError", "Invalid DataView length");
+        if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+        if (offset + vl > @as(u64, @intCast(ab.data.len))) return self.throwError("RangeError", "Invalid DataView length");
         view_len = @intCast(vl);
     }
-    // The detached re-check after ToIndex coercions is spec'd (a side-effecting
-    // length argument could detach the buffer).
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const o = (try self.newObject()).object;
-    if (self.new_target == .object and self.new_target.object.getOwn("prototype") != null and self.new_target.object.getOwn("prototype").? == .object) {
-        o.proto = self.new_target.object.getOwn("prototype").?.object;
-    } else if (self.env.get("DataView")) |c| {
-        if (c == .object) o.proto = try self.protoObject(c.object);
-    }
+    if (self.new_target == .object) o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "DataView");
+    // The detached/out-of-bounds re-check after OrdinaryCreateFromConstructor is
+    // spec'd: reading newTarget.prototype can run user code that detaches or
+    // resizes the buffer.
+    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    const live_len = ab.data.len;
+    if (offset > live_len) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
+    if (!track and offset + @as(u64, @intCast(view_len)) > @as(u64, @intCast(live_len)))
+        return self.throwError("RangeError", "Invalid DataView length");
     const dv = try self.arena.create(value.DataViewData);
     dv.* = .{ .buffer = buf_v.object, .byte_offset = @intCast(offset), .byte_length = view_len, .track_length = track };
     o.data_view = dv;
