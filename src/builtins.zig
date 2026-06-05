@@ -142,7 +142,9 @@ fn skipStrWhiteSpace(s: []const u8) usize {
 
 pub fn parseFloatFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
-    const s = try arg(args, 0).toString(interp(ctx).arena);
+    const self = interp(ctx);
+    const prim = try self.toPrimitive(arg(args, 0), .string);
+    const s = try prim.toString(self.arena);
     const nan = std.math.nan(f64);
     // ParseFloat: trim leading StrWhiteSpace, then take the longest prefix that is
     // a StrDecimalLiteral. We scan that grammar by hand rather than leaning on
