@@ -151,8 +151,9 @@ pub const TryNode = struct {
 pub const Node = union(enum) {
     // expressions
     number: f64,
-    /// A `123n` BigInt literal (exact `i128` value).
-    bigint_lit: i128,
+    /// A `123n` BigInt literal. `text` is a canonical decimal value when it is
+    /// too large for the current i128 fast path.
+    bigint_lit: struct { value: i128 = 0, text: ?[]const u8 = null },
     string: []const u8,
     boolean: bool,
     null_lit,

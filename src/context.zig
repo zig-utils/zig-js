@@ -1863,6 +1863,20 @@ test "Map getOrInsertComputed validates callback and canonicalizes keys" {
     )).boolean);
 }
 
+test "oversized BigInt literals preserve identity for keyed collections" {
+    try std.testing.expect((try evalIn(
+        \\var s = '100000000000000000000000000000000000000000000000000000000000000000000000000000000001';
+        \\var n = 100000000000000000000000000000000000000000000000000000000000000000000000000000000001n;
+        \\n === BigInt(s) && String(n) === s
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var s = '100000000000000000000000000000000000000000000000000000000000000000000000000000000001';
+        \\var n = 100000000000000000000000000000000000000000000000000000000000000000000000000000000001n;
+        \\var m = new Map([[n, 'ok']]);
+        \\m.get(BigInt(s)) === 'ok' && m.has(n)
+    )).boolean);
+}
+
 test "__lookupGetter__/__lookupSetter__ walk the chain, proxy-aware" {
     // Returns the accessor's getter; a data property yields undefined.
     try std.testing.expect((try evalIn("var o = { get x() { return 1; } }; o.__lookupGetter__('x') === Object.getOwnPropertyDescriptor(o, 'x').get")).boolean);

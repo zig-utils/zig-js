@@ -1998,7 +1998,7 @@ pub const Parser = struct {
             .number => {
                 // Legacy octal / non-octal-decimal literals are SyntaxErrors in strict mode.
                 if (self.strict and t.legacy_octal) return ParseError.UnexpectedToken;
-                if (t.is_bigint) return self.alloc(.{ .bigint_lit = t.bigint });
+                if (t.is_bigint) return self.alloc(.{ .bigint_lit = .{ .value = t.bigint, .text = t.bigint_text } });
                 return self.alloc(.{ .number = t.number });
             },
             .string => return self.alloc(.{ .string = t.text }),

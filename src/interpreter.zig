@@ -663,7 +663,7 @@ pub const Interpreter = struct {
         if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
         return switch (node.*) {
             .number => |n| .{ .number = n },
-            .bigint_lit => |b| try self.makeBigInt(b),
+            .bigint_lit => |b| if (b.text) |s| try self.makeBigIntText(s) else try self.makeBigInt(b.value),
             .string => |s| .{ .string = s },
             .boolean => |b| .{ .boolean = b },
             .null_lit => .null,
@@ -2457,10 +2457,22 @@ pub const Interpreter = struct {
     pub fn makeBigInt(self: *Interpreter, v: i128) EvalError!Value {
         const o = try self.arena.create(value.Object);
         o.* = .{ .is_bigint = true, .bigint = v };
+        try self.finishBigInt(o);
+        return .{ .object = o };
+    }
+
+    pub fn makeBigIntText(self: *Interpreter, s: []const u8) EvalError!Value {
+        if (std.fmt.parseInt(i128, s, 10)) |v| return self.makeBigInt(v) else |_| {}
+        const o = try self.arena.create(value.Object);
+        o.* = .{ .is_bigint = true, .bigint_text = s };
+        try self.finishBigInt(o);
+        return .{ .object = o };
+    }
+
+    fn finishBigInt(self: *Interpreter, o: *value.Object) EvalError!void {
         if (self.env.get("BigInt")) |c| {
             if (c == .object) o.proto = try self.protoObject(c.object);
         }
-        return .{ .object = o };
     }
 
     /// ToBigInt(v): a boolean/number(integer)/string/BigInt converts; a
@@ -2503,8 +2515,8 @@ pub const Interpreter = struct {
                 if (t.len > 2 and t[0] == '0' and (t[1] == 'b' or t[1] == 'B')) {
                     return self.makeBigInt(std.fmt.parseInt(i128, t[2..], 2) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
                 }
-                const i = std.fmt.parseInt(i128, t, 10) catch return self.throwError("SyntaxError", "Cannot convert string to a BigInt");
-                return self.makeBigInt(i);
+                return self.makeBigIntText((try canonicalBigIntDecimalString(self.arena, t)) orelse
+                    return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
             },
             .null, .undefined => return self.throwError("TypeError", "Cannot convert undefined or null to a BigInt"),
         }
@@ -8428,6 +8440,26 @@ fn formatBigIntRadix(arena: std.mem.Allocator, val: i128, radix: u8) error{OutOf
     return arena.dupe(u8, buf[i..]);
 }
 
+fn canonicalBigIntDecimalString(arena: std.mem.Allocator, raw: []const u8) error{OutOfMemory}!?[]const u8 {
+    if (raw.len == 0) return null;
+    var i: usize = 0;
+    var neg = false;
+    if (raw[i] == '+' or raw[i] == '-') {
+        neg = raw[i] == '-';
+        i += 1;
+        if (i == raw.len) return null;
+    }
+    while (i < raw.len and raw[i] == '0') i += 1;
+    if (i == raw.len) return "0";
+    for (raw[i..]) |c| if (!std.ascii.isDigit(c)) return null;
+    if (!neg) {
+        const out = try arena.dupe(u8, raw[i..]);
+        return out;
+    }
+    const out = try std.mem.concat(arena, u8, &.{ "-", raw[i..] });
+    return out;
+}
+
 /// `BigInt(value)` — NumberToBigInt for an integral Number, else ToBigInt; not a
 /// constructor. ToPrimitive(number) is applied to an object argument first
 /// (handled inside `toBigIntValueImpl`).
@@ -8441,17 +8473,19 @@ fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const big: i128 = if (this == .object and this.object.is_bigint) this.object.bigint else if (this == .object and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) this.object.prim.?.object.bigint else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
-    return .{ .string = try formatBigIntRadix(self.arena, big, 10) };
+    const big = if (this == .object and this.object.is_bigint) this.object else if (this == .object and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) this.object.prim.?.object else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
+    return .{ .string = try value.bigIntToString(big, self.arena) };
 }
 
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
 fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const big: i128 = if (this == .object and this.object.is_bigint) this.object.bigint else if (this == .object and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) this.object.prim.?.object.bigint else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
+    const big = if (this == .object and this.object.is_bigint) this.object else if (this == .object and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) this.object.prim.?.object else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
     const radix: u8 = if (args.len > 0 and args[0] != .undefined) @intFromFloat(@trunc(try self.toNumberV(args[0]))) else 10;
     if (radix < 2 or radix > 36) return self.throwError("RangeError", "toString() radix must be between 2 and 36");
-    return .{ .string = try formatBigIntRadix(self.arena, big, radix) };
+    if (big.bigint_text != null and radix == 10) return .{ .string = big.bigint_text.? };
+    if (big.bigint_text != null) return self.throwError("RangeError", "BigInt value is too large for non-decimal radix conversion");
+    return .{ .string = try formatBigIntRadix(self.arena, big.bigint, radix) };
 }
 
 fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {

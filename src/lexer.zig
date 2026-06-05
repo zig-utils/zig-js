@@ -85,9 +85,11 @@ pub const Token = struct {
     /// A legacy octal (`0123`) or non-octal-decimal (`08`) integer literal —
     /// a SyntaxError in strict mode (the parser checks).
     legacy_octal: bool = false,
-    /// A `123n` BigInt literal — `bigint` holds the exact value.
+    /// A `123n` BigInt literal. `bigint_text`, when present, holds a canonical
+    /// decimal value too large for the current i128 fast path.
     is_bigint: bool = false,
     bigint: i128 = 0,
+    bigint_text: ?[]const u8 = null,
     /// True when an IdentifierName token contained at least one `\u` escape.
     escaped_identifier: bool = false,
 };
@@ -571,12 +573,15 @@ pub const Lexer = struct {
                 while (self.i < self.src.len and (isRadixDigit(self.src[self.i], r) or self.src[self.i] == '_')) self.i += 1;
                 if (!separatorsValid(self.src[ds..self.i], r)) return LexError.InvalidNumber;
                 const cleaned = try stripSeparators(self.arena, self.src[ds..self.i]);
-                const n = std.fmt.parseInt(u128, cleaned, r) catch return LexError.InvalidNumber;
                 if (self.peek() == 'n') {
                     self.i += 1; // `0xFFn` — a BigInt literal.
-                    if (n > @as(u128, @intCast(std.math.maxInt(i128)))) return LexError.InvalidNumber;
-                    return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start, .is_bigint = true, .bigint = @intCast(n) };
+                    if (std.fmt.parseInt(u128, cleaned, r)) |n| {
+                        if (n <= @as(u128, @intCast(std.math.maxInt(i128))))
+                            return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start, .is_bigint = true, .bigint = @intCast(n) };
+                    } else |_| {}
+                    return .{ .kind = .number, .text = self.src[start..self.i], .pos = start, .is_bigint = true, .bigint_text = try radixDigitsToDecimal(self.arena, cleaned, r) };
                 }
+                const n = std.fmt.parseInt(u128, cleaned, r) catch return LexError.InvalidNumber;
                 return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start };
             }
         }
@@ -599,10 +604,14 @@ pub const Lexer = struct {
             std.mem.indexOfScalar(u8, self.src[start..self.i], '_') != null) return LexError.InvalidNumber;
         if (self.peek() == 'n') {
             // `123n` — a decimal BigInt literal (no fraction/exponent allowed).
+            if (std.mem.indexOfAny(u8, self.src[start..self.i], ".eE") != null) return LexError.InvalidNumber;
             const digits = try stripSeparators(self.arena, self.src[start..self.i]);
             self.i += 1;
-            const bi = std.fmt.parseInt(i128, digits, 10) catch return LexError.InvalidNumber;
-            return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(bi), .pos = start, .is_bigint = true, .bigint = bi };
+            if (std.fmt.parseInt(i128, digits, 10)) |bi| {
+                return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(bi), .pos = start, .is_bigint = true, .bigint = bi };
+            } else |_| {
+                return .{ .kind = .number, .text = self.src[start..self.i], .pos = start, .is_bigint = true, .bigint_text = try canonicalDecimalDigits(self.arena, digits) };
+            }
         }
         const cleaned = try stripSeparators(self.arena, self.src[start..self.i]);
         const n = std.fmt.parseFloat(f64, cleaned) catch return LexError.InvalidNumber;
@@ -973,6 +982,35 @@ fn stripSeparators(arena: std.mem.Allocator, s: []const u8) LexError![]const u8 
         try buf.append(arena, c);
     }
     return buf.toOwnedSlice(arena);
+}
+
+fn canonicalDecimalDigits(arena: std.mem.Allocator, digits: []const u8) LexError![]const u8 {
+    var i: usize = 0;
+    while (i < digits.len and digits[i] == '0') i += 1;
+    if (i == digits.len) return "0";
+    return arena.dupe(u8, digits[i..]);
+}
+
+fn radixDigitsToDecimal(arena: std.mem.Allocator, digits: []const u8, radix: u8) LexError![]const u8 {
+    var dec: std.ArrayListUnmanaged(u8) = .empty; // little-endian decimal digits
+    try dec.append(arena, 0);
+    for (digits) |c| {
+        const d = std.fmt.charToDigit(c, radix) catch return LexError.InvalidNumber;
+        var carry: u16 = d;
+        for (dec.items) |*digit| {
+            const v: u16 = @as(u16, digit.*) * radix + carry;
+            digit.* = @intCast(v % 10);
+            carry = v / 10;
+        }
+        while (carry > 0) {
+            try dec.append(arena, @intCast(carry % 10));
+            carry /= 10;
+        }
+    }
+    while (dec.items.len > 1 and dec.items[dec.items.len - 1] == 0) dec.items.len -= 1;
+    const out = try arena.alloc(u8, dec.items.len);
+    for (dec.items, 0..) |d, i| out[out.len - 1 - i] = '0' + d;
+    return out;
 }
 
 /// Keywords after which a `/` begins a regex (they expect an operand).

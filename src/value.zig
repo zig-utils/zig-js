@@ -318,10 +318,12 @@ pub const Object = struct {
     is_symbol: bool = false,
     sym_key: []const u8 = "",
     /// A BigInt primitive (`typeof` reports "bigint"; treated as a primitive in
-    /// equality/arithmetic). Backed by an `i128` (the arbitrary-precision range
-    /// beyond ±2^127 is not yet modeled). `is_bigint` marks it.
+    /// equality/arithmetic). Small values use the `i128` fast path; oversized
+    /// literals/decimal strings keep a canonical decimal identity in
+    /// `bigint_text` until full arbitrary-precision arithmetic lands.
     is_bigint: bool = false,
     bigint: i128 = 0,
+    bigint_text: ?[]const u8 = null,
     /// A Symbol's `[[Description]]`: `null` = no description (reads as
     /// `undefined`), else the string. Held in this dedicated slot rather than an
     /// own `description` property so it stays invisible to reflection
@@ -660,7 +662,7 @@ pub const Value = union(enum) {
             .boolean => |b| b,
             .number => |n| n != 0 and !std.math.isNan(n),
             .string => |s| s.len != 0,
-            .object => |o| if (o.is_bigint) o.bigint != 0 else true,
+            .object => |o| if (o.is_bigint) !bigIntIsZero(o) else true,
         };
     }
 
@@ -674,7 +676,7 @@ pub const Value = union(enum) {
             .string => |s| stringToNumber(s),
             // A BigInt's mathematical value (explicit `Number(1n) === 1`); other
             // objects coerce to NaN here (proper ToPrimitive is `Interpreter`-level).
-            .object => |o| if (o.is_bigint) @floatFromInt(o.bigint) else std.math.nan(f64),
+            .object => |o| if (o.is_bigint) bigIntToNumber(o) else std.math.nan(f64),
         };
     }
 
@@ -722,10 +724,38 @@ pub const Value = union(enum) {
             .boolean => |b| if (b) "true" else "false",
             .number => |n| try numberToString(arena, n),
             .string => |s| s,
-            .object => |o| if (o.is_bigint) try std.fmt.allocPrint(arena, "{d}", .{o.bigint}) else try objectToString(o, arena),
+            .object => |o| if (o.is_bigint) try bigIntToString(o, arena) else try objectToString(o, arena),
         };
     }
 };
+
+pub fn bigIntIsZero(o: *Object) bool {
+    if (o.bigint_text) |s| return std.mem.eql(u8, s, "0");
+    return o.bigint == 0;
+}
+
+pub fn bigIntToNumber(o: *Object) f64 {
+    if (o.bigint_text) |s| return std.fmt.parseFloat(f64, s) catch if (s.len > 0 and s[0] == '-') -std.math.inf(f64) else std.math.inf(f64);
+    return @floatFromInt(o.bigint);
+}
+
+pub fn bigIntToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+    if (o.bigint_text) |s| return s;
+    return std.fmt.allocPrint(arena, "{d}", .{o.bigint});
+}
+
+fn bigIntEquals(a: *Object, b: *Object) bool {
+    if (a.bigint_text) |as| {
+        if (b.bigint_text) |bs| return std.mem.eql(u8, as, bs);
+        const parsed = std.fmt.parseInt(i128, as, 10) catch return false;
+        return parsed == b.bigint;
+    }
+    if (b.bigint_text) |bs| {
+        const parsed = std.fmt.parseInt(i128, bs, 10) catch return false;
+        return a.bigint == parsed;
+    }
+    return a.bigint == b.bigint;
+}
 
 /// ECMAScript-ish ToString for objects: errors render `Name: message`, arrays
 /// join their elements with commas (Array.prototype.toString), everything else
@@ -883,7 +913,7 @@ pub fn strictEquals(a: Value, b: Value) bool {
         .string => |x| b == .string and std.mem.eql(u8, x, b.string),
         // BigInt is a primitive: `===` compares its value, not object identity.
         .object => |x| if (x.is_bigint)
-            (b == .object and b.object.is_bigint and b.object.bigint == x.bigint)
+            (b == .object and b.object.is_bigint and bigIntEquals(x, b.object))
         else
             (b == .object and b.object == x and !b.object.is_bigint),
     };
@@ -910,8 +940,15 @@ pub fn looseEquals(a: Value, b: Value) bool {
     const a_big = a == .object and a.object.is_bigint;
     const b_big = b == .object and b.object.is_bigint;
     if (a_big != b_big) {
-        const big: i128 = if (a_big) a.object.bigint else b.object.bigint;
+        const big_obj = if (a_big) a.object else b.object;
         const other = if (a_big) b else a;
+        if (big_obj.bigint_text != null) {
+            return switch (other) {
+                .string => |s| std.mem.eql(u8, std.mem.trim(u8, s, " \t\r\n"), big_obj.bigint_text.?),
+                else => false,
+            };
+        }
+        const big: i128 = big_obj.bigint;
         return switch (other) {
             .number => |n| @as(f64, @floatFromInt(big)) == n,
             .boolean => |x| big == @as(i128, if (x) 1 else 0),
