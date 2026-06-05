@@ -1306,6 +1306,16 @@ test "AggregateError" {
     )).boolean);
 }
 
+test "SuppressedError creates message before error and suppressed" {
+    try std.testing.expect((try evalIn(
+        \\var e = new SuppressedError({}, {}, { toString: function () { return ""; } });
+        \\var keys = Object.getOwnPropertyNames(e);
+        \\keys.indexOf("message") !== -1 &&
+        \\keys.indexOf("error") === keys.indexOf("message") + 1 &&
+        \\keys.indexOf("suppressed") === keys.indexOf("error") + 1
+    )).boolean);
+}
+
 test "Error cause option (ES2022)" {
     // `new Error(msg, { cause })` installs a non-enumerable own `cause`.
     try std.testing.expectEqual(@as(f64, 42), (try evalIn("new Error('m', { cause: 42 }).cause")).number);

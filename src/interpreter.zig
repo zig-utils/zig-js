@@ -1903,7 +1903,8 @@ pub const Interpreter = struct {
 
         // The message is ToString'd (via ToPrimitive(string), so an object's
         // toString/valueOf runs); a Symbol message throws a TypeError.
-        const msg = if (args.len > msg_i and args[msg_i] != .undefined) blk: {
+        const has_msg = args.len > msg_i and args[msg_i] != .undefined;
+        const msg = if (has_msg) blk: {
             const prim = try self.toPrimitive(args[msg_i], .string);
             if (prim == .object and prim.object.is_symbol)
                 return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
@@ -1911,6 +1912,10 @@ pub const Interpreter = struct {
         } else "";
         const proto = if (new_target == .object) try self.ctorRealmIntrinsicProto(new_target.object, name) else null;
         const err = try self.makeErrorWithProto(name, msg, proto);
+        if (has_msg and msg.len == 0) {
+            try self.setProp(err.object, "message", .{ .string = "" });
+            try err.object.setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
+        }
 
         if (aggregate) {
             // `errors` is a fresh Array built from the (iterable) first argument.
