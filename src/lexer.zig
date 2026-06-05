@@ -574,6 +574,7 @@ pub const Lexer = struct {
                 const n = std.fmt.parseInt(u128, cleaned, r) catch return LexError.InvalidNumber;
                 if (self.peek() == 'n') {
                     self.i += 1; // `0xFFn` — a BigInt literal.
+                    if (n > @as(u128, @intCast(std.math.maxInt(i128)))) return LexError.InvalidNumber;
                     return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start, .is_bigint = true, .bigint = @intCast(n) };
                 }
                 return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(n), .pos = start };

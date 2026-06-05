@@ -21,7 +21,7 @@ const Value = value.Value;
 
 /// Robustness limits so adversarial input throws a catchable error instead of
 /// crashing the process (stack overflow / runaway loop).
-pub const max_call_depth: u32 = 1000;
+pub const max_call_depth: u32 = 256;
 pub const max_steps: u64 = 100_000_000;
 
 /// Coerce a JS number to a length/index, clamping NaN/negative to 0 and huge
@@ -1771,6 +1771,9 @@ pub const Interpreter = struct {
         }
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
         if (obj.native) |nf| {
+            if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
+            self.depth += 1;
+            defer self.depth -= 1;
             // Expose the callee object to the native (it isn't a parameter), so
             // closures-over-data like Promise resolve/reject can find their slot.
             const saved_native = self.active_native;
