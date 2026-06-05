@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create Release
+        uses: stacksjs/action-releaser@v1.2.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to Pantry
+        uses: home-lang/pantry/packages/action@main
+        with:
+          publish: zig
+          install: 'false'
+        env:
+          PANTRY_TOKEN: ${{ secrets.PANTRY_TOKEN }}
