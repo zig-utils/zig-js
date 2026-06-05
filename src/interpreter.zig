@@ -6284,7 +6284,11 @@ pub const Interpreter = struct {
             return result;
         }
         if (eq(name, "at")) {
-            const fl = @trunc(try self.toNumberV(arg0(args)));
+            const n = try self.toNumberV(arg0(args));
+            const fl = if (std.math.isNan(n)) 0 else @trunc(n);
+            if (std.math.isInf(fl)) return Value.undefined;
+            const slen_f = @as(f64, @floatFromInt(s.len));
+            if (fl < -slen_f or fl >= slen_f) return Value.undefined;
             const idx: i64 = if (fl < 0) @as(i64, @intCast(s.len)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
             if (idx < 0 or idx >= s.len) return Value.undefined;
             return Value{ .string = try self.arena.dupe(u8, s[@intCast(idx) .. @as(usize, @intCast(idx)) + 1]) };
@@ -6399,6 +6403,7 @@ pub const Interpreter = struct {
             const len: usize = if (args.len > 1 and arg(args, 1) != .undefined) blk: {
                 const l = arg(args, 1).toNumber();
                 if (std.math.isNan(l) or l <= 0) break :blk 0;
+                if (std.math.isInf(l) or l >= @as(f64, @floatFromInt(remaining))) break :blk remaining;
                 const lu: usize = @intFromFloat(@trunc(l));
                 break :blk @min(lu, remaining);
             } else remaining;
@@ -21899,8 +21904,10 @@ fn toFixed(arena: std.mem.Allocator, n: f64, d: usize) ![]const u8 {
     if (std.math.isInf(n)) return if (n < 0) "-Infinity" else "Infinity";
     const neg = n < 0;
     const scale = std.math.pow(f64, 10, @floatFromInt(d));
+    const u64_max_f = @as(f64, @floatFromInt(std.math.maxInt(u64)));
+    if (std.math.isInf(scale) or scale >= u64_max_f) return value.numberToString(arena, n);
     const scaled_f = @round(@abs(n) * scale);
-    if (scaled_f >= 18446744073709551615.0) return value.numberToString(arena, n); // too big for fixed-point
+    if (std.math.isInf(scaled_f) or scaled_f >= u64_max_f) return value.numberToString(arena, n); // too big for fixed-point
     const scaled: u64 = @intFromFloat(scaled_f);
     const scale_u: u64 = @intFromFloat(scale);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
