@@ -9895,7 +9895,7 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     // %AsyncIteratorPrototype%.
     const proto = try a.create(value.Object);
     proto.* = .{ .proto = object_proto };
-    if (sym_async_iter) |k| try setNative(a, rs, proto, k, 0, asyncIterProtoSymbolFn);
+    if (sym_async_iter) |k| try installSymbolMethod(a, rs, proto, k, "[Symbol.asyncIterator]", 0, asyncIterProtoSymbolFn);
     if (sym_async_dispose) |k| try installSymbolMethod(a, rs, proto, k, "[Symbol.asyncDispose]", 0, asyncIterProtoDisposeFn);
     inline for (.{
         .{ "map", asyncIterMapFn },         .{ "filter", asyncIterFilterFn },

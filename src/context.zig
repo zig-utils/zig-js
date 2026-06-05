@@ -2475,6 +2475,7 @@ test "async: declarations/expressions/arrows/methods parse; never-called is vali
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("class C { async m() { await this.x; } static async s() {} } 1")).number);
     // async generator parses.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function* ag() { yield await 1; } 1")).number);
+    try expectEvalStr("[Symbol.asyncIterator]", "async function* g() {} Object.getPrototypeOf(Object.getPrototypeOf(g.prototype))[Symbol.asyncIterator].name");
 }
 
 test "async/await: suspendable runtime with spec ordering" {
