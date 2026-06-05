@@ -16718,12 +16718,18 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, number_ns, "isSafeInteger", 1, builtins.numberIsSafeInteger);
     try setNative(a, root_shape, number_ns, "isNaN", 1, builtins.numberIsNaN);
     try setNative(a, root_shape, number_ns, "isFinite", 1, builtins.numberIsFinite);
-    try setNative(a, root_shape, number_ns, "parseFloat", 1, builtins.parseFloatFn);
-    try setNative(a, root_shape, number_ns, "parseInt", 2, builtins.parseIntFn);
+    if (env.get("parseFloat")) |pf| {
+        try number_ns.setOwn(a, root_shape, "parseFloat", pf);
+        try number_ns.setAttr(a, "parseFloat", .{ .enumerable = false, .configurable = true, .writable = true });
+    }
+    if (env.get("parseInt")) |pi| {
+        try number_ns.setOwn(a, root_shape, "parseInt", pi);
+        try number_ns.setAttr(a, "parseInt", .{ .enumerable = false, .configurable = true, .writable = true });
+    }
     try number_ns.setOwn(a, root_shape, "MAX_SAFE_INTEGER", .{ .number = 9007199254740991 });
     try number_ns.setOwn(a, root_shape, "MIN_SAFE_INTEGER", .{ .number = -9007199254740991 });
     try number_ns.setOwn(a, root_shape, "MAX_VALUE", .{ .number = std.math.floatMax(f64) });
-    try number_ns.setOwn(a, root_shape, "MIN_VALUE", .{ .number = std.math.floatMin(f64) });
+    try number_ns.setOwn(a, root_shape, "MIN_VALUE", .{ .number = std.math.floatTrueMin(f64) });
     try number_ns.setOwn(a, root_shape, "EPSILON", .{ .number = std.math.floatEps(f64) });
     try number_ns.setOwn(a, root_shape, "POSITIVE_INFINITY", .{ .number = std.math.inf(f64) });
     try number_ns.setOwn(a, root_shape, "NEGATIVE_INFINITY", .{ .number = -std.math.inf(f64) });
@@ -17034,6 +17040,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // brand-checked methods (`Number.prototype.toString(radix)`, `valueOf()`,
     // `toFixed(...)`) accept it as a Number and return "0"/0 rather than throw.
     number_proto.* = .{ .proto = object_proto, .prim = .{ .number = 0 } };
+    number_ns.proto = func_proto;
     inline for (.{
         .{ "toString", 1 },     .{ "toFixed", 1 },        .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
         .{ "toExponential", 1 }, .{ "toPrecision", 1 },
@@ -22956,6 +22963,10 @@ test "interpreter JSON, Object, Number builtins" {
     try std.testing.expect((try evalSource(a, "Number.isInteger(5)")).boolean);
     try std.testing.expect(!(try evalSource(a, "Number.isInteger(5.5)")).boolean);
     try std.testing.expect((try evalSource(a, "Number.isNaN(NaN)")).boolean);
+    try std.testing.expect((try evalSource(a, "Number.parseInt === parseInt")).boolean);
+    try std.testing.expect((try evalSource(a, "Number.parseFloat === parseFloat")).boolean);
+    try std.testing.expect((try evalSource(a, "Function.prototype.isPrototypeOf(Number)")).boolean);
+    try std.testing.expectEqual(@as(f64, 0), (try evalSource(a, "Number.MIN_VALUE / 2")).number);
     try std.testing.expectEqualStrings("AB", (try evalSource(a, "String.fromCharCode(65, 66)")).string);
 }
 
