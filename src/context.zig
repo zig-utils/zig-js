@@ -2136,6 +2136,7 @@ test "parseFloat: Unicode whitespace, Infinity, and no numeric separators" {
     try std.testing.expect(std.math.isInf((try evalIn("parseFloat('-Infinity')")).number));
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('1e')")).number);
     try std.testing.expect(std.math.isNan((try evalIn("parseFloat('.e5')")).number));
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('0.1e1' + String.fromCharCode(0x0130))")).number);
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { return 0; } })")).number);
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { return {}; } })")).number);
     try std.testing.expectError(error.Throw, evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { throw 'error'; } })"));

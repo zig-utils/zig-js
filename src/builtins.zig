@@ -1621,9 +1621,9 @@ pub fn stringFromCharCode(ctx: *anyopaque, this: Value, args: []const Value) Hos
     const self = interp(ctx);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (args) |c| {
-        const n = c.toNumber();
-        const code: u8 = if (std.math.isNan(n) or std.math.isInf(n)) 0 else @intFromFloat(@mod(@trunc(n), 256));
-        try buf.append(self.arena, code);
+        const n = try self.toNumberV(c);
+        const code: u16 = if (std.math.isNan(n) or std.math.isInf(n)) 0 else @intFromFloat(@mod(@trunc(n), 65536));
+        try appendCodePointWtf8(self.arena, &buf, @intCast(code));
     }
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }

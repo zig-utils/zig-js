@@ -22988,6 +22988,8 @@ test "interpreter JSON, Object, Number builtins" {
     try std.testing.expect((try evalSource(a, "Function.prototype.isPrototypeOf(Number)")).boolean);
     try std.testing.expectEqual(@as(f64, 0), (try evalSource(a, "Number.MIN_VALUE / 2")).number);
     try std.testing.expectEqualStrings("AB", (try evalSource(a, "String.fromCharCode(65, 66)")).string);
+    try std.testing.expect((try evalSource(a, "String.fromCharCode(0x0130) === '\\u0130'")).boolean);
+    try std.testing.expect((try evalSource(a, "String.fromCharCode(0x10400) === '\\u0400'")).boolean);
 }
 
 test "interpreter builtins: Math, Object, Array, globals" {
