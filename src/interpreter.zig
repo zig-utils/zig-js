@@ -19,6 +19,8 @@ const cldr_tzalias = @import("cldr_tzalias.zig");
 const Node = ast.Node;
 const Value = value.Value;
 
+extern "c" fn snprintf(noalias s: [*c]u8, maxlen: usize, noalias format: [*:0]const u8, ...) c_int;
+
 /// Robustness limits so adversarial input throws a catchable error instead of
 /// crashing the process (stack overflow / runaway loop).
 pub const max_call_depth: u32 = 256;
@@ -22400,8 +22402,21 @@ fn jsExpFix(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     const ei = std.mem.indexOfScalar(u8, s, 'e') orelse return arena.dupe(u8, s);
     const mant = s[0..ei];
     const exp = s[ei + 1 ..];
-    const sign: []const u8 = if (exp.len > 0 and exp[0] == '-') "" else "+";
-    return std.fmt.allocPrint(arena, "{s}e{s}{s}", .{ mant, sign, exp });
+    var sign: u8 = '+';
+    var start: usize = 0;
+    if (exp.len > 0 and (exp[0] == '-' or exp[0] == '+')) {
+        sign = exp[0];
+        start = 1;
+    }
+    while (start + 1 < exp.len and exp[start] == '0') start += 1;
+    return std.fmt.allocPrint(arena, "{s}e{c}{s}", .{ mant, sign, exp[start..] });
+}
+
+fn renderScientificFixed(arena: std.mem.Allocator, n: f64, frac: usize) ![]const u8 {
+    var raw: [512]u8 = undefined;
+    const len = snprintf(raw[0..].ptr, raw.len, "%.*e", @as(c_int, @intCast(frac)), @as(f64, n));
+    if (len < 0 or @as(usize, @intCast(len)) >= raw.len) return error.OutOfMemory;
+    return jsExpFix(arena, raw[0..@intCast(len)]);
 }
 
 /// `Number.prototype.toExponential` — scientific notation with `frac` fraction
@@ -22418,6 +22433,7 @@ fn toExponentialStr(arena: std.mem.Allocator, n: f64, frac: ?usize) ![]const u8 
         return out.items;
     }
     var buf: [512]u8 = undefined;
+    if (frac) |f| if (f >= 16) return renderScientificFixed(arena, n, f);
     const s = std.fmt.float.render(&buf, n, .{ .mode = .scientific, .precision = frac }) catch return error.OutOfMemory;
     return jsExpFix(arena, s);
 }
@@ -22434,9 +22450,8 @@ fn toPrecisionStr(arena: std.mem.Allocator, n: f64, p: usize) ![]const u8 {
         return z.items;
     }
     const neg = n < 0;
-    var buf: [512]u8 = undefined;
     // Scientific with p-1 fraction digits yields exactly p significant digits.
-    const s = std.fmt.float.render(&buf, @abs(n), .{ .mode = .scientific, .precision = p - 1 }) catch return error.OutOfMemory;
+    const s = try renderScientificFixed(arena, @abs(n), p - 1);
     // Parse "d.ddd...eX": collect the significant digits and the decimal exponent.
     const ei = std.mem.indexOfScalar(u8, s, 'e').?;
     var digits: std.ArrayListUnmanaged(u8) = .empty;
@@ -23079,6 +23094,8 @@ test "interpreter number/boolean primitive methods" {
     try std.testing.expectEqualStrings("3.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", (try evalSource(a, "(3).toFixed(100)")).string);
     try std.testing.expectEqualStrings("0e+0", (try evalSource(a, "(-0).toExponential(0)")).string);
     try std.testing.expectEqualStrings("0.00e+0", (try evalSource(a, "(-0).toExponential(2)")).string);
+    try std.testing.expectEqualStrings("1.234e+27", (try evalSource(a, "(1.2345e+27).toPrecision(4)")).string);
+    try std.testing.expectEqualStrings("1.23456000000000003070e+2", (try evalSource(a, "(123.456).toExponential(20)")).string);
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "(7).valueOf()")).number);
     try std.testing.expectEqualStrings("true", (try evalSource(a, "true.toString()")).string);
 }
