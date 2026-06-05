@@ -22395,6 +22395,16 @@ fn jsExpFix(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
 /// `Number.prototype.toExponential` — scientific notation with `frac` fraction
 /// digits (or shortest when null), exponent always signed.
 fn toExponentialStr(arena: std.mem.Allocator, n: f64, frac: ?usize) ![]const u8 {
+    if (n == 0) {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        try out.append(arena, '0');
+        if (frac) |f| if (f > 0) {
+            try out.append(arena, '.');
+            try out.appendNTimes(arena, '0', f);
+        };
+        try out.appendSlice(arena, "e+0");
+        return out.items;
+    }
     var buf: [512]u8 = undefined;
     const s = std.fmt.float.render(&buf, n, .{ .mode = .scientific, .precision = frac }) catch return error.OutOfMemory;
     return jsExpFix(arena, s);
@@ -23052,6 +23062,8 @@ test "interpreter number/boolean primitive methods" {
     try std.testing.expectEqualStrings("1010", (try evalSource(a, "(10).toString(2)")).string);
     try std.testing.expectEqualStrings("3.14", (try evalSource(a, "(3.14159).toFixed(2)")).string);
     try std.testing.expectEqualStrings("5.00", (try evalSource(a, "(5).toFixed(2)")).string);
+    try std.testing.expectEqualStrings("0e+0", (try evalSource(a, "(-0).toExponential(0)")).string);
+    try std.testing.expectEqualStrings("0.00e+0", (try evalSource(a, "(-0).toExponential(2)")).string);
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "(7).valueOf()")).number);
     try std.testing.expectEqualStrings("true", (try evalSource(a, "true.toString()")).string);
 }
