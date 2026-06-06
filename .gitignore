@@ -11,3 +11,4 @@ bun.lockb
 /pantry
 pantry.lock
 .claude/scheduled_tasks.lock
+/.zig-global-cache
