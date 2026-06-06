@@ -4719,12 +4719,12 @@ pub const Interpreter = struct {
             // (handled by the prototype-chain setter walk below), not the store.
             if (arrayIndex(key) != null and o.getAccessor(key) != null) {
                 // fall through to the setter walk
-            } else if (arrayIndex(key) != null and arrayProtoAccessor(o, key) and
+            } else if (arrayIndex(key) != null and self.arrayProtoMayInterceptSet(o, key) and
                 !(arrayIndex(key).? < o.elements.items.len and !o.isHole(arrayIndex(key).?)))
             {
-                // The index isn't an own present element and an inherited accessor
-                // (e.g. `Array.prototype[0]`) intercepts the write — OrdinarySet
-                // routes to its setter; fall through to the setter walk.
+                // The index isn't an own present element and an inherited
+                // accessor or Proxy can intercept the write — OrdinarySet routes
+                // through the prototype chain before creating a local element.
             } else if (arrayIndex(key)) |i| {
                 // A per-index descriptor (recorded in `attrs`) may mark the
                 // element non-writable: sloppy ignores the write, strict throws.
@@ -5733,14 +5733,15 @@ pub const Interpreter = struct {
         return !(o.attrs != null and !o.getAttr("length").writable);
     }
 
-    /// Whether some object on `o`'s *prototype* chain defines an accessor at the
-    /// (array-index) key — so an assignment to a hole/out-of-range index routes
-    /// to that inherited setter (OrdinarySet) instead of the dense store.
-    fn arrayProtoAccessor(o: *value.Object, key: []const u8) bool {
-        var cur: ?*value.Object = o.proto;
+    /// Whether some object on `o`'s *prototype* chain can intercept a
+    /// (array-index) write — so an assignment to a hole/out-of-range index routes
+    /// through OrdinarySet instead of the dense store.
+    fn arrayProtoMayInterceptSet(self: *Interpreter, o: *value.Object, key: []const u8) bool {
+        var cur: ?*value.Object = self.effectiveProto(o);
         while (cur) |c| {
+            if (c.proxy_handler != null or c.proxy_revoked) return true;
             if (c.getAccessor(key) != null) return true;
-            cur = c.proto;
+            cur = self.effectiveProto(c);
         }
         return false;
     }
