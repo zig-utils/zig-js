@@ -267,6 +267,11 @@ pub const Function = struct {
     home_object: ?*value.Object = null,
     /// For a derived class constructor: the superclass object, called by `super(...)`.
     super_ctor: ?*value.Object = null,
+    /// Class constructors have [[FunctionKind]] "classConstructor": they cannot
+    /// be called without [[Construct]], and derived constructors must initialize
+    /// `this` through `super()` before completing normally.
+    is_class_constructor: bool = false,
+    is_derived_constructor: bool = false,
     /// `function*`: calling this returns a generator object instead of running
     /// the body. `gen_chunk` is the body compiled for the suspendable VM (null if
     /// the body falls outside the VM's lowered subset — then calling it throws).
@@ -368,6 +373,9 @@ pub const Interpreter = struct {
     /// constructor of the executing derived constructor (for `super(...)`).
     home_object: ?*value.Object = null,
     super_ctor: ?*value.Object = null,
+    /// Scoped flag for a running derived class constructor. `super()` flips this
+    /// from false to true; completion reads it to implement GetThisBinding.
+    this_initialized: bool = true,
     /// `new.target`: the constructor of the in-flight `new` call (undefined in a
     /// plain call). Inherited lexically by arrow functions.
     new_target: Value = .undefined,
@@ -768,7 +776,7 @@ pub const Interpreter = struct {
                 // super (`class extends Set/Map/Array/...`) returns a fresh exotic
                 // object carrying the internal slots; per spec that object becomes
                 // the `this` binding, so rebind `this` and record it for construct.
-                const sup_ret = try self.callValueWithThis(.{ .object = sup }, args, self.this_value);
+                const sup_ret = try self.constructNT(.{ .object = sup }, args, self.new_target);
                 // A built-in super (`class extends Set/Map/Array/Promise/...`)
                 // returns a fresh exotic object carrying the internal slots the
                 // derived `this` should have. Rather than rebind `this`'s identity
@@ -778,6 +786,7 @@ pub const Interpreter = struct {
                 // initialized `this` directly), so nothing to adopt.
                 if (self.this_value == .object and sup_ret == .object and sup_ret.object != self.this_value.object)
                     adoptInternalSlots(self.this_value.object, sup_ret.object);
+                self.this_initialized = true;
                 break :blk .undefined;
             },
             .super_member => |m| blk: {
@@ -1641,6 +1650,8 @@ pub const Interpreter = struct {
         if (funcOf(class_val)) |cf| {
             cf.home_object = proto;
             cf.super_ctor = super_obj;
+            cf.is_class_constructor = true;
+            cf.is_derived_constructor = super_obj != null;
         }
 
         for (members) |m| {
@@ -2029,6 +2040,7 @@ pub const Interpreter = struct {
         const saved_nt = self.new_target;
         const saved_strict = self.strict;
         const saved_global = self.global_object;
+        const saved_this_initialized = self.this_initialized;
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
@@ -2051,6 +2063,7 @@ pub const Interpreter = struct {
         self.home_object = func.home_object;
         self.super_ctor = func.super_ctor;
         self.new_target = if (func.is_arrow) saved_nt else new_target; // arrows inherit lexically
+        self.this_initialized = !func.is_derived_constructor;
         defer {
             self.env = saved_env;
             self.signal = saved_signal;
@@ -2061,7 +2074,10 @@ pub const Interpreter = struct {
             self.new_target = saved_nt;
             self.strict = saved_strict;
             self.global_object = saved_global;
+            self.this_initialized = saved_this_initialized;
         }
+        if (func.is_class_constructor and new_target == .undefined)
+            return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
 
         // Non-arrow functions get an `arguments` array-like over the call args.
         if (!func.is_arrow) {
@@ -2104,6 +2120,22 @@ pub const Interpreter = struct {
         // `call_env`) before executing it, so a forward reference reads undefined.
         if (func.body.* == .block) try self.hoistVarNames(func.body.block);
         _ = try self.eval(func.body);
+        if (func.is_class_constructor and func.is_derived_constructor) {
+            if (self.signal == .ret) {
+                if (self.ret_value == .object and !self.ret_value.object.is_symbol and !self.ret_value.object.is_bigint) return self.ret_value;
+                if (self.ret_value != .undefined) {
+                    self.env = saved_env;
+                    self.global_object = saved_global;
+                    return self.throwError("TypeError", "Derived constructors may only return object or undefined");
+                }
+            }
+            if (!self.this_initialized) {
+                self.env = saved_env;
+                self.global_object = saved_global;
+                return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+            }
+            return .undefined;
+        }
         return if (self.signal == .ret) self.ret_value else .undefined;
     }
 
@@ -2343,7 +2375,11 @@ pub const Interpreter = struct {
         return null;
     }
 
-    fn functionRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) ?*value.Object {
+    fn functionRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!?*value.Object {
+        if (ctor.proxy_handler != null or ctor.proxy_revoked) {
+            const target = ctor.proxy_target orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
+            return try self.functionRealmIntrinsicProto(target, intrinsic);
+        }
         if ((ctor.native_ctor or ctor.error_ctor != null) and ctor.private_data != null) {
             const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
             if (envIntrinsicProto(env, intrinsic)) |proto| return proto;
@@ -2359,7 +2395,7 @@ pub const Interpreter = struct {
         }
         if (ctor.bound) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            if (bf.target == .object) return self.functionRealmIntrinsicProto(bf.target.object, intrinsic);
+            if (bf.target == .object) return try self.functionRealmIntrinsicProto(bf.target.object, intrinsic);
         }
         return null;
     }
@@ -2370,7 +2406,7 @@ pub const Interpreter = struct {
     pub fn ctorRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!*value.Object {
         const p = try self.getProperty(.{ .object = ctor }, "prototype");
         if (p == .object and !p.object.is_symbol) return p.object;
-        if (self.functionRealmIntrinsicProto(ctor, intrinsic)) |proto| return proto;
+        if (try self.functionRealmIntrinsicProto(ctor, intrinsic)) |proto| return proto;
         if (envIntrinsicProto(self.env, intrinsic)) |proto| return proto;
         return try self.protoObject(ctor);
     }
@@ -23330,6 +23366,19 @@ test "interpreter class extends and super" {
         \\class C extends P {}
         \\C.sq(4)
     )).number);
+    try std.testing.expectError(error.Throw, evalSource(a, "class C {} C()"));
+    try std.testing.expectError(error.Throw, evalSource(a,
+        \\class C extends Object { constructor() {} }
+        \\new C()
+    ));
+    try std.testing.expectError(error.Throw, evalSource(a,
+        \\class C extends Object { constructor() { return null; } }
+        \\new C()
+    ));
+    try std.testing.expect((try evalSource(a,
+        \\class C extends Object { constructor() { return { ok: true }; } }
+        \\new C().ok
+    )).boolean);
 }
 
 test "interpreter assignment and parameter destructuring" {

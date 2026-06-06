@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 34,011 / 41,664 (81.6%)**, with **135 parse failures**,
-> **7,518 runtime failures**, **0 host failures**, and **NEGATIVE 3,211 / 4,668 (68.8%)**.
+> The latest full run passes **VALID 34,055 / 41,664 (81.7%)**, with **135 parse failures**,
+> **7,474 runtime failures**, **0 host failures**, and **NEGATIVE 3,211 / 4,668 (68.8%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **34,011 / 41,664 (81.6%)** |
+| **valid** | can we run the program? (scored corpus) | **34,055 / 41,664 (81.7%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,211 / 4,668 (68.8%) |
 
 The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
@@ -67,9 +67,9 @@ Per area (valid):
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 12,719 / 14,285 (89.0%) | `Object` | 3,223 / 3,411 (94.5%) |
+| `language` | 12,745 / 14,285 (89.2%) | `Object` | 3,223 / 3,411 (94.5%) |
 | `Array` | 2,599 / 2,991 (86.9%) | `RegExp` | 1,461 / 1,687 (86.6%) |
-| `String` | 1,071 / 1,223 (87.6%) | `TypedArray` | 1,216 / 1,446 (84.1%) |
+| `String` | 1,071 / 1,223 (87.6%) | `TypedArray` | 1,217 / 1,446 (84.2%) |
 | `Map` | 204 / 204 (100%) | `Set` | 363 / 383 (94.8%) |
 | `BigInt` | 77 / 77 (100%) | `Symbol` | 98 / 98 (100%) |
 | `Boolean` | 51 / 51 (100%) | `Math` | 327 / 327 (100%) |
@@ -77,7 +77,7 @@ Per area (valid):
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 25 / 29 (86.2%) | `FinalizationRegistry` | 40 / 47 (85.1%) |
 | `Temporal` | 3,209 / 4,603 (69.7%) | `intl402` | 1,427 / 3,341 (42.7%) |
-| `annexB` | 461 / 1,070 (43.1%) | `staging` | 609 / 991 (61.5%) |
+| `annexB` | 461 / 1,070 (43.1%) | `staging` | 617 / 991 (62.3%) |
 | `SharedArrayBuffer` | 88 / 104 (84.6%) | `ArrayBuffer` | 196 / 221 (88.7%) |
 | `SuppressedError` | 22 / 22 (100%) | `ThrowTypeError` | 14 / 14 (100%) |
 | `AbstractModuleSource` | 8 / 8 (100%) | `AggregateError` | 25 / 25 (100%) |
@@ -85,7 +85,7 @@ Per area (valid):
 | `decodeURI` | 55 / 55 (100%) | `decodeURIComponent` | 56 / 56 (100%) |
 | `encodeURI` | 31 / 31 (100%) | `encodeURIComponent` | 31 / 31 (100%) |
 | `AsyncIteratorPrototype` | 9 / 9 (100%) | `eval` | 10 / 10 (100%) |
-| `global` | 29 / 29 (100%) | `Function` | 501 / 509 (98.4%) |
+| `global` | 29 / 29 (100%) | `Function` | 509 / 509 (100%) |
 
 > `zig build test262` prints each subtree's pass rate plus `parse-fail`, `runtime-fail`, and
 > `host-fail` counts so the work stays data-driven. Bump the corpus with
