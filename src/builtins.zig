@@ -1016,6 +1016,17 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
     return target;
 }
 
+pub fn reflectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const target = arg(args, 0);
+    if (!isRealObject(target)) return self.throwError("TypeError", "Reflect.defineProperty called on non-object");
+    const key = try self.keyOf(arg(args, 1));
+    const desc = arg(args, 2);
+    if (!isRealObject(desc)) return self.throwError("TypeError", "Property description must be an object");
+    return .{ .boolean = try defineOneResult(self, target.object, key, desc.object) };
+}
+
 /// Core of `Object.defineProperty` / `defineProperties`: apply descriptor `d` to
 /// `target[key]`, honoring attributes and bypassing [[Set]].
 /// Read a property-descriptor field per ToPropertyDescriptor: present iff
@@ -1027,6 +1038,11 @@ fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?
 }
 
 pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!void {
+    if (!try defineOneResult(self, target, key, d_obj))
+        return self.throwError("TypeError", "Cannot define property");
+}
+
+pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!bool {
     // Materialize the descriptor once over the prototype chain (a field may be
     // inherited or itself an accessor), into a plain own-property record the
     // rest of this function reads via `getOwn`.
@@ -1057,10 +1073,10 @@ pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_o
         const handler = target.proxy_handler.?;
         const tgt = target.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
         const trap = try self.getProperty(.{ .object = handler }, "defineProperty");
-        if (trap == .undefined or trap == .null) return defineOne(self, tgt, key, d);
+        if (trap == .undefined or trap == .null) return defineOneResult(self, tgt, key, d);
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
         const res = try self.callValueWithThis(trap, &.{ .{ .object = tgt }, self.keyToValue(key), .{ .object = d } }, .{ .object = handler });
-        if (!res.toBoolean()) return self.throwError("TypeError", "proxy 'defineProperty' trap returned falsish for property");
+        if (!res.toBoolean()) return false;
         // [[DefineOwnProperty]] invariants (9.5.6) for an ordinary target.
         if (tgt.proxy_handler == null and !tgt.proxy_revoked) {
             const setting_nonconfig = if (d.getOwn("configurable")) |c| !c.toBoolean() else false;
@@ -1073,13 +1089,19 @@ pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_o
                 // exposes as configurable is a lie.
                 if (setting_nonconfig and tgt.getAttr(key).configurable)
                     return self.throwError("TypeError", "proxy 'defineProperty' cannot report a configurable target property as non-configurable");
+                if (!tgt.getAttr(key).configurable and tgt.getAttr(key).writable) {
+                    if (d.getOwn("writable")) |w| {
+                        if (!w.toBoolean())
+                            return self.throwError("TypeError", "proxy 'defineProperty' cannot report a non-configurable writable property as non-writable");
+                    }
+                }
                 // A non-configurable target property only admits a compatible
                 // redefinition (IsCompatiblePropertyDescriptor).
-                if (!tgt.getAttr(key).configurable)
-                    try rejectIncompatibleRedefine(self, tgt.getAttr(key), tgt.getOwn(key), tgt.getAccessor(key), d);
+                if (!tgt.getAttr(key).configurable and !try compatibleRedefine(tgt.getAttr(key), tgt.getOwn(key), tgt.getAccessor(key), d))
+                    return self.throwError("TypeError", "proxy 'defineProperty' cannot report an incompatible non-configurable redefinition");
             }
         }
-        return;
+        return true;
     }
     // Array `length` is a data property { writable, !enumerable, !configurable }.
     // Redefining it can change the value (ToUint32, truncating/extending) and
@@ -1131,8 +1153,8 @@ pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_o
         var lattr: value.PropAttr = .{ .writable = cur_writable, .enumerable = false, .configurable = false };
         if (d.getOwn("writable")) |w| lattr.writable = w.toBoolean();
         try target.setAttr(self.arena, "length", lattr);
-        if (blocked) return self.throwError("TypeError", "Cannot delete a non-configurable array element while reducing length");
-        return;
+        if (blocked) return false;
+        return true;
     }
     // Array index with a data descriptor: keep the value in the dense element
     // store and record its attributes in the string-keyed `attrs` map (so
@@ -1145,9 +1167,9 @@ pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_o
                 const within = i < target.elements.items.len;
                 const cur_attr = target.getAttr(key);
                 if (within and !cur_attr.configurable) {
-                    try rejectIncompatibleRedefine(self, cur_attr, target.elements.items[i], null, d);
+                    if (!try compatibleRedefine(cur_attr, target.elements.items[i], null, d)) return false;
                 } else if (!within and !target.extensible) {
-                    return self.throwError("TypeError", "Cannot define property, object is not extensible");
+                    return false;
                 }
                 while (target.elements.items.len <= i) try target.elements.append(self.arena, .undefined);
                 if (d.getOwn("value")) |val| target.elements.items[i] = val;
@@ -1159,7 +1181,7 @@ pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_o
                 if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
                 try target.setAttr(self.arena, key, attr);
                 if (i >= target.array_len) target.array_len = i + 1;
-                return;
+                return true;
             }
         }
     }
@@ -1170,10 +1192,9 @@ pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_o
     // current state forbids — adding to a non-extensible object, or altering a
     // non-configurable property in an incompatible way.
     if (!exists) {
-        if (!target.extensible)
-            return self.throwError("TypeError", "Cannot define property, object is not extensible");
+        if (!target.extensible) return false;
     } else if (!target.getAttr(key).configurable) {
-        try rejectIncompatibleRedefine(self, target.getAttr(key), cur_data, cur_acc, d);
+        if (!try compatibleRedefine(target.getAttr(key), cur_data, cur_acc, d)) return false;
     }
     // Redefining keeps the current attributes for any omitted field; a new
     // property defaults omitted fields to false.
@@ -1199,53 +1220,52 @@ pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_o
             if (i + 1 > target.array_len and i + 1 > target.elements.items.len) target.array_len = i + 1;
         }
     }
+    return true;
 }
 
-/// The rejection half of ValidateAndApplyPropertyDescriptor, for an existing
-/// *non-configurable* property: throw a TypeError if descriptor `d` tries to
-/// flip configurable on, change enumerable, switch between data/accessor, or —
-/// for a non-writable data property — change writability or value. A generic
+/// The rejection half of ValidateAndApplyPropertyDescriptor for an existing
+/// *non-configurable* property. Returns false if descriptor `d` tries to flip
+/// configurable on, change enumerable, switch between data/accessor, or — for a
+/// non-writable data property — change writability or value. A generic
 /// descriptor (no value/writable/get/set) only constrains config/enumerable.
-fn rejectIncompatibleRedefine(
-    self: *Interpreter,
+fn compatibleRedefine(
     cur_attr: value.PropAttr,
     cur_data: ?Value,
     cur_acc: ?value.Accessor,
     d: *value.Object,
-) HostError!void {
+) HostError!bool {
     if (d.getOwn("configurable")) |c| {
-        if (c.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+        if (c.toBoolean()) return false;
     }
     if (d.getOwn("enumerable")) |e| {
-        if (e.toBoolean() != cur_attr.enumerable)
-            return self.throwError("TypeError", "Cannot redefine property: not configurable");
+        if (e.toBoolean() != cur_attr.enumerable) return false;
     }
     const d_get = d.getOwn("get");
     const d_set = d.getOwn("set");
     const d_is_accessor = d_get != null or d_set != null;
     const d_is_data = d.getOwn("value") != null or d.getOwn("writable") != null;
-    if (!d_is_accessor and !d_is_data) return; // generic descriptor: nothing more to check
+    if (!d_is_accessor and !d_is_data) return true; // generic descriptor: nothing more to check
 
     const cur_is_accessor = cur_acc != null;
-    if (d_is_accessor != cur_is_accessor)
-        return self.throwError("TypeError", "Cannot redefine property: not configurable");
+    if (d_is_accessor != cur_is_accessor) return false;
 
     if (cur_is_accessor) {
         const acc = cur_acc.?;
         if (d_get) |g| {
-            if (!sameValue(g, acc.get orelse .undefined)) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+            if (!sameValue(g, acc.get orelse .undefined)) return false;
         }
         if (d_set) |s| {
-            if (!sameValue(s, acc.set orelse .undefined)) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+            if (!sameValue(s, acc.set orelse .undefined)) return false;
         }
     } else if (!cur_attr.writable) {
         if (d.getOwn("writable")) |w| {
-            if (w.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+            if (w.toBoolean()) return false;
         }
         if (d.getOwn("value")) |v| {
-            if (!sameValue(v, cur_data orelse .undefined)) return self.throwError("TypeError", "Cannot redefine property: not configurable");
+            if (!sameValue(v, cur_data orelse .undefined)) return false;
         }
     }
+    return true;
 }
 
 pub fn objectDefineProperties(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

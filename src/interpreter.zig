@@ -17353,7 +17353,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, reflect_ns, "setPrototypeOf", 2, reflectSetProtoFn);
     try setNative(a, root_shape, reflect_ns, "apply", 3, reflectApplyFn);
     try setNative(a, root_shape, reflect_ns, "construct", 2, reflectConstructFn);
-    try setNative(a, root_shape, reflect_ns, "defineProperty", 3, builtins.objectDefineProperty);
+    try setNative(a, root_shape, reflect_ns, "defineProperty", 3, builtins.reflectDefineProperty);
     try setNative(a, root_shape, reflect_ns, "getOwnPropertyDescriptor", 2, reflectGetOwnDescFn);
     try setNative(a, root_shape, reflect_ns, "isExtensible", 1, reflectIsExtensibleFn);
     try setNative(a, root_shape, reflect_ns, "preventExtensions", 1, reflectPreventExtFn);
@@ -23208,6 +23208,19 @@ test "interpreter JSON, Object, Number builtins" {
         \\called === 1 && Object.getPrototypeOf(target) === proto &&
         \\Reflect.setPrototypeOf(falseTrap, {}) === false && objectThrows &&
         \\Reflect.setPrototypeOf(invariantProxy, fixedProto) === true && invariantThrows
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let falseTrap = new Proxy({}, { defineProperty() { return 0; } });
+        \\let objectThrows = false;
+        \\try { Object.defineProperty(falseTrap, "x", {}); } catch (e) { objectThrows = e instanceof TypeError; }
+        \\let target = {};
+        \\let invariantProxy = new Proxy(target, { defineProperty(t, p, d) {
+        \\  Object.defineProperty(t, p, { configurable: false, writable: true });
+        \\  return true;
+        \\} });
+        \\let invariantThrows = false;
+        \\try { Reflect.defineProperty(invariantProxy, "x", { writable: false }); } catch (e) { invariantThrows = e instanceof TypeError; }
+        \\Reflect.defineProperty(falseTrap, "x", {}) === false && objectThrows && invariantThrows
     )).boolean);
 }
 
