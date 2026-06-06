@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 34,236 / 41,664 (82.2%)**, with **135 parse failures**,
-> **7,293 runtime failures**, **0 host failures**, and **NEGATIVE 3,211 / 4,668 (68.8%)**.
+> The latest full run passes **VALID 34,239 / 41,664 (82.2%)**, with **135 parse failures**,
+> **7,290 runtime failures**, **0 host failures**, and **NEGATIVE 3,211 / 4,668 (68.8%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **34,236 / 41,664 (82.2%)** |
+| **valid** | can we run the program? (scored corpus) | **34,239 / 41,664 (82.2%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,211 / 4,668 (68.8%) |
 
 The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
@@ -67,7 +67,7 @@ Per area (valid):
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 12,759 / 14,285 (89.3%) | `Object` | 3,229 / 3,411 (94.7%) |
+| `language` | 12,759 / 14,285 (89.3%) | `Object` | 3,231 / 3,411 (94.7%) |
 | `Array` | 2,625 / 2,991 (87.8%) | `RegExp` | 1,461 / 1,687 (86.6%) |
 | `String` | 1,075 / 1,223 (87.9%) | `TypedArray` | 1,217 / 1,446 (84.2%) |
 | `TypedArrayConstructors` | 561 / 738 (76.0%) | `Uint8Array` | 70 / 70 (100%) |
@@ -87,7 +87,7 @@ Per area (valid):
 | `encodeURI` | 31 / 31 (100%) | `encodeURIComponent` | 31 / 31 (100%) |
 | `AsyncIteratorPrototype` | 9 / 9 (100%) | `eval` | 10 / 10 (100%) |
 | `global` | 29 / 29 (100%) | `Function` | 509 / 509 (100%) |
-| `Proxy` | 305 / 310 (98.4%) | `Reflect` | 153 / 153 (100%) |
+| `Proxy` | 306 / 310 (98.7%) | `Reflect` | 153 / 153 (100%) |
 
 > `zig build test262` prints each subtree's pass rate plus `parse-fail`, `runtime-fail`, and
 > `host-fail` counts so the work stays data-driven. Bump the corpus with

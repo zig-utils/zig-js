@@ -4742,6 +4742,7 @@ pub const Interpreter = struct {
                 }
                 // Grow densely only for near-contiguous, bounded indices; large
                 // or gappy indices become sparse named properties (no giant alloc).
+                if (!o.extensible) return false;
                 const dense_cap: usize = 1 << 24;
                 if (i < dense_cap and i <= o.elements.items.len + 1024) {
                     const gap_start = o.elements.items.len;
