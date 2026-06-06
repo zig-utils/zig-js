@@ -8401,6 +8401,53 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     return .{ .object = realm };
 }
 
+fn host262AbstractModuleSourceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.throwError("TypeError", "AbstractModuleSource is not constructible");
+}
+
+fn host262AbstractModuleSourceTagGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    // Real module source objects will carry [[ModuleSourceClassName]] later.
+    return .undefined;
+}
+
+fn install262AbstractModuleSource(env: *Environment, rs: *Shape, host: *value.Object, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const proto = try a.create(value.Object);
+    proto.* = .{ .proto = object_proto };
+
+    const ctor = try a.create(value.Object);
+    const function_proto: ?*value.Object = blk: {
+        if (env.get("Function")) |fv| if (fv == .object) {
+            if (fv.object.getOwn("prototype")) |pv| if (pv == .object) break :blk pv.object;
+        };
+        break :blk null;
+    };
+    ctor.* = .{ .native = host262AbstractModuleSourceFn, .native_ctor = true, .proto = function_proto };
+    try installNativeProps(a, rs, ctor, "AbstractModuleSource", 0);
+    try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try setConstructor(a, rs, proto, ctor);
+
+    if (env.get("Symbol")) |sym| if (sym == .object) {
+        if (sym.object.getOwn("toStringTag")) |tag| if (tag == .object and tag.object.is_symbol) {
+            const getter = try a.create(value.Object);
+            getter.* = .{ .native = host262AbstractModuleSourceTagGetter };
+            try installNativeProps(a, rs, getter, "get [Symbol.toStringTag]", 0);
+            try proto.setAccessor(a, tag.object.sym_key, .{ .object = getter }, null);
+            try proto.setAttr(a, tag.object.sym_key, .{ .enumerable = false, .configurable = true });
+        };
+    };
+
+    try host.setOwn(a, rs, "AbstractModuleSource", .{ .object = ctor });
+    try host.setAttr(a, "AbstractModuleSource", .{ .writable = true, .enumerable = false, .configurable = true });
+}
+
 /// Build a fresh realm (own global env + global object + intrinsics), sharing
 /// the creating realm's well-known symbols. Returns the new Environment.
 fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
@@ -8508,6 +8555,7 @@ pub fn install262(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
     es.* = .{ .native = host262EvalScriptFn, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, es, "evalScript", 1);
     try d.setOwn(a, rs, "evalScript", .{ .object = es });
+    try install262AbstractModuleSource(env, rs, d, object_proto);
     try installAgent(a, rs, d);
     // On the main thread, each test gets a fresh Context → reset cross-test
     // agent coordination state. Agent threads must NOT reset it (the parent owns

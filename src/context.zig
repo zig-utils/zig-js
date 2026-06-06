@@ -1061,6 +1061,38 @@ fn expectEvalStr(expected: []const u8, src: []const u8) !void {
     try std.testing.expectEqualStrings(expected, v.string);
 }
 
+test "$262.AbstractModuleSource host intrinsic surface" {
+    try std.testing.expect((try evalIn(
+        \\var C = $262.AbstractModuleSource;
+        \\var ctorProtoDesc = Object.getOwnPropertyDescriptor(C, "prototype");
+        \\var ctorDesc = Object.getOwnPropertyDescriptor(C.prototype, "constructor");
+        \\var tagDesc = Object.getOwnPropertyDescriptor(C.prototype, Symbol.toStringTag);
+        \\var threw = false;
+        \\try { new C(); } catch (e) { threw = e instanceof TypeError; }
+        \\typeof C === "function" &&
+        \\Object.getPrototypeOf(C) === Function.prototype &&
+        \\Object.getPrototypeOf(C.prototype) === Object.prototype &&
+        \\C.name === "AbstractModuleSource" &&
+        \\C.length === 0 &&
+        \\ctorProtoDesc.value === C.prototype &&
+        \\ctorProtoDesc.writable === false &&
+        \\ctorProtoDesc.enumerable === false &&
+        \\ctorProtoDesc.configurable === false &&
+        \\ctorDesc.value === C &&
+        \\ctorDesc.writable === true &&
+        \\ctorDesc.enumerable === false &&
+        \\ctorDesc.configurable === true &&
+        \\typeof tagDesc.get === "function" &&
+        \\tagDesc.set === undefined &&
+        \\tagDesc.enumerable === false &&
+        \\tagDesc.configurable === true &&
+        \\C.prototype[Symbol.toStringTag] === undefined &&
+        \\tagDesc.get.call(262) === undefined &&
+        \\tagDesc.get.call(C.prototype) === undefined &&
+        \\threw
+    )).boolean);
+}
+
 test "function name + length own properties" {
     // `name` and `length` are own, non-enumerable, configurable, non-writable.
     try expectEvalStr("foo", "function foo(a, b) {} foo.name");
