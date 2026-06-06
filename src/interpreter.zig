@@ -1843,7 +1843,7 @@ pub const Interpreter = struct {
     /// so a real array-like (e.g. `arguments`) works, not only a dense array.
     fn argListFromArrayLike(self: *Interpreter, v: Value) EvalError![]const Value {
         if (v == .undefined or v == .null) return &.{};
-        if (v != .object) return self.throwError("TypeError", "CreateListFromArrayLike called on non-object");
+        if (!builtins.isRealObject(v)) return self.throwError("TypeError", "CreateListFromArrayLike called on non-object");
         const o = v.object;
         const len = toLen((try self.toPrimitive(try self.getProperty(v, "length"), .number)).toNumber());
         if (len > (1 << 24)) return self.throwError("RangeError", "argument list too large");
@@ -16999,7 +16999,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (error_ctor_obj) |eo| eo.proto = func_proto;
     inline for (.{
         .{ "call", 1 }, .{ "apply", 2 }, .{ "bind", 1 }, .{ "toString", 0 },
-    }) |s| try setNative(a, root_shape, func_proto, s[0], s[1], funcProtoMethod(s[0]));
+    }) |s| try setNativeWithData(a, root_shape, func_proto, s[0], s[1], funcProtoMethod(s[0]), @ptrCast(env));
     // `Function.prototype` is itself callable-shaped, with own `length` 0 and
     // `name` "" — both { !writable, !enumerable, configurable }.
     try func_proto.setOwn(a, root_shape, "length", .{ .number = 0 });
@@ -17573,14 +17573,18 @@ fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, 
     try env.put(name, .{ .object = o });
 }
 
-fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
+fn setNativeWithData(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn, data: ?*anyopaque) EvalError!void {
     const m = try a.create(value.Object);
-    m.* = .{ .native = f };
+    m.* = .{ .native = f, .private_data = data };
     try installNativeProps(a, root_shape, m, name, len);
     try obj.setOwn(a, root_shape, name, .{ .object = m });
     // Built-in methods/statics are non-enumerable (writable + configurable), per
     // spec — so `Object.keys`/`for-in` skip them and verifyProperty is satisfied.
     try obj.setAttr(a, name, .{ .enumerable = false, .configurable = true, .writable = true });
+}
+
+fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
+    return setNativeWithData(a, root_shape, obj, name, len, f, null);
 }
 
 /// A prototype-object method: a native thunk that routes to the existing
@@ -17697,6 +17701,11 @@ fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const saved_env = self.env;
+            if (self.active_native) |callee| {
+                if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
+            }
+            defer self.env = saved_env;
             if (!(this == .object and this.object.isCallableObject()))
                 return self.throwError("TypeError", "Function.prototype." ++ name ++ " requires that 'this' be callable");
             return (try self.builtinMethod(this, name, args)) orelse .undefined;
