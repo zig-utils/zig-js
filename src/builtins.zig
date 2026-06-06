@@ -1517,6 +1517,17 @@ fn completeDescriptor(self: *Interpreter, desc_obj: *value.Object) HostError!Val
     const getf = try descField(self, desc_obj, "get");
     const setf = try descField(self, desc_obj, "set");
     const is_accessor = getf != null or setf != null;
+    const is_data = (try descField(self, desc_obj, "value")) != null or (try descField(self, desc_obj, "writable")) != null;
+    if (is_accessor and is_data)
+        return self.throwError("TypeError", "Invalid property descriptor: cannot both specify accessors and a value or writable attribute");
+    if (getf) |g| {
+        if (g != .undefined and !(g == .object and g.object.isCallableObject()))
+            return self.throwError("TypeError", "Getter must be a function");
+    }
+    if (setf) |s| {
+        if (s != .undefined and !(s == .object and s.object.isCallableObject()))
+            return self.throwError("TypeError", "Setter must be a function");
+    }
     const out = (try self.newObject()).object;
     if (is_accessor) {
         try self.setMember(.{ .object = out }, "get", getf orelse .undefined);
@@ -1528,6 +1539,25 @@ fn completeDescriptor(self: *Interpreter, desc_obj: *value.Object) HostError!Val
     try self.setMember(.{ .object = out }, "enumerable", .{ .boolean = if (try descField(self, desc_obj, "enumerable")) |e| e.toBoolean() else false });
     try self.setMember(.{ .object = out }, "configurable", .{ .boolean = if (try descField(self, desc_obj, "configurable")) |c| c.toBoolean() else false });
     return .{ .object = out };
+}
+
+fn completedDescAttr(d: *value.Object) value.PropAttr {
+    return .{
+        .writable = if (d.getOwn("writable")) |w| w.toBoolean() else false,
+        .enumerable = if (d.getOwn("enumerable")) |e| e.toBoolean() else false,
+        .configurable = if (d.getOwn("configurable")) |c| c.toBoolean() else false,
+    };
+}
+
+fn completedDescAccessor(d: *value.Object) ?value.Accessor {
+    if (d.getOwn("get") == null and d.getOwn("set") == null) return null;
+    return .{ .get = d.getOwn("get"), .set = d.getOwn("set") };
+}
+
+fn proxyTargetExtensible(self: *Interpreter, target: *value.Object) HostError!bool {
+    if (target.proxy_handler != null or target.proxy_revoked) return self.proxyIsExtensible(target);
+    if (interpreter.isModuleNs(target)) return false;
+    return target.extensible;
 }
 
 pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -1553,18 +1583,41 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             return objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ .{ .object = tgt }, arg(args, 1) });
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap is not callable");
         const res = try self.callValueWithThis(trap, &.{ .{ .object = tgt }, self.keyToValue(key) }, .{ .object = handler });
-        if (res != .undefined and res != .object) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap must return an object or undefined");
-        // [[GetOwnProperty]] invariants (9.5.5) for an ordinary target: a trap
-        // that hides a property must respect non-configurability / extensibility.
-        if (tgt.proxy_handler == null and !tgt.proxy_revoked) {
-            const has_own = tgt.getOwn(key) != null or tgt.getAccessor(key) != null;
-            if (res == .undefined and has_own) {
-                if (!tgt.getAttr(key).configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a non-configurable property as absent");
-                if (!tgt.extensible) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a property of a non-extensible target as absent");
+        if (res != .undefined and !isRealObject(res)) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap must return an object or undefined");
+        const target_desc = try objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ .{ .object = tgt }, self.keyToValue(key) });
+        const target_extensible = try proxyTargetExtensible(self, tgt);
+        if (res == .undefined) {
+            if (target_desc == .object) {
+                const target_attr = completedDescAttr(target_desc.object);
+                if (!target_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a non-configurable property as absent");
+                if (!target_extensible) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a property of a non-extensible target as absent");
+            }
+            return .undefined;
+        }
+        const completed = try completeDescriptor(self, res.object);
+        const result_desc = completed.object;
+        const result_attr = completedDescAttr(result_desc);
+        if (target_desc != .object) {
+            if (!target_extensible) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a new property on a non-extensible target");
+            if (!result_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a new non-configurable property");
+        } else {
+            const target_obj = target_desc.object;
+            const target_attr = completedDescAttr(target_obj);
+            const target_acc = completedDescAccessor(target_obj);
+            const target_data = target_obj.getOwn("value");
+            if (!target_attr.configurable and !try compatibleRedefine(target_attr, target_data, target_acc, result_desc))
+                return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' reported an incompatible descriptor");
+            if (!target_extensible and !try compatibleRedefine(target_attr, target_data, target_acc, result_desc))
+                return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' reported a descriptor incompatible with a non-extensible target");
+            if (!result_attr.configurable) {
+                if (target_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a configurable target property as non-configurable");
+                if (result_desc.getOwn("writable")) |w| {
+                    if (!w.toBoolean() and target_attr.writable)
+                        return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a non-configurable writable target property as non-writable");
+                }
             }
         }
-        if (res == .undefined) return .undefined;
-        return try completeDescriptor(self, res.object);
+        return completed;
     }
 
     if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
