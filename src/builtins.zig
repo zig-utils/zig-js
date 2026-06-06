@@ -826,6 +826,8 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
     _ = this;
     const self = interp(ctx);
     const arr = try self.newArray();
+    if (self.new_target == .object)
+        arr.object.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Array");
     if (args.len == 1 and args[0] == .number) {
         const n = args[0].number;
         if (n < 0 or @trunc(n) != n or n > 4294967295) return self.throwError("RangeError", "Invalid array length");
