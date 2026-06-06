@@ -547,7 +547,7 @@ pub const Interpreter = struct {
     /// property AND `name` is not listed truthy in the object's
     /// `[Symbol.unscopables]` (which hides selected names from `with` scope).
     pub fn withHasBinding(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!bool {
-        if (!hasProperty(o, name)) return false;
+        if (!try self.hasPropertyResult(o, name)) return false;
         const unsc_key = self.wellKnownSymbolKey("unscopables") orelse return true;
         const unsc = try self.getProperty(.{ .object = o }, unsc_key);
         if (unsc == .object) {
@@ -4034,9 +4034,7 @@ pub const Interpreter = struct {
             }
             return b;
         }
-        if (target.proxy_handler != null) return self.proxyHas(target, key);
-        if (moduleNsOf(target)) |ns| return moduleNsHas(ns, key);
-        return hasProperty(target, key);
+        return self.hasPropertyResult(target, key);
     }
 
     fn proxyDelete(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
@@ -4240,6 +4238,8 @@ pub const Interpreter = struct {
                 while (cur) |c| {
                     if (c.proxy_handler != null or c.proxy_revoked)
                         return self.proxyGet(c, key, receiver);
+                    if (c.is_array and std.mem.eql(u8, key, "length"))
+                        return .{ .number = @floatFromInt(@max(c.elements.items.len, c.array_len)) };
                     if (c.getAccessor(key)) |acc| {
                         // An explicit `get: undefined` is stored as the undefined
                         // value but means "no getter".
@@ -4247,6 +4247,19 @@ pub const Interpreter = struct {
                             if (g != .undefined) return self.callValueWithThis(g, &.{}, receiver);
                         }
                         return .undefined; // accessor with no getter
+                    }
+                    if (c.is_array) {
+                        if (arrayIndex(key)) |i| {
+                            if (c.getAccessor(key) == null and i < c.elements.items.len and !c.isHole(i)) return c.elements.items[i];
+                        }
+                    }
+                    if (c.prim) |p| {
+                        if (p == .string) {
+                            if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(p.string.len) };
+                            if (arrayIndex(key)) |i| {
+                                if (i < p.string.len) return .{ .string = try self.arena.dupe(u8, p.string[i .. i + 1]) };
+                            }
+                        }
                     }
                     if (c.getOwn(key)) |v| return v;
                     cur = self.effectiveProto(c);
@@ -7380,19 +7393,24 @@ pub const Interpreter = struct {
     /// `new F()` carry `ctor_ref` pointing at F's object, and builtin error
     /// constructors carry `error_ctor`; this checks those links rather than a
     /// full prototype chain.
-    /// `key in obj`: true if `obj` has the (own, since we lack a prototype
-    /// chain) property or array index named by `key`.
+    /// Spec [[HasProperty]]: own property first, then prototype chain, invoking
+    /// Proxy `has` traps at whichever object in the chain provides them.
+    fn hasPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        var cur: ?*value.Object = o;
+        while (cur) |c| {
+            if (c.proxy_handler != null or c.proxy_revoked) return self.proxyHas(c, key);
+            if (moduleNsOf(c)) |ns| return moduleNsHas(ns, key);
+            if (objectHasOwn(c, key)) return true;
+            cur = self.effectiveProto(c);
+        }
+        return false;
+    }
+
     pub fn inOperator(self: *Interpreter, l: Value, r: Value) EvalError!bool {
         if (r != .object) return self.throwError("TypeError", "cannot use 'in' on a non-object");
         const o = r.object;
         const key = try self.keyOf(l);
-        if (o.proxy_handler != null or o.proxy_revoked) return self.proxyHas(o, key);
-        if (moduleNsOf(o)) |ns| return moduleNsHas(ns, key);
-        if (hasProperty(o, key)) return true;
-        if (o.is_array) {
-            if (std.mem.eql(u8, key, "length")) return true;
-            if (arrayIndex(key)) |i| return i < o.elements.items.len and !o.isHole(i);
-        }
+        if (try self.hasPropertyResult(o, key)) return true;
         // The global object carries the installed globals as properties.
         if (self.global_object != null and o == self.global_object.? and rootEnv(self.env).get(key) != null) return true;
         return false;
@@ -17194,6 +17212,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     const array_proto = try a.create(value.Object);
     array_proto.* = .{ .proto = object_proto };
+    try array_proto.setOwn(a, root_shape, "length", .{ .number = 0 });
+    try array_proto.setAttr(a, "length", .{ .writable = true, .enumerable = false, .configurable = false });
     try setArrayProtoMethods(a, root_shape, array_proto, .{
         .{ "join", 1 },       .{ "push", 1 },         .{ "pop", 0 },        .{ "shift", 0 },
         .{ "unshift", 1 },    .{ "slice", 2 },        .{ "splice", 2 },     .{ "concat", 1 },
@@ -22525,6 +22545,12 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     if (value.isPrivateKey(name)) return false;
     if (moduleNsOf(o)) |ns| return moduleNsHas(ns, name);
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
+    if (o.prim) |p| {
+        if (p == .string) {
+            if (std.mem.eql(u8, name, "length")) return true;
+            if (Interpreter.arrayIndex(name)) |i| return i < p.string.len;
+        }
+    }
     if (o.is_array) {
         if (std.mem.eql(u8, name, "length")) return true;
         if (Interpreter.arrayIndex(name)) |i| return i < o.elements.items.len and !o.isHole(i);
@@ -23289,6 +23315,20 @@ test "interpreter JSON, Object, Number builtins" {
         \\Object.defineProperty(target, "x", { configurable: false, get: undefined });
         \\try { proxy.x; } catch (e) { threw = e instanceof TypeError; }
         \\threw
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let sawX = false, sawY = false;
+        \\let handler = {
+        \\  has(t, p) { if (p === "x") sawX = true; if (p === "y") sawY = true; return p === "x"; },
+        \\  get(t, p) { return p === "x" ? 42 : undefined; }
+        \\};
+        \\let proxy = new Proxy({}, handler);
+        \\let heir = Object.create(proxy);
+        \\let inOk = ("x" in heir) && !("y" in heir) && sawX && sawY;
+        \\let withValue = 0;
+        \\sawX = false;
+        \\with (proxy) { withValue = x; }
+        \\inOk && withValue === 42 && sawX
     )).boolean);
 }
 
