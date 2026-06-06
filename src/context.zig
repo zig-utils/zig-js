@@ -2355,6 +2355,32 @@ test "function objects inherit from Function.prototype" {
     try std.testing.expect((try evalIn("function f() {} f.call === Function.prototype.call")).boolean);
 }
 
+test "dynamic Function observes NewTarget and constructor realms" {
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\var C = new other.Function();
+        \\C.prototype = null;
+        \\Object.getPrototypeOf(Reflect.construct(Function, [], C)) === other.Function.prototype
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var realmA = $262.createRealm().global;
+        \\realmA.calls = 0;
+        \\var realmB = $262.createRealm().global;
+        \\var newTarget = new realmB.Function();
+        \\newTarget.prototype = null;
+        \\var fn = Reflect.construct(realmA.Function, ["calls += 1;"], newTarget);
+        \\Object.getPrototypeOf(fn) === realmB.Function.prototype &&
+        \\Object.getPrototypeOf(fn.prototype) === realmA.Object.prototype &&
+        \\new fn() instanceof realmA.Object &&
+        \\realmA.calls === 1
+    )).boolean);
+}
+
+test "Date call remains string-returning through bind" {
+    try std.testing.expect((try evalIn("typeof Date(0, 0, 0) === 'string'")).boolean);
+    try std.testing.expect((try evalIn("typeof Date.bind(null)(0, 0, 0) === 'string'")).boolean);
+}
+
 test "prototype objects: Function.prototype.call.bind + X.prototype methods" {
     // The propertyHelper pattern: borrow a prototype method via call.bind.
     try expectEvalStr("1-2-3",

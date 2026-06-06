@@ -114,7 +114,13 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     const nt = self.new_target;
     const saved_env = self.env;
     var swapped = false;
-    if (nt == .object and nt.object.native_ctor and nt.object.private_data != null) {
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| {
+            self.env = @ptrCast(@alignCast(pd));
+            swapped = true;
+        }
+    }
+    if (!swapped and nt == .object and nt.object.native_ctor and nt.object.private_data != null) {
         self.env = @ptrCast(@alignCast(nt.object.private_data.?));
         swapped = true;
     }
@@ -123,6 +129,7 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     };
     const fn_v = try self.eval(prog);
     if (fn_v == .object and fn_v.object.js_func != null) {
+        if (nt == .object) fn_v.object.proto = try self.ctorRealmIntrinsicProto(nt.object, "Function");
         _ = try self.protoObject(fn_v.object);
         try fn_v.object.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
     }
@@ -839,7 +846,11 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
     const self = interp(ctx);
     const v = arg(args, 0);
     if (v == .object and !v.object.is_bigint and !v.object.is_symbol) return v;
-    if (v == .undefined or v == .null) return self.newObject();
+    if (v == .undefined or v == .null) {
+        const obj = (try self.newObject()).object;
+        if (self.new_target == .object) obj.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Object");
+        return .{ .object = obj };
+    }
     return .{ .object = try self.toObject(v) };
 }
 

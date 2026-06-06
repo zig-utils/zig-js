@@ -1858,17 +1858,22 @@ pub const Interpreter = struct {
         const bf = try self.arena.create(BoundFn);
         bf.* = .{ .target = .{ .object = target }, .this = this, .args = try self.arena.dupe(Value, bound_args) };
         const obj = try self.arena.create(value.Object);
-        obj.* = .{ .bound = @ptrCast(bf) };
+        const target_proto = if (target.proxy_handler != null or target.proxy_revoked) blk: {
+            const p = try self.proxyGetProto(target);
+            break :blk if (p == .object) p.object else null;
+        } else self.effectiveProto(target);
+        obj.* = .{ .bound = @ptrCast(bf), .proto = target_proto };
         // Per spec: a bound function's `length` is max(0, target.length - args)
         // and its `name` is "bound " + target.name. Both are
         // { writable: false, enumerable: false, configurable: true }.
         const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-        const tgt_len = (try self.getProperty(.{ .object = target }, "length")).toNumber();
-        const bound_len: f64 = if (std.math.isNan(tgt_len)) 0 else blk: {
-            const len_int = @trunc(tgt_len);
+        const bound_len: f64 = if (objectHasOwn(target, "length")) blk: {
+            const tgt_len_v = try self.getProperty(.{ .object = target }, "length");
+            if (tgt_len_v != .number) break :blk 0;
+            const len_int = if (std.math.isNan(tgt_len_v.number)) @as(f64, 0) else @trunc(tgt_len_v.number);
             const bound_count: f64 = @floatFromInt(bound_args.len);
             break :blk if (len_int <= bound_count) 0 else len_int - bound_count;
-        };
+        } else 0;
         try obj.setOwn(self.arena, self.root_shape, "length", .{ .number = bound_len });
         try obj.setAttr(self.arena, "length", ro_attr);
         const tgt_name = try self.getProperty(.{ .object = target }, "name");
@@ -2022,9 +2027,13 @@ pub const Interpreter = struct {
         const saved_super = self.super_ctor;
         const saved_nt = self.new_target;
         const saved_strict = self.strict;
+        const saved_global = self.global_object;
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
+        if (self.env.get("globalThis")) |gt| {
+            if (gt == .object) self.global_object = gt.object;
+        }
         // Sloppy-mode this-substitution: null/undefined become the callee
         // realm's global object; primitive receivers are boxed in the callee
         // realm. Strict functions keep the original value, and arrows inherit
@@ -2050,6 +2059,7 @@ pub const Interpreter = struct {
             self.super_ctor = saved_super;
             self.new_target = saved_nt;
             self.strict = saved_strict;
+            self.global_object = saved_global;
         }
 
         // Non-arrow functions get an `arguments` array-like over the call args.
@@ -2186,6 +2196,9 @@ pub const Interpreter = struct {
             const saved_nt = self.new_target;
             self.new_target = new_target;
             defer self.new_target = saved_nt;
+            const saved_native = self.active_native;
+            self.active_native = obj;
+            defer self.active_native = saved_native;
             return nf(@ptrCast(self), .undefined, args); // native ctor (Array, Map, RegExp, ...)
         }
         if (obj.js_func) |erased| {
@@ -2195,7 +2208,7 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "value is not a constructor");
             // OrdinaryCreateFromConstructor: the instance proto comes from NewTarget.
             const inst = try self.arena.create(value.Object);
-            inst.* = .{ .ctor_ref = obj, .proto = if (new_target == .object) try self.protoObject(new_target.object) else try self.protoObject(obj) };
+            inst.* = .{ .ctor_ref = obj, .proto = if (new_target == .object) try self.ctorRealmIntrinsicProto(new_target.object, "Object") else try self.protoObject(obj) };
             const this_val = Value{ .object = inst };
             const ret = try self.callFunctionNT(func, args, this_val, new_target);
             return if (ret == .object) ret else this_val;
@@ -2329,12 +2342,7 @@ pub const Interpreter = struct {
         return null;
     }
 
-    /// GetPrototypeFromConstructor for global intrinsics such as
-    /// `%AggregateError.prototype%`: own `newTarget.prototype` wins; otherwise
-    /// use the NewTarget realm's intrinsic prototype when that realm is known.
-    fn ctorRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!*value.Object {
-        const p = try self.getProperty(.{ .object = ctor }, "prototype");
-        if (p == .object and !p.object.is_symbol) return p.object;
+    fn functionRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) ?*value.Object {
         if ((ctor.native_ctor or ctor.error_ctor != null) and ctor.private_data != null) {
             const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
             if (envIntrinsicProto(env, intrinsic)) |proto| return proto;
@@ -2348,6 +2356,20 @@ pub const Interpreter = struct {
                 env = e.parent;
             }
         }
+        if (ctor.bound) |erased| {
+            const bf: *BoundFn = @ptrCast(@alignCast(erased));
+            if (bf.target == .object) return self.functionRealmIntrinsicProto(bf.target.object, intrinsic);
+        }
+        return null;
+    }
+
+    /// GetPrototypeFromConstructor for global intrinsics such as
+    /// `%AggregateError.prototype%`: own `newTarget.prototype` wins; otherwise
+    /// use the NewTarget realm's intrinsic prototype when that realm is known.
+    pub fn ctorRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!*value.Object {
+        const p = try self.getProperty(.{ .object = ctor }, "prototype");
+        if (p == .object and !p.object.is_symbol) return p.object;
+        if (self.functionRealmIntrinsicProto(ctor, intrinsic)) |proto| return proto;
         if (envIntrinsicProto(self.env, intrinsic)) |proto| return proto;
         return try self.protoObject(ctor);
     }
@@ -3130,9 +3152,8 @@ pub const Interpreter = struct {
         // `class extends Date` subclass), else %Date.prototype% — so
         // `Date.prototype.isPrototypeOf(d)` and `d.constructor` resolve. Date
         // methods still dispatch via the `is_date` branch in builtinMethod.
-        if (self.new_target == .object and self.new_target.object.getOwn("prototype") != null) {
-            if (self.new_target.object.getOwn("prototype").? == .object)
-                o.proto = self.new_target.object.getOwn("prototype").?.object;
+        if (self.new_target == .object) {
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Date");
         } else if (self.env.get("Date")) |ctor| {
             if (ctor == .object) {
                 if (ctor.object.getOwn("prototype")) |p| {
@@ -22243,6 +22264,10 @@ fn dateParseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
 fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target == .undefined) {
+        const d = (try self.makeDate(0)).object;
+        return (try self.dateMethod(d, "toString", &.{})) orelse .{ .string = "Invalid Date" };
+    }
     if (args.len >= 2) {
         // Multi-component form: ToNumber each component once (invoking valueOf),
         // with years 0–99 mapped to 1900–1999.
