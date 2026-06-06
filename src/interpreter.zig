@@ -4931,10 +4931,11 @@ pub const Interpreter = struct {
                 if (o.gen != null) return v;
                 // A user-defined `[Symbol.iterator]()` method takes precedence.
                 if (self.symbolIteratorKey()) |ik| {
-                    if (hasProperty(o, ik)) {
-                        const itfn = try self.getProperty(v, ik);
+                    const itfn = try self.getProperty(v, ik);
+                    if (itfn != .undefined and itfn != .null) {
                         if (itfn == .object and itfn.object.isCallableObject())
                             return try self.callValueWithThis(itfn, &.{}, v);
+                        return self.throwError("TypeError", "value is not iterable");
                     }
                 }
                 // An array honors a deleted/overridden `Array.prototype[Symbol.iterator]`.
@@ -17664,6 +17665,12 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
             // (or the sparse tail) yields `undefined` and accessor indices run.
             if (i < @max(so.elements.items.len, so.array_len)) {
                 val = try self.arrIndexGet(so, i);
+                done = false;
+            }
+        } else if (so.proxy_handler != null or so.proxy_revoked) {
+            const len = toLen((try self.toPrimitive(try self.getProperty(src, "length"), .number)).toNumber());
+            if (i < len) {
+                val = try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                 done = false;
             }
         } else if (so.typed_array) |ta| {
