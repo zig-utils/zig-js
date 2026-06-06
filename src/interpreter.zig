@@ -3876,6 +3876,34 @@ pub const Interpreter = struct {
         return if (o.proto) |p| Value{ .object = p } else .null;
     }
 
+    fn sameProtoValue(proto: ?*value.Object, v: Value) bool {
+        return (proto == null and v == .null) or (proto != null and v == .object and proto.? == v.object);
+    }
+
+    fn ordinarySetPrototypeOf(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
+        const current = if (o.proto) |p| Value{ .object = p } else Value.null;
+        if (sameProtoValue(new_proto, current)) return true;
+        if (!o.extensible) return false;
+        var cur = new_proto;
+        while (cur) |c| {
+            if (c == o) return false;
+            // OrdinarySetPrototypeOf only continues the cycle walk through
+            // ordinary objects. A Proxy in the candidate prototype chain is
+            // exotic; reaching it stops the walk rather than invoking its
+            // [[GetPrototypeOf]] trap.
+            if (c.proxy_handler != null or c.proxy_revoked) break;
+            cur = self.effectiveProto(c);
+        }
+        o.proto = new_proto;
+        return true;
+    }
+
+    /// [[SetPrototypeOf]] honoring Proxy targets and Proxy invariants.
+    pub fn setPrototypeOfObject(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxySetProto(o, new_proto);
+        return self.ordinarySetPrototypeOf(o, new_proto);
+    }
+
     /// [[GetPrototypeOf]] for a Proxy (9.5.1): invoke the trap, require an Object
     /// or null result, and enforce the non-extensible-target invariant.
     pub fn proxyGetProto(self: *Interpreter, o: *value.Object) EvalError!Value {
@@ -3926,6 +3954,22 @@ pub const Interpreter = struct {
         if (res and try self.ordinaryIsExtensible(target))
             return self.throwError("TypeError", "proxy 'preventExtensions' cannot report success while the target is extensible");
         return res;
+    }
+
+    /// [[SetPrototypeOf]] for a Proxy: forward when the trap is absent, otherwise
+    /// coerce the trap result and enforce the non-extensible target invariant.
+    pub fn proxySetProto(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
+        try self.proxyDepth();
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'setPrototypeOf' on a proxy that has been revoked");
+        const proto_v: Value = if (new_proto) |p| .{ .object = p } else .null;
+        const trap = (try self.proxyTrap(o, "setPrototypeOf")) orelse return self.setPrototypeOfObject(target, new_proto);
+        const ok = (try self.callValueWithThis(trap, &.{ .{ .object = target }, proto_v }, .{ .object = o.proxy_handler.? })).toBoolean();
+        if (!ok) return false;
+        if (try self.ordinaryIsExtensible(target)) return true;
+        const target_proto = try self.ordinaryProtoValue(target);
+        if (!sameProtoValue(new_proto, target_proto))
+            return self.throwError("TypeError", "proxy 'setPrototypeOf' cannot report success with a different prototype on a non-extensible target");
+        return true;
     }
 
     fn proxyGet(self: *Interpreter, o: *value.Object, key: []const u8, receiver: Value) EvalError!Value {
@@ -7946,19 +7990,11 @@ fn protoSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     if (this != .object) return .undefined; // a primitive `this` has no own [[Prototype]]
     const o = this.object;
     const new_proto: ?*value.Object = if (v == .object) v.object else null;
-    if (o.proto == new_proto) return .undefined; // unchanged: always succeeds
     // OrdinarySetPrototypeOf rejects setting the prototype of a non-extensible
-    // object, or any change that would form a [[Prototype]] cycle — the `__proto__`
-    // setter turns that false result into a TypeError. (Without this, `Object.
-    // prototype.__proto__ = {}` would loop, since the fresh `{}` chains back to
-    // Object.prototype, and a later property walk would spin forever.)
-    if (!o.extensible)
-        return self.throwError("TypeError", "Cannot set prototype of a non-extensible object");
-    var cur = new_proto;
-    while (cur) |c| : (cur = c.proto) {
-        if (c == o) return self.throwError("TypeError", "Cyclic __proto__ value");
-    }
-    o.proto = new_proto;
+    // object, or any change that would form a [[Prototype]] cycle. The
+    // `__proto__` setter turns that false result into a TypeError.
+    if (!try self.setPrototypeOfObject(o, new_proto))
+        return self.throwError("TypeError", "Cannot set object prototype");
     return .undefined;
 }
 
@@ -8345,16 +8381,8 @@ fn reflectSetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const p = if (args.len > 1) args[1] else .undefined;
     if (p != .object and p != .null)
         return self.throwError("TypeError", "Object prototype may only be an Object or null");
-    const o = target.object;
     const new_proto: ?*value.Object = if (p == .object) p.object else null;
-    if (o.proto == new_proto) return .{ .boolean = true }; // unchanged: always succeeds
-    if (!o.extensible) return .{ .boolean = false };
-    var cur = new_proto;
-    while (cur) |c| : (cur = c.proto) {
-        if (c == o) return .{ .boolean = false }; // cycle
-    }
-    o.proto = new_proto;
-    return .{ .boolean = true };
+    return .{ .boolean = try self.setPrototypeOfObject(target.object, new_proto) };
 }
 
 /// Best-effort [[Construct]]-ability test: a native flagged `native_ctor`, an
@@ -23159,6 +23187,27 @@ test "interpreter JSON, Object, Number builtins" {
         \\names[names.indexOf("length") + 1] === "name" &&
         \\lengthDesc.writable === false && lengthDesc.enumerable === false && lengthDesc.configurable === true &&
         \\nameDesc.writable === false && nameDesc.enumerable === false && nameDesc.configurable === true
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let target = {};
+        \\let proto = {};
+        \\let called = 0;
+        \\let forwarded = new Proxy(new Proxy(target, {
+        \\  setPrototypeOf(t, v) { called++; Object.setPrototypeOf(t, v); return true; }
+        \\}), {});
+        \\Object.setPrototypeOf(forwarded, proto);
+        \\let falseTrap = new Proxy({}, { setPrototypeOf() { return 0; } });
+        \\let objectThrows = false;
+        \\try { Object.setPrototypeOf(falseTrap, {}); } catch (e) { objectThrows = e instanceof TypeError; }
+        \\let fixedProto = {};
+        \\let fixedTarget = Object.setPrototypeOf({}, fixedProto);
+        \\Object.preventExtensions(fixedTarget);
+        \\let invariantProxy = new Proxy(fixedTarget, { setPrototypeOf() { return true; } });
+        \\let invariantThrows = false;
+        \\try { Reflect.setPrototypeOf(invariantProxy, {}); } catch (e) { invariantThrows = e instanceof TypeError; }
+        \\called === 1 && Object.getPrototypeOf(target) === proto &&
+        \\Reflect.setPrototypeOf(falseTrap, {}) === false && objectThrows &&
+        \\Reflect.setPrototypeOf(invariantProxy, fixedProto) === true && invariantThrows
     )).boolean);
 }
 

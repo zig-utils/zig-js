@@ -1439,16 +1439,8 @@ pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) H
         return self.throwError("TypeError", "Object prototype may only be an Object or null");
     if (o != .object) return o; // a primitive `this` has no own [[Prototype]] to set
     const new_proto: ?*value.Object = if (p == .object) p.object else null;
-    if (o.object.proto == new_proto) return o; // no-op when unchanged
-    if (!o.object.extensible)
-        return self.throwError("TypeError", "Cannot set prototype of a non-extensible object");
-    // Reject a cycle (a non-proxy chain that loops back to the target).
-    var cur = new_proto;
-    while (cur) |c| {
-        if (c == o.object) return self.throwError("TypeError", "Cyclic __proto__ value");
-        cur = c.proto;
-    }
-    o.object.proto = new_proto;
+    if (!try self.setPrototypeOfObject(o.object, new_proto))
+        return self.throwError("TypeError", "Cannot set object prototype");
     return o;
 }
 
