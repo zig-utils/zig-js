@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 33,974 / 41,664 (81.5%)**, with **135 parse failures**,
-> **7,555 runtime failures**, **0 host failures**, and **NEGATIVE 3,211 / 4,668 (68.8%)**.
+> The latest full run passes **VALID 33,976 / 41,664 (81.5%)**, with **135 parse failures**,
+> **7,553 runtime failures**, **0 host failures**, and **NEGATIVE 3,211 / 4,668 (68.8%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **33,974 / 41,664 (81.5%)** |
+| **valid** | can we run the program? (scored corpus) | **33,976 / 41,664 (81.5%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,211 / 4,668 (68.8%) |
 
 The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
@@ -85,7 +85,7 @@ Per area (valid):
 | `decodeURI` | 55 / 55 (100%) | `decodeURIComponent` | 56 / 56 (100%) |
 | `encodeURI` | 31 / 31 (100%) | `encodeURIComponent` | 31 / 31 (100%) |
 | `AsyncIteratorPrototype` | 9 / 9 (100%) | `eval` | 10 / 10 (100%) |
-| `global` | 29 / 29 (100%) | `Function` | 486 / 509 (95.5%) |
+| `global` | 29 / 29 (100%) | `Function` | 488 / 509 (95.9%) |
 
 > `zig build test262` prints each subtree's pass rate plus `parse-fail`, `runtime-fail`, and
 > `host-fail` counts so the work stays data-driven. Bump the corpus with

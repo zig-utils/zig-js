@@ -121,7 +121,12 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     defer if (swapped) {
         self.env = saved_env;
     };
-    return self.eval(prog);
+    const fn_v = try self.eval(prog);
+    if (fn_v == .object and fn_v.object.js_func != null) {
+        _ = try self.protoObject(fn_v.object);
+        try fn_v.object.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
+    }
+    return fn_v;
 }
 
 /// Byte offset past the leading run of ECMAScript StrWhiteSpace (WhiteSpace +
