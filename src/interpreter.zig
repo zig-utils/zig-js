@@ -8189,6 +8189,7 @@ fn proxyRevocableFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     p.* = .{ .proxy_target = target.object, .proxy_handler = handler.object };
     const revoke = try self.arena.create(value.Object);
     revoke.* = .{ .native = proxyRevokeFn, .private_data = @ptrCast(p) };
+    try installNativeProps(self.arena, self.root_shape, revoke, "", 0);
     const result = (try self.newObject()).object;
     try self.setProp(result, "proxy", .{ .object = p });
     try self.setProp(result, "revoke", .{ .object = revoke });
@@ -23149,6 +23150,16 @@ test "interpreter JSON, Object, Number builtins" {
     try std.testing.expectEqualStrings("AB", (try evalSource(a, "String.fromCharCode(65, 66)")).string);
     try std.testing.expect((try evalSource(a, "String.fromCharCode(0x0130) === '\\u0130'")).boolean);
     try std.testing.expect((try evalSource(a, "String.fromCharCode(0x10400) === '\\u0400'")).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let f = Proxy.revocable({}, {}).revoke;
+        \\let names = Object.getOwnPropertyNames(f);
+        \\let lengthDesc = Object.getOwnPropertyDescriptor(f, "length");
+        \\let nameDesc = Object.getOwnPropertyDescriptor(f, "name");
+        \\f.length === 0 && f.name === "" &&
+        \\names[names.indexOf("length") + 1] === "name" &&
+        \\lengthDesc.writable === false && lengthDesc.enumerable === false && lengthDesc.configurable === true &&
+        \\nameDesc.writable === false && nameDesc.enumerable === false && nameDesc.configurable === true
+    )).boolean);
 }
 
 test "interpreter builtins: Math, Object, Array, globals" {
