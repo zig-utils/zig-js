@@ -2090,6 +2090,7 @@ pub const Interpreter = struct {
         // Non-arrow functions get an `arguments` array-like over the call args.
         if (!func.is_arrow) {
             const args_obj = try self.newArray();
+            args_obj.object.is_arguments = true;
             for (args) |av| try args_obj.object.elements.append(self.arena, av);
             // Strict mode's `arguments.callee` is a poison-pill accessor whose
             // get and set are both `%ThrowTypeError%`. Reading or writing it
@@ -4855,7 +4856,7 @@ pub const Interpreter = struct {
                 if (o.is_array) {
                     if (arrayIndex(key)) |i| if (i < o.elements.items.len) try o.markHole(self.arena, i);
                 }
-                return true;
+                if (o.getOwn(key) == null) return true;
             }
         }
         // Dense array element → leave a hole (reads as absent), length unchanged.
@@ -8109,28 +8110,41 @@ fn protoSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const builtin_tag: []const u8 = switch (this) {
+    const tag_obj: ?*value.Object = switch (this) {
         .undefined => return .{ .string = "[object Undefined]" },
         .null => return .{ .string = "[object Null]" },
+        .object => |o| o,
+        else => try self.toObject(this),
+    };
+    const builtin_tag: []const u8 = switch (this) {
         .number => "Number",
         .boolean => "Boolean",
         .string => "String",
-        .object => |o| if (o.is_array) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.prim) |p| (switch (p) {
+        .object => |o| if (o.is_arguments) "Arguments" else if (try objectToStringIsArray(self, o)) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.prim) |p| (switch (p) {
             .number => "Number",
             .string => "String",
             .boolean => "Boolean",
             else => "Object",
         }) else if (o.isCallableObject()) "Function" else "Object",
+        else => "Object",
     };
     // `Symbol.toStringTag` (a string) wins over the builtin tag.
     var tag = builtin_tag;
-    if (this == .object) {
+    if (tag_obj) |o| {
         if (symbolToStringTagKey(self)) |tk| {
-            const tv = try self.getProperty(this, tk);
+            const tv = try self.getProperty(.{ .object = o }, tk);
             if (tv == .string) tag = tv.string;
         }
     }
     return .{ .string = try std.mem.concat(self.arena, u8, &.{ "[object ", tag, "]" }) };
+}
+
+fn objectToStringIsArray(self: *Interpreter, o: *value.Object) EvalError!bool {
+    if (o.proxy_handler != null or o.proxy_revoked) {
+        const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform IsArray on a revoked proxy");
+        return objectToStringIsArray(self, target);
+    }
+    return o.is_array;
 }
 
 /// Internal key of the well-known `Symbol.toStringTag`, for `@@toStringTag`.
@@ -17393,7 +17407,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // `Object.prototype.toString` reports the right tag.
     if (symbol_ns.getOwn("toStringTag")) |stt| if (stt == .object and stt.object.is_symbol) {
         const tk = stt.object.sym_key;
-        inline for (.{ "Map", "Set", "WeakMap", "WeakSet" }) |nm| {
+        inline for (.{ "Map", "Set", "WeakMap", "WeakSet", "Promise" }) |nm| {
             if (env.get(nm)) |cv| if (cv == .object) if (cv.object.getOwn("prototype")) |pv| if (pv == .object) {
                 try pv.object.setOwn(a, root_shape, tk, .{ .string = nm });
                 try pv.object.setAttr(a, tk, .{ .writable = false, .enumerable = false, .configurable = true });

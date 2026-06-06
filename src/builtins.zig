@@ -1223,6 +1223,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     if (get != null or set != null) {
         try target.setAccessor(self.arena, key, get, set);
     } else {
+        if (cur_acc != null) _ = try self.deleteOwn(target, key);
         if (d.getOwn("writable")) |w| attr.writable = w.toBoolean();
         // An omitted `value` keeps the existing data property's value on a
         // redefine (a partial descriptor like `{enumerable:false}` must not reset

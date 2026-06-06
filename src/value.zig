@@ -368,6 +368,9 @@ pub const Object = struct {
     /// True for `RegExp` instances (carries `source`/`flags` properties; matching
     /// is backed by zig-regex).
     is_regex: bool = false,
+    /// True for function `arguments` objects; they are array-like internally but
+    /// carry the Arguments brand for Object.prototype.toString.
+    is_arguments: bool = false,
     /// `Map`/`Set` instances. A Map keeps `[key,value]` pair-arrays in
     /// `elements`; a Set keeps values directly. `size` is a maintained property.
     is_map: bool = false,
