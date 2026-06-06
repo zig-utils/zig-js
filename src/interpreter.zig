@@ -1513,7 +1513,8 @@ pub const Interpreter = struct {
         if (funcOf(.{ .object = o })) |func| {
             if (func.source.len > 0) return .{ .string = func.source };
         }
-        const nm: []const u8 = if (o.getOwn("name")) |n| (if (n == .string) n.string else "") else "";
+        const raw_name: []const u8 = if (o.getOwn("name")) |n| (if (n == .string) n.string else "") else "";
+        const nm: []const u8 = if (raw_name.len > 0 and raw_name[0] == 0) "" else raw_name;
         return .{ .string = try std.mem.concat(self.arena, u8, &.{ "function ", nm, "() { [native code] }" }) };
     }
 
@@ -7034,7 +7035,7 @@ pub const Interpreter = struct {
                     break;
                 }
                 if (c.getOwn(m)) |fv| {
-                    if (fv == .object and fv.object.js_func != null) method = fv
+                    if (fv == .object and (fv.object.js_func != null or (c == o and fv.object.native != null))) method = fv
                     // Primitive wrappers' native valueOf is a spec builtin that
                     // produces the boxed primitive at this position in the
                     // OrdinaryToPrimitive order, so do not continue to a later
@@ -17741,6 +17742,7 @@ fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
             defer self.env = saved_env;
             if (!(this == .object and this.object.isCallableObject()))
                 return self.throwError("TypeError", "Function.prototype." ++ name ++ " requires that 'this' be callable");
+            if (std.mem.eql(u8, name, "toString")) return self.functionToString(this.object);
             return (try self.builtinMethod(this, name, args)) orelse .undefined;
         }
     }.call;

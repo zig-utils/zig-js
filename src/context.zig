@@ -2381,6 +2381,15 @@ test "Date call remains string-returning through bind" {
     try std.testing.expect((try evalIn("typeof Date.bind(null)(0, 0, 0) === 'string'")).boolean);
 }
 
+test "ordinary toPrimitive calls borrowed native toString methods" {
+    try std.testing.expectError(error.Throw, evalIn(
+        \\String({ toString: Function.prototype.toString })
+    ));
+    try std.testing.expect((try evalIn(
+        \\String(Function.prototype).indexOf("[native code]") >= 0
+    )).boolean);
+}
+
 test "prototype objects: Function.prototype.call.bind + X.prototype methods" {
     // The propertyHelper pattern: borrow a prototype method via call.bind.
     try expectEvalStr("1-2-3",
