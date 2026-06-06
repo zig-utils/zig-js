@@ -3984,7 +3984,7 @@ pub const Interpreter = struct {
             // no getter must report undefined.
             if (target.proxy_handler == null and !target.proxy_revoked and objectHasOwn(target, key) and !target.getAttr(key).configurable) {
                 if (target.getAccessor(key)) |acc| {
-                    if (acc.get == null and res != .undefined)
+                    if ((acc.get == null or acc.get.? == .undefined) and res != .undefined)
                         return self.throwError("TypeError", "proxy 'get' must report undefined for a non-configurable accessor with no getter");
                 } else if (!target.getAttr(key).writable) {
                     if (target.getOwn(key)) |tv| if (!value.strictEquals(res, tv))
@@ -3993,7 +3993,7 @@ pub const Interpreter = struct {
             }
             return res;
         }
-        return self.getProperty(.{ .object = target }, key);
+        return self.getPropertyWithReceiver(.{ .object = target }, key, receiver);
     }
 
     fn proxySet(self: *Interpreter, o: *value.Object, key: []const u8, v: Value, receiver: Value) EvalError!bool {
@@ -4139,10 +4139,17 @@ pub const Interpreter = struct {
     }
 
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
+        return self.getPropertyWithReceiver(recv, key, recv);
+    }
+
+    /// Ordinary [[Get]] with the receiver kept separate from the object where
+    /// lookup starts. Reflect.get and Proxy forwarding rely on this when an
+    /// inherited accessor observes `this`.
+    fn getPropertyWithReceiver(self: *Interpreter, recv: Value, key: []const u8, receiver: Value) EvalError!Value {
         switch (recv) {
             .object => |o| {
                 if (o.is_symbol or o.is_bigint) return self.getPrimitiveMember(recv, key);
-                if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, recv);
+                if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, receiver);
                 if (moduleNsOf(o)) |ns| return moduleNsGet(self, ns, key);
                 // Legacy `caller`: a *non-strict ordinary* function (not strict,
                 // arrow, generator, async, or bound) reads `null` for `.caller`,
@@ -4231,11 +4238,13 @@ pub const Interpreter = struct {
                 // value, etc. resolve).
                 var cur: ?*value.Object = o;
                 while (cur) |c| {
+                    if (c.proxy_handler != null or c.proxy_revoked)
+                        return self.proxyGet(c, key, receiver);
                     if (c.getAccessor(key)) |acc| {
                         // An explicit `get: undefined` is stored as the undefined
                         // value but means "no getter".
                         if (acc.get) |g| {
-                            if (g != .undefined) return self.callValueWithThis(g, &.{}, recv);
+                            if (g != .undefined) return self.callValueWithThis(g, &.{}, receiver);
                         }
                         return .undefined; // accessor with no getter
                     }
@@ -8281,7 +8290,8 @@ fn reflectGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.get called on non-object");
-    return self.getProperty(target, try self.keyOf(if (args.len > 1) args[1] else .undefined));
+    const receiver = if (args.len > 2) args[2] else target;
+    return self.getPropertyWithReceiver(target, try self.keyOf(if (args.len > 1) args[1] else .undefined), receiver);
 }
 
 fn reflectSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -23262,6 +23272,23 @@ test "interpreter JSON, Object, Number builtins" {
         \\Reflect.set(falseSet, "x", 1) === false &&
         \\Reflect.set(forwarded, "y", 2, receiver) === true &&
         \\defineCount === 1 && receiver.y === 2 && target.y === undefined
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let target = { get attr() { return this; } };
+        \\let proxy = new Proxy(target, { get: null });
+        \\let inherited = Object.create(new Proxy({ get value() { return this; } }, {}));
+        \\let receiver = {};
+        \\proxy.attr === proxy &&
+        \\inherited.value === inherited &&
+        \\Reflect.get(target, "attr", receiver) === receiver
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let target = {};
+        \\let proxy = new Proxy(target, { get() { return 1; } });
+        \\let threw = false;
+        \\Object.defineProperty(target, "x", { configurable: false, get: undefined });
+        \\try { proxy.x; } catch (e) { threw = e instanceof TypeError; }
+        \\threw
     )).boolean);
 }
 
