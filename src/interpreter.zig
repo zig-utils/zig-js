@@ -4056,7 +4056,7 @@ pub const Interpreter = struct {
                 // function has one, with a `constructor` back-reference. Without
                 // this a plain `Test262Error.prototype.toString = …` (and any
                 // `f.prototype.x = …`) read undefined and threw.
-                if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null) {
+                if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null) {
                     if (funcOf(recv)) |f| {
                         // A generator function's `.prototype` is a fresh object whose
                         // [[Prototype]] is %GeneratorPrototype% and which has NO
@@ -7276,20 +7276,32 @@ pub const Interpreter = struct {
         return null;
     }
 
+    fn objectGetPrototypeValue(self: *Interpreter, o: *value.Object) EvalError!Value {
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGetProto(o);
+        return if (self.effectiveProto(o)) |p| .{ .object = p } else .null;
+    }
+
     pub fn ordinaryHasInstance(self: *Interpreter, rc: *value.Object, l: Value) EvalError!bool {
         if (!rc.isCallableObject()) return false;
-        if (l != .object) return false;
+        if (rc.bound) |erased| {
+            const bf: *BoundFn = @ptrCast(@alignCast(erased));
+            return self.instanceOf(l, bf.target);
+        }
+        if (!builtins.isRealObject(l)) return false;
         const lo = l.object;
-        if (rc.getOwn("prototype")) |p| {
+        const p = try self.getProperty(.{ .object = rc }, "prototype");
+        if (!builtins.isRealObject(p)) return self.throwError("TypeError", "Function has non-object prototype in instanceof check");
+        var cur = try self.objectGetPrototypeValue(lo);
+        while (cur == .object) {
+            if (cur.object == p.object) return true;
+            cur = try self.objectGetPrototypeValue(cur.object);
+        }
+        if (lo.ctor_ref) |cr| {
+            if (cr == rc) return true;
             if (p == .object) {
-                var cur: ?*value.Object = self.effectiveProto(lo);
-                while (cur) |c| {
-                    if (c == p.object) return true;
-                    cur = self.effectiveProto(c);
-                }
+                if (cr.getOwn("prototype")) |cp| if (cp == .object and cp.object == p.object) return true;
             }
         }
-        if (lo.ctor_ref) |cr| if (cr == rc) return true;
         if (rc.error_ctor) |name| {
             if (lo.is_error and (std.mem.eql(u8, lo.error_name, name) or std.mem.eql(u8, name, "Error")))
                 return true;
