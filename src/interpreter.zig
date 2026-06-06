@@ -10024,12 +10024,12 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             var params: std.ArrayListUnmanaged(u8) = .empty;
             var body: []const u8 = "";
             if (args.len > 0) {
-                body = try self.toStringV(args[args.len - 1]);
                 var i: usize = 0;
                 while (i + 1 < args.len) : (i += 1) {
                     if (i != 0) try params.append(self.arena, ',');
                     try params.appendSlice(self.arena, try self.toStringV(args[i]));
                 }
+                body = try self.toStringV(args[args.len - 1]);
             }
             const prefix = switch (kind) {
                 .generator => "function* anonymous",

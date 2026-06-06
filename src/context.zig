@@ -1490,6 +1490,17 @@ test "Function constructor builds callable functions from source" {
     try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).number);
     try std.testing.expectEqual(@as(f64, 12), (try evalIn("new Function('a,b', 'return a * b')(3, 4)")).number);
     try std.testing.expectEqual(@as(f64, 42), (try evalIn("Function('return 42')()")).number);
+    try std.testing.expect((try evalIn(
+        \\var i = 0;
+        \\var p = { toString: function() { return "a" + (++i); } };
+        \\var f = Function(p, p, p, "return a3 + a2 + a1.length;");
+        \\f("x", "", 2) === "21" && i === 3
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var p = { toString: function() { p = 1; return "a"; } };
+        \\var body = { toString: function() { throw "body"; } };
+        \\try { Function(p, body); false; } catch (e) { e === "body" && p === 1; }
+    )).boolean);
     // Spec name + arity of the synthesized function.
     try expectEvalStr("anonymous", "Function('return 1').name");
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("Function('a', 'b', 'return 0').length")).number);

@@ -97,12 +97,12 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     var params: std.ArrayListUnmanaged(u8) = .empty;
     var body: []const u8 = "";
     if (args.len > 0) {
-        body = try args[args.len - 1].toString(self.arena);
         var i: usize = 0;
         while (i + 1 < args.len) : (i += 1) {
             if (i != 0) try params.append(self.arena, ',');
-            try params.appendSlice(self.arena, try args[i].toString(self.arena));
+            try params.appendSlice(self.arena, try self.toStringV(args[i]));
         }
+        body = try self.toStringV(args[args.len - 1]);
     }
     const source = try std.fmt.allocPrint(self.arena, "(function anonymous({s}\n) {{\n{s}\n}})", .{ params.items, body });
     var parser = Parser.init(self.arena, source) catch
