@@ -1100,11 +1100,19 @@ pub const Interpreter = struct {
                     if (o.getAttr(key).enumerable) try out.append(self.arena, key);
                 }
             }
-            for (try o.ownKeys(self.arena)) |k| {
+            const own_keys = if (o.proxy_handler != null or o.proxy_revoked)
+                try self.objectOwnKeysList(o)
+            else
+                try o.ownKeys(self.arena);
+            for (own_keys) |k| {
                 if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
                 if (visited.contains(k)) continue;
                 try visited.put(self.arena, k, {});
-                if (o.getAttr(k).enumerable) try out.append(self.arena, k);
+                const enumerable = if (o.proxy_handler != null or o.proxy_revoked) blk: {
+                    const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ .{ .object = o }, self.keyToValue(k) });
+                    break :blk desc == .object and if (desc.object.getOwn("enumerable")) |e| e.toBoolean() else false;
+                } else o.getAttr(k).enumerable;
+                if (enumerable) try out.append(self.arena, k);
             }
             cur = o.proto;
         }
@@ -4844,6 +4852,7 @@ pub const Interpreter = struct {
         // Dense array element → leave a hole (reads as absent), length unchanged.
         // A per-index descriptor may mark it non-configurable (delete fails).
         if (o.is_array) {
+            if (std.mem.eql(u8, key, "length")) return false;
             if (arrayIndex(key)) |i| {
                 if (i < o.elements.items.len) {
                     if (o.attrs != null and !o.getAttr(key).configurable) return false;
@@ -4853,6 +4862,8 @@ pub const Interpreter = struct {
                 }
             }
         }
+        if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
+            _ = try self.getProperty(.{ .object = o }, key);
         // Named data property: nothing to do if absent; reject if non-configurable.
         if (o.getOwn(key) == null) return true;
         if (!o.getAttr(key).configurable) return false;
@@ -5316,6 +5327,30 @@ pub const Interpreter = struct {
         };
     }
 
+    fn objectProtoHasOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        if (isModuleNs(o)) return (try moduleNsDesc(self, o, key)) != .undefined;
+        if (o.proxy_handler != null or o.proxy_revoked) {
+            const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ .{ .object = o }, self.keyToValue(key) });
+            return desc != .undefined;
+        }
+        return objectHasOwn(o, key);
+    }
+
+    fn objectProtoPropertyIsEnumerable(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        if (isModuleNs(o)) {
+            _ = try moduleNsDesc(self, o, key);
+            return moduleNsEnumerable(o, key);
+        }
+        if (o.proxy_handler != null or o.proxy_revoked) {
+            const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ .{ .object = o }, self.keyToValue(key) });
+            if (desc != .object) return false;
+            if (desc.object.getOwn("enumerable")) |enumerable| return enumerable.toBoolean();
+            return false;
+        }
+        return objectHasOwn(o, key) and o.getAttr(key).enumerable and
+            !(o.is_array and std.mem.eql(u8, key, "length"));
+    }
+
     /// Dispatch `Array.prototype` / `String.prototype` methods (which aren't
     /// stored as own properties). Returns null when `name` isn't a recognized
     /// builtin for `recv`, so the caller falls back to a property lookup + call.
@@ -5323,18 +5358,11 @@ pub const Interpreter = struct {
         const o = try self.toObject(recv);
         if (eq(name, "hasOwnProperty")) {
             const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
-            if (isModuleNs(o)) return Value{ .boolean = (try moduleNsDesc(self, o, k)) != .undefined };
-            return Value{ .boolean = objectHasOwn(o, k) };
+            return Value{ .boolean = try self.objectProtoHasOwn(o, k) };
         }
         if (eq(name, "propertyIsEnumerable")) {
             const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
-            if (isModuleNs(o)) {
-                _ = try moduleNsDesc(self, o, k);
-                return Value{ .boolean = moduleNsEnumerable(o, k) };
-            }
-            const enumerable = objectHasOwn(o, k) and o.getAttr(k).enumerable and
-                !(o.is_array and std.mem.eql(u8, k, "length"));
-            return Value{ .boolean = enumerable };
+            return Value{ .boolean = try self.objectProtoPropertyIsEnumerable(o, k) };
         }
         if (eq(name, "isPrototypeOf")) {
             var cur: ?*value.Object = if (args.len > 0 and args[0] == .object) args[0].object.proto else null;
@@ -5409,22 +5437,11 @@ pub const Interpreter = struct {
                     }
                     if (eq(name, "hasOwnProperty")) {
                         const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
-                        // A module namespace [[GetOwnProperty]] reads the live
-                        // binding (throwing for an uninitialized one).
-                        if (isModuleNs(o)) return Value{ .boolean = (try moduleNsDesc(self, o, k)) != .undefined };
-                        return Value{ .boolean = objectHasOwn(o, k) };
+                        return Value{ .boolean = try self.objectProtoHasOwn(o, k) };
                     }
                     if (eq(name, "propertyIsEnumerable")) {
                         const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
-                        if (isModuleNs(o)) {
-                            _ = try moduleNsDesc(self, o, k); // surfaces TDZ ReferenceError
-                            return Value{ .boolean = moduleNsEnumerable(o, k) };
-                        }
-                        // Own + enumerable per its attributes; array `length` is
-                        // the notable non-enumerable.
-                        const enumerable = objectHasOwn(o, k) and o.getAttr(k).enumerable and
-                            !(o.is_array and std.mem.eql(u8, k, "length"));
-                        return Value{ .boolean = enumerable };
+                        return Value{ .boolean = try self.objectProtoPropertyIsEnumerable(o, k) };
                     }
                     if (eq(name, "isPrototypeOf")) {
                         var cur: ?*value.Object = if (args.len > 0 and args[0] == .object) args[0].object.proto else null;

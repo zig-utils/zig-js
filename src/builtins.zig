@@ -1653,7 +1653,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         if (arrayIndexOf(key)) |i| {
             // Per-index attributes recorded by `defineProperty` override the
             // all-true default for a dense element.
-            if (i < o.elements.items.len)
+            if (i < o.elements.items.len and !o.isHole(i))
                 return dataDescriptor(self, o.elements.items[i], o.getAttr(key));
         }
     }
