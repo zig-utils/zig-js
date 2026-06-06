@@ -3996,7 +3996,7 @@ pub const Interpreter = struct {
         return self.getProperty(.{ .object = target }, key);
     }
 
-    fn proxySet(self: *Interpreter, o: *value.Object, key: []const u8, v: Value, receiver: Value) EvalError!void {
+    fn proxySet(self: *Interpreter, o: *value.Object, key: []const u8, v: Value, receiver: Value) EvalError!bool {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
@@ -4008,15 +4008,15 @@ pub const Interpreter = struct {
             // non-configurable accessor that has no setter.
             if (ok and target.proxy_handler == null and !target.proxy_revoked and objectHasOwn(target, key) and !target.getAttr(key).configurable) {
                 if (target.getAccessor(key)) |acc| {
-                    if (acc.set == null) return self.throwError("TypeError", "proxy 'set' cannot succeed for a non-configurable accessor with no setter");
+                    if (acc.set == null or acc.set.? == .undefined) return self.throwError("TypeError", "proxy 'set' cannot succeed for a non-configurable accessor with no setter");
                 } else if (!target.getAttr(key).writable) {
                     if (target.getOwn(key)) |tv| if (!value.strictEquals(v, tv))
                         return self.throwError("TypeError", "proxy 'set' cannot change a non-configurable non-writable property");
                 }
             }
-            return;
+            return ok;
         }
-        return self.setMember(.{ .object = target }, key, v);
+        return self.setMemberResult(.{ .object = target }, key, v, receiver);
     }
 
     fn proxyHas(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
@@ -4597,21 +4597,27 @@ pub const Interpreter = struct {
     /// store (growing with holes); everything else is a named property. Shared
     /// by the tree-walker and the VM.
     pub fn setMember(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
+        if (!try self.setMemberResult(recv, key, v, recv)) {
+            if (self.strict) return self.throwError("TypeError", "Cannot set property");
+        }
+    }
+
+    /// Internal [[Set]] returning the spec boolean result. Assignment callers
+    /// translate a false result into a strict-mode TypeError; Reflect.set returns
+    /// the boolean directly.
+    pub fn setMemberResult(self: *Interpreter, recv: Value, key: []const u8, v: Value, receiver: Value) EvalError!bool {
         if (recv == .object and (recv.object.is_symbol or recv.object.is_bigint))
-            return self.setPrimitiveMember(recv, key, v);
+            return self.setPrimitiveMemberResult(recv, key, v);
         if (recv != .object) {
             if (recv == .null or recv == .undefined)
                 return self.throwError("TypeError", "Cannot set property of null or undefined");
-            return self.setPrimitiveMember(recv, key, v);
+            return self.setPrimitiveMemberResult(recv, key, v);
         }
         const o = recv.object;
-        if (o.proxy_handler != null or o.proxy_revoked) return self.proxySet(o, key, v, recv);
+        if (o.proxy_handler != null or o.proxy_revoked) return self.proxySet(o, key, v, receiver);
         // A module namespace's [[Set]] always fails: strict throws, sloppy is a
         // silent no-op.
-        if (o.module_ns != null) {
-            if (self.strict) return self.throwError("TypeError", "Cannot assign to read only property of a module namespace");
-            return;
-        }
+        if (o.module_ns != null) return false;
         if (o.typed_array) |ta| {
             // An integer-keyed write coerces the value to a number and stores it
             // in the buffer; out-of-bounds / detached writes are silently ignored
@@ -4627,7 +4633,7 @@ pub const Interpreter = struct {
                     const num = (try self.toNumberV(v));
                     if (i < (ta.currentLength() orelse 0)) value.taWrite(ta, i, num);
                 }
-                return;
+                return true;
             }
             // non-index keys fall through to ordinary [[Set]].
         }
@@ -4644,15 +4650,14 @@ pub const Interpreter = struct {
                 // ArraySetLength: a non-writable `length` rejects the assignment
                 // (the RangeError above still precedes this) — sloppy silently,
                 // strict throws.
-                if (o.attrs != null and !o.getAttr("length").writable)
-                    return if (self.strict) self.throwError("TypeError", "Cannot assign to read only property 'length'") else {};
+                if (o.attrs != null and !o.getAttr("length").writable) return false;
                 if (u < o.elements.items.len) {
                     o.elements.shrinkRetainingCapacity(u);
                     o.array_len = 0; // physical length is now exactly `u`
                 } else {
                     o.array_len = u; // grow logically; don't materialize holes
                 }
-                return;
+                return true;
             }
             // An accessor defined on an index routes the write to its setter
             // (handled by the prototype-chain setter walk below), not the store.
@@ -4667,12 +4672,17 @@ pub const Interpreter = struct {
             } else if (arrayIndex(key)) |i| {
                 // A per-index descriptor (recorded in `attrs`) may mark the
                 // element non-writable: sloppy ignores the write, strict throws.
-                if (o.attrs != null and !o.getAttr(key).writable)
-                    return if (self.strict) self.throwError("TypeError", "Cannot assign to read only property") else {};
+                if (o.attrs != null and !o.getAttr(key).writable) return false;
                 if (i < o.elements.items.len) {
+                    if (o.isHole(i)) {
+                        if (self.effectiveProto(o)) |p| {
+                            if (p.proxy_handler != null or p.proxy_revoked)
+                                return self.proxySet(p, key, v, receiver);
+                        }
+                    }
                     o.elements.items[i] = v;
                     o.clearHole(i); // an assignment fills a hole
-                    return;
+                    return true;
                 }
                 // Grow densely only for near-contiguous, bounded indices; large
                 // or gappy indices become sparse named properties (no giant alloc).
@@ -4685,7 +4695,7 @@ pub const Interpreter = struct {
                     // Indices skipped over by a sparse assignment are holes.
                     var g = gap_start;
                     while (g < i) : (g += 1) try o.markHole(self.arena, g);
-                    return;
+                    return true;
                 }
                 // A large/gappy index becomes a sparse named property; the array's
                 // logical length still extends past it (`a[1e9]=x` → length 1e9+1).
@@ -4696,34 +4706,55 @@ pub const Interpreter = struct {
         // A setter anywhere on the prototype chain intercepts the assignment.
         var cur: ?*value.Object = o;
         while (cur) |c| {
+            if (c.proxy_handler != null or c.proxy_revoked)
+                return self.proxySet(c, key, v, receiver);
             if (c.getAccessor(key)) |acc| {
                 if (acc.set) |s| {
                     // An explicit `set: undefined` means "no setter".
                     if (s != .undefined) {
-                        _ = try self.callValueWithThis(s, &.{v}, recv);
-                        return;
+                        _ = try self.callValueWithThis(s, &.{v}, receiver);
+                        return true;
                     }
                 }
-                // Accessor with no setter: sloppy ignores, strict throws.
-                return if (self.strict) self.throwError("TypeError", "Cannot set property which has only a getter") else {};
+                return false;
             }
-            cur = c.proto;
+            cur = self.effectiveProto(c);
         }
-        // [[Set]] attribute checks: sloppy silently ignores rejection, strict throws.
+        // [[Set]] attribute checks.
         if (o.getOwn(key)) |_| {
-            if (!o.getAttr(key).writable)
-                return if (self.strict) self.throwError("TypeError", "Cannot assign to read only property") else {};
-        } else if (!o.extensible) {
-            return if (self.strict) self.throwError("TypeError", "Cannot add property, object is not extensible") else {};
+            if (!o.getAttr(key).writable) return false;
         }
-        try self.setProp(o, key, v);
+        if (receiver != .object) return false;
+        const ro = receiver.object;
+        if (ro.proxy_handler != null or ro.proxy_revoked) {
+            const desc = (try self.newObject()).object;
+            try desc.setOwn(self.arena, self.root_shape, "value", v);
+            try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+            try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+            try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+            return try builtins.defineOneResult(self, ro, key, desc);
+        }
+        if (ro.getAccessor(key)) |acc| {
+            if (acc.set) |s| {
+                if (s != .undefined) {
+                    _ = try self.callValueWithThis(s, &.{v}, receiver);
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (ro.getOwn(key)) |_| {
+            if (!ro.getAttr(key).writable) return false;
+        } else if (!ro.extensible) return false;
+        try self.setProp(ro, key, v);
+        return true;
     }
 
     /// [[Set]] on a primitive base: ToObject(base), then walk inherited setters
     /// and Proxy set traps, but a data-property/no-property write ultimately
     /// fails because the original receiver is not an Object. Sloppy code ignores
     /// that false result; strict code throws.
-    fn setPrimitiveMember(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
+    fn setPrimitiveMemberResult(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!bool {
         const boxed = try self.boxPrimitiveBase(recv);
         var cur: ?*value.Object = boxed;
         while (cur) |c| {
@@ -4733,17 +4764,15 @@ pub const Interpreter = struct {
                 if (acc.set) |s| {
                     if (s != .undefined) {
                         _ = try self.callValueWithThis(s, &.{v}, recv);
-                        return;
+                        return true;
                     }
                 }
-                return if (self.strict) self.throwError("TypeError", "Cannot set property which has only a getter") else {};
+                return false;
             }
-            if (c.getOwn(key)) |_| {
-                return if (self.strict) self.throwError("TypeError", "Cannot create property on a primitive") else {};
-            }
+            if (c.getOwn(key)) |_| return false;
             cur = self.effectiveProto(c);
         }
-        return if (self.strict) self.throwError("TypeError", "Cannot create property on a primitive") else {};
+        return false;
     }
 
     /// `delete obj[key]`: remove an own property, returning whether the object
@@ -8263,8 +8292,8 @@ fn reflectSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     // A module namespace's [[Set]] returns false (Reflect.set reports it without
     // throwing, unlike a strict assignment).
     if (target == .object and isModuleNs(target.object)) return .{ .boolean = false };
-    try self.setMember(target, try self.keyOf(if (args.len > 1) args[1] else .undefined), if (args.len > 2) args[2] else .undefined);
-    return .{ .boolean = true };
+    const receiver = if (args.len > 3) args[3] else target;
+    return .{ .boolean = try self.setMemberResult(target, try self.keyOf(if (args.len > 1) args[1] else .undefined), if (args.len > 2) args[2] else .undefined, receiver) };
 }
 
 fn reflectHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -23221,6 +23250,18 @@ test "interpreter JSON, Object, Number builtins" {
         \\let invariantThrows = false;
         \\try { Reflect.defineProperty(invariantProxy, "x", { writable: false }); } catch (e) { invariantThrows = e instanceof TypeError; }
         \\Reflect.defineProperty(falseTrap, "x", {}) === false && objectThrows && invariantThrows
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let falseSet = new Proxy({}, { set() { return 0; } });
+        \\let target = {};
+        \\let defineCount = 0;
+        \\let receiver = new Proxy({}, {
+        \\  defineProperty(t, k, d) { defineCount++; return Reflect.defineProperty(t, k, d); }
+        \\});
+        \\let forwarded = new Proxy(target, {});
+        \\Reflect.set(falseSet, "x", 1) === false &&
+        \\Reflect.set(forwarded, "y", 2, receiver) === true &&
+        \\defineCount === 1 && receiver.y === 2 && target.y === undefined
     )).boolean);
 }
 
