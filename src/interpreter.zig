@@ -4783,11 +4783,19 @@ pub const Interpreter = struct {
         if (receiver != .object) return false;
         const ro = receiver.object;
         if (ro.proxy_handler != null or ro.proxy_revoked) {
+            const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ .{ .object = ro }, self.keyToValue(key) });
             const desc = (try self.newObject()).object;
             try desc.setOwn(self.arena, self.root_shape, "value", v);
-            try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
-            try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
-            try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+            if (existing == .object) {
+                if (existing.object.getOwn("get") != null or existing.object.getOwn("set") != null) return false;
+                if (existing.object.getOwn("writable")) |w| {
+                    if (!w.toBoolean()) return false;
+                }
+            } else {
+                try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+                try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+                try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+            }
             return try builtins.defineOneResult(self, ro, key, desc);
         }
         if (ro.getAccessor(key) != null) return false;
