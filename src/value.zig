@@ -498,11 +498,21 @@ pub const Object = struct {
             }
         }
         // OrdinaryOwnPropertyKeys order: canonical array-index keys ascending
-        // first, then every other key in insertion order.
+        // first, then string keys in insertion order, then Symbol keys in
+        // insertion order. Keep internal/private keys in the string bucket here:
+        // public reflection filters them at the interpreter boundary, while
+        // engine algorithms that call this low-level helper still need them.
         var indices: std.ArrayListUnmanaged([]const u8) = .empty;
-        var rest: std.ArrayListUnmanaged([]const u8) = .empty;
+        var strings: std.ArrayListUnmanaged([]const u8) = .empty;
+        var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
         for (insertion.items) |k| {
-            if (canonicalIndex(k) != null) try indices.append(arena, k) else try rest.append(arena, k);
+            if (canonicalIndex(k) != null) {
+                try indices.append(arena, k);
+            } else if (isRealSymbolKey(k)) {
+                try symbols.append(arena, k);
+            } else {
+                try strings.append(arena, k);
+            }
         }
         std.mem.sort([]const u8, indices.items, {}, struct {
             fn lt(_: void, x: []const u8, y: []const u8) bool {
@@ -511,7 +521,8 @@ pub const Object = struct {
         }.lt);
         var out: std.ArrayListUnmanaged([]const u8) = .empty;
         try out.appendSlice(arena, indices.items);
-        try out.appendSlice(arena, rest.items);
+        try out.appendSlice(arena, strings.items);
+        try out.appendSlice(arena, symbols.items);
         return out.items;
     }
 

@@ -4062,12 +4062,30 @@ pub const Interpreter = struct {
     /// outside the shape).
     pub fn objectOwnKeysList(self: *Interpreter, t: *value.Object) EvalError![]const []const u8 {
         if (t.proxy_handler != null or t.proxy_revoked) return self.proxyOwnKeys(t);
+        const appendReflectable = struct {
+            fn f(arena: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8), k: []const u8) !void {
+                if (value.isPrivateKey(k)) return;
+                if (value.isSymbolKey(k) and !value.isRealSymbolKey(k)) return;
+                try list.append(arena, k);
+            }
+        }.f;
         if (moduleNsOf(t)) |ns| {
             // Sorted string export names first, then the @@toStringTag symbol key.
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
             try list.appendSlice(self.arena, ns.names);
             try list.append(self.arena, ns.tag_key);
             return list.items;
+        }
+        if (t.prim) |p| {
+            if (p == .string) {
+                var list: std.ArrayListUnmanaged([]const u8) = .empty;
+                for (p.string, 0..) |_, i| try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+                try list.append(self.arena, "length");
+                for (try t.ownKeys(self.arena)) |k| {
+                    if (!std.mem.eql(u8, k, "length")) try appendReflectable(self.arena, &list, k);
+                }
+                return list.items;
+            }
         }
         if (t.is_array) {
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -4076,11 +4094,13 @@ pub const Interpreter = struct {
                 if (t.isHole(i)) continue;
                 try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
             }
-            for (try t.ownKeys(self.arena)) |k| try list.append(self.arena, k);
+            for (try t.ownKeys(self.arena)) |k| try appendReflectable(self.arena, &list, k);
             try list.append(self.arena, "length");
             return list.items;
         }
-        return t.ownKeys(self.arena);
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (try t.ownKeys(self.arena)) |k| try appendReflectable(self.arena, &list, k);
+        return list.items;
     }
 
     pub fn proxyOwnKeys(self: *Interpreter, o: *value.Object) EvalError![]const []const u8 {
@@ -4756,15 +4776,7 @@ pub const Interpreter = struct {
             try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
             return try builtins.defineOneResult(self, ro, key, desc);
         }
-        if (ro.getAccessor(key)) |acc| {
-            if (acc.set) |s| {
-                if (s != .undefined) {
-                    _ = try self.callValueWithThis(s, &.{v}, receiver);
-                    return true;
-                }
-            }
-            return false;
-        }
+        if (ro.getAccessor(key) != null) return false;
         if (ro.getOwn(key)) |_| {
             if (!ro.getAttr(key).writable) return false;
         } else if (!ro.extensible) return false;
@@ -8365,7 +8377,7 @@ fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 /// `length` + indexed properties (a throwing `length`/index getter propagates);
 /// a non-object is a TypeError. Real arrays take the dense fast path.
 fn createListFromArrayLike(self: *Interpreter, v: Value) EvalError![]const Value {
-    if (v != .object) return self.throwError("TypeError", "Reflect: arguments list is not an object");
+    if (!builtins.isRealObject(v)) return self.throwError("TypeError", "Reflect: arguments list is not an object");
     if (v.object.is_array) return v.object.elements.items;
     const len = toLen((try self.toPrimitive(try self.getProperty(v, "length"), .number)).toNumber());
     if (len > (1 << 22)) return self.throwError("RangeError", "arguments list is too large");
@@ -8418,10 +8430,14 @@ fn reflectIsExtensibleFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 /// `Reflect.preventExtensions(target)` — TypeError on a non-Object, returns a
 /// boolean (Object.preventExtensions returns the target / no-ops a primitive).
 fn reflectPreventExtFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!builtins.isRealObject(if (args.len > 0) args[0] else .undefined))
+    const target = if (args.len > 0) args[0] else .undefined;
+    if (!builtins.isRealObject(target))
         return self.throwError("TypeError", "Reflect.preventExtensions called on non-object");
-    _ = try builtins.objectPreventExtensions(ctx, this, args);
+    if (target.object.proxy_handler != null or target.object.proxy_revoked)
+        return .{ .boolean = try self.proxyPreventExt(target.object) };
+    target.object.extensible = false;
     return .{ .boolean = true };
 }
 
@@ -8436,7 +8452,7 @@ fn reflectSetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     if (!builtins.isRealObject(target))
         return self.throwError("TypeError", "Reflect.setPrototypeOf called on non-object");
     const p = if (args.len > 1) args[1] else .undefined;
-    if (p != .object and p != .null)
+    if (p != .null and !builtins.isRealObject(p))
         return self.throwError("TypeError", "Object prototype may only be an Object or null");
     const new_proto: ?*value.Object = if (p == .object) p.object else null;
     return .{ .boolean = try self.setPrototypeOfObject(target.object, new_proto) };
@@ -23270,9 +23286,34 @@ test "interpreter JSON, Object, Number builtins" {
         \\let invariantProxy = new Proxy(fixedTarget, { setPrototypeOf() { return true; } });
         \\let invariantThrows = false;
         \\try { Reflect.setPrototypeOf(invariantProxy, {}); } catch (e) { invariantThrows = e instanceof TypeError; }
+        \\let symbolProtoThrows = false;
+        \\try { Reflect.setPrototypeOf({}, Symbol()); } catch (e) { symbolProtoThrows = e instanceof TypeError; }
         \\called === 1 && Object.getPrototypeOf(target) === proto &&
         \\Reflect.setPrototypeOf(falseTrap, {}) === false && objectThrows &&
-        \\Reflect.setPrototypeOf(invariantProxy, fixedProto) === true && invariantThrows
+        \\Reflect.setPrototypeOf(invariantProxy, fixedProto) === true && invariantThrows &&
+        \\symbolProtoThrows
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let count = 0;
+        \\function fn() { count++; }
+        \\function typeThrows(v) {
+        \\  try { Reflect.apply(fn, null, v); } catch (e) { return e instanceof TypeError; }
+        \\  return false;
+        \\}
+        \\let lengthThrows = false;
+        \\try { Reflect.apply(fn, null, { get length() { throw "length"; } }); } catch (e) { lengthThrows = e === "length"; }
+        \\lengthThrows &&
+        \\typeThrows(undefined) && typeThrows(null) && typeThrows(Symbol()) &&
+        \\typeThrows(1) && typeThrows(Infinity) && typeThrows(false) &&
+        \\typeThrows(true) && typeThrows(NaN) && count === 0
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let p1 = new Proxy({}, { preventExtensions() { return false; } });
+        \\let target = {};
+        \\let p2 = new Proxy(target, { preventExtensions(t) { Object.preventExtensions(t); return 1; } });
+        \\Reflect.preventExtensions(p1) === false &&
+        \\Reflect.preventExtensions(p2) === true &&
+        \\Object.isExtensible(target) === false
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let falseTrap = new Proxy({}, { defineProperty() { return 0; } });
@@ -23295,9 +23336,37 @@ test "interpreter JSON, Object, Number builtins" {
         \\  defineProperty(t, k, d) { defineCount++; return Reflect.defineProperty(t, k, d); }
         \\});
         \\let forwarded = new Proxy(target, {});
+        \\let accessorReceiver = {};
+        \\let setterCalled = false;
+        \\Object.defineProperty(accessorReceiver, "z", { set(v) { setterCalled = true; } });
         \\Reflect.set(falseSet, "x", 1) === false &&
         \\Reflect.set(forwarded, "y", 2, receiver) === true &&
-        \\defineCount === 1 && receiver.y === 2 && target.y === undefined
+        \\Reflect.set({ z: 1 }, "z", 2, accessorReceiver) === false &&
+        \\defineCount === 1 && receiver.y === 2 && target.y === undefined &&
+        \\setterCalled === false
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let symA = Symbol("a");
+        \\let symB = Symbol("b");
+        \\let obj = {};
+        \\obj[symA] = 1;
+        \\obj[symB] = 2;
+        \\Object.defineProperty(obj, symA, { configurable: false });
+        \\let stringObj = new String("");
+        \\stringObj.a = 1;
+        \\stringObj.b = 2;
+        \\Object.defineProperty(stringObj, "a", { get() {} });
+        \\let large = { 12345678900: true, b: true, 1: true, a: true, [Number.MAX_SAFE_INTEGER]: true, [Symbol.for("z")]: true, 12345678901: true, 4294967294: true, 4294967295: true };
+        \\let largeKeys = Reflect.ownKeys(large);
+        \\Reflect.ownKeys(obj)[0] === symA &&
+        \\Reflect.ownKeys(obj)[1] === symB &&
+        \\Reflect.ownKeys(stringObj).join("|") === "length|a|b" &&
+        \\largeKeys.length === 9 &&
+        \\largeKeys[0] === "1" && largeKeys[1] === "4294967294" &&
+        \\largeKeys[2] === "12345678900" && largeKeys[3] === "b" &&
+        \\largeKeys[4] === "a" && largeKeys[5] === String(Number.MAX_SAFE_INTEGER) &&
+        \\largeKeys[6] === "12345678901" && largeKeys[7] === "4294967295" &&
+        \\largeKeys[8] === Symbol.for("z")
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let target = { get attr() { return this; } };
