@@ -1103,6 +1103,21 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         }
         return true;
     }
+    if (target.prim) |p| {
+        if (p == .string) {
+            if (std.mem.eql(u8, key, "length")) {
+                const attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = false };
+                return compatibleRedefine(attr, .{ .number = @floatFromInt(p.string.len) }, null, d);
+            }
+            if (arrayIndexOf(key)) |i| {
+                if (i < p.string.len) {
+                    const attr: value.PropAttr = .{ .writable = false, .enumerable = true, .configurable = false };
+                    const ch: Value = .{ .string = try self.arena.dupe(u8, p.string[i .. i + 1]) };
+                    return compatibleRedefine(attr, ch, null, d);
+                }
+            }
+        }
+    }
     // Array `length` is a data property { writable, !enumerable, !configurable }.
     // Redefining it can change the value (ToUint32, truncating/extending) and
     // toggle writability, but not make it configurable/enumerable or an accessor.
@@ -1552,6 +1567,18 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         return try completeDescriptor(self, res.object);
     }
 
+    if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
+        _ = try self.getProperty(ov, key);
+    if (o.prim) |p| {
+        if (p == .string) {
+            if (std.mem.eql(u8, key, "length"))
+                return dataDescriptor(self, .{ .number = @floatFromInt(p.string.len) }, .{ .writable = false, .enumerable = false, .configurable = false });
+            if (arrayIndexOf(key)) |i| {
+                if (i < p.string.len)
+                    return dataDescriptor(self, .{ .string = try self.arena.dupe(u8, p.string[i .. i + 1]) }, .{ .writable = false, .enumerable = true, .configurable = false });
+            }
+        }
+    }
     if (o.getAccessor(key)) |acc| {
         const a = o.getAttr(key);
         const desc = try self.newObject();

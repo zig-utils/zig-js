@@ -402,6 +402,9 @@ pub const Object = struct {
     proxy_target: ?*Object = null,
     proxy_handler: ?*Object = null,
     proxy_revoked: bool = false,
+    /// Proxies keep their [[Call]] exotic behavior even after revocation. Once
+    /// revoked, the target slot is gone, so cache the callable bit at creation.
+    proxy_callable: bool = false,
     /// Module Namespace exotic object: points to an `interpreter.ModuleNs`
     /// (its sorted export names + live bindings). When set, this object is a
     /// `[[Module]]` namespace and the engine intercepts its essential internal
@@ -473,6 +476,7 @@ pub const Object = struct {
             if (guard > 10000) return false;
             o = t;
         }
+        if (o.proxy_revoked) return o.proxy_callable;
         return o.callback != null or o.native != null or
             o.js_func != null or o.error_ctor != null or o.bound != null;
     }

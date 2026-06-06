@@ -4679,6 +4679,12 @@ pub const Interpreter = struct {
             }
             // non-index keys fall through to ordinary [[Set]].
         }
+        if (o.prim) |p| {
+            if (p == .string) {
+                if (std.mem.eql(u8, key, "length")) return false;
+                if (arrayIndex(key)) |i| if (i < p.string.len) return false;
+            }
+        }
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) {
                 // ArraySetLength: newLen = ToUint32(value); if it differs from
@@ -4817,6 +4823,12 @@ pub const Interpreter = struct {
         // A module namespace's own properties (exports + @@toStringTag) are
         // non-configurable → [[Delete]] returns false; a non-own key "deletes".
         if (moduleNsOf(o)) |ns| return !moduleNsHas(ns, key);
+        if (o.prim) |p| {
+            if (p == .string) {
+                if (std.mem.eql(u8, key, "length")) return false;
+                if (arrayIndex(key)) |i| if (i < p.string.len) return false;
+            }
+        }
         // Accessor property.
         if (o.accessors) |m| {
             if (m.getPtr(key) != null) {
@@ -8271,10 +8283,10 @@ fn proxyConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         return self.throwError("TypeError", "Constructor Proxy requires 'new'");
     const target = if (args.len > 0) args[0] else .undefined;
     const handler = if (args.len > 1) args[1] else .undefined;
-    if (target != .object or handler != .object)
+    if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
         return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
     const o = try self.arena.create(value.Object);
-    o.* = .{ .proxy_target = target.object, .proxy_handler = handler.object };
+    o.* = .{ .proxy_target = target.object, .proxy_handler = handler.object, .proxy_callable = target.object.isCallableObject() };
     return .{ .object = o };
 }
 
@@ -8287,10 +8299,10 @@ fn proxyRevocableFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     defer self.new_target = saved_nt;
     const target = if (args.len > 0) args[0] else .undefined;
     const handler = if (args.len > 1) args[1] else .undefined;
-    if (target != .object or handler != .object)
+    if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
         return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
     const p = try self.arena.create(value.Object);
-    p.* = .{ .proxy_target = target.object, .proxy_handler = handler.object };
+    p.* = .{ .proxy_target = target.object, .proxy_handler = handler.object, .proxy_callable = target.object.isCallableObject() };
     const revoke = try self.arena.create(value.Object);
     revoke.* = .{ .native = proxyRevokeFn, .private_data = @ptrCast(p) };
     try installNativeProps(self.arena, self.root_shape, revoke, "", 0);
@@ -23398,6 +23410,29 @@ test "interpreter JSON, Object, Number builtins" {
         \\sawX = false;
         \\with (proxy) { withValue = x; }
         \\inOk && withValue === 42 && sawX
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let target = Proxy.revocable(function () {}, {});
+        \\target.revoke();
+        \\let outer = new Proxy(target.proxy, {});
+        \\let revocable = Proxy.revocable(target.proxy, {});
+        \\typeof outer === "function" &&
+        \\typeof revocable.proxy === "function"
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let target = new Proxy(new String("str"), {});
+        \\let proxy = new Proxy(target, {});
+        \\let zero = Object.getOwnPropertyDescriptor(proxy, "0");
+        \\let length = Object.getOwnPropertyDescriptor(proxy, "length");
+        \\let fn = function () {};
+        \\let fp = new Proxy(new Proxy(fn, {}), {});
+        \\let proto = Object.getOwnPropertyDescriptor(fp, "prototype");
+        \\zero.value === "s" && zero.writable === false &&
+        \\zero.enumerable === true && zero.configurable === false &&
+        \\length.value === 3 && length.writable === false &&
+        \\length.enumerable === false && length.configurable === false &&
+        \\proto.writable === true && proto.enumerable === false &&
+        \\proto.configurable === false
     )).boolean);
 }
 
