@@ -1200,6 +1200,8 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             }
         }
     }
+    if (std.mem.eql(u8, key, "prototype") and target.js_func != null and target.getOwn("prototype") == null and target.getAccessor("prototype") == null)
+        _ = try self.getProperty(.{ .object = target }, key);
     const cur_data = target.getOwn(key);
     const cur_acc = target.getAccessor(key);
     const exists = cur_data != null or cur_acc != null;
@@ -1317,7 +1319,8 @@ pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value
     const o = arg(args, 0);
     if (o == .object) {
         if (o.object.proxy_handler != null or o.object.proxy_revoked) {
-            _ = try self.proxyPreventExt(o.object);
+            if (!try self.proxyPreventExt(o.object))
+                return self.throwError("TypeError", "Cannot prevent extensions on proxy target");
         } else o.object.extensible = false;
     }
     return o;
