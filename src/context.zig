@@ -1124,6 +1124,26 @@ test "function name + length own properties" {
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f(a, b, c) {} f.bind(null, 1).length")).number);
 }
 
+test "sloppy function calls bind this through the callee realm" {
+    try std.testing.expect((try evalIn(
+        \\var touchedNumber = Function("this.touched = true; return this;").call(1);
+        \\var touchedString = Function("this.touched = true; return this;").apply("", []);
+        \\var strictThis = Function('"use strict"; return this;').call(1);
+        \\var other = $262.createRealm().global;
+        \\var f = new other.Function("return this;");
+        \\var otherNumber = f.call(1);
+        \\touchedNumber.touched === true &&
+        \\touchedNumber.constructor === Number &&
+        \\touchedString.touched === true &&
+        \\touchedString.constructor === String &&
+        \\strictThis === 1 &&
+        \\f() === other &&
+        \\f.call(null) === other &&
+        \\otherNumber.constructor === other.Number &&
+        \\otherNumber instanceof other.Number
+    )).boolean);
+}
+
 test "native functions carry name + length own properties" {
     // Built-in methods/globals/constructors report their spec name and arity.
     try expectEvalStr("defineProperty", "Object.defineProperty.name");

@@ -2025,14 +2025,19 @@ pub const Interpreter = struct {
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
-        // Sloppy-mode this-substitution: a non-strict, non-arrow function called
-        // with a null/undefined `this` (`fn()`, `fn.call(undefined)`) sees the
-        // global object. Strict functions keep the undefined `this`; arrows
-        // inherit `this` lexically, so both are exempt.
-        self.this_value = if (!func.is_strict and !func.is_arrow and (this_val == .null or this_val == .undefined))
-            (if (self.global_object) |g| Value{ .object = g } else this_val)
-        else
-            this_val;
+        // Sloppy-mode this-substitution: null/undefined become the callee
+        // realm's global object; primitive receivers are boxed in the callee
+        // realm. Strict functions keep the original value, and arrows inherit
+        // `this` lexically.
+        self.this_value = if (!func.is_strict and !func.is_arrow) blk: {
+            if (this_val == .null or this_val == .undefined) {
+                if (self.env.get("globalThis")) |gt| if (gt == .object) break :blk gt;
+                break :blk if (self.global_object) |g| Value{ .object = g } else this_val;
+            }
+            if (this_val != .object or this_val.object.is_symbol or this_val.object.is_bigint)
+                break :blk .{ .object = try self.toObject(this_val) };
+            break :blk this_val;
+        } else this_val;
         self.home_object = func.home_object;
         self.super_ctor = func.super_ctor;
         self.new_target = if (func.is_arrow) saved_nt else new_target; // arrows inherit lexically
