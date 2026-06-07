@@ -37,6 +37,12 @@ pub fn toLen(n: f64) usize {
     return @intFromFloat(@trunc(n));
 }
 
+fn toArrayLikeLen(n: f64) usize {
+    if (std.math.isNan(n) or n <= 0) return 0;
+    if (n > 9007199254740991.0) return 9007199254740991;
+    return @intFromFloat(@trunc(n));
+}
+
 /// True for any ECMAScript WhiteSpace or LineTerminator code point — the exact
 /// set `String.prototype.trim`/`trimStart`/`trimEnd` strip, and the StrWhiteSpace
 /// that `parseInt`/`parseFloat`/`Number(str)` skip at the start of their argument.
@@ -2091,6 +2097,8 @@ pub const Interpreter = struct {
         if (!func.is_arrow) {
             const args_obj = try self.newArray();
             args_obj.object.is_arguments = true;
+            try args_obj.object.setOwn(self.arena, self.root_shape, "length", .{ .number = @floatFromInt(args.len) });
+            try args_obj.object.setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
             for (args) |av| try args_obj.object.elements.append(self.arena, av);
             // Strict mode's `arguments.callee` is a poison-pill accessor whose
             // get and set are both `%ThrowTypeError%`. Reading or writing it
@@ -3833,6 +3841,11 @@ pub const Interpreter = struct {
         return std.fmt.parseInt(usize, key, 10) catch null;
     }
 
+    fn arrayElementIndex(key: []const u8) ?usize {
+        const i = arrayIndex(key) orelse return null;
+        return if (i < 4294967295) i else null;
+    }
+
     // ---- Proxy ------------------------------------------------------------
 
     /// Fetch trap `name` from a proxy's handler. Returns null when the trap is
@@ -4236,10 +4249,12 @@ pub const Interpreter = struct {
                 }
                 if (o.is_array) {
                     if (std.mem.eql(u8, key, "length"))
+                        if (o.is_arguments) return o.getOwn("length") orelse .{ .number = @floatFromInt(o.elements.items.len) };
+                    if (std.mem.eql(u8, key, "length"))
                         return .{ .number = @floatFromInt(@max(o.elements.items.len, o.array_len)) };
                     // An accessor defined on an index (via defineProperty) wins
                     // over the dense element store, so the getter is invoked.
-                    if (arrayIndex(key)) |i| {
+                    if (arrayElementIndex(key)) |i| {
                         // A present (non-hole) dense element with no index accessor
                         // is returned directly; a hole falls through to the proto
                         // chain so an inherited index (e.g. `Array.prototype[0]`) is
@@ -4268,6 +4283,8 @@ pub const Interpreter = struct {
                     if (c.proxy_handler != null or c.proxy_revoked)
                         return self.proxyGet(c, key, receiver);
                     if (c.is_array and std.mem.eql(u8, key, "length"))
+                        if (c.is_arguments) return c.getOwn("length") orelse .{ .number = @floatFromInt(c.elements.items.len) };
+                    if (c.is_array and std.mem.eql(u8, key, "length"))
                         return .{ .number = @floatFromInt(@max(c.elements.items.len, c.array_len)) };
                     if (c.getAccessor(key)) |acc| {
                         // An explicit `get: undefined` is stored as the undefined
@@ -4278,7 +4295,7 @@ pub const Interpreter = struct {
                         return .undefined; // accessor with no getter
                     }
                     if (c.is_array) {
-                        if (arrayIndex(key)) |i| {
+                        if (arrayElementIndex(key)) |i| {
                             if (c.getAccessor(key) == null and i < c.elements.items.len and !c.isHole(i)) return c.elements.items[i];
                         }
                     }
@@ -4694,7 +4711,20 @@ pub const Interpreter = struct {
                 if (arrayIndex(key)) |i| if (i < p.string.len) return false;
             }
         }
-        if (o.is_array) {
+        if (o.is_arguments) {
+            if (std.mem.eql(u8, key, "length")) {
+                try self.setProp(o, key, v);
+                return true;
+            }
+            if (arrayElementIndex(key)) |i| {
+                if (i < o.elements.items.len) {
+                    o.elements.items[i] = v;
+                    o.clearHole(i);
+                    return true;
+                }
+            }
+        }
+        if (o.is_array and !o.is_arguments) {
             if (std.mem.eql(u8, key, "length")) {
                 // ArraySetLength: newLen = ToUint32(value); if it differs from
                 // ToNumber(value) the length isn't a valid array index → RangeError.
@@ -4718,15 +4748,15 @@ pub const Interpreter = struct {
             }
             // An accessor defined on an index routes the write to its setter
             // (handled by the prototype-chain setter walk below), not the store.
-            if (arrayIndex(key) != null and o.getAccessor(key) != null) {
+            if (arrayElementIndex(key) != null and o.getAccessor(key) != null) {
                 // fall through to the setter walk
-            } else if (arrayIndex(key) != null and self.arrayProtoMayInterceptSet(o, key) and
-                !(arrayIndex(key).? < o.elements.items.len and !o.isHole(arrayIndex(key).?)))
+            } else if (arrayElementIndex(key) != null and self.arrayProtoMayInterceptSet(o, key) and
+                !(arrayElementIndex(key).? < o.elements.items.len and !o.isHole(arrayElementIndex(key).?)))
             {
                 // The index isn't an own present element and an inherited
                 // accessor or Proxy can intercept the write — OrdinarySet routes
                 // through the prototype chain before creating a local element.
-            } else if (arrayIndex(key)) |i| {
+            } else if (arrayElementIndex(key)) |i| {
                 // A per-index descriptor (recorded in `attrs`) may mark the
                 // element non-writable: sloppy ignores the write, strict throws.
                 if (o.attrs != null and !o.getAttr(key).writable) return false;
@@ -4854,7 +4884,7 @@ pub const Interpreter = struct {
                 _ = m.remove(key);
                 // An accessor on an array index leaves a hole behind.
                 if (o.is_array) {
-                    if (arrayIndex(key)) |i| if (i < o.elements.items.len) try o.markHole(self.arena, i);
+                    if (arrayElementIndex(key)) |i| if (i < o.elements.items.len) try o.markHole(self.arena, i);
                 }
                 if (o.getOwn(key) == null) return true;
             }
@@ -4863,7 +4893,7 @@ pub const Interpreter = struct {
         // A per-index descriptor may mark it non-configurable (delete fails).
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) return false;
-            if (arrayIndex(key)) |i| {
+            if (arrayElementIndex(key)) |i| {
                 if (i < o.elements.items.len) {
                     if (o.attrs != null and !o.getAttr(key).configurable) return false;
                     o.elements.items[i] = .undefined;
@@ -5612,6 +5642,10 @@ pub const Interpreter = struct {
         return false;
     }
 
+    fn arraySearchReadsLive(name: []const u8) bool {
+        return eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes");
+    }
+
     fn isArrayGeneric(name: []const u8) bool {
         const names = [_][]const u8{
             "join",      "indexOf", "lastIndexOf", "includes", "slice", "concat", "map",  "filter",
@@ -5641,6 +5675,9 @@ pub const Interpreter = struct {
         // chain can still make it present (HasProperty walks the chain).
         if (o.is_array and o.accessors == null and i < o.elements.items.len and !o.isHole(i))
             return true;
+        if (o.typed_array) |ta| {
+            if (i < (ta.currentLength() orelse 0)) return true;
+        }
         const ks = std.fmt.allocPrint(self.arena, "{d}", .{i}) catch return false;
         return objectHasOwn(o, ks) or hasProperty(o, ks);
     }
@@ -5786,6 +5823,7 @@ pub const Interpreter = struct {
         // Real arrays use the dense element store directly; an array-like `this`
         // (via `.call`) materializes its `length`/indexed properties into a
         // temporary slice so the read-only methods below work unchanged.
+        var array_like_len: usize = 0;
         const items: []Value = if (o.is_array) o.elements.items else blk: {
             // ToLength(ToNumber(obj.length)) — `toNumberV` runs valueOf/toString
             // and throws a TypeError for a Symbol/BigInt `length`.
@@ -5798,7 +5836,9 @@ pub const Interpreter = struct {
             const real_len: f64 = if (std.math.isNan(lenf) or lenf <= 0) 0 else @min(@trunc(lenf), 9007199254740991.0);
             if (real_len > 4294967295 and arrayCreatesResult(name))
                 return self.throwError("RangeError", "Invalid array length");
-            const len = toLen(lenf);
+            const len = toArrayLikeLen(lenf);
+            array_like_len = len;
+            if (arraySearchReadsLive(name)) break :blk try self.arena.alloc(Value, 0);
             if (len > (1 << 22)) return null; // guard against pathological array-like lengths (OOM)
             const buf = try self.arena.alloc(Value, len);
             for (buf, 0..) |*slot, i| {
@@ -5823,7 +5863,12 @@ pub const Interpreter = struct {
         }
         // The logical length for index iteration: a real array's includes any
         // sparse tail (`array_len`); an array-like uses its materialized slice.
-        const ilen: usize = if (o.is_array) @max(o.elements.items.len, o.array_len) else items.len;
+        const ilen: usize = if (o.is_arguments)
+            toArrayLikeLen(try self.toNumberV(try self.getProperty(.{ .object = o }, "length")))
+        else if (o.is_array)
+            @max(o.elements.items.len, o.array_len)
+        else
+            array_like_len;
         if (eq(name, "push")) {
             const len = ilen;
             // Set(O, ToString(len+k), E, true) for each argument (fires an
@@ -5911,6 +5956,14 @@ pub const Interpreter = struct {
             // also what keeps a huge sparse array from being walked element by
             // element.
             const k = if (args.len > 1) try self.fromIndexForward(args[1], ilen) else 0;
+            if (!o.is_array and ilen <= (1 << 22)) {
+                var i = k;
+                while (i < ilen) : (i += 1) {
+                    if (self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                        return Value{ .number = @floatFromInt(i) };
+                }
+                return Value{ .number = -1 };
+            }
             // Dense scan: indexOf skips holes (HasProperty check).
             const dense_hi = @min(o.elements.items.len, ilen);
             var i = k;
@@ -5931,6 +5984,13 @@ pub const Interpreter = struct {
             const target = arg0(args);
             if (ilen == 0) return Value{ .boolean = false };
             const k = if (args.len > 1) try self.fromIndexForward(args[1], ilen) else 0;
+            if (!o.is_array and ilen <= (1 << 22)) {
+                var i = k;
+                while (i < ilen) : (i += 1) {
+                    if (value.sameValueZero(try self.arrIndexGet(o, i), target)) return Value{ .boolean = true };
+                }
+                return Value{ .boolean = false };
+            }
             // includes treats holes as `undefined` and uses SameValueZero (so
             // NaN matches NaN). Dense scan visits every in-range index.
             const dense_hi = @min(o.elements.items.len, ilen);
@@ -6177,7 +6237,7 @@ pub const Interpreter = struct {
             // Negative counts from the end; below 0 means no search.
             var start: usize = ilen - 1;
             if (args.len > 1) {
-                const n = args[1].toNumber();
+                const n = try self.toNumberV(args[1]);
                 const fl = if (std.math.isNan(n)) 0 else @trunc(n);
                 if (fl < 0) {
                     const s = @as(f64, @floatFromInt(ilen)) + fl;
@@ -6187,6 +6247,15 @@ pub const Interpreter = struct {
                     const flen_1: f64 = @floatFromInt(ilen - 1);
                     start = if (fl > flen_1) ilen - 1 else @intFromFloat(fl);
                 }
+            }
+            if (!o.is_array and ilen <= (1 << 22)) {
+                var i = start + 1;
+                while (i > 0) {
+                    i -= 1;
+                    if (self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                        return Value{ .number = @floatFromInt(i) };
+                }
+                return Value{ .number = -1 };
             }
             const dense_hi = @min(o.elements.items.len, ilen);
             // Sparse indices (above the dense store) are the highest, so search
@@ -22629,7 +22698,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     }
     if (o.is_array) {
         if (std.mem.eql(u8, name, "length")) return true;
-        if (Interpreter.arrayIndex(name)) |i| return i < o.elements.items.len and !o.isHole(i);
+        if (Interpreter.arrayElementIndex(name)) |i| return i < o.elements.items.len and !o.isHole(i);
     }
     return false;
 }
