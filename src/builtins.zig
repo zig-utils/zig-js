@@ -1221,18 +1221,34 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     var attr: value.PropAttr = if (exists) target.getAttr(key) else .{ .writable = false, .enumerable = false, .configurable = false };
     if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
     if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
+    const has_data_field = d.getOwn("value") != null or d.getOwn("writable") != null;
     if (get != null or set != null) {
-        try target.setAccessor(self.arena, key, get, set);
-    } else {
+        // (Partial) accessor definition: an omitted get/set keeps the existing
+        // accessor's corresponding half (a redefine like `{get: g}` must not wipe
+        // the setter); converting from a data property drops the old value.
+        var new_get = get;
+        var new_set = set;
+        if (cur_acc) |a| {
+            if (new_get == null) new_get = a.get;
+            if (new_set == null) new_set = a.set;
+        }
+        // A converted-from-data key keeps its slot in the data shape (shadowed by
+        // the accessor, which getProperty consults first) so own-key creation
+        // order is preserved — accessors live in a separate, append-ordered map.
+        try target.setAccessor(self.arena, key, new_get, new_set);
+    } else if (has_data_field or cur_acc == null) {
+        // A data property: either explicit data fields, or a generic descriptor on
+        // a non-accessor (brand-new / existing data property).
         if (cur_acc != null) _ = try self.deleteOwn(target, key);
         if (d.getOwn("writable")) |w| attr.writable = w.toBoolean();
         // An omitted `value` keeps the existing data property's value on a
         // redefine (a partial descriptor like `{enumerable:false}` must not reset
-        // it); a brand-new property — or one converted from an accessor — defaults
-        // to undefined.
+        // it); a brand-new property defaults to undefined.
         const new_value = d.getOwn("value") orelse (cur_data orelse .undefined);
         try target.setOwn(self.arena, self.root_shape, key, new_value);
     }
+    // else: a generic descriptor on an existing accessor keeps the accessor as-is;
+    // only enumerable/configurable (in `attr`) change.
     try target.setAttr(self.arena, key, attr);
     // Defining an own property at an array index at or past the current length
     // extends the array's length (so iteration sees it).
