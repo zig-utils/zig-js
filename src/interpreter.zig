@@ -3328,6 +3328,7 @@ pub const Interpreter = struct {
         // ---- setters ----------------------------------------------------------
         if (std.mem.startsWith(u8, name, "set")) {
             const fy = eq(name, "setFullYear") or eq(name, "setUTCFullYear");
+            const sy = eq(name, "setYear"); // Annex B B.2.4.2 (revives like setFullYear)
             // ToNumber each provided argument once, left-to-right (object args
             // invoke valueOf exactly once), BEFORE consulting the stored time —
             // the spec reads [[DateValue]] first (captured in `t` above) but still
@@ -3337,7 +3338,7 @@ pub const Interpreter = struct {
             for (args, 0..) |av, idx| a[idx] = .{ .number = try self.toNumberV(av) };
             // Non-fullyear setters on an invalid date stay invalid (arguments were
             // still coerced above); setFullYear revives it from a zero base.
-            if (std.math.isNan(t) and !fy) return Value{ .number = nan };
+            if (std.math.isNan(t) and !fy and !sy) return Value{ .number = nan };
             const c = dateDecompose(if (std.math.isNan(t)) 0 else t);
             var y: f64 = @floatFromInt(c.y);
             var mo: f64 = @floatFromInt(c.mo);
@@ -3350,6 +3351,16 @@ pub const Interpreter = struct {
                 y = arg0(a).toNumber();
                 if (a.len > 1) mo = a[1].toNumber();
                 if (a.len > 2) d = a[2].toNumber();
+                return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
+            }
+            if (sy) {
+                const yv = arg0(a).toNumber();
+                if (std.math.isNan(yv)) {
+                    o.date_ms = nan;
+                    return Value{ .number = nan };
+                }
+                const yi = @trunc(yv);
+                y = if (yi >= 0 and yi <= 99) 1900 + yi else yv;
                 return try self.dateCommit(o, y, mo, d, h, mi, s, ms);
             }
             if (eq(name, "setMonth") or eq(name, "setUTCMonth")) {
@@ -3422,6 +3433,7 @@ pub const Interpreter = struct {
         const tod = @mod(ti, ms_per_day);
         const c = civilFromDays(days);
         if (eq(name, "getFullYear") or eq(name, "getUTCFullYear")) return Value{ .number = @floatFromInt(c.y) };
+        if (eq(name, "getYear")) return Value{ .number = @floatFromInt(c.y - 1900) }; // Annex B B.2.4.1
         if (eq(name, "getMonth") or eq(name, "getUTCMonth")) return Value{ .number = @floatFromInt(c.m - 1) };
         if (eq(name, "getDate") or eq(name, "getUTCDate")) return Value{ .number = @floatFromInt(c.d) };
         if (eq(name, "getDay") or eq(name, "getUTCDay")) return Value{ .number = @floatFromInt(@mod(days + 4, 7)) };
@@ -5620,7 +5632,10 @@ pub const Interpreter = struct {
             "toLowerCase", "trim",       "trimStart",   "trimEnd",  "repeat",      "concat",
             "split",       "at",         "padStart",    "padEnd",   "replace",     "replaceAll",
             "localeCompare", "normalize", "search",     "match",     "toLocaleUpperCase", "toLocaleLowerCase",
-            "matchAll",
+            "matchAll",      "trimLeft",  "trimRight",
+            "anchor",        "big",       "blink",       "bold",      "fixed",      "fontcolor",
+            "fontsize",      "italics",   "link",        "small",     "strike",     "sub",
+            "sup",
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
@@ -6897,6 +6912,49 @@ pub const Interpreter = struct {
                 break :blk @min(lu, remaining);
             } else remaining;
             return Value{ .string = try self.arena.dupe(u8, s[start .. start + len]) };
+        }
+        if (eq(name, "trimLeft")) return Value{ .string = jsTrim(s, true, false) };
+        if (eq(name, "trimRight")) return Value{ .string = jsTrim(s, false, true) };
+        // Annex B B.2.3 HTML wrapper methods (CreateHTML).
+        {
+            const HtmlSpec = struct { m: []const u8, tag: []const u8, attr: []const u8 };
+            const html = [_]HtmlSpec{
+                .{ .m = "anchor", .tag = "a", .attr = "name" },
+                .{ .m = "big", .tag = "big", .attr = "" },
+                .{ .m = "blink", .tag = "blink", .attr = "" },
+                .{ .m = "bold", .tag = "b", .attr = "" },
+                .{ .m = "fixed", .tag = "tt", .attr = "" },
+                .{ .m = "fontcolor", .tag = "font", .attr = "color" },
+                .{ .m = "fontsize", .tag = "font", .attr = "size" },
+                .{ .m = "italics", .tag = "i", .attr = "" },
+                .{ .m = "link", .tag = "a", .attr = "href" },
+                .{ .m = "small", .tag = "small", .attr = "" },
+                .{ .m = "strike", .tag = "strike", .attr = "" },
+                .{ .m = "sub", .tag = "sub", .attr = "" },
+                .{ .m = "sup", .tag = "sup", .attr = "" },
+            };
+            for (html) |h| {
+                if (!eq(name, h.m)) continue;
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                try buf.append(self.arena, '<');
+                try buf.appendSlice(self.arena, h.tag);
+                if (h.attr.len != 0) {
+                    const v = try self.toStringV(arg0(args));
+                    try buf.append(self.arena, ' ');
+                    try buf.appendSlice(self.arena, h.attr);
+                    try buf.appendSlice(self.arena, "=\"");
+                    for (v) |ch| {
+                        if (ch == '"') try buf.appendSlice(self.arena, "&quot;") else try buf.append(self.arena, ch);
+                    }
+                    try buf.append(self.arena, '"');
+                }
+                try buf.append(self.arena, '>');
+                try buf.appendSlice(self.arena, s);
+                try buf.appendSlice(self.arena, "</");
+                try buf.appendSlice(self.arena, h.tag);
+                try buf.append(self.arena, '>');
+                return Value{ .string = try buf.toOwnedSlice(self.arena) };
+            }
         }
         if (eq(name, "localeCompare")) {
             const other = try arg0(args).toString(self.arena);
@@ -17386,7 +17444,21 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         .{ "padStart", 1 },      .{ "padEnd", 1 },      .{ "replace", 2 },     .{ "replaceAll", 2 },
         .{ "localeCompare", 1 }, .{ "toLocaleUpperCase", 0 }, .{ "toLocaleLowerCase", 0 },
         .{ "match", 1 },         .{ "matchAll", 1 },    .{ "search", 1 },      .{ "normalize", 0 },
+        .{ "anchor", 1 },        .{ "big", 0 },         .{ "blink", 0 },       .{ "bold", 0 },
+        .{ "fixed", 0 },         .{ "fontcolor", 1 },   .{ "fontsize", 1 },    .{ "italics", 0 },
+        .{ "link", 1 },          .{ "small", 0 },       .{ "strike", 0 },      .{ "sub", 0 },
+        .{ "sup", 0 },
     }) |s| try setNative(a, root_shape, string_proto, s[0], s[1], stringProtoMethod(s[0]));
+    // Annex B trimLeft/trimRight are the SAME function objects as trimStart/trimEnd
+    // (so `trimLeft === trimStart` and `trimLeft.name === "trimStart"`).
+    if (string_proto.getOwn("trimStart")) |ts| {
+        try string_proto.setOwn(a, root_shape, "trimLeft", ts);
+        try string_proto.setAttr(a, "trimLeft", .{ .enumerable = false, .configurable = true, .writable = true });
+    }
+    if (string_proto.getOwn("trimEnd")) |te| {
+        try string_proto.setOwn(a, root_shape, "trimRight", te);
+        try string_proto.setAttr(a, "trimRight", .{ .enumerable = false, .configurable = true, .writable = true });
+    }
     // `toString`/`valueOf` brand-check (a String primitive or wrapper), not ToString.
     try setNative(a, root_shape, string_proto, "toString", 0, stringValueMethod);
     try setNative(a, root_shape, string_proto, "valueOf", 0, stringValueMethod);
@@ -17608,6 +17680,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         .{ "setMilliseconds", 1 }, .{ "setUTCMilliseconds", 1 },
         .{ "toString", 0 },     .{ "toDateString", 0 }, .{ "toTimeString", 0 }, .{ "toGMTString", 0 },
         .{ "toLocaleString", 0 }, .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
+        .{ "getYear", 0 },      .{ "setYear", 1 }, // Annex B B.2.4
     });
     // Date.prototype.toJSON is intentionally *generic* (works on any object),
     // not brand-checked: ToObject(this), ToPrimitive(number); a non-finite value
