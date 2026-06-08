@@ -230,10 +230,12 @@ fn parseMeta(src: []const u8) Meta {
         // Modules run via a dedicated path (`runModule`). Async modules
         // (module+async) additionally need top-level-await/$DONE-in-module
         // machinery, so those stay skipped; CanBlockIsFalse needs Atomics.
+        // module+async needs top-level-await/$DONE-in-module machinery, so it
+        // stays unsupported; a plain async test runs via the $DONE / @@Async
+        // sentinel path in runOne (the synchronous-settling async runtime).
         if (std.mem.indexOf(u8, flags, "module") != null) {
             if (meta.is_async) meta.unsupported_flag = true else meta.is_module = true;
         }
-        if (meta.is_async) meta.unsupported_flag = true;
         if (std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
             meta.unsupported_flag = true;
     }
