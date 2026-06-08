@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 34929,
-    "total": 41664,
+    "passing": 35317,
+    "total": 42135,
     "percentage": 83.8,
     "parseFail": 135,
-    "runtimeFail": 6600,
+    "runtimeFail": 6683,
     "hostFail": 0
   },
   "negative": {
@@ -12,7 +12,7 @@
     "total": 4668,
     "percentage": 68.8
   },
-  "skipped": 6845,
+  "skipped": 6374,
   "generatedAt": "2026-06-08",
   "harness": "real (WebKit JSTests/test262 corpus)",
   "suites": [

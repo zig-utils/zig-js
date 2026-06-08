@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 34,929 / 41,664 (83.8%)**, with **135 parse failures**,
-> **6,600 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
+> The latest full run passes **VALID 35,317 / 42,135 (83.8%)**, with **135 parse failures**,
+> **6,683 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,10 +55,10 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **34,929 / 41,664 (83.8%)** |
+| **valid** | can we run the program? (scored corpus) | **35,317 / 42,135 (83.8%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,213 / 4,668 (68.8%) |
 
-The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
+The scored corpus currently skips 6,374 tests that require runner work for modules, async harness
 protocols, or unloadable includes. The valid failures are concentrated in partially implemented
 subsystems such as `intl402`, Annex B behavior, Temporal edge cases, and the remaining built-in
 surface.
