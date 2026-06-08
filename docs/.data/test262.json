@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 40845,
+    "passing": 40871,
     "total": 47928,
-    "percentage": 85.2,
+    "percentage": 85.3,
     "parseFail": 146,
-    "runtimeFail": 6937,
+    "runtimeFail": 6911,
     "hostFail": 0
   },
   "negative": {
@@ -45,11 +45,11 @@
     },
     {
       "name": "staging",
-      "passing": 673,
+      "passing": 674,
       "total": 1028,
-      "percentage": 65.5,
+      "percentage": 65.6,
       "parseFail": 6,
-      "runtimeFail": 349,
+      "runtimeFail": 348,
       "hostFail": 0
     }
   ]
