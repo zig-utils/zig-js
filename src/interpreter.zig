@@ -436,6 +436,21 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Like `globalDefine` but a new global property is *configurable* (deletable)
+    /// — CreateGlobalVarBinding(F, true), used for the Annex B B.3.3 legacy
+    /// function bindings (and not for ordinary top-level declarations).
+    fn globalDefineDeletable(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
+        const vs = self.env.varScope();
+        try vs.put(name, v);
+        if (vs.parent == null) {
+            if (self.global_object) |g| {
+                const existed = g.getOwn(name) != null;
+                try self.setProp(g, name, v);
+                if (!existed) try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = true });
+            }
+        }
+    }
+
     /// The TDZ sentinel as a Value.
     fn tdzVal(self: *Interpreter) Value {
         return .{ .object = self.tdz_marker.? };
@@ -891,7 +906,7 @@ pub const Interpreter = struct {
                 // with the statement, so nothing leaks to the enclosing scope).
                 const fnv = try self.makeFunction(fnode, self.env);
                 if (self.annexb_legacy) |set| {
-                    if (set.contains(fnode.name)) try self.globalDefine(fnode.name, fnv);
+                    if (set.contains(fnode.name)) try self.globalDefineDeletable(fnode.name, fnv);
                 } else {
                     try self.globalDefine(fnode.name, fnv);
                 }
@@ -1201,7 +1216,7 @@ pub const Interpreter = struct {
             .func_decl => |fnode| {
                 const fnv = try self.makeFunction(fnode, self.env);
                 try self.env.put(fnode.name, fnv);
-                if (self.annexb_legacy) |set| if (set.contains(fnode.name)) try self.globalDefine(fnode.name, fnv);
+                if (self.annexb_legacy) |set| if (set.contains(fnode.name)) try self.globalDefineDeletable(fnode.name, fnv);
             },
             else => {},
         };
@@ -1621,7 +1636,7 @@ pub const Interpreter = struct {
             const vs = self.env.varScope();
             var it = annexb_set.keyIterator();
             while (it.next()) |k| {
-                if (!vs.vars.contains(k.*)) try self.globalDefine(k.*, .undefined);
+                if (!vs.vars.contains(k.*)) try self.globalDefineDeletable(k.*, .undefined);
             }
         }
         // Hoist function declarations to the top of the scope so forward
@@ -1638,7 +1653,7 @@ pub const Interpreter = struct {
                     try self.env.put(fnode.name, fnv);
                     // ...and (Annex B) copy to the var scope when eligible.
                     if (self.annexb_legacy) |set| {
-                        if (set.contains(fnode.name)) try self.globalDefine(fnode.name, fnv);
+                        if (set.contains(fnode.name)) try self.globalDefineDeletable(fnode.name, fnv);
                     }
                 }
             },
