@@ -5020,7 +5020,10 @@ pub const Interpreter = struct {
                 return true;
             }
             if (arrayElementIndex(key)) |i| {
-                if (i < o.elements.items.len) {
+                // An accessor installed on this index (via defineProperty) routes
+                // the write to its setter through the ordinary [[Set]] path below,
+                // rather than overwriting the mapped element directly.
+                if (o.getAccessor(key) == null and i < o.elements.items.len) {
                     o.elements.items[i] = v;
                     o.clearHole(i);
                     return true;
