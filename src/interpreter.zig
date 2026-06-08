@@ -134,6 +134,11 @@ pub const Environment = struct {
     /// for a block `{…}` scope. `var`/function declarations hoist to the nearest
     /// variable environment, while `let`/`const`/`class` bind in the block.
     fn_scope: bool = false,
+    /// True for the *function body* block — a real block env (so it can hold the
+    /// body's top-level `let`/`const`) but treated like the variable scope for
+    /// function-declaration hoisting and Annex B B.3.3 analysis: a function
+    /// declared directly in the body is var-scoped, not block-scoped.
+    fn_body: bool = false,
     /// An object Environment Record for a `with (obj) {…}` block: identifier
     /// resolution at this chain position consults `obj`'s properties (honoring
     /// `Symbol.unscopables`). Because it sits in the lexical chain, a binding
@@ -331,6 +336,18 @@ pub const Interpreter = struct {
     /// While binding a declaration, whether it's `const` (so the bound names are
     /// marked immutable and later assignment throws a TypeError).
     binding_const: bool = false,
+    /// One-shot flag: tag the next block env created (the function body) as
+    /// `fn_body` (consumed by `evalBlockScope`).
+    mark_fn_body: bool = false,
+    /// Annex B B.3.3: names of block-nested function declarations in the current
+    /// variable scope that are eligible for the legacy var-scoped binding. A
+    /// block-level function declaration whose name is in this set also creates/
+    /// updates a var-scoped binding when its block is evaluated; one absent from
+    /// the set stays purely block-scoped (the "skip" cases). Null in strict code.
+    annexb_legacy: ?*std.StringHashMapUnmanaged(void) = null,
+    /// The formal-parameter names of the current function activation (used by the
+    /// Annex B B.3.3 eligibility analysis to exclude parameter-shadowing names).
+    cur_params: []const []const u8 = &.{},
     /// Sentinel object for a `let`/`const` binding in its temporal dead zone
     /// (hoisted into scope but not yet initialized). Reading it throws.
     tdz_marker: ?*value.Object = null,
@@ -613,6 +630,10 @@ pub const Interpreter = struct {
     fn evalBlockScope(self: *Interpreter, stmts: []*Node) EvalError!Value {
         const block_env = try self.arena.create(Environment);
         block_env.* = .{ .arena = self.arena, .parent = self.env };
+        if (self.mark_fn_body) {
+            block_env.fn_body = true;
+            self.mark_fn_body = false;
+        }
         const saved_env = self.env;
         self.env = block_env;
         defer self.env = saved_env;
@@ -862,8 +883,18 @@ pub const Interpreter = struct {
             },
 
             .func_decl => |fnode| blk: {
+                // Reached only for a function declaration that is the *bare* body
+                // of an `if`/loop/label (a function in a statement list is hoisted
+                // by `evalStatements`, not evaluated here). Annex B B.3.3 treats it
+                // as block-scoped: it creates the legacy var binding only when the
+                // name is eligible; otherwise the binding is purely local (and dies
+                // with the statement, so nothing leaks to the enclosing scope).
                 const fnv = try self.makeFunction(fnode, self.env);
-                try self.globalDefine(fnode.name, fnv);
+                if (self.annexb_legacy) |set| {
+                    if (set.contains(fnode.name)) try self.globalDefine(fnode.name, fnv);
+                } else {
+                    try self.globalDefine(fnode.name, fnv);
+                }
                 break :blk .undefined;
             },
 
@@ -1385,13 +1416,192 @@ pub const Interpreter = struct {
         }
     }
 
+    // ---- Annex B B.3.3 block-level function legacy-binding analysis -----------
+
+    const NameStack = std.ArrayListUnmanaged([]const u8);
+
+    fn annexbStackHas(stack: NameStack, name: []const u8) bool {
+        for (stack.items) |n| if (eq(n, name)) return true;
+        return false;
+    }
+
+    fn appendPatternNames(arena: std.mem.Allocator, pat: *Node, list: *NameStack) EvalError!void {
+        switch (pat.*) {
+            .identifier => |nm| try list.append(arena, nm),
+            .obj_pattern => |p| {
+                for (p.props) |pr| try appendPatternNames(arena, pr.target, list);
+                if (p.rest) |r| try list.append(arena, r);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |e| if (e.target) |t| try appendPatternNames(arena, t, list);
+                if (p.rest) |r| try appendPatternNames(arena, r, list);
+            },
+            else => {},
+        }
+    }
+
+    /// Bound names of a parameter list (used to exclude parameter-shadowing
+    /// function names from the Annex B legacy var binding).
+    fn collectParamNames(arena: std.mem.Allocator, params: []const ast.Param) EvalError![]const []const u8 {
+        var list: NameStack = .empty;
+        for (params) |p| {
+            if (p.pattern) |pat| {
+                try appendPatternNames(arena, pat, &list);
+            } else if (p.name.len > 0) try list.append(arena, p.name);
+        }
+        return list.items;
+    }
+
+    /// Push the lexically-declared (let/const/class) names of one statement.
+    fn annexbPushLexical(self: *Interpreter, s: *Node, stack: *NameStack) EvalError!void {
+        switch (s.*) {
+            .var_decl => |d| if (d.kind != .@"var") try stack.append(self.arena, d.name),
+            .decl_group => |g| for (g) |gs| {
+                if (gs.* == .var_decl and gs.var_decl.kind != .@"var") try stack.append(self.arena, gs.var_decl.name);
+            },
+            .destructure_decl => |d| if (d.kind != .@"var") try appendPatternNames(self.arena, d.pattern, stack),
+            .class_expr => |c| if (c.name.len > 0) try stack.append(self.arena, c.name),
+            else => {},
+        }
+    }
+
+    /// Entry point: collect the eligible legacy-binding function names of a
+    /// variable scope's statement list. `stack` is seeded with parameter names
+    /// and "arguments" (both block the legacy binding).
+    fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
+        var stack: NameStack = .empty;
+        for (self.cur_params) |pn| try stack.append(self.arena, pn);
+        try stack.append(self.arena, "arguments");
+        try self.annexbScanList(stmts, &stack, depth, out);
+    }
+
+    fn annexbScanList(self: *Interpreter, stmts: []*Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
+        const base = stack.items.len;
+        // This block's own let/const/class names shadow the legacy binding.
+        for (stmts) |s| try self.annexbPushLexical(s, stack);
+        // A function declaration directly in a nested block (depth >= 1) is a
+        // legacy-binding candidate unless its name is already lexically bound.
+        // A *block*-level function declaration is itself block-lexical, so it
+        // blocks a deeper same-named declaration's legacy binding (replacing it
+        // with `var F` would early-error) — but a *top-level* (var-scoped)
+        // function declaration does not block, hence the depth >= 1 gate.
+        if (depth >= 1) {
+            for (stmts) |s| switch (s.*) {
+                .func_decl => |f| if (!annexbStackHas(stack.*, f.name)) try out.put(self.arena, f.name, {}),
+                else => {},
+            };
+            for (stmts) |s| switch (s.*) {
+                .func_decl => |f| try stack.append(self.arena, f.name),
+                else => {},
+            };
+        }
+        for (stmts) |s| try self.annexbScanStmt(s, stack, depth, out);
+        stack.shrinkRetainingCapacity(base);
+    }
+
+    /// Scan a single statement that is the *body* of an if/loop/label — a block,
+    /// a bare function declaration (treated as a one-statement block), or other.
+    fn annexbScanBranch(self: *Interpreter, node: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
+        switch (node.*) {
+            .block => |b| try self.annexbScanList(b, stack, depth + 1, out),
+            .func_decl => |f| if (!annexbStackHas(stack.*, f.name)) try out.put(self.arena, f.name, {}),
+            else => try self.annexbScanStmt(node, stack, depth, out),
+        }
+    }
+
+    fn annexbScanStmt(self: *Interpreter, s: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
+        switch (s.*) {
+            .block => |b| try self.annexbScanList(b, stack, depth + 1, out),
+            .if_stmt => |i| {
+                try self.annexbScanBranch(i.consequent, stack, depth, out);
+                if (i.alternate) |a| try self.annexbScanBranch(a, stack, depth, out);
+            },
+            .while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out),
+            .do_while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out),
+            .for_stmt => |f| {
+                const base = stack.items.len;
+                if (f.init) |ini| try self.annexbPushLexical(ini, stack);
+                try self.annexbScanBranch(f.body, stack, depth, out);
+                stack.shrinkRetainingCapacity(base);
+            },
+            .for_in => |f| {
+                const base = stack.items.len;
+                if (f.decl_kind) |k| if (k != .@"var") try appendPatternNames(self.arena, f.target, stack);
+                try self.annexbScanBranch(f.body, stack, depth, out);
+                stack.shrinkRetainingCapacity(base);
+            },
+            .labeled_stmt => |l| try self.annexbScanStmt(l.body, stack, depth, out),
+            .switch_stmt => |sw| {
+                const base = stack.items.len;
+                // The whole switch is one lexical (CaseBlock) scope across all cases.
+                for (sw.cases) |c| for (c.body) |cs| try self.annexbPushLexical(cs, stack);
+                for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
+                    .func_decl => |fd| if (!annexbStackHas(stack.*, fd.name)) try out.put(self.arena, fd.name, {}),
+                    else => {},
+                };
+                for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
+                    .func_decl => |fd| try stack.append(self.arena, fd.name),
+                    else => {},
+                };
+                for (sw.cases) |c| for (c.body) |cs| try self.annexbScanStmt(cs, stack, depth + 1, out);
+                stack.shrinkRetainingCapacity(base);
+            },
+            .try_stmt => |t| {
+                try self.annexbScanBranch(t.block, stack, depth, out);
+                if (t.catch_block) |cb| {
+                    const cbase = stack.items.len;
+                    // A *simple* (identifier) catch parameter does not block the
+                    // legacy binding (Annex B B.3.5 allows `catch(e){var e}`); a
+                    // destructuring catch parameter does.
+                    if (t.catch_param) |cp| if (cp.* != .identifier) try appendPatternNames(self.arena, cp, stack);
+                    try self.annexbScanBranch(cb, stack, depth, out);
+                    stack.shrinkRetainingCapacity(cbase);
+                }
+                if (t.finally_block) |fb| try self.annexbScanBranch(fb, stack, depth, out);
+            },
+            else => {},
+        }
+    }
+
     pub fn evalStatements(self: *Interpreter, stmts: []*Node) EvalError!Value {
+        // A function-declaration directly in the variable scope (function body /
+        // script / eval top level) is var-scoped; one inside a nested block is
+        // block-scoped, with an additional legacy var binding under Annex B B.3.3.
+        const at_fn_top = self.env.fn_body or self.env == self.env.varScope();
+        // Annex B B.3.3: at the variable scope, work out which block-nested
+        // function names get a legacy var binding, and pre-create those bindings
+        // as `undefined`. Sloppy code only (strict block functions stay purely
+        // block-scoped). The set stays live for nested blocks via `annexb_legacy`.
+        var annexb_set: std.StringHashMapUnmanaged(void) = .empty;
+        const saved_annexb = self.annexb_legacy;
+        defer self.annexb_legacy = saved_annexb;
+        if (at_fn_top and !self.strict) {
+            try self.collectAnnexBLegacy(stmts, 0, &annexb_set);
+            self.annexb_legacy = &annexb_set;
+            const vs = self.env.varScope();
+            var it = annexb_set.keyIterator();
+            while (it.next()) |k| {
+                if (!vs.vars.contains(k.*)) try self.globalDefine(k.*, .undefined);
+            }
+        }
         // Hoist function declarations to the top of the scope so forward
         // references work (`bar(); function bar() {}`). Each is bound exactly
         // once here; the main loop then skips them, preserving function identity
         // (`var g = bar; function bar() {}` ⇒ `g === bar`).
         for (stmts) |s| switch (s.*) {
-            .func_decl => |fnode| try self.globalDefine(fnode.name, try self.makeFunction(fnode, self.env)),
+            .func_decl => |fnode| {
+                const fnv = try self.makeFunction(fnode, self.env);
+                if (at_fn_top) {
+                    try self.globalDefine(fnode.name, fnv);
+                } else {
+                    // Block-scoped function declaration: bind in this block...
+                    try self.env.put(fnode.name, fnv);
+                    // ...and (Annex B) copy to the var scope when eligible.
+                    if (self.annexb_legacy) |set| {
+                        if (set.contains(fnode.name)) try self.globalDefine(fnode.name, fnv);
+                    }
+                }
+            },
             // `export function f(){}` / `export default function f(){}` hoist `f`
             // just like a bare function declaration so forward references resolve.
             .export_decl => |e| {
@@ -2136,7 +2346,14 @@ pub const Interpreter = struct {
         // Hoist the body's `var` declarations into the function scope (the current
         // `call_env`) before executing it, so a forward reference reads undefined.
         if (func.body.* == .block) try self.hoistVarNames(func.body.block);
+        // Expose this activation's parameter names + tag the body block as the
+        // function-body scope, for Annex B B.3.3 block-function analysis.
+        const saved_params = self.cur_params;
+        self.cur_params = collectParamNames(self.arena, func.params) catch &.{};
+        defer self.cur_params = saved_params;
+        self.mark_fn_body = true;
         _ = try self.eval(func.body);
+        self.mark_fn_body = false;
         if (func.is_class_constructor and func.is_derived_constructor) {
             if (self.signal == .ret) {
                 if (self.ret_value == .object and !self.ret_value.object.is_symbol and !self.ret_value.object.is_bigint) return self.ret_value;
