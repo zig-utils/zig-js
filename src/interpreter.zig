@@ -8448,8 +8448,9 @@ fn promiseThenFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 
 fn promiseCatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    // `catch(f)` is `then(undefined, f)` — including its species behavior.
-    return promiseThenImpl(self, this, .undefined, if (args.len > 0) args[0] else .undefined);
+    // `catch(f)` is `? Invoke(this, "then", «undefined, f»)` — a generic call to
+    // this value's own `then`, so it works on any thenable, not just a Promise.
+    return self.callMethod(this, "then", &.{ .undefined, if (args.len > 0) args[0] else .undefined });
 }
 
 /// Captured state for a `finally` reaction (`then`/`catch` side) and its inner
@@ -8492,10 +8493,12 @@ fn finallyThunkFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 
 fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.finally called on a non-Promise");
+    // `finally` requires an Object `this` (not necessarily a Promise) and ends in
+    // `Invoke(this, "then", …)`, so it composes over any thenable.
+    if (this != .object) return self.throwError("TypeError", "Promise.prototype.finally called on a non-object");
     const cb = if (args.len > 0) args[0] else .undefined;
     // A non-callable `onFinally` is used directly for both reactions (spec).
-    if (!cb.isCallable()) return promise.then(self, p, cb, cb);
+    if (!cb.isCallable()) return self.callMethod(this, "then", &.{ cb, cb });
     const onf = try self.arena.create(value.Object);
     const ond = try self.arena.create(FinallyData);
     ond.* = .{ .on_finally = cb, .is_catch = false };
@@ -8506,7 +8509,7 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     ord.* = .{ .on_finally = cb, .is_catch = true };
     onr.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ord) };
     try installNativeProps(self.arena, self.root_shape, onr, "", 1);
-    return promise.then(self, p, .{ .object = onf }, .{ .object = onr });
+    return self.callMethod(this, "then", &.{ .{ .object = onf }, .{ .object = onr } });
 }
 
 /// Internal `PromiseResolve(%Promise%, v)`: `v` itself if already a native
@@ -8708,6 +8711,19 @@ fn capabilityExecutorFn(ctx: *anyopaque, this: Value, args: []const Value) value
 /// `NewPromiseCapability(C)`: construct `new C(executor)`, capturing the resolve
 /// and reject functions. Both must be callable. Works for the native `Promise`
 /// and for any subclass/custom constructor that forwards to a Promise executor.
+/// `Promise.withResolvers()` — `{ promise, resolve, reject }` built from a fresh
+/// capability of `this` constructor (so a subclass's promise/functions are used).
+fn promiseWithResolversFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cap = try newPromiseCapability(self, this);
+    const obj = (try self.newObject()).object;
+    try self.setProp(obj, "promise", cap.promise);
+    try self.setProp(obj, "resolve", cap.resolve);
+    try self.setProp(obj, "reject", cap.reject);
+    return .{ .object = obj };
+}
+
 fn newPromiseCapability(self: *Interpreter, c: Value) EvalError!Capability {
     if (!isConstructorValue(c)) return self.throwError("TypeError", "NewPromiseCapability called on a non-constructor");
     const capture = try self.arena.create(CapCapture);
@@ -17980,6 +17996,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, promise_ns, "allSettled", 1, promiseAllSettledFn);
     try setNative(a, root_shape, promise_ns, "any", 1, promiseAnyFn);
     try setNative(a, root_shape, promise_ns, "race", 1, promiseRaceFn);
+    try setNative(a, root_shape, promise_ns, "withResolvers", 0, promiseWithResolversFn);
     try promise_ns.setOwn(a, root_shape, "prototype", .{ .object = promise_proto });
     try promise_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, promise_proto, promise_ns);
