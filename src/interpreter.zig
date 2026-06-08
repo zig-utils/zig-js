@@ -1184,7 +1184,40 @@ pub const Interpreter = struct {
     /// `switch`: evaluate the discriminant, find the first strictly-equal `case`
     /// (or `default`), then run from there with fall-through until a `break`.
     fn evalSwitch(self: *Interpreter, disc_node: *Node, cases: []ast.SwitchCase) EvalError!Value {
+        // The discriminant evaluates in the enclosing scope; the whole CaseBlock
+        // is then one lexical (declarative) environment, so a `let`/`const`/class
+        // in any case is block-scoped to the switch (and case-test expressions
+        // evaluate within it).
         const disc = try self.eval(disc_node);
+        const block_env = try self.arena.create(Environment);
+        block_env.* = .{ .arena = self.arena, .parent = self.env };
+        const saved_env = self.env;
+        self.env = block_env;
+        defer self.env = saved_env;
+        // Instantiate the CaseBlock's lexical declarations (across all cases):
+        // function declarations are block-scoped (with the Annex B B.3.3 legacy
+        // copy), and let/const/class get the temporal-dead-zone sentinel.
+        for (cases) |c| for (c.body) |s| switch (s.*) {
+            .func_decl => |fnode| {
+                const fnv = try self.makeFunction(fnode, self.env);
+                try self.env.put(fnode.name, fnv);
+                if (self.annexb_legacy) |set| if (set.contains(fnode.name)) try self.globalDefine(fnode.name, fnv);
+            },
+            else => {},
+        };
+        if (self.tdz_marker) |_| {
+            const tdz = self.tdzVal();
+            for (cases) |c| for (c.body) |s| switch (s.*) {
+                .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
+                .decl_group => |g| for (g) |gs| switch (gs.*) {
+                    .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
+                    else => {},
+                },
+                .destructure_decl => |d| if (d.kind != .@"var") self.tdzBindPattern(d.pattern, tdz),
+                .class_expr => |c2| if (c2.name.len > 0) try self.env.put(c2.name, tdz),
+                else => {},
+            };
+        }
         var start: ?usize = null;
         for (cases, 0..) |c, i| {
             if (c.@"test") |t| {
@@ -1207,6 +1240,7 @@ pub const Interpreter = struct {
             var i = si;
             outer: while (i < cases.len) : (i += 1) {
                 for (cases[i].body) |stmt| {
+                    if (stmt.* == .func_decl) continue; // hoisted above
                     last = try self.eval(stmt);
                     if (self.signal != .none) break :outer;
                 }
@@ -1214,6 +1248,12 @@ pub const Interpreter = struct {
             // An unlabeled `break` exits the switch; a labeled one targets an
             // enclosing loop and must keep propagating.
             if (self.signal == .brk and self.signal_label == null) self.signal = .none;
+        }
+        if (block_env.disposables.items.len != 0) {
+            if (try self.disposeScope(block_env, null)) |err| {
+                self.exception = err;
+                return error.Throw;
+            }
         }
         return last;
     }
