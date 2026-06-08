@@ -6548,6 +6548,8 @@ pub const Interpreter = struct {
         }
         if (eq(name, "toSorted")) {
             const cmp = arg0(args);
+            if (cmp != .undefined and !cmp.isCallable())
+                return self.throwError("TypeError", "Array.prototype.toSorted comparator is not a function");
             const result = try self.newArray();
             try result.object.elements.appendSlice(self.arena, items);
             const ri = result.object.elements.items;
@@ -18201,6 +18203,17 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (symbol_ns.getOwn("toStringTag")) |tst| if (tst == .object) {
         try symbol_proto.setOwn(a, root_shape, tst.object.sym_key, .{ .string = "Symbol" });
         try symbol_proto.setAttr(a, tst.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+    };
+    // Array.prototype[@@unscopables]: a null-prototype object whose own data
+    // properties (all `true`) hide the post-ES2015 method names from `with` scope.
+    if (symbol_ns.getOwn("unscopables")) |usk| if (usk == .object) {
+        const unsc = try a.create(value.Object);
+        unsc.* = .{ .proto = null };
+        inline for (.{ "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values" }) |n| {
+            try unsc.setOwn(a, root_shape, n, .{ .boolean = true });
+        }
+        try array_proto.setOwn(a, root_shape, usk.object.sym_key, .{ .object = unsc });
+        try array_proto.setAttr(a, usk.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
     };
     try env.put("Symbol", .{ .object = symbol_ns });
 
