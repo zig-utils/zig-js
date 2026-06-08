@@ -2367,6 +2367,14 @@ pub const Interpreter = struct {
             // `arguments.toString()` is Object.prototype.toString → "[object
             // Arguments]". Index storage and for-of still use the `is_array` path.
             if (self.objectProto()) |op| args_obj.object.proto = op;
+            // It does have an own @@iterator = %Array.prototype.values% (so
+            // `arguments[Symbol.iterator]()` yields an Array Iterator).
+            if (self.arrayProtoObj()) |ap| if (self.symbolIteratorKey()) |ik| {
+                if (ap.getOwn(ik)) |it| {
+                    try args_obj.object.setOwn(self.arena, self.root_shape, ik, it);
+                    try args_obj.object.setAttr(self.arena, ik, .{ .writable = true, .enumerable = false, .configurable = true });
+                }
+            };
             try args_obj.object.setOwn(self.arena, self.root_shape, "length", .{ .number = @floatFromInt(args.len) });
             try args_obj.object.setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
             for (args) |av| try args_obj.object.elements.append(self.arena, av);
