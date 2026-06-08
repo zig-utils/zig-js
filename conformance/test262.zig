@@ -56,9 +56,7 @@ const unsupported_staging_prefixes = [_][]const u8{
     "sm/String/replace-math.js",
     "sm/TypedArray/",
 };
-const unsupported_subtrees = [_][]const u8{
-    "test/built-ins/Atomics",
-};
+const unsupported_subtrees = [_][]const u8{};
 const UnsupportedPathPrefix = struct { sub: []const u8, prefix: []const u8 };
 // The Iterator-helper subtrees used to be excluded here because a `next`-accessor
 // that returned a fresh generator each read caused unbounded iteration. With
