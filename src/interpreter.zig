@@ -5625,6 +5625,14 @@ pub const Interpreter = struct {
         return value.taRead(ta, i);
     }
 
+    /// `taLoad` but yielding `undefined` for an index at/past the current length
+    /// (a resizable buffer shrank, or detached, mid-iteration) — matching `[[Get]]`
+    /// on the integer-indexed exotic, which the iteration methods read through.
+    fn taLoadIdx(self: *Interpreter, ta: *const value.TypedArrayData, i: usize) EvalError!Value {
+        if (i >= (ta.currentLength() orelse 0)) return .undefined;
+        return self.taLoad(ta, i);
+    }
+
     /// Collect an iterable's values (via `Symbol.iterator`) or an array-like's
     /// `0..length` elements into a freshly-allocated slice.
     fn iterableOrArrayLikeToList(self: *Interpreter, v: Value) EvalError![]Value {
@@ -11488,7 +11496,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     if (eq(name, "forEach")) {
         const cb = if (args.len > 0) args[0] else Value.undefined;
         var i: usize = 0;
-        while (i < len) : (i += 1) _ = try self.callValueWithThis(cb, &.{ try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
+        while (i < len) : (i += 1) _ = try self.callValueWithThis(cb, &.{ try self.taLoadIdx(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
         return Value.undefined;
     }
     if (eq(name, "map")) {
@@ -11496,7 +11504,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const result = try self.typedArraySpeciesCreate(o, len);
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const r = try self.callValueWithThis(cb, &.{ try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
+            const r = try self.callValueWithThis(cb, &.{ try self.taLoadIdx(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
             try self.taStore(result.typed_array.?, i, r);
         }
         return .{ .object = result };
@@ -11506,7 +11514,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         var kept: std.ArrayListUnmanaged(Value) = .empty;
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const el = try self.taLoad(ta, i);
+            const el = try self.taLoadIdx(ta, i);
             if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean())
                 try kept.append(self.arena, el);
         }
@@ -11519,7 +11527,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const cb = if (args.len > 0) args[0] else Value.undefined;
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const t = (try self.callValueWithThis(cb, &.{ try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean();
+            const t = (try self.callValueWithThis(cb, &.{ try self.taLoadIdx(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean();
             if (every and !t) return Value{ .boolean = false };
             if (!every and t) return Value{ .boolean = true };
         }
@@ -11533,7 +11541,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         var k: usize = 0;
         while (k < len) : (k += 1) {
             const i = if (from_end) len - 1 - k else k;
-            const el = try self.taLoad(ta, i);
+            const el = try self.taLoadIdx(ta, i);
             if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean())
                 return if (want_idx) Value{ .number = @floatFromInt(i) } else el;
         }
@@ -11554,12 +11562,12 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             acc = args[1];
         } else {
             if (len == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
-            acc = try self.taLoad(ta, idxOf(right, len, 0));
+            acc = try self.taLoadIdx(ta, idxOf(right, len, 0));
             count = 1;
         }
         while (count < len) : (count += 1) {
             const i = idxOf(right, len, count);
-            acc = try self.callValueWithThis(cb, &.{ acc, try self.taLoad(ta, i), .{ .number = @floatFromInt(i) }, recv }, .undefined);
+            acc = try self.callValueWithThis(cb, &.{ acc, try self.taLoadIdx(ta, i), .{ .number = @floatFromInt(i) }, recv }, .undefined);
         }
         return acc;
     }
