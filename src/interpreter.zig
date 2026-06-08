@@ -2989,11 +2989,25 @@ pub const Interpreter = struct {
                         if (pv == .null) v.object.proto = null;
                         continue;
                     }
+                    // A concise method's [[HomeObject]] is the object being built,
+                    // so `super` inside it resolves on the object's prototype.
+                    if (p.value.* == .function and p.value.function.is_method)
+                        if (funcOf(pv)) |f| {
+                            f.home_object = v.object;
+                        };
                     try self.maybeNameAnon(pv, p.value, key); // `{ x: function(){} }` ⇒ name "x"
                     try self.setProp(v.object, key, pv);
                 },
-                .get => try self.defineAccessor(v.object, key, try self.eval(p.value), null),
-                .set => try self.defineAccessor(v.object, key, null, try self.eval(p.value)),
+                .get => {
+                    const gv = try self.eval(p.value);
+                    if (funcOf(gv)) |f| f.home_object = v.object;
+                    try self.defineAccessor(v.object, key, gv, null);
+                },
+                .set => {
+                    const sv = try self.eval(p.value);
+                    if (funcOf(sv)) |f| f.home_object = v.object;
+                    try self.defineAccessor(v.object, key, null, sv);
+                },
             }
         }
         return v;

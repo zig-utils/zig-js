@@ -86,6 +86,9 @@ pub const FunctionNode = struct {
     /// strict code, or a class member (always strict). Gates sloppy-only
     /// behaviors like `this`-substitution.
     is_strict: bool = false,
+    /// A MethodDefinition (concise method, getter, or setter in an object literal
+    /// or class body). Such functions get a [[HomeObject]] so `super` resolves.
+    is_method: bool = false,
 };
 
 /// A `class` member: a method (`func` is a `.function` node) or a field

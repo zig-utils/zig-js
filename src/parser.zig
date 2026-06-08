@@ -1954,7 +1954,7 @@ pub const Parser = struct {
         const body = try self.parseFnBody(is_gen, is_async);
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict, .is_method = true };
         return self.alloc(.{ .function = fnode });
     }
 
