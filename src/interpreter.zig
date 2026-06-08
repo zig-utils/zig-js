@@ -304,6 +304,9 @@ pub const Function = struct {
     /// Strict-mode function (see `ast.FunctionNode.is_strict`). Gates sloppy-only
     /// behaviors — currently `this`-substitution on a null/undefined receiver.
     is_strict: bool = false,
+    /// A concise method (object/class method, get/set) — has no [[Construct]], so
+    /// it is not a constructor (e.g. `%TypedArray%.from.call(method)` is a TypeError).
+    is_method: bool = false,
     /// The `with`-scope chain captured at definition (object environment records
     /// enclosing the function). A function called from inside a `with` does NOT
     /// see the caller's `with` object — only the ones lexically enclosing its own
@@ -1735,6 +1738,7 @@ pub const Interpreter = struct {
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
+            .is_method = fnode.is_method,
         };
         // A `with` block's object Environment Record is part of the lexical chain
         // (`Environment.with_object`), so a function defined inside a `with`
@@ -9158,7 +9162,7 @@ fn isConstructorValue(v: Value) bool {
     if (o.native != null) return o.native_ctor;
     if (o.js_func) |erased| {
         const f: *Function = @ptrCast(@alignCast(erased));
-        return !f.is_arrow and !f.is_async and !f.is_generator;
+        return !f.is_arrow and !f.is_async and !f.is_generator and !f.is_method;
     }
     return false;
 }
@@ -11772,7 +11776,8 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const rel = if (std.math.isNan(rel_num)) @as(f64, 0) else @trunc(rel_num);
         const len_f: f64 = @floatFromInt(len);
         // actualIndex computed from the entry length; +inf/-inf stay out of range.
-        const actual: f64 = if (rel >= 0) rel else len_f + rel;
+        // `+ 0.0` normalizes -0 (e.g. with(-0) or with(-0.5)) to the +0 index.
+        const actual: f64 = (if (rel >= 0) rel else len_f + rel) + 0.0;
         const v = if (args.len > 1) args[1] else Value.undefined;
         // The value coerces (and can throw / resize the buffer) BEFORE the index
         // is validated against the CURRENT length (IsValidIntegerIndex).
