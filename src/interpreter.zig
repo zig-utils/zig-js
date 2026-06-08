@@ -402,6 +402,11 @@ pub const Interpreter = struct {
     /// Scoped flag for a running derived class constructor. `super()` flips this
     /// from false to true; completion reads it to implement GetThisBinding.
     this_initialized: bool = true,
+    /// Whether the most recently completed statement list produced an EMPTY
+    /// completion (only declarations / empty statements / empty blocks ran), so
+    /// the eval/program completion value carries the last non-empty value forward
+    /// (UpdateEmpty).
+    completion_empty: bool = true,
     /// `new.target`: the constructor of the in-flight `new` call (undefined in a
     /// plain call). Inherited lexically by arrow functions.
     new_target: Value = .undefined,
@@ -1768,6 +1773,7 @@ pub const Interpreter = struct {
             };
         }
         var last: Value = .undefined;
+        var seen_value = false; // any non-empty completion accumulated yet
         for (stmts) |s| {
             if (s.* == .func_decl) continue; // already hoisted above
             // An exported function declaration was hoisted above too (preserving
@@ -1780,10 +1786,32 @@ pub const Interpreter = struct {
                     if (dx.* == .func_decl) continue;
                 }
             }
-            last = try self.eval(s);
-            if (self.signal != .none) return last;
+            const r = try self.eval(s);
+            // An abrupt completion (break/continue/return/throw) is handled by the
+            // caller; the full UpdateEmpty semantics over abrupt completions aren't
+            // modeled, so keep returning the statement's own value here.
+            if (self.signal != .none) return r;
+            // UpdateEmpty: a declaration / empty statement / empty block does not
+            // replace the statement list's value.
+            if (!self.stmtCompletionEmpty(s)) {
+                last = r;
+                seen_value = true;
+            }
         }
+        self.completion_empty = !seen_value;
         return last;
+    }
+
+    /// Whether statement `s` produces an EMPTY completion (so it doesn't update
+    /// the enclosing list's completion value). Declarations and empty statements
+    /// are empty; a `{ … }` block defers to the brand its own list set.
+    fn stmtCompletionEmpty(self: *Interpreter, s: *Node) bool {
+        return switch (s.*) {
+            .var_decl, .decl_group, .destructure_decl => true,
+            .class_expr => true, // a class *declaration* statement
+            .block => self.completion_empty,
+            else => false,
+        };
     }
 
     fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {
