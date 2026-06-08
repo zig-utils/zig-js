@@ -2713,6 +2713,18 @@ pub const Interpreter = struct {
         return try self.protoObject(ctor);
     }
 
+    /// GetPrototypeFromConstructor(newTarget, %ctor_name.prototype%): read
+    /// `newTarget.prototype` via [[Get]] (a getter runs and may throw); if the
+    /// result isn't an object, fall back to the named intrinsic's prototype.
+    /// Returns null when there is no new.target (the caller keeps its default).
+    fn protoFromCtor(self: *Interpreter, ctor_name: []const u8) EvalError!?*value.Object {
+        if (self.new_target != .object) return null;
+        const p = try self.getProperty(self.new_target, "prototype");
+        if (p == .object and !p.object.is_symbol and !p.object.is_bigint) return p.object;
+        if (self.env.get(ctor_name)) |c| if (c == .object) return try self.protoObject(c.object);
+        return null;
+    }
+
     pub fn protoObject(self: *Interpreter, ctor: *value.Object) EvalError!*value.Object {
         if (ctor.getOwn("prototype")) |p| {
             if (p == .object) return p.object;
@@ -4030,19 +4042,34 @@ pub const Interpreter = struct {
                 for (try self.collectSetKeys(rec)) |k| _ = try self.setMethod(result, "add", &.{k});
                 return .{ .object = result };
             }
+            const this_size: f64 = @floatFromInt(o.elements.items.len);
             if (eq(name, "intersection")) {
                 const result = (try self.makeSet(.undefined)).object;
-                for (o.elements.items) |e| {
-                    if ((try self.recordHas(rec, e)))
-                        _ = try self.setMethod(result, "add", &.{e});
+                if (this_size <= rec.size) {
+                    // Smaller `this`: walk this, probe the other set's `has`.
+                    for (o.elements.items) |e| {
+                        if (try self.recordHas(rec, e)) _ = try self.setMethod(result, "add", &.{e});
+                    }
+                } else {
+                    // Smaller other: walk the other set's keys, keep those in this.
+                    for (try self.collectSetKeys(rec)) |k| {
+                        if (setContains(o, k)) _ = try self.setMethod(result, "add", &.{k});
+                    }
                 }
                 return .{ .object = result };
             }
             if (eq(name, "difference")) {
+                // result starts as a copy of this; the smaller operand drives the walk.
                 const result = (try self.makeSet(.undefined)).object;
-                for (o.elements.items) |e| {
-                    if (!(try self.recordHas(rec, e)))
-                        _ = try self.setMethod(result, "add", &.{e});
+                for (o.elements.items) |e| _ = try self.setMethod(result, "add", &.{e});
+                if (this_size <= rec.size) {
+                    for (o.elements.items) |e| {
+                        if (try self.recordHas(rec, e)) _ = try self.setMethod(result, "delete", &.{e});
+                    }
+                } else {
+                    for (try self.collectSetKeys(rec)) |k| {
+                        _ = try self.setMethod(result, "delete", &.{k});
+                    }
                 }
                 return .{ .object = result };
             }
@@ -4058,6 +4085,8 @@ pub const Interpreter = struct {
                 return .{ .object = result };
             }
             if (eq(name, "isSubsetOf")) {
+                // A larger `this` cannot be a subset (and must not probe `has`).
+                if (this_size > rec.size) return Value{ .boolean = false };
                 for (o.elements.items) |e| {
                     if (!(try self.recordHas(rec, e)))
                         return Value{ .boolean = false };
@@ -4065,15 +4094,22 @@ pub const Interpreter = struct {
                 return Value{ .boolean = true };
             }
             if (eq(name, "isSupersetOf")) {
+                // A smaller `this` cannot be a superset (and must not iterate keys).
+                if (this_size < rec.size) return Value{ .boolean = false };
                 for (try self.collectSetKeys(rec)) |k| {
-                    if (!(try self.setMethod(o, "has", &.{k})).?.boolean) return Value{ .boolean = false };
+                    if (!setContains(o, k)) return Value{ .boolean = false };
                 }
                 return Value{ .boolean = true };
             }
             if (eq(name, "isDisjointFrom")) {
-                for (o.elements.items) |e| {
-                    if ((try self.recordHas(rec, e)))
-                        return Value{ .boolean = false };
+                if (this_size <= rec.size) {
+                    for (o.elements.items) |e| {
+                        if (try self.recordHas(rec, e)) return Value{ .boolean = false };
+                    }
+                } else {
+                    for (try self.collectSetKeys(rec)) |k| {
+                        if (setContains(o, k)) return Value{ .boolean = false };
+                    }
                 }
                 return Value{ .boolean = true };
             }
@@ -4105,6 +4141,13 @@ pub const Interpreter = struct {
         return .{ .obj = v.object, .has = has, .keys = keys, .size = size, .is_set = false };
     }
 
+    /// SetDataHas: whether the native Set `o` contains `elem` (SameValueZero) —
+    /// used by the set operations when they iterate the *other* operand.
+    fn setContains(o: *value.Object, elem: Value) bool {
+        for (o.elements.items) |e| if (value.sameValueZero(e, elem)) return true;
+        return false;
+    }
+
     /// Whether the set-like contains `elem` (a native Set scans its elements; a
     /// set-like calls its `has`).
     fn recordHas(self: *Interpreter, rec: SetRecord, elem: Value) EvalError!bool {
@@ -4119,9 +4162,12 @@ pub const Interpreter = struct {
     fn collectSetKeys(self: *Interpreter, rec: SetRecord) EvalError![]Value {
         if (rec.is_set) return rec.obj.elements.items;
         const iter = try self.callValueWithThis(rec.keys, &.{}, .{ .object = rec.obj });
+        // GetIteratorDirect: capture `next` ONCE, then call it each step (the
+        // spec does not re-read the `next` property on every iteration).
+        const next_method = try self.getProperty(iter, "next");
         var list: std.ArrayListUnmanaged(Value) = .empty;
         while (true) {
-            const r = try self.callMethod(iter, "next", &.{});
+            const r = try self.callValueWithThis(next_method, &.{}, iter);
             if (r != .object) return self.throwError("TypeError", "iterator.next() did not return an object");
             if ((try self.getProperty(r, "done")).toBoolean()) break;
             try list.append(self.arena, try self.getProperty(r, "value"));
@@ -11011,7 +11057,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "WeakRef: target must be an object or a symbol");
     const o = (try self.newObject()).object;
     o.weak_ref_target = target;
-    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    if (try self.protoFromCtor("WeakRef")) |pr| o.proto = pr;
     return .{ .object = o };
 }
 
@@ -11030,7 +11076,7 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry: cleanup callback must be callable");
     const o = (try self.newObject()).object;
     o.is_finalization_registry = true;
-    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    if (try self.protoFromCtor("FinalizationRegistry")) |pr| o.proto = pr;
     return .{ .object = o };
 }
 
@@ -11084,7 +11130,7 @@ fn disposableStackConstructorFn(comptime is_async: bool) value.NativeFn {
             const name = if (is_async) "AsyncDisposableStack" else "DisposableStack";
             if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor " ++ name ++ " requires 'new'");
             const o = (try self.newObject()).object;
-            if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+            if (try self.protoFromCtor(name)) |pr| o.proto = pr;
             try dsHidden(self, o, "\x00ds_res", try self.newArray());
             try dsHidden(self, o, "\x00ds_done", .{ .boolean = false });
             return .{ .object = o };
@@ -12212,7 +12258,7 @@ fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     }
     const o = try self.makeArrayBuffer(@intCast(len));
     o.array_buffer.?.max_byte_length = max;
-    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    if (try self.protoFromCtor("ArrayBuffer")) |pr| o.proto = pr;
     return .{ .object = o };
 }
 
@@ -17118,7 +17164,7 @@ fn sharedArrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     const o = try self.makeArrayBuffer(@intCast(len));
     o.array_buffer.?.max_byte_length = max;
     o.array_buffer.?.is_shared = true;
-    if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
+    if (try self.protoFromCtor("SharedArrayBuffer")) |pr| o.proto = pr;
     return .{ .object = o };
 }
 
