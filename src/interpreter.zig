@@ -8724,6 +8724,22 @@ fn promiseWithResolversFn(ctx: *anyopaque, this: Value, args: []const Value) val
     return .{ .object = obj };
 }
 
+/// `Promise.try(callback, ...args)` — run `callback(...args)` now, settling a
+/// fresh capability of `this` constructor with its result or thrown reason.
+fn promiseTryFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cap = try newPromiseCapability(self, this);
+    const cb = if (args.len > 0) args[0] else .undefined;
+    const extra = if (args.len > 1) args[1..] else &[_]Value{};
+    const result = self.callValue(cb, extra) catch |e| {
+        if (e != error.Throw) return e;
+        _ = try self.callValue(cap.reject, &.{self.exception});
+        return cap.promise;
+    };
+    _ = try self.callValue(cap.resolve, &.{result});
+    return cap.promise;
+}
+
 fn newPromiseCapability(self: *Interpreter, c: Value) EvalError!Capability {
     if (!isConstructorValue(c)) return self.throwError("TypeError", "NewPromiseCapability called on a non-constructor");
     const capture = try self.arena.create(CapCapture);
@@ -17997,6 +18013,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, promise_ns, "any", 1, promiseAnyFn);
     try setNative(a, root_shape, promise_ns, "race", 1, promiseRaceFn);
     try setNative(a, root_shape, promise_ns, "withResolvers", 0, promiseWithResolversFn);
+    try setNative(a, root_shape, promise_ns, "try", 1, promiseTryFn);
     try promise_ns.setOwn(a, root_shape, "prototype", .{ .object = promise_proto });
     try promise_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, promise_proto, promise_ns);
