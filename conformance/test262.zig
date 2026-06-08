@@ -60,22 +60,11 @@ const unsupported_subtrees = [_][]const u8{
     "test/built-ins/Atomics",
 };
 const UnsupportedPathPrefix = struct { sub: []const u8, prefix: []const u8 };
-const unsupported_path_prefixes = [_]UnsupportedPathPrefix{
-    .{ .sub = "test/built-ins/Iterator", .prefix = "concat/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/drop/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/every/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/filter/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/find/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/flatMap/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/forEach/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/map/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/reduce/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/some/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/take/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "prototype/toArray/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "zip/" },
-    .{ .sub = "test/built-ins/Iterator", .prefix = "zipKeyed/" },
-};
+// The Iterator-helper subtrees used to be excluded here because a `next`-accessor
+// that returned a fresh generator each read caused unbounded iteration. With
+// GetIteratorDirect capturing `next` once (and IteratorClose on abrupt
+// completion), they run cleanly and are scored again.
+const unsupported_path_prefixes = [_]UnsupportedPathPrefix{};
 
 /// A faithful, subset-only reimplementation of the test262 harness essentials
 /// (`sta.js` + the parts of `assert.js` we lean on directly).

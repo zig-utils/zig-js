@@ -4850,6 +4850,15 @@ pub const Interpreter = struct {
         if (ret.isCallable()) _ = try self.callValueWithThis(ret, &.{}, iter);
     }
 
+    /// IteratorClose with an existing throw completion: close `iter`, but keep the
+    /// pending exception (a throw from `return()` is discarded — the original
+    /// completion wins). Used when an iterator-helper callback throws.
+    fn iteratorCloseKeepingThrow(self: *Interpreter, iter: Value) void {
+        const saved = self.exception;
+        self.iteratorClose(iter) catch {};
+        self.exception = saved;
+    }
+
     /// Element `i` of an array/string for array destructuring (undefined if out
     /// of range). Non-iterable values raise a TypeError.
     fn elementAt(self: *Interpreter, val: Value, i: usize) EvalError!Value {
@@ -9671,7 +9680,13 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                 h.done = true;
                 return self.iterResultObj(.undefined, true);
             }
-            const mapped = try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined);
+            const mapped = self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined) catch |e| {
+                if (e == error.Throw) {
+                    h.done = true;
+                    self.iteratorCloseKeepingThrow(h.src);
+                }
+                return e;
+            };
             h.counter += 1;
             return self.iterResultObj(mapped, false);
         },
@@ -9682,7 +9697,13 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                     h.done = true;
                     return self.iterResultObj(.undefined, true);
                 }
-                const keep = (try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined)).toBoolean();
+                const keep = (self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined) catch |e| {
+                    if (e == error.Throw) {
+                        h.done = true;
+                        self.iteratorCloseKeepingThrow(h.src);
+                    }
+                    return e;
+                }).toBoolean();
                 h.counter += 1;
                 if (keep) return self.iterResultObj(s.value, false);
             }
@@ -9726,7 +9747,13 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                         h.done = true;
                         return self.iterResultObj(.undefined, true);
                     }
-                    const mapped = try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined);
+                    const mapped = self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined) catch |e| {
+                        if (e == error.Throw) {
+                            h.done = true;
+                            self.iteratorCloseKeepingThrow(h.src);
+                        }
+                        return e;
+                    };
                     h.counter += 1;
                     h.inner = try self.iteratorOf(mapped);
                     // Capture the inner iterator's `next` once (GetIteratorFlattenable).
@@ -9849,7 +9876,20 @@ fn closeZipIterators(self: *Interpreter, iters: []Value, flags: *value.Object) E
 fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this == .object and this.object.iter_helper != null) this.object.iter_helper.?.done = true;
+    if (this == .object and this.object.iter_helper != null) {
+        const h = this.object.iter_helper.?;
+        const was_done = h.done;
+        h.done = true;
+        // Closing a live helper closes its underlying source iterator (and the
+        // current inner iterator for flatMap); a throw from `return()` propagates.
+        if (!was_done) {
+            switch (h.kind) {
+                .concat, .zip, .zip_keyed => {},
+                else => if (h.src == .object) try self.iteratorClose(h.src),
+            }
+            if (h.inner) |inner| if (inner == .object and inner.object.iter_helper == null) try self.iteratorClose(inner);
+        }
+    }
     return self.iterResultObj(.undefined, true);
 }
 
@@ -9859,35 +9899,50 @@ fn iterMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.map called on a non-object");
     const f = if (args.len > 0) args[0] else .undefined;
-    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.map: mapper is not a function");
+    if (!f.isCallable()) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("TypeError", "Iterator.prototype.map: mapper is not a function");
+    }
     return makeIterHelper(self, this, .map, f, 0);
 }
 fn iterFilterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.filter called on a non-object");
     const f = if (args.len > 0) args[0] else .undefined;
-    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.filter: predicate is not a function");
+    if (!f.isCallable()) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("TypeError", "Iterator.prototype.filter: predicate is not a function");
+    }
     return makeIterHelper(self, this, .filter, f, 0);
 }
 fn iterFlatMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.flatMap called on a non-object");
     const f = if (args.len > 0) args[0] else .undefined;
-    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.flatMap: mapper is not a function");
+    if (!f.isCallable()) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("TypeError", "Iterator.prototype.flatMap: mapper is not a function");
+    }
     return makeIterHelper(self, this, .flat_map, f, 0);
 }
 fn iterTakeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.take called on a non-object");
     const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
-    if (std.math.isNan(n) or n < 0) return self.throwError("RangeError", "Iterator.prototype.take: invalid count");
+    if (std.math.isNan(n) or n < 0) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("RangeError", "Iterator.prototype.take: invalid count");
+    }
     return makeIterHelper(self, this, .take, .undefined, @trunc(n));
 }
 fn iterDropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.drop called on a non-object");
     const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
-    if (std.math.isNan(n) or n < 0) return self.throwError("RangeError", "Iterator.prototype.drop: invalid count");
+    if (std.math.isNan(n) or n < 0) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("RangeError", "Iterator.prototype.drop: invalid count");
+    }
     return makeIterHelper(self, this, .drop, .undefined, @trunc(n));
 }
 
@@ -9909,12 +9964,19 @@ fn iterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.forEach called on a non-object");
     const f = if (args.len > 0) args[0] else .undefined;
-    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.forEach: fn is not a function");
+    if (!f.isCallable()) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("TypeError", "Iterator.prototype.forEach: fn is not a function");
+    }
+    const next_method = try self.getProperty(this, "next");
     var i: f64 = 0;
     while (true) : (i += 1) {
-        const s = try self.iterStep(this);
+        const s = try self.iterStepM(this, next_method);
         if (s.done) break;
-        _ = try self.callValueWithThis(f, &.{ s.value, .{ .number = i } }, .undefined);
+        _ = self.callValueWithThis(f, &.{ s.value, .{ .number = i } }, .undefined) catch |e| {
+            if (e == error.Throw) self.iteratorCloseKeepingThrow(this);
+            return e;
+        };
     }
     return .undefined;
 }
@@ -9922,21 +9984,28 @@ fn iterReduceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.reduce called on a non-object");
     const f = if (args.len > 0) args[0] else .undefined;
-    if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype.reduce: reducer is not a function");
+    if (!f.isCallable()) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("TypeError", "Iterator.prototype.reduce: reducer is not a function");
+    }
+    const next_method = try self.getProperty(this, "next");
     var acc: Value = undefined;
     var i: f64 = 0;
     if (args.len > 1) {
         acc = args[1];
     } else {
-        const s = try self.iterStep(this);
+        const s = try self.iterStepM(this, next_method);
         if (s.done) return self.throwError("TypeError", "Reduce of empty iterator with no initial value");
         acc = s.value;
         i = 1;
     }
     while (true) : (i += 1) {
-        const s = try self.iterStep(this);
+        const s = try self.iterStepM(this, next_method);
         if (s.done) break;
-        acc = try self.callValueWithThis(f, &.{ acc, s.value, .{ .number = i } }, .undefined);
+        acc = self.callValueWithThis(f, &.{ acc, s.value, .{ .number = i } }, .undefined) catch |e| {
+            if (e == error.Throw) self.iteratorCloseKeepingThrow(this);
+            return e;
+        };
     }
     return acc;
 }
@@ -9947,15 +10016,29 @@ fn iterSomeEveryFindFn(comptime which: enum { some, every, find }) value.NativeF
             if (this != .object) return self.throwError("TypeError", "Iterator.prototype method called on a non-object");
             const f = if (args.len > 0) args[0] else .undefined;
             if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype method: fn is not a function");
+            const next_method = try self.getProperty(this, "next");
             var i: f64 = 0;
             while (true) : (i += 1) {
-                const s = try self.iterStep(this);
+                const s = try self.iterStepM(this, next_method);
                 if (s.done) break;
-                const t = (try self.callValueWithThis(f, &.{ s.value, .{ .number = i } }, .undefined)).toBoolean();
+                const tv = self.callValueWithThis(f, &.{ s.value, .{ .number = i } }, .undefined) catch |e| {
+                    if (e == error.Throw) self.iteratorCloseKeepingThrow(this);
+                    return e;
+                };
+                const t = tv.toBoolean();
                 switch (which) {
-                    .some => if (t) return .{ .boolean = true },
-                    .every => if (!t) return .{ .boolean = false },
-                    .find => if (t) return s.value,
+                    .some => if (t) {
+                        try self.iteratorClose(this);
+                        return .{ .boolean = true };
+                    },
+                    .every => if (!t) {
+                        try self.iteratorClose(this);
+                        return .{ .boolean = false };
+                    },
+                    .find => if (t) {
+                        try self.iteratorClose(this);
+                        return s.value;
+                    },
                 }
             }
             return switch (which) {
