@@ -1818,6 +1818,9 @@ pub const Interpreter = struct {
         return last;
     }
 
+    /// Whether statement `s` produces an EMPTY completion (so it doesn't update
+    /// the enclosing list's completion value). Declarations and empty statements
+    /// are empty; a `{ … }` block defers to the brand its own list set.
     /// Whether an ABRUPT completion produced by `s` carries an EMPTY value (so
     /// UpdateEmpty lets the enclosing list's accumulated value flow through). A
     /// raw `break`/`continue` has an empty completion value; `return` carries its
@@ -1829,9 +1832,6 @@ pub const Interpreter = struct {
         };
     }
 
-    /// Whether statement `s` produces an EMPTY completion (so it doesn't update
-    /// the enclosing list's completion value). Declarations and empty statements
-    /// are empty; a `{ … }` block defers to the brand its own list set.
     fn stmtCompletionEmpty(self: *Interpreter, s: *Node) bool {
         return switch (s.*) {
             .var_decl, .decl_group, .destructure_decl => true,
@@ -3508,6 +3508,35 @@ pub const Interpreter = struct {
 
     fn isRegExpObjectValue(v: Value) bool {
         return v == .object and !v.object.is_symbol and !v.object.is_bigint;
+    }
+
+    /// RegExp.prototype[@@matchAll]: build a lazy %RegExpStringIterator% over a
+    /// species-constructed matcher (so a subclass's exec/lastIndex drive iteration).
+    fn regexpMatchAll(self: *Interpreter, this: Value, s: []const u8) EvalError!Value {
+        if (this != .object) return self.throwError("TypeError", "RegExp.prototype[Symbol.matchAll] called on a non-object");
+        const default_ctor = self.env.get("RegExp") orelse return self.throwError("TypeError", "RegExp is not defined");
+        const c = try self.speciesConstructor(this, default_ctor);
+        const flags = try self.toStringV(try self.getProperty(this, "flags"));
+        const matcher = try self.construct(c, &.{ this, .{ .string = flags } });
+        const last_index = toLen(try self.toNumberV(try self.getProperty(this, "lastIndex")));
+        try self.setRegExpLikeLastIndex(matcher, @floatFromInt(last_index));
+        const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
+        const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+        return self.createRegExpStringIterator(matcher, s, global, unicode);
+    }
+
+    fn createRegExpStringIterator(self: *Interpreter, matcher: Value, s: []const u8, global: bool, unicode: bool) EvalError!Value {
+        const it = try self.arena.create(value.Object);
+        it.* = .{};
+        if (self.env.get("\x00ReStrIterProto")) |p| {
+            if (p == .object) it.proto = p.object;
+        }
+        try self.setProp(it, "__re", matcher);
+        try self.setProp(it, "__str", .{ .string = try self.arena.dupe(u8, s) });
+        try self.setProp(it, "__g", .{ .boolean = global });
+        try self.setProp(it, "__u", .{ .boolean = unicode });
+        try self.setProp(it, "__done", .{ .boolean = false });
+        return .{ .object = it };
     }
 
     fn regexpMatch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
@@ -7318,7 +7347,8 @@ pub const Interpreter = struct {
     fn stringProtocolSymbol(_: *Interpreter, name: []const u8) ?[]const u8 {
         if (eq(name, "split")) return "split";
         if (eq(name, "match")) return "match";
-        if (eq(name, "matchAll")) return "matchAll";
+        // `matchAll` is intentionally absent: its branch below performs the full
+        // spec dispatch (IsRegExp/global-flag check, GetMethod only for objects).
         if (eq(name, "search")) return "search";
         if (eq(name, "replace") or eq(name, "replaceAll")) return "replace";
         return null;
@@ -7705,26 +7735,44 @@ pub const Interpreter = struct {
             return (try self.regexMethod(re_obj, "exec", &.{.{ .string = s }})).?;
         }
         if (eq(name, "matchAll")) {
-            const re_obj = try self.toRegexObject(arg0(args));
-            // Snapshot every match (each as an exec-style result) and return an
-            // iterator over them. A global/sticky exec advances lastIndex; use a
-            // fresh regex so the caller's object isn't mutated.
-            const flags = re_obj.regex_flags;
-            const has_g = std.mem.indexOfScalar(u8, flags, 'g') != null;
-            const gflags = if (has_g) flags else try std.mem.concat(self.arena, u8, &.{ flags, "g" });
-            const iter_re = (try self.makeRegex(re_obj.regex_source, gflags)).object;
-            const results = try self.newArray();
-            while (true) {
-                const r = (try self.regexMethod(iter_re, "exec", &.{.{ .string = s }})).?;
-                if (r == .null) break;
-                try results.object.elements.append(self.arena, r);
-                // Guard against an empty match stalling lastIndex.
-                if (r.object.elements.items.len > 0 and r.object.elements.items[0].string.len == 0) {
-                    const li = toLen((iter_re.getOwn("lastIndex") orelse Value{ .number = 0 }).toNumber());
-                    try self.setProp(iter_re, "lastIndex", .{ .number = @floatFromInt(li + 1) });
+            // String.prototype.matchAll(regexp): dispatch to regexp[@@matchAll]
+            // when the argument supplies one, after the global-flag invariant.
+            const regexp = arg0(args);
+            const skey = self.wellKnownSymbolKey("matchAll");
+            if (regexp != .undefined and regexp != .null) {
+                if (try self.isRegExp(regexp)) {
+                    const flags_v = try self.getProperty(regexp, "flags");
+                    if (flags_v == .undefined or flags_v == .null)
+                        return self.throwError("TypeError", "String.prototype.matchAll called with a RegExp whose flags is undefined or null");
+                    const flags_s = try self.toStringV(flags_v);
+                    if (std.mem.indexOfScalar(u8, flags_s, 'g') == null)
+                        return self.throwError("TypeError", "String.prototype.matchAll called with a non-global RegExp argument");
                 }
+                // GetMethod(regexp, @@matchAll) — only an object can carry one; a
+                // primitive argument (string/number, and the object-boxed
+                // BigInt/Symbol) is left to the RegExpCreate fallback below.
+                if (isRegExpObjectValue(regexp)) if (skey) |k| {
+                    const m = try self.getProperty(regexp, k);
+                    if (m != .undefined and m != .null) {
+                        if (!m.isCallable()) return self.throwError("TypeError", "regexp[Symbol.matchAll] is not callable");
+                        return try self.callValueWithThis(m, &.{.{ .string = s }}, regexp);
+                    }
+                };
             }
-            return try self.iteratorOf(results);
+            // RegExpCreate(regexp, "g"), then Invoke(rx, @@matchAll, « S ») so a
+            // replaced/deleted RegExp.prototype[@@matchAll] is honoured.
+            const src = if (regexp == .object and regexp.object.is_regex)
+                regexp.object.regex_source
+            else if (regexp == .undefined)
+                ""
+            else
+                try self.toStringV(regexp);
+            const rx = try self.makeRegex(src, "g");
+            if (skey) |k| {
+                const m = try self.getProperty(rx, k);
+                return try self.callValueWithThis(m, &.{.{ .string = s }}, rx);
+            }
+            return try self.regexpMatchAll(rx, s);
         }
         return null;
     }
@@ -10780,6 +10828,19 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
             try kproto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
         try env.put(kp[0], .{ .object = kproto });
+    }
+
+    // %RegExpStringIteratorPrototype% (proto %IteratorPrototype%): the lazy
+    // iterator returned by String.prototype.matchAll / RegExp.prototype[@@matchAll].
+    {
+        const re_iter_proto = try a.create(value.Object);
+        re_iter_proto.* = .{ .proto = iter_proto };
+        try setNative(a, rs, re_iter_proto, "next", 0, regexpStringIterNext);
+        if (sym_tag) |k| {
+            try re_iter_proto.setOwn(a, rs, k, .{ .string = "RegExp String Iterator" });
+            try re_iter_proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+        try env.put("\x00ReStrIterProto", .{ .object = re_iter_proto });
     }
 
     // %IteratorHelperPrototype% (proto %IteratorPrototype%): next + return, plus
@@ -18716,6 +18777,39 @@ fn stringIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     return self.makeCursorIterator(.{ .string = try self.toStringV(this) });
 }
 
+/// %RegExpStringIteratorPrototype%.next — lazily RegExpExec the matcher against
+/// the saved string, advancing past empty matches when the matcher is global.
+fn regexpStringIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object) return self.throwError("TypeError", "next called on non-object");
+    const o = this.object;
+    const matcher = o.getOwn("__re") orelse
+        return self.throwError("TypeError", "next called on an incompatible receiver");
+    if (o.getOwn("__done")) |d| if (d.toBoolean()) return self.iterResultObj(.undefined, true);
+    const s = (o.getOwn("__str") orelse Value{ .string = "" }).string;
+    const global = (o.getOwn("__g") orelse Value{ .boolean = false }).toBoolean();
+    const unicode = (o.getOwn("__u") orelse Value{ .boolean = false }).toBoolean();
+    const match = try self.regexpExecGeneric(matcher, s);
+    if (match == .null) {
+        try self.setProp(o, "__done", .{ .boolean = true });
+        return self.iterResultObj(.undefined, true);
+    }
+    if (!global) {
+        try self.setProp(o, "__done", .{ .boolean = true });
+        return self.iterResultObj(match, false);
+    }
+    // Global: a zero-length match would otherwise stall lastIndex; bump it past
+    // the current position (honouring surrogate pairs under the `u`/`v` flag).
+    const match_str = try self.toStringV(try self.getProperty(match, "0"));
+    if (match_str.len == 0) {
+        const this_index = toLen(try self.toNumberV(try self.getProperty(matcher, "lastIndex")));
+        const next_index = Interpreter.advanceStringIndex(s, this_index, unicode);
+        try self.setRegExpLikeLastIndex(matcher, @floatFromInt(next_index));
+    }
+    return self.iterResultObj(match, false);
+}
+
 fn canonicalCollectionKey(v: Value) Value {
     return if (v == .number and v.number == 0) Value{ .number = 0 } else v;
 }
@@ -19436,6 +19530,9 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, op, "split")) {
                 const limit: Value = if (args.len > 1) args[1] else .undefined;
                 return try self.regexpSplit(this, str, limit);
+            }
+            if (comptime std.mem.eql(u8, op, "matchAll")) {
+                return try self.regexpMatchAll(this, str);
             }
             return (try self.stringMethod(str, op, &.{this})) orelse .undefined;
         }
