@@ -4096,22 +4096,18 @@ pub const Interpreter = struct {
             if (eq(name, "isSupersetOf")) {
                 // A smaller `this` cannot be a superset (and must not iterate keys).
                 if (this_size < rec.size) return Value{ .boolean = false };
-                for (try self.collectSetKeys(rec)) |k| {
-                    if (!setContains(o, k)) return Value{ .boolean = false };
-                }
-                return Value{ .boolean = true };
+                // Stop (closing the iterator) at the first other-key absent from this.
+                return Value{ .boolean = !(try self.setKeysAny(rec, o, false)) };
             }
             if (eq(name, "isDisjointFrom")) {
                 if (this_size <= rec.size) {
                     for (o.elements.items) |e| {
                         if (try self.recordHas(rec, e)) return Value{ .boolean = false };
                     }
-                } else {
-                    for (try self.collectSetKeys(rec)) |k| {
-                        if (setContains(o, k)) return Value{ .boolean = false };
-                    }
+                    return Value{ .boolean = true };
                 }
-                return Value{ .boolean = true };
+                // Stop (closing the iterator) at the first other-key present in this.
+                return Value{ .boolean = !(try self.setKeysAny(rec, o, true)) };
             }
         }
         if (eq(name, "keys") or eq(name, "values") or eq(name, "entries"))
@@ -4139,6 +4135,29 @@ pub const Interpreter = struct {
         const keys = try self.getProperty(v, "keys");
         if (!keys.isCallable()) return self.throwError("TypeError", "set-like 'keys' is not callable");
         return .{ .obj = v.object, .has = has, .keys = keys, .size = size, .is_set = false };
+    }
+
+    /// Lazily walk `rec`'s keys (GetIteratorDirect — `next` captured once),
+    /// stopping as soon as `setContains(o, key) == want`. On an early stop the
+    /// key iterator is closed (IteratorClose) and `true` is returned; if the keys
+    /// are exhausted without a match, `false` (no close — the iterator finished).
+    fn setKeysAny(self: *Interpreter, rec: SetRecord, o: *value.Object, want: bool) EvalError!bool {
+        if (rec.is_set) {
+            for (rec.obj.elements.items) |k| if (setContains(o, k) == want) return true;
+            return false;
+        }
+        const iter = try self.callValueWithThis(rec.keys, &.{}, .{ .object = rec.obj });
+        const next_m = try self.getProperty(iter, "next");
+        while (true) {
+            const r = try self.callValueWithThis(next_m, &.{}, iter);
+            if (r != .object) return self.throwError("TypeError", "iterator.next() did not return an object");
+            if ((try self.getProperty(r, "done")).toBoolean()) return false;
+            const k = try self.getProperty(r, "value");
+            if (setContains(o, k) == want) {
+                try self.iteratorClose(iter);
+                return true;
+            }
+        }
     }
 
     /// SetDataHas: whether the native Set `o` contains `elem` (SameValueZero) —
