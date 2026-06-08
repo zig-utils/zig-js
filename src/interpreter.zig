@@ -5531,12 +5531,13 @@ pub const Interpreter = struct {
         if (res != .object or res.object.typed_array == null)
             return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
         const rta = res.object.typed_array.?;
-        if (rta.buffer.array_buffer.?.detached)
-            return self.throwError("TypeError", "TypedArray species returned a detached TypedArray");
         if (rta.kind.isBigInt() != kind.isBigInt())
             return self.throwError("TypeError", "TypedArray species content type does not match");
-        if (rta.length < len)
-            return self.throwError("TypeError", "TypedArray species result is too short");
+        // ValidateTypedArray + the single-Number length guard use the LIVE length:
+        // a result whose (resizable) buffer is detached/out-of-bounds, or now
+        // shorter than requested, is a TypeError.
+        if ((rta.currentLength() orelse 0) < len)
+            return self.throwError("TypeError", "TypedArray species result is too short or out of bounds");
         return res.object;
     }
 
@@ -5624,7 +5625,10 @@ pub const Interpreter = struct {
             if (has_len) {
                 length = req_len;
             } else {
-                if ((buflen - byte_offset) % size != 0) return self.throwError("RangeError", "byte length not a multiple of element size");
+                // A length-tracking view over a resizable buffer just tracks
+                // floor(available / elementSize); only a fixed-length view
+                // requires the byte length to be an exact multiple.
+                if (!track and (buflen - byte_offset) % size != 0) return self.throwError("RangeError", "byte length not a multiple of element size");
                 length = (buflen - byte_offset) / size;
             }
             if (byte_offset + length * size > buflen) return self.throwError("RangeError", "invalid typed array length");
