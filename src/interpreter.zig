@@ -1886,6 +1886,27 @@ pub const Interpreter = struct {
     /// destructuring default), give the still-unnamed function that name. The
     /// `name` own property is { writable:false, enumerable:false,
     /// configurable:true }, like every function name.
+    /// Name an accessor function `"get name"` / `"set name"` (a non-writable,
+    /// non-enumerable, configurable own `name` property), overriding the
+    /// parser-assigned bare name.
+    fn nameAccessor(self: *Interpreter, fnv: Value, prefix: []const u8, name_str: []const u8) EvalError!void {
+        if (fnv != .object or !fnv.object.isCallableObject()) return;
+        const nm = try std.fmt.allocPrint(self.arena, "{s} {s}", .{ prefix, name_str });
+        try fnv.object.setOwn(self.arena, self.root_shape, "name", .{ .string = nm });
+        try fnv.object.setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+        if (funcOf(fnv)) |f| f.name = nm;
+    }
+
+    /// The function-name string a property key contributes (PropertyName's name):
+    /// a string key as-is, a symbol as `[description]` (or `""` when undescribed),
+    /// else ToString. Used to name concise methods/accessors from their key.
+    fn keyDisplayName(self: *Interpreter, kv: Value) EvalError![]const u8 {
+        if (kv == .object and kv.object.is_symbol)
+            return if (kv.object.sym_desc) |d| try std.fmt.allocPrint(self.arena, "[{s}]", .{d}) else "";
+        if (kv == .string) return kv.string;
+        return self.toStringV(kv);
+    }
+
     fn maybeNameAnon(self: *Interpreter, val: Value, init_node: *Node, name: []const u8) EvalError!void {
         if (name.len == 0) return;
         if (!isAnonFnDef(init_node)) return;
@@ -2010,11 +2031,14 @@ pub const Interpreter = struct {
                 _ = try self.eval(block);
                 continue;
             }
-            const key = if (m.key_expr) |ke| try self.keyOf(try self.eval(ke)) else m.key;
+            const kv: ?Value = if (m.key_expr) |ke| try self.eval(ke) else null;
+            const key = if (kv) |k| try self.keyOf(k) else m.key;
+            const name_str = if (kv) |k| try self.keyDisplayName(k) else m.key;
             if (m.is_field) {
                 if (m.is_static) {
-                    const v = if (m.field_init) |init_node| try self.eval(init_node) else .undefined;
-                    try self.setProp(class_obj, key, v);
+                    const fv2 = if (m.field_init) |init_node| try self.eval(init_node) else .undefined;
+                    if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
+                    try self.setProp(class_obj, key, fv2);
                 }
                 continue;
             }
@@ -2026,9 +2050,20 @@ pub const Interpreter = struct {
                 mf.super_ctor = super_obj;
             }
             switch (m.accessor) {
-                .none => try self.setProp(home, key, fv),
-                .get => try self.defineAccessor(home, key, fv, null),
-                .set => try self.defineAccessor(home, key, null, fv),
+                .none => {
+                    // Name a computed/symbol-keyed method ("[desc]"); a plain
+                    // `m(){}` already carries its parser-assigned name.
+                    try self.maybeNameAnon(fv, m.func.?, name_str);
+                    try self.setProp(home, key, fv);
+                },
+                .get => {
+                    try self.nameAccessor(fv, "get", name_str);
+                    try self.defineAccessor(home, key, fv, null);
+                },
+                .set => {
+                    try self.nameAccessor(fv, "set", name_str);
+                    try self.defineAccessor(home, key, null, fv);
+                },
             }
             // Class methods/accessors are non-enumerable (writable + configurable),
             // unlike object-literal properties.
@@ -3066,7 +3101,11 @@ pub const Interpreter = struct {
                 }
                 continue;
             }
-            const key = if (p.key_expr) |ke| try self.keyOf(try self.eval(ke)) else p.key;
+            const kv: ?Value = if (p.key_expr) |ke| try self.eval(ke) else null;
+            const key = if (kv) |k| try self.keyOf(k) else p.key;
+            // The name a method/accessor takes from this key (a symbol shows as
+            // `[description]`, not its internal key).
+            const name_str = if (kv) |k| try self.keyDisplayName(k) else p.key;
             switch (p.accessor) {
                 .none => {
                     const pv = try self.eval(p.value);
@@ -3081,17 +3120,19 @@ pub const Interpreter = struct {
                         if (funcOf(pv)) |f| {
                             f.home_object = v.object;
                         };
-                    try self.maybeNameAnon(pv, p.value, key); // `{ x: function(){} }` ⇒ name "x"
+                    try self.maybeNameAnon(pv, p.value, name_str); // `{ x: function(){} }` ⇒ name "x"
                     try self.setProp(v.object, key, pv);
                 },
                 .get => {
                     const gv = try self.eval(p.value);
                     if (funcOf(gv)) |f| f.home_object = v.object;
+                    try self.nameAccessor(gv, "get", name_str);
                     try self.defineAccessor(v.object, key, gv, null);
                 },
                 .set => {
                     const sv = try self.eval(p.value);
                     if (funcOf(sv)) |f| f.home_object = v.object;
+                    try self.nameAccessor(sv, "set", name_str);
                     try self.defineAccessor(v.object, key, null, sv);
                 },
             }
