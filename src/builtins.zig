@@ -799,11 +799,13 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
         // key = ToPropertyKey(Get(entry,"0")); value = Get(entry,"1"); a throw in
         // either step closes the iterator (IteratorClose on abrupt completion).
         const key = self.keyOf(try self.getProperty(entry, "0")) catch |e| {
-            self.iteratorClose(iter) catch {};
+            // IteratorClose with a throw completion: keep the original exception
+            // (any error from `return()` is discarded, the original throw wins).
+            self.iteratorCloseKeepingThrow(iter);
             return e;
         };
         const v = self.getProperty(entry, "1") catch |e| {
-            self.iteratorClose(iter) catch {};
+            self.iteratorCloseKeepingThrow(iter);
             return e;
         };
         try self.setMember(result, key, v);

@@ -5024,17 +5024,24 @@ pub const Interpreter = struct {
     /// throw propagates (normal-completion close).
     pub fn iteratorClose(self: *Interpreter, iter: Value) EvalError!void {
         if (iter == .object and iter.object.gen != null) {
-            _ = try self.callMethod(iter, "return", &.{});
+            const r = try self.callMethod(iter, "return", &.{});
+            if (r != .object) return self.throwError("TypeError", "iterator 'return' did not return an object");
             return;
         }
+        // GetMethod(iterator, "return"): absent (undefined/null) → no close; a
+        // present-but-non-callable `return` is a TypeError. A normal-completion
+        // close also requires `return()` to return an object.
         const ret = try self.getProperty(iter, "return");
-        if (ret.isCallable()) _ = try self.callValueWithThis(ret, &.{}, iter);
+        if (ret == .undefined or ret == .null) return;
+        if (!ret.isCallable()) return self.throwError("TypeError", "iterator 'return' is not a function");
+        const r = try self.callValueWithThis(ret, &.{}, iter);
+        if (r != .object) return self.throwError("TypeError", "iterator 'return' did not return an object");
     }
 
     /// IteratorClose with an existing throw completion: close `iter`, but keep the
     /// pending exception (a throw from `return()` is discarded — the original
     /// completion wins). Used when an iterator-helper callback throws.
-    fn iteratorCloseKeepingThrow(self: *Interpreter, iter: Value) void {
+    pub fn iteratorCloseKeepingThrow(self: *Interpreter, iter: Value) void {
         const saved = self.exception;
         self.iteratorClose(iter) catch {};
         self.exception = saved;
