@@ -5646,8 +5646,20 @@ pub const Interpreter = struct {
     }
 
     /// Pull the next result from iterator `it`, returning `{ done, value }`.
-    fn iterStep(self: *Interpreter, it: Value) EvalError!struct { done: bool, value: Value } {
-        const r = try self.callMethod(it, "next", &.{});
+    const IterStepResult = struct { done: bool, value: Value };
+
+    fn iterStep(self: *Interpreter, it: Value) EvalError!IterStepResult {
+        return self.iterStepM(it, .undefined);
+    }
+
+    /// Pull one step from an iterator. If `next_method` is a callable (captured
+    /// once via GetIteratorDirect), call it with `it` as the receiver rather than
+    /// re-reading `it.next` each step — so a `next` accessor runs only once.
+    fn iterStepM(self: *Interpreter, it: Value, next_method: Value) EvalError!IterStepResult {
+        const r = if (next_method == .object and next_method.object.isCallableObject())
+            try self.callValueWithThis(next_method, &.{}, it)
+        else
+            try self.callMethod(it, "next", &.{});
         if (r != .object) return self.throwError("TypeError", "iterator result is not an object");
         const done = (try self.getProperty(r, "done")).toBoolean();
         const val = if (done) Value.undefined else try self.getProperty(r, "value");
@@ -9620,6 +9632,15 @@ fn makeIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, f
     const o = (try self.newObject()).object;
     const h = try self.arena.create(value.IterHelper);
     h.* = .{ .src = src, .kind = kind, .func = func, .limit = limit };
+    // GetIteratorDirect: capture the source iterator's `next` method once at
+    // creation (the concat/zip kinds hold an array of iterables, not a single
+    // iterator, so they capture per-source instead).
+    switch (kind) {
+        .concat, .zip, .zip_keyed => {},
+        else => if (src == .object) {
+            h.next_method = try self.getProperty(src, "next");
+        },
+    }
     o.iter_helper = h;
     if (self.env.get("\x00IterHelperProto")) |p| if (p == .object) {
         o.proto = p.object;
@@ -9637,7 +9658,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (h.done) return self.iterResultObj(.undefined, true);
     switch (h.kind) {
         .wrap => {
-            const s = try self.iterStep(h.src);
+            const s = try self.iterStepM(h.src, h.next_method);
             if (s.done) {
                 h.done = true;
                 return self.iterResultObj(.undefined, true);
@@ -9645,7 +9666,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             return self.iterResultObj(s.value, false);
         },
         .map => {
-            const s = try self.iterStep(h.src);
+            const s = try self.iterStepM(h.src, h.next_method);
             if (s.done) {
                 h.done = true;
                 return self.iterResultObj(.undefined, true);
@@ -9656,7 +9677,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         },
         .filter => {
             while (true) {
-                const s = try self.iterStep(h.src);
+                const s = try self.iterStepM(h.src, h.next_method);
                 if (s.done) {
                     h.done = true;
                     return self.iterResultObj(.undefined, true);
@@ -9671,7 +9692,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                 h.done = true;
                 return self.iterResultObj(.undefined, true);
             }
-            const s = try self.iterStep(h.src);
+            const s = try self.iterStepM(h.src, h.next_method);
             if (s.done) {
                 h.done = true;
                 return self.iterResultObj(.undefined, true);
@@ -9683,14 +9704,14 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             if (!h.started) {
                 h.started = true;
                 while (h.counter < h.limit) : (h.counter += 1) {
-                    const s = try self.iterStep(h.src);
+                    const s = try self.iterStepM(h.src, h.next_method);
                     if (s.done) {
                         h.done = true;
                         return self.iterResultObj(.undefined, true);
                     }
                 }
             }
-            const s = try self.iterStep(h.src);
+            const s = try self.iterStepM(h.src, h.next_method);
             if (s.done) {
                 h.done = true;
                 return self.iterResultObj(.undefined, true);
@@ -9700,7 +9721,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         .flat_map => {
             while (true) {
                 if (h.inner == null) {
-                    const s = try self.iterStep(h.src);
+                    const s = try self.iterStepM(h.src, h.next_method);
                     if (s.done) {
                         h.done = true;
                         return self.iterResultObj(.undefined, true);
@@ -9708,8 +9729,10 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                     const mapped = try self.callValueWithThis(h.func, &.{ s.value, .{ .number = h.counter } }, .undefined);
                     h.counter += 1;
                     h.inner = try self.iteratorOf(mapped);
+                    // Capture the inner iterator's `next` once (GetIteratorFlattenable).
+                    h.inner_next = if (h.inner.? == .object) try self.getProperty(h.inner.?, "next") else .undefined;
                 }
-                const is = try self.iterStep(h.inner.?);
+                const is = try self.iterStepM(h.inner.?, h.inner_next);
                 if (is.done) {
                     h.inner = null;
                     continue;
