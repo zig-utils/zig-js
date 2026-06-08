@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 34,855 / 41,664 (83.7%)**, with **135 parse failures**,
-> **6,674 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
+> The latest full run passes **VALID 34,929 / 41,664 (83.8%)**, with **135 parse failures**,
+> **6,600 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **34,855 / 41,664 (83.7%)** |
+| **valid** | can we run the program? (scored corpus) | **34,929 / 41,664 (83.8%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,213 / 4,668 (68.8%) |
 
 The scored corpus currently skips 6,845 tests that require runner work for modules, async harness
@@ -67,7 +67,7 @@ Per area (valid):
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 12,759 / 14,285 (89.3%) | `Object` | 3,251 / 3,411 (95.3%) |
+| `language` | 12,821 / 14,285 (89.8%) | `Object` | 3,273 / 3,411 (96.0%) |
 | `Array` | 2,732 / 2,991 (91.3%) | `RegExp` | 1,463 / 1,687 (86.7%) |
 | `String` | 1,075 / 1,223 (87.9%) | `TypedArray` | 1,217 / 1,446 (84.2%) |
 | `TypedArrayConstructors` | 561 / 738 (76.0%) | `Uint8Array` | 70 / 70 (100%) |
@@ -78,7 +78,7 @@ Per area (valid):
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 25 / 29 (86.2%) | `FinalizationRegistry` | 40 / 47 (85.1%) |
 | `Temporal` | 3,209 / 4,603 (69.7%) | `intl402` | 1,427 / 3,341 (42.7%) |
-| `annexB` | 461 / 1,070 (43.1%) | `staging` | 631 / 991 (63.7%) |
+| `annexB` | 919 / 1,070 (85.9%) | `staging` | 647 / 991 (65.3%) |
 | `SharedArrayBuffer` | 88 / 104 (84.6%) | `ArrayBuffer` | 196 / 221 (88.7%) |
 | `SuppressedError` | 22 / 22 (100%) | `ThrowTypeError` | 14 / 14 (100%) |
 | `AbstractModuleSource` | 8 / 8 (100%) | `AggregateError` | 25 / 25 (100%) |
