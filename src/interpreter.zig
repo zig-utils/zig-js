@@ -5024,6 +5024,9 @@ pub const Interpreter = struct {
                 // the write to its setter through the ordinary [[Set]] path below,
                 // rather than overwriting the mapped element directly.
                 if (o.getAccessor(key) == null and i < o.elements.items.len) {
+                    // A per-index descriptor may mark the element non-writable:
+                    // sloppy ignores the write, strict throws (handled by caller).
+                    if (o.attrs != null and !o.getAttr(key).writable) return false;
                     o.elements.items[i] = v;
                     o.clearHole(i);
                     return true;
