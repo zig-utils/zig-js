@@ -6445,6 +6445,20 @@ pub const Interpreter = struct {
         return self.getProperty(.{ .object = o }, ks);
     }
 
+    /// Set(O, ToString(i), v, true) — SetPropertyOrThrow on an integer index.
+    fn arrIndexSetOrThrow(self: *Interpreter, o: *value.Object, i: usize, v: Value) EvalError!void {
+        const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        if (!try self.setMemberResult(.{ .object = o }, ks, v, .{ .object = o }))
+            return self.throwError("TypeError", "Cannot set array index");
+    }
+
+    /// DeletePropertyOrThrow(O, ToString(i)).
+    fn arrIndexDeleteOrThrow(self: *Interpreter, o: *value.Object, i: usize) EvalError!void {
+        const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        if (!try self.deleteOwn(o, ks))
+            return self.throwError("TypeError", "Cannot delete array index");
+    }
+
     /// Spread one concat-spreadable source into `dst`, preserving holes: a real
     /// Array uses its sparse `length`, an array-like reads ToLength(.length).
     /// A pathological 2**53-style length throws (instead of OOM-crashing).
@@ -6806,7 +6820,36 @@ pub const Interpreter = struct {
             return result;
         }
         if (eq(name, "reverse")) {
-            std.mem.reverse(Value, o.elements.items);
+            // Dense fast path: a plain array with no holes, no accessors, and no
+            // sparse tail is a contiguous value slice — swap in place.
+            if (o.is_array and o.holes == null and o.accessors == null and
+                o.array_len <= o.elements.items.len)
+            {
+                std.mem.reverse(Value, o.elements.items);
+                return Value{ .object = o };
+            }
+            // Generic Array.prototype.reverse: Get/Set/HasProperty/Delete keyed by
+            // index, so it works on an array-like `this`, honours holes (deleting
+            // the mirror when only one side is present), and runs accessors.
+            const middle = ilen / 2;
+            var lower: usize = 0;
+            while (lower != middle) : (lower += 1) {
+                const upper = ilen - lower - 1;
+                const lower_exists = self.arrIndexPresent(o, lower);
+                const lower_val: Value = if (lower_exists) try self.arrIndexGet(o, lower) else .undefined;
+                const upper_exists = self.arrIndexPresent(o, upper);
+                const upper_val: Value = if (upper_exists) try self.arrIndexGet(o, upper) else .undefined;
+                if (lower_exists and upper_exists) {
+                    try self.arrIndexSetOrThrow(o, lower, upper_val);
+                    try self.arrIndexSetOrThrow(o, upper, lower_val);
+                } else if (upper_exists) {
+                    try self.arrIndexSetOrThrow(o, lower, upper_val);
+                    try self.arrIndexDeleteOrThrow(o, upper);
+                } else if (lower_exists) {
+                    try self.arrIndexDeleteOrThrow(o, lower);
+                    try self.arrIndexSetOrThrow(o, upper, lower_val);
+                }
+            }
             return Value{ .object = o };
         }
         // ES2023 "change array by copy": return a new array, leaving `this`
@@ -7111,27 +7154,53 @@ pub const Interpreter = struct {
             const rra = removed.object.is_array;
             var i: usize = 0;
             while (i < del) : (i += 1) {
-                const v = if (self.arrIndexPresent(o, start + i)) try self.arrIndexGet(o, start + i) else Value.undefined;
-                if (rra) try removed.object.elements.append(self.arena, v) else try self.arrayResultPush(removed, i, v);
-            }
-            i = 0;
-            while (i < del) : (i += 1) {
-                if (o.is_array and start < o.elements.items.len) {
-                    _ = o.elements.orderedRemove(start);
-                } else {
-                    const idx = try std.fmt.allocPrint(self.arena, "{d}", .{start + i});
-                    _ = try self.deleteOwn(o, idx);
+                if (self.arrIndexPresent(o, start + i)) {
+                    const v = try self.arrIndexGet(o, start + i);
+                    if (rra) try removed.object.elements.append(self.arena, v) else try self.arrayResultPush(removed, i, v);
+                } else if (rra) { // preserve a hole in the removed array
+                    try removed.object.elements.append(self.arena, .undefined);
+                    try removed.object.markHole(self.arena, i);
                 }
             }
             const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
-            var j: usize = inserts.len;
-            while (j > 0) : (j -= 1) {
-                if (o.is_array and start <= o.elements.items.len) {
-                    try o.elements.insert(self.arena, start, inserts[j - 1]);
-                } else {
-                    try self.arraySetIndexThrowing(o, start + (j - 1), inserts[j - 1]);
+            const item_count = inserts.len;
+            // Dense fast path: an ordinary array with no holes/accessors/sparse
+            // tail can splice its contiguous value store directly.
+            if (o.is_array and o.holes == null and o.accessors == null and o.array_len <= o.elements.items.len) {
+                i = 0;
+                while (i < del) : (i += 1) if (start < o.elements.items.len) {
+                    _ = o.elements.orderedRemove(start);
+                };
+                var j: usize = item_count;
+                while (j > 0) : (j -= 1) try o.elements.insert(self.arena, start, inserts[j - 1]);
+                return removed;
+            }
+            // Generic Array.prototype.splice: shift the tail through [[Get]]/[[Set]]/
+            // [[Delete]] (so holes move and an array-like `this` is updated), then
+            // SetLength. Honour deletion failures (non-configurable) with a throw.
+            if (item_count < del) {
+                var k = start;
+                while (k < len - del) : (k += 1) {
+                    if (self.arrIndexPresent(o, k + del))
+                        try self.arrIndexSetOrThrow(o, k + item_count, try self.arrIndexGet(o, k + del))
+                    else
+                        try self.arrIndexDeleteOrThrow(o, k + item_count);
+                }
+                var k2 = len;
+                while (k2 > len - del + item_count) : (k2 -= 1) try self.arrIndexDeleteOrThrow(o, k2 - 1);
+            } else if (item_count > del) {
+                var k = len - del;
+                while (k > start) : (k -= 1) {
+                    if (self.arrIndexPresent(o, k + del - 1))
+                        try self.arrIndexSetOrThrow(o, k + item_count - 1, try self.arrIndexGet(o, k + del - 1))
+                    else
+                        try self.arrIndexDeleteOrThrow(o, k + item_count - 1);
                 }
             }
+            for (inserts, 0..) |it, off| try self.arrIndexSetOrThrow(o, start + off, it);
+            const new_len: f64 = @floatFromInt(len - del + item_count);
+            if (!try self.setMemberResult(.{ .object = o }, "length", .{ .number = new_len }, .{ .object = o }))
+                return self.throwError("TypeError", "Cannot set length");
             return removed;
         }
         if (eq(name, "copyWithin")) {
