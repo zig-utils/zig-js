@@ -6445,7 +6445,9 @@ pub const Interpreter = struct {
             return Value{ .boolean = false };
         }
         if (eq(name, "join")) {
-            const sep = if (args.len > 0 and args[0] != .undefined) try args[0].toString(self.arena) else ",";
+            // The separator and each element coerce via ToString (which runs a
+            // custom toString/valueOf), not raw formatting.
+            const sep = if (args.len > 0 and args[0] != .undefined) try self.toStringV(args[0]) else ",";
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             // Walk the logical length: a hole reads as `undefined` (via [[Get]])
             // and — like `undefined`/`null` — renders as the empty string.
@@ -6454,7 +6456,7 @@ pub const Interpreter = struct {
                 if (i != 0) try buf.appendSlice(self.arena, sep);
                 switch (try self.arrIndexGet(o, i)) {
                     .undefined, .null => {},
-                    else => |el| try buf.appendSlice(self.arena, try el.toString(self.arena)),
+                    else => |el| try buf.appendSlice(self.arena, try self.toStringV(el)),
                 }
             }
             return Value{ .string = try buf.toOwnedSlice(self.arena) };
@@ -11467,16 +11469,18 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         if (rel < -len_f or rel >= len_f) return Value.undefined;
         var idx: i64 = @intFromFloat(rel);
         if (idx < 0) idx += @as(i64, @intCast(len));
-        return try self.taLoad(ta, @intCast(idx));
+        return try self.taLoadIdx(ta, @intCast(idx));
     }
     if (eq(name, "join")) {
+        // The separator coerces once (it can resize the buffer); each element is
+        // then read length-aware — an index now out of bounds joins as "".
         const sep = if (args.len > 0 and args[0] != .undefined) try self.toStringV(args[0]) else ",";
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         var i: usize = 0;
         while (i < len) : (i += 1) {
             if (i > 0) try buf.appendSlice(self.arena, sep);
-            const el = try self.taLoad(ta, i);
-            try buf.appendSlice(self.arena, try self.toStringV(el));
+            const el = try self.taLoadIdx(ta, i);
+            if (el != .undefined) try buf.appendSlice(self.arena, try self.toStringV(el));
         }
         return Value{ .string = try buf.toOwnedSlice(self.arena) };
     }
@@ -11696,19 +11700,18 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const rel_num = if (args.len > 0) try self.toNumberV(args[0]) else 0;
         const rel = if (std.math.isNan(rel_num)) @as(f64, 0) else @trunc(rel_num);
         const len_f: f64 = @floatFromInt(len);
-        const in_bounds = !std.math.isInf(rel) and rel >= -len_f and rel < len_f;
-        const idx: i64 = if (in_bounds)
-            if (rel < 0) @as(i64, @intCast(len)) + @as(i64, @intFromFloat(rel)) else @intFromFloat(rel)
-        else
-            0;
+        // actualIndex computed from the entry length; +inf/-inf stay out of range.
+        const actual: f64 = if (rel >= 0) rel else len_f + rel;
         const v = if (args.len > 1) args[1] else Value.undefined;
-        // The value coerces (and can throw) before the bounds check.
+        // The value coerces (and can throw / resize the buffer) BEFORE the index
+        // is validated against the CURRENT length (IsValidIntegerIndex).
         const cv = if (ta.kind.isBigInt()) try self.toBigIntValueImpl(v, false) else Value{ .number = try self.toNumberV(v) };
-        if (!in_bounds or idx < 0 or idx >= len) return self.throwError("RangeError", "Invalid typed array index");
+        if (!isValidIntegerIndex(ta, actual)) return self.throwError("RangeError", "Invalid typed array index");
+        const idx: usize = @intFromFloat(actual);
+        // The result has the entry length; indices now out of bounds copy undefined.
         const result = try newTypedArray(self, ta.kind, len);
         var i: usize = 0;
-        while (i < len) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, i));
-        try self.taStore(result.typed_array.?, @intCast(idx), cv);
+        while (i < len) : (i += 1) try self.taStore(result.typed_array.?, i, if (i == idx) cv else try self.taLoadIdx(ta, i));
         return .{ .object = result };
     }
     if (eq(name, "toReversed")) {
