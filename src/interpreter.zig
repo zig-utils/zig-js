@@ -892,9 +892,13 @@ pub const Interpreter = struct {
                 break :blk .undefined;
             },
             .super_member => |m| blk: {
-                const parent = (self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method")).proto orelse break :blk .undefined;
+                const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
                 const key = try self.memberKey(m.property, m.computed);
-                break :blk try self.getProperty(.{ .object = parent }, key);
+                // GetSuperBase + RequireObjectCoercible: a null/absent prototype is
+                // a TypeError. The lookup uses `this` as the receiver so an
+                // inherited accessor observes the current instance.
+                const parent = home.proto orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+                break :blk try self.getPropertyWithReceiver(.{ .object = parent }, key, self.this_value);
             },
 
             .call => |c| try self.evalCall(c.callee, c.args, c.optional),
