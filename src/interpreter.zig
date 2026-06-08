@@ -5011,29 +5011,51 @@ pub const Interpreter = struct {
         // silent no-op.
         if (o.module_ns != null) return false;
         if (o.typed_array) |ta| {
-            // An integer-keyed write coerces the value to a number and stores it
-            // in the buffer; out-of-bounds / detached writes are silently ignored
-            // (a canonical numeric index never falls through to a named property).
-            if (arrayIndex(key)) |i| {
-                // A BigInt array coerces the value with ToBigInt (rejecting a
-                // Number), a numeric array with ToNumber. The coercion still runs
-                // (and can throw) even when the index is out of bounds/detached.
-                if (ta.kind.isBigInt()) {
-                    const bv = try self.toBigIntValueImpl(v, false);
-                    if (i < (ta.currentLength() orelse 0)) value.taWriteBig(ta, i, bv.object.bigint);
-                } else {
-                    const num = (try self.toNumberV(v));
-                    if (i < (ta.currentLength() orelse 0)) value.taWrite(ta, i, num);
+            // Integer-Indexed Exotic [[Set]] for a canonical numeric key.
+            const numkey: ?f64 = if (arrayIndex(key)) |i| @as(f64, @floatFromInt(i)) else canonicalNumericIndexString(key);
+            if (numkey) |n| {
+                const same = (receiver == .object and receiver.object == o);
+                if (same) {
+                    // IntegerIndexedElementSet: ToNumber/ToBigInt always runs (an
+                    // observable valueOf, can throw) even for an out-of-bounds /
+                    // detached index — and BEFORE the validity check, because the
+                    // coercion can resize the buffer and change which index is
+                    // valid; the store happens only if the index is valid after.
+                    if (ta.kind.isBigInt()) {
+                        const bv = try self.toBigIntValueImpl(v, false);
+                        if (isValidIntegerIndex(ta, n)) value.taWriteBig(ta, @intFromFloat(n), bv.object.bigint);
+                    } else {
+                        const num = try self.toNumberV(v);
+                        if (isValidIntegerIndex(ta, n)) value.taWrite(ta, @intFromFloat(n), num);
+                    }
+                    return true;
                 }
-                return true;
-            }
-            // A canonical numeric key not caught above ("-0", "-1", "1.5",
-            // out-of-bounds, …) is an invalid index: the value still coerces
-            // (an observable valueOf), the write is a no-op, and it never
-            // becomes a named property. Returns true.
-            if (canonicalNumericIndexString(key) != null) {
-                if (ta.kind.isBigInt()) _ = try self.toBigIntValueImpl(v, false) else _ = try self.toNumberV(v);
-                return true;
+                // A different Receiver: an invalid index on the target is a no-op
+                // that does NOT coerce the value. A valid target index does
+                // OrdinarySet → CreateDataProperty(Receiver, P, V): on a typed-array
+                // receiver that is a [[DefineOwnProperty]] (false for a bad index,
+                // never an inherited setter); on any other object an ordinary set.
+                if (!isValidIntegerIndex(ta, n)) return true;
+                if (receiver != .object) return true;
+                const rcv = receiver.object;
+                if (rcv.typed_array) |rta| {
+                    if (!isValidIntegerIndex(rta, n)) return false;
+                    if (rta.kind.isBigInt()) {
+                        const bv = try self.toBigIntValueImpl(v, false);
+                        value.taWriteBig(rta, @intFromFloat(n), bv.object.bigint);
+                    } else {
+                        value.taWrite(rta, @intFromFloat(n), try self.toNumberV(v));
+                    }
+                    return true;
+                }
+                // CreateDataProperty(Receiver, P, V): an own data property (no
+                // prototype [[Set]]/setter walk, unlike an ordinary assignment).
+                const desc = (try self.newObject()).object;
+                try desc.setOwn(self.arena, self.root_shape, "value", v);
+                try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+                try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+                try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+                return builtins.defineOneResult(self, rcv, key, desc);
             }
             // non-index keys fall through to ordinary [[Set]].
         }
@@ -5134,6 +5156,12 @@ pub const Interpreter = struct {
         while (cur) |c| {
             if (c.proxy_handler != null or c.proxy_revoked)
                 return self.proxySet(c, key, v, receiver);
+            // OrdinarySet delegates to an ancestor's [[Set]]: an Integer-Indexed
+            // Exotic ancestor handles a canonical numeric key itself (writing to a
+            // valid index of the Receiver, else a no-op), so a same-keyed accessor
+            // further up the chain is never reached.
+            if (c.typed_array != null and canonicalNumericIndexString(key) != null)
+                return self.setMemberResult(.{ .object = c }, key, v, receiver);
             if (c.getAccessor(key)) |acc| {
                 if (acc.set) |s| {
                     // An explicit `set: undefined` means "no setter".
@@ -5512,18 +5540,24 @@ pub const Interpreter = struct {
         o.typed_array = ta;
 
         if (a0 == .object and a0.object.array_buffer != null) {
-            // new TA(buffer, byteOffset?, length?)
+            // new TA(buffer, byteOffset?, length?). byteOffset/length are ToIndex
+            // (a negative or non-integer-huge value is a RangeError), the offset
+            // alignment is checked before the length coerces, and the buffer is
+            // re-checked for detachment AFTER both coercions run user code.
             const buffer = a0.object;
+            const byte_offset: usize = @intCast(if (args.len > 1) try toIndexArg(self, args[1]) else 0);
+            if (byte_offset % size != 0) return self.throwError("RangeError", "invalid typed array offset");
+            const has_len = args.len > 2 and args[2] != .undefined;
+            const req_len: usize = if (has_len) @intCast(try toIndexArg(self, args[2])) else 0;
+            if (buffer.array_buffer.?.detached) return self.throwError("TypeError", "Cannot construct a TypedArray on a detached buffer");
             const buflen = buffer.array_buffer.?.data.len;
-            const bo_f = if (args.len > 1) try self.toNumberV(args[1]) else 0;
-            const byte_offset: usize = @intFromFloat(@trunc(@max(0, bo_f)));
-            if (byte_offset % size != 0 or byte_offset > buflen) return self.throwError("RangeError", "invalid typed array offset");
+            if (byte_offset > buflen) return self.throwError("RangeError", "invalid typed array offset");
             var length: usize = undefined;
             // Omitting the length on a resizable buffer makes the view
             // length-tracking; on a fixed buffer it spans the remaining bytes.
-            const track = (args.len <= 2 or args[2] == .undefined) and buffer.array_buffer.?.max_byte_length != null;
-            if (args.len > 2 and args[2] != .undefined) {
-                length = @intFromFloat(@trunc(@max(0, try self.toNumberV(args[2]))));
+            const track = !has_len and buffer.array_buffer.?.max_byte_length != null;
+            if (has_len) {
+                length = req_len;
             } else {
                 if ((buflen - byte_offset) % size != 0) return self.throwError("RangeError", "byte length not a multiple of element size");
                 length = (buflen - byte_offset) / size;
@@ -11495,6 +11529,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const want_idx = eq(name, "findIndex") or eq(name, "findLastIndex");
         const from_end = eq(name, "findLast") or eq(name, "findLastIndex");
         const cb = if (args.len > 0) args[0] else Value.undefined;
+        if (!cb.isCallable()) return self.throwError("TypeError", "TypedArray.prototype.find predicate is not callable");
         var k: usize = 0;
         while (k < len) : (k += 1) {
             const i = if (from_end) len - 1 - k else k;
@@ -11577,17 +11612,21 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         return .{ .number = -1 };
     }
     if (eq(name, "fill")) {
-        // ToBigInt / ToNumber the fill value before clamping start/end.
+        // ToBigInt / ToNumber the fill value exactly once (before clamping
+        // start/end), then store the already-coerced value each step.
         const fillv = if (args.len > 0) args[0] else Value.undefined;
-        if (ta.kind.isBigInt()) {
-            _ = try self.toBigIntValueImpl(fillv, false);
-        } else {
-            _ = try self.toNumberV(fillv);
-        }
+        const coerced: Value = if (ta.kind.isBigInt())
+            try self.toBigIntValueImpl(fillv, false)
+        else
+            .{ .number = try self.toNumberV(fillv) };
         const start = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, 0);
         const end = try relIndex(self, if (args.len > 2) args[2] else .undefined, len, @floatFromInt(len));
+        // The value/start/end coercions can detach or shrink the buffer; re-read
+        // the live length (throw if detached) and clamp the write range to it.
+        const live = ta.currentLength() orelse return self.throwError("TypeError", "Cannot fill a TypedArray whose buffer is detached or out of bounds");
+        const hi = @min(end, live);
         var i = start;
-        while (i < end) : (i += 1) try self.taStore(ta, i, fillv);
+        while (i < hi) : (i += 1) try self.taStore(ta, i, coerced);
         return recv;
     }
     if (eq(name, "reverse")) {
