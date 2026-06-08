@@ -1106,6 +1106,22 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         }
         return true;
     }
+    // Integer-Indexed Exotic [[DefineOwnProperty]]: a canonical numeric key may
+    // only be (re)defined as a configurable, enumerable, writable data property
+    // at a valid index; anything else returns false (and Object.defineProperty
+    // then throws). The value, if present, is written through [[Set]].
+    if (target.typed_array) |ta| {
+        if (interpreter.canonicalNumericIndexString(key)) |n| {
+            if (!interpreter.isValidIntegerIndex(ta, n)) return false;
+            if (get != null or set != null) return false;
+            if (d.getOwn("configurable")) |c| if (!c.toBoolean()) return false;
+            if (d.getOwn("enumerable")) |e| if (!e.toBoolean()) return false;
+            if (d.getOwn("writable")) |w| if (!w.toBoolean()) return false;
+            if (d.getOwn("value")) |val|
+                _ = try self.setMemberResult(.{ .object = target }, key, val, .{ .object = target });
+            return true;
+        }
+    }
     if (target.prim) |p| {
         if (p == .string) {
             if (std.mem.eql(u8, key, "length")) {
@@ -1643,6 +1659,15 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         return completed;
     }
 
+    // Integer-Indexed Exotic [[GetOwnProperty]]: a valid index is a configurable,
+    // enumerable, writable data property; any other canonical numeric key is absent.
+    if (o.typed_array) |ta| {
+        if (interpreter.canonicalNumericIndexString(key)) |n| {
+            if (!interpreter.isValidIntegerIndex(ta, n)) return .undefined;
+            const el = try self.getProperty(ov, key);
+            return dataDescriptor(self, el, .{ .writable = true, .enumerable = true, .configurable = true });
+        }
+    }
     if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
         _ = try self.getProperty(ov, key);
     if (o.prim) |p| {

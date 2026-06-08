@@ -4556,6 +4556,10 @@ pub const Interpreter = struct {
                         if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
                         return value.taRead(ta, i);
                     }
+                    // A canonical numeric key that isn't a plain in-range index
+                    // ("-0", "-1", "1.5", out-of-bounds, …) reads as undefined and
+                    // never consults the prototype (Integer-Indexed [[Get]]).
+                    if (canonicalNumericIndexString(key) != null) return .undefined;
                     // other keys (methods, constructor, @@toStringTag) fall through.
                 }
                 if (o.is_array) {
@@ -5023,6 +5027,14 @@ pub const Interpreter = struct {
                 }
                 return true;
             }
+            // A canonical numeric key not caught above ("-0", "-1", "1.5",
+            // out-of-bounds, …) is an invalid index: the value still coerces
+            // (an observable valueOf), the write is a no-op, and it never
+            // becomes a named property. Returns true.
+            if (canonicalNumericIndexString(key) != null) {
+                if (ta.kind.isBigInt()) _ = try self.toBigIntValueImpl(v, false) else _ = try self.toNumberV(v);
+                return true;
+            }
             // non-index keys fall through to ordinary [[Set]].
         }
         if (o.prim) |p| {
@@ -5197,6 +5209,12 @@ pub const Interpreter = struct {
         // A module namespace's own properties (exports + @@toStringTag) are
         // non-configurable → [[Delete]] returns false; a non-own key "deletes".
         if (moduleNsOf(o)) |ns| return !moduleNsHas(ns, key);
+        // Integer-Indexed Exotic [[Delete]]: a canonical numeric key cannot be
+        // deleted when it is a valid index (returns false); any other numeric key
+        // (out of bounds, "-0", fractional) "deletes" as a no-op (returns true).
+        if (o.typed_array) |ta| {
+            if (canonicalNumericIndexString(key)) |n| return !isValidIntegerIndex(ta, n);
+        }
         if (o.prim) |p| {
             if (p == .string) {
                 if (std.mem.eql(u8, key, "length")) return false;
@@ -5429,6 +5447,29 @@ pub const Interpreter = struct {
         return res.object;
     }
 
+    /// TypedArraySpeciesCreate(exemplar, «buffer, byteOffset, length») — the
+    /// form `subarray` uses: the species constructor is `new`-ed with the shared
+    /// buffer and a byte range (so the result is a view, not a copy). Constructing
+    /// over a detached buffer throws TypeError (ValidateTypedArray); a wrong
+    /// content type or non-TypedArray result also throws.
+    fn typedArraySubarrayCreate(self: *Interpreter, exemplar: *value.Object, buffer: *value.Object, byte_offset: usize, len: usize) EvalError!Value {
+        const kind = exemplar.typed_array.?.kind;
+        const default_ctor = self.env.get(kind.ctorName()) orelse return self.throwError("TypeError", "missing TypedArray constructor");
+        const ctor = try self.speciesConstructor(.{ .object = exemplar }, default_ctor);
+        const res = try self.construct(ctor, &.{
+            .{ .object = buffer },
+            .{ .number = @floatFromInt(byte_offset) },
+            .{ .number = @floatFromInt(len) },
+        });
+        if (res != .object or res.object.typed_array == null)
+            return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
+        if (res.object.typed_array.?.buffer.array_buffer.?.detached)
+            return self.throwError("TypeError", "TypedArray species returned a detached TypedArray");
+        if (res.object.typed_array.?.kind.isBigInt() != kind.isBigInt())
+            return self.throwError("TypeError", "TypedArray species content type does not match");
+        return res;
+    }
+
     /// Create a zero-filled `ArrayBuffer` object of `len` bytes.
     pub fn makeArrayBuffer(self: *Interpreter, len: usize) EvalError!*value.Object {
         const o = (try self.newObject()).object;
@@ -5454,9 +5495,16 @@ pub const Interpreter = struct {
         const size = kind.byteSize();
         const a0 = if (args.len > 0) args[0] else Value.undefined;
         const o = (try self.newObject()).object;
-        // Prototype from the in-flight new.target, else the kind's constructor.
+        // GetPrototypeFromConstructor(newTarget, %TAPrototype%): read
+        // `newTarget.prototype` via [[Get]] (a getter runs and may throw); if the
+        // result isn't an object, fall back to the kind's intrinsic prototype.
         if (self.new_target == .object) {
-            o.proto = try self.protoObject(self.new_target.object);
+            const p = try self.getProperty(self.new_target, "prototype");
+            if (p == .object and !p.object.is_symbol and !p.object.is_bigint) {
+                o.proto = p.object;
+            } else if (self.env.get(kind.ctorName())) |c| {
+                if (c == .object) o.proto = try self.protoObject(c.object);
+            }
         } else if (self.env.get(kind.ctorName())) |c| {
             if (c == .object) o.proto = try self.protoObject(c.object);
         }
@@ -7905,6 +7953,11 @@ pub const Interpreter = struct {
     /// Spec [[HasProperty]]: own property first, then prototype chain, invoking
     /// Proxy `has` traps at whichever object in the chain provides them.
     fn hasPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        // Integer-Indexed Exotic [[HasProperty]]: a canonical numeric key resolves
+        // purely to index validity — it never consults the prototype chain.
+        if (o.typed_array) |ta| {
+            if (canonicalNumericIndexString(key)) |n| return isValidIntegerIndex(ta, n);
+        }
         var cur: ?*value.Object = o;
         while (cur) |c| {
             if (c.proxy_handler != null or c.proxy_revoked) return self.proxyHas(c, key);
@@ -11374,14 +11427,27 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         if (idx < 0) idx += @as(i64, @intCast(len));
         return try self.taLoad(ta, @intCast(idx));
     }
-    if (eq(name, "join") or eq(name, "toLocaleString")) {
-        const sep = if (eq(name, "join") and args.len > 0 and args[0] != .undefined) try self.toStringV(args[0]) else ",";
+    if (eq(name, "join")) {
+        const sep = if (args.len > 0 and args[0] != .undefined) try self.toStringV(args[0]) else ",";
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         var i: usize = 0;
         while (i < len) : (i += 1) {
             if (i > 0) try buf.appendSlice(self.arena, sep);
             const el = try self.taLoad(ta, i);
             try buf.appendSlice(self.arena, try self.toStringV(el));
+        }
+        return Value{ .string = try buf.toOwnedSlice(self.arena) };
+    }
+    if (eq(name, "toLocaleString")) {
+        // Per spec: R = ToString(? Invoke(element, "toLocaleString")), joined by ",".
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            if (i > 0) try buf.append(self.arena, ',');
+            const el = try self.taLoad(ta, i);
+            const method = try self.getProperty(el, "toLocaleString");
+            const r = try self.callValueWithThis(method, &.{}, el);
+            try buf.appendSlice(self.arena, try self.toStringV(r));
         }
         return Value{ .string = try buf.toOwnedSlice(self.arena) };
     }
@@ -11466,14 +11532,49 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const incl = eq(name, "includes");
         const last = eq(name, "lastIndexOf");
         const search = if (args.len > 0) args[0] else Value.undefined;
-        var k: usize = 0;
-        while (k < len) : (k += 1) {
-            const i = if (last) len - 1 - k else k;
-            const el = try self.taLoad(ta, i);
-            const match = if (incl) value.sameValueZero(el, search) else value.strictEquals(el, search);
-            if (match) return if (incl) Value{ .boolean = true } else Value{ .number = @floatFromInt(i) };
+        const not_found: Value = if (incl) .{ .boolean = false } else .{ .number = -1 };
+        if (len == 0) return not_found;
+        const flen: f64 = @floatFromInt(len);
+        // ToIntegerOrInfinity(fromIndex): default 0 (indexOf/includes) or len-1
+        // (lastIndexOf). The coercion runs user code that may detach/shrink the
+        // buffer, so re-read the live length afterwards and treat now-out-of-range
+        // indices as absent (HasProperty=false / Get=undefined).
+        var n: f64 = if (last) flen - 1 else 0;
+        if (args.len > 1) {
+            const raw = try self.toNumberV(args[1]);
+            n = if (std.math.isNan(raw)) 0 else @trunc(raw);
         }
-        return if (incl) Value{ .boolean = false } else Value{ .number = -1 };
+        const cur = ta.currentLength() orelse 0;
+        if (!last) {
+            if (n == std.math.inf(f64)) return not_found;
+            const start: usize = if (n >= flen) len else if (n >= 0) @intFromFloat(n) else blk: {
+                const s = flen + n;
+                break :blk if (s < 0) 0 else @intFromFloat(s);
+            };
+            var k: usize = start;
+            while (k < len) : (k += 1) {
+                if (k >= cur) continue;
+                const el = try self.taLoad(ta, k);
+                const match = if (incl) value.sameValueZero(el, search) else value.strictEquals(el, search);
+                if (match) return if (incl) Value{ .boolean = true } else Value{ .number = @floatFromInt(k) };
+            }
+            return not_found;
+        }
+        // lastIndexOf: search backward from `start`.
+        if (n == -std.math.inf(f64)) return .{ .number = -1 };
+        const start: i64 = if (n >= flen) @as(i64, @intCast(len)) - 1 else if (n >= 0) @intFromFloat(n) else blk: {
+            const s = flen + n;
+            if (s < 0) return .{ .number = -1 };
+            break :blk @intFromFloat(s);
+        };
+        var k: i64 = start;
+        while (k >= 0) : (k -= 1) {
+            const ku: usize = @intCast(k);
+            if (ku >= cur) continue;
+            const el = try self.taLoad(ta, ku);
+            if (value.strictEquals(el, search)) return .{ .number = @floatFromInt(ku) };
+        }
+        return .{ .number = -1 };
     }
     if (eq(name, "fill")) {
         // ToBigInt / ToNumber the fill value before clamping start/end.
@@ -11511,23 +11612,29 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             const esz = ta.kind.byteSize();
             const bytes = ta.buffer.array_buffer.?.data;
             const base = ta.byte_offset;
-            std.mem.copyForwards(u8, bytes[base + target * esz ..][0 .. count * esz], bytes[base + start * esz ..][0 .. count * esz]);
+            const dst = bytes[base + target * esz ..][0 .. count * esz];
+            const src = bytes[base + start * esz ..][0 .. count * esz];
+            // memmove: when the destination overlaps and follows the source,
+            // copy back-to-front so earlier writes don't clobber unread source.
+            if (target > start) std.mem.copyBackwards(u8, dst, src) else std.mem.copyForwards(u8, dst, src);
         }
         return recv;
     }
-    if (eq(name, "slice") or eq(name, "subarray")) {
+    if (eq(name, "subarray")) {
+        // subarray returns TypedArraySpeciesCreate(O, «buffer, beginByteOffset,
+        // newLength») — a view (sharing the buffer) built through the species
+        // constructor, so a non-constructor species or a detached buffer throws.
         const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, len, 0);
         const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, @floatFromInt(len));
         const count = if (end > start) end - start else 0;
-        if (eq(name, "subarray")) {
-            // A view onto the same buffer (no copy).
-            const o2 = (try self.newObject()).object;
-            const ta2 = try self.arena.create(value.TypedArrayData);
-            ta2.* = .{ .buffer = ta.buffer, .byte_offset = ta.byte_offset + start * ta.kind.byteSize(), .length = count, .kind = ta.kind };
-            o2.typed_array = ta2;
-            o2.proto = o.proto;
-            return .{ .object = o2 };
-        }
+        const begin_byte = ta.byte_offset + start * ta.kind.byteSize();
+        const sub = try self.typedArraySubarrayCreate(o, ta.buffer, begin_byte, count);
+        return sub;
+    }
+    if (eq(name, "slice")) {
+        const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, len, 0);
+        const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, @floatFromInt(len));
+        const count = if (end > start) end - start else 0;
         const result = try self.typedArraySpeciesCreate(o, count);
         // TypedArraySpeciesCreate can run user code (the `constructor`/@@species
         // getters) that detaches O's buffer; per spec slice re-checks before the
@@ -11583,16 +11690,32 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const offset_u64 = if (args.len > 1) try toIndexArg(self, args[1]) else 0;
         if (offset_u64 > std.math.maxInt(usize)) return self.throwError("RangeError", "offset is out of bounds");
         const offset: usize = @intCast(offset_u64);
+        // The offset's ToInteger can run user code (a valueOf) that detaches or
+        // shrinks the target's buffer; re-read the live length afterwards.
+        const tlen = ta.currentLength() orelse return self.throwError("TypeError", "Cannot set on a TypedArray whose buffer is detached or out of bounds");
         if (src == .object and src.object.typed_array != null) {
             const s = src.object.typed_array.?;
             if (s.kind.isBigInt() != ta.kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when setting a TypedArray");
-            if (offset > len or s.length > len - offset) return self.throwError("RangeError", "offset is out of bounds");
+            const slen = s.currentLength() orelse return self.throwError("TypeError", "source TypedArray buffer is detached or out of bounds");
+            if (offset > tlen or slen > tlen - offset) return self.throwError("RangeError", "offset is out of bounds");
+            // Snapshot the source first so an overlapping same-buffer copy is safe.
+            const tmp = try self.arena.alloc(Value, slen);
             var i: usize = 0;
-            while (i < s.length) : (i += 1) try self.taStore(ta, offset + i, try self.taLoad(s, i));
-        } else if (src == .object) {
-            const list = try self.iterableOrArrayLikeToList(src);
-            if (offset > len or list.len > len - offset) return self.throwError("RangeError", "offset is out of bounds");
-            for (list, 0..) |x, i| try self.taStore(ta, offset + i, x);
+            while (i < slen) : (i += 1) tmp[i] = try self.taLoad(s, i);
+            i = 0;
+            while (i < slen) : (i += 1) try self.taStore(ta, offset + i, tmp[i]);
+        } else {
+            // SetTypedArrayFromArrayLike: ToObject(source) — boxes a primitive
+            // (string/number/boolean/symbol), throws on undefined/null — then Get
+            // each index in order, writing as we go (so a getter sees prior writes).
+            const src_v = Value{ .object = try self.toObject(src) };
+            const slen = toLen(try self.toNumberV(try self.getProperty(src_v, "length")));
+            if (offset > tlen or slen > tlen - offset) return self.throwError("RangeError", "offset is out of bounds");
+            var k: usize = 0;
+            while (k < slen) : (k += 1) {
+                const v = try self.getProperty(src_v, try std.fmt.allocPrint(self.arena, "{d}", .{k}));
+                try self.taStore(ta, offset + k, v);
+            }
         }
         return Value.undefined;
     }
@@ -23210,12 +23333,45 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
     return false;
 }
 
+/// CanonicalNumericIndexString(key): the Number a key denotes when it is the
+/// canonical string form of that Number ("-0", "0", "1", "1.5", "Infinity", …),
+/// else null. Used by the Integer-Indexed Exotic Object internal methods so a
+/// numeric-looking key on a TypedArray is handled as an index (never as an
+/// ordinary/inherited property), even when out of bounds or fractional.
+pub fn canonicalNumericIndexString(key: []const u8) ?f64 {
+    if (key.len == 0) return null;
+    if (std.mem.eql(u8, key, "-0")) return -0.0;
+    // A key must start like a number for this to ever match (cheap reject).
+    const c0 = key[0];
+    if ((c0 < '0' or c0 > '9') and c0 != '-' and c0 != '.' and c0 != 'I' and c0 != 'N') return null;
+    const n = value.stringToNumber(key);
+    var buf: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const s = value.numberToString(fba.allocator(), n) catch return null;
+    return if (std.mem.eql(u8, s, key)) n else null;
+}
+
+/// IsValidIntegerIndex(O, index): true iff `n` is an in-bounds, integral,
+/// non-negative, non-`-0` index into the (attached, in-bounds) typed array.
+pub fn isValidIntegerIndex(ta: *const value.TypedArrayData, n: f64) bool {
+    if (std.math.isNan(n) or std.math.isInf(n) or @trunc(n) != n) return false;
+    if (n < 0) return false;
+    if (n == 0 and std.math.signbit(n)) return false; // -0
+    const len = ta.currentLength() orelse return false;
+    return n < @as(f64, @floatFromInt(len));
+}
+
 /// Does `o` have `name` as an *own* property (data, accessor, array index, or
 /// array `length`)? Backs `hasOwnProperty` / `propertyIsEnumerable` / `Object.hasOwn`.
 pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     // Private members (`#x`) are internal slots, invisible to all reflection.
     if (value.isPrivateKey(name)) return false;
     if (moduleNsOf(o)) |ns| return moduleNsHas(ns, name);
+    // A TypedArray's integer-indexed elements: a canonical numeric key is an own
+    // property iff it is a valid index (so "-0"/out-of-bounds/fractional are not).
+    if (o.typed_array) |ta| {
+        if (canonicalNumericIndexString(name)) |n| return isValidIntegerIndex(ta, n);
+    }
     if (o.getOwn(name) != null or o.getAccessor(name) != null) return true;
     if (o.prim) |p| {
         if (p == .string) {
