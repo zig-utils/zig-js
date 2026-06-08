@@ -373,6 +373,13 @@ pub const Object = struct {
     /// True for function `arguments` objects; they are array-like internally but
     /// carry the Arguments brand for Object.prototype.toString.
     is_arguments: bool = false,
+    /// A mapped (sloppy-mode, simple-parameter) arguments object's
+    /// `[[ParameterMap]]`: the call's environment record (type-erased
+    /// `*Environment`) and the parameter name each index maps to (`""` = not
+    /// mapped). A mapped index reads/writes the parameter binding; defining it as
+    /// an accessor or non-writable, or deleting it, severs the mapping.
+    arg_map_env: ?*anyopaque = null,
+    arg_map_names: [][]const u8 = &.{},
     /// `Map`/`Set` instances. A Map keeps `[key,value]` pair-arrays in
     /// `elements`; a Set keeps values directly. `size` is a maintained property.
     is_map: bool = false,

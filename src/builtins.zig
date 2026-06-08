@@ -1208,7 +1208,16 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                     return false;
                 }
                 while (target.elements.items.len <= i) try target.elements.append(self.arena, .undefined);
-                if (d.getOwn("value")) |val| target.elements.items[i] = val;
+                const am_mapped = target.is_arguments and interpreter.argMapName(target, i) != null;
+                if (d.getOwn("value")) |val| {
+                    target.elements.items[i] = val;
+                    // A mapped index also writes its parameter binding.
+                    if (am_mapped) interpreter.argMapSet(target, i, val);
+                } else if (am_mapped) {
+                    // No explicit value: snapshot the binding so an unmap below
+                    // leaves the current value frozen in the element.
+                    target.elements.items[i] = interpreter.argMapGet(target, i) orelse .undefined;
+                }
                 // Omitted fields keep the current value when redefining an
                 // existing element (implicitly all-true), else default to false.
                 var attr: value.PropAttr = if (within) cur_attr else .{ .writable = false, .enumerable = false, .configurable = false };
@@ -1216,6 +1225,8 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
                 if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
                 try target.setAttr(self.arena, key, attr);
+                // Redefining a mapped index as non-writable severs the parameter link.
+                if (am_mapped and !attr.writable) target.arg_map_names[i] = "";
                 if (i >= target.array_len) target.array_len = i + 1;
                 return true;
             }
@@ -1273,6 +1284,8 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     if (target.is_array) {
         if (arrayIndexOf(key)) |i| {
             if (i + 1 > target.array_len and i + 1 > target.elements.items.len) target.array_len = i + 1;
+            // Defining a mapped arguments index as an accessor severs its link.
+            if (target.is_arguments and (get != null or set != null) and i < target.arg_map_names.len) target.arg_map_names[i] = "";
         }
     }
     return true;
@@ -1701,6 +1714,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             return dataDescriptor(self, .{ .number = @floatFromInt(@max(o.elements.items.len, o.array_len)) }, .{ .writable = w, .enumerable = false, .configurable = false });
         }
         if (arrayIndexOf(key)) |i| {
+            // A mapped arguments index reports its current parameter binding value.
+            if (interpreter.argMapGet(o, i)) |bv|
+                return dataDescriptor(self, bv, o.getAttr(key));
             // Per-index attributes recorded by `defineProperty` override the
             // all-true default for a dense element.
             if (i < o.elements.items.len and !o.isHole(i))

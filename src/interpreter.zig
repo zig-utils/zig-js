@@ -2492,6 +2492,24 @@ pub const Interpreter = struct {
                     try args_obj.object.setAttr(self.arena, "callee", .{ .enumerable = false, .configurable = false });
                 }
             }
+            // Mapped arguments [[ParameterMap]]: in sloppy mode with simple
+            // parameters, each in-range index aliases its parameter binding (a
+            // two-way live link; reads/writes go to `call_env`).
+            if (!func.is_strict and !non_simple_params and func.params.len > 0) {
+                const n = @min(args.len, func.params.len);
+                const names = try self.arena.alloc([]const u8, n);
+                for (names, 0..) |*nm, i| nm.* = func.params[i].name;
+                // A duplicated parameter name maps only its last index.
+                for (names, 0..) |nm, i| {
+                    var j = i + 1;
+                    while (j < n) : (j += 1) if (std.mem.eql(u8, nm, names[j])) {
+                        names[i] = "";
+                        break;
+                    };
+                }
+                args_obj.object.arg_map_env = @ptrCast(call_env);
+                args_obj.object.arg_map_names = names;
+            }
             try call_env.put("arguments", args_obj);
         }
 
@@ -4747,6 +4765,11 @@ pub const Interpreter = struct {
                     // An accessor defined on an index (via defineProperty) wins
                     // over the dense element store, so the getter is invoked.
                     if (arrayElementIndex(key)) |i| {
+                        // A mapped arguments index reads its parameter binding.
+                        if (argMapName(o, i)) |nm| {
+                            const aenv: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
+                            return aenv.get(nm) orelse .undefined;
+                        }
                         // A present (non-hole) dense element with no index accessor
                         // is returned directly; a hole falls through to the proto
                         // chain so an inherited index (e.g. `Array.prototype[0]`) is
@@ -4788,6 +4811,11 @@ pub const Interpreter = struct {
                     }
                     if (c.is_array) {
                         if (arrayElementIndex(key)) |i| {
+                            // A mapped arguments index reads its parameter binding.
+                            if (argMapName(c, i)) |nm| {
+                                const aenv: *Environment = @ptrCast(@alignCast(c.arg_map_env.?));
+                                return aenv.get(nm) orelse .undefined;
+                            }
                             if (c.getAccessor(key) == null and i < c.elements.items.len and !c.isHole(i)) return c.elements.items[i];
                         }
                     }
@@ -5255,6 +5283,14 @@ pub const Interpreter = struct {
                 return true;
             }
             if (arrayElementIndex(key)) |i| {
+                // A mapped index writes through to its parameter binding (the
+                // element is kept in sync so the descriptor's value stays current).
+                if (argMapName(o, i)) |nm| {
+                    const aenv: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
+                    try aenv.assign(nm, v);
+                    if (i < o.elements.items.len) o.elements.items[i] = v;
+                    return true;
+                }
                 // An accessor installed on this index (via defineProperty) routes
                 // the write to its setter through the ordinary [[Set]] path below,
                 // rather than overwriting the mapped element directly.
@@ -5452,6 +5488,8 @@ pub const Interpreter = struct {
             if (arrayElementIndex(key)) |i| {
                 if (i < o.elements.items.len) {
                     if (o.attrs != null and !o.getAttr(key).configurable) return false;
+                    // Deleting a mapped arguments index severs its parameter link.
+                    if (o.is_arguments and i < o.arg_map_names.len) o.arg_map_names[i] = "";
                     o.elements.items[i] = .undefined;
                     try o.markHole(self.arena, i);
                     return true;
@@ -23593,6 +23631,28 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
         cur = c.proto;
     }
     return false;
+}
+
+/// The parameter name a mapped-arguments index aliases, or null if `o` is not a
+/// mapped arguments object or index `i` is unmapped (out of range / severed).
+pub fn argMapName(o: *value.Object, i: usize) ?[]const u8 {
+    if (o.arg_map_env == null or i >= o.arg_map_names.len) return null;
+    const nm = o.arg_map_names[i];
+    return if (nm.len == 0) null else nm;
+}
+
+/// Read a mapped index's parameter binding (null if unmapped).
+pub fn argMapGet(o: *value.Object, i: usize) ?Value {
+    const nm = argMapName(o, i) orelse return null;
+    const env: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
+    return env.get(nm);
+}
+
+/// Write a mapped index's parameter binding.
+pub fn argMapSet(o: *value.Object, i: usize, v: Value) void {
+    const nm = argMapName(o, i) orelse return;
+    const env: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
+    env.assign(nm, v) catch {};
 }
 
 /// CanonicalNumericIndexString(key): the Number a key denotes when it is the
