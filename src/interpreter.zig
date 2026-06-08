@@ -2362,6 +2362,11 @@ pub const Interpreter = struct {
         if (!func.is_arrow) {
             const args_obj = try self.newArray();
             args_obj.object.is_arguments = true;
+            // The arguments exotic object's [[Prototype]] is %Object.prototype%
+            // (not Array.prototype): it has no inherited array methods, and
+            // `arguments.toString()` is Object.prototype.toString → "[object
+            // Arguments]". Index storage and for-of still use the `is_array` path.
+            if (self.objectProto()) |op| args_obj.object.proto = op;
             try args_obj.object.setOwn(self.arena, self.root_shape, "length", .{ .number = @floatFromInt(args.len) });
             try args_obj.object.setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
             for (args) |av| try args_obj.object.elements.append(self.arena, av);

@@ -901,7 +901,8 @@ pub fn identity1(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 pub fn arrayIsArray(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = ctx;
     _ = this;
-    return .{ .boolean = arg(args, 0) == .object and arg(args, 0).object.is_array };
+    // The arguments exotic object is array-like but not an Array.
+    return .{ .boolean = arg(args, 0) == .object and arg(args, 0).object.is_array and !arg(args, 0).object.is_arguments };
 }
 
 pub fn mapFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
