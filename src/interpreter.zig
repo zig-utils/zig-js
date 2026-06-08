@@ -788,6 +788,63 @@ pub const Interpreter = struct {
                 break :blk v;
             },
 
+            // Compound assignment `target op= value`: resolve the LeftHandSide
+            // reference ONCE, GetValue, then PutValue on the SAME reference.
+            .op_assign => |oa| blk: {
+                switch (oa.target.*) {
+                    .identifier => |name| {
+                        // If a `with` object owns the binding, get AND set go to it
+                        // (even a self-deleting getter writes back to that object).
+                        if (try self.assignWithObject(name)) |wo| {
+                            const old = try self.getProperty(.{ .object = wo }, name);
+                            const rhs = try self.eval(oa.value);
+                            const new = try self.applyBinary(oa.op, old, rhs);
+                            // Object env record SetMutableBinding: in strict mode a
+                            // binding the getter deleted no longer exists → ReferenceError.
+                            if (self.strict and !(try self.hasPropertyResult(wo, name)))
+                                return self.throwError("ReferenceError", "binding is no longer defined");
+                            try self.setMember(.{ .object = wo }, name, new);
+                            break :blk new;
+                        }
+                        // Otherwise the lexical/global binding is stable across the
+                        // get/set, so a plain read + assignTo resolve to the same one.
+                        const old = try self.eval(oa.target);
+                        const rhs = try self.eval(oa.value);
+                        const new = try self.applyBinary(oa.op, old, rhs);
+                        try self.assignTo(oa.target, new);
+                        break :blk new;
+                    },
+                    .member => |m| {
+                        // The base (and a computed key expression) evaluate exactly
+                        // once. Mirror a member read's order: the key expression is
+                        // evaluated, then the null/undefined base is rejected BEFORE
+                        // ToPropertyKey (so `null[obj.toString]` throws without
+                        // calling toString), then the property key is formed.
+                        const obj = try self.eval(m.object);
+                        const key: []const u8 = if (m.computed) |ce| blk2: {
+                            const kv = try self.eval(ce);
+                            if (m.optional and (obj == .null or obj == .undefined)) break :blk .undefined;
+                            if (obj == .null or obj == .undefined)
+                                return self.throwError("TypeError", "cannot read property of null or undefined");
+                            break :blk2 try self.keyOf(kv);
+                        } else m.property;
+                        const old = try self.getProperty(obj, key);
+                        const rhs = try self.eval(oa.value);
+                        const new = try self.applyBinary(oa.op, old, rhs);
+                        try self.setMember(obj, key, new);
+                        break :blk new;
+                    },
+                    else => {
+                        // super.x etc.: the base is stable, so read + assignTo are safe.
+                        const old = try self.eval(oa.target);
+                        const rhs = try self.eval(oa.value);
+                        const new = try self.applyBinary(oa.op, old, rhs);
+                        try self.assignTo(oa.target, new);
+                        break :blk new;
+                    },
+                }
+            },
+
             .function => |fnode| blk: {
                 // A *named* function expression binds its own name as an
                 // immutable binding in a fresh scope enclosing the body, so the

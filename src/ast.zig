@@ -178,6 +178,10 @@ pub const Node = union(enum) {
     /// The comma operator: evaluate `first` (discarded), then `second` (result).
     sequence: struct { first: *Node, second: *Node },
     assign: struct { target: *Node, value: *Node },
+    /// Compound assignment `target op= value`: the LeftHandSide reference is
+    /// resolved ONCE (GetValue then PutValue use the same reference), so a
+    /// `with`-bound getter that mutates its scope is observed correctly.
+    op_assign: struct { target: *Node, op: BinaryOp, value: *Node },
     conditional: struct { cond: *Node, consequent: *Node, alternate: *Node },
     function: *FunctionNode, // function/arrow expression -> a function value
     /// `yield [expr]` / `yield* expr` — only valid inside a generator body.

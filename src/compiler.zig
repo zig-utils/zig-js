@@ -629,6 +629,27 @@ pub const Compiler = struct {
                 },
                 else => return error.Unsupported,
             },
+            .op_assign => |oa| switch (oa.target.*) {
+                // Identifier target: load the old value, apply the op, store back.
+                // (No `with` here — a function using `with` already falls back to
+                // the tree-walker, which resolves the reference once.)
+                .identifier => |name| {
+                    const op: bc.Op = switch (oa.op) {
+                        .add => .add,        .sub => .sub,       .mul => .mul,
+                        .div => .div,        .mod => .mod,       .pow => .pow,
+                        .bit_and => .bit_and, .bit_or => .bit_or, .bit_xor => .bit_xor,
+                        .shl => .shl,        .shr => .shr,       .ushr => .ushr,
+                        else => return error.Unsupported,
+                    };
+                    try self.emitLoad(name);
+                    try self.compileExpr(oa.value);
+                    _ = try self.chunk.emit(op, 0);
+                    try self.emitStore(name);
+                },
+                // Member/super targets resolve the base once — defer to the
+                // tree-walker (correct reference semantics, member case is rarer).
+                else => return error.Unsupported,
+            },
             .conditional => |c| {
                 try self.compileExpr(c.cond);
                 const to_else = try self.chunk.emit(.jump_if_false, 0);

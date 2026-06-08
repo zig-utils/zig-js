@@ -1244,8 +1244,7 @@ pub const Parser = struct {
                 return ParseError.UnexpectedToken;
             _ = self.advance();
             const rhs = try self.parseAssignment();
-            const bin = try self.alloc(.{ .binary = .{ .op = op, .left = left, .right = rhs } });
-            return self.alloc(.{ .assign = .{ .target = left, .value = bin } });
+            return self.alloc(.{ .op_assign = .{ .target = left, .op = op, .value = rhs } });
         }
         // Logical assignment: `a &&= b` -> `a && (a = b)`, etc. (short-circuiting).
         const logassign: ?ast.LogicalOp = switch (self.cur().kind) {
