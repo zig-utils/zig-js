@@ -1325,8 +1325,16 @@ pub const Interpreter = struct {
             outer: while (i < cases.len) : (i += 1) {
                 for (cases[i].body) |stmt| {
                     if (stmt.* == .func_decl) continue; // hoisted above
-                    last = try self.eval(stmt);
-                    if (self.signal != .none) break :outer;
+                    const r = try self.eval(stmt);
+                    if (self.signal != .none) {
+                        // UpdateEmpty: a raw break/continue is empty (keep `last`);
+                        // a compound statement carries its own folded value.
+                        if (!abruptCompletionEmpty(stmt)) last = r;
+                        break :outer;
+                    }
+                    // UpdateEmpty: an empty statement completion (declarations,
+                    // empty statement/block) does not replace the case block's value.
+                    if (!self.stmtCompletionEmpty(stmt)) last = r;
                 }
             }
             // An unlabeled `break` exits the switch; a labeled one targets an
@@ -1339,6 +1347,9 @@ pub const Interpreter = struct {
                 return error.Throw;
             }
         }
+        // CaseBlockEvaluation returns NormalCompletion(undefined) when no case
+        // statement produced a value — a concrete value, never an empty completion.
+        self.completion_empty = false;
         return last;
     }
 
@@ -1787,10 +1798,15 @@ pub const Interpreter = struct {
                 }
             }
             const r = try self.eval(s);
-            // An abrupt completion (break/continue/return/throw) is handled by the
-            // caller; the full UpdateEmpty semantics over abrupt completions aren't
-            // modeled, so keep returning the statement's own value here.
-            if (self.signal != .none) return r;
+            // An abrupt completion (break/continue/return) unwinds to the caller.
+            // UpdateEmpty: a raw break/continue carries an EMPTY value, so the
+            // list's accumulated value (`last`) flows through; anything else
+            // (return, or a compound statement that already folded its nested
+            // value) carries its own value.
+            if (self.signal != .none) {
+                if (!abruptCompletionEmpty(s)) last = r;
+                return last;
+            }
             // UpdateEmpty: a declaration / empty statement / empty block does not
             // replace the statement list's value.
             if (!self.stmtCompletionEmpty(s)) {
@@ -1800,6 +1816,17 @@ pub const Interpreter = struct {
         }
         self.completion_empty = !seen_value;
         return last;
+    }
+
+    /// Whether an ABRUPT completion produced by `s` carries an EMPTY value (so
+    /// UpdateEmpty lets the enclosing list's accumulated value flow through). A
+    /// raw `break`/`continue` has an empty completion value; `return` carries its
+    /// argument, and a compound statement already folded its own nested value in.
+    fn abruptCompletionEmpty(s: *Node) bool {
+        return switch (s.*) {
+            .break_stmt, .continue_stmt => true,
+            else => false,
+        };
     }
 
     /// Whether statement `s` produces an EMPTY completion (so it doesn't update
