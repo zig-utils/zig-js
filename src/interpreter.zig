@@ -5366,7 +5366,10 @@ pub const Interpreter = struct {
     pub fn speciesConstructor(self: *Interpreter, o: Value, default_ctor: Value) EvalError!Value {
         const ctor = try self.getProperty(o, "constructor");
         if (ctor == .undefined) return default_ctor;
-        if (ctor != .object) return self.throwError("TypeError", "constructor is not an object");
+        // Type(C) must be Object: Symbol/BigInt primitives are wrapped as objects
+        // (is_symbol/is_bigint) in this engine, so reject them explicitly too.
+        if (ctor != .object or ctor.object.is_symbol or ctor.object.is_bigint)
+            return self.throwError("TypeError", "constructor is not an object");
         const skey = self.wellKnownSymbolKey("species") orelse return default_ctor;
         const s = try self.getProperty(ctor, skey);
         if (s == .undefined or s == .null) return default_ctor;
@@ -11526,6 +11529,11 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             return .{ .object = o2 };
         }
         const result = try self.typedArraySpeciesCreate(o, count);
+        // TypedArraySpeciesCreate can run user code (the `constructor`/@@species
+        // getters) that detaches O's buffer; per spec slice re-checks before the
+        // copy when count > 0.
+        if (count > 0 and ta.currentLength() == null)
+            return self.throwError("TypeError", "Cannot slice a TypedArray whose buffer is detached or out of bounds");
         var i: usize = 0;
         while (i < count) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, start + i));
         return .{ .object = result };
@@ -17186,13 +17194,23 @@ fn installAgent(a: std.mem.Allocator, rs: *Shape, d: *value.Object) EvalError!vo
 /// ValidateIntegerTypedArray: the receiver must be an integer typed array (not
 /// a Float or Uint8Clamped view) over an attached buffer; returns the in-bounds
 /// element index from ToIndex(request).
-fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool) value.HostError!struct { ta: *value.TypedArrayData, i: usize } {
+fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, only_int32: bool, require_shared: bool) value.HostError!struct { ta: *value.TypedArrayData, i: usize } {
     if (ta_v != .object or ta_v.object.typed_array == null) return self.throwError("TypeError", "Atomics operand must be an integer TypedArray");
     const ta = ta_v.object.typed_array.?;
-    switch (ta.kind) {
+    // ValidateIntegerTypedArray(typedArray, waitable): a waitable op
+    // (wait/notify/waitAsync) only accepts Int32Array or BigInt64Array; the
+    // kind check runs BEFORE the index is coerced to ToIndex.
+    if (only_int32) {
+        if (ta.kind != .i32 and ta.kind != .i64)
+            return self.throwError("TypeError", "Atomics waitable op requires an Int32Array or BigInt64Array");
+    } else switch (ta.kind) {
         .i8, .u8, .i16, .u16, .i32, .u32, .i64, .u64 => {},
         else => return self.throwError("TypeError", "Atomics operand must be an integer TypedArray (not Float/Uint8Clamped)"),
     }
+    // ValidateSharedIntegerTypedArray(true): `Atomics.wait` additionally
+    // requires a SharedArrayBuffer, also checked before the index is coerced.
+    if (require_shared and !ta.buffer.array_buffer.?.is_shared)
+        return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
     // ValidateTypedArray(write): reject an immutable buffer before the index is
     // coerced (the value isn't coerced yet either).
     if (write and ta.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Atomics cannot write to an immutable ArrayBuffer");
@@ -17209,7 +17227,12 @@ fn atomicsCoerce(self: *Interpreter, ta: *value.TypedArrayData, v: Value) value.
         const bv = try self.toBigIntValueImpl(v, false);
         return @floatFromInt(@as(i64, @truncate(bv.object.bigint)));
     }
-    return @trunc(try self.toNumberV(v));
+    // ToIntegerOrInfinity: NaN coerces to +0 and -0 normalizes to +0 (so the
+    // value `Atomics.store` returns matches ToInteger, e.g. store(view,i,-0)===+0).
+    const num = try self.toNumberV(v);
+    if (std.math.isNan(num)) return 0;
+    const t = @trunc(num);
+    return if (t == 0) 0 else t;
 }
 
 fn atomicsReadV(self: *Interpreter, ta: *const value.TypedArrayData, i: usize) Value {
@@ -17226,7 +17249,7 @@ fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = this;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true);
+            const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true, false, false);
             const arg_v = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
             const old = atomicsReadV(self, vd.ta, vd.i);
             const old_n: f64 = if (old == .object and old.object.is_bigint) @floatFromInt(@as(i64, @truncate(old.object.bigint))) else old.number;
@@ -17249,13 +17272,13 @@ fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.
 fn atomicsLoadFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, false, false);
     return atomicsReadV(self, vd.ta, vd.i);
 }
 fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true, false, false);
     const raw = if (args.len > 2) args[2] else Value.undefined;
     const n = try atomicsCoerce(self, vd.ta, raw);
     atomicsWriteN(vd.ta, vd.i, n);
@@ -17267,7 +17290,7 @@ fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 fn atomicsCompareExchangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true, false, false);
     const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     const replacement = try atomicsCoerce(self, vd.ta, if (args.len > 3) args[3] else .undefined);
     const old = atomicsReadV(self, vd.ta, vd.i);
@@ -17285,9 +17308,7 @@ fn atomicsIsLockFreeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
-    if (vd.ta.kind != .i32 and vd.ta.kind != .i64) return self.throwError("TypeError", "Atomics.wait requires an Int32Array or BigInt64Array");
-    if (!vd.ta.buffer.array_buffer.?.is_shared) return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
     const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     // ToNumber(timeout) is still observable (a valueOf side effect must run)
     // even though, in the cooperative agent model, no concurrent agent can wake
@@ -17299,10 +17320,24 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     if (@as(i64, @intFromFloat(cur_n)) != @as(i64, @intFromFloat(expected))) return .{ .string = "not-equal" };
     return .{ .string = "timed-out" };
 }
+/// `Atomics.pause(N)` — a microarchitectural pause hint. `N`, if present, must
+/// be an integral Number (the iteration count); anything else is a TypeError.
+/// In this single-threaded engine there is nothing to spin on, so it is a
+/// no-op that returns undefined after validating the argument.
+fn atomicsPauseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and args[0] != .undefined) {
+        const n = args[0];
+        if (n != .number or std.math.isNan(n.number) or std.math.isInf(n.number) or @trunc(n.number) != n.number)
+            return self.throwError("TypeError", "Atomics.pause iterationNumber must be an integer");
+    }
+    return .undefined;
+}
 fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, false);
     _ = vd;
     // count: ToInteger is observable; no agent is ever blocked in a cooperative
     // wait, so zero are woken.
@@ -17311,14 +17346,14 @@ fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 }
 
 /// `Atomics.waitAsync(typedArray, index, value, timeout)` — the non-blocking
-/// form of `wait`. It accepts a non-shared buffer; in this single-threaded
-/// engine no other agent can ever notify, so an actual wait yields a forever
-/// pending promise, and the early-out cases resolve synchronously.
+/// form of `wait`. Like `wait`, DoWait runs ValidateSharedIntegerTypedArray, so
+/// the buffer must be shared; in this single-threaded engine no other agent can
+/// ever notify, so an actual wait yields a forever pending promise and the
+/// early-out cases resolve synchronously.
 fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false);
-    if (vd.ta.kind != .i32 and vd.ta.kind != .i64) return self.throwError("TypeError", "Atomics.waitAsync requires an Int32Array or BigInt64Array");
+    const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
     const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     const t = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);
     const timeout: f64 = if (std.math.isNan(t)) std.math.inf(f64) else @max(0, t);
@@ -22834,6 +22869,7 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
         try setNative(a, rs, atomics, "wait", 4, atomicsWaitFn);
         try setNative(a, rs, atomics, "waitAsync", 4, atomicsWaitAsyncFn);
         try setNative(a, rs, atomics, "notify", 3, atomicsNotifyFn);
+        try setNative(a, rs, atomics, "pause", 0, atomicsPauseFn);
         if (sym_tag) |k| {
             try atomics.setOwn(a, rs, k, .{ .string = "Atomics" });
             try atomics.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
