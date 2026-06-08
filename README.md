@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 40,747 / 47,928 (85.0%)**, with **146 parse failures**,
-> **7,035 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
+> The latest full run passes **VALID 40,813 / 47,928 (85.2%)**, with **146 parse failures**,
+> **6,969 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **40,747 / 47,928 (85.0%)** |
+| **valid** | can we run the program? (scored corpus) | **40,813 / 47,928 (85.2%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,213 / 4,668 (68.8%) |
 
 The scored corpus currently skips 581 tests that require runner work for modules, async harness
@@ -67,7 +67,7 @@ Per area (valid):
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 17,096 / 19,070 (89.6%) | `Object` | 3,277 / 3,411 (96.1%) |
+| `language` | 17,160 / 19,070 (90.0%) | `Object` | 3,277 / 3,411 (96.1%) |
 | `Array` | 2,742 / 3,081 (89.0%) | `RegExp` | 1,465 / 1,687 (86.8%) |
 | `String` | 1,075 / 1,223 (87.9%) | `TypedArray` | 1,434 / 1,446 (99.2%) |
 | `TypedArrayConstructors` | 704 / 738 (95.4%) | `Uint8Array` | 70 / 70 (100%) |
