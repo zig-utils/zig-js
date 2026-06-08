@@ -9711,6 +9711,8 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         .take => {
             if (h.counter >= h.limit) {
                 h.done = true;
+                // Reaching the limit closes the underlying iterator (IteratorClose).
+                try self.iteratorClose(h.src);
                 return self.iterResultObj(.undefined, true);
             }
             const s = try self.iterStepM(h.src, h.next_method);
@@ -10106,15 +10108,13 @@ fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = if (args.len > 0) args[0] else .undefined;
     if (o == .string) return makeIterHelper(self, try self.iteratorOf(o), .wrap, .undefined, 0);
-    if (o != .object) return self.throwError("TypeError", "Iterator.from: argument is not iterable");
-    // An iterable is opened via its iterator; an iterator-like object (has a
-    // `next` method) is used directly; otherwise it is not iterable.
-    const it = if (self.isIterable(o))
-        try self.iteratorOf(o)
-    else if (hasProperty(o.object, "next"))
-        o
-    else
+    // BigInt/Symbol are primitives (boxed as objects here) — not iterable.
+    if (o != .object or o.object.is_symbol or o.object.is_bigint)
         return self.throwError("TypeError", "Iterator.from: argument is not iterable");
+    // GetIteratorFlattenable: an iterable is opened via its @@iterator; an object
+    // without an @@iterator method is used directly as the iterator (its `next`
+    // is read later by GetIteratorDirect — a missing one only fails on iteration).
+    const it = if (self.isIterable(o)) try self.iteratorOf(o) else o;
     return makeIterHelper(self, it, .wrap, .undefined, 0);
 }
 
