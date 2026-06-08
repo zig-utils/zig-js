@@ -5537,6 +5537,10 @@ pub const Interpreter = struct {
         const rta = res.object.typed_array.?;
         if (rta.kind.isBigInt() != kind.isBigInt())
             return self.throwError("TypeError", "TypedArray species content type does not match");
+        // The callers (map/filter/slice) write into the result, so ValidateTypedArray
+        // is in ~write~ mode: an immutable destination buffer is a TypeError.
+        if (rta.buffer.array_buffer.?.immutable)
+            return self.throwError("TypeError", "TypedArray species result is backed by an immutable buffer");
         // ValidateTypedArray + the single-Number length guard use the LIVE length:
         // a result whose (resizable) buffer is detached/out-of-bounds, or now
         // shorter than requested, is a TypeError.
@@ -11675,7 +11679,13 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             };
             var k: usize = start;
             while (k < len) : (k += 1) {
-                if (k >= cur) continue;
+                // An index past the live length reads as undefined: `includes`
+                // (Get-based, sameValueZero) compares it, so includes(undefined)
+                // matches; indexOf/lastIndexOf (HasProperty-based) skip it.
+                if (k >= cur) {
+                    if (incl and value.sameValueZero(.undefined, search)) return Value{ .boolean = true };
+                    continue;
+                }
                 const el = try self.taLoad(ta, k);
                 const match = if (incl) value.sameValueZero(el, search) else value.strictEquals(el, search);
                 if (match) return if (incl) Value{ .boolean = true } else Value{ .number = @floatFromInt(k) };
