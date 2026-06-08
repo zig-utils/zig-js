@@ -7943,7 +7943,14 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     }
 
     const eval_env = try self.arena.create(Environment);
-    eval_env.* = .{ .arena = self.arena, .parent = self.env };
+    // Eval's lexical environment holds the eval'd code's let/const/class. In
+    // *sloppy* eval its top-level function/var declarations target the
+    // surrounding variable scope (EvalDeclarationInstantiation) — `fn_body`
+    // marks it as a function-top scope so those functions hoist var-scoped (to
+    // the caller / realm global) and the Annex B B.3.3 analysis runs. *Strict*
+    // eval has its OWN variable environment (declarations stay local), so it is
+    // a real variable scope (`fn_scope`).
+    eval_env.* = .{ .arena = self.arena, .parent = self.env, .fn_scope = parser.strict, .fn_body = !parser.strict };
     self.env = eval_env;
     defer {
         self.env = saved_env;
