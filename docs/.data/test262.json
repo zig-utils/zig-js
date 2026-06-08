@@ -1,55 +1,55 @@
 {
   "valid": {
-    "passing": 35966,
-    "total": 48411,
-    "percentage": 74.3,
-    "parseFail": 206,
-    "runtimeFail": 12215,
-    "hostFail": 24
+    "passing": 34855,
+    "total": 41664,
+    "percentage": 83.7,
+    "parseFail": 135,
+    "runtimeFail": 6674,
+    "hostFail": 0
   },
   "negative": {
-    "passing": 1717,
-    "total": 4669,
-    "percentage": 36.8
+    "passing": 3213,
+    "total": 4668,
+    "percentage": 68.8
   },
-  "skipped": 97,
-  "generatedAt": "2026-05-31",
+  "skipped": 6845,
+  "generatedAt": "2026-06-08",
   "harness": "real (WebKit JSTests/test262 corpus)",
   "suites": [
     {
       "name": "language",
-      "passing": 16477,
-      "total": 19104,
-      "percentage": 86.2,
-      "parseFail": 180,
-      "runtimeFail": 2435,
-      "hostFail": 12
+      "passing": 12806,
+      "total": 14285,
+      "percentage": 89.6,
+      "parseFail": 79,
+      "runtimeFail": 1400,
+      "hostFail": 0
     },
     {
       "name": "annexB",
-      "passing": 429,
-      "total": 1071,
-      "percentage": 40.1,
-      "parseFail": 4,
-      "runtimeFail": 638,
+      "passing": 918,
+      "total": 1070,
+      "percentage": 85.8,
+      "parseFail": 13,
+      "runtimeFail": 139,
       "hostFail": 0
     },
     {
       "name": "intl402",
-      "passing": 448,
+      "passing": 1427,
       "total": 3341,
-      "percentage": 13.4,
+      "percentage": 42.7,
       "parseFail": 0,
-      "runtimeFail": 2893,
+      "runtimeFail": 1914,
       "hostFail": 0
     },
     {
       "name": "staging",
-      "passing": 678,
-      "total": 1476,
-      "percentage": 45.9,
-      "parseFail": 14,
-      "runtimeFail": 784,
+      "passing": 644,
+      "total": 991,
+      "percentage": 65,
+      "parseFail": 6,
+      "runtimeFail": 341,
       "hostFail": 0
     }
   ]
