@@ -4489,6 +4489,16 @@ pub const Interpreter = struct {
                 return list.items;
             }
         }
+        if (t.typed_array) |ta| {
+            // Integer-Indexed Exotic [[OwnPropertyKeys]]: the in-bounds element
+            // indices (ascending) first, then any ordinary own string/symbol keys.
+            var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            var i: usize = 0;
+            const cur = ta.currentLength() orelse 0;
+            while (i < cur) : (i += 1) try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+            for (try t.ownKeys(self.arena)) |k| try appendReflectable(self.arena, &list, k);
+            return list.items;
+        }
         if (t.is_array) {
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
             var i: usize = 0;
