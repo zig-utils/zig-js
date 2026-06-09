@@ -7185,9 +7185,11 @@ pub const Interpreter = struct {
             return Value{ .object = o };
         }
         if (eq(name, "flat")) {
-            const depth: f64 = if (args.len > 0 and args[0] != .undefined) arg0(args).toNumber() else 1;
-            const result = try self.newArray();
-            try self.flattenInto(result.object, o, depth);
+            // ToIntegerOrInfinity(depthArg) — runs valueOf, throws for a Symbol.
+            const depth_raw: f64 = if (args.len > 0 and args[0] != .undefined) try self.toNumberV(arg0(args)) else 1;
+            const depth: f64 = if (std.math.isNan(depth_raw)) 0 else @trunc(depth_raw);
+            const result = try self.arraySpeciesCreate(.{ .object = o }, 0);
+            _ = try self.flattenInto(result, o, depth, 0);
             return result;
         }
         if (eq(name, "sort")) {
@@ -7328,16 +7330,27 @@ pub const Interpreter = struct {
             return Value{ .object = o };
         }
         if (eq(name, "flatMap")) {
-            const cb = arg0(args);
-            const result = try self.newArray();
+            const cb = arg0(args); // callability checked up front (cb_methods)
+            const result = try self.arraySpeciesCreate(.{ .object = o }, 0);
+            var target_index: usize = 0;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (!self.arrIndexPresent(o, i)) continue; // skip holes
                 const el = try self.arrIndexGet(o, i);
                 const m = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
+                // FlattenIntoArray with depth 1: a mapped array is spread one level.
                 if (m == .object and m.object.is_array) {
-                    for (m.object.elements.items) |e2| try result.object.elements.append(self.arena, e2);
-                } else try result.object.elements.append(self.arena, m);
+                    const mlen: usize = @max(m.object.elements.items.len, m.object.array_len);
+                    var j: usize = 0;
+                    while (j < mlen) : (j += 1) {
+                        if (!self.arrIndexPresent(m.object, j)) continue;
+                        try self.arrayResultPush(result, target_index, try self.arrIndexGet(m.object, j));
+                        target_index += 1;
+                    }
+                } else {
+                    try self.arrayResultPush(result, target_index, m);
+                    target_index += 1;
+                }
             }
             return result;
         }
@@ -7381,21 +7394,24 @@ pub const Interpreter = struct {
     /// FlattenIntoArray: walk `src`'s logical length, *skipping holes*
     /// (HasProperty) and recursing into nested arrays up to `depth`. The result
     /// is packed — flat does not preserve holes.
-    fn flattenInto(self: *Interpreter, dst: *value.Object, src: *value.Object, depth: f64) EvalError!void {
+    fn flattenInto(self: *Interpreter, dst: Value, src: *value.Object, depth: f64, start: usize) EvalError!usize {
         const len: usize = if (src.is_array) @max(src.elements.items.len, src.array_len) else blk: {
             const lv = try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number);
             break :blk toLen(lv.toNumber());
         };
+        var target_index = start;
         var i: usize = 0;
         while (i < len) : (i += 1) {
             if (!self.arrIndexPresent(src, i)) continue; // flat skips holes
             const el = try self.arrIndexGet(src, i);
             if (depth > 0 and el == .object and el.object.is_array) {
-                try self.flattenInto(dst, el.object, depth - 1);
+                target_index = try self.flattenInto(dst, el.object, depth - 1, target_index);
             } else {
-                try dst.elements.append(self.arena, el);
+                try self.arrayResultPush(dst, target_index, el); // CreateDataPropertyOrThrow
+                target_index += 1;
             }
         }
+        return target_index;
     }
 
     /// SortCompare: `undefined` always sorts after everything else and is never
