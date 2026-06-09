@@ -6411,7 +6411,7 @@ pub const Interpreter = struct {
             "toLowerCase", "trim",       "trimStart",   "trimEnd",  "repeat",      "concat",
             "split",       "at",         "padStart",    "padEnd",   "replace",     "replaceAll",
             "localeCompare", "normalize", "search",     "match",     "toLocaleUpperCase", "toLocaleLowerCase",
-            "matchAll",      "trimLeft",  "trimRight",
+            "matchAll",      "trimLeft",  "trimRight", "isWellFormed", "toWellFormed",
             "anchor",        "big",       "blink",       "bold",      "fixed",      "fontcolor",
             "fontsize",      "italics",   "link",        "small",     "strike",     "sub",
             "sup",
@@ -7679,6 +7679,48 @@ pub const Interpreter = struct {
         }
         if (eq(name, "trimStart")) return Value{ .string = jsTrim(s, true, false) };
         if (eq(name, "trimEnd")) return Value{ .string = jsTrim(s, false, true) };
+        if (eq(name, "isWellFormed")) {
+            // Well-formed UTF-16 has no LONE surrogate. An astral code point is a
+            // 4-byte UTF-8 sequence here; a high+low surrogate pair (e.g. from
+            // concatenation, WTF-8-encoded) is also well-formed.
+            var i: usize = 0;
+            while (i < s.len) {
+                if (wtf8SurrogateAt(s, i)) |first| {
+                    if (isHighSurrogate(first)) {
+                        if (wtf8SurrogateAt(s, i + 3)) |second| if (isLowSurrogate(second)) {
+                            i += 6; // a valid pair
+                            continue;
+                        };
+                    }
+                    return Value{ .boolean = false }; // lone (or trailing low) surrogate
+                }
+                i += utf8SeqLen(s, i);
+            }
+            return Value{ .boolean = true };
+        }
+        if (eq(name, "toWellFormed")) {
+            // Replace every LONE surrogate with U+FFFD, leaving valid pairs intact.
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            var i: usize = 0;
+            while (i < s.len) {
+                if (wtf8SurrogateAt(s, i)) |first| {
+                    if (isHighSurrogate(first)) {
+                        if (wtf8SurrogateAt(s, i + 3)) |second| if (isLowSurrogate(second)) {
+                            try buf.appendSlice(self.arena, s[i .. i + 6]);
+                            i += 6;
+                            continue;
+                        };
+                    }
+                    try buf.appendSlice(self.arena, "\u{FFFD}");
+                    i += 3;
+                } else {
+                    const n = utf8SeqLen(s, i);
+                    try buf.appendSlice(self.arena, s[i .. i + n]);
+                    i += n;
+                }
+            }
+            return Value{ .string = try buf.toOwnedSlice(self.arena) };
+        }
         if (eq(name, "padStart") or eq(name, "padEnd")) {
             const target = toLen(try self.toNumberV(arg0(args)));
             if (s.len >= target) return Value{ .string = try self.arena.dupe(u8, s) };
@@ -18620,6 +18662,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         .{ "padStart", 1 },      .{ "padEnd", 1 },      .{ "replace", 2 },     .{ "replaceAll", 2 },
         .{ "localeCompare", 1 }, .{ "toLocaleUpperCase", 0 }, .{ "toLocaleLowerCase", 0 },
         .{ "match", 1 },         .{ "matchAll", 1 },    .{ "search", 1 },      .{ "normalize", 0 },
+        .{ "isWellFormed", 0 },  .{ "toWellFormed", 0 },
         .{ "anchor", 1 },        .{ "big", 0 },         .{ "blink", 0 },       .{ "bold", 0 },
         .{ "fixed", 0 },         .{ "fontcolor", 1 },   .{ "fontsize", 1 },    .{ "italics", 0 },
         .{ "link", 1 },          .{ "small", 0 },       .{ "strike", 0 },      .{ "sub", 0 },
