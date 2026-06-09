@@ -9964,7 +9964,22 @@ fn srWrapValue(self: *Interpreter, v: Value) EvalError!Value {
         const w = (try self.newObject()).object;
         w.native = srWrappedCallFn;
         w.private_data = @ptrCast(o);
-        try installNativeProps(self.arena, self.root_shape, w, "", 0);
+        // CopyNameAndLength(wrapped, target): a read that throws (a poisoned
+        // length/name getter) aborts the wrap with a TypeError in this realm.
+        const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
+        const len_v = self.getProperty(.{ .object = o }, "length") catch
+            return self.throwError("TypeError", "ShadowRealm: wrapped function length is not accessible");
+        // ToIntegerOrInfinity(targetLen): +∞ is preserved; otherwise clamp to ≥ 0.
+        const len: f64 = if (len_v == .number and !std.math.isNan(len_v.number))
+            (if (std.math.isInf(len_v.number)) len_v.number else @max(0, @trunc(len_v.number)))
+        else
+            0;
+        try w.setOwn(self.arena, self.root_shape, "length", .{ .number = len });
+        try w.setAttr(self.arena, "length", ro_attr);
+        const name_v = self.getProperty(.{ .object = o }, "name") catch
+            return self.throwError("TypeError", "ShadowRealm: wrapped function name is not accessible");
+        try w.setOwn(self.arena, self.root_shape, "name", .{ .string = if (name_v == .string) name_v.string else "" });
+        try w.setAttr(self.arena, "name", ro_attr);
         return .{ .object = w };
     }
     return self.throwError("TypeError", "ShadowRealm: a non-callable object cannot cross the realm boundary");
@@ -10013,12 +10028,14 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         self.this_value = .{ .object = go };
         self.global_object = go;
     }
-    defer {
-        self.env = s_env;
-        self.this_value = s_this;
-        self.global_object = s_glob;
-    }
-    const result = self.eval(prog) catch |e| {
+    const eval_result = self.eval(prog);
+    // Restore the CALLER realm before converting an abrupt completion / wrapping
+    // the result, so a boundary TypeError is created with the caller's %TypeError%
+    // (and the result value is wrapped from the caller's perspective).
+    self.env = s_env;
+    self.this_value = s_this;
+    self.global_object = s_glob;
+    const result = eval_result catch |e| {
         // A throw inside the child realm surfaces as a TypeError in the caller
         // (the thrown value can't cross the boundary).
         if (e == error.Throw) {
