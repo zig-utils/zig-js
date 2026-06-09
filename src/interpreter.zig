@@ -5805,6 +5805,13 @@ pub const Interpreter = struct {
     pub fn arraySpeciesCreate(self: *Interpreter, original: Value, len: usize) EvalError!Value {
         if (original != .object or !original.object.is_array) return self.newArray();
         const c = try self.getProperty(original, "constructor");
+        // GetFunctionRealm cross-realm check: a `constructor` that is another
+        // realm's %Array% is treated as the default — ArrayCreate, WITHOUT
+        // consulting its @@species (so a cross-realm species getter is untouched).
+        if (c == .object and c.object.native == builtins.arrayConstructor) {
+            const cur = self.env.get("Array");
+            if (cur == null or cur.? != .object or c.object != cur.?.object) return self.newArray();
+        }
         var ctor: Value = c;
         if (c == .object) {
             const skey = self.wellKnownSymbolKey("species") orelse return self.newArray();
