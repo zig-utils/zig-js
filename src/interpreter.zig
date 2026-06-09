@@ -7460,10 +7460,10 @@ pub const Interpreter = struct {
     fn stringProtocolSymbol(_: *Interpreter, name: []const u8) ?[]const u8 {
         if (eq(name, "split")) return "split";
         if (eq(name, "match")) return "match";
-        // `matchAll` is intentionally absent: its branch below performs the full
-        // spec dispatch (IsRegExp/global-flag check, GetMethod only for objects).
+        // `matchAll`/`replaceAll` are intentionally absent: their branches perform
+        // the full spec dispatch (IsRegExp/global-flag check, GetMethod for objects).
         if (eq(name, "search")) return "search";
-        if (eq(name, "replace") or eq(name, "replaceAll")) return "replace";
+        if (eq(name, "replace")) return "replace";
         return null;
     }
 
@@ -7490,6 +7490,31 @@ pub const Interpreter = struct {
 
     fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value) EvalError!?Value {
         if (eq(name, "valueOf") or eq(name, "toString")) return Value{ .string = s };
+        // String.prototype.replaceAll: a RegExp searchValue must be global, and an
+        // object searchValue's @@replace (if any) is used — checked before the
+        // generic protocol block so the flag invariant and dispatch order hold.
+        if (eq(name, "replaceAll")) {
+            const search = arg0(args);
+            if (search != .undefined and search != .null) {
+                if (try self.isRegExp(search)) {
+                    const flags_v = try self.getProperty(search, "flags");
+                    if (flags_v == .undefined or flags_v == .null)
+                        return self.throwError("TypeError", "String.prototype.replaceAll called with a RegExp whose flags is undefined or null");
+                    const flags_s = try self.toStringV(flags_v);
+                    if (std.mem.indexOfScalar(u8, flags_s, 'g') == null)
+                        return self.throwError("TypeError", "String.prototype.replaceAll must be called with a global RegExp");
+                }
+                // GetMethod(search, @@replace) — only an object carries one (a
+                // BigInt/Symbol primitive is left to the string path below).
+                if (isRegExpObjectValue(search)) if (self.wellKnownSymbolKey("replace")) |key| {
+                    const m = try self.getProperty(search, key);
+                    if (m != .undefined and m != .null) {
+                        if (!m.isCallable()) return self.throwError("TypeError", "searchValue[Symbol.replace] is not callable");
+                        return try self.callValueWithThis(m, &.{ .{ .string = s }, arg(args, 1) }, search);
+                    }
+                };
+            }
+        }
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
         // `replace`/`replaceAll` first check their first argument for the matching
         // `Symbol.*` method and, if it is callable, delegate to it (with `this` =
