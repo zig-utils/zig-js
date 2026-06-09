@@ -12045,21 +12045,39 @@ fn relIndex(self: *Interpreter, v: Value, len: usize, default: f64) EvalError!us
 
 /// `ArrayBuffer.prototype.slice(begin, end)` — a copy of the byte range.
 fn arrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.slice called on a non-ArrayBuffer");
+    return arrayBufferSliceImpl(@ptrCast(@alignCast(ctx)), this, args, false);
+}
+
+/// ArrayBuffer/SharedArrayBuffer .prototype.slice: clamp the range, then
+/// ArrayBufferSpeciesCreate(O, newLen) — Construct via SpeciesConstructor and
+/// validate the result (right kind, not detached/same/too-small) before copying.
+fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, comptime want_shared: bool) value.HostError!Value {
+    const kind_name = if (want_shared) "SharedArrayBuffer" else "ArrayBuffer";
+    if (this != .object or this.object.array_buffer == null or this.object.array_buffer.?.is_shared != want_shared)
+        return self.throwError("TypeError", kind_name ++ ".prototype.slice called on an incompatible receiver");
     const ab = this.object.array_buffer.?;
-    if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.slice called on a SharedArrayBuffer");
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.data.len;
     const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, blen, 0);
     const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
-    const count = if (end > start) end - start else 0;
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const src_len = ab.data.len;
-    const safe_count = if (start >= src_len) 0 else @min(count, src_len - start);
-    const out = try self.makeArrayBuffer(safe_count);
-    @memcpy(out.array_buffer.?.data[0..safe_count], ab.data[start .. start + safe_count]);
-    return .{ .object = out };
+    const safe_count = if (start >= src_len) 0 else @min(if (end > start) end - start else 0, src_len - start);
+    // ArrayBufferSpeciesCreate(O, newLen).
+    const default_ctor = self.env.get(kind_name) orelse .undefined;
+    const ctor = try self.speciesConstructor(this, default_ctor);
+    const new_v = try self.construct(ctor, &.{.{ .number = @floatFromInt(safe_count) }});
+    if (new_v != .object or new_v.object.array_buffer == null)
+        return self.throwError("TypeError", "ArrayBuffer species constructor did not return an ArrayBuffer");
+    const nb = new_v.object.array_buffer.?;
+    if (nb.is_shared != want_shared)
+        return self.throwError("TypeError", "ArrayBuffer species constructor returned a buffer of the wrong shared-ness");
+    if (!want_shared and nb.detached) return self.throwError("TypeError", "species constructor returned a detached ArrayBuffer");
+    if (new_v.object == this.object) return self.throwError("TypeError", "ArrayBuffer species constructor returned the same buffer");
+    if (nb.data.len < safe_count) return self.throwError("TypeError", "ArrayBuffer species constructor returned too small a buffer");
+    if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    @memcpy(nb.data[0..safe_count], ab.data[start .. start + safe_count]);
+    return new_v;
 }
 
 /// Build a fresh typed array of `kind` with `len` zero-initialized elements.
@@ -17805,18 +17823,7 @@ fn sabGrowFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
 }
 
 fn sharedArrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object or this.object.array_buffer == null or !this.object.array_buffer.?.is_shared)
-        return self.throwError("TypeError", "SharedArrayBuffer.prototype.slice called on a non-SharedArrayBuffer");
-    const ab = this.object.array_buffer.?;
-    const blen = ab.data.len;
-    const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, blen, 0);
-    const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, blen, @floatFromInt(blen));
-    const count = if (end > start) end - start else 0;
-    const out = try self.makeArrayBuffer(count);
-    out.array_buffer.?.is_shared = true;
-    @memcpy(out.array_buffer.?.data[0..count], ab.data[start .. start + count]);
-    return .{ .object = out };
+    return arrayBufferSliceImpl(@ptrCast(@alignCast(ctx)), this, args, true);
 }
 
 // ===== $262.agent (cooperative synchronous agents) ==================
