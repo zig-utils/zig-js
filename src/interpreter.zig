@@ -5227,6 +5227,20 @@ pub const Interpreter = struct {
         self.exception = saved;
     }
 
+    /// Close every iterator in `list` in reverse list order while preserving the
+    /// in-flight throw completion (its value in `self.exception`): any error a
+    /// `return()` raises is discarded. Mirrors IteratorCloseAll over a Throw
+    /// completion for the `Iterator.zip` setup phase.
+    pub fn closeListKeepingThrow(self: *Interpreter, list: []const Value) void {
+        const saved = self.exception;
+        var i: usize = list.len;
+        while (i > 0) {
+            i -= 1;
+            self.iteratorClose(list[i]) catch {};
+            self.exception = saved;
+        }
+    }
+
     /// Element `i` of an array/string for array destructuring (undefined if out
     /// of range). Non-iterable values raise a TypeError.
     fn elementAt(self: *Interpreter, val: Value, i: usize) EvalError!Value {
@@ -6044,6 +6058,29 @@ pub const Interpreter = struct {
         return out.items;
     }
 
+    /// GetIteratorFlattenable(obj, reject-primitives) per the joint-iteration
+    /// proposal: `obj` must be an Object (strings and other primitives throw).
+    /// Reads `@@iterator` (GetMethod); if absent uses `obj` itself, else calls
+    /// it. The resulting iterator must be an Object; its `next` is read eagerly
+    /// (GetIteratorDirect). Returns the iterator object.
+    pub fn getIteratorFlattenableObj(self: *Interpreter, obj: Value) EvalError!Value {
+        if (obj != .object or obj.object.is_bigint or obj.object.is_symbol)
+            return self.throwError("TypeError", "value is not an iterable object");
+        var iterator: Value = obj;
+        if (self.symbolIteratorKey()) |ik| {
+            const method = try self.getProperty(obj, ik);
+            if (method != .undefined and method != .null) {
+                if (method != .object or !method.object.isCallableObject())
+                    return self.throwError("TypeError", "Symbol.iterator is not callable");
+                iterator = try self.callValueWithThis(method, &.{}, obj);
+            }
+        }
+        if (iterator != .object) return self.throwError("TypeError", "iterator is not an object");
+        // GetIteratorDirect reads `next` (observable) before returning.
+        _ = try self.getProperty(iterator, "next");
+        return iterator;
+    }
+
     fn arrayLikeToListLen(self: *Interpreter, v: Value, len: usize) EvalError![]Value {
         var out: std.ArrayListUnmanaged(Value) = .empty;
         var i: usize = 0;
@@ -6161,6 +6198,14 @@ pub const Interpreter = struct {
         const done = (try self.getProperty(r, "done")).toBoolean();
         const val = if (done) Value.undefined else try self.getProperty(r, "value");
         return .{ .done = done, .value = val };
+    }
+
+    /// IteratorStep: pull one step and report only whether the iterator is done
+    /// (the `value` is not read). Used by `Iterator.zip` strict-mode checking.
+    fn iterStepDoneOnly(self: *Interpreter, it: Value) EvalError!bool {
+        const r = try self.callMethod(it, "next", &.{});
+        if (r != .object) return self.throwError("TypeError", "iterator result is not an object");
+        return (try self.getProperty(r, "done")).toBoolean();
     }
 
     /// `Array.prototype` (the global), for consulting/observing its
@@ -10643,9 +10688,11 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             }
         },
         .zip, .zip_keyed => {
-            // `src` = array of opened iterators; `inner` = per-source done flags;
-            // `limit` = mode (0 shortest, 1 longest, 2 strict); `padding` =
-            // per-source padding (longest); `func` = key array (zip_keyed).
+            // `src` = opened iterators; `inner` = per-source removed flags (true =
+            // openIters[i] is null); `limit` = mode (0 shortest, 1 longest, 2
+            // strict); `padding` = per-source padding (longest); `func` = key
+            // array (zip_keyed). Implements the IteratorZip abstract closure.
+            h.started = true; // the generator has run (→ "suspended-yield")
             const iters = h.src.object.elements.items;
             const flags = h.inner.?.object;
             const n = iters.len;
@@ -10656,58 +10703,83 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             const mode: u8 = @intFromFloat(h.limit);
             const results = (try self.newArray()).object;
             try results.elements.ensureTotalCapacity(self.arena, n);
-            var any_done = false;
-            var any_live = false;
             var i: usize = 0;
             while (i < n) : (i += 1) {
                 if (flags.elements.items[i].toBoolean()) {
-                    // already finished — pad (longest) or mark done.
-                    any_done = true;
+                    // openIters[i] is null — longest padding.
                     const pad = if (h.padding == .object and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
                     try results.elements.append(self.arena, pad);
                     continue;
                 }
-                const s = try self.iterStep(iters[i]);
-                if (s.done) {
+                // IteratorStepValue(openIters[i]); an abrupt completion closes the
+                // remaining open iterators (reverse order) and propagates.
+                const s = self.iterStep(iters[i]) catch {
                     flags.elements.items[i] = .{ .boolean = true };
-                    any_done = true;
-                    const pad = if (h.padding == .object and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
-                    try results.elements.append(self.arena, pad);
-                } else {
-                    any_live = true;
+                    h.done = true;
+                    try zipCloseAll(self, iters, flags, true);
+                    return error.Throw;
+                };
+                if (!s.done) {
                     try results.elements.append(self.arena, s.value);
+                    continue;
+                }
+                // The source is done — remove it from openIters.
+                flags.elements.items[i] = .{ .boolean = true };
+                switch (mode) {
+                    0 => { // shortest: close the rest and finish.
+                        h.done = true;
+                        try zipCloseAll(self, iters, flags, false);
+                        return self.iterResultObj(.undefined, true);
+                    },
+                    2 => { // strict: every source must end together.
+                        h.done = true;
+                        if (i != 0) {
+                            self.exception = try self.makeError("TypeError", "Iterator.zip: strict mode requires all iterators to have the same length");
+                            try zipCloseAll(self, iters, flags, true);
+                            return error.Throw;
+                        }
+                        // i == 0: each remaining source must also be done now.
+                        var k: usize = 1;
+                        while (k < n) : (k += 1) {
+                            if (flags.elements.items[k].toBoolean()) continue;
+                            const kdone = self.iterStepDoneOnly(iters[k]) catch {
+                                flags.elements.items[k] = .{ .boolean = true };
+                                try zipCloseAll(self, iters, flags, true);
+                                return error.Throw;
+                            };
+                            if (!kdone) {
+                                self.exception = try self.makeError("TypeError", "Iterator.zip: strict mode requires all iterators to have the same length");
+                                try zipCloseAll(self, iters, flags, true);
+                                return error.Throw;
+                            }
+                            flags.elements.items[k] = .{ .boolean = true };
+                        }
+                        return self.iterResultObj(.undefined, true);
+                    },
+                    else => { // longest: pad this slot and continue.
+                        const pad = if (h.padding == .object and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
+                        try results.elements.append(self.arena, pad);
+                    },
                 }
             }
-            switch (mode) {
-                1 => { // longest: finish only when every source is exhausted
-                    if (!any_live) {
-                        h.done = true;
-                        return self.iterResultObj(.undefined, true);
-                    }
-                },
-                2 => { // strict: all must advance in lock-step, else throw
-                    if (any_done and any_live) {
-                        h.done = true;
-                        try closeZipIterators(self, iters, flags);
-                        return self.throwError("RangeError", "Iterator.zip: strict mode requires all iterators to have the same length");
-                    }
-                    if (!any_live) {
-                        h.done = true;
-                        return self.iterResultObj(.undefined, true);
-                    }
-                },
-                else => { // shortest: finish as soon as any source is exhausted
-                    if (any_done) {
-                        h.done = true;
-                        try closeZipIterators(self, iters, flags);
-                        return self.iterResultObj(.undefined, true);
-                    }
-                },
+            // Longest mode: finish once every source has been removed.
+            var all_null = true;
+            for (flags.elements.items[0..n]) |f| {
+                if (!f.toBoolean()) {
+                    all_null = false;
+                    break;
+                }
+            }
+            if (all_null) {
+                h.done = true;
+                return self.iterResultObj(.undefined, true);
             }
             if (h.kind == .zip) return self.iterResultObj(.{ .object = results }, false);
-            // zip_keyed: assemble an object from the parallel key array.
+            // zip_keyed: OrdinaryObjectCreate(null) with one data property per
+            // key (CreateDataPropertyOrThrow → writable/enumerable/configurable).
             const keys = h.func.object.elements.items;
             const obj = (try self.newObject()).object;
+            obj.proto = null;
             var k: usize = 0;
             while (k < keys.len and k < results.elements.items.len) : (k += 1) {
                 try self.setProp(obj, keys[k].string, results.elements.items[k]);
@@ -10717,12 +10789,31 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     }
 }
 
-/// Close any still-live source iterators (call their `return`) when a zip
-/// helper finishes early or throws.
-fn closeZipIterators(self: *Interpreter, iters: []Value, flags: *value.Object) EvalError!void {
-    for (iters, 0..) |it, i| {
+/// IteratorCloseAll(openIters, completion): close every non-removed iterator in
+/// reverse list order. When `pending` is true a throw completion is already in
+/// flight (its value in `self.exception`) — any error from a `return()` call is
+/// swallowed and the original throw re-raised. When false the completion is
+/// normal — the first close error becomes the completion and is raised.
+fn zipCloseAll(self: *Interpreter, iters: []Value, flags: *value.Object, pending: bool) EvalError!void {
+    var thrown = pending;
+    var pending_val: Value = if (pending) self.exception else .undefined;
+    var i: usize = iters.len;
+    while (i > 0) {
+        i -= 1;
         if (i < flags.elements.items.len and flags.elements.items[i].toBoolean()) continue;
-        self.iteratorClose(it) catch {};
+        if (thrown) {
+            self.iteratorClose(iters[i]) catch {};
+            self.exception = pending_val; // a throw completion discards close errors
+        } else {
+            self.iteratorClose(iters[i]) catch {
+                thrown = true;
+                pending_val = self.exception;
+            };
+        }
+    }
+    if (thrown) {
+        self.exception = pending_val;
+        return error.Throw;
     }
 }
 
@@ -10732,6 +10823,9 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (this != .object or this.object.iter_helper == null)
         return self.throwError("TypeError", "Iterator Helper return called on an incompatible receiver");
     const h = this.object.iter_helper.?;
+    // GeneratorValidate: a re-entrant return() while the helper is mid-close
+    // (state "executing") is a TypeError.
+    if (h.running) return self.throwError("TypeError", "Iterator Helper is already running");
     const was_done = h.done;
     h.done = true;
     // A WrapForValidIterator forwards return() to its underlying iterator and
@@ -10746,7 +10840,23 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     // An IteratorHelper closes its source iterator(s) and yields {undefined, done}.
     if (!was_done) {
         switch (h.kind) {
-            .concat, .zip, .zip_keyed => {},
+            // zip closes every still-open source via IteratorCloseAll (reverse
+            // order, normal completion → a return() error propagates). The
+            // `running` guard makes a re-entrant next() from a source's return()
+            // a TypeError (GeneratorValidate sees the "executing" state).
+            .zip, .zip_keyed => {
+                if (h.src == .object and h.inner != null and h.inner.? == .object) {
+                    // "suspended-yield" (already started) → state is "executing"
+                    // during the close, so a re-entrant call throws TypeError.
+                    // "suspended-start" (never stepped) → state is "completed",
+                    // so a re-entrant call just returns {undefined, done:true}.
+                    h.running = h.started;
+                    defer h.running = false;
+                    try zipCloseAll(self, h.src.object.elements.items, h.inner.?.object, false);
+                }
+                return self.iterResultObj(.undefined, true);
+            },
+            .concat => {},
             else => if (h.src == .object) try self.iteratorClose(h.src),
         }
         if (h.inner) |inner| if (inner == .object and inner.object.iter_helper == null) try self.iteratorClose(inner);
@@ -11030,11 +11140,15 @@ fn iteratorConcatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 fn zipReadMode(self: *Interpreter, options: Value, padding_out: *Value) EvalError!u8 {
     padding_out.* = .undefined;
     if (options == .undefined) return 0;
-    if (options != .object) return self.throwError("TypeError", "Iterator.zip: options must be an object");
+    if (options != .object or options.object.is_bigint or options.object.is_symbol)
+        return self.throwError("TypeError", "Iterator.zip: options must be an object");
     const mv = try self.getProperty(options, "mode");
     var mode: u8 = 0;
     if (mv != .undefined) {
-        const ms = try self.toStringV(mv);
+        // The mode is compared by value (no ToString): only the primitive
+        // strings "shortest"/"longest"/"strict" are accepted.
+        if (mv != .string) return self.throwError("TypeError", "Iterator.zip: mode must be 'shortest', 'longest', or 'strict'");
+        const ms = mv.string;
         if (std.mem.eql(u8, ms, "shortest")) {
             mode = 0;
         } else if (std.mem.eql(u8, ms, "longest")) {
@@ -11054,26 +11168,61 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const iterables = if (args.len > 0) args[0] else .undefined;
-    if (iterables != .object) return self.throwError("TypeError", "Iterator.zip: iterables must be an object");
+    if (iterables != .object or iterables.object.is_bigint or iterables.object.is_symbol)
+        return self.throwError("TypeError", "Iterator.zip: iterables must be an object");
     var padding: Value = .undefined;
     const mode = try zipReadMode(self, if (args.len > 1) args[1] else .undefined, &padding);
 
-    // Open each input's iterator.
+    // GetIterator(iterables, sync): a strict `@@iterator` lookup (no array-like
+    // fallback). Then drain it, flattening each yielded value into an iterator.
     const iters = (try self.newArray()).object;
-    const list = try self.iterableOrArrayLikeToList(iterables);
-    for (list) |item| {
-        if (item != .object or !self.isIterable(item)) return self.throwError("TypeError", "Iterator.zip: every input must be an iterable object");
-        try iters.elements.append(self.arena, try self.iteratorOf(item));
+    const ik = self.symbolIteratorKey();
+    const method: Value = if (ik) |k| try self.getProperty(iterables, k) else .undefined;
+    if (method == .undefined or method == .null or method != .object or !method.object.isCallableObject())
+        return self.throwError("TypeError", "Iterator.zip: iterables is not iterable");
+    const input_iter = try self.callValueWithThis(method, &.{}, iterables);
+    if (input_iter != .object) return self.throwError("TypeError", "Iterator.zip: iterator is not an object");
+    const next_method = try self.getProperty(input_iter, "next");
+    if (next_method != .object or !next_method.object.isCallableObject())
+        return self.throwError("TypeError", "Iterator.zip: iterator.next is not callable");
+    while (true) {
+        // IteratorStepValue(inputIter). An abrupt completion runs
+        // IfAbruptCloseIterators(next, iters): close every opened input (reverse
+        // order) but NOT inputIter, then re-raise.
+        const r = self.callValueWithThis(next_method, &.{}, input_iter) catch {
+            self.closeListKeepingThrow(iters.elements.items);
+            return error.Throw;
+        };
+        if (r != .object) {
+            self.exception = try self.makeError("TypeError", "Iterator.zip: iterator result is not an object");
+            self.closeListKeepingThrow(iters.elements.items);
+            return error.Throw;
+        }
+        const dn = (self.getProperty(r, "done") catch {
+            self.closeListKeepingThrow(iters.elements.items);
+            return error.Throw;
+        }).toBoolean();
+        if (dn) break;
+        const item = self.getProperty(r, "value") catch {
+            self.closeListKeepingThrow(iters.elements.items);
+            return error.Throw;
+        };
+        // GetIteratorFlattenable(item) abrupt → IfAbruptCloseIterators over the
+        // list-concatenation « inputIter » ++ iters (reverse): iters then input.
+        const sub = self.getIteratorFlattenableObj(item) catch {
+            self.closeListKeepingThrow(iters.elements.items);
+            self.iteratorCloseKeepingThrow(input_iter);
+            return error.Throw;
+        };
+        try iters.elements.append(self.arena, sub);
     }
-    // Per-source padding aligned to iterator order (longest mode only).
-    var pad_arr: Value = .undefined;
-    if (mode == 1 and padding != .undefined) {
-        if (padding != .object) return self.throwError("TypeError", "Iterator.zip: padding must be an object");
-        const pads = (try self.newArray()).object;
-        const plist = try self.iterableOrArrayLikeToList(padding);
-        for (plist) |p| try pads.elements.append(self.arena, p);
-        pad_arr = .{ .object = pads };
-    }
+    // Per-source padding aligned to iterator order (longest mode only): pull
+    // exactly `iterCount` values from the padding iterable, padding short. Any
+    // abrupt completion here closes the opened inputs (reverse) and re-raises.
+    const pad_arr = buildZipPadding(self, mode, padding, iters.elements.items.len) catch {
+        self.closeListKeepingThrow(iters.elements.items);
+        return error.Throw;
+    };
     return makeZipHelper(self, .zip, iters, .undefined, mode, pad_arr);
 }
 
@@ -11083,25 +11232,98 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const iterables = if (args.len > 0) args[0] else .undefined;
-    if (iterables != .object) return self.throwError("TypeError", "Iterator.zipKeyed: iterables must be an object");
+    if (iterables != .object or iterables.object.is_bigint or iterables.object.is_symbol)
+        return self.throwError("TypeError", "Iterator.zipKeyed: iterables must be an object");
     var padding: Value = .undefined;
     const mode = try zipReadMode(self, if (args.len > 1) args[1] else .undefined, &padding);
+    // Longest-mode padding must be undefined or an Object (validated up front,
+    // independent of how many keys `iterables` has).
+    if (mode == 1 and padding != .undefined and (padding != .object or padding.object.is_bigint or padding.object.is_symbol))
+        return self.throwError("TypeError", "Iterator.zipKeyed: padding must be an object");
 
     const keys = (try self.newArray()).object;
     const iters = (try self.newArray()).object;
-    const pads = (try self.newArray()).object;
-    // Own enumerable string keys, in insertion order.
-    for (iterables.object.enumerableKeys(self.arena) catch &.{}) |key| {
-        const v = try self.getProperty(iterables, key);
-        if (v != .object or !self.isIterable(v)) return self.throwError("TypeError", "Iterator.zipKeyed: every input must be an iterable object");
+    // [[OwnPropertyKeys]] snapshot, then per key: [[GetOwnProperty]] (enumerable
+    // check), [[Get]] (value), GetIteratorFlattenable. Both string and symbol
+    // keys participate. An abrupt completion closes opened inputs (reverse).
+    const all_keys = try self.objectOwnKeysList(iterables.object);
+    for (all_keys) |key| {
+        const en = self.objectProtoPropertyIsEnumerable(iterables.object, key) catch {
+            self.closeListKeepingThrow(iters.elements.items);
+            return error.Throw;
+        };
+        if (!en) continue;
+        const v = self.getProperty(iterables, key) catch {
+            self.closeListKeepingThrow(iters.elements.items);
+            return error.Throw;
+        };
+        // An `undefined` value excludes the key entirely (no result property).
+        if (v == .undefined) continue;
+        const sub = self.getIteratorFlattenableObj(v) catch {
+            self.closeListKeepingThrow(iters.elements.items);
+            return error.Throw;
+        };
         try keys.elements.append(self.arena, .{ .string = key });
-        try iters.elements.append(self.arena, try self.iteratorOf(v));
-        if (mode == 1 and padding == .object) {
-            try pads.elements.append(self.arena, try self.getProperty(padding, key));
-        }
+        try iters.elements.append(self.arena, sub);
     }
-    const pad_arr: Value = if (mode == 1 and padding == .object) .{ .object = pads } else .undefined;
+    // Per-key padding (longest mode): Get(padding, key) for each key, or all
+    // undefined when padding is absent.
+    var pad_arr: Value = .undefined;
+    if (mode == 1) {
+        const pads = (try self.newArray()).object;
+        for (keys.elements.items) |kv| {
+            if (padding == .object) {
+                const pv = self.getProperty(padding, kv.string) catch {
+                    self.closeListKeepingThrow(iters.elements.items);
+                    return error.Throw;
+                };
+                try pads.elements.append(self.arena, pv);
+            } else try pads.elements.append(self.arena, .undefined);
+        }
+        pad_arr = .{ .object = pads };
+    }
     return makeZipHelper(self, .zip_keyed, iters, .{ .object = keys }, mode, pad_arr);
+}
+
+/// Build the per-source padding list for `Iterator.zip` longest mode: pull
+/// exactly `n` values from the padding iterable (`reject-primitives`), padding
+/// any shortfall with undefined and closing the iterator if not exhausted.
+/// Returns `.undefined` for non-longest modes or an n-length array otherwise.
+fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalError!Value {
+    if (mode != 1) return .undefined;
+    const pads = (try self.newArray()).object;
+    if (padding == .undefined) {
+        var i: usize = 0;
+        while (i < n) : (i += 1) try pads.elements.append(self.arena, .undefined);
+        return .{ .object = pads };
+    }
+    if (padding != .object or padding.object.is_bigint or padding.object.is_symbol)
+        return self.throwError("TypeError", "Iterator.zip: padding must be an object");
+    // GetIterator(padding, sync): strict — a missing @@iterator is a TypeError.
+    const ik = self.symbolIteratorKey();
+    const method: Value = if (ik) |k| try self.getProperty(padding, k) else .undefined;
+    if (method == .undefined or method == .null or method != .object or !method.object.isCallableObject())
+        return self.throwError("TypeError", "Iterator.zip: padding is not iterable");
+    const pit = try self.callValueWithThis(method, &.{}, padding);
+    if (pit != .object) return self.throwError("TypeError", "Iterator.zip: padding iterator is not an object");
+    // GetIteratorDirect captures `next` once (so an accessor runs a single time).
+    const pnext = try self.getProperty(pit, "next");
+    var exhausted = false;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (exhausted) {
+            try pads.elements.append(self.arena, .undefined);
+            continue;
+        }
+        const s = try self.iterStepM(pit, pnext);
+        if (s.done) {
+            exhausted = true;
+            try pads.elements.append(self.arena, .undefined);
+        } else try pads.elements.append(self.arena, s.value);
+    }
+    // Close the padding iterator (normal completion) if it still has values.
+    if (!exhausted) try self.iteratorClose(pit);
+    return .{ .object = pads };
 }
 
 /// Build a zip/zipKeyed iterator-helper object with its per-source done flags.

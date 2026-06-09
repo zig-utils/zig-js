@@ -308,6 +308,10 @@ pub const Object = struct {
     /// Accessor (get/set) properties, lazily allocated. Checked before the data
     /// slot at each level of the prototype walk.
     accessors: ?*std.StringHashMapUnmanaged(Accessor) = null,
+    /// Accessor keys in creation order (the hash map above does not preserve it),
+    /// so `ownKeys`/`Object.keys`/for-in surface getters/setters in spec order.
+    /// May hold stale entries (deleted/re-added keys) — readers re-check the map.
+    accessor_order: ?*std.ArrayListUnmanaged([]const u8) = null,
     elements: std.ArrayListUnmanaged(Value) = .empty,
     /// Per-property attribute overrides, lazily allocated. Absent name = the
     /// all-true default (a plain-assignment property). See `PropAttr`.
@@ -511,13 +515,23 @@ pub const Object = struct {
         std.mem.reverse([]const u8, insertion.items); // chain is newest-first → insertion order
         // Accessor-only properties live in a separate map (not the data-slot
         // shape); include any whose key isn't already a data slot, so getters/
-        // setters appear in Object.keys / for-in / JSON / spread / rest.
+        // setters appear in Object.keys / for-in / JSON / spread / rest. Walk
+        // `accessor_order` (creation order) rather than the unordered map, and
+        // re-check membership so stale entries (deleted keys) are skipped.
         if (self.accessors) |m| {
-            var it = m.iterator();
-            next: while (it.next()) |entry| {
-                const k = entry.key_ptr.*;
-                for (insertion.items) |existing| if (std.mem.eql(u8, existing, k)) continue :next;
-                try insertion.append(arena, k);
+            if (self.accessor_order) |ord| {
+                next: for (ord.items) |k| {
+                    if (m.get(k) == null) continue;
+                    for (insertion.items) |existing| if (std.mem.eql(u8, existing, k)) continue :next;
+                    try insertion.append(arena, k);
+                }
+            } else {
+                var it = m.iterator();
+                next: while (it.next()) |entry| {
+                    const k = entry.key_ptr.*;
+                    for (insertion.items) |existing| if (std.mem.eql(u8, existing, k)) continue :next;
+                    try insertion.append(arena, k);
+                }
             }
         }
         // OrdinaryOwnPropertyKeys order: canonical array-index keys ascending
@@ -596,6 +610,12 @@ pub const Object = struct {
         if (!gop.found_existing) {
             gop.key_ptr.* = try arena.dupe(u8, name);
             gop.value_ptr.* = .{};
+            // Record creation order for ownKeys (the map itself is unordered).
+            if (self.accessor_order == null) {
+                self.accessor_order = try arena.create(std.ArrayListUnmanaged([]const u8));
+                self.accessor_order.?.* = .empty;
+            }
+            try self.accessor_order.?.append(arena, gop.key_ptr.*);
         }
         if (get) |g| gop.value_ptr.get = g;
         if (set) |s| gop.value_ptr.set = s;
