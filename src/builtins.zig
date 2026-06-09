@@ -1954,7 +1954,9 @@ pub fn stringFromCodePoint(ctx: *anyopaque, this: Value, args: []const Value) Ho
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try buf.ensureTotalCapacity(self.arena, args.len * 4);
     for (args) |c| {
-        const n = c.toNumber();
+        // ToNumber(arg) runs valueOf/@@toPrimitive (and throws for a Symbol/BigInt)
+        // BEFORE the integer-code-point range check.
+        const n = try self.toNumberV(c);
         if (std.math.isNan(n) or @trunc(n) != n or n < 0 or n > 0x10FFFF)
             return self.throwError("RangeError", "Invalid code point");
         const cp: u21 = @intFromFloat(n);
@@ -1978,17 +1980,19 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const raw = try self.getProperty(cooked, "raw");
     if (raw == .null or raw == .undefined)
         return self.throwError("TypeError", "Cannot convert undefined or null to object");
-    const len_v = try self.toPrimitive(try self.getProperty(raw, "length"), .number);
-    const segs = interpreter.toLen(len_v.toNumber());
+    // ToLength(Get(raw,"length")) — ToNumber throws for a Symbol/BigInt length.
+    const segs = interpreter.toLen(try self.toNumberV(try self.getProperty(raw, "length")));
     if (segs == 0) return .{ .string = "" };
     const subs: []const Value = if (args.len > 1) args[1..] else &.{};
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     while (i < segs) : (i += 1) {
         const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-        try buf.appendSlice(self.arena, try (try self.getProperty(raw, key)).toString(self.arena));
+        // ToString of each cooked segment and substitution runs valueOf/toString
+        // (and throws for a Symbol), propagating any abrupt completion.
+        try buf.appendSlice(self.arena, try self.toStringV(try self.getProperty(raw, key)));
         if (i + 1 == segs) break;
-        if (i < subs.len) try buf.appendSlice(self.arena, try subs[i].toString(self.arena));
+        if (i < subs.len) try buf.appendSlice(self.arena, try self.toStringV(subs[i]));
     }
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }

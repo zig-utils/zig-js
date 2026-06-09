@@ -7887,6 +7887,11 @@ pub const Interpreter = struct {
             } };
         }
         if (eq(name, "normalize")) {
+            // The form (default "NFC") is ToString'd — a Symbol throws TypeError —
+            // and must be one of the four Unicode normalization forms.
+            const form = if (args.len > 0 and arg0(args) != .undefined) try self.toStringV(arg0(args)) else "NFC";
+            if (!eq(form, "NFC") and !eq(form, "NFD") and !eq(form, "NFKC") and !eq(form, "NFKD"))
+                return self.throwError("RangeError", "The normalization form should be one of NFC, NFD, NFKC, NFKD");
             // v1: ASCII-only engine, so normalization is the identity.
             return Value{ .string = try self.arena.dupe(u8, s) };
         }
