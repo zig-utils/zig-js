@@ -318,6 +318,17 @@ pub const Function = struct {
 /// `ret` unwinds to the enclosing function, `brk`/`cont` to the enclosing loop.
 const Signal = enum { none, ret, brk, cont };
 
+/// Legacy static RegExp match state (Annex B 22.2.4.x). All slices are owned by
+/// the interpreter arena; the empty string is the initial/no-match value.
+const RegExpLegacy = struct {
+    input: []const u8 = "",
+    last_match: []const u8 = "",
+    last_paren: []const u8 = "",
+    left_context: []const u8 = "",
+    right_context: []const u8 = "",
+    groups: [9][]const u8 = .{ "", "", "", "", "", "", "", "", "" },
+};
+
 /// Tree-walking evaluator. Evaluating a program/block returns the completion
 /// value of the last statement, which is what `JSEvaluateScript` hands back.
 pub const Interpreter = struct {
@@ -377,6 +388,10 @@ pub const Interpreter = struct {
     dyn_import: ?*const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, out: *Value) bool = null,
     /// The surrounding module's `import.meta` object, created lazily and cached.
     import_meta_obj: ?*value.Object = null,
+    /// Legacy static RegExp match state (Annex B): updated after a successful
+    /// match, read by `RegExp.input`/`$_`/`lastMatch`/`$&`/`lastParen`/`$+`/
+    /// `leftContext`/`$\``/`rightContext`/`$'`/`$1`..`$9`.
+    re_legacy: RegExpLegacy = .{},
     signal: Signal = .none,
     ret_value: Value = .undefined,
     /// The `this` binding for the currently-executing function (undefined at
@@ -3373,6 +3388,7 @@ pub const Interpreter = struct {
                 }
                 const mstart = start + m.start;
                 if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(start + m.end));
+                recordRegexpLegacy(self, input, mstart, start + m.end, m.captures);
                 const arr = try self.newArray();
                 try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
                 for (0..m.captures.len) |i| try arr.object.elements.append(self.arena, try self.captureVal(m, i));
@@ -19797,6 +19813,75 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
     }.call;
 }
 
+/// Record a successful match into the legacy static RegExp state. `captures` are
+/// the 1-based capture-group substrings (group i at index i-1); an absent group
+/// is the empty string. All values are duped into the arena.
+pub fn recordRegexpLegacy(self: *Interpreter, input: []const u8, start: usize, end: usize, captures: []const []const u8) void {
+    const a = self.arena;
+    const dup = struct {
+        fn f(arena: std.mem.Allocator, s: []const u8) []const u8 {
+            return arena.dupe(u8, s) catch "";
+        }
+    }.f;
+    self.re_legacy.input = dup(a, input);
+    self.re_legacy.last_match = dup(a, input[@min(start, input.len)..@min(end, input.len)]);
+    self.re_legacy.left_context = dup(a, input[0..@min(start, input.len)]);
+    self.re_legacy.right_context = dup(a, input[@min(end, input.len)..]);
+    var last_paren: []const u8 = "";
+    for (self.re_legacy.groups[0..], 0..) |*g, i| {
+        const cap: []const u8 = if (i < captures.len) captures[i] else "";
+        g.* = dup(a, cap);
+        if (i < captures.len and captures[i].len > 0) last_paren = cap;
+    }
+    self.re_legacy.last_paren = dup(a, last_paren);
+}
+
+/// A legacy RegExp accessor getter/setter must be invoked with the %RegExp%
+/// constructor itself as the receiver (so a subclass / cross-realm / arbitrary
+/// receiver throws a TypeError).
+fn regexpLegacyBrandCheck(self: *Interpreter, this: Value) EvalError!void {
+    const ctor = self.env.get("RegExp") orelse return self.throwError("TypeError", "RegExp is not defined");
+    if (this != .object or ctor != .object or this.object != ctor.object)
+        return self.throwError("TypeError", "RegExp legacy accessor requires the RegExp constructor as receiver");
+}
+
+const ReLegacyField = enum { input, last_match, last_paren, left_context, right_context, g1, g2, g3, g4, g5, g6, g7, g8, g9 };
+
+fn regexpLegacyGetter(comptime field: ReLegacyField) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            try regexpLegacyBrandCheck(self, this);
+            const s: []const u8 = switch (field) {
+                .input => self.re_legacy.input,
+                .last_match => self.re_legacy.last_match,
+                .last_paren => self.re_legacy.last_paren,
+                .left_context => self.re_legacy.left_context,
+                .right_context => self.re_legacy.right_context,
+                .g1 => self.re_legacy.groups[0],
+                .g2 => self.re_legacy.groups[1],
+                .g3 => self.re_legacy.groups[2],
+                .g4 => self.re_legacy.groups[3],
+                .g5 => self.re_legacy.groups[4],
+                .g6 => self.re_legacy.groups[5],
+                .g7 => self.re_legacy.groups[6],
+                .g8 => self.re_legacy.groups[7],
+                .g9 => self.re_legacy.groups[8],
+            };
+            return .{ .string = s };
+        }
+    }.call;
+}
+
+/// `RegExp.input` / `RegExp.$_` setter — stores ToString(value) as the input.
+fn regexpLegacyInputSetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try regexpLegacyBrandCheck(self, this);
+    self.re_legacy.input = try self.toStringV(if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
 fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const ctor = env.get("RegExp") orelse return;
@@ -19818,6 +19903,46 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     try setNative(a, rs, p, "test", 1, regexProtoMethod("test"));
     try setNative(a, rs, p, "compile", 2, regexProtoMethod("compile"));
     try setNative(a, rs, p, "toString", 0, regexProtoMethod("toString"));
+    // Legacy static RegExp accessors (Annex B) on the constructor itself — each a
+    // {enumerable:false, configurable:true} accessor that brand-checks %RegExp%.
+    const co = ctor.object;
+    const mkGetSet = struct {
+        // The accessor functions are anonymous (name ""), matching other engines —
+        // a name like "get $`" would not be a valid NativeFunction IdentifierName.
+        fn f(arena: std.mem.Allocator, shape: *Shape, obj: *value.Object, name: []const u8, getf: value.NativeFn, setf: ?value.NativeFn) EvalError!void {
+            const g = try arena.create(value.Object);
+            g.* = .{ .native = getf };
+            try installNativeProps(arena, shape, g, "", 0);
+            var sv: ?Value = null;
+            if (setf) |sf| {
+                const s = try arena.create(value.Object);
+                s.* = .{ .native = sf };
+                try installNativeProps(arena, shape, s, "", 1);
+                sv = .{ .object = s };
+            }
+            try obj.setAccessor(arena, name, .{ .object = g }, sv);
+            try obj.setAttr(arena, name, .{ .enumerable = false, .configurable = true });
+        }
+    }.f;
+    try mkGetSet(a, rs, co, "input", regexpLegacyGetter(.input), regexpLegacyInputSetter);
+    try mkGetSet(a, rs, co, "$_", regexpLegacyGetter(.input), regexpLegacyInputSetter);
+    try mkGetSet(a, rs, co, "lastMatch", regexpLegacyGetter(.last_match), null);
+    try mkGetSet(a, rs, co, "$&", regexpLegacyGetter(.last_match), null);
+    try mkGetSet(a, rs, co, "lastParen", regexpLegacyGetter(.last_paren), null);
+    try mkGetSet(a, rs, co, "$+", regexpLegacyGetter(.last_paren), null);
+    try mkGetSet(a, rs, co, "leftContext", regexpLegacyGetter(.left_context), null);
+    try mkGetSet(a, rs, co, "$`", regexpLegacyGetter(.left_context), null);
+    try mkGetSet(a, rs, co, "rightContext", regexpLegacyGetter(.right_context), null);
+    try mkGetSet(a, rs, co, "$'", regexpLegacyGetter(.right_context), null);
+    try mkGetSet(a, rs, co, "$1", regexpLegacyGetter(.g1), null);
+    try mkGetSet(a, rs, co, "$2", regexpLegacyGetter(.g2), null);
+    try mkGetSet(a, rs, co, "$3", regexpLegacyGetter(.g3), null);
+    try mkGetSet(a, rs, co, "$4", regexpLegacyGetter(.g4), null);
+    try mkGetSet(a, rs, co, "$5", regexpLegacyGetter(.g5), null);
+    try mkGetSet(a, rs, co, "$6", regexpLegacyGetter(.g6), null);
+    try mkGetSet(a, rs, co, "$7", regexpLegacyGetter(.g7), null);
+    try mkGetSet(a, rs, co, "$8", regexpLegacyGetter(.g8), null);
+    try mkGetSet(a, rs, co, "$9", regexpLegacyGetter(.g9), null);
     // The @@match/@@replace/@@search/@@split/@@matchAll methods are installed
     // later (after Symbol's well-known symbols exist) in installGlobalsInner.
 }
