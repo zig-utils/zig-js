@@ -10960,15 +10960,35 @@ fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = if (args.len > 0) args[0] else .undefined;
-    if (o == .string) return makeIterHelper(self, try self.iteratorOf(o), .wrap, .undefined, 0);
-    // BigInt/Symbol are primitives (boxed as objects here) — not iterable.
-    if (o != .object or o.object.is_symbol or o.object.is_bigint)
+    // GetIteratorFlattenable(O, iterate-string-primitives): among primitives only a
+    // String is accepted (Symbol/BigInt are object-boxed here, so reject them too).
+    if (o != .object) {
+        if (o != .string) return self.throwError("TypeError", "Iterator.from: argument is not iterable");
+    } else if (o.object.is_symbol or o.object.is_bigint) {
         return self.throwError("TypeError", "Iterator.from: argument is not iterable");
-    // GetIteratorFlattenable: an iterable is opened via its @@iterator; an object
-    // without an @@iterator method is used directly as the iterator (its `next`
-    // is read later by GetIteratorDirect — a missing one only fails on iteration).
-    const it = if (self.isIterable(o)) try self.iteratorOf(o) else o;
-    return makeIterHelper(self, it, .wrap, .undefined, 0);
+    }
+    // method = GetMethod(O, @@iterator): an undefined method means O is itself the
+    // iterator; otherwise Call(method, O) yields the iterator. Reads run getters in
+    // spec order (@@iterator before next).
+    var iterator: Value = o;
+    if (self.wellKnownSymbolKey("iterator")) |ikey| {
+        const method = try self.getProperty(o, ikey);
+        if (method != .undefined and method != .null) {
+            if (!method.isCallable()) return self.throwError("TypeError", "Iterator.from: @@iterator is not callable");
+            iterator = try self.callValueWithThis(method, &.{}, o);
+        }
+    }
+    if (iterator != .object or iterator.object.is_symbol or iterator.object.is_bigint)
+        return self.throwError("TypeError", "Iterator.from: the iterator is not an object");
+    // If the iterator already inherits from %Iterator.prototype%, return it as-is;
+    // otherwise wrap it (WrapForValidIteratorPrototype).
+    if (self.env.get("Iterator")) |ic| if (ic == .object) {
+        if (ic.object.getOwn("prototype")) |ip| if (ip == .object) {
+            var cur: ?*value.Object = iterator.object.proto;
+            while (cur) |c| : (cur = c.proto) if (c == ip.object) return iterator;
+        };
+    };
+    return makeIterHelper(self, iterator, .wrap, .undefined, 0);
 }
 
 /// `Iterator.concat(...items)` — an iterator yielding all values of each
