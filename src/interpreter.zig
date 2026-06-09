@@ -7123,7 +7123,7 @@ pub const Interpreter = struct {
                 while (j > 0 and (try self.sortCompareSpec(ps[j - 1], key, cmp)) > 0) : (j -= 1) ps[j] = ps[j - 1];
                 ps[j] = key;
             }
-            if (o.is_array) {
+            if (o.is_array and o.accessors == null) {
                 // Drop any sparse named-index props (their values are in `ps`).
                 for (try o.ownKeys(self.arena)) |k| if (value.canonicalIndex(k) != null) {
                     _ = try self.deleteOwn(o, k);
@@ -7133,6 +7133,8 @@ pub const Interpreter = struct {
                 if (o.holes) |h| h.clearRetainingCapacity();
                 o.array_len = ilen; // indices past the sorted run read as holes
             } else {
+                // Per SortIndexedProperties: write the sorted run back with [[Set]]
+                // (running accessor setters) and DeleteProperty the trailing slots.
                 var k: usize = 0;
                 while (k < ilen) : (k += 1) {
                     const ks = try std.fmt.allocPrint(self.arena, "{d}", .{k});
