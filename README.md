@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 41,049 / 47,928 (85.6%)**, with **146 parse failures**,
-> **6,733 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
+> The latest full run passes **VALID 41,095 / 47,928 (85.7%)**, with **146 parse failures**,
+> **6,687 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **41,049 / 47,928 (85.6%)** |
+| **valid** | can we run the program? (scored corpus) | **41,095 / 47,928 (85.7%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,213 / 4,668 (68.8%) |
 
 The scored corpus currently skips 581 tests that require runner work for modules, async harness
@@ -67,9 +67,9 @@ Per area (valid):
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 17,183 / 19,070 (90.1%) | `Object` | 3,283 / 3,411 (96.2%) |
-| `Array` | 2,742 / 3,081 (89.0%) | `RegExp` | 1,465 / 1,687 (86.8%) |
-| `String` | 1,075 / 1,223 (87.9%) | `TypedArray` | 1,434 / 1,446 (99.2%) |
+| `language` | 17,214 / 19,070 (90.3%) | `Object` | 3,314 / 3,411 (97.2%) |
+| `Array` | 2,804 / 3,081 (91.0%) | `RegExp` | 1,479 / 1,687 (87.7%) |
+| `String` | 1,106 / 1,223 (90.4%) | `TypedArray` | 1,434 / 1,446 (99.2%) |
 | `TypedArrayConstructors` | 704 / 738 (95.4%) | `Uint8Array` | 70 / 70 (100%) |
 | `Map` | 204 / 204 (100%) | `Set` | 379 / 383 (99.0%) |
 | `BigInt` | 77 / 77 (100%) | `Symbol` | 98 / 98 (100%) |
@@ -78,7 +78,7 @@ Per area (valid):
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 28 / 29 (96.6%) | `FinalizationRegistry` | 43 / 47 (91.5%) |
 | `Temporal` | 3,209 / 4,603 (69.7%) | `intl402` | 1,427 / 3,341 (42.7%) |
-| `annexB` | 919 / 1,071 (85.8%) | `staging` | 667 / 1,028 (64.9%) |
+| `annexB` | 937 / 1,071 (87.5%) | `staging` | 679 / 1,028 (66.1%) |
 | `SharedArrayBuffer` | 91 / 104 (87.5%) | `ArrayBuffer` | 199 / 221 (90.0%) |
 | `Atomics` | 308 / 388 (79.4%) | — | — |
 | `SuppressedError` | 22 / 22 (100%) | `ThrowTypeError` | 14 / 14 (100%) |
