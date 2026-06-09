@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 41095,
+    "passing": 41157,
     "total": 47928,
-    "percentage": 85.7,
+    "percentage": 85.9,
     "parseFail": 146,
-    "runtimeFail": 6687,
+    "runtimeFail": 6625,
     "hostFail": 0
   },
   "negative": {
@@ -27,29 +27,29 @@
     },
     {
       "name": "annexB",
-      "passing": 937,
+      "passing": 961,
       "total": 1071,
-      "percentage": 87.5,
+      "percentage": 89.7,
       "parseFail": 13,
-      "runtimeFail": 121,
+      "runtimeFail": 97,
       "hostFail": 0
     },
     {
       "name": "intl402",
-      "passing": 1427,
+      "passing": 1428,
       "total": 3341,
       "percentage": 42.7,
       "parseFail": 0,
-      "runtimeFail": 1914,
+      "runtimeFail": 1913,
       "hostFail": 0
     },
     {
       "name": "staging",
-      "passing": 679,
+      "passing": 680,
       "total": 1028,
       "percentage": 66.1,
       "parseFail": 6,
-      "runtimeFail": 343,
+      "runtimeFail": 342,
       "hostFail": 0
     }
   ]
