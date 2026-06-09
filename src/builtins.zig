@@ -1250,6 +1250,18 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // toggle writability, but not make it configurable/enumerable or an accessor.
     if (target.is_array and std.mem.eql(u8, key, "length")) {
         if (get != null or set != null) return self.throwError("TypeError", "Cannot redefine 'length' as an accessor");
+        // ArraySetLength (ES 10.4.2.4): ToUint32(value) is validated FIRST — a
+        // value whose ToUint32 differs from its ToNumber is a RangeError, *before*
+        // the (non-configurable / non-enumerable) attribute-compatibility checks.
+        var new_len_opt: ?u32 = null;
+        if (d.getOwn("value")) |val| {
+            // ToUint32(ToNumber(value)): a value object's valueOf/toString runs
+            // here (and a Symbol/BigInt throws) — newLen must equal numberLen.
+            const n = try self.toNumberV(val);
+            const u = Value.uint32FromF64(n);
+            if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
+            new_len_opt = u;
+        }
         if (d.getOwn("configurable")) |c| {
             if (c.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: length");
         }
@@ -1257,17 +1269,11 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             if (e.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: length");
         }
         const cur_writable = if (target.attrs != null) target.getAttr("length").writable else true;
-        // ArraySetLength (ES 10.4.2.4): reducing `length` deletes elements from
-        // the top down; a non-configurable element blocks the deletion — `length`
-        // stops just above it and the redefinition fails (a TypeError). `length`
-        // and its (possibly new) writability are still applied before throwing.
+        // ArraySetLength: reducing `length` deletes elements from the top down; a
+        // non-configurable element blocks the deletion — `length` stops just above
+        // it and the redefinition fails. `length`/writability are still applied.
         var blocked = false;
-        if (d.getOwn("value")) |val| {
-            // ToUint32(ToNumber(value)): a value object's valueOf/toString runs
-            // here (and a Symbol/BigInt throws) — newLen must equal numberLen.
-            const n = try self.toNumberV(val);
-            const u = Value.uint32FromF64(n);
-            if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
+        if (new_len_opt) |u| {
             if (!cur_writable and u != @max(target.elements.items.len, target.array_len))
                 return self.throwError("TypeError", "Cannot assign to read only property 'length'");
             var new_len: usize = u;
