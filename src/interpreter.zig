@@ -10860,7 +10860,12 @@ fn iterSomeEveryFindFn(comptime which: enum { some, every, find }) value.NativeF
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this != .object) return self.throwError("TypeError", "Iterator.prototype method called on a non-object");
             const f = if (args.len > 0) args[0] else .undefined;
-            if (!f.isCallable()) return self.throwError("TypeError", "Iterator.prototype method: fn is not a function");
+            if (!f.isCallable()) {
+                // IteratorClose(O, ThrowCompletion): a non-callable predicate
+                // closes the underlying iterator before the TypeError propagates.
+                self.iteratorClose(this) catch {};
+                return self.throwError("TypeError", "Iterator.prototype method: fn is not a function");
+            }
             const next_method = try self.getProperty(this, "next");
             var i: f64 = 0;
             while (true) : (i += 1) {
