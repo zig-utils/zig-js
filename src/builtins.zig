@@ -846,11 +846,11 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
             self.iteratorClose(iter) catch {};
             return self.throwError("TypeError", "Object.fromEntries entry is not an object");
         }
-        // key = ToPropertyKey(Get(entry,"0")); value = Get(entry,"1"); a throw in
-        // either step closes the iterator (IteratorClose on abrupt completion).
-        const key = self.keyOf(try self.getProperty(entry, "0")) catch |e| {
-            // IteratorClose with a throw completion: keep the original exception
-            // (any error from `return()` is discarded, the original throw wins).
+        // AddEntriesFromIterable: k = Get(entry,"0"); v = Get(entry,"1"); THEN the
+        // adder does ToPropertyKey(k) + CreateDataPropertyOrThrow — so the key's
+        // ToString runs AFTER reading "1", and an abrupt completion in any step
+        // closes the iterator (keeping the original throw).
+        const k_raw = self.getProperty(entry, "0") catch |e| {
             self.iteratorCloseKeepingThrow(iter);
             return e;
         };
@@ -858,7 +858,13 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
             self.iteratorCloseKeepingThrow(iter);
             return e;
         };
-        try self.setMember(result, key, v);
+        const key = self.keyOf(k_raw) catch |e| {
+            self.iteratorCloseKeepingThrow(iter);
+            return e;
+        };
+        // CreateDataPropertyOrThrow(result, key, v): an own data property —
+        // NOT [[Set]], so a poisoned Object.prototype setter is never invoked.
+        try result.object.setOwn(self.arena, self.root_shape, key, v);
     }
     return result;
 }
