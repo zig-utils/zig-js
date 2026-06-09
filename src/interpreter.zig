@@ -12998,14 +12998,25 @@ fn typedArrayAbstractFn(ctx: *anyopaque, this: Value, args: []const Value) value
 
 /// `%TypedArray%.of(...items)` — `this` is a view constructor; build a length-N
 /// view of it and store each item.
+/// TypedArrayCreate(constructor, «length»): Construct then ValidateTypedArray —
+/// the result must be a non-detached TypedArray whose length is at least the
+/// requested one, else a TypeError.
+fn typedArrayCreateLen(self: *Interpreter, constructor: Value, length: usize) EvalError!Value {
+    const result = try self.construct(constructor, &.{.{ .number = @floatFromInt(length) }});
+    if (result != .object or result.object.typed_array == null)
+        return self.throwError("TypeError", "TypedArrayCreate did not return a TypedArray");
+    const cur = result.object.typed_array.?.currentLength();
+    if (cur == null) return self.throwError("TypeError", "TypedArrayCreate returned a detached TypedArray");
+    if (cur.? < length) return self.throwError("TypeError", "TypedArrayCreate returned a TypedArray smaller than requested");
+    return result;
+}
+
 fn typedArrayOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isConstructorValue(this)) return self.throwError("TypeError", "%TypedArray%.of requires a constructor `this`");
-    const result = try self.construct(this, &.{.{ .number = @floatFromInt(args.len) }});
-    if (result == .object and result.object.typed_array != null) {
-        const ta = result.object.typed_array.?;
-        for (args, 0..) |av, i| try self.taStore(ta, i, av);
-    }
+    const result = try typedArrayCreateLen(self, this, args.len);
+    const ta = result.object.typed_array.?;
+    for (args, 0..) |av, i| try self.taStore(ta, i, av);
     return result;
 }
 
@@ -13020,13 +13031,11 @@ fn typedArrayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (mapfn != .undefined and !mapfn.isCallable()) return self.throwError("TypeError", "%TypedArray%.from mapfn is not callable");
     const this_arg = if (args.len > 2) args[2] else Value.undefined;
     const list = try self.iterableOrArrayLikeToList(source);
-    const result = try self.construct(this, &.{.{ .number = @floatFromInt(list.len) }});
-    if (result == .object and result.object.typed_array != null) {
-        const ta = result.object.typed_array.?;
-        for (list, 0..) |v, i| {
-            const mapped = if (mapfn.isCallable()) try self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg) else v;
-            try self.taStore(ta, i, mapped);
-        }
+    const result = try typedArrayCreateLen(self, this, list.len);
+    const ta = result.object.typed_array.?;
+    for (list, 0..) |v, i| {
+        const mapped = if (mapfn.isCallable()) try self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg) else v;
+        try self.taStore(ta, i, mapped);
     }
     return result;
 }
