@@ -1312,7 +1312,10 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     if (target.is_array and get == null and set == null and !std.mem.eql(u8, key, "length") and target.getAccessor(key) == null) {
         if (arrayIndexOf(key)) |i| {
             if (i <= target.elements.items.len + 1024 and i < (1 << 24)) {
-                const within = i < target.elements.items.len;
+                // A hole within bounds is NOT an existing property — treat it as a
+                // new definition (so attributes default correctly and the hole is
+                // materialized below), not a redefinition of a present element.
+                const within = i < target.elements.items.len and !target.isHole(i);
                 const cur_attr = target.getAttr(key);
                 if (within and !cur_attr.configurable) {
                     if (!try compatibleRedefine(cur_attr, target.elements.items[i], null, d)) return false;
@@ -1320,6 +1323,8 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                     return false;
                 }
                 while (target.elements.items.len <= i) try target.elements.append(self.arena, .undefined);
+                // Defining the index makes it a present own element (clear any hole).
+                target.clearHole(i);
                 const am_mapped = target.is_arguments and interpreter.argMapName(target, i) != null;
                 if (d.getOwn("value")) |val| {
                     target.elements.items[i] = val;
@@ -2171,7 +2176,12 @@ const Stringifier = struct {
 
     fn serializeArray(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, shape: *value.Object) HostError!void {
         const a = st.self.arena;
-        const len: usize = @max(shape.elements.items.len, shape.array_len);
+        // SerializeJSONArray reads the length via LengthOfArrayLike (Get) — for a
+        // Proxy that runs the "length" trap (and propagates an abrupt completion).
+        const len: usize = if (holder == .object and (holder.object.proxy_handler != null or holder.object.proxy_revoked))
+            interpreter.toLen(try st.self.toNumberV(try st.self.getProperty(holder, "length")))
+        else
+            @max(shape.elements.items.len, shape.array_len);
         if (len == 0) {
             try buf.appendSlice(a, "[]");
             return;
@@ -2331,7 +2341,9 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const reviver = arg(args, 1);
     if (reviver == .object and reviver.object.isCallableObject()) {
         const holder = (try self.newObject()).object;
-        try self.setMember(.{ .object = holder }, "", v);
+        // CreateDataPropertyOrThrow(holder, "", v) — not [[Set]], so an inherited
+        // Object.prototype[""] setter is not invoked.
+        try holder.setOwn(self.arena, self.root_shape, "", v);
         return internalizeJson(self, .{ .object = holder }, "", reviver);
     }
     return v;
@@ -2535,7 +2547,10 @@ const JsonParser = struct {
             if (p.i >= p.s.len or p.s[p.i] != ':') return error.Invalid;
             p.i += 1;
             const v = try p.parseValue();
-            try p.interp.setMember(result, key, v);
+            // CreateDataPropertyOrThrow: define an own data property (default
+            // attrs). Not [[Set]] — so "__proto__" becomes a normal own property
+            // and duplicate keys overwrite without invoking inherited setters.
+            try result.object.setOwn(p.interp.arena, p.interp.root_shape, key, v);
             p.skipWs();
             if (p.i >= p.s.len) return error.Invalid;
             if (p.s[p.i] == ',') {
