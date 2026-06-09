@@ -5907,16 +5907,11 @@ pub const Interpreter = struct {
         const size = kind.byteSize();
         const a0 = if (args.len > 0) args[0] else Value.undefined;
         const o = (try self.newObject()).object;
-        // GetPrototypeFromConstructor(newTarget, %TAPrototype%): read
-        // `newTarget.prototype` via [[Get]] (a getter runs and may throw); if the
-        // result isn't an object, fall back to the kind's intrinsic prototype.
+        // GetPrototypeFromConstructor(newTarget, %TAPrototype%): newTarget.prototype
+        // (a getter runs and may throw), or — when that is not an Object — the
+        // *newTarget's realm's* typed-array prototype for this kind.
         if (self.new_target == .object) {
-            const p = try self.getProperty(self.new_target, "prototype");
-            if (p == .object and !p.object.is_symbol and !p.object.is_bigint) {
-                o.proto = p.object;
-            } else if (self.env.get(kind.ctorName())) |c| {
-                if (c == .object) o.proto = try self.protoObject(c.object);
-            }
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, kind.ctorName());
         } else if (self.env.get(kind.ctorName())) |c| {
             if (c == .object) o.proto = try self.protoObject(c.object);
         }
