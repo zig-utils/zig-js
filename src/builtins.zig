@@ -2086,6 +2086,9 @@ const Stringifier = struct {
         if (v == .object) if (v.object.prim) |p| {
             v = p;
         };
+        // A BigInt (primitive or [[BigIntData]] wrapper) is not serializable.
+        if (v == .object and v.object.is_bigint)
+            return self.throwError("TypeError", "Do not know how to serialize a BigInt");
         switch (v) {
             .undefined => return false,
             .null => try buf.appendSlice(a, "null"),
@@ -2279,22 +2282,22 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
 /// defineProperty traps (so a throwing trap propagates); a plain object takes
 /// the fast `setMember` path.
 fn internalizeStore(self: *Interpreter, o: *value.Object, val: Value, key: []const u8, nv: Value) HostError!void {
+    _ = val;
+    // InternalizeJSONProperty: a removed value is [[Delete]]'d, otherwise the
+    // result is CreateDataProperty'd. Both use the plain internal method whose
+    // boolean result is IGNORED (a non-configurable property is left as-is, no
+    // TypeError) — only an abrupt completion from a Proxy trap propagates.
     if (nv == .undefined) {
-        const ok = try self.deleteOwn(o, key); // routes to the proxy deleteProperty trap
-        if (!ok) return self.throwError("TypeError", "Cannot delete property");
+        _ = try self.deleteOwn(o, key); // routes to the proxy deleteProperty trap
         return;
     }
-    if (o.proxy_handler != null or o.proxy_revoked) {
-        // CreateDataProperty(o, key, nv) → the proxy defineProperty trap.
-        const desc = (try self.newObject()).object;
-        try desc.setOwn(self.arena, self.root_shape, "value", nv);
-        try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
-        try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
-        try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
-        try defineOne(self, o, key, desc);
-        return;
-    }
-    try self.setMember(val, key, nv);
+    // CreateDataProperty(o, key, nv) — a full {value,w,e,c}=true data descriptor.
+    const desc = (try self.newObject()).object;
+    try desc.setOwn(self.arena, self.root_shape, "value", nv);
+    try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+    try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+    try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+    _ = try defineOneResult(self, o, key, desc);
 }
 
 /// Explicit error set so the mutually-recursive parser methods don't form an
