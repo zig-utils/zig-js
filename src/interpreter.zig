@@ -10726,19 +10726,27 @@ fn closeZipIterators(self: *Interpreter, iters: []Value, flags: *value.Object) E
 fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this == .object and this.object.iter_helper != null) {
-        const h = this.object.iter_helper.?;
-        const was_done = h.done;
-        h.done = true;
-        // Closing a live helper closes its underlying source iterator (and the
-        // current inner iterator for flatMap); a throw from `return()` propagates.
-        if (!was_done) {
-            switch (h.kind) {
-                .concat, .zip, .zip_keyed => {},
-                else => if (h.src == .object) try self.iteratorClose(h.src),
-            }
-            if (h.inner) |inner| if (inner == .object and inner.object.iter_helper == null) try self.iteratorClose(inner);
+    if (this != .object or this.object.iter_helper == null)
+        return self.throwError("TypeError", "Iterator Helper return called on an incompatible receiver");
+    const h = this.object.iter_helper.?;
+    const was_done = h.done;
+    h.done = true;
+    // A WrapForValidIterator forwards return() to its underlying iterator and
+    // returns THAT result (or {undefined, done:true} when there is no return()).
+    if (h.kind == .wrap) {
+        if (was_done or h.src != .object) return self.iterResultObj(.undefined, true);
+        const ret = try self.getProperty(h.src, "return");
+        if (ret == .undefined or ret == .null) return self.iterResultObj(.undefined, true);
+        if (!ret.isCallable()) return self.throwError("TypeError", "iterator return is not callable");
+        return try self.callValueWithThis(ret, &.{}, h.src);
+    }
+    // An IteratorHelper closes its source iterator(s) and yields {undefined, done}.
+    if (!was_done) {
+        switch (h.kind) {
+            .concat, .zip, .zip_keyed => {},
+            else => if (h.src == .object) try self.iteratorClose(h.src),
         }
+        if (h.inner) |inner| if (inner == .object and inner.object.iter_helper == null) try self.iteratorClose(inner);
     }
     return self.iterResultObj(.undefined, true);
 }
