@@ -5681,11 +5681,16 @@ pub const Interpreter = struct {
         if (o.getOwn(key) == null) return true;
         if (!o.getAttr(key).configurable) return false;
         // Rebuild shape+slots without `key` (delete is rare; correctness over speed).
-        const keys = try o.ownKeys(self.arena);
+        const keys = try o.ownKeys(self.arena); // creation order (data + accessor)
         const Entry = struct { k: []const u8, v: Value, a: value.PropAttr };
         var saved: std.ArrayListUnmanaged(Entry) = .empty;
+        // Capture the surviving creation order (incl. accessor keys) to restore as
+        // `key_order` afterward — the rebuild's setOwn would otherwise append the
+        // data keys to the end of the existing key_order, corrupting the order.
+        var survived: std.ArrayListUnmanaged([]const u8) = .empty;
         for (keys) |k| {
             if (std.mem.eql(u8, k, key)) continue;
+            try survived.append(self.arena, k);
             // Accessor-only keys have no data slot (they live in `o.accessors`,
             // which this shape/slots rebuild leaves untouched) — skip them rather
             // than unwrapping a null slot.
@@ -5694,9 +5699,17 @@ pub const Interpreter = struct {
         }
         o.shape = self.root_shape;
         o.slots = .empty;
+        o.key_order = null; // disable append-on-setOwn during the rebuild
         for (saved.items) |e| {
             try o.setOwn(self.arena, self.root_shape, e.k, e.v);
             try o.setAttr(self.arena, e.k, e.a);
+        }
+        // Restore the (deduped) creation order when the object carries accessors.
+        if (o.accessors != null) {
+            const ko = try self.arena.create(std.ArrayListUnmanaged([]const u8));
+            ko.* = .empty;
+            try ko.appendSlice(self.arena, survived.items);
+            o.key_order = ko;
         }
         return true;
     }

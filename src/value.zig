@@ -308,10 +308,13 @@ pub const Object = struct {
     /// Accessor (get/set) properties, lazily allocated. Checked before the data
     /// slot at each level of the prototype walk.
     accessors: ?*std.StringHashMapUnmanaged(Accessor) = null,
-    /// Accessor keys in creation order (the hash map above does not preserve it),
-    /// so `ownKeys`/`Object.keys`/for-in surface getters/setters in spec order.
-    /// May hold stale entries (deleted/re-added keys) — readers re-check the map.
-    accessor_order: ?*std.ArrayListUnmanaged([]const u8) = null,
+    /// All own named keys (data AND accessor) in creation order — allocated
+    /// lazily only when an accessor is first added, since data slots otherwise
+    /// keep insertion order via the shape chain. `ownKeys` uses this to interleave
+    /// data and accessor keys by creation order (the shape can't, as accessors
+    /// live in a side map). May hold stale/duplicate entries (deleted or re-added
+    /// keys) — readers re-check membership and keep each key's LAST occurrence.
+    key_order: ?*std.ArrayListUnmanaged([]const u8) = null,
     elements: std.ArrayListUnmanaged(Value) = .empty,
     /// Per-property attribute overrides, lazily allocated. Absent name = the
     /// all-true default (a plain-assignment property). See `PropAttr`.
@@ -507,32 +510,53 @@ pub const Object = struct {
     /// Own named property keys in insertion order (for `for-in` / enumeration).
     pub fn ownKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         var insertion: std.ArrayListUnmanaged([]const u8) = .empty;
-        var s = self.shape;
-        while (s) |sh| {
-            if (sh.name) |n| try insertion.append(arena, n);
-            s = sh.parent;
-        }
-        std.mem.reverse([]const u8, insertion.items); // chain is newest-first → insertion order
-        // Accessor-only properties live in a separate map (not the data-slot
-        // shape); include any whose key isn't already a data slot, so getters/
-        // setters appear in Object.keys / for-in / JSON / spread / rest. Walk
-        // `accessor_order` (creation order) rather than the unordered map, and
-        // re-check membership so stale entries (deleted keys) are skipped.
-        if (self.accessors) |m| {
-            if (self.accessor_order) |ord| {
-                next: for (ord.items) |k| {
-                    if (m.get(k) == null) continue;
-                    for (insertion.items) |existing| if (std.mem.eql(u8, existing, k)) continue :next;
-                    try insertion.append(arena, k);
-                }
-            } else {
+        const has_own = struct {
+            fn f(o: *const Object, k: []const u8) bool {
+                return o.getOwn(k) != null or (o.accessors != null and o.accessors.?.get(k) != null);
+            }
+        }.f;
+        const contains = struct {
+            fn f(list: []const []const u8, k: []const u8) bool {
+                for (list) |e| if (std.mem.eql(u8, e, k)) return true;
+                return false;
+            }
+        }.f;
+        if (self.key_order) |ord| {
+            // Creation order across data + accessor keys. Keep each present key's
+            // LAST occurrence (a deleted-then-re-added key sorts to its new spot).
+            for (ord.items, 0..) |k, i| {
+                if (!has_own(self, k)) continue;
+                var later = false;
+                var j = i + 1;
+                while (j < ord.items.len) : (j += 1) if (std.mem.eql(u8, ord.items[j], k)) {
+                    later = true;
+                    break;
+                };
+                if (later) continue;
+                try insertion.append(arena, k);
+            }
+            // Safety net: surface any current data slot or accessor that somehow
+            // bypassed key_order, so no key is ever dropped (order best-effort).
+            var s2 = self.shape;
+            while (s2) |sh| {
+                if (sh.name) |n| if (!contains(insertion.items, n)) try insertion.append(arena, n);
+                s2 = sh.parent;
+            }
+            if (self.accessors) |m| {
                 var it = m.iterator();
-                next: while (it.next()) |entry| {
+                while (it.next()) |entry| {
                     const k = entry.key_ptr.*;
-                    for (insertion.items) |existing| if (std.mem.eql(u8, existing, k)) continue :next;
-                    try insertion.append(arena, k);
+                    if (!contains(insertion.items, k)) try insertion.append(arena, k);
                 }
             }
+        } else {
+            // No accessors ever added: data slots in shape-chain insertion order.
+            var s = self.shape;
+            while (s) |sh| {
+                if (sh.name) |n| try insertion.append(arena, n);
+                s = sh.parent;
+            }
+            std.mem.reverse([]const u8, insertion.items); // chain is newest-first → insertion order
         }
         // OrdinaryOwnPropertyKeys order: canonical array-index keys ascending
         // first, then string keys in insertion order, then Symbol keys in
@@ -610,15 +634,40 @@ pub const Object = struct {
         if (!gop.found_existing) {
             gop.key_ptr.* = try arena.dupe(u8, name);
             gop.value_ptr.* = .{};
-            // Record creation order for ownKeys (the map itself is unordered).
-            if (self.accessor_order == null) {
-                self.accessor_order = try arena.create(std.ArrayListUnmanaged([]const u8));
-                self.accessor_order.?.* = .empty;
-            }
-            try self.accessor_order.?.append(arena, gop.key_ptr.*);
+            // First accessor on this object: start key_order by snapshotting the
+            // existing data keys (shape-chain insertion order), so the new
+            // accessor interleaves correctly with them.
+            try self.ensureKeyOrder(arena);
+            try self.recordKeyOrder(arena, gop.key_ptr.*);
         }
         if (get) |g| gop.value_ptr.get = g;
         if (set) |s| gop.value_ptr.set = s;
+    }
+
+    /// Append `name` to `key_order` unless it's already recorded — so converting
+    /// a property between data and accessor keeps its original creation position
+    /// (only a brand-new key extends the order).
+    fn recordKeyOrder(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
+        const ko = self.key_order orelse return;
+        for (ko.items) |e| if (std.mem.eql(u8, e, name)) return;
+        try ko.append(arena, try arena.dupe(u8, name));
+    }
+
+    /// Lazily build `key_order`, seeding it with the current data keys in
+    /// insertion order (the order the shape chain already encodes).
+    fn ensureKeyOrder(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
+        if (self.key_order != null) return;
+        const ko = try arena.create(std.ArrayListUnmanaged([]const u8));
+        ko.* = .empty;
+        var seed: std.ArrayListUnmanaged([]const u8) = .empty;
+        var s = self.shape;
+        while (s) |sh| {
+            if (sh.name) |n| try seed.append(arena, n);
+            s = sh.parent;
+        }
+        std.mem.reverse([]const u8, seed.items); // newest-first → insertion order
+        try ko.appendSlice(arena, seed.items);
+        self.key_order = ko;
     }
 
     /// Read an own named property, or null if absent. No allocation.
@@ -643,6 +692,10 @@ pub const Object = struct {
         const child = try base.transition(name);
         try self.slots.append(arena, v); // new slot index == base.count == child.slot
         self.shape = child;
+        // A new data key on an accessor-bearing object records its creation order
+        // (a data↔accessor conversion keeps its position; deleteOwn drops stale
+        // entries so a genuinely re-added key lands at the end).
+        if (self.key_order != null) try self.recordKeyOrder(arena, name);
     }
 };
 
