@@ -7275,13 +7275,14 @@ pub const Interpreter = struct {
                 break :blk if (start + du > len) len - start else du;
             };
             const removed = try self.arraySpeciesCreate(.{ .object = o }, del);
-            const rra = removed.object.is_array;
+            // A plain dense Array `removed` preserves holes; a custom-species
+            // result is CreateDataProperty'd per present index.
+            const rdense = removed.object.is_array and removed.object.accessors == null and removed.object.attrs == null and removed.object.proxy_handler == null;
             var i: usize = 0;
             while (i < del) : (i += 1) {
                 if (self.arrIndexPresent(o, start + i)) {
-                    const v = try self.arrIndexGet(o, start + i);
-                    if (rra) try removed.object.elements.append(self.arena, v) else try self.arrayResultPush(removed, i, v);
-                } else if (rra) { // preserve a hole in the removed array
+                    try self.arrayResultPush(removed, i, try self.arrIndexGet(o, start + i)); // CreateDataPropertyOrThrow
+                } else if (rdense) { // preserve a hole in the removed array
                     try removed.object.elements.append(self.arena, .undefined);
                     try removed.object.markHole(self.arena, i);
                 }
