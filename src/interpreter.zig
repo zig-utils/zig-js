@@ -23962,16 +23962,20 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 /// the given UTC date components (NaN if any component is NaN; years 0–99 map
 /// to 1900–1999).
 fn dateUTCFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = ctx;
     _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len == 0) return .{ .number = std.math.nan(f64) };
     const n = @min(args.len, 7);
     var buf: [7]Value = undefined;
+    // ToNumber every argument first, in order (each valueOf/toString runs, and a
+    // Symbol/BigInt throws) — a NaN does not short-circuit the remaining coercions.
+    var any_nan = false;
     for (0..n) |i| {
-        const num = args[i].toNumber();
-        if (std.math.isNan(num)) return .{ .number = std.math.nan(f64) };
+        const num = try self.toNumberV(args[i]);
         buf[i] = .{ .number = num };
+        if (std.math.isNan(num)) any_nan = true;
     }
+    if (any_nan) return .{ .number = std.math.nan(f64) };
     // Years 0–99 are offset to 1900–1999.
     const yi = @trunc(buf[0].number);
     if (yi >= 0 and yi <= 99) buf[0] = .{ .number = yi + 1900 };
