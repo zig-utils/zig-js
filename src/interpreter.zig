@@ -9964,6 +9964,12 @@ fn srWrapValue(self: *Interpreter, v: Value) EvalError!Value {
         const w = (try self.newObject()).object;
         w.native = srWrappedCallFn;
         w.private_data = @ptrCast(o);
+        // The wrapper's [[Prototype]] is the *calling* realm's %Function.prototype%.
+        if (self.env.get("Function")) |fc| if (fc == .object) {
+            if (fc.object.getOwn("prototype")) |fp| if (fp == .object) {
+                w.proto = fp.object;
+            };
+        };
         // CopyNameAndLength(wrapped, target): a read that throws (a poisoned
         // length/name getter) aborts the wrap with a TypeError in this realm.
         const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
@@ -9994,7 +10000,12 @@ fn srWrappedCallFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const target: *value.Object = @ptrCast(@alignCast(fnobj.private_data orelse return .undefined));
     const wargs = try self.arena.alloc(Value, args.len);
     for (args, 0..) |arg_v, i| wargs[i] = try srWrapValue(self, arg_v);
-    const r = try self.callValueWithThis(.{ .object = target }, wargs, .undefined);
+    // WrappedFunction [[Call]]: a normal completion is wrapped outward; an abrupt
+    // one is re-thrown as a TypeError in the *calling* realm.
+    const r = self.callValueWithThis(.{ .object = target }, wargs, .undefined) catch |e| {
+        if (e == error.Throw) return self.throwError("TypeError", "WrappedFunction: the wrapped target threw");
+        return e;
+    };
     return srWrapValue(self, r);
 }
 
