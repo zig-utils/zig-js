@@ -12217,6 +12217,10 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     const o = (try self.newObject()).object;
     o.is_finalization_registry = true;
     if (try self.protoFromCtor("FinalizationRegistry")) |pr| o.proto = pr;
+    // Cells `[target, heldValue, unregisterToken]` — there is no GC so they're
+    // never cleaned up, but `unregister` operates on this live set.
+    try self.setProp(o, "\x00fr_cells", try self.newArray());
+    try o.setAttr(self.arena, "\x00fr_cells", .{ .writable = true, .enumerable = false, .configurable = false });
     return .{ .object = o };
 }
 
@@ -12229,7 +12233,15 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (value.strictEquals(target, held)) return self.throwError("TypeError", "FinalizationRegistry.register: target and held value must not be the same");
     const token = if (args.len > 2) args[2] else Value.undefined;
     if (token != .undefined and !canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.register: unregister token must be an object or a symbol");
-    // No real GC, so the cleanup callback never runs; registration is a no-op.
+    // No real GC, so the cleanup callback never runs; record the cell so a later
+    // `unregister(token)` can find it.
+    if (this.object.getOwn("\x00fr_cells")) |cv| if (cv == .object) {
+        const cell = (try self.newArray()).object;
+        try cell.elements.append(self.arena, target);
+        try cell.elements.append(self.arena, held);
+        try cell.elements.append(self.arena, token);
+        try cv.object.elements.append(self.arena, .{ .object = cell });
+    };
     return .undefined;
 }
 
@@ -12238,7 +12250,22 @@ fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (this != .object or !this.object.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.unregister called on an incompatible receiver");
     const token = if (args.len > 0) args[0] else .undefined;
     if (!canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.unregister: token must be an object or a symbol");
-    return .{ .boolean = false }; // nothing is ever registered
+    // Remove every cell whose [[UnregisterToken]] is SameValue(token); return
+    // whether any were removed.
+    const cv = this.object.getOwn("\x00fr_cells") orelse return .{ .boolean = false };
+    if (cv != .object) return .{ .boolean = false };
+    const cells = cv.object;
+    var removed = false;
+    var i: usize = 0;
+    while (i < cells.elements.items.len) {
+        const cell = cells.elements.items[i].object;
+        const ctok = cell.elements.items[2];
+        if (ctok != .undefined and value.strictEquals(ctok, token)) {
+            _ = cells.elements.orderedRemove(i);
+            removed = true;
+        } else i += 1;
+    }
+    return .{ .boolean = removed };
 }
 
 /// Install `WeakRef` and `FinalizationRegistry` (the cleanup callback never
