@@ -6056,7 +6056,8 @@ pub const Interpreter = struct {
     /// dense store; a custom species object gets a `[[Set]]` at `idx`).
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
         if (result == .object and result.object.is_array and result.object.accessors == null and
-            result.object.attrs == null and !result.object.proxy_revoked and result.object.proxy_handler == null)
+            result.object.attrs == null and !result.object.proxy_revoked and result.object.proxy_handler == null and
+            idx == result.object.elements.items.len and idx >= result.object.array_len)
         {
             try result.object.elements.append(self.arena, v);
         } else {
@@ -6535,41 +6536,48 @@ pub const Interpreter = struct {
     /// Spread one concat-spreadable source into `dst`, preserving holes: a real
     /// Array uses its sparse `length`, an array-like reads ToLength(.length).
     /// A pathological 2**53-style length throws (instead of OOM-crashing).
-    fn concatSpreadInto(self: *Interpreter, dst: *value.Object, src: *value.Object) EvalError!void {
+    fn concatSpreadInto(self: *Interpreter, dst: Value, src: *value.Object, n: *usize) EvalError!void {
         const slen: usize = if (src.is_array) @max(src.elements.items.len, src.array_len) else blk: {
             const ln = toLen((try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number)).toNumber());
             if (ln > (1 << 22)) return self.throwError("TypeError", "Invalid array length");
             break :blk ln;
         };
+        // A plain dense Array result preserves holes (append + markHole); a
+        // species/exotic result leaves a hole as an absent index (CreateDataProperty
+        // only for present elements).
+        const dense = dst == .object and dst.object.is_array and dst.object.accessors == null and
+            dst.object.attrs == null and dst.object.proxy_handler == null and !dst.object.proxy_revoked;
         var j: usize = 0;
         while (j < slen) : (j += 1) {
-            const base = dst.elements.items.len;
             if (self.arrIndexPresent(src, j)) {
-                try dst.elements.append(self.arena, try self.arrIndexGet(src, j));
-            } else {
-                try dst.elements.append(self.arena, .undefined);
-                try dst.markHole(self.arena, base);
+                try self.arrayResultPush(dst, n.*, try self.arrIndexGet(src, j));
+            } else if (dense) {
+                const base = dst.object.elements.items.len;
+                try dst.object.elements.append(self.arena, .undefined);
+                try dst.object.markHole(self.arena, base);
             }
+            n.* += 1;
         }
     }
 
     /// Process one concat operand: spread it when concat-spreadable (per the
-    /// `Symbol.isConcatSpreadable` override, else only real Arrays), else append
-    /// whole. `ck` is the cached `Symbol.isConcatSpreadable` property key.
-    fn concatProcessOne(self: *Interpreter, dst: *value.Object, v: Value, ck: ?[]const u8) EvalError!void {
-        if (v != .object) {
-            try dst.elements.append(self.arena, v);
-            return;
-        }
-        var spread: bool = v.object.is_array;
-        if (ck) |k| {
-            const flag = try self.getProperty(v, k);
-            if (flag != .undefined) spread = flag.toBoolean();
+    /// `Symbol.isConcatSpreadable` override, else only real Arrays), else
+    /// CreateDataProperty it whole at the running result index `n`. `ck` is the
+    /// cached `Symbol.isConcatSpreadable` property key.
+    fn concatProcessOne(self: *Interpreter, dst: Value, v: Value, ck: ?[]const u8, n: *usize) EvalError!void {
+        var spread: bool = false;
+        if (v == .object) {
+            spread = v.object.is_array;
+            if (ck) |k| {
+                const flag = try self.getProperty(v, k);
+                if (flag != .undefined) spread = flag.toBoolean();
+            }
         }
         if (spread) {
-            try self.concatSpreadInto(dst, v.object);
+            try self.concatSpreadInto(dst, v.object, n);
         } else {
-            try dst.elements.append(self.arena, v);
+            try self.arrayResultPush(dst, n.*, v);
+            n.* += 1;
         }
     }
 
@@ -6902,8 +6910,13 @@ pub const Interpreter = struct {
         if (eq(name, "concat")) {
             const result = try self.arraySpeciesCreate(.{ .object = o }, 0);
             const ck = self.wellKnownSymbolKey("isConcatSpreadable");
-            try self.concatProcessOne(result.object, .{ .object = o }, ck);
-            for (args) |a| try self.concatProcessOne(result.object, a, ck);
+            var n: usize = 0;
+            try self.concatProcessOne(result, .{ .object = o }, ck, &n);
+            for (args) |a| try self.concatProcessOne(result, a, ck, &n);
+            // Set the result length (so trailing holes are reflected) when the
+            // species result isn't a plain dense array that already tracks it.
+            if (!(result == .object and result.object.is_array and result.object.accessors == null and result.object.attrs == null))
+                try self.setMember(result, "length", .{ .number = @floatFromInt(n) });
             return result;
         }
         if (eq(name, "reverse")) {
