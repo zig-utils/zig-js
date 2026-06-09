@@ -10507,7 +10507,12 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.iter_helper == null) return self.throwError("TypeError", "Iterator Helper next called on an incompatible receiver");
     const h = this.object.iter_helper.?;
+    // GeneratorValidate: re-entering an already-executing helper (e.g. its
+    // mapper calls back into next()) is a TypeError, not a stack RangeError.
+    if (h.running) return self.throwError("TypeError", "Iterator Helper is already running");
     if (h.done) return self.iterResultObj(.undefined, true);
+    h.running = true;
+    defer h.running = false;
     switch (h.kind) {
         .wrap => {
             const s = try self.iterStepM(h.src, h.next_method);

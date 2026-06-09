@@ -287,6 +287,7 @@ pub const IterHelper = struct {
     done: bool = false,
     started: bool = false, // drop: the initial skip has run
     is_async: bool = false, // AsyncIterator helper: `next` returns a promise
+    running: bool = false, // GeneratorValidate: a re-entrant next() is a TypeError
 };
 
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
