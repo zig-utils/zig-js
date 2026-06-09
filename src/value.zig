@@ -326,6 +326,9 @@ pub const Object = struct {
     is_bigint: bool = false,
     bigint: i128 = 0,
     bigint_text: ?[]const u8 = null,
+    /// An `[[IsHTMLDDA]]` exotic object (e.g. `document.all`): `typeof` reports
+    /// "undefined", ToBoolean is false, and it is loosely-equal to null/undefined.
+    is_htmldda: bool = false,
     /// A Symbol's `[[Description]]`: `null` = no description (reads as
     /// `undefined`), else the string. Held in this dedicated slot rather than an
     /// own `description` property so it stays invisible to reflection
@@ -689,7 +692,7 @@ pub const Value = union(enum) {
             .boolean => |b| b,
             .number => |n| n != 0 and !std.math.isNan(n),
             .string => |s| s.len != 0,
-            .object => |o| if (o.is_bigint) !bigIntIsZero(o) else true,
+            .object => |o| if (o.is_htmldda) false else if (o.is_bigint) !bigIntIsZero(o) else true,
         };
     }
 
@@ -739,7 +742,7 @@ pub const Value = union(enum) {
             .boolean => "boolean",
             .number => "number",
             .string => "string",
-            .object => |o| if (o.is_symbol) "symbol" else if (o.is_bigint) "bigint" else if (o.isCallableObject()) "function" else "object",
+            .object => |o| if (o.is_htmldda) "undefined" else if (o.is_symbol) "symbol" else if (o.is_bigint) "bigint" else if (o.isCallableObject()) "function" else "object",
         };
     }
 
@@ -989,6 +992,9 @@ pub fn looseEquals(a: Value, b: Value) bool {
         return strictEquals(a, b);
     }
     if ((a == .null and b == .undefined) or (a == .undefined and b == .null)) return true;
+    // An [[IsHTMLDDA]] object is loosely equal to null and undefined.
+    if ((a == .object and a.object.is_htmldda) and (b == .null or b == .undefined)) return true;
+    if ((b == .object and b.object.is_htmldda) and (a == .null or a == .undefined)) return true;
     // BigInt == Number/Boolean/String: compare mathematically (a string is parsed
     // to a BigInt; a non-integer/unparseable comparand is unequal).
     const a_big = a == .object and a.object.is_bigint;

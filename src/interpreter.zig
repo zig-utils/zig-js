@@ -9566,6 +9566,18 @@ fn host262GcFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     return .undefined;
 }
 
+/// `$262.IsHTMLDDA()` — the [[Call]] of an [[IsHTMLDDA]] object (legacy
+/// `document.all`): returns null when called with no arguments or a first
+/// argument that is undefined or the empty string, else undefined.
+fn host262IsHTMLDDACallFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    if (args.len == 0) return .null;
+    if (args[0] == .undefined) return .null;
+    if (args[0] == .string and args[0].string.len == 0) return .null;
+    return .undefined;
+}
+
 /// `$262.detachArrayBuffer(buffer)` — detach an ArrayBuffer's backing store.
 fn host262DetachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -9784,6 +9796,11 @@ pub fn install262(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
     try setNative(a, rs, d, "gc", 0, host262GcFn);
     try setNative(a, rs, d, "detachArrayBuffer", 1, host262DetachFn);
     try setNative(a, rs, d, "createRealm", 0, host262CreateRealmFn);
+    // $262.IsHTMLDDA — an [[IsHTMLDDA]] exotic (typeof "undefined", falsy,
+    // loosely-equal to null/undefined), callable per its legacy [[Call]].
+    const htmldda = try a.create(value.Object);
+    htmldda.* = .{ .proto = object_proto, .native = host262IsHTMLDDACallFn, .is_htmldda = true };
+    try d.setOwn(a, rs, "IsHTMLDDA", .{ .object = htmldda });
     const es = try a.create(value.Object);
     es.* = .{ .native = host262EvalScriptFn, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, es, "evalScript", 1);
