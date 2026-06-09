@@ -24594,7 +24594,7 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         // Multi-component form: ToNumber each component once (invoking valueOf),
         // with years 0–99 mapped to 1900–1999.
         const buf = try self.arena.alloc(Value, args.len);
-        for (args, 0..) |av, i| buf[i] = .{ .number = (try self.toPrimitive(av, .number)).toNumber() };
+        for (args, 0..) |av, i| buf[i] = .{ .number = try self.toNumberV(av) };
         const yi = @trunc(buf[0].number);
         if (yi >= 0 and yi <= 99) buf[0] = .{ .number = yi + 1900 };
         return self.makeDate(Interpreter.dateTimeFromArgs(buf));
@@ -24606,7 +24606,8 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
             return self.makeDate(args[0].object.date_ms);
         const prim = try self.toPrimitive(args[0], .default);
         if (prim == .string) return self.makeDate(dateParseISO(prim.string));
-        return self.makeDate(prim.toNumber());
+        // ToNumber(prim): a Symbol or BigInt primitive throws a TypeError.
+        return self.makeDate(try self.toNumberV(prim));
     }
     return self.makeDate(0);
 }
