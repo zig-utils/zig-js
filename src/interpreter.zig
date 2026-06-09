@@ -6476,7 +6476,7 @@ pub const Interpreter = struct {
             "join",      "indexOf", "lastIndexOf", "includes", "slice", "concat", "map",  "filter",
             "forEach",   "reduce",  "reduceRight", "some",     "every", "find",   "findIndex", "findLast",
             "findLastIndex", "at",  "flat",        "flatMap",  "keys",  "values", "entries",
-            "toReversed",    "toSorted", "toSpliced", "with",
+            "toReversed",    "toSorted", "toSpliced", "with",     "toLocaleString",
             // fill/copyWithin operate purely through [[Get]]/[[Set]] over the
             // receiver, so they work on an array-like `this` (and read its
             // `length` via ToLength, throwing for a Symbol/BigInt length).
@@ -6863,6 +6863,20 @@ pub const Interpreter = struct {
                     .undefined, .null => {},
                     else => |el| try buf.appendSlice(self.arena, try self.toStringV(el)),
                 }
+            }
+            return Value{ .string = try buf.toOwnedSlice(self.arena) };
+        }
+        if (eq(name, "toLocaleString")) {
+            // Like join(","), but each present element is rendered via
+            // ToString(? Invoke(element, "toLocaleString", « locales, options »)).
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            var i: usize = 0;
+            while (i < ilen) : (i += 1) {
+                if (i != 0) try buf.append(self.arena, ',');
+                const el = try self.arrIndexGet(o, i);
+                if (el == .undefined or el == .null) continue;
+                const r = try self.callMethod(el, "toLocaleString", args);
+                try buf.appendSlice(self.arena, try self.toStringV(r));
             }
             return Value{ .string = try buf.toOwnedSlice(self.arena) };
         }
@@ -18715,7 +18729,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         .{ "flat", 0 },       .{ "flatMap", 1 },      .{ "sort", 1 },       .{ "keys", 0 },
         .{ "values", 0 },     .{ "entries", 0 },      .{ "copyWithin", 2 }, .{ "at", 1 },
         .{ "toString", 0 },   .{ "toReversed", 0 },   .{ "toSorted", 1 },   .{ "toSpliced", 2 },
-        .{ "with", 2 },
+        .{ "with", 2 },       .{ "toLocaleString", 0 },
     });
     try array_ns.setOwn(a, root_shape, "prototype", .{ .object = array_proto });
     try array_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
