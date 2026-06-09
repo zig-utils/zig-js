@@ -803,12 +803,26 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
     while (i < args.len) : (i += 1) {
         // A null/undefined source is skipped; other primitives ToObject.
         if (args[i] == .null or args[i] == .undefined) continue;
-        const src_v: Value = .{ .object = try self.toObject(args[i]) };
+        const from = try self.toObject(args[i]);
+        const src_v: Value = .{ .object = from };
+        const is_proxy = from.proxy_handler != null or from.proxy_revoked;
         // Every enumerable own key — string AND symbol (private excluded) — is
-        // copied, in [[OwnPropertyKeys]] order.
-        for (try src_v.object.ownKeys(self.arena)) |k| {
+        // copied, in [[OwnPropertyKeys]] order (array indices / String chars /
+        // "length" / symbols all included).
+        for (try self.objectOwnKeysList(from)) |k| {
             if (value.isPrivateKey(k)) continue;
-            if (!src_v.object.getAttr(k).enumerable) continue;
+            // [[GetOwnProperty]] for the enumerable bit (proxy-aware, and a key
+            // dropped since the snapshot is skipped).
+            const enumerable = if (is_proxy) blk: {
+                const desc = try objectGetOwnPropertyDescriptor(self, .undefined, &.{ src_v, self.keyToValue(k) });
+                break :blk desc == .object and (try self.getProperty(desc, "enumerable")).toBoolean();
+            } else if (from.prim != null and from.prim.? == .string)
+                // A String wrapper's only enumerable own keys are its char indices
+                // ("length" and inherited methods are non-enumerable).
+                (arrayIndexOf(k) != null and arrayIndexOf(k).? < from.prim.?.string.len)
+            else
+                ((interpreter.objectHasOwn(from, k) or (from.is_array and arrayIndexOf(k) != null and arrayIndexOf(k).? < from.elements.items.len and !from.isHole(arrayIndexOf(k).?))) and from.getAttr(k).enumerable);
+            if (!enumerable) continue;
             // Get(from, key) runs a source getter, then Set(to, key, v, true) —
             // assignment to a read-only / non-extensible / setter-less target
             // property must throw, so force the throwing (strict) [[Set]].
@@ -1665,13 +1679,15 @@ pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []con
     _ = this;
     const self = interp(ctx);
     const result = try self.newObject();
-    if (arg(args, 0) == .object) {
-        const o = arg(args, 0).object;
-        for (try o.ownKeys(self.arena)) |k| {
-            if (value.isPrivateKey(k)) continue; // private slots aren't reflected
-            const d = try objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ arg(args, 0), .{ .string = k } });
-            try self.setMember(result, k, d);
-        }
+    // ToObject(arg): null/undefined throw; a primitive boxes to a wrapper.
+    const o = try self.toObject(arg(args, 0));
+    const ov: Value = .{ .object = o };
+    // [[OwnPropertyKeys]] order (array indices / String chars / "length" aware).
+    for (try self.objectOwnKeysList(o)) |k| {
+        if (value.isPrivateKey(k)) continue; // private slots aren't reflected
+        const d = try objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ ov, self.keyToValue(k) });
+        if (d == .undefined) continue; // CreateDataPropertyOrThrow only for present descs
+        try self.setMember(result, k, d);
     }
     return result;
 }
@@ -1863,14 +1879,14 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Val
     _ = this;
     const self = interp(ctx);
     const result = try self.newArray();
-    if (arg(args, 0) == .object) {
-        const o = arg(args, 0).object;
-        // [[OwnPropertyKeys]] (proxy-aware, array-index/length-aware), string
-        // keys only (symbols go to getOwnPropertySymbols).
-        for (try self.objectOwnKeysList(o)) |k| {
-            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-            try result.object.elements.append(self.arena, .{ .string = k });
-        }
+    // ToObject(arg): null/undefined throw; a primitive boxes (a String exposes
+    // its character indices + "length").
+    const o = try self.toObject(arg(args, 0));
+    // [[OwnPropertyKeys]] (proxy-aware, array-index/length-aware), string
+    // keys only (symbols go to getOwnPropertySymbols).
+    for (try self.objectOwnKeysList(o)) |k| {
+        if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+        try result.object.elements.append(self.arena, .{ .string = k });
     }
     return result;
 }
