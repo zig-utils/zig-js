@@ -3748,7 +3748,12 @@ pub const Interpreter = struct {
                 }
             }
         }
-        o.date_ms = t;
+        // TimeClip(t): a non-finite or out-of-±8.64e15 time is NaN, otherwise the
+        // integer part (toward zero), with -0 normalized to +0.
+        o.date_ms = if (std.math.isNan(t) or @abs(t) > 8.64e15) std.math.nan(f64) else blk: {
+            const tr = @trunc(t);
+            break :blk if (tr == 0) 0 else tr;
+        };
         return .{ .object = o };
     }
 
