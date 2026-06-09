@@ -9488,47 +9488,68 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 /// is implementation-defined; we return `"name: message"`.
 fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
-    _ = ctx;
-    if (this != .object or !this.object.is_error) return .undefined;
-    // Implementation-defined trace string. Read the class name directly off
-    // `[[ErrorData]]` rather than via [[Get]], so a hostile/recursive receiver
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.is_symbol or this.object.is_bigint)
+        return self.throwError("TypeError", "Error.prototype.stack getter called on a non-object");
+    // No [[ErrorData]] → undefined (e.g. Error.prototype, a plain object). For an
+    // error, an implementation-defined trace string. Read the class name directly
+    // off `[[ErrorData]]` rather than via [[Get]], so a hostile/recursive receiver
     // (proxy traps, getters) can't re-enter and blow the stack.
+    if (!this.object.is_error) return .undefined;
     const name = this.object.error_name;
     return .{ .string = if (name.len == 0) "Error" else name };
 }
 
-/// `Error.prototype.stack` setter — SetterThatIgnoresPrototypeProperties(this,
-/// %Error.prototype%, "stack", v): a TypeError if `this` is not an Object or `v`
-/// is not a String, a TypeError if `this` is the home object (%Error.prototype%),
-/// otherwise an own { writable, enumerable, configurable } data property `stack`
-/// is created on the receiver (any object, no [[ErrorData]] check), shadowing the
-/// accessor. The home pointer is the setter's `private_data`.
+/// SetterThatIgnoresPrototypeProperties(this, home, p, v): reject a non-object
+/// receiver or the `home` object (which emulates a non-writable data property),
+/// then — per the receiver's OWN descriptor — CreateDataPropertyOrThrow when the
+/// property is absent (bypassing this inherited accessor) or Set(this, p, v,
+/// true) when present (honoring an own accessor/writability).
+fn setterIgnoringProto(self: *Interpreter, this: Value, home: ?*value.Object, key: []const u8, v: Value) EvalError!Value {
+    if (this != .object or this.object.is_symbol or this.object.is_bigint)
+        return self.throwError("TypeError", "setter requires an object receiver");
+    if (home) |h| if (this.object == h)
+        return self.throwError("TypeError", "Cannot assign to the read-only property of the home object");
+    const o = this.object;
+    // [[GetOwnProperty]](this, key): own data slot, own accessor, or proxy trap.
+    const has_own = if (o.proxy_handler != null or o.proxy_revoked) blk: {
+        const d = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ .{ .object = o }, self.keyToValue(key) });
+        break :blk d == .object;
+    } else (o.getOwn(key) != null or o.getAccessor(key) != null);
+    if (!has_own) {
+        // CreateDataPropertyOrThrow(this, key, v) — own {w,e,c}=true data property;
+        // fails (TypeError) on a non-extensible receiver.
+        const desc = (try self.newObject()).object;
+        try desc.setOwn(self.arena, self.root_shape, "value", v);
+        try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+        try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+        try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+        if (!try builtins.defineOneResult(self, o, key, desc))
+            return self.throwError("TypeError", "Cannot create property");
+        return .undefined;
+    }
+    // Set(this, key, v, true) — honors an own accessor or writability.
+    if (!try self.setMemberResult(.{ .object = o }, key, v, .{ .object = o }))
+        return self.throwError("TypeError", "Cannot set property");
+    return .undefined;
+}
+
+/// `Error.prototype.stack` setter. The home pointer (%Error.prototype%) is the
+/// setter's `private_data`.
 fn errorStackSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object)
+    // Step 1: a non-object receiver throws (handled in setterIgnoringProto).
+    if (this != .object or this.object.is_symbol or this.object.is_bigint)
         return self.throwError("TypeError", "Error.prototype.stack setter called on a non-object");
+    // Step 2: v must already be a String (no coercion of an object/wrapper).
     const v = if (args.len > 0) args[0] else .undefined;
     if (v != .string)
         return self.throwError("TypeError", "Error.prototype.stack setter requires a string value");
-    // Assignment to the home object itself (%Error.prototype%) throws, mirroring
-    // a write to a non-writable own data property in strict mode.
-    if (self.active_native) |nat| {
-        if (nat.private_data) |hd| {
-            const home: *value.Object = @ptrCast(@alignCast(hd));
-            if (this.object == home)
-                return self.throwError("TypeError", "Error.prototype.stack setter called on %Error.prototype%");
-        }
-    }
-    const o = this.object;
-    // Define an *own* data property directly (CreateDataProperty), NOT via
-    // [[Set]] — going through setProp would re-find this very setter on the
-    // prototype and recurse infinitely. A fresh property is writable/enumerable/
-    // configurable; an existing own one just takes the new value.
-    const had_own = o.getOwn("stack") != null;
-    try o.setOwn(self.arena, self.root_shape, "stack", v);
-    if (!had_own)
-        try o.setAttr(self.arena, "stack", .{ .enumerable = true, .configurable = true, .writable = true });
-    return .undefined;
+    const home: ?*value.Object = if (self.active_native) |nat|
+        (if (nat.private_data) |hd| @as(*value.Object, @ptrCast(@alignCast(hd))) else null)
+    else
+        null;
+    return setterIgnoringProto(self, this, home, "stack", v);
 }
 
 /// Give `proto` a `constructor` own property pointing back to `ctor`
@@ -11447,14 +11468,11 @@ fn asyncGenProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn
 /// write an own property on the receiver — CreateDataPropertyOrThrow when absent
 /// or Set when present (both bypass this inherited accessor).
 fn iterProtoAccessorSet(self: *Interpreter, this: Value, key: []const u8, v: Value) EvalError!Value {
-    if (this != .object or this.object.is_bigint or this.object.is_symbol)
-        return self.throwError("TypeError", "Iterator.prototype setter requires an object receiver");
-    if (self.env.get("\x00IterProto")) |home| {
-        if (home == .object and this.object == home.object)
-            return self.throwError("TypeError", "Cannot assign to the read-only property of %Iterator.prototype%");
-    }
-    try self.setProp(this.object, key, v);
-    return .undefined;
+    const home: ?*value.Object = if (self.env.get("\x00IterProto")) |h|
+        (if (h == .object) h.object else null)
+    else
+        null;
+    return setterIgnoringProto(self, this, home, key, v);
 }
 fn iterProtoCtorGetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
