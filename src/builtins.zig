@@ -685,27 +685,94 @@ fn ownValueOf(o: *value.Object, key: []const u8) Value {
     return o.getOwn(key) orelse .undefined;
 }
 
+/// All own *string* keys of `o` in [[OwnPropertyKeys]] order (integer indices
+/// ascending, then strings in insertion order) WITHOUT filtering on enumerable —
+/// the EnumerableOwnPropertyNames snapshot, before the per-key live recheck.
+fn ownStringKeysOrdered(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (interpreter.isModuleNs(o)) {
+        try list.appendSlice(self.arena, interpreter.moduleNsNames(o));
+        return list.items;
+    }
+    if (o.proxy_handler != null or o.proxy_revoked) {
+        for (try self.proxyOwnKeys(o)) |k| {
+            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+            try list.append(self.arena, k);
+        }
+        return list.items;
+    }
+    // A String wrapper's own integer-indexed character properties come first.
+    if (o.prim) |p| if (p == .string) {
+        var i: usize = 0;
+        while (i < p.string.len) : (i += 1) try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+    };
+    if (o.is_array) {
+        var i: usize = 0;
+        while (i < o.elements.items.len) : (i += 1) {
+            if (!o.isHole(i)) try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+        }
+    }
+    for (try o.ownKeys(self.arena)) |k| {
+        if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+        if (o.is_array and value.canonicalIndex(k) != null) {
+            var dup = false;
+            for (list.items) |e| if (std.mem.eql(u8, e, k)) {
+                dup = true;
+                break;
+            };
+            if (dup) continue;
+        }
+        try list.append(self.arena, k);
+    }
+    return list.items;
+}
+
+const EnumKind = enum { key, value, key_value };
+
+/// EnumerableOwnProperties(ToObject(arg), kind): snapshot own string keys, then —
+/// per key, in order — re-check [[Enumerable]] live (a getter run for an earlier
+/// key may have toggled it) and [[Get]] the value (running accessors).
+fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) HostError!Value {
+    const o = try self.toObject(arg0); // RequireObjectCoercible + ToObject
+    const ov: Value = .{ .object = o };
+    const result = try self.newArray();
+    const is_proxy = o.proxy_handler != null or o.proxy_revoked;
+    for (try ownStringKeysOrdered(self, o)) |k| {
+        // [[GetOwnProperty]] enumerable check, read live so an earlier getter's
+        // mutation is observed; a key deleted in the meantime drops out.
+        const str_index = if (o.prim) |p| (p == .string and arrayIndexOf(k) != null and arrayIndexOf(k).? < p.string.len) else false;
+        const enumerable = if (is_proxy) blk: {
+            const desc = try objectGetOwnPropertyDescriptor(self, .undefined, &.{ ov, self.keyToValue(k) });
+            break :blk desc == .object and (try self.getProperty(desc, "enumerable")).toBoolean();
+        } else str_index or ((interpreter.objectHasOwn(o, k) or (o.is_array and arrayIndexOf(k) != null and arrayIndexOf(k).? < o.elements.items.len and !o.isHole(arrayIndexOf(k).?))) and o.getAttr(k).enumerable);
+        if (!enumerable) continue;
+        if (kind == .key) {
+            try result.object.elements.append(self.arena, .{ .string = k });
+            continue;
+        }
+        const v = try self.getProperty(ov, k); // [[Get]] — runs an accessor getter
+        if (kind == .value) {
+            try result.object.elements.append(self.arena, v);
+        } else {
+            const pair = try self.newArray();
+            try pair.object.elements.append(self.arena, .{ .string = k });
+            try pair.object.elements.append(self.arena, v);
+            try result.object.elements.append(self.arena, pair);
+        }
+    }
+    return result;
+}
+
 pub fn objectKeys(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const result = try self.newArray();
-    if (arg(args, 0) == .object) {
-        const keys = try ownEnumerableKeys(self, arg(args, 0).object);
-        for (keys) |k| try result.object.elements.append(self.arena, .{ .string = k });
-    }
-    return result;
+    return enumerableOwnProperties(self, arg(args, 0), .key);
 }
 
 pub fn objectValues(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const result = try self.newArray();
-    if (arg(args, 0) == .object) {
-        const o = arg(args, 0).object;
-        const keys = try ownEnumerableKeys(self, o);
-        for (keys) |k| try result.object.elements.append(self.arena, ownValueOf(o, k));
-    }
-    return result;
+    return enumerableOwnProperties(self, arg(args, 0), .value);
 }
 
 /// `Object.hasOwn(O, P)` — HasOwnProperty after ToObject(O) / ToPropertyKey(P).
@@ -761,18 +828,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
 pub fn objectEntries(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const result = try self.newArray();
-    if (arg(args, 0) == .object) {
-        const o = arg(args, 0).object;
-        const keys = try ownEnumerableKeys(self, o);
-        for (keys) |k| {
-            const pair = try self.newArray();
-            try pair.object.elements.append(self.arena, .{ .string = k });
-            try pair.object.elements.append(self.arena, ownValueOf(o, k));
-            try result.object.elements.append(self.arena, pair);
-        }
-    }
-    return result;
+    return enumerableOwnProperties(self, arg(args, 0), .key_value);
 }
 
 pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

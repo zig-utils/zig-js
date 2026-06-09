@@ -1173,9 +1173,12 @@ pub const Interpreter = struct {
                 };
             }
         } else {
-            // for-in: enumerate keys (skip null/undefined per spec).
+            // for-in: enumerate keys (skip null/undefined per spec, ToObject any
+            // other primitive — e.g. a string's character indices).
             switch (iter) {
-                .object => |o| {
+                .undefined, .null => {}, // iterating null/undefined is a no-op
+                else => {
+                    const o = try self.toObject(iter);
                     // EnumerateObjectProperties: own + inherited enumerable string
                     // keys with prototype-chain shadowing (see forInKeyList).
                     for (try self.forInKeyList(o)) |k| {
@@ -1191,8 +1194,6 @@ pub const Interpreter = struct {
                         if (self.loopSignal(my_label)) |stop| if (stop) break;
                     }
                 },
-                .undefined, .null => {}, // iterating null/undefined is a no-op
-                else => {},
             }
         }
         return last;
@@ -1209,6 +1210,16 @@ pub const Interpreter = struct {
         var visited: std.StringHashMapUnmanaged(void) = .empty;
         var cur: ?*value.Object = start;
         while (cur) |o| {
+            // A String wrapper's own enumerable character indices "0".."len-1".
+            if (o.prim) |p| if (p == .string) {
+                var i: usize = 0;
+                while (i < p.string.len) : (i += 1) {
+                    const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                    if (visited.contains(key)) continue;
+                    try visited.put(self.arena, key, {});
+                    try out.append(self.arena, key);
+                }
+            };
             if (o.is_array) {
                 var i: usize = 0;
                 while (i < o.elements.items.len) : (i += 1) {
@@ -1245,8 +1256,11 @@ pub const Interpreter = struct {
     /// opcode to drive for-in via the for-of machinery.
     pub fn forInKeysArray(self: *Interpreter, v: Value) EvalError!Value {
         const arr = (try self.newArray()).object;
-        if (v == .object) {
-            for (try self.forInKeyList(v.object)) |k| {
+        // ForIn/OfHeadEvaluation: undefined/null enumerate nothing; any other
+        // value is ToObject'd first (so a primitive string yields its indices).
+        if (v != .undefined and v != .null) {
+            const o = try self.toObject(v);
+            for (try self.forInKeyList(o)) |k| {
                 try arr.elements.append(self.arena, .{ .string = k });
             }
         }
