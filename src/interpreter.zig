@@ -18309,6 +18309,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     json_ns.* = .{};
     try setNative(a, root_shape, json_ns, "stringify", 3, builtins.jsonStringify);
     try setNative(a, root_shape, json_ns, "parse", 2, builtins.jsonParse);
+    try setNative(a, root_shape, json_ns, "rawJSON", 1, builtins.jsonRawJSON);
+    try setNative(a, root_shape, json_ns, "isRawJSON", 1, builtins.jsonIsRawJSON);
     try env.put("JSON", .{ .object = json_ns });
 
     // Math namespace.
@@ -18773,6 +18775,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (symbol_ns.getOwn("toStringTag")) |rtt| if (rtt == .object and rtt.object.is_symbol) {
         try reflect_ns.setOwn(a, root_shape, rtt.object.sym_key, .{ .string = "Reflect" });
         try reflect_ns.setAttr(a, rtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        // The JSON and Math namespaces carry the same non-enumerable tag.
+        inline for (.{ .{ "JSON", "JSON" }, .{ "Math", "Math" } }) |nt| {
+            if (env.get(nt[0])) |nv| if (nv == .object) {
+                try nv.object.setOwn(a, root_shape, rtt.object.sym_key, .{ .string = nt[1] });
+                try nv.object.setAttr(a, rtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            };
+        }
     };
     try setNative(a, root_shape, reflect_ns, "get", 2, reflectGetFn);
     try setNative(a, root_shape, reflect_ns, "set", 3, reflectSetFn);

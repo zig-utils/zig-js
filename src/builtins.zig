@@ -2083,6 +2083,12 @@ const Stringifier = struct {
         }
         if (st.replacer_fn) |rf|
             v = try self.callValueWithThis(rf, &.{ .{ .string = key }, v }, holder);
+        // A JSON.rawJSON object emits its validated text verbatim.
+        if (v == .object and v.object.is_raw_json) {
+            const raw = (v.object.getOwn("rawJSON") orelse Value{ .string = "" }).string;
+            try buf.appendSlice(a, raw);
+            return true;
+        }
         if (v == .object) if (v.object.prim) |p| {
             v = p;
         };
@@ -2225,6 +2231,43 @@ fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []
         i += 1;
     }
     try buf.append(a, '"');
+}
+
+/// `JSON.rawJSON(text)`: validate `text` as a single JSON primitive and wrap it
+/// in a frozen, null-prototype `[[IsRawJSON]]` object emitted verbatim later.
+pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    const self = interp(ctx);
+    const s = try self.toStringV(arg(args, 0));
+    const isJsonWs = struct {
+        fn f(c: u8) bool {
+            return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+        }
+    }.f;
+    if (s.len == 0 or isJsonWs(s[0]) or isJsonWs(s[s.len - 1]))
+        return self.throwError("SyntaxError", "JSON.rawJSON text must be non-empty and not start or end with whitespace");
+    var p = JsonParser{ .s = s, .i = 0, .interp = self };
+    p.skipWs();
+    const v = p.parseValue() catch return self.throwError("SyntaxError", "JSON.rawJSON: invalid JSON");
+    p.skipWs();
+    if (p.i != s.len) return self.throwError("SyntaxError", "JSON.rawJSON: trailing characters");
+    // The outermost value must be a primitive (not an object or array).
+    if (v == .object and !v.object.is_bigint and !v.object.is_symbol)
+        return self.throwError("SyntaxError", "JSON.rawJSON text must be a primitive JSON value");
+    const o = try self.arena.create(value.Object);
+    o.* = .{ .proto = null, .is_raw_json = true };
+    try o.setOwn(self.arena, self.root_shape, "rawJSON", .{ .string = s });
+    try o.setAttr(self.arena, "rawJSON", .{ .writable = false, .enumerable = true, .configurable = false });
+    o.extensible = false; // SetIntegrityLevel(frozen)
+    return .{ .object = o };
+}
+
+/// `JSON.isRawJSON(O)`: true iff `O` is a `JSON.rawJSON` result.
+pub fn jsonIsRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = ctx;
+    _ = this;
+    const v = arg(args, 0);
+    return .{ .boolean = v == .object and v.object.is_raw_json };
 }
 
 pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

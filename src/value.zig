@@ -329,6 +329,9 @@ pub const Object = struct {
     /// An `[[IsHTMLDDA]]` exotic object (e.g. `document.all`): `typeof` reports
     /// "undefined", ToBoolean is false, and it is loosely-equal to null/undefined.
     is_htmldda: bool = false,
+    /// A `JSON.rawJSON(...)` result (carries `[[IsRawJSON]]`): a frozen null-proto
+    /// object with an own "rawJSON" string property emitted verbatim by stringify.
+    is_raw_json: bool = false,
     /// A Symbol's `[[Description]]`: `null` = no description (reads as
     /// `undefined`), else the string. Held in this dedicated slot rather than an
     /// own `description` property so it stays invisible to reflection
