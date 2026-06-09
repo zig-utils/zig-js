@@ -6912,13 +6912,13 @@ pub const Interpreter = struct {
             const end = try relIndex(self, arg(args, 1), ilen, @floatFromInt(ilen));
             const count = if (end > start) end - start else 0;
             const result = try self.arraySpeciesCreate(.{ .object = o }, count);
-            const ra = result.object.is_array;
+            const dense = result.object.is_array and result.object.accessors == null and result.object.attrs == null and result.object.proxy_handler == null;
             var i = start;
             var k: usize = 0; // result index, for hole preservation
             while (i < end) : (i += 1) {
                 if (self.arrIndexPresent(o, i)) {
-                    if (ra) try result.object.elements.append(self.arena, try self.arrIndexGet(o, i)) else try self.arrayResultPush(result, k, try self.arrIndexGet(o, i));
-                } else if (ra) { // slice preserves holes (only on a real array result)
+                    try self.arrayResultPush(result, k, try self.arrIndexGet(o, i)); // CreateDataPropertyOrThrow
+                } else if (dense) { // slice preserves holes on a plain dense result
                     try result.object.elements.append(self.arena, .undefined);
                     try result.object.markHole(self.arena, k);
                 }
@@ -7028,11 +7028,13 @@ pub const Interpreter = struct {
         if (eq(name, "map")) {
             const cb = arg0(args);
             const result = try self.arraySpeciesCreate(.{ .object = o }, ilen);
-            const ra = result.object.is_array;
+            // Only a freshly-created plain dense Array preserves holes by filling
+            // them (a custom-species result leaves an absent index).
+            const dense = result.object.is_array and result.object.accessors == null and result.object.attrs == null and result.object.proxy_handler == null;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (!self.arrIndexPresent(o, i)) {
-                    if (ra) {
+                    if (dense) {
                         try result.object.elements.append(self.arena, .undefined);
                         try result.object.markHole(self.arena, i); // map preserves holes
                     }
@@ -7040,21 +7042,20 @@ pub const Interpreter = struct {
                 }
                 const el = try self.arrIndexGet(o, i);
                 const r = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
-                if (ra) try result.object.elements.append(self.arena, r) else try self.arrayResultPush(result, i, r);
+                try self.arrayResultPush(result, i, r); // CreateDataPropertyOrThrow
             }
             return result;
         }
         if (eq(name, "filter")) {
             const cb = arg0(args);
             const result = try self.arraySpeciesCreate(.{ .object = o }, 0);
-            const ra = result.object.is_array;
             var i: usize = 0;
             var ridx: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!self.arrIndexPresent(o, i)) continue; // skip holes
+                if (!self.arrIndexPresent(o, i)) continue; // skip holes (filter packs)
                 const el = try self.arrIndexGet(o, i);
                 if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean()) {
-                    if (ra) try result.object.elements.append(self.arena, el) else try self.arrayResultPush(result, ridx, el);
+                    try self.arrayResultPush(result, ridx, el); // CreateDataPropertyOrThrow
                     ridx += 1;
                 }
             }
