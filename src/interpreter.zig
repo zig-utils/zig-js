@@ -2921,10 +2921,9 @@ pub const Interpreter = struct {
     /// Returns null when there is no new.target (the caller keeps its default).
     fn protoFromCtor(self: *Interpreter, ctor_name: []const u8) EvalError!?*value.Object {
         if (self.new_target != .object) return null;
-        const p = try self.getProperty(self.new_target, "prototype");
-        if (p == .object and !p.object.is_symbol and !p.object.is_bigint) return p.object;
-        if (self.env.get(ctor_name)) |c| if (c == .object) return try self.protoObject(c.object);
-        return null;
+        // GetPrototypeFromConstructor: new.target.prototype, or — when that is not
+        // an Object — the *new.target's realm's* named intrinsic prototype.
+        return try self.ctorRealmIntrinsicProto(self.new_target.object, ctor_name);
     }
 
     pub fn protoObject(self: *Interpreter, ctor: *value.Object) EvalError!*value.Object {
