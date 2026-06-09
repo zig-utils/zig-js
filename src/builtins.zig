@@ -689,39 +689,11 @@ fn ownValueOf(o: *value.Object, key: []const u8) Value {
 /// ascending, then strings in insertion order) WITHOUT filtering on enumerable —
 /// the EnumerableOwnPropertyNames snapshot, before the per-key live recheck.
 fn ownStringKeysOrdered(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
+    // [[OwnPropertyKeys]] (array indices / String chars / "length" / symbols, in
+    // spec order), keeping only the string keys.
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
-    if (interpreter.isModuleNs(o)) {
-        try list.appendSlice(self.arena, interpreter.moduleNsNames(o));
-        return list.items;
-    }
-    if (o.proxy_handler != null or o.proxy_revoked) {
-        for (try self.proxyOwnKeys(o)) |k| {
-            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-            try list.append(self.arena, k);
-        }
-        return list.items;
-    }
-    // A String wrapper's own integer-indexed character properties come first.
-    if (o.prim) |p| if (p == .string) {
-        var i: usize = 0;
-        while (i < p.string.len) : (i += 1) try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-    };
-    if (o.is_array) {
-        var i: usize = 0;
-        while (i < o.elements.items.len) : (i += 1) {
-            if (!o.isHole(i)) try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-        }
-    }
-    for (try o.ownKeys(self.arena)) |k| {
+    for (try self.objectOwnKeysList(o)) |k| {
         if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-        if (o.is_array and value.canonicalIndex(k) != null) {
-            var dup = false;
-            for (list.items) |e| if (std.mem.eql(u8, e, k)) {
-                dup = true;
-                break;
-            };
-            if (dup) continue;
-        }
         try list.append(self.arena, k);
     }
     return list.items;
@@ -740,11 +712,17 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
     for (try ownStringKeysOrdered(self, o)) |k| {
         // [[GetOwnProperty]] enumerable check, read live so an earlier getter's
         // mutation is observed; a key deleted in the meantime drops out.
-        const str_index = if (o.prim) |p| (p == .string and arrayIndexOf(k) != null and arrayIndexOf(k).? < p.string.len) else false;
         const enumerable = if (is_proxy) blk: {
             const desc = try objectGetOwnPropertyDescriptor(self, .undefined, &.{ ov, self.keyToValue(k) });
             break :blk desc == .object and (try self.getProperty(desc, "enumerable")).toBoolean();
-        } else str_index or ((interpreter.objectHasOwn(o, k) or (o.is_array and arrayIndexOf(k) != null and arrayIndexOf(k).? < o.elements.items.len and !o.isHole(arrayIndexOf(k).?))) and o.getAttr(k).enumerable);
+        } else if (o.prim != null and o.prim.? == .string)
+            // A String wrapper exposes only its char indices as enumerable own keys.
+            (arrayIndexOf(k) != null and arrayIndexOf(k).? < o.prim.?.string.len)
+        else if ((o.is_array or o.typed_array != null) and std.mem.eql(u8, k, "length"))
+            // An Array's / TypedArray's "length" is a non-enumerable own property.
+            false
+        else
+            ((interpreter.objectHasOwn(o, k) or (o.is_array and arrayIndexOf(k) != null and arrayIndexOf(k).? < o.elements.items.len and !o.isHole(arrayIndexOf(k).?))) and o.getAttr(k).enumerable);
         if (!enumerable) continue;
         if (kind == .key) {
             try result.object.elements.append(self.arena, .{ .string = k });
@@ -820,6 +798,8 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
                 // A String wrapper's only enumerable own keys are its char indices
                 // ("length" and inherited methods are non-enumerable).
                 (arrayIndexOf(k) != null and arrayIndexOf(k).? < from.prim.?.string.len)
+            else if ((from.is_array or from.typed_array != null) and std.mem.eql(u8, k, "length"))
+                false
             else
                 ((interpreter.objectHasOwn(from, k) or (from.is_array and arrayIndexOf(k) != null and arrayIndexOf(k).? < from.elements.items.len and !from.isHole(arrayIndexOf(k).?))) and from.getAttr(k).enumerable);
             if (!enumerable) continue;
@@ -1360,7 +1340,18 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     }
     if (std.mem.eql(u8, key, "prototype") and target.js_func != null and target.getOwn("prototype") == null and target.getAccessor("prototype") == null)
         _ = try self.getProperty(.{ .object = target }, key);
-    const cur_data = target.getOwn(key);
+    // A dense array element lives in the element store (not `slots`/`accessors`),
+    // so [[GetOwnProperty]] must surface it here too: redefining one — reaching
+    // this generic path only for an accessor descriptor — is a redefinition of an
+    // existing data property whose implicit attributes are all true, not the
+    // creation of a brand-new (all-false) property.
+    var arr_elem_index: ?usize = null;
+    if (target.is_array and target.getAccessor(key) == null) {
+        if (arrayIndexOf(key)) |i| {
+            if (i < target.elements.items.len and !target.isHole(i)) arr_elem_index = i;
+        }
+    }
+    const cur_data = target.getOwn(key) orelse (if (arr_elem_index) |i| target.elements.items[i] else null);
     const cur_acc = target.getAccessor(key);
     const exists = cur_data != null or cur_acc != null;
     // ValidateAndApplyPropertyDescriptor: reject (TypeError) any change that the
@@ -1391,6 +1382,9 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         // the accessor, which getProperty consults first) so own-key creation
         // order is preserved — accessors live in a separate, append-ordered map.
         try target.setAccessor(self.arena, key, new_get, new_set);
+        // A dense array element converted to an accessor must vacate the element
+        // store (now an accessor index) so it isn't double-counted in own keys.
+        if (arr_elem_index) |i| try target.markHole(self.arena, i);
     } else if (has_data_field or cur_acc == null) {
         // A data property: either explicit data fields, or a generic descriptor on
         // a non-accessor (brand-new / existing data property).

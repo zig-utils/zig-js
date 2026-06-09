@@ -4718,14 +4718,42 @@ pub const Interpreter = struct {
             return list.items;
         }
         if (t.is_array) {
-            var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            // OrdinaryOwnPropertyKeys order: integer indices ascending (merging the
+            // dense element store with any sparse/accessor index in the shape),
+            // then string keys in insertion order, then "length", then symbols.
+            var indices: std.ArrayListUnmanaged([]const u8) = .empty;
+            var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
             var i: usize = 0;
             while (i < t.elements.items.len) : (i += 1) {
                 if (t.isHole(i)) continue;
-                try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+                try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+                try seen.put(self.arena, i, {});
             }
-            for (try t.ownKeys(self.arena)) |k| try appendReflectable(self.arena, &list, k);
+            var strings: std.ArrayListUnmanaged([]const u8) = .empty;
+            var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (try t.ownKeys(self.arena)) |k| {
+                if (value.isPrivateKey(k)) continue;
+                if (value.isSymbolKey(k)) {
+                    if (value.isRealSymbolKey(k)) try symbols.append(self.arena, k);
+                } else if (value.canonicalIndex(k)) |idx| {
+                    if (!seen.contains(idx)) {
+                        try seen.put(self.arena, idx, {});
+                        try indices.append(self.arena, k);
+                    }
+                } else {
+                    try strings.append(self.arena, k);
+                }
+            }
+            std.mem.sort([]const u8, indices.items, {}, struct {
+                fn lt(_: void, x: []const u8, y: []const u8) bool {
+                    return value.canonicalIndex(x).? < value.canonicalIndex(y).?;
+                }
+            }.lt);
+            var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            try list.appendSlice(self.arena, indices.items);
+            try list.appendSlice(self.arena, strings.items);
             try list.append(self.arena, "length");
+            try list.appendSlice(self.arena, symbols.items);
             return list.items;
         }
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
