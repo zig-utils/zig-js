@@ -3270,8 +3270,10 @@ pub const Interpreter = struct {
         o.regex_flags = try self.arena.dupe(u8, flags);
         try self.setProp(o, "lastIndex", .{ .number = 0 });
         try o.setAttr(self.arena, "lastIndex", .{ .writable = true, .enumerable = false, .configurable = false });
-        if (try self.regexpPrototypeFromNewTarget()) |p| {
-            o.proto = p;
+        if (self.new_target == .object) {
+            // GetPrototypeFromConstructor: new.target.prototype, or new.target's
+            // realm's %RegExp.prototype% when that is not an Object.
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "RegExp");
         } else if (self.env.get("RegExp")) |c| {
             if (c == .object) o.proto = try self.protoObject(c.object);
         }
