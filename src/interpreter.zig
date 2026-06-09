@@ -5558,6 +5558,14 @@ pub const Interpreter = struct {
                 }
                 return false;
             }
+            // OrdinarySet consults only the FIRST own descriptor on the chain: an
+            // own data property here shadows any inherited accessor above it. A
+            // non-writable one fails the set; a writable one falls through to the
+            // ordinary data-write on the receiver.
+            if (c.getOwn(key) != null) {
+                if (!c.getAttr(key).writable) return false;
+                break;
+            }
             cur = self.effectiveProto(c);
         }
         // [[Set]] attribute checks.
@@ -10650,8 +10658,16 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                         return e;
                     };
                     h.counter += 1;
-                    h.inner = try self.iteratorOf(mapped);
-                    // Capture the inner iterator's `next` once (GetIteratorFlattenable).
+                    // GetIteratorFlattenable(mapped, reject-primitives): a primitive
+                    // (including a primitive string) is a TypeError; an abrupt
+                    // completion closes the source iterator.
+                    h.inner = self.getIteratorFlattenableObj(mapped) catch |e| {
+                        if (e == error.Throw) {
+                            h.done = true;
+                            self.iteratorCloseKeepingThrow(h.src);
+                        }
+                        return e;
+                    };
                     h.inner_next = if (h.inner.? == .object) try self.getProperty(h.inner.?, "next") else .undefined;
                 }
                 const is = try self.iterStepM(h.inner.?, h.inner_next);
@@ -10665,6 +10681,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         .concat => {
             // `h.src` is a JS array of the source iterables; `counter` is the next
             // source index and `inner` the iterator currently being drained.
+            h.started = true; // the generator has run (→ "suspended-yield")
             const srcs = h.src.object;
             while (true) {
                 if (h.inner == null) {
@@ -10856,7 +10873,16 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
                 }
                 return self.iterResultObj(.undefined, true);
             },
-            .concat => {},
+            // concat closes the iterator it is currently draining; the running
+            // guard makes a re-entrant return() from that close a TypeError.
+            .concat => {
+                if (h.inner) |inner| if (inner == .object and inner.object.iter_helper == null) {
+                    h.running = h.started;
+                    defer h.running = false;
+                    try self.iteratorClose(inner);
+                };
+                return self.iterResultObj(.undefined, true);
+            },
             else => if (h.src == .object) try self.iteratorClose(h.src),
         }
         if (h.inner) |inner| if (inner == .object and inner.object.iter_helper == null) try self.iteratorClose(inner);
@@ -10896,25 +10922,37 @@ fn iterFlatMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     }
     return makeIterHelper(self, this, .flat_map, f, 0);
 }
+/// Validate the `limit`/`count` argument of take/drop: ToNumber (closing `this`
+/// on an abrupt completion), then ToIntegerOrInfinity, requiring NaN→RangeError
+/// and a non-negative result (the truncation happens before the `< 0` check, so
+/// `-0.5` yields 0, not a RangeError). Closes `this` before any RangeError.
+fn iterLimitArg(self: *Interpreter, this: Value, arg_v: Value, comptime who: []const u8) EvalError!f64 {
+    const n = self.toNumberV(arg_v) catch |e| {
+        if (e == error.Throw) self.iteratorCloseKeepingThrow(this);
+        return e;
+    };
+    if (std.math.isNan(n)) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("RangeError", who ++ ": invalid count");
+    }
+    const lim = @trunc(n); // ToIntegerOrInfinity (-0.5 → -0, which is not < 0)
+    if (lim < 0) {
+        self.iteratorClose(this) catch {};
+        return self.throwError("RangeError", who ++ ": invalid count");
+    }
+    return lim;
+}
 fn iterTakeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.take called on a non-object");
-    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
-    if (std.math.isNan(n) or n < 0) {
-        self.iteratorClose(this) catch {};
-        return self.throwError("RangeError", "Iterator.prototype.take: invalid count");
-    }
-    return makeIterHelper(self, this, .take, .undefined, @trunc(n));
+    const lim = try iterLimitArg(self, this, if (args.len > 0) args[0] else .undefined, "Iterator.prototype.take");
+    return makeIterHelper(self, this, .take, .undefined, lim);
 }
 fn iterDropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.drop called on a non-object");
-    const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
-    if (std.math.isNan(n) or n < 0) {
-        self.iteratorClose(this) catch {};
-        return self.throwError("RangeError", "Iterator.prototype.drop: invalid count");
-    }
-    return makeIterHelper(self, this, .drop, .undefined, @trunc(n));
+    const lim = try iterLimitArg(self, this, if (args.len > 0) args[0] else .undefined, "Iterator.prototype.drop");
+    return makeIterHelper(self, this, .drop, .undefined, lim);
 }
 
 // --- the eager helper methods (consume `this`) -----------------------
@@ -10923,9 +10961,11 @@ fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object) return self.throwError("TypeError", "Iterator.prototype.toArray called on a non-object");
+    // GetIteratorDirect captures `next` once (a `next` accessor runs a single time).
+    const next_method = try self.getProperty(this, "next");
     const arr = (try self.newArray()).object;
     while (true) {
-        const s = try self.iterStep(this);
+        const s = try self.iterStepM(this, next_method);
         if (s.done) break;
         try arr.elements.append(self.arena, s.value);
     }
@@ -11401,6 +11441,55 @@ fn asyncGenProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn
     }.call;
 }
 
+/// The shared setter for %Iterator.prototype%'s `constructor` and
+/// `@@toStringTag` accessors: reject a non-object receiver or the home object
+/// (%Iterator.prototype%, which emulates a non-writable data property), then
+/// write an own property on the receiver — CreateDataPropertyOrThrow when absent
+/// or Set when present (both bypass this inherited accessor).
+fn iterProtoAccessorSet(self: *Interpreter, this: Value, key: []const u8, v: Value) EvalError!Value {
+    if (this != .object or this.object.is_bigint or this.object.is_symbol)
+        return self.throwError("TypeError", "Iterator.prototype setter requires an object receiver");
+    if (self.env.get("\x00IterProto")) |home| {
+        if (home == .object and this.object == home.object)
+            return self.throwError("TypeError", "Cannot assign to the read-only property of %Iterator.prototype%");
+    }
+    try self.setProp(this.object, key, v);
+    return .undefined;
+}
+fn iterProtoCtorGetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.env.get("Iterator") orelse .undefined;
+}
+fn iterProtoCtorSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return iterProtoAccessorSet(self, this, "constructor", if (args.len > 0) args[0] else .undefined);
+}
+fn iterProtoTagGetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    _ = args;
+    return .{ .string = "Iterator" };
+}
+fn iterProtoTagSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const key = symbolToStringTagKey(self) orelse return .undefined;
+    return iterProtoAccessorSet(self, this, key, if (args.len > 0) args[0] else .undefined);
+}
+/// Install an accessor with a native getter and setter (non-enumerable,
+/// configurable), naming them `get <display>` / `set <display>` per spec.
+fn setNativeGetSet(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, key: []const u8, comptime display: []const u8, getf: value.NativeFn, setf: value.NativeFn) EvalError!void {
+    const g = try a.create(value.Object);
+    g.* = .{ .native = getf };
+    try installNativeProps(a, rs, g, "get " ++ display, 0);
+    const s = try a.create(value.Object);
+    s.* = .{ .native = setf };
+    try installNativeProps(a, rs, s, "set " ++ display, 1);
+    try obj.setAccessor(a, key, .{ .object = g }, .{ .object = s });
+    try obj.setAttr(a, key, .{ .enumerable = false, .configurable = true });
+}
+
 fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
     const sym_iter: ?[]const u8 = blk: {
@@ -11426,14 +11515,15 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     // %IteratorPrototype%.
     const iter_proto = try a.create(value.Object);
     iter_proto.* = .{ .proto = object_proto };
-    if (sym_iter) |k| try setNative(a, rs, iter_proto, k, 0, iterProtoSymbolIteratorFn);
+    if (sym_iter) |k| try installSymbolMethod(a, rs, iter_proto, k, "[Symbol.iterator]", 0, iterProtoSymbolIteratorFn);
     if (sym_dispose) |k| try installSymbolMethod(a, rs, iter_proto, k, "[Symbol.dispose]", 0, iterProtoDisposeFn);
     inline for (.{
         .{ "map", iterMapFn },        .{ "filter", iterFilterFn },
         .{ "take", iterTakeFn },      .{ "drop", iterDropFn },
         .{ "flatMap", iterFlatMapFn }, .{ "reduce", iterReduceFn },
-        .{ "toArray", iterToArrayFn }, .{ "forEach", iterForEachFn },
+        .{ "forEach", iterForEachFn },
     }) |m| try setNative(a, rs, iter_proto, m[0], 1, m[1]);
+    try setNative(a, rs, iter_proto, "toArray", 0, iterToArrayFn); // toArray() takes no args
     try setNative(a, rs, iter_proto, "some", 1, iterSomeEveryFindFn(.some));
     try setNative(a, rs, iter_proto, "every", 1, iterSomeEveryFindFn(.every));
     try setNative(a, rs, iter_proto, "find", 1, iterSomeEveryFindFn(.find));
@@ -11509,14 +11599,13 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     try setNative(a, rs, ctor, "zipKeyed", 1, iteratorZipKeyedFn);
     try ctor.setOwn(a, rs, "prototype", .{ .object = iter_proto });
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
-    try setConstructor(a, rs, iter_proto, ctor);
-    // %IteratorPrototype%[@@toStringTag] is an accessor in the spec; a writable
-    // data property of "Iterator" satisfies the common reflection checks.
-    if (sym_tag) |k| {
-        try iter_proto.setOwn(a, rs, k, .{ .string = "Iterator" });
-        try iter_proto.setAttr(a, k, .{ .writable = true, .enumerable = false, .configurable = true });
-    }
     try env.put("Iterator", .{ .object = ctor });
+    // %IteratorPrototype%.constructor and [@@toStringTag] are accessor properties
+    // (not data) in the iterator-helpers proposal: the getter yields the value
+    // and the shared setter lets a subclass shadow it while protecting the home.
+    try setNativeGetSet(a, rs, iter_proto, "constructor", "constructor", iterProtoCtorGetterFn, iterProtoCtorSetterFn);
+    if (sym_tag) |k|
+        try setNativeGetSet(a, rs, iter_proto, k, "[Symbol.toStringTag]", iterProtoTagGetterFn, iterProtoTagSetterFn);
 }
 
 // ===== AsyncIterator helpers =========================================
