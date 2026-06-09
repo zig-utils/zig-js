@@ -10629,7 +10629,10 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                         return self.iterResultObj(.undefined, true);
                     }
                     h.counter += 1;
-                    h.inner = try self.iteratorOf(srcs.elements.items[idx]);
+                    // Open the source with its pre-captured @@iterator method.
+                    const it = try self.callValueWithThis(h.func.object.elements.items[idx], &.{}, srcs.elements.items[idx]);
+                    if (it != .object) return self.throwError("TypeError", "Iterator.concat: @@iterator did not return an object");
+                    h.inner = it;
                 }
                 const is = try self.iterStep(h.inner.?);
                 if (is.done) {
@@ -11005,11 +11008,20 @@ fn iteratorConcatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const srcs = (try self.newArray()).object;
+    const methods = (try self.newArray()).object;
+    const ikey = self.wellKnownSymbolKey("iterator") orelse "";
+    // Validate every argument up front, in order: each must be an Object whose
+    // @@iterator (GetMethod, read exactly once now) is callable.
     for (args) |arg_v| {
-        if (arg_v != .object or !self.isIterable(arg_v)) return self.throwError("TypeError", "Iterator.concat: each argument must be an iterable object");
+        if (arg_v != .object) return self.throwError("TypeError", "Iterator.concat: each argument must be an object");
+        const method = try self.getProperty(arg_v, ikey);
+        if (method == .undefined or method == .null or !method.isCallable())
+            return self.throwError("TypeError", "Iterator.concat: each argument must have a callable @@iterator");
         try srcs.elements.append(self.arena, arg_v);
+        try methods.elements.append(self.arena, method);
     }
-    return makeIterHelper(self, .{ .object = srcs }, .concat, .undefined, 0);
+    // The captured @@iterator methods ride in `func` for the .concat consumer.
+    return makeIterHelper(self, .{ .object = srcs }, .concat, .{ .object = methods }, 0);
 }
 
 /// Read the shared `{ mode, padding }` options of `Iterator.zip`/`zipKeyed`.
