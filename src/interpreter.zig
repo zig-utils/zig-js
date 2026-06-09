@@ -7798,8 +7798,12 @@ pub const Interpreter = struct {
             return Value{ .string = try buf.toOwnedSlice(a) };
         }
         if (eq(name, "codePointAt")) {
-            const i = toLen(try self.toNumberV(arg0(args)));
-            if (i >= s.len) return Value.undefined;
+            // ToIntegerOrInfinity(pos): a position outside [0, len) yields undefined
+            // (so a negative position is undefined, not clamped to index 0).
+            const pos_raw = try self.toNumberV(arg0(args));
+            const pos: f64 = if (std.math.isNan(pos_raw)) 0 else @trunc(pos_raw);
+            if (pos < 0 or pos >= @as(f64, @floatFromInt(s.len))) return Value.undefined;
+            const i: usize = @intFromFloat(pos);
             // Decode the UTF-8 code point at byte offset `i` (a lone/invalid byte
             // reports its own value, as a lone code unit would).
             const n = utf8SeqLen(s, i);
@@ -9292,11 +9296,14 @@ fn errorIsErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object) return self.throwError("TypeError", "Error.prototype.toString called on non-object");
+    if (this != .object or this.object.is_symbol or this.object.is_bigint)
+        return self.throwError("TypeError", "Error.prototype.toString called on a non-object");
+    // ToString(name)/ToString(message) run ToPrimitive (throwing for a Symbol and
+    // propagating an abrupt valueOf/toString).
     const name_v = try self.getProperty(this, "name");
-    const name = if (name_v == .undefined) "Error" else try name_v.toString(self.arena);
+    const name = if (name_v == .undefined) "Error" else try self.toStringV(name_v);
     const msg_v = try self.getProperty(this, "message");
-    const msg = if (msg_v == .undefined) "" else try msg_v.toString(self.arena);
+    const msg = if (msg_v == .undefined) "" else try self.toStringV(msg_v);
     if (name.len == 0) return .{ .string = msg };
     if (msg.len == 0) return .{ .string = name };
     return .{ .string = try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }) };
