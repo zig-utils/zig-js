@@ -12212,6 +12212,14 @@ fn isDispStack(this: Value) bool {
     return this == .object and this.object.getOwn("\x00ds_res") != null;
 }
 
+/// Brand-check a specific stack kind: a (sync) DisposableStack method rejects an
+/// AsyncDisposableStack and vice versa.
+fn isDispStackOf(this: Value, want_async: bool) bool {
+    if (this != .object or this.object.getOwn("\x00ds_res") == null) return false;
+    const is_async = (this.object.getOwn("\x00ds_async") orelse Value{ .boolean = false }).toBoolean();
+    return is_async == want_async;
+}
+
 fn dispDisposed(o: *value.Object) bool {
     return (o.getOwn("\x00ds_done") orelse Value{ .boolean = false }).toBoolean();
 }
@@ -12228,6 +12236,7 @@ fn disposableStackConstructorFn(comptime is_async: bool) value.NativeFn {
             if (try self.protoFromCtor(name)) |pr| o.proto = pr;
             try dsHidden(self, o, "\x00ds_res", try self.newArray());
             try dsHidden(self, o, "\x00ds_done", .{ .boolean = false });
+            try dsHidden(self, o, "\x00ds_async", .{ .boolean = is_async });
             return .{ .object = o };
         }
     }.call;
@@ -12254,7 +12263,7 @@ fn dispUseFn(comptime is_async: bool) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!isDispStack(this)) return self.throwError("TypeError", "use called on a non-DisposableStack");
+            if (!isDispStackOf(this, is_async)) return self.throwError("TypeError", "use called on an incompatible receiver");
             if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
             const v = if (args.len > 0) args[0] else Value.undefined;
             if (v == .undefined or v == .null) return v;
@@ -12299,16 +12308,21 @@ fn dispMoveFn(comptime is_async: bool) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!isDispStack(this)) return self.throwError("TypeError", "move called on a non-DisposableStack");
+            if (!isDispStackOf(this, is_async)) return self.throwError("TypeError", "move called on an incompatible receiver");
             if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+            // OrdinaryCreateFromConstructor(%DisposableStack%, …): the new stack
+            // uses the INTRINSIC prototype, never the subclass's.
+            const name = if (is_async) "AsyncDisposableStack" else "DisposableStack";
             const o = (try self.newObject()).object;
-            o.proto = this.object.proto;
+            if (self.env.get(name)) |c| if (c == .object) {
+                o.proto = try self.protoObject(c.object);
+            };
             try dsHidden(self, o, "\x00ds_res", this.object.getOwn("\x00ds_res").?);
             try dsHidden(self, o, "\x00ds_done", .{ .boolean = false });
+            try dsHidden(self, o, "\x00ds_async", .{ .boolean = is_async });
             // The source keeps an empty list and is marked disposed.
             try dsHidden(self, this.object, "\x00ds_res", try self.newArray());
             try dsHidden(self, this.object, "\x00ds_done", .{ .boolean = true });
-            _ = is_async;
             return .{ .object = o };
         }
     }.call;
@@ -12367,7 +12381,7 @@ fn makeSuppressed(self: *Interpreter, errv: Value, suppressed: Value) EvalError!
 fn dispDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!isDispStack(this)) return self.throwError("TypeError", "dispose called on a non-DisposableStack");
+    if (!isDispStackOf(this, false)) return self.throwError("TypeError", "dispose called on an incompatible receiver");
     if (dispDisposed(this.object)) return .undefined;
     try dsHidden(self, this.object, "\x00ds_done", .{ .boolean = true });
     if (try dispRunAll(self, this.object, false)) |err| {
@@ -12380,7 +12394,7 @@ fn dispDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 fn dispDisposeAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!isDispStack(this)) return promiseRejectValue(self, try self.makeError("TypeError", "disposeAsync called on a non-AsyncDisposableStack"));
+    if (!isDispStackOf(this, true)) return promiseRejectValue(self, try self.makeError("TypeError", "disposeAsync called on an incompatible receiver"));
     if (dispDisposed(this.object)) return promiseResolveValue(self, .undefined);
     try dsHidden(self, this.object, "\x00ds_done", .{ .boolean = true });
     const r = dispRunAll(self, this.object, true) catch {
@@ -12422,7 +12436,12 @@ fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.O
         try setNative(a, rs, proto, "move", 0, dispMoveFn(false));
         try setNative(a, rs, proto, "dispose", 0, dispDisposeFn);
         try setNativeGetter(a, rs, proto, "disposed", dispDisposedGetter);
-        if (symKey(sym, "dispose")) |k| try setNative(a, rs, proto, k, 0, dispDisposeFn);
+        // %DisposableStack.prototype%[@@dispose] is the SAME function as `dispose`
+        // (a writable, configurable, non-enumerable data property).
+        if (symKey(sym, "dispose")) |k| if (proto.getOwn("dispose")) |dv| {
+            try proto.setOwn(a, rs, k, dv);
+            try proto.setAttr(a, k, .{ .writable = true, .enumerable = false, .configurable = true });
+        };
         if (tag) |k| {
             try proto.setOwn(a, rs, k, .{ .string = "DisposableStack" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
@@ -12445,7 +12464,11 @@ fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.O
         try setNative(a, rs, proto, "move", 0, dispMoveFn(true));
         try setNative(a, rs, proto, "disposeAsync", 0, dispDisposeAsyncFn);
         try setNativeGetter(a, rs, proto, "disposed", dispDisposedGetter);
-        if (symKey(sym, "asyncDispose")) |k| try setNative(a, rs, proto, k, 0, dispDisposeAsyncFn);
+        // [@@asyncDispose] is the SAME function as `disposeAsync`.
+        if (symKey(sym, "asyncDispose")) |k| if (proto.getOwn("disposeAsync")) |dv| {
+            try proto.setOwn(a, rs, k, dv);
+            try proto.setAttr(a, k, .{ .writable = true, .enumerable = false, .configurable = true });
+        };
         if (tag) |k| {
             try proto.setOwn(a, rs, k, .{ .string = "AsyncDisposableStack" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
