@@ -5985,10 +5985,16 @@ pub const Interpreter = struct {
             }
             return .{ .object = o };
         }
-        if (a0 == .object) {
+        if (a0 == .object and !a0.object.is_symbol and !a0.object.is_bigint) {
             // new TA(arrayLike | iterable): collect the values, then coerce + copy
-            // (ToBigInt for a BigInt view, ToNumber otherwise).
-            const list = if (self.isIterable(a0)) try self.iterableOrArrayLikeToList(a0) else blk: {
+            // (ToBigInt for a BigInt view, ToNumber otherwise). The iterable path
+            // is taken only when GetMethod(@@iterator) yields a callable — a null
+            // or undefined @@iterator falls back to the array-like length path.
+            const ik = self.symbolIteratorKey();
+            const itm = if (ik) |k| try self.getProperty(a0, k) else Value.undefined;
+            const use_iter = itm != .undefined and itm != .null;
+            if (use_iter and !itm.isCallable()) return self.throwError("TypeError", "@@iterator is not a function");
+            const list = if (use_iter) try self.iterableOrArrayLikeToList(a0) else blk: {
                 const len = toLen(try self.toNumberV(try self.getProperty(a0, "length")));
                 if (len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
                 break :blk try self.arrayLikeToListLen(a0, len);
@@ -5999,11 +6005,11 @@ pub const Interpreter = struct {
             while (i < list.len) : (i += 1) try self.taStore(ta, i, list[i]);
             return .{ .object = o };
         }
-        // new TA(length)
-        const len_f = if (a0 == .undefined) 0 else try self.toNumberV(a0);
-        const max_len_f: f64 = @floatFromInt(typedArrayLengthLimit(size));
-        if (!std.math.isFinite(len_f) or len_f < 0 or @trunc(len_f) != len_f or len_f > max_len_f) return self.throwError("RangeError", "invalid typed array length");
-        const length: usize = @intFromFloat(len_f);
+        // new TA(length): ToIndex(length) — truncates (0.9→0, 1.9→1), a Symbol or
+        // BigInt throws (ToNumber), a negative or >2^53-1 value is a RangeError.
+        const len_idx = try toIndexArg(self, a0);
+        if (len_idx > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
+        const length: usize = @intCast(len_idx);
         ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
         return .{ .object = o };
     }
@@ -13360,7 +13366,6 @@ fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor ArrayBuffer requires 'new'");
     const len = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
-    if (len > 0x7fffffff) return self.throwError("RangeError", "Invalid ArrayBuffer length");
     // The optional `maxByteLength` option makes the buffer resizable.
     var max: ?usize = null;
     if (args.len > 1 and args[1] == .object) {
@@ -13371,9 +13376,14 @@ fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
             max = @intCast(m);
         }
     }
+    // AllocateArrayBuffer reads the prototype (GetPrototypeFromConstructor) BEFORE
+    // CreateByteDataBlock — so a throwing `newTarget.prototype` getter wins over
+    // the length RangeError.
+    const proto = try self.protoFromCtor("ArrayBuffer");
+    if (len > 0x7fffffff) return self.throwError("RangeError", "Invalid ArrayBuffer length");
     const o = try self.makeArrayBuffer(@intCast(len));
     o.array_buffer.?.max_byte_length = max;
-    if (try self.protoFromCtor("ArrayBuffer")) |pr| o.proto = pr;
+    if (proto) |pr| o.proto = pr;
     return .{ .object = o };
 }
 
