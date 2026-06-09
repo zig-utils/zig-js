@@ -9517,7 +9517,7 @@ fn reflectSetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 /// Best-effort [[Construct]]-ability test: a native flagged `native_ctor`, an
 /// error constructor, a non-arrow/non-generator/non-async JS function, a bound
 /// function over a constructor, or a proxy whose target is a constructor.
-fn isConstructorValue(v: Value) bool {
+pub fn isConstructorValue(v: Value) bool {
     if (v != .object) return false;
     const o = v.object;
     if (o.proxy_handler != null) return if (o.proxy_target) |t| isConstructorValue(.{ .object = t }) else false;

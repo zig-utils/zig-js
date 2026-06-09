@@ -814,10 +814,16 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
 }
 
 pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = this;
     const self = interp(ctx);
-    const result = try self.newArray();
-    for (args) |v| try result.object.elements.append(self.arena, v);
+    // Array.of uses `this` as a constructor when it is one (so a subclass's
+    // Array.of produces a subclass instance), via Construct(C, « len »).
+    const len = args.len;
+    const result: Value = if (interpreter.isConstructorValue(this))
+        try self.construct(this, &.{.{ .number = @floatFromInt(len) }})
+    else
+        try self.newArray();
+    for (args, 0..) |v, k| try createDataIndexOrThrow(self, result, k, v);
+    try self.setMember(result, "length", .{ .number = @floatFromInt(len) });
     return result;
 }
 
@@ -858,39 +864,89 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
     return .{ .object = try self.toObject(v) };
 }
 
-pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = this;
-    const self = interp(ctx);
-    const result = try self.newArray();
-    const src = arg(args, 0);
-    const map_fn = arg(args, 1);
-    const has_map = map_fn == .object and map_fn.object.isCallableObject();
+/// CreateDataPropertyOrThrow(O, ToString(k), v) — define an own enumerable,
+/// writable, configurable data property; throw if [[DefineOwnProperty]] fails.
+fn createDataIndexOrThrow(self: *Interpreter, target: Value, k: usize, v: Value) HostError!void {
+    if (target == .object and target.object.is_array and target.object.accessors == null and
+        target.object.holes == null and k == target.object.elements.items.len and
+        k == target.object.array_len)
+    {
+        // Fast path: appending the next index of a plain dense Array.
+        try target.object.elements.append(self.arena, v);
+        return;
+    }
+    const key = try std.fmt.allocPrint(self.arena, "{d}", .{k});
+    const desc = (try self.newObject()).object;
+    try desc.setOwn(self.arena, self.root_shape, "value", v);
+    try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+    try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+    try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+    if (target != .object) return self.throwError("TypeError", "Cannot create property on non-object");
+    if (!try defineOneResult(self, target.object, key, desc))
+        return self.throwError("TypeError", "Cannot create property");
+}
 
-    if (self.isIterable(src)) {
-        // Iterator path: strings, arrays, generators, user `[Symbol.iterator]`.
-        const it = try self.iteratorOf(src);
-        var idx: f64 = 0;
-        while (true) {
-            const res = try self.callMethod(it, "next", &.{});
-            if ((try self.getProperty(res, "done")).toBoolean()) break;
-            var v = try self.getProperty(res, "value");
-            if (has_map) v = try self.callValue(map_fn, &.{ v, .{ .number = idx } });
-            try result.object.elements.append(self.arena, v);
-            idx += 1;
-        }
-    } else if (src == .object) {
-        // Array-like: copy indices 0..length-1.
-        if (src.object.getOwn("length")) |len_v| {
-            const n: usize = @intFromFloat(@max(@trunc(len_v.toNumber()), 0));
-            var i: usize = 0;
-            while (i < n) : (i += 1) {
-                const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-                var v = src.object.getOwn(key) orelse .undefined;
-                if (has_map) v = try self.callValue(map_fn, &.{ v, .{ .number = @floatFromInt(i) } });
-                try result.object.elements.append(self.arena, v);
+pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    const self = interp(ctx);
+    const C = this; // the receiver: a constructor when called as Array.from / subclass.use_ctor below
+    const items = arg(args, 0);
+    const map_fn = arg(args, 1);
+    const this_arg = arg(args, 2);
+    var mapping = false;
+    if (map_fn != .undefined) {
+        if (!map_fn.isCallable()) return self.throwError("TypeError", "Array.from: mapping function is not callable");
+        mapping = true;
+    }
+    const use_ctor = interpreter.isConstructorValue(C);
+
+    // GetMethod(items, @@iterator).
+    var iter_method: Value = .undefined;
+    if (items != .undefined and items != .null) {
+        if (self.wellKnownSymbolKey("iterator")) |ik| {
+            const m = try self.getProperty(items, ik);
+            if (m != .undefined and m != .null) {
+                if (!m.isCallable()) return self.throwError("TypeError", "Array.from: @@iterator is not callable");
+                iter_method = m;
             }
         }
     }
+
+    if (iter_method != .undefined) {
+        const result: Value = if (use_ctor) try self.construct(C, &.{}) else try self.newArray();
+        const it = try self.callValueWithThis(iter_method, &.{}, items);
+        var k: usize = 0;
+        while (true) {
+            const res = try self.callMethod(it, "next", &.{});
+            if (res != .object) return self.throwError("TypeError", "iterator result is not an object");
+            if ((try self.getProperty(res, "done")).toBoolean()) break;
+            const v = try self.getProperty(res, "value");
+            const mapped: Value = if (mapping) self.callValueWithThis(map_fn, &.{ v, .{ .number = @floatFromInt(k) } }, this_arg) catch |e| {
+                self.iteratorCloseKeepingThrow(it);
+                return e;
+            } else v;
+            createDataIndexOrThrow(self, result, k, mapped) catch |e| {
+                self.iteratorCloseKeepingThrow(it);
+                return e;
+            };
+            k += 1;
+        }
+        try self.setMember(result, "length", .{ .number = @floatFromInt(k) });
+        return result;
+    }
+
+    // Not iterable: ToObject(items) (throws for null/undefined), then copy
+    // indices 0..LengthOfArrayLike-1 via [[Get]].
+    const array_like = try self.toObject(items);
+    const len = interpreter.toLen(try self.toNumberV(try self.getProperty(.{ .object = array_like }, "length")));
+    const result: Value = if (use_ctor) try self.construct(C, &.{.{ .number = @floatFromInt(len) }}) else try self.newArray();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        const v = try self.getProperty(.{ .object = array_like }, key);
+        const mapped: Value = if (mapping) try self.callValueWithThis(map_fn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg) else v;
+        try createDataIndexOrThrow(self, result, i, mapped);
+    }
+    try self.setMember(result, "length", .{ .number = @floatFromInt(len) });
     return result;
 }
 
