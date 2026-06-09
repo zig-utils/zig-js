@@ -10011,6 +10011,20 @@ fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     return .{ .object = o };
 }
 
+/// `ShadowRealm.prototype.importValue(specifier, exportName)` — validates the
+/// receiver and arguments synchronously (ToString(specifier); exportName must be
+/// a String), then returns a Promise. Module loading inside a ShadowRealm is not
+/// wired up, so the returned promise rejects.
+fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or !this.object.is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.importValue called on a non-ShadowRealm");
+    _ = try self.toStringV(if (args.len > 0) args[0] else .undefined); // ToString(specifier) — may throw
+    const export_name = if (args.len > 1) args[1] else .undefined;
+    if (export_name != .string) return self.throwError("TypeError", "ShadowRealm.prototype.importValue: exportName must be a string");
+    const reason = try self.makeError("TypeError", "ShadowRealm module import is not supported");
+    return promiseRejectValue(self, reason);
+}
+
 fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or !this.object.is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
@@ -20201,6 +20215,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         const proto = try a.create(value.Object);
         proto.* = .{ .proto = object_proto };
         try setNative(a, rs, proto, "evaluate", 1, shadowRealmEvaluateFn);
+        try setNative(a, rs, proto, "importValue", 2, shadowRealmImportValueFn);
         if (env.get("Symbol")) |sym| if (sym == .object) {
             if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
                 try proto.setOwn(a, rs, tt.object.sym_key, .{ .string = "ShadowRealm" });
