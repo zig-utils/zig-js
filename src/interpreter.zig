@@ -9293,6 +9293,29 @@ fn errorIsErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 /// `Error.prototype.toString`: `"name: message"`, or just one when the other is
 /// empty. Generic — reads `name`/`message` off `this` (so the prototype chain and
 /// `.call(errorLike)` both work).
+/// `Date.prototype[Symbol.toPrimitive](hint)`: OrdinaryToPrimitive over a string
+/// hint — "string"/"default" try toString then valueOf, "number" the reverse;
+/// any other hint (or a non-string) is a TypeError.
+fn dateSymbolToPrimitiveFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.is_symbol or this.object.is_bigint)
+        return self.throwError("TypeError", "Date.prototype[Symbol.toPrimitive] called on a non-object");
+    const hint = if (args.len > 0) args[0] else .undefined;
+    if (hint != .string) return self.throwError("TypeError", "hint must be a string");
+    const string_first = std.mem.eql(u8, hint.string, "string") or std.mem.eql(u8, hint.string, "default");
+    if (!string_first and !std.mem.eql(u8, hint.string, "number"))
+        return self.throwError("TypeError", "invalid hint for Symbol.toPrimitive");
+    const names: [2][]const u8 = if (string_first) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
+    for (names) |m| {
+        const method = try self.getProperty(this, m);
+        if (method.isCallable()) {
+            const res = try self.callValueWithThis(method, &.{}, this);
+            if (res != .object or res.object.is_symbol or res.object.is_bigint) return res;
+        }
+    }
+    return self.throwError("TypeError", "Cannot convert object to primitive value");
+}
+
 fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -18935,6 +18958,17 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // not brand-checked: ToObject(this), ToPrimitive(number); a non-finite value
     // returns null, otherwise Invoke(O, "toISOString").
     try setNative(a, root_shape, date_proto, "toJSON", 1, dateToJSONFn);
+    // Date.prototype[Symbol.toPrimitive] — non-enumerable, non-writable,
+    // configurable; OrdinaryToPrimitive with a validated hint.
+    if (env.get("Symbol")) |sym| if (sym == .object) {
+        if (sym.object.getOwn("toPrimitive")) |tp| if (tp == .object and tp.object.is_symbol) {
+            const m = try a.create(value.Object);
+            m.* = .{ .native = dateSymbolToPrimitiveFn };
+            try installNativeProps(a, root_shape, m, "[Symbol.toPrimitive]", 1);
+            try date_proto.setOwn(a, root_shape, tp.object.sym_key, .{ .object = m });
+            try date_proto.setAttr(a, tp.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        };
+    };
     try date_ns.setOwn(a, root_shape, "prototype", .{ .object = date_proto });
     try date_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, date_proto, date_ns);
