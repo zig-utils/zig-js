@@ -12048,6 +12048,7 @@ fn arrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.slice called on a non-ArrayBuffer");
     const ab = this.object.array_buffer.?;
+    if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.slice called on a SharedArrayBuffer");
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.data.len;
     const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, blen, 0);
@@ -12867,8 +12868,9 @@ fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resiza
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a non-ArrayBuffer");
             const ab = this.object.array_buffer.?;
-            // `immutable` is a non-shared-buffer accessor; the others apply to both.
-            if (which == .immutable and ab.is_shared) return self.throwError("TypeError", "get ArrayBuffer.prototype.immutable called on a SharedArrayBuffer");
+            // These are %ArrayBuffer.prototype% accessors — a SharedArrayBuffer
+            // receiver throws (it has its own byteLength/maxByteLength/growable).
+            if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a SharedArrayBuffer");
             return switch (which) {
                 .byte_length => .{ .number = @floatFromInt(if (ab.detached) 0 else ab.data.len) },
                 .max_byte_length => .{ .number = @floatFromInt(if (ab.detached) 0 else (ab.max_byte_length orelse ab.data.len)) },
@@ -12944,6 +12946,7 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
             const ab = this.object.array_buffer.?;
+            if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
             if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
             if (ab.immutable) return self.throwError("TypeError", "an immutable ArrayBuffer cannot be transferred");
             const new_len: usize = if (args.len > 0 and args[0] != .undefined) @intCast(try toIndexArg(self, args[0])) else ab.data.len;
