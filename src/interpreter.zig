@@ -24215,6 +24215,14 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
     var cur: ?*value.Object = o;
     while (cur) |c| {
         if (c.getOwn(name) != null or c.getAccessor(name) != null) return true;
+        // Dense array / typed-array / String-wrapper indices live outside the
+        // slot store, so [[HasProperty]] must consult them on each chain object
+        // (an inherited array element makes the index present on the receiver).
+        if (value.canonicalIndex(name)) |idx| {
+            if (c.is_array and idx < c.elements.items.len and !c.isHole(idx)) return true;
+            if (c.typed_array) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
+            if (c.prim) |p| if (p == .string and idx < p.string.len) return true;
+        }
         cur = c.proto;
     }
     return false;
