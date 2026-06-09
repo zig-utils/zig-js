@@ -6055,12 +6055,22 @@ pub const Interpreter = struct {
     /// Append `v` as the next element of a method's result (an array uses its
     /// dense store; a custom species object gets a `[[Set]]` at `idx`).
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
-        if (result == .object and result.object.is_array) {
+        if (result == .object and result.object.is_array and result.object.accessors == null and
+            result.object.attrs == null and !result.object.proxy_revoked and result.object.proxy_handler == null)
+        {
             try result.object.elements.append(self.arena, v);
         } else {
-            var kb: [24]u8 = undefined;
-            const k = std.fmt.bufPrint(&kb, "{d}", .{idx}) catch return;
-            try self.setMember(result, k, v);
+            // CreateDataPropertyOrThrow(result, ToString(idx), v) — a non-Array
+            // species result (or one carrying accessors) takes the generic define
+            // path, which throws if the index is non-writable / non-extensible.
+            const k = try std.fmt.allocPrint(self.arena, "{d}", .{idx});
+            const desc = (try self.newObject()).object;
+            try desc.setOwn(self.arena, self.root_shape, "value", v);
+            try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+            try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+            try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+            if (result != .object or !try builtins.defineOneResult(self, result.object, k, desc))
+                return self.throwError("TypeError", "Cannot create array result property");
         }
     }
 
