@@ -6474,7 +6474,12 @@ pub const Interpreter = struct {
         // array-like without OOM-ing on the guard below. push/pop only touch the
         // tail; shift/unshift loop the full length, so they keep the OOM guard.
         return eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes") or
-            eq(name, "push") or eq(name, "pop");
+            eq(name, "push") or eq(name, "pop") or
+            // The short-circuiting predicate methods iterate via live [[Get]] and
+            // return as soon as a match is found, so they also accept a huge-length
+            // array-like (the test corpus matches at a low index).
+            eq(name, "some") or eq(name, "every") or eq(name, "find") or
+            eq(name, "findIndex") or eq(name, "findLast") or eq(name, "findLastIndex");
     }
 
     fn isArrayGeneric(name: []const u8) bool {
