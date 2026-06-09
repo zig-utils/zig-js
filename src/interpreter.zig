@@ -4331,8 +4331,12 @@ pub const Interpreter = struct {
             if (eq(name, "isSubsetOf")) {
                 // A larger `this` cannot be a subset (and must not probe `has`).
                 if (this_size > rec.size) return Value{ .boolean = false };
-                for (o.elements.items) |e| {
-                    if (!(try self.recordHas(rec, e)))
+                // Iterate the LIVE [[SetData]] by index: `rec.has` may mutate `this`
+                // (e.g. delete a trailing element), and a removed slot must be
+                // skipped rather than re-probed from a stale snapshot.
+                var i: usize = 0;
+                while (i < o.elements.items.len) : (i += 1) {
+                    if (!(try self.recordHas(rec, o.elements.items[i])))
                         return Value{ .boolean = false };
                 }
                 return Value{ .boolean = true };
@@ -4345,8 +4349,9 @@ pub const Interpreter = struct {
             }
             if (eq(name, "isDisjointFrom")) {
                 if (this_size <= rec.size) {
-                    for (o.elements.items) |e| {
-                        if (try self.recordHas(rec, e)) return Value{ .boolean = false };
+                    var i: usize = 0;
+                    while (i < o.elements.items.len) : (i += 1) {
+                        if (try self.recordHas(rec, o.elements.items[i])) return Value{ .boolean = false };
                     }
                     return Value{ .boolean = true };
                 }
