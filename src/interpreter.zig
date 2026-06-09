@@ -6469,7 +6469,12 @@ pub const Interpreter = struct {
     }
 
     fn arraySearchReadsLive(name: []const u8) bool {
-        return eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes");
+        // Methods that operate purely through live [[Get]]/[[Set]] on the receiver
+        // (no materialized snapshot) — so they also handle a 2**53-1-length
+        // array-like without OOM-ing on the guard below. push/pop only touch the
+        // tail; shift/unshift loop the full length, so they keep the OOM guard.
+        return eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes") or
+            eq(name, "push") or eq(name, "pop");
     }
 
     fn isArrayGeneric(name: []const u8) bool {
@@ -6653,6 +6658,11 @@ pub const Interpreter = struct {
             if (new_len > o.elements.items.len and new_len > o.array_len) o.array_len = @intCast(new_len);
             return;
         }
+        // Set(O, "length", newLen, true) — force strict so a non-writable /
+        // setter-less length on an array-like rejects with a TypeError.
+        const saved = self.strict;
+        self.strict = true;
+        defer self.strict = saved;
         try self.setMember(.{ .object = o }, "length", .{ .number = @floatFromInt(new_len) });
     }
 
@@ -6718,6 +6728,10 @@ pub const Interpreter = struct {
             array_like_len;
         if (eq(name, "push")) {
             const len = ilen;
+            // The new length may not exceed 2**53-1 — checked (in f64, exact near
+            // the limit) BEFORE any element is set.
+            if (@as(f64, @floatFromInt(len)) + @as(f64, @floatFromInt(args.len)) > 9007199254740991.0)
+                return self.throwError("TypeError", "push would exceed the maximum array length 2**53-1");
             // Set(O, ToString(len+k), E, true) for each argument (fires an
             // inherited index setter; a non-extensible array throws), then
             // Set(O, "length", newLen, true).
