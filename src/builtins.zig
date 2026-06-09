@@ -2016,18 +2016,25 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     if (replacer == .object) {
         if (replacer.object.isCallableObject()) {
             st.replacer_fn = replacer;
-        } else if (replacer.object.is_array) {
+        } else if (try interpreter.objectToStringIsArray(self, replacer.object)) {
+            // PropertyList: read via LengthOfArrayLike + Get(replacer, ToString(i))
+            // so a Proxy/array-like replacer's traps run (and abrupts propagate).
             var allow: std.ArrayListUnmanaged([]const u8) = .empty;
-            for (replacer.object.elements.items) |item| {
+            const rlen = interpreter.toLen(try self.toNumberV(try self.getProperty(replacer, "length")));
+            var idx: usize = 0;
+            while (idx < rlen) : (idx += 1) {
+                const ikey = try std.fmt.allocPrint(a, "{d}", .{idx});
+                const item = try self.getProperty(replacer, ikey);
                 // Items are property keys: strings as-is, numbers ToString'd,
                 // String/Number wrappers unwrapped; anything else is ignored.
                 var k: ?[]const u8 = null;
                 switch (item) {
                     .string => |s| k = s,
                     .number => |n| k = try value.numberToString(a, n),
+                    // A String/Number wrapper is ToString'd (invoking its own
+                    // toString, e.g. an overridden one), not unwrapped raw.
                     .object => |o| if (o.prim) |p| switch (p) {
-                        .string => |s| k = s,
-                        .number => |n| k = try value.numberToString(a, n),
+                        .string, .number => k = try self.toStringV(item),
                         else => {},
                     },
                     else => {},
@@ -2046,10 +2053,22 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     }
 
     // arg 2 — space: up to 10 spaces (number) or the first 10 chars (string);
-    // a Number/String wrapper is unwrapped first.
+    // a Number wrapper is ToNumber'd and a String wrapper ToString'd (running
+    // any overridden valueOf/toString), not unwrapped raw.
     var space = arg(args, 2);
     if (space == .object) if (space.object.prim) |p| {
-        space = p;
+        // Compute into a temp first (result-location aliasing — see serialize).
+        switch (p) {
+            .number => {
+                const n = try self.toNumberV(space);
+                space = .{ .number = n };
+            },
+            .string => {
+                const s = try self.toStringV(space);
+                space = .{ .string = s };
+            },
+            else => space = p,
+        }
     };
     switch (space) {
         .number => |n| {
@@ -2099,8 +2118,23 @@ const Stringifier = struct {
             try buf.appendSlice(a, raw);
             return true;
         }
+        // SerializeJSONProperty: a [[NumberData]] wrapper → ToNumber, a
+        // [[StringData]] wrapper → ToString (both run overridden valueOf/toString),
+        // a [[BooleanData]] wrapper → its boolean.
         if (v == .object) if (v.object.prim) |p| {
-            v = p;
+            // Compute into a temp first: `v = .{ .number = toNumberV(v) }` would
+            // clobber v's tag before toNumberV reads it (result-location aliasing).
+            switch (p) {
+                .number => {
+                    const n = try self.toNumberV(v);
+                    v = .{ .number = n };
+                },
+                .string => {
+                    const s = try self.toStringV(v);
+                    v = .{ .string = s };
+                },
+                else => v = p,
+            }
         };
         // A BigInt (primitive or [[BigIntData]] wrapper) is not serializable.
         if (v == .object and v.object.is_bigint)

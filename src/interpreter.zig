@@ -9410,7 +9410,7 @@ fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     return .{ .string = try std.mem.concat(self.arena, u8, &.{ "[object ", tag, "]" }) };
 }
 
-fn objectToStringIsArray(self: *Interpreter, o: *value.Object) EvalError!bool {
+pub fn objectToStringIsArray(self: *Interpreter, o: *value.Object) EvalError!bool {
     if (o.proxy_handler != null or o.proxy_revoked) {
         const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform IsArray on a revoked proxy");
         return objectToStringIsArray(self, target);
