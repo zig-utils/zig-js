@@ -3021,8 +3021,9 @@ pub const Interpreter = struct {
             try promise.reject(self, p, self.exception);
             return .{ .object = pobj };
         };
+        var optionsv: Value = .undefined;
         if (options_node) |on| {
-            _ = self.eval(on) catch {
+            optionsv = self.eval(on) catch {
                 try promise.reject(self, p, self.exception);
                 return .{ .object = pobj };
             };
@@ -3031,6 +3032,14 @@ pub const Interpreter = struct {
             try promise.reject(self, p, self.exception);
             return .{ .object = pobj };
         };
+        // EvaluateImportCall steps 10-11: validate the options/import-attributes
+        // argument. A non-undefined options that is not an Object, a non-Object
+        // `with`, or a non-String attribute value all reject with a TypeError.
+        // (Attributes are otherwise ignored — every module is the host's source.)
+        if (self.validateImportOptions(optionsv)) |_| {} else |_| {
+            try promise.reject(self, p, self.exception);
+            return .{ .object = pobj };
+        }
         // Resolve+load the module synchronously through the host (set by the
         // module driver). With no host (plain script), reject with a TypeError.
         if (self.dyn_import) |f| {
@@ -3045,6 +3054,25 @@ pub const Interpreter = struct {
             try promise.reject(self, p, err);
         }
         return .{ .object = pobj };
+    }
+
+    /// Validate the second argument of `import(specifier, options)` per
+    /// EvaluateImportCall: options (when present) must be an Object; its `with`
+    /// attribute (when present) must be an Object whose every own enumerable
+    /// value is a String. Throws a TypeError otherwise.
+    fn validateImportOptions(self: *Interpreter, options: Value) EvalError!void {
+        if (options == .undefined) return;
+        if (options != .object or options.object.is_symbol or options.object.is_bigint)
+            return self.throwError("TypeError", "import() options must be an object");
+        const attrs = try self.getProperty(options, "with");
+        if (attrs == .undefined) return;
+        if (attrs != .object or attrs.object.is_symbol or attrs.object.is_bigint)
+            return self.throwError("TypeError", "import() 'with' attributes must be an object");
+        const keys = try attrs.object.enumerableKeys(self.arena);
+        for (keys) |k| {
+            const v = try self.getProperty(attrs, k);
+            if (v != .string) return self.throwError("TypeError", "import attribute values must be strings");
+        }
     }
 
     /// `await v` on an already-evaluated value (synchronous-settling): if `v` is

@@ -353,6 +353,16 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []con
     const ctx = js.Context.create(gpa) catch return .skip;
     defer ctx.destroy();
 
+    // Enable top-level-script dynamic `import()` (resolved relative to the test
+    // file), so script tests that `import('./fixture.js')` work like the engine's
+    // module path. The host only does I/O if the script actually calls import().
+    var host = ModHost{ .gpa = gpa, .io = io };
+    defer host.deinit();
+    var imp_cache: std.StringHashMapUnmanaged(*js.Context.Module) = .{};
+    ctx.mod_host = .{ .ctx = &host, .load = modLoad };
+    ctx.mod_cache = &imp_cache;
+    ctx.script_referrer = abs_path;
+
     if (ctx.evaluate(buf.items)) |_| {
         if (meta.negative) return .fail_negative;
         // An async test passes only if it printed the harness success sentinel
