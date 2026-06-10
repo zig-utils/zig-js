@@ -32,6 +32,9 @@ pub const installGlobals = @import("interpreter.zig").installGlobals;
 // Agent/threading infrastructure ($262.agent, Atomics waiter table). Hosts
 // set `agent.main_can_block` to model the main agent's [[CanBlock]].
 pub const agent = @import("agent.zig");
+// Worker agents: one Context per OS thread, postMessage over the
+// structured-clone wire format, cooperative terminate.
+pub const Worker = @import("worker.zig").Worker;
 
 // Bytecode pipeline (tier-1 VM): compiler lowers the AST, vm executes it.
 pub const bytecode = @import("bytecode.zig");
@@ -59,6 +62,7 @@ test {
     _ = @import("shared_buffer.zig");
     _ = @import("agent.zig");
     _ = @import("structured_clone.zig");
+    _ = @import("worker.zig");
     _ = @import("jsstring.zig");
     _ = @import("lexer.zig");
     _ = @import("ast.zig");

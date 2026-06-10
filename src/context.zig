@@ -41,6 +41,9 @@ pub const Context = struct {
     /// the list's address is the realm's waiter-table owner token). Settled by
     /// the drain tail in `evaluate`/`evaluateModule`.
     async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty,
+    /// Cooperative termination for worker contexts: the owning Worker's stop
+    /// word, polled at the engines' step checkpoints (src/worker.zig).
+    stop_flag: ?*const std.atomic.Value(bool) = null,
     /// TDZ sentinel for uninitialized let/const bindings.
     tdz_marker: *value.Object,
     /// Active module graph state during `evaluateModule`, so runtime `import()`
@@ -122,6 +125,7 @@ pub const Context = struct {
             .tdz_marker = self.tdz_marker,
             .sab_retains = &self.sab_retains,
             .async_waiters = &self.async_waiters,
+            .stop_flag = self.stop_flag,
         };
     }
 

@@ -185,6 +185,8 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     while (ip < code.len) {
         vm.steps += 1;
         if (vm.steps > interp.max_steps) return vm.throwError("RangeError", "evaluation step budget exceeded");
+        if (vm.stop_flag) |sf| if ((vm.steps & 1023) == 0 and sf.load(.monotonic))
+            return vm.throwError("Error", "worker terminated");
         const inst = code[ip];
         ip += 1;
         switch (inst.op) {

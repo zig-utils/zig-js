@@ -67,7 +67,7 @@ var group: Group = .{};
 /// Set by start/broadcast/report on the main thread; lets `reset` skip all
 /// locking (and the Io bootstrap) for the overwhelmingly common test that
 /// never touches agents.
-var group_used: bool = false;
+var group_used = std.atomic.Value(bool).init(false);
 
 /// `[[CanBlock]]` of the *main* agent (host-set; spawned agents always may
 /// block). The runner flips this for `CanBlockIsFalse` tests.
@@ -96,7 +96,7 @@ pub fn start(src: []const u8, run: RunFn) error{OutOfMemory}!void {
     a.* = .{ .src = try alloc.dupe(u8, src) };
     errdefer alloc.free(a.src);
     group.mutex.lockUncancelable(io);
-    group_used = true;
+    group_used.store(true, .monotonic);
     group.agents.append(alloc, a) catch {
         group.mutex.unlock(io);
         return error.OutOfMemory;
@@ -156,7 +156,7 @@ pub fn broadcast(storage: *SharedBufferStorage) void {
     const io = engineIo();
     group.mutex.lockUncancelable(io);
     defer group.mutex.unlock(io);
-    group_used = true;
+    group_used.store(true, .monotonic);
     if (group.bcast) |old| old.release();
     group.bcast = storage.retain();
     group.bcast_gen += 1;
@@ -184,7 +184,7 @@ pub fn report(msg: []const u8) void {
     const io = engineIo();
     const copy = alloc.dupe(u8, msg) catch return;
     group.mutex.lockUncancelable(io);
-    group_used = true;
+    group_used.store(true, .monotonic);
     group.reports.append(alloc, copy) catch alloc.free(copy);
     group.mutex.unlock(io);
 }
@@ -192,7 +192,7 @@ pub fn report(msg: []const u8) void {
 /// Main side of `getReport()`: pop the oldest report into `into` (the
 /// caller's arena), or null when none is pending.
 pub fn takeReport(into: std.mem.Allocator) ?[]const u8 {
-    if (!group_used) return null;
+    if (!group_used.load(.monotonic)) return null;
     const io = engineIo();
     group.mutex.lockUncancelable(io);
     defer group.mutex.unlock(io);
@@ -208,7 +208,7 @@ pub fn takeReport(into: std.mem.Allocator) ?[]const u8 {
 /// blocking point polling `stopping` and (b) the interpreter's step budget;
 /// the runner's per-worker timeout is the last line of defense.
 pub fn reset() void {
-    if (!group_used) return;
+    if (!group_used.load(.monotonic)) return;
     const io = engineIo();
     group.mutex.lockUncancelable(io);
     group.stopping = true;
@@ -230,7 +230,7 @@ pub fn reset() void {
     group.bcast = null;
     group.bcast_gen = 0;
     group.stopping = false;
-    group_used = false;
+    group_used.store(false, .monotonic);
     group.mutex.unlock(io);
 }
 

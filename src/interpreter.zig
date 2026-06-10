@@ -360,6 +360,11 @@ pub const Interpreter = struct {
     /// token in the waiter table; `settleAsyncWaiters` resolves entries as
     /// their tickets settle.
     async_waiters: ?*std.ArrayListUnmanaged(AsyncWaiterEntry) = null,
+    /// Cooperative termination (a worker's `terminate()`): when set and true,
+    /// evaluation throws at the next step checkpoint in either engine (the
+    /// tree-walker's `eval` and the VM's dispatch loop both poll it every
+    /// 1024 steps).
+    stop_flag: ?*const std.atomic.Value(bool) = null,
     /// The native-function object currently being invoked (set around each
     /// native call), so a native can reach its own `private_data` — used by
     /// Promise executor resolve/reject closures.
@@ -789,6 +794,8 @@ pub const Interpreter = struct {
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
         self.steps += 1;
         if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
+        if (self.stop_flag) |sf| if ((self.steps & 1023) == 0 and sf.load(.monotonic))
+            return self.throwError("Error", "worker terminated");
         return switch (node.*) {
             .number => |n| .{ .number = n },
             .bigint_lit => |b| if (b.text) |s| try self.makeBigIntText(s) else try self.makeBigInt(b.value),

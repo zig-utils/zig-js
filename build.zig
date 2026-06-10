@@ -31,11 +31,15 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     // Unit tests over the root module (engine core + C-API).
+    // `-Dtsan` builds them under ThreadSanitizer — the concurrency gate for
+    // the agent/worker/waiter machinery (issue #1).
+    const tsan = b.option(bool, "tsan", "Build unit tests with ThreadSanitizer") orelse false;
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
             .imports = &.{.{ .name = "regex", .module = regex_mod }},
         }),
     });
