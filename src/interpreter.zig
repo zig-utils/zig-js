@@ -8,6 +8,7 @@ const vm = @import("vm.zig");
 const promise = @import("promise.zig");
 const shared_buffer = @import("shared_buffer.zig");
 const agent = @import("agent.zig");
+const structured_clone = @import("structured_clone.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -465,7 +466,7 @@ pub const Interpreter = struct {
     // ---- exception helpers ------------------------------------------------
 
     /// Set a named property on an object via its shape (see `Object.setOwn`).
-    fn setProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
+    pub fn setProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
         try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 
@@ -18651,10 +18652,48 @@ fn sharedArrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) v
 // blocks or spins — the ordering the blocking-wait corpus requires and the
 // old cooperative model could not express. Design: docs/threads/P2-agents.md.
 
+/// `structuredClone(value, { transfer }?)` — the HTML structured-clone
+/// algorithm over the engine's types (src/structured_clone.zig): a serialize/
+/// deserialize round trip, so the IR doubles as the future worker
+/// `postMessage` wire format. Transferred ArrayBuffers are moved (the clone
+/// keeps the bytes, the source detaches).
+fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const v = arg0(args);
+    // Collect + validate the transfer list before serializing.
+    var transfer: std.ArrayListUnmanaged(*value.Object) = .empty;
+    if (args.len > 1 and args[1] != .undefined and args[1] != .null) {
+        if (args[1] != .object) return self.throwError("TypeError", "structuredClone options must be an object");
+        const tv = try self.getProperty(args[1], "transfer");
+        if (tv != .undefined and tv != .null) {
+            if (tv != .object or !tv.object.is_array)
+                return self.throwError("TypeError", "structuredClone transfer must be an array");
+            for (tv.object.elements.items) |entry| {
+                if (entry != .object or entry.object.array_buffer == null)
+                    return self.throwError("TypeError", "DataCloneError: only ArrayBuffers are transferable");
+                const ab = entry.object.array_buffer.?;
+                if (ab.is_shared) return self.throwError("TypeError", "DataCloneError: a SharedArrayBuffer is not transferable");
+                if (ab.detached) return self.throwError("TypeError", "DataCloneError: cannot transfer a detached ArrayBuffer");
+                if (ab.immutable) return self.throwError("TypeError", "DataCloneError: cannot transfer an immutable ArrayBuffer");
+                for (transfer.items) |seen| if (seen == entry.object)
+                    return self.throwError("TypeError", "DataCloneError: duplicate transferable");
+                try transfer.append(self.arena, entry.object);
+            }
+        }
+    }
+    const bytes = try structured_clone.serialize(self, self.arena, v);
+    // The move: the clone owns a copy of the bytes; the sources detach now
+    // (after a fully successful serialize, so a DataCloneError mid-graph
+    // leaves the inputs untouched).
+    for (transfer.items) |o| o.array_buffer.?.detached = true;
+    return structured_clone.deserialize(self, bytes);
+}
+
 /// Wrap shared storage in a fresh SharedArrayBuffer object for *this* realm,
 /// taking ownership of one reference (the caller's ref transfers in; it is
 /// tracked in the realm's RetainList and released at realm teardown).
-fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.SharedBufferStorage) EvalError!*value.Object {
+pub fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.SharedBufferStorage) EvalError!*value.Object {
     if (self.sab_retains) |rl| try rl.track(storage); // on OOM, track released the ref
     const o = (try self.newObject()).object;
     const ab = try self.arena.create(value.ArrayBufferData);
@@ -19202,6 +19241,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     }
     try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
+    try defineGlobalFn(env, root_shape, "structuredClone", 1, structuredCloneFn);
     try defineGlobalFn(env, root_shape, "isNaN", 1, builtins.isNaNFn);
     try defineGlobalFn(env, root_shape, "isFinite", 1, builtins.isFiniteFn);
     try defineGlobalFn(env, root_shape, "encodeURI", 1, builtins.encodeURIFn);

@@ -58,6 +58,7 @@ test {
     _ = @import("shape.zig");
     _ = @import("shared_buffer.zig");
     _ = @import("agent.zig");
+    _ = @import("structured_clone.zig");
     _ = @import("jsstring.zig");
     _ = @import("lexer.zig");
     _ = @import("ast.zig");

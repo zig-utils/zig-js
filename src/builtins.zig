@@ -649,7 +649,7 @@ pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 /// ascending first, then named keys in insertion order. Array element indices
 /// live in the dense `elements` store (not the shape), so they're added here;
 /// a per-index `enumerable:false` (from defineProperty) hides one.
-fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
+pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     // A module namespace's enumerable own keys are exactly its (sorted) string
     // export names; the @@toStringTag is non-enumerable.

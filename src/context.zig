@@ -3050,3 +3050,52 @@ test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle"
         \\if (!globalThis.__ok) throw new Error("notified waiter not settled");
     );
 }
+
+test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\// cycles + identity
+        \\const shared = { n: 1 };
+        \\const root = { a: shared, b: shared, list: [1, , 3] };
+        \\root.self = root;
+        \\const c = structuredClone(root);
+        \\if (c === root) throw new Error("not a copy");
+        \\if (c.a !== c.b) throw new Error("identity lost");
+        \\if (c.self !== c) throw new Error("cycle lost");
+        \\c.a.n = 2;
+        \\if (root.a.n !== 1) throw new Error("not deep");
+        \\if (c.list.length !== 3 || 1 in c.list) throw new Error("holes lost");
+        \\// types
+        \\const m = new Map([[1, "one"]]); const s = new Set(["x"]);
+        \\const t = structuredClone({ m, s, d: new Date(123), r: /ab+c/gi,
+        \\  big: 123456789012345678901234567890n, w: new Number(7),
+        \\  e: new TypeError("boom") });
+        \\if (!(t.m instanceof Map) || t.m.get(1) !== "one") throw new Error("Map");
+        \\if (!(t.s instanceof Set) || !t.s.has("x")) throw new Error("Set");
+        \\if (!(t.d instanceof Date) || t.d.getTime() !== 123) throw new Error("Date");
+        \\if (!(t.r instanceof RegExp) || t.r.source !== "ab+c" || t.r.flags !== "gi") throw new Error("RegExp");
+        \\if (t.big !== 123456789012345678901234567890n) throw new Error("BigInt");
+        \\if (!(t.w instanceof Number) || t.w.valueOf() !== 7) throw new Error("wrapper");
+        \\if (!(t.e instanceof TypeError) || t.e.message !== "boom") throw new Error("Error clone");
+        \\// typed arrays + buffers
+        \\const ta = new Uint8Array([1, 2, 3]);
+        \\const ct = structuredClone(ta);
+        \\ct[0] = 9;
+        \\if (ta[0] !== 1 || ct[1] !== 2) throw new Error("TA not copied");
+        \\// SAB shares storage
+        \\const sab = new SharedArrayBuffer(8);
+        \\const cs = structuredClone(sab);
+        \\new Int32Array(cs)[0] = 42;
+        \\if (new Int32Array(sab)[0] !== 42) throw new Error("SAB not shared");
+        \\// transfer moves + detaches
+        \\const ab = new Uint8Array([5, 6]).buffer;
+        \\const moved = structuredClone(ab, { transfer: [ab] });
+        \\if (new Uint8Array(moved)[0] !== 5) throw new Error("transfer bytes");
+        \\if (ab.byteLength !== 0 || !ab.detached) throw new Error("source not detached");
+        \\// DataCloneError
+        \\let threw = false;
+        \\try { structuredClone(function () {}); } catch (e) { threw = e instanceof TypeError; }
+        \\if (!threw) throw new Error("function clone did not throw");
+    );
+}
