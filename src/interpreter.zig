@@ -23544,6 +23544,121 @@ fn temporalDateToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) 
     return makeYearMonth(self, t.year, t.month);
 }
 
+/// ToTemporalCalendarSlotValue, restricted to the only supported calendar
+/// (iso8601): a Temporal instance contributes its own calendar; any other value
+/// is `ToString`'d and must name `iso8601`, else a RangeError.
+fn requireIsoCalendarArg(self: *Interpreter, v: Value) value.HostError!void {
+    if (v == .object and v.object.temporal != null) return; // a Temporal instance is iso8601 here
+    // ToTemporalCalendarIdentifier: a non-object non-String is a TypeError.
+    if (v != .string) return self.throwError("TypeError", "calendar must be a string or a Temporal object");
+    const s = v.string;
+    if (asciiEqlIgnoreCase(s, "iso8601")) return; // a bare calendar id
+    // Otherwise the string is a Temporal date/time string whose calendar
+    // annotation (default iso8601) must resolve to iso8601.
+    _ = stripTemporalAnnotations(self, s) catch return self.throwError("RangeError", "invalid calendar string");
+}
+
+fn temporalPlainDateWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+    try requireIsoCalendarArg(self, if (args.len > 0) args[0] else .undefined);
+    const t = this.object.temporal.?;
+    const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
+    o.temporal.?.year = t.year;
+    o.temporal.?.month = t.month;
+    o.temporal.?.day = t.day;
+    return .{ .object = o };
+}
+
+fn temporalDateTimeWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    try requireIsoCalendarArg(self, if (args.len > 0) args[0] else .undefined);
+    const t = this.object.temporal.?;
+    const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
+    o.temporal.?.* = t.*;
+    return .{ .object = o };
+}
+
+/// Nanoseconds since the Unix epoch for a local date+time (no time-zone offset
+/// applied) held in `t`'s year/month/day + hour/.../nanosecond fields.
+fn dtLocalNs(t: *const value.TemporalData) i128 {
+    return @as(i128, tDaysFromCivil(t.year, t.month, t.day)) * 86_400_000_000_000 +
+        @as(i128, t.hour) * 3_600_000_000_000 +
+        @as(i128, t.minute) * 60_000_000_000 +
+        @as(i128, t.second) * 1_000_000_000 +
+        @as(i128, t.millisecond) * 1_000_000 +
+        @as(i128, t.microsecond) * 1_000 +
+        @as(i128, t.nanosecond);
+}
+
+/// ToTemporalTimeZoneSlotValue restricted to fixed-offset / named zones: a
+/// ZonedDateTime contributes its own zone; otherwise `ToString` then `parseTimeZone`.
+fn resolveTimeZoneArg(self: *Interpreter, v: Value) value.HostError!TimeZone {
+    if (v == .object) if (v.object.temporal) |t| if (t.kind == .zoned_date_time)
+        return TimeZone{ .name = t.tz_name, .offset_ns = t.tz_offset_ns };
+    return parseTimeZone(self, try self.toStringV(v));
+}
+
+/// `Temporal.PlainDateTime.prototype.toZonedDateTime(timeZone, options)`.
+fn temporalDateTimeToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "toZonedDateTime requires a time zone");
+    const tz = try resolveTimeZoneArg(self, args[0]);
+    // GetTemporalDisambiguationOption (validated even though fixed-offset zones
+    // ignore it — an invalid value must still throw).
+    if (args.len > 1 and args[1] != .undefined) {
+        if (args[1] != .object) return self.throwError("TypeError", "options must be an object");
+        _ = try dtfGetStr(self, args[1], "disambiguation", &.{ "compatible", "earlier", "later", "reject" }, "compatible");
+    }
+    const local = dtLocalNs(this.object.temporal.?);
+    return zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
+}
+
+/// `Temporal.PlainDate.prototype.toZonedDateTime(item)` — `item` is a time-zone
+/// (string/ZonedDateTime) or a `{ timeZone, plainTime }` bag (default midnight).
+fn temporalDateToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+    const item = if (args.len > 0) args[0] else Value.undefined;
+    var tz: TimeZone = undefined;
+    var time = value.TemporalData{ .kind = .plain_time }; // midnight
+    if (item == .object and (item.object.temporal == null or item.object.temporal.?.kind != .zoned_date_time)) {
+        // A bag: { timeZone (required), plainTime (optional) }.
+        const tzv = try self.getProperty(item, "timeZone");
+        if (tzv == .undefined) return self.throwError("TypeError", "toZonedDateTime: missing timeZone");
+        tz = try resolveTimeZoneArg(self, tzv);
+        const ptv = try self.getProperty(item, "plainTime");
+        if (ptv != .undefined) time = try toPlainTimeData(self, ptv);
+    } else {
+        if (item == .undefined) return self.throwError("TypeError", "toZonedDateTime requires a time zone");
+        tz = try resolveTimeZoneArg(self, item);
+    }
+    const d = this.object.temporal.?;
+    var combined = value.TemporalData{ .kind = .plain_date_time };
+    combined.year = d.year;
+    combined.month = d.month;
+    combined.day = d.day;
+    combined.hour = time.hour;
+    combined.minute = time.minute;
+    combined.second = time.second;
+    combined.millisecond = time.millisecond;
+    combined.microsecond = time.microsecond;
+    combined.nanosecond = time.nanosecond;
+    const local = dtLocalNs(&combined);
+    return zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
+}
+
+/// `Temporal.Instant.prototype.toZonedDateTimeISO(timeZone)`.
+fn temporalInstantToZonedDateTimeISOFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+    if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "toZonedDateTimeISO requires a time zone");
+    const tz = try resolveTimeZoneArg(self, args[0]);
+    return zdtMake(self, this.object.temporal.?.epoch_ns, tz.name, tz.offset_ns);
+}
+
 fn temporalDateToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -24288,6 +24403,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toPlainDateTime", 1, temporalDateToPlainDateTimeFn);
         try setNative(a, rs, p, "toPlainYearMonth", 0, temporalDateToYearMonthFn);
         try setNative(a, rs, p, "toPlainMonthDay", 0, temporalDateToMonthDayFn);
+        try setNative(a, rs, p, "withCalendar", 1, temporalPlainDateWithCalendarFn);
+        try setNative(a, rs, p, "toZonedDateTime", 1, temporalDateToZonedDateTimeFn);
         if (ns.getOwn("PlainDate")) |c| if (c == .object) {
             try setNative(a, rs, c.object, "from", 1, temporalPlainDateFromFn);
             try setNative(a, rs, c.object, "compare", 2, temporalPlainDateCompareFn);
@@ -24356,6 +24473,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toPlainMonthDay", 0, temporalDateTimeToPlainMonthDayFn);
         try setNative(a, rs, p, "withPlainTime", 1, temporalDateTimeWithPlainTimeFn);
         try setNative(a, rs, p, "withPlainDate", 1, temporalDateTimeWithPlainDateFn);
+        try setNative(a, rs, p, "withCalendar", 1, temporalDateTimeWithCalendarFn);
+        try setNative(a, rs, p, "toZonedDateTime", 1, temporalDateTimeToZonedDateTimeFn);
         if (ns.getOwn("PlainDateTime")) |c| if (c == .object) {
             try setNative(a, rs, c.object, "from", 1, temporalDateTimeFromFn);
             try setNative(a, rs, c.object, "compare", 2, temporalPlainDateTimeCompareFn);
@@ -24418,6 +24537,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "since", 1, temporalInstantUntilFn(-1));
         try setNative(a, rs, p, "round", 1, temporalInstantRoundFn);
         try setNative(a, rs, p, "equals", 1, temporalInstantEqualsFn);
+        try setNative(a, rs, p, "toZonedDateTimeISO", 1, temporalInstantToZonedDateTimeISOFn);
         if (ns.getOwn("Instant")) |c| if (c == .object) {
             try setNative(a, rs, c.object, "fromEpochMilliseconds", 1, temporalInstantFromEpochFn(1_000_000));
             try setNative(a, rs, c.object, "fromEpochNanoseconds", 1, temporalInstantFromEpochFn(1));
