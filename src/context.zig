@@ -37,6 +37,10 @@ pub const Context = struct {
     /// wrapper created here). Released in `destroy` — shared bytes live in
     /// process-wide refcounted storage, not the arena (see shared_buffer.zig).
     sab_retains: shared_buffer.RetainList,
+    /// Outstanding `Atomics.waitAsync` promises (entries live in the arena;
+    /// the list's address is the realm's waiter-table owner token). Settled by
+    /// the drain tail in `evaluate`/`evaluateModule`.
+    async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty,
     /// TDZ sentinel for uninitialized let/const bindings.
     tdz_marker: *value.Object,
     /// Active module graph state during `evaluateModule`, so runtime `import()`
@@ -117,6 +121,7 @@ pub const Context = struct {
             .print_buffer = &self.print_buffer,
             .tdz_marker = self.tdz_marker,
             .sab_retains = &self.sab_retains,
+            .async_waiters = &self.async_waiters,
         };
     }
 
@@ -184,8 +189,11 @@ pub const Context = struct {
 
         // Microtask checkpoint: run queued Promise reactions before returning, so
         // settled `.then`/`await` continuations and the async harness's `$DONE`
-        // have executed by the time `evaluate` returns.
+        // have executed by the time `evaluate` returns. Then the waitAsync
+        // tail: block for outstanding async waiters (notify/deadline), resolve
+        // them, and drain again until quiescent.
         machine.drainMicrotasks() catch {};
+        machine.settleAsyncWaiters();
 
         return outcome catch |err| {
             if (err == error.Throw) self.exception = machine.exception;
@@ -245,6 +253,7 @@ pub const Context = struct {
         // every exported binding holds its final value.
         const outcome = self.evalModule(&machine, root);
         machine.drainMicrotasks() catch {};
+        machine.settleAsyncWaiters();
         outcome catch |err| {
             if (err == error.Throw) self.exception = machine.exception;
             return err;
@@ -3006,5 +3015,38 @@ test "real agents: broadcast rendezvous, blocking wait, notify, report" {
         \\let r = null;
         \\while ((r = $262.agent.getReport()) === null) $262.agent.sleep(1);
         \\if (r !== "waited: ok") throw new Error("agent reported: " + r);
+    );
+}
+
+test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\const sab = new SharedArrayBuffer(8);
+        \\const view = new Int32Array(sab);
+        \\const r1 = Atomics.waitAsync(view, 0, 99);
+        \\if (r1.async !== false || r1.value !== "not-equal") throw new Error("r1: " + r1.value);
+        \\globalThis.__timedOut = false;
+        \\const r2 = Atomics.waitAsync(view, 0, 0, 50);
+        \\if (r2.async !== true) throw new Error("r2 not async");
+        \\r2.value.then(v => { globalThis.__timedOut = (v === "timed-out"); });
+        \\const r3 = Atomics.waitAsync(view, 1, 0);
+        \\if (r3.async !== true) throw new Error("r3 not async");
+        \\globalThis.__ok = false;
+        \\r3.value.then(v => { globalThis.__ok = (v === "ok"); });
+        \\$262.agent.start(`
+        \\  $262.agent.receiveBroadcast(function(sab) {
+        \\    const v = new Int32Array(sab);
+        \\    $262.agent.sleep(10);
+        \\    Atomics.notify(v, 1, 1);
+        \\    $262.agent.leaving();
+        \\  });
+        \\`);
+        \\$262.agent.broadcast(sab);
+    );
+    // evaluate's drain tail settled both promises before returning.
+    _ = try ctx.evaluate(
+        \\if (!globalThis.__timedOut) throw new Error("timeout waiter not settled");
+        \\if (!globalThis.__ok) throw new Error("notified waiter not settled");
     );
 }

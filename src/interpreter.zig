@@ -23,6 +23,10 @@ const Value = value.Value;
 
 extern "c" fn snprintf(noalias s: [*c]u8, maxlen: usize, noalias format: [*:0]const u8, ...) c_int;
 
+/// One outstanding `Atomics.waitAsync` of a realm: the waiter-table ticket id
+/// and the promise to settle with "ok"/"timed-out" (see `settleAsyncWaiters`).
+pub const AsyncWaiterEntry = struct { id: u64, promise: Value };
+
 /// Robustness limits so adversarial input throws a catchable error instead of
 /// crashing the process (stack overflow / runaway loop).
 pub const max_call_depth: u32 = 256;
@@ -350,6 +354,11 @@ pub const Interpreter = struct {
     /// it — the arena itself runs no per-object destructors. Null only in
     /// hosts that never touch SABs (then wrappers leak their ref, harmlessly).
     sab_retains: ?*shared_buffer.RetainList = null,
+    /// Outstanding `Atomics.waitAsync` promises of this realm (Context-owned,
+    /// like `microtasks`). The list's address doubles as the realm's owner
+    /// token in the waiter table; `settleAsyncWaiters` resolves entries as
+    /// their tickets settle.
+    async_waiters: ?*std.ArrayListUnmanaged(AsyncWaiterEntry) = null,
     /// The native-function object currently being invoked (set around each
     /// native call), so a native can reach its own `private_data` — used by
     /// Promise executor resolve/reject closures.
@@ -3039,6 +3048,39 @@ pub const Interpreter = struct {
             try promise.runJob(self, q.items[i]);
         }
         q.clearRetainingCapacity();
+    }
+
+    /// Event-loop tail for `Atomics.waitAsync`: while this realm has
+    /// outstanding async waiters, block until tickets settle (a notify, the
+    /// deadline, or group teardown), resolve their promises, and drain the
+    /// reactions — repeating until none remain or none can ever settle
+    /// (infinite deadline with no live agent to notify; those promises are
+    /// abandoned pending, the host's prerogative). Called after the main
+    /// microtask drain in Context.evaluate/evaluateModule and agent realms.
+    pub fn settleAsyncWaiters(self: *Interpreter) void {
+        const listp = self.async_waiters orelse return;
+        if (listp.items.len == 0) return;
+        const owner: *const anyopaque = @ptrCast(listp);
+        var buf: [16]agent.Settled = undefined;
+        while (listp.items.len > 0) {
+            const n = agent.harvestAsync(owner, &buf);
+            if (n == 0) break;
+            for (buf[0..n]) |s| {
+                var i: usize = 0;
+                while (i < listp.items.len) : (i += 1) {
+                    if (listp.items[i].id != s.id) continue;
+                    const e = listp.swapRemove(i);
+                    if (promise.promiseOf(e.promise)) |pp| {
+                        const outcome: Value = .{ .string = if (s.outcome == .ok) "ok" else "timed-out" };
+                        promise.resolve(self, pp, outcome) catch {};
+                    }
+                    break;
+                }
+            }
+            self.drainMicrotasks() catch {};
+        }
+        agent.abandonAsync(owner);
+        listp.clearRetainingCapacity();
     }
 
     /// `await expr` (synchronous-settling): if the awaited value is a promise,
@@ -18643,6 +18685,7 @@ fn agentThreadRun(src: []const u8) void {
     // parent's and the broadcast slot's references.
     var sab_retains = shared_buffer.RetainList{ .gpa = std.heap.page_allocator };
     defer sab_retains.deinit();
+    var async_waiters: std.ArrayListUnmanaged(AsyncWaiterEntry) = .empty;
     var machine = Interpreter{
         .arena = a,
         .env = &env,
@@ -18653,6 +18696,7 @@ fn agentThreadRun(src: []const u8) void {
         .print_buffer = &print_buffer,
         .tdz_marker = tdz,
         .sab_retains = &sab_retains,
+        .async_waiters = &async_waiters,
     };
     var parser = Parser.init(a, src) catch return;
     const prog = parser.parseProgram() catch return;
@@ -18663,6 +18707,7 @@ fn agentThreadRun(src: []const u8) void {
         _ = machine.eval(prog) catch {};
     }
     machine.drainMicrotasks() catch {};
+    machine.settleAsyncWaiters();
 }
 
 fn host262AgentStartFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -18967,23 +19012,48 @@ fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
-    const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
-    const t = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);
-    const timeout: f64 = if (std.math.isNan(t)) std.math.inf(f64) else @max(0, t);
-    const cur = atomicsReadV(self, vd.ta, vd.i);
-    const cur_n: f64 = if (cur == .object and cur.object.is_bigint) @floatFromInt(@as(i64, @truncate(cur.object.bigint))) else cur.number;
+    const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
+    const timeout_ms: f64 = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);
+    const timeout_ns: ?u64 = if (std.math.isNan(timeout_ms) or timeout_ms == std.math.inf(f64))
+        null
+    else if (timeout_ms <= 0)
+        0
+    else if (timeout_ms >= 1e12)
+        null
+    else
+        @intFromFloat(timeout_ms * std.time.ns_per_ms);
+    const ab = vd.ta.buffer.array_buffer.?;
+    const storage = ab.shared orelse return self.throwError("TypeError", "Atomics.waitAsync requires a shared buffer");
+    const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
     const res = (try self.newObject()).object;
-    if (@as(i64, @intFromFloat(cur_n)) != @as(i64, @intFromFloat(expected))) {
-        try self.setProp(res, "async", .{ .boolean = false });
-        try self.setProp(res, "value", .{ .string = "not-equal" });
-    } else if (timeout == 0) {
-        try self.setProp(res, "async", .{ .boolean = false });
-        try self.setProp(res, "value", .{ .string = "timed-out" });
-    } else {
-        // A genuine wait: no agent can ever notify, so the promise stays pending.
-        const cap = try newPromiseCapability(self, self.env.get("Promise") orelse .undefined);
-        try self.setProp(res, "async", .{ .boolean = true });
-        try self.setProp(res, "value", cap.promise);
+    // Register the async ticket (the value re-check and the timeout-0 early-out
+    // both happen inside the waiter table's critical section).
+    const enq = if (self.async_waiters == null)
+        // No settle loop wired in this host: report "timed-out" synchronously
+        // rather than minting a promise nothing will ever resolve.
+        agent.AsyncEnqueue.timed_out
+    else if (vd.ta.kind == .i64)
+        agent.waitAsyncEnqueue(storage, offset, i64, @bitCast(expected_raw), timeout_ns, @ptrCast(self.async_waiters.?))
+    else
+        agent.waitAsyncEnqueue(storage, offset, i32, @bitCast(@as(u32, @truncate(expected_raw))), timeout_ns, @ptrCast(self.async_waiters.?));
+    switch (enq) {
+        .not_equal => {
+            try self.setProp(res, "async", .{ .boolean = false });
+            try self.setProp(res, "value", .{ .string = "not-equal" });
+        },
+        .timed_out => {
+            try self.setProp(res, "async", .{ .boolean = false });
+            try self.setProp(res, "value", .{ .string = "timed-out" });
+        },
+        .enqueued => |id| {
+            const cap = try newPromiseCapability(self, self.env.get("Promise") orelse .undefined);
+            self.async_waiters.?.append(self.arena, .{ .id = id, .promise = cap.promise }) catch {
+                agent.abandonAsync(@ptrCast(self.async_waiters.?));
+                return error.OutOfMemory;
+            };
+            try self.setProp(res, "async", .{ .boolean = true });
+            try self.setProp(res, "value", cap.promise);
+        },
     }
     return .{ .object = res };
 }

@@ -115,12 +115,19 @@ pub fn start(src: []const u8, run: RunFn) error{OutOfMemory}!void {
 
 fn agentMain(a: *Agent, run: RunFn) void {
     t_agent = a;
+    _ = live_agents.fetchAdd(1, .monotonic);
     run(a.src);
+    _ = live_agents.fetchSub(1, .monotonic);
     const io = engineIo();
     group.mutex.lockUncancelable(io);
     a.done = true;
     group.cond.broadcast(io); // a broadcast rendezvous may be waiting on us
     group.mutex.unlock(io);
+    // An async harvester waiting on "some agent might still notify me" must
+    // re-evaluate now that this agent is gone.
+    waiters_mutex.lockUncancelable(io);
+    waiters_cond.broadcast(io);
+    waiters_mutex.unlock(io);
 }
 
 /// Agent side of `receiveBroadcast`: park until a broadcast generation this
@@ -264,6 +271,14 @@ const WaitKey = struct { storage: *SharedBufferStorage, offset: usize };
 const Ticket = struct {
     cond: std.Io.Condition = .init,
     woken: bool = false,
+    /// Async (`Atomics.waitAsync`) tickets are heap-allocated, carry their
+    /// owner realm and deadline, and are harvested by the owner's drain loop
+    /// rather than parking a thread. Sync tickets live on the waiter's stack.
+    is_async: bool = false,
+    owner: ?*const anyopaque = null,
+    async_id: u64 = 0,
+    /// Absolute `.awake`-clock nanoseconds; null waits forever.
+    deadline_ns: ?i96 = null,
 };
 
 const WaiterList = struct {
@@ -272,7 +287,27 @@ const WaiterList = struct {
 
 var waiters: std.AutoHashMapUnmanaged(WaitKey, *WaiterList) = .empty;
 var waiters_mutex: std.Io.Mutex = .init;
+/// Signaled when an async ticket settles (notify or teardown), waking the
+/// owner's harvest loop.
+var waiters_cond: std.Io.Condition = .init;
 var waiters_used = std.atomic.Value(bool).init(false);
+/// Agents whose threads are still running — an infinite-deadline async ticket
+/// can only ever settle if one of these (or a notify already in flight) exists.
+var live_agents = std.atomic.Value(usize).init(0);
+
+/// The waiter list for (storage, offset), created on demand. Caller holds
+/// `waiters_mutex`. Null on allocation failure.
+fn listFor(key: WaitKey) ?*WaiterList {
+    const gop = waiters.getOrPut(alloc, key) catch return null;
+    if (!gop.found_existing) {
+        gop.value_ptr.* = alloc.create(WaiterList) catch {
+            _ = waiters.remove(key);
+            return null;
+        };
+        gop.value_ptr.*.* = .{};
+    }
+    return gop.value_ptr.*;
+}
 
 pub const WaitOutcome = enum { ok, not_equal, timed_out };
 
@@ -293,19 +328,10 @@ pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expe
         waiters_mutex.unlock(io);
         return .timed_out;
     }
-    const gop = waiters.getOrPut(alloc, .{ .storage = storage, .offset = offset }) catch {
+    const list = listFor(.{ .storage = storage, .offset = offset }) orelse {
         waiters_mutex.unlock(io);
         return .timed_out;
     };
-    if (!gop.found_existing) {
-        gop.value_ptr.* = alloc.create(WaiterList) catch {
-            _ = waiters.remove(.{ .storage = storage, .offset = offset });
-            waiters_mutex.unlock(io);
-            return .timed_out;
-        };
-        gop.value_ptr.*.* = .{};
-    }
-    const list = gop.value_ptr.*;
     var ticket = Ticket{};
     list.tickets.append(alloc, &ticket) catch {
         waiters_mutex.unlock(io);
@@ -340,8 +366,8 @@ pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expe
     return outcome;
 }
 
-/// `Atomics.notify` core: wake up to `count` FIFO waiters; returns the number
-/// actually woken.
+/// `Atomics.notify` core: wake up to `count` FIFO waiters (sync and async
+/// alike, in list order); returns the number actually woken.
 pub fn notify(storage: *SharedBufferStorage, offset: usize, count: usize) usize {
     if (!waiters_used.load(.monotonic)) return 0;
     const io = engineIo();
@@ -349,18 +375,132 @@ pub fn notify(storage: *SharedBufferStorage, offset: usize, count: usize) usize 
     defer waiters_mutex.unlock(io);
     const list = waiters.get(.{ .storage = storage, .offset = offset }) orelse return 0;
     var n: usize = 0;
+    var any_async = false;
     for (list.tickets.items) |t| {
         if (n >= count) break;
         if (!t.woken) {
             t.woken = true;
-            t.cond.signal(io);
+            if (t.is_async) any_async = true else t.cond.signal(io);
             n += 1;
         }
     }
+    if (any_async) waiters_cond.broadcast(io);
     return n;
 }
 
-/// Teardown helper: wake every parked waiter (they observe `group.stopping`).
+// ---- Atomics.waitAsync ------------------------------------------------------
+// An async ticket parks no thread: it sits in the same FIFO list (so notify
+// ordering across wait/waitAsync is the spec's), and the owning realm's drain
+// loop harvests settlements (notify or deadline) and resolves the promises.
+
+pub const AsyncEnqueue = union(enum) { not_equal, timed_out, enqueued: u64 };
+pub const Settled = struct { id: u64, outcome: WaitOutcome };
+
+var async_id_counter = std.atomic.Value(u64).init(1);
+
+/// Register an async waiter. `owner` identifies the realm that will harvest
+/// it (a stable pointer for the realm's lifetime). Returns `not_equal` /
+/// `timed_out` for the spec's synchronous early-outs.
+pub fn waitAsyncEnqueue(storage: *SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64, owner: *const anyopaque) AsyncEnqueue {
+    const io = engineIo();
+    waiters_used.store(true, .monotonic);
+    waiters_mutex.lockUncancelable(io);
+    defer waiters_mutex.unlock(io);
+    const p: *T = @ptrCast(@alignCast(storage.slab + offset));
+    if (@atomicLoad(T, p, .seq_cst) != expected) return .not_equal;
+    if (timeout_ns) |ns| if (ns == 0) return .timed_out;
+    if (group.stopping) return .timed_out;
+    const list = listFor(.{ .storage = storage, .offset = offset }) orelse return .timed_out;
+    const t = alloc.create(Ticket) catch return .timed_out;
+    const id = async_id_counter.fetchAdd(1, .monotonic);
+    const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
+    t.* = .{
+        .is_async = true,
+        .owner = owner,
+        .async_id = id,
+        .deadline_ns = if (timeout_ns) |ns| now + ns else null,
+    };
+    list.tickets.append(alloc, t) catch {
+        alloc.destroy(t);
+        return .timed_out;
+    };
+    return .{ .enqueued = id };
+}
+
+/// Block until at least one of `owner`'s async tickets settles (woken by a
+/// notify, deadline passed, or group teardown), collect all currently-settled
+/// ones into `out`, and return the count. Returns 0 when the owner has no
+/// outstanding tickets — or when none can ever settle (every remaining ticket
+/// has an infinite deadline and no agent thread is alive to notify it; the
+/// owner should then `abandonAsync` and leave those promises pending).
+pub fn harvestAsync(owner: *const anyopaque, out: []Settled) usize {
+    if (!waiters_used.load(.monotonic)) return 0;
+    const io = engineIo();
+    waiters_mutex.lockUncancelable(io);
+    defer waiters_mutex.unlock(io);
+    while (true) {
+        const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        var n: usize = 0;
+        var outstanding: usize = 0;
+        var nearest: ?i96 = null;
+        var it = waiters.valueIterator();
+        while (it.next()) |listp| {
+            const list = listp.*;
+            var i: usize = 0;
+            while (i < list.tickets.items.len) {
+                const t = list.tickets.items[i];
+                if (t.is_async and t.owner == owner) {
+                    const expired = t.deadline_ns != null and t.deadline_ns.? <= now;
+                    if ((t.woken or expired or group.stopping) and n < out.len) {
+                        out[n] = .{ .id = t.async_id, .outcome = if (t.woken) .ok else .timed_out };
+                        n += 1;
+                        _ = list.tickets.orderedRemove(i);
+                        alloc.destroy(t);
+                        continue;
+                    }
+                    outstanding += 1;
+                    if (t.deadline_ns) |d| nearest = if (nearest) |m| @min(m, d) else d;
+                }
+                i += 1;
+            }
+        }
+        if (n > 0 or outstanding == 0) return n;
+        if (!group.stopping and nearest == null and live_agents.load(.monotonic) == 0) return 0;
+        const wait_ns: u64 = if (nearest) |d| @intCast(@max(1, d - now)) else 100 * std.time.ns_per_ms;
+        waiters_cond.waitTimeout(io, &waiters_mutex, .{ .duration = .{
+            .raw = .fromNanoseconds(wait_ns),
+            .clock = .awake,
+        } }) catch {};
+    }
+}
+
+/// Drop every async ticket belonging to `owner` (its realm is done; the
+/// promises stay forever pending — the host's prerogative for unsettleable
+/// waits).
+pub fn abandonAsync(owner: *const anyopaque) void {
+    if (!waiters_used.load(.monotonic)) return;
+    const io = engineIo();
+    waiters_mutex.lockUncancelable(io);
+    defer waiters_mutex.unlock(io);
+    var it = waiters.valueIterator();
+    while (it.next()) |listp| {
+        const list = listp.*;
+        var i: usize = 0;
+        while (i < list.tickets.items.len) {
+            const t = list.tickets.items[i];
+            if (t.is_async and t.owner == owner) {
+                _ = list.tickets.orderedRemove(i);
+                alloc.destroy(t);
+                continue;
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Teardown helper: wake every parked sync waiter (they observe
+/// `group.stopping`) and poke async harvesters (they collect under the same
+/// flag).
 fn wakeAllWaiters() void {
     if (!waiters_used.load(.monotonic)) return;
     const io = engineIo();
@@ -369,10 +509,12 @@ fn wakeAllWaiters() void {
     var it = waiters.valueIterator();
     while (it.next()) |list| {
         for (list.*.tickets.items) |t| {
+            if (t.is_async) continue; // harvest sees group.stopping
             t.woken = true;
             t.cond.signal(io);
         }
     }
+    waiters_cond.broadcast(io);
 }
 
 test "waiter table: wait blocks until notify; not-equal early-out" {
