@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const interp = @import("interpreter.zig");
 const ast = @import("ast.zig");
 const value = @import("value.zig");
@@ -16,6 +17,12 @@ pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 pub const Context = struct {
     gpa: std.mem.Allocator,
     arena_state: *std.heap.ArenaAllocator,
+    /// A Context is single-thread-affine: every mutating entry point (evaluate,
+    /// evaluateModule, the C API) must run on the thread that created it. The
+    /// arena, environments, shapes, and microtask queue are unsynchronized by
+    /// design; cross-thread sharing happens only through SharedArrayBuffer
+    /// storage (see docs/threads/bindings.md). Debug builds enforce this.
+    owner_thread: std.Thread.Id,
     env: interp.Environment,
     global_object: *value.Object,
     /// The empty root shape every object in this context transitions from.
@@ -31,6 +38,11 @@ pub const Context = struct {
     /// (dynamic import) can resolve+load+evaluate further modules on demand.
     mod_host: ?ModuleHost = null,
     mod_cache: ?*std.StringHashMapUnmanaged(*Module) = null,
+    /// Referrer path for runtime `import()` issued from top-level *script* code
+    /// (a `flags:[module]`-free test). When `mod_host` is set, `evaluate` wires
+    /// the dynamic-import hook using this as the importing script's path, so
+    /// `import('./x.js')` resolves relative to the script's directory.
+    script_referrer: []const u8 = "",
 
     pub fn create(gpa: std.mem.Allocator) !*Context {
         const arena_state = try gpa.create(std.heap.ArenaAllocator);
@@ -53,6 +65,7 @@ pub const Context = struct {
         self.* = .{
             .gpa = gpa,
             .arena_state = arena_state,
+            .owner_thread = std.Thread.getCurrentId(),
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
             .global_object = global_obj,
             .root_shape = try Shape.createRoot(a),
@@ -101,9 +114,27 @@ pub const Context = struct {
     }
 
     pub fn destroy(self: *Context) void {
+        self.assertOwnerThread();
         self.arena_state.deinit();
         self.gpa.destroy(self.arena_state);
         self.gpa.destroy(self);
+    }
+
+    /// Whether the calling thread is the one that created this context.
+    pub fn isOwnerThread(self: *const Context) bool {
+        return std.Thread.getCurrentId() == self.owner_thread;
+    }
+
+    /// Debug-only affinity check: panics with a clear message when a Context is
+    /// touched from a thread other than its creator. Compiles to nothing in
+    /// release modes, so the single-threaded hot path pays zero cost.
+    pub fn assertOwnerThread(self: *const Context) void {
+        if (comptime builtin.mode == .Debug) {
+            if (!self.isOwnerThread()) std.debug.panic(
+                "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
+                .{ std.Thread.getCurrentId(), self.owner_thread },
+            );
+        }
     }
 
     pub fn arena(self: *Context) std.mem.Allocator {
@@ -118,6 +149,7 @@ pub const Context = struct {
     /// constructs the compiler doesn't lower yet fall back to the tree-walker,
     /// so behavior is identical either way — the VM just handles the hot subset.
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
+        self.assertOwnerThread();
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
         var parser = try Parser.init(a, owned_source);
@@ -127,6 +159,13 @@ pub const Context = struct {
         // leaves `strict` set if it saw a leading `"use strict"`).
         machine.strict = parser.strict;
         self.exception = null;
+        // Top-level-script dynamic `import()`: when a module host is installed,
+        // resolve specifiers relative to the script's referrer path.
+        if (self.mod_host != null) {
+            machine.dyn_import = dynImportHook;
+            machine.dyn_import_ctx = self;
+            machine.cur_module = self.script_referrer;
+        }
 
         const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
             vm.run(&machine, chunk, null)
@@ -183,6 +222,7 @@ pub const Context = struct {
     /// completion is the entry module having run; an uncaught throw leaves the
     /// reason in `self.exception` and returns `error.Throw`.
     pub fn evaluateModule(self: *Context, entry_path: []const u8, entry_source: []const u8, host: ModuleHost) RunError!value.Value {
+        self.assertOwnerThread();
         var cache: std.StringHashMapUnmanaged(*Module) = .{};
         const root = try self.loadModule(entry_path, entry_source, host, &cache);
         try self.linkModule(root);
@@ -2921,4 +2961,20 @@ test "async: `async` remains usable as an ordinary identifier" {
     try std.testing.expectEqual(@as(f64, 5), (try evalIn("var o = { async() { return 5; } }; o.async()")).number);
     // `async` called as a function.
     try std.testing.expectEqual(@as(f64, 9), (try evalIn("function async(x) { return x; } async(9)")).number);
+}
+
+test "Context is thread-affine: owner recognized, foreign thread rejected" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try std.testing.expect(ctx.isOwnerThread());
+
+    const Probe = struct {
+        fn run(c: *Context, saw_owner: *bool) void {
+            saw_owner.* = c.isOwnerThread();
+        }
+    };
+    var saw_owner = true;
+    const t = try std.Thread.spawn(.{}, Probe.run, .{ ctx, &saw_owner });
+    t.join();
+    try std.testing.expect(!saw_owner);
 }

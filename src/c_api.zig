@@ -10,6 +10,20 @@
 //!
 //! Internally a `JSValueRef` is a pointer to a `Boxed` value living in the
 //! Context arena; a `JSStringRef` is a reference-counted `JsString`.
+//!
+//! ## Threading rules
+//!
+//! Every handle is affine to the thread that created its context:
+//! a `JSContextRef` — and every `JSValueRef`/`JSObjectRef` obtained through it —
+//! may only be used on the thread that called `JSGlobalContextCreate`.
+//! Cross-thread use is undefined behavior (the arena, object graph, and
+//! microtask queue are unsynchronized by design); debug builds panic on it.
+//! The supported multithreading pattern is one context per thread, sharing
+//! only `SharedArrayBuffer` storage — see docs/threads/bindings.md and
+//! https://github.com/zig-utils/zig-js/issues/1 for the worker/agent roadmap.
+//! `JSStringRef`s are immutable and may be created and released on any thread,
+//! but a given string must not be used from two threads concurrently (its
+//! refcount is not atomic).
 
 const std = @import("std");
 const value = @import("value.zig");
@@ -57,7 +71,11 @@ pub const JSObjectCallAsFunctionCallback = *const fn (
 // ---- internal helpers --------------------------------------------------
 
 fn ctxFrom(ref: JSContextRef) ?*Context {
-    return @ptrCast(@alignCast(ref orelse return null));
+    const c: *Context = @ptrCast(@alignCast(ref orelse return null));
+    // Single funnel for every C-API entry point: enforce context thread
+    // affinity in debug builds (see "Threading rules" above).
+    c.assertOwnerThread();
+    return c;
 }
 
 fn box(ctx: *Context, v: Value) JSValueRef {
