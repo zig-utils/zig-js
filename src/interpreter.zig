@@ -22024,6 +22024,7 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
             const t = this.object.temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            _ = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined); // validates the overflow option
             var y: i64 = t.year + @as(i64, @intFromFloat(sign * dur[0]));
             var m: i64 = @as(i64, t.month) + @as(i64, @intFromFloat(sign * dur[1]));
             // Balance month into [1,12].
@@ -22502,6 +22503,7 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
             const t = this.object.temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            _ = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined); // validates the overflow option
             var total: i64 = (@as(i64, t.year) * 12 + (t.month - 1)) + @as(i64, @intFromFloat(sign * (dur[0] * 12 + dur[1])));
             const ny = @divFloor(total, 12);
             if (ny < -271821 or ny > 275760) return self.throwError("RangeError", "year out of range");
@@ -22895,13 +22897,21 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
     if (opts != .object or opts.object.is_symbol or opts.object.is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
     // Each unit/mode option is coerced to a string (GetOption) and validated
     // against its allowed set; a wrong-typed value is therefore a RangeError.
+    var largest_set = false;
+    var smallest_set = false;
     const lu = try self.getProperty(opts, "largestUnit");
     if (lu != .undefined) {
         const s = try self.toStringV(lu);
-        if (std.mem.eql(u8, s, "auto")) {} else r.largest = tUnitFromStr(s) orelse return self.throwError("RangeError", "invalid largestUnit");
+        if (std.mem.eql(u8, s, "auto")) {} else {
+            r.largest = tUnitFromStr(s) orelse return self.throwError("RangeError", "invalid largestUnit");
+            largest_set = true;
+        }
     }
     const su = try self.getProperty(opts, "smallestUnit");
-    if (su != .undefined) r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
+    if (su != .undefined) {
+        r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
+        smallest_set = true;
+    }
     const rm = try self.getProperty(opts, "roundingMode");
     if (rm != .undefined) r.mode = roundModeFromStr(try self.toStringV(rm)) orelse return self.throwError("RangeError", "invalid roundingMode");
     const ri = try self.getProperty(opts, "roundingIncrement");
@@ -22910,6 +22920,10 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
         if (std.math.isNan(n) or n < 1 or n > 1e9 or @trunc(n) != n) return self.throwError("RangeError", "invalid roundingIncrement");
         r.increment = n;
     }
+    // ValidateTemporalUnitRange: a larger TUnit has a smaller enum value, so an
+    // explicit largestUnit smaller than the smallestUnit is a RangeError.
+    if (largest_set and smallest_set and @intFromEnum(r.largest) > @intFromEnum(r.smallest))
+        return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
     return r;
 }
 
@@ -23209,6 +23223,7 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
             const t = this.object.temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            _ = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined); // validates the overflow option
             // Date part with constrain, then time part carrying whole days.
             const c = addCalendarDate(t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign);
             const time_ns = timeToNs(t) + @as(i128, @intFromFloat(sign)) * (durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day));
@@ -24140,6 +24155,7 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
             const t = this.object.temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
+            _ = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined); // validates the overflow option
             var epoch = t.epoch_ns;
             if (durHasCalendar(dur) or dur[3] != 0) {
                 // Apply date units to the local date.
