@@ -787,6 +787,11 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, exe: []con
 
 fn workerLimitForSubtree(sub: []const u8) usize {
     if (std.mem.eql(u8, sub, "test/staging")) return 1;
+    // One test per worker process for the blocking-wait corpus: a worker
+    // timeout discards the batch's partial stdout and blames its FIRST test,
+    // so a wedged agent test in a 10-batch would cost up to 10×30s to crawl
+    // past. At limit 1 a deadlock costs one timeout and blames the right test.
+    if (std.mem.eql(u8, sub, "test/built-ins/Atomics")) return 1;
     return 10;
 }
 
