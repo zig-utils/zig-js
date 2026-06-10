@@ -3208,3 +3208,44 @@ test "Thread API (enable_threads): shared realm, identity, exceptions, ids" {
         \\if (spin.join() !== "done") throw new Error("spinner");
     );
 }
+
+test "Lock/Condition/ThreadLocal: mailbox handshake, mutual exclusion, TLS" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\// Mutual exclusion: read-modify-write under the lock never loses an
+        \\// update even though the GIL can yield between the read and the write.
+        \\const lock = new Lock();
+        \\const acc = { n: 0 };
+        \\const ts = [];
+        \\for (let i = 0; i < 4; i++) ts.push(new Thread(() => {
+        \\  for (let j = 0; j < 500; j++) lock.hold(() => { acc.n = acc.n + 1; });
+        \\}));
+        \\ts.forEach(t => t.join());
+        \\if (acc.n !== 2000) throw new Error("lost update: " + acc.n);
+        \\// hold releases on throw (finally-equivalent)
+        \\let threw = false;
+        \\try { lock.hold(() => { throw new Error("x"); }); } catch (e) { threw = true; }
+        \\if (!threw) throw new Error("hold must propagate");
+        \\lock.hold(() => {}); // and the lock is reacquirable
+        \\// The PR-249 mailbox: a condition-variable handshake with a JS object
+        \\const mlock = new Lock(), mcond = new Condition();
+        \\const mailbox = { ready: false, payload: null };
+        \\const consumer = new Thread(() => {
+        \\  let got;
+        \\  mlock.hold(() => {
+        \\    while (!mailbox.ready) mcond.wait(mlock);
+        \\    got = mailbox.payload;
+        \\  });
+        \\  return got.text;
+        \\});
+        \\mlock.hold(() => { mailbox.payload = { text: "hello" }; mailbox.ready = true; mcond.notify(); });
+        \\if (consumer.join() !== "hello") throw new Error("mailbox");
+        \\// ThreadLocal: per-thread values, main's untouched
+        \\const tls = new ThreadLocal();
+        \\tls.value = "main";
+        \\const seen = new Thread(() => { const before = tls.value; tls.value = "worker"; return [before, tls.value]; }).join();
+        \\if (seen[0] !== undefined || seen[1] !== "worker") throw new Error("tls worker view");
+        \\if (tls.value !== "main") throw new Error("tls main view");
+    );
+}
