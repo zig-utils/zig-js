@@ -22162,6 +22162,8 @@ fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
             out[i] = try temporalIntegralArg(self, pv, "duration component");
         }
         if (!any) return self.throwError("TypeError", "invalid duration");
+        // All non-zero components must share one sign (ToTemporalDuration).
+        if (!durSignOk(out)) return self.throwError("RangeError", "mixed-sign duration");
         return out;
     }
     // Non-object: ToString then parse as an ISO 8601 duration (Symbol throws).
