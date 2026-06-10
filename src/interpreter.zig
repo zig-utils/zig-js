@@ -466,6 +466,38 @@ pub const Interpreter = struct {
         }
     }
 
+    /// A top-level function declaration (script GlobalDeclarationInstantiation or
+    /// eval EvalDeclarationInstantiation). Implements CanDeclareGlobalFunction +
+    /// CreateGlobalFunctionBinding: a new/configurable target takes a fresh
+    /// `{ writable, enumerable, configurable: D }` descriptor (D = deletable for
+    /// eval); a non-configurable existing property must already be a writable,
+    /// enumerable data property or the declaration is a TypeError.
+    pub fn globalDefineFunc(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
+        const vs = self.env.varScope();
+        if (vs.parent != null or self.global_object == null) {
+            try vs.put(name, v);
+            return;
+        }
+        const g = self.global_object.?;
+        if (g.getOwn(name) != null or g.getAccessor(name) != null) {
+            const a = g.getAttr(name);
+            if (!a.configurable) {
+                // CanDeclareGlobalFunction: a non-configurable property is only
+                // redefinable if it is a writable, enumerable *data* property.
+                if (g.getAccessor(name) != null or !a.writable or !a.enumerable)
+                    return self.throwError("TypeError", "cannot declare global function (existing property is not configurable)");
+                try vs.put(name, v);
+                try self.setProp(g, name, v); // keep the existing attributes
+                return;
+            }
+        } else if (!g.extensible) {
+            return self.throwError("TypeError", "cannot declare global function (global object is not extensible)");
+        }
+        try vs.put(name, v);
+        try self.setProp(g, name, v);
+        try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
+    }
+
     /// Like `globalDefine` but a new global property is *configurable* (deletable)
     /// — CreateGlobalVarBinding(F, true), used for the Annex B B.3.3 legacy
     /// function bindings (and not for ordinary top-level declarations).
@@ -1763,7 +1795,7 @@ pub const Interpreter = struct {
             .func_decl => |fnode| {
                 const fnv = try self.makeFunction(fnode, self.env);
                 if (at_fn_top) {
-                    try self.globalDefine(fnode.name, fnv);
+                    try self.globalDefineFunc(fnode.name, fnv);
                 } else {
                     // Block-scoped function declaration: bind in this block...
                     try self.env.put(fnode.name, fnv);
