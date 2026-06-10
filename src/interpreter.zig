@@ -23561,6 +23561,37 @@ fn temporalDateToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) 
     return makeYearMonth(self, t.year, t.month);
 }
 
+/// `Temporal.<Type>.prototype.valueOf` is a poison pill: it always throws, so a
+/// Temporal value can never be implicitly converted with `<`/`>`/`+` (callers
+/// must use `compare`/`equals`).
+fn temporalValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return self.throwError("TypeError", "Called valueOf on a Temporal type; use compare() / equals() / a string conversion instead");
+}
+
+/// `Temporal.<Type>.prototype.toLocaleString(locales, options)` — without an Intl
+/// Temporal data table this falls back to the default ISO `toString`. The
+/// locale/options arguments are deliberately ignored (not forwarded to
+/// `toString`, whose option set differs), and the receiver is brand-checked.
+fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null) return self.throwError("TypeError", "toLocaleString called on a non-Temporal value");
+    const none: []const Value = &.{};
+    return switch (this.object.temporal.?.kind) {
+        .plain_date => temporalPlainDateToStringFn(ctx, this, none),
+        .plain_time => temporalPlainTimeToStringFn(ctx, this, none),
+        .plain_date_time => temporalPlainDateTimeToStringFn(ctx, this, none),
+        .plain_year_month => temporalYearMonthToStringFn(ctx, this, none),
+        .plain_month_day => temporalMonthDayToStringFn(ctx, this, none),
+        .instant => temporalInstantToStringFn(ctx, this, none),
+        .zoned_date_time => temporalZdtToStringFn(ctx, this, none),
+        .duration => temporalDurationToStringFn(ctx, this, none),
+    };
+}
+
 /// ToTemporalCalendarSlotValue, restricted to the only supported calendar
 /// (iso8601): a Temporal instance contributes its own calendar; any other value
 /// is `ToString`'d and must name `iso8601`, else a RangeError.
@@ -24419,6 +24450,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "total", 1, temporalDurationTotalFn);
         try setNative(a, rs, p, "round", 1, temporalDurationRoundFn);
         try setNative(a, rs, p, "toString", 0, temporalDurationToStringFn);
+        try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
+        try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalDurationToStringFn);
         if (ns.getOwn("Duration")) |dc| if (dc == .object) {
             try setNative(a, rs, dc.object, "from", 1, temporalDurationFromFn);
@@ -24445,6 +24478,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNative(a, rs, p, "toString", 0, temporalPlainDateToStringFn);
+        try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
+        try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalPlainDateToStringFn);
         try setNative(a, rs, p, "equals", 1, temporalPlainDateEqualsFn);
         try setNative(a, rs, p, "add", 1, temporalPlainDateAddFn(1));
@@ -24472,6 +24507,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "microsecond", temporalPlainTimeGetter(.microsecond));
         try setNativeGetter(a, rs, p, "nanosecond", temporalPlainTimeGetter(.nanosecond));
         try setNative(a, rs, p, "toString", 0, temporalPlainTimeToStringFn);
+        try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
+        try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalPlainTimeToStringFn);
         try setNative(a, rs, p, "with", 1, temporalPlainTimeWithFn);
         try setNative(a, rs, p, "add", 1, temporalPlainTimeAddFn(1));
@@ -24511,6 +24548,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "era", temporalEraGetter);
         try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
         try setNative(a, rs, p, "toString", 0, temporalPlainDateTimeToStringFn);
+        try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
+        try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalPlainDateTimeToStringFn);
         try setNative(a, rs, p, "with", 1, temporalPlainDateTimeWithFn);
         try setNative(a, rs, p, "add", 1, temporalPlainDateTimeAddFn(1));
@@ -24546,6 +24585,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNative(a, rs, p, "toString", 0, temporalYearMonthToStringFn);
+        try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
+        try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalYearMonthToStringFn);
         try setNative(a, rs, p, "with", 1, temporalYearMonthWithFn);
         try setNative(a, rs, p, "equals", 1, temporalYearMonthEqualsFn);
@@ -24566,6 +24607,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "day", temporalMonthDayGetter(.day));
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNative(a, rs, p, "toString", 0, temporalMonthDayToStringFn);
+        try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
+        try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalMonthDayToStringFn);
         try setNative(a, rs, p, "with", 1, temporalMonthDayWithFn);
         try setNative(a, rs, p, "equals", 1, temporalMonthDayEqualsFn);
@@ -24582,6 +24625,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "epochSeconds", temporalInstantExtraEpochGetter(1_000_000_000));
         try setNativeGetter(a, rs, p, "epochMicroseconds", temporalInstantExtraEpochGetter(1_000));
         try setNative(a, rs, p, "toString", 0, temporalInstantToStringFn);
+        try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
+        try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalInstantToStringFn);
         try setNative(a, rs, p, "add", 1, temporalInstantAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalInstantAddFn(-1));
@@ -24632,6 +24677,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "timeZoneId", temporalZdtTimeZoneIdGetter);
         try setNativeGetter(a, rs, p, "offset", temporalZdtOffsetGetter);
         try setNative(a, rs, p, "toString", 0, temporalZdtToStringFn);
+        try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
+        try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalZdtToStringFn);
         try setNative(a, rs, p, "toInstant", 0, temporalZdtToInstantFn);
         try setNative(a, rs, p, "toPlainDateTime", 0, temporalZdtToPlainDateTimeFn);

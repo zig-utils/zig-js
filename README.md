@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` when a host already targets the JSC C API.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **41,836 / 47,928 (87.3%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **41,868 / 47,928 (87.4%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
 
 ```zig
 const js = @import("js");
@@ -45,10 +45,10 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **41,836 / 47,928 (87.3%)** |
+| **valid** | can we run the program? (scored corpus) | **41,868 / 47,928 (87.4%)** |
 | negative | do we reject invalid input? (early errors — partial) | 3,213 / 4,668 (68.8%) |
 
-Of the valid corpus: **119 parse failures**, **5,973 runtime failures**, **0 host failures**. The runner currently skips 581 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, Annex B, and the regex engine.
+Of the valid corpus: **119 parse failures**, **5,941 runtime failures**, **0 host failures**. The runner currently skips 581 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, Annex B, and the regex engine.
 
 ### Per area (valid)
 
@@ -64,7 +64,7 @@ Of the valid corpus: **119 parse failures**, **5,973 runtime failures**, **0 hos
 | `DataView` | 561 / 561 (100%) | `Number` | 340 / 340 (100%) |
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 29 / 29 (100%) | `FinalizationRegistry` | 47 / 47 (100%) |
-| `Temporal` | 3,369 / 4,603 (73.2%) | `intl402` | 1,442 / 3,341 (43.2%) |
+| `Temporal` | 3,401 / 4,603 (73.9%) | `intl402` | 1,442 / 3,341 (43.2%) |
 | `annexB` | 961 / 1,071 (89.7%) | `staging` | 694 / 1,028 (67.5%) |
 | `SharedArrayBuffer` | 103 / 104 (99.0%) | `ArrayBuffer` | 216 / 221 (97.7%) |
 | `Atomics` | 308 / 388 (79.4%) | — | — |
