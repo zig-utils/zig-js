@@ -23095,13 +23095,13 @@ fn temporalPlainTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) v
 /// Coerce to PlainTime fields (a PlainTime, a PlainDateTime, a fields bag, or a
 /// "HH:MM:SS" string).
 fn toPlainTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalData {
-    return toPlainTimeDataOpt(self, v, true);
+    return toPlainTimeDataOpt(self, v, true, false);
 }
 
 /// As `toPlainTimeData`, but when `require_any` is false a fields bag with no
 /// recognised time fields yields all-zero time (used by PlainDateTime, where the
 /// time portion is optional and defaults to midnight).
-fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool) EvalError!value.TemporalData {
+fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: bool) EvalError!value.TemporalData {
     if (tIsTemporal(v, .plain_time) or tIsTemporal(v, .plain_date_time)) {
         return v.object.temporal.?.*;
     }
@@ -23116,8 +23116,10 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool) EvalError
             if (pv == .undefined) continue;
             any = true;
             const n: i64 = @intFromFloat(try temporalIntArg(self, pv, nm));
-            if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
-            vals[i] = n;
+            // RegulateTime: overflow "reject" throws on an out-of-range field;
+            // "constrain" (the default) clamps it (so `{ second: 60 }` ⇒ 59).
+            if (reject and (n < 0 or n > maxes[i])) return self.throwError("RangeError", "time component out of range");
+            vals[i] = @max(0, @min(maxes[i], n));
         }
         if (!any and require_any) return self.throwError("TypeError", "invalid PlainTime fields");
         setTimeFields(&t, .{ @floatFromInt(vals[0]), @floatFromInt(vals[1]), @floatFromInt(vals[2]), @floatFromInt(vals[3]), @floatFromInt(vals[4]), @floatFromInt(vals[5]) });
@@ -23159,8 +23161,8 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool) EvalError
 fn temporalPlainTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const t = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
-    try validateTemporalOptions(self, if (args.len > 1) args[1] else .undefined);
+    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined);
+    const t = try toPlainTimeDataOpt(self, if (args.len > 0) args[0] else .undefined, true, reject);
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     o.temporal.?.* = t;
     o.temporal.?.kind = .plain_time;
@@ -23349,7 +23351,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
     }
     if (v == .object) {
         const f = try toPlainDateFields(self, v, constrain);
-        const tm = try toPlainTimeDataOpt(self, v, false);
+        const tm = try toPlainTimeDataOpt(self, v, false, !constrain);
         var t: value.TemporalData = .{ .kind = .plain_date_time };
         t.year = @intCast(f.y);
         t.month = f.m;
@@ -24300,7 +24302,7 @@ fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
         if (tzv == .string) {
             const tz = try parseTimeZone(self, tzv.string);
             const f = try toPlainDateFields(self, v, true);
-            const tm = try toPlainTimeDataOpt(self, v, false);
+            const tm = try toPlainTimeDataOpt(self, v, false, false);
             var l: value.TemporalData = .{ .kind = .plain_date_time };
             l.year = @intCast(f.y);
             l.month = f.m;
