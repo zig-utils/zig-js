@@ -195,6 +195,9 @@ const Meta = struct {
     /// `flags: [module]` — run as an ES module (harness in the global scope, the
     /// body linked + evaluated as a module against sibling fixtures).
     is_module: bool = false,
+    /// `flags: [CanBlockIsFalse]` — run with the main agent's [[CanBlock]]
+    /// false (Atomics.wait on it must throw TypeError).
+    can_block_false: bool = false,
     /// `includes:` harness file names. Slices point into the source frontmatter,
     /// which outlives `runOne`.
     includes: [8][]const u8 = undefined,
@@ -235,7 +238,7 @@ fn parseMeta(src: []const u8) Meta {
             if (meta.is_async) meta.unsupported_flag = true else meta.is_module = true;
         }
         if (std.mem.indexOf(u8, flags, "CanBlockIsFalse") != null)
-            meta.unsupported_flag = true;
+            meta.can_block_false = true;
     }
     if (std.mem.indexOf(u8, front, "negative:")) |ni| {
         meta.negative = true;
@@ -352,6 +355,10 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []con
 
     const ctx = js.Context.create(gpa) catch return .skip;
     defer ctx.destroy();
+
+    // The host-defined [[CanBlock]] of the main agent for this test.
+    js.agent.main_can_block = !meta.can_block_false;
+    defer js.agent.main_can_block = true;
 
     // Enable top-level-script dynamic `import()` (resolved relative to the test
     // file), so script tests that `import('./fixture.js')` work like the engine's

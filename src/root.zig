@@ -29,6 +29,10 @@ pub const Parser = @import("parser.zig").Parser;
 pub const JsString = @import("jsstring.zig").JsString;
 pub const installGlobals = @import("interpreter.zig").installGlobals;
 
+// Agent/threading infrastructure ($262.agent, Atomics waiter table). Hosts
+// set `agent.main_can_block` to model the main agent's [[CanBlock]].
+pub const agent = @import("agent.zig");
+
 // Bytecode pipeline (tier-1 VM): compiler lowers the AST, vm executes it.
 pub const bytecode = @import("bytecode.zig");
 pub const Compiler = @import("compiler.zig").Compiler;
