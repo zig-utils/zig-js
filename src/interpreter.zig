@@ -21226,6 +21226,17 @@ fn durSignOk(dur: [10]f64) bool {
     return true;
 }
 
+/// IsValidDuration's magnitude bounds: every field finite, the calendar fields
+/// (years/months/weeks) below 2^32, and the days+time portion (expressed in
+/// seconds) below 2^53.
+fn durInRange(dur: [10]f64) bool {
+    for (dur) |c| if (!std.math.isFinite(c)) return false;
+    if (@abs(dur[0]) >= 4294967296.0 or @abs(dur[1]) >= 4294967296.0 or @abs(dur[2]) >= 4294967296.0) return false;
+    const total_s = dur[3] * 86400.0 + dur[4] * 3600.0 + dur[5] * 60.0 + dur[6] +
+        dur[7] / 1000.0 + dur[8] / 1_000_000.0 + dur[9] / 1_000_000_000.0;
+    return @abs(total_s) < 9007199254740992.0; // 2^53
+}
+
 fn temporalDurationWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
@@ -22162,8 +22173,9 @@ fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
             out[i] = try temporalIntegralArg(self, pv, "duration component");
         }
         if (!any) return self.throwError("TypeError", "invalid duration");
-        // All non-zero components must share one sign (ToTemporalDuration).
+        // All non-zero components must share one sign and stay in range.
         if (!durSignOk(out)) return self.throwError("RangeError", "mixed-sign duration");
+        if (!durInRange(out)) return self.throwError("RangeError", "duration out of range");
         return out;
     }
     // Non-object: ToString then parse as an ISO 8601 duration (Symbol throws).
@@ -22933,8 +22945,10 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
     return r;
 }
 
-/// Build a Temporal.Duration object from raw components.
+/// Build a Temporal.Duration object from raw components (CreateTemporalDuration,
+/// which rejects an out-of-range duration).
 fn makeDuration(self: *Interpreter, dur: [10]f64) EvalError!Value {
+    if (!durInRange(dur)) return self.throwError("RangeError", "duration out of range");
     const o = try makeTemporal(self, .duration, "\x00T.Duration");
     o.temporal.?.dur = dur;
     return .{ .object = o };
