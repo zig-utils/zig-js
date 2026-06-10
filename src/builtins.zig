@@ -1204,13 +1204,19 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
 pub fn objectGetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    if (arg(args, 0) == .object) {
-        const o = arg(args, 0).object;
+    const v = arg(args, 0);
+    if (v == .object) {
+        const o = v.object;
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGetProto(o);
         // [[GetPrototypeOf]]: a callable with no explicit prototype reports
         // %Function.prototype% (every function inherits it).
         if (self.effectiveProto(o)) |p| return .{ .object = p };
+        return .null;
     }
+    // ES2015+: ToObject(O) — null/undefined throw a TypeError; a primitive boxes
+    // to its wrapper, so `Object.getPrototypeOf(0) === Number.prototype`.
+    const boxed = try self.toObject(v);
+    if (self.effectiveProto(boxed)) |p| return .{ .object = p };
     return .null;
 }
 
@@ -1869,8 +1875,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     _ = this;
     const self = interp(ctx);
     const ov = arg(args, 0);
-    if (ov != .object) return .undefined;
-    const o = ov.object;
+    // ES2015+: ToObject(O) — null/undefined throw; a primitive boxes to its
+    // wrapper (so `Object.getOwnPropertyDescriptor("ab", 0)` sees the chars).
+    const o = if (ov == .object) ov.object else try self.toObject(ov);
     const key = try self.keyOf(arg(args, 1));
     // Private members are internal slots — invisible to reflection.
     if (value.isPrivateKey(key)) return .undefined;

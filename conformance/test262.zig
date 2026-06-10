@@ -41,7 +41,7 @@ const worker_timeout: std.Io.Timeout = .{ .duration = .{
     .raw = .fromSeconds(30),
     .clock = .awake,
 } };
-const verbose_failures = false;
+const verbose_failures = true;
 const unsupported_staging_prefixes = [_][]const u8{
     "sm/async-functions/",
     "sm/AsyncGenerators/",
