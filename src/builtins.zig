@@ -1530,7 +1530,9 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // extends the array's length (so iteration sees it).
     if (target.is_array) {
         if (arrayIndexOf(key)) |i| {
-            if (i + 1 > target.array_len and i + 1 > target.elements.items.len) target.array_len = i + 1;
+            // Only a valid array index (ToUint32(P) === P and < 2^32 - 1) updates
+            // `length`; 2^32 - 1 and above are ordinary properties.
+            if (i < 4294967295 and i + 1 > target.array_len and i + 1 > target.elements.items.len) target.array_len = i + 1;
             // Defining a mapped arguments index as an accessor severs its link.
             if (target.is_arguments and (get != null or set != null) and i < target.arg_map_names.len) target.arg_map_names[i] = "";
         }
