@@ -1002,9 +1002,21 @@ pub const Interpreter = struct {
                 }
                 // `var` hoists to the variable scope (and mirrors onto the global
                 // object); `let`/`const` bind in the current (possibly block) scope.
-                if (d.kind == .@"var")
-                    try self.globalDefine(d.name, v)
-                else if (d.kind == .@"const")
+                if (d.kind == .@"var") {
+                    // A `var x = init` inside a `with` whose object provides `x`
+                    // assigns the initializer to that object (ResolveBinding walks
+                    // the object Environment Record), leaving the hoisted var
+                    // binding untouched — exactly like a bare `x = init`. Without
+                    // an initializer, or when no `with` shadows the name, the var
+                    // scope binding takes the value as before.
+                    if (d.init != null) {
+                        if (try self.assignWithObject(d.name)) |o| {
+                            try self.setMember(.{ .object = o }, d.name, v);
+                            break :blk .undefined;
+                        }
+                    }
+                    try self.globalDefine(d.name, v);
+                } else if (d.kind == .@"const")
                     {
                         try self.checkRestrictedGlobalLexical(d.name);
                         try self.env.putConst(d.name, v);
@@ -1587,6 +1599,7 @@ pub const Interpreter = struct {
             },
             .while_stmt => |w| try self.hoistVarsIn(w.body),
             .do_while_stmt => |w| try self.hoistVarsIn(w.body),
+            .with_stmt => |w| try self.hoistVarsIn(w.body),
             .for_stmt => |f| {
                 if (f.init) |ini| try self.hoistVarsIn(ini);
                 try self.hoistVarsIn(f.body);
