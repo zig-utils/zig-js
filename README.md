@@ -12,8 +12,8 @@ JavaScriptCore C API.
 > interpreter (the correctness oracle) and a suspendable stack **bytecode VM** that lowers the
 > hot subset plus generators, async functions, and async generators. It runs the **real
 > tc39/test262 corpus** against the upstream harness (`sta.js`, `assert.js`, and `includes:`).
-> The latest full run passes **VALID 41,762 / 47,928 (87.1%)**, with **119 parse failures**,
-> **6,047 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
+> The latest full run passes **VALID 41,777 / 47,928 (87.2%)**, with **119 parse failures**,
+> **6,032 runtime failures**, **0 host failures**, and **NEGATIVE 3,213 / 4,668 (68.8%)**.
 > `zig build conformance` keeps a 33/33 always-green smoke suite. Some flagged suites are still
 > skipped by the runner while module, async-harness, and include-loading support is completed.
 >
@@ -55,7 +55,7 @@ apart:
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **41,762 / 47,928 (87.1%)** |
+| **valid** | can we run the program? (scored corpus) | **41,777 / 47,928 (87.2%)** |
 | negative | do we reject invalid input? (early errors - partial) | 3,213 / 4,668 (68.8%) |
 
 The scored corpus currently skips 581 tests that require runner work for modules, async harness
@@ -77,7 +77,7 @@ Per area (valid):
 | `DataView` | 561 / 561 (100%) | `Number` | 340 / 340 (100%) |
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 29 / 29 (100%) | `FinalizationRegistry` | 47 / 47 (100%) |
-| `Temporal` | 3,300 / 4,603 (71.7%) | `intl402` | 1,437 / 3,341 (43.0%) |
+| `Temporal` | 3,310 / 4,603 (71.9%) | `intl402` | 1,442 / 3,341 (43.2%) |
 | `annexB` | 961 / 1,071 (89.7%) | `staging` | 694 / 1,028 (67.5%) |
 | `SharedArrayBuffer` | 103 / 104 (99.0%) | `ArrayBuffer` | 216 / 221 (97.7%) |
 | `Atomics` | 308 / 388 (79.4%) | — | — |
