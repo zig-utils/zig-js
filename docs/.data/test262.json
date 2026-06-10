@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 41557,
+    "passing": 41561,
     "total": 47928,
     "percentage": 86.7,
     "parseFail": 119,
-    "runtimeFail": 6252,
+    "runtimeFail": 6248,
     "hostFail": 0
   },
   "negative": {
@@ -18,11 +18,11 @@
   "suites": [
     {
       "name": "language",
-      "passing": 17291,
+      "passing": 17295,
       "total": 19070,
       "percentage": 90.7,
       "parseFail": 63,
-      "runtimeFail": 1716,
+      "runtimeFail": 1712,
       "hostFail": 0
     },
     {

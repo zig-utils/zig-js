@@ -428,6 +428,11 @@ pub const Interpreter = struct {
     /// Set only while invoking a syntactic `eval(...)` call. The eval native
     /// uses this to distinguish direct eval from member/indirect eval.
     direct_eval_call: bool = false,
+    /// True while executing eval'd code: EvalDeclarationInstantiation creates
+    /// new global var/function bindings as *deletable* (configurable), unlike a
+    /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
+    /// around the eval body.
+    eval_decl_deletable: bool = false,
     /// Active `with` scope objects (innermost last); bare identifiers consult
     /// these before the lexical environment.
     with_stack: std.ArrayListUnmanaged(*value.Object) = .empty,
@@ -454,7 +459,9 @@ pub const Interpreter = struct {
             if (self.global_object) |g| {
                 const existed = g.getOwn(name) != null;
                 try self.setProp(g, name, v);
-                if (!existed) try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = false });
+                // EvalDeclarationInstantiation makes new global bindings deletable
+                // (configurable); a script's GlobalDeclarationInstantiation does not.
+                if (!existed) try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
             }
         }
     }
@@ -8869,10 +8876,16 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // a real variable scope (`fn_scope`).
     eval_env.* = .{ .arena = self.arena, .parent = self.env, .fn_scope = parser.strict, .fn_body = !parser.strict };
     self.env = eval_env;
+    // Non-strict eval's var/function declarations target the surrounding
+    // variable scope and, when that is the global object, must be deletable.
+    // (Strict eval keeps them local in `eval_env`, so the flag is moot there.)
+    const saved_deletable = self.eval_decl_deletable;
+    self.eval_decl_deletable = !parser.strict;
     defer {
         self.env = saved_env;
         self.this_value = saved_this;
         self.global_object = saved_glob;
+        self.eval_decl_deletable = saved_deletable;
     }
 
     // Eval creates a fresh lexical environment for let/const/class declarations,
