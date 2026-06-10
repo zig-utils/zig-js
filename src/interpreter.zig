@@ -1222,17 +1222,24 @@ pub const Interpreter = struct {
                     self.env = iter_env;
                 }
                 try self.bindLoopTarget(decl_kind, target, try self.getProperty(res, "value"));
-                // A throw in the body closes the iterator before propagating.
+                // A throw in the body closes the iterator before propagating. On a
+                // throw completion any error from IteratorClose is discarded AND the
+                // original thrown value is preserved (iteratorClose can overwrite
+                // `self.exception` via a throwing `return`/get-method).
                 last = self.eval(body) catch |e| {
-                    self.iteratorClose(iter_obj) catch {};
+                    self.iteratorCloseKeepingThrow(iter_obj);
                     return e;
                 };
                 // `break`/`return` (an abrupt loop exit) also closes the iterator.
+                // Unlike the throw case above, this is a normal/return completion,
+                // so an error from IteratorClose (a non-callable `return`, or a
+                // `return()` that yields a non-object) PROPAGATES rather than being
+                // swallowed.
                 if (self.loopSignal(my_label)) |stop| if (stop) {
                     const ss = self.signal;
                     const sr = self.ret_value;
                     self.signal = .none;
-                    self.iteratorClose(iter_obj) catch {};
+                    try self.iteratorClose(iter_obj);
                     self.signal = ss;
                     self.ret_value = sr;
                     break;

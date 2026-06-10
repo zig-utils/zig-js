@@ -590,10 +590,21 @@ pub const Compiler = struct {
         try self.compileLoopBind(decl_kind, target);
         try self.compileStmt(body);
         _ = try self.chunk.emit(.jump, @intCast(top));
-        self.chunk.patchToHere(to_end);
         // `continue` re-enters the loop at the top (next .next()).
         for (loop.continues.items) |j| self.chunk.patchTo(j, top);
-        for (loop.breaks.items) |j| self.chunk.patchToHere(j);
+        // Normal completion (the iterator reported `done`): it is already
+        // exhausted, so it is NOT closed — control just exits the loop.
+        self.chunk.patchToHere(to_end);
+        // `break` is an abrupt completion, so it must run IteratorClose (which
+        // throws if `return` is present-but-non-callable or returns a non-object).
+        // The normal-done path above jumps over this close block.
+        if (loop.breaks.items.len > 0) {
+            const skip_close = try self.chunk.emit(.jump, 0);
+            for (loop.breaks.items) |j| self.chunk.patchToHere(j);
+            try self.emitLoad(it_name);
+            _ = try self.chunk.emit(.iter_close, 0);
+            self.chunk.patchToHere(skip_close);
+        }
         self.popLoop();
     }
 
