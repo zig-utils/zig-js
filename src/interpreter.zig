@@ -22918,9 +22918,13 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
     if (rm != .undefined) r.mode = roundModeFromStr(try self.toStringV(rm)) orelse return self.throwError("RangeError", "invalid roundingMode");
     const ri = try self.getProperty(opts, "roundingIncrement");
     if (ri != .undefined) {
+        // ToTemporalRoundingIncrement: a non-finite increment is a RangeError,
+        // otherwise it is TRUNCATED to an integer (so 2.5 → 2) and range-checked.
         const n = try self.toNumberV(ri);
-        if (std.math.isNan(n) or n < 1 or n > 1e9 or @trunc(n) != n) return self.throwError("RangeError", "invalid roundingIncrement");
-        r.increment = n;
+        if (std.math.isNan(n) or std.math.isInf(n)) return self.throwError("RangeError", "roundingIncrement must be finite");
+        const inc = @trunc(n);
+        if (inc < 1 or inc > 1e9) return self.throwError("RangeError", "invalid roundingIncrement");
+        r.increment = inc;
     }
     // ValidateTemporalUnitRange: a larger TUnit has a smaller enum value, so an
     // explicit largestUnit smaller than the smallestUnit is a RangeError.
