@@ -7,6 +7,7 @@ const regex = @import("regex");
 const vm = @import("vm.zig");
 const promise = @import("promise.zig");
 const shared_buffer = @import("shared_buffer.zig");
+const agent = @import("agent.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -10339,7 +10340,10 @@ pub fn install262(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
     // On the main thread, each test gets a fresh Context → reset cross-test
     // agent coordination state. Agent threads must NOT reset it (the parent owns
     // the broadcast/report channels they're using).
-    if (!t_is_agent) agentResetState();
+    // A fresh *main* realm tears down the previous test's agent group (joins
+    // agent threads, clears reports/broadcast, wakes stranded waiters). An
+    // agent realm installing $262 must not reset the group it belongs to.
+    if (agent.currentAgent() == null) agent.reset();
     try env.put("$262", .{ .object = d });
 }
 
@@ -18560,47 +18564,17 @@ fn sharedArrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) v
     return arrayBufferSliceImpl(@ptrCast(@alignCast(ctx)), this, args, true);
 }
 
-// ===== $262.agent (cooperative synchronous agents) ==================
+// ===== $262.agent (real OS-thread agents) ===========================
 // test262's agent model: the main agent calls `$262.agent.start(src)` to spawn
 // a worker agent running `src` in a fresh realm; they share memory through a
 // SharedArrayBuffer handed over via `broadcast`, coordinate with `report`/
-// `getReport`, and (in real hosts) block/wake on `Atomics.wait`/`.notify`.
+// `getReport`, and block/wake on `Atomics.wait`/`.notify`.
 //
-// This zig-dev std has no usable thread Mutex/Condition/sleep (mid `Io`
-// rewrite), and the test runner has no wall-clock timeout, so real preemptive
-// agents would be both hard to write and dangerous (a single never-woken wait
-// would wedge the whole worker forever). Instead we run agents *cooperatively*:
-// `broadcast(sab)` synchronously runs each started agent to completion in its
-// own realm, with `receiveBroadcast` immediately invoked with a view over the
-// shared bytes; `report`s queue for the parent's `getReport`. This passes every
-// agent test whose worker completes during the broadcast (the common timeout /
-// value-report pattern) and simply reports "timed-out" for the cases that would
-// need a genuine concurrent mid-wait wakeup. Zero threads → zero hang risk.
-
-const AgentState = struct {
-    /// Sources of agents started but not yet run (run at the next broadcast).
-    pending: std.ArrayListUnmanaged([]const u8) = .empty,
-    /// FIFO of reports queued by agents, for the parent's getReport.
-    reports: std.ArrayListUnmanaged([]const u8) = .empty,
-    /// The most recent broadcast's shared storage (seen by receiveBroadcast).
-    /// Holds its own reference while set.
-    bcast_storage: ?*shared_buffer.SharedBufferStorage = null,
-};
-
-var g_agent: AgentState = .{};
-const g_agent_alloc = std.heap.page_allocator;
-
-/// True while running inside a cooperatively-spawned agent realm — keeps the
-/// `$262` install from resetting the parent's agent state.
-threadlocal var t_is_agent: bool = false;
-
-/// Reset cross-test agent state (called from the parent per Context).
-fn agentResetState() void {
-    g_agent.pending.clearRetainingCapacity();
-    g_agent.reports.clearRetainingCapacity();
-    if (g_agent.bcast_storage) |s| s.release();
-    g_agent.bcast_storage = null;
-}
+// `start` spawns the agent's OS thread immediately (src/agent.zig owns the
+// group state, broadcast rendezvous, and the Atomics waiter table; the realm
+// construction below stays here). Agents make progress while the main agent
+// blocks or spins — the ordering the blocking-wait corpus requires and the
+// old cooperative model could not express. Design: docs/threads/P2-agents.md.
 
 /// Wrap shared storage in a fresh SharedArrayBuffer object for *this* realm,
 /// taking ownership of one reference (the caller's ref transfers in; it is
@@ -18622,12 +18596,11 @@ fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.Shar
     return o;
 }
 
-/// Run one agent's `src` synchronously in a fresh realm on the current thread.
-fn agentRunSync(src: []const u8) void {
-    const prev = t_is_agent;
-    t_is_agent = true;
-    defer t_is_agent = prev;
-    var arena_state = std.heap.ArenaAllocator.init(g_agent_alloc);
+/// An agent's thread main: run `src` in a fresh realm on this (new) thread.
+/// Matches `agent.RunFn`; src/agent.zig sets the thread's agent identity
+/// before calling, so the `$262` install below skips the group reset.
+fn agentThreadRun(src: []const u8) void {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
     var env = Environment{ .arena = a, .fn_scope = true };
@@ -18646,7 +18619,7 @@ fn agentRunSync(src: []const u8) void {
     // The agent realm's own SAB references (its receiveBroadcast wrapper);
     // released when the agent finishes, while the storage lives on via the
     // parent's and the broadcast slot's references.
-    var sab_retains = shared_buffer.RetainList{ .gpa = g_agent_alloc };
+    var sab_retains = shared_buffer.RetainList{ .gpa = std.heap.page_allocator };
     defer sab_retains.deinit();
     var machine = Interpreter{
         .arena = a,
@@ -18674,8 +18647,7 @@ fn host262AgentStartFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const src = try self.toStringV(arg0(args));
-    const dup = g_agent_alloc.dupe(u8, src) catch return self.throwError("Error", "agent.start: out of memory");
-    g_agent.pending.append(g_agent_alloc, dup) catch {};
+    agent.start(src, agentThreadRun) catch return self.throwError("Error", "agent.start: could not spawn agent");
     return .undefined;
 }
 
@@ -18695,13 +18667,9 @@ fn host262AgentBroadcastFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const storage = sabStorageOf(arg0(args)) orelse return self.throwError("TypeError", "agent.broadcast expects a SharedArrayBuffer or shared TypedArray");
-    if (g_agent.bcast_storage) |old| old.release();
-    g_agent.bcast_storage = storage.retain();
-    // Run each started agent to completion now (cooperative). Drain `pending`
-    // into a local copy first so an agent that itself starts a sub-agent queues
-    // for a later broadcast rather than mutating the list we're iterating.
-    const batch = g_agent.pending.toOwnedSlice(g_agent_alloc) catch &.{};
-    for (batch) |src| agentRunSync(src);
+    // Publishes the storage, wakes every parked agent, and blocks until each
+    // live agent has received it (the INTERPRETING.md rendezvous).
+    agent.broadcast(storage);
     return .undefined;
 }
 
@@ -18709,8 +18677,8 @@ fn host262AgentReceiveBroadcastFn(ctx: *anyopaque, this: Value, args: []const Va
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const cb = arg0(args);
-    const storage = g_agent.bcast_storage orelse return .undefined;
-    const sab = try makeSharedArrayBufferWrapper(self, storage.retain());
+    const storage = agent.parkUntilBroadcast() orelse return .undefined;
+    const sab = try makeSharedArrayBufferWrapper(self, storage);
     _ = try self.callValueWithThis(cb, &.{.{ .object = sab }}, .undefined);
     return .undefined;
 }
@@ -18719,8 +18687,7 @@ fn host262AgentReportFn(ctx: *anyopaque, this: Value, args: []const Value) value
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const s = try self.toStringV(arg0(args));
-    const dup = g_agent_alloc.dupe(u8, s) catch return self.throwError("Error", "agent.report: out of memory");
-    g_agent.reports.append(g_agent_alloc, dup) catch {};
+    agent.report(s);
     return .undefined;
 }
 
@@ -18728,9 +18695,8 @@ fn host262AgentGetReportFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (g_agent.reports.items.len == 0) return .null; // none available (harness polls)
-    const r = g_agent.reports.orderedRemove(0);
-    return .{ .string = try self.arena.dupe(u8, r) };
+    const r = agent.takeReport(self.arena) orelse return .null; // none available (harness polls)
+    return .{ .string = r };
 }
 
 fn host262AgentNoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -18740,27 +18706,35 @@ fn host262AgentNoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     return .undefined;
 }
 
+fn host262AgentSleepFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const ms = try self.toNumberV(arg0(args));
+    agent.sleepMs(ms);
+    return .undefined;
+}
+
 fn host262AgentMonotonicNowFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = ctx;
     _ = this;
     _ = args;
-    return .{ .number = 0 }; // deterministic clock (matches Date.now())
+    return .{ .number = agent.monotonicNowMs() };
 }
 
 /// Install `$262.agent` with the parent-side (start/broadcast/getReport) and
 /// agent-side (receiveBroadcast/report/leaving) primitives.
 fn installAgent(a: std.mem.Allocator, rs: *Shape, d: *value.Object) EvalError!void {
-    const agent = try a.create(value.Object);
-    agent.* = .{};
-    try setNative(a, rs, agent, "start", 1, host262AgentStartFn);
-    try setNative(a, rs, agent, "broadcast", 1, host262AgentBroadcastFn);
-    try setNative(a, rs, agent, "getReport", 0, host262AgentGetReportFn);
-    try setNative(a, rs, agent, "sleep", 1, host262AgentNoopFn);
-    try setNative(a, rs, agent, "monotonicNow", 0, host262AgentMonotonicNowFn);
-    try setNative(a, rs, agent, "receiveBroadcast", 1, host262AgentReceiveBroadcastFn);
-    try setNative(a, rs, agent, "report", 1, host262AgentReportFn);
-    try setNative(a, rs, agent, "leaving", 0, host262AgentNoopFn);
-    try d.setOwn(a, rs, "agent", .{ .object = agent });
+    const ag = try a.create(value.Object);
+    ag.* = .{};
+    try setNative(a, rs, ag, "start", 1, host262AgentStartFn);
+    try setNative(a, rs, ag, "broadcast", 1, host262AgentBroadcastFn);
+    try setNative(a, rs, ag, "getReport", 0, host262AgentGetReportFn);
+    try setNative(a, rs, ag, "sleep", 1, host262AgentSleepFn);
+    try setNative(a, rs, ag, "monotonicNow", 0, host262AgentMonotonicNowFn);
+    try setNative(a, rs, ag, "receiveBroadcast", 1, host262AgentReceiveBroadcastFn);
+    try setNative(a, rs, ag, "report", 1, host262AgentReportFn);
+    try setNative(a, rs, ag, "leaving", 0, host262AgentNoopFn);
+    try d.setOwn(a, rs, "agent", .{ .object = ag });
 }
 
 // ===== Atomics =======================================================
@@ -18901,16 +18875,31 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
-    const expected = try atomicsCoerce(self, vd.ta, if (args.len > 2) args[2] else .undefined);
-    // ToNumber(timeout) is still observable (a valueOf side effect must run)
-    // even though, in the cooperative agent model, no concurrent agent can wake
-    // a wait: a matching value can never change underneath us, so we return
-    // "timed-out"; a mismatch returns "not-equal".
-    if (args.len > 3) _ = try self.toNumberV(args[3]);
-    const cur = atomicsReadV(self, vd.ta, vd.i);
-    const cur_n: f64 = if (cur == .object and cur.object.is_bigint) @floatFromInt(@as(i64, @truncate(cur.object.bigint))) else cur.number;
-    if (@as(i64, @intFromFloat(cur_n)) != @as(i64, @intFromFloat(expected))) return .{ .string = "not-equal" };
-    return .{ .string = "timed-out" };
+    const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
+    // ToNumber(timeout): NaN → wait forever; negative clamps to 0.
+    const timeout_ms: f64 = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);
+    const timeout_ns: ?u64 = if (std.math.isNan(timeout_ms) or timeout_ms == std.math.inf(f64))
+        null
+    else if (timeout_ms <= 0)
+        0
+    else if (timeout_ms >= 1e12)
+        null // effectively unbounded; the runner watchdog is the backstop
+    else
+        @intFromFloat(timeout_ms * std.time.ns_per_ms);
+    // AgentCanSuspend check runs after every coercion.
+    if (!agent.canBlock()) return self.throwError("TypeError", "Atomics.wait cannot block this agent");
+    const ab = vd.ta.buffer.array_buffer.?;
+    const storage = ab.shared orelse return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
+    const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
+    const outcome = if (vd.ta.kind == .i64)
+        agent.wait(storage, offset, i64, @bitCast(expected_raw), timeout_ns)
+    else
+        agent.wait(storage, offset, i32, @bitCast(@as(u32, @truncate(expected_raw))), timeout_ns);
+    return .{ .string = switch (outcome) {
+        .ok => "ok",
+        .not_equal => "not-equal",
+        .timed_out => "timed-out",
+    } };
 }
 /// `Atomics.pause(N)` — a microarchitectural pause hint. `N`, if present, must
 /// be an integral Number (the iteration count); anything else is a TypeError.
@@ -18930,11 +18919,21 @@ fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, false);
-    _ = vd;
-    // count: ToInteger is observable; no agent is ever blocked in a cooperative
-    // wait, so zero are woken.
-    if (args.len > 2 and args[2] != .undefined) _ = try self.toNumberV(args[2]);
-    return .{ .number = 0 };
+    // count: ToIntegerOrInfinity, default +∞, negatives clamp to 0.
+    var count: usize = std.math.maxInt(usize);
+    if (args.len > 2 and args[2] != .undefined) {
+        const n = try self.toNumberV(args[2]);
+        if (std.math.isNan(n) or n <= 0) {
+            count = 0;
+        } else if (n != std.math.inf(f64) and n < 1e18) {
+            count = @intFromFloat(@trunc(n));
+        }
+    }
+    // Waiters only ever exist on shared buffers; notify on a non-shared
+    // integer view validly wakes nobody.
+    const storage = vd.ta.buffer.array_buffer.?.shared orelse return .{ .number = 0 };
+    const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
+    return .{ .number = @floatFromInt(agent.notify(storage, offset, count)) };
 }
 
 /// `Atomics.waitAsync(typedArray, index, value, timeout)` — the non-blocking
@@ -24949,7 +24948,10 @@ fn aliasIteratorToMethod(a: std.mem.Allocator, rs: *Shape, env: *Environment, pr
 
 /// Monotonic id for unique Symbol property-key encodings (single-threaded;
 /// test262 workers are separate processes).
-var symbol_counter: usize = 0;
+// Atomic: concurrent agents minting symbols must never collide on a key
+// (bindings.md ruling — racing `+=` could yield duplicate sym_keys, i.e.
+// two distinct Symbols comparing equal as property keys).
+var symbol_counter = std.atomic.Value(usize).init(0);
 
 /// Create a Symbol object: a tagged object with a unique `sym_key` (a NUL-led
 /// string that can't collide with user property names) and a `description`.
@@ -24957,8 +24959,8 @@ fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*v
     _ = rs;
     const o = try a.create(value.Object);
     o.* = .{ .is_symbol = true, .proto = proto, .sym_desc = desc };
-    symbol_counter += 1;
-    o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{symbol_counter});
+    const n = symbol_counter.fetchAdd(1, .monotonic) + 1;
+    o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{n});
     return .{ .object = o };
 }
 

@@ -2986,3 +2986,25 @@ test "Context is thread-affine: owner recognized, foreign thread rejected" {
     t.join();
     try std.testing.expect(!saw_owner);
 }
+
+test "real agents: broadcast rendezvous, blocking wait, notify, report" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\const sab = new SharedArrayBuffer(8);
+        \\const view = new Int32Array(sab);
+        \\$262.agent.start(`
+        \\  $262.agent.receiveBroadcast(function(sab) {
+        \\    const v = new Int32Array(sab);
+        \\    $262.agent.report("waited: " + Atomics.wait(v, 0, 0, 5000));
+        \\    $262.agent.leaving();
+        \\  });
+        \\`);
+        \\$262.agent.broadcast(sab);
+        \\// The agent acked the broadcast; wake it once it parks in wait().
+        \\while (Atomics.notify(view, 0, 1) === 0) $262.agent.sleep(1);
+        \\let r = null;
+        \\while ((r = $262.agent.getReport()) === null) $262.agent.sleep(1);
+        \\if (r !== "waited: ok") throw new Error("agent reported: " + r);
+    );
+}

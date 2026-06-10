@@ -631,7 +631,10 @@ pub fn mathImul(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
     return .{ .number = @floatFromInt(a *% b) };
 }
 
-var math_prng = std.Random.DefaultPrng.init(0x2545F4914F6CDD1D);
+// Per-thread: concurrent agents each get their own PRNG stream (a shared one
+// would be a data race — bindings.md ruling). The fixed per-thread seed is
+// fine: the spec requires no particular distribution across agents.
+threadlocal var math_prng = std.Random.DefaultPrng.init(0x2545F4914F6CDD1D);
 
 pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = ctx;
