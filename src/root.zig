@@ -63,6 +63,8 @@ test {
     _ = @import("agent.zig");
     _ = @import("structured_clone.zig");
     _ = @import("worker.zig");
+    _ = @import("gil.zig");
+    _ = @import("jsthread.zig");
     _ = @import("jsstring.zig");
     _ = @import("lexer.zig");
     _ = @import("ast.zig");

@@ -9,6 +9,7 @@ const promise = @import("promise.zig");
 const shared_buffer = @import("shared_buffer.zig");
 const agent = @import("agent.zig");
 const structured_clone = @import("structured_clone.zig");
+const gil_mod = @import("gil.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -365,6 +366,10 @@ pub const Interpreter = struct {
     /// tree-walker's `eval` and the VM's dispatch loop both poll it every
     /// 1024 steps).
     stop_flag: ?*const std.atomic.Value(bool) = null,
+    /// The Context's VM lock when `enable_threads` is on (Phase 6): the step
+    /// checkpoints yield it when contended, and blocking operations release
+    /// it while parked. Null = no threads, zero cost.
+    gil: ?*gil_mod.Gil = null,
     /// The native-function object currently being invoked (set around each
     /// native call), so a native can reach its own `private_data` — used by
     /// Promise executor resolve/reject closures.
@@ -794,8 +799,11 @@ pub const Interpreter = struct {
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
         self.steps += 1;
         if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
-        if (self.stop_flag) |sf| if ((self.steps & 1023) == 0 and sf.load(.monotonic))
-            return self.throwError("Error", "worker terminated");
+        if ((self.steps & 1023) == 0) {
+            if (self.stop_flag) |sf| if (sf.load(.monotonic))
+                return self.throwError("Error", "worker terminated");
+            if (self.gil) |g| g.yieldIfContended();
+        }
         return switch (node.*) {
             .number => |n| .{ .number = n },
             .bigint_lit => |b| if (b.text) |s| try self.makeBigIntText(s) else try self.makeBigInt(b.value),
@@ -3071,7 +3079,10 @@ pub const Interpreter = struct {
         const owner: *const anyopaque = @ptrCast(listp);
         var buf: [16]agent.Settled = undefined;
         while (listp.items.len > 0) {
+            // harvestAsync blocks; under a GIL the notifier needs the VM lock.
+            if (self.gil) |g| g.release();
             const n = agent.harvestAsync(owner, &buf);
+            if (self.gil) |g| g.acquire();
             if (n == 0) break;
             for (buf[0..n]) |s| {
                 var i: usize = 0;
@@ -9855,7 +9866,7 @@ fn errorStackSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 
 /// Give `proto` a `constructor` own property pointing back to `ctor`
 /// (non-enumerable, writable, configurable — the spec default for built-ins).
-fn setConstructor(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, ctor: *value.Object) EvalError!void {
+pub fn setConstructor(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, ctor: *value.Object) EvalError!void {
     try proto.setOwn(a, rs, "constructor", .{ .object = ctor });
     try proto.setAttr(a, "constructor", .{ .enumerable = false, .configurable = true, .writable = true });
 }
@@ -19061,6 +19072,10 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const ab = vd.ta.buffer.array_buffer.?;
     const storage = ab.shared orelse return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
     const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
+    // A GIL'd thread must not park holding the VM lock — its notifier needs
+    // it to run.
+    if (self.gil) |g| g.release();
+    defer if (self.gil) |g| g.acquire();
     const outcome = if (vd.ta.kind == .i64)
         agent.wait(storage, offset, i64, @bitCast(expected_raw), timeout_ns)
     else
@@ -20267,7 +20282,7 @@ fn setNativeWithData(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Objec
     try obj.setAttr(a, name, .{ .enumerable = false, .configurable = true, .writable = true });
 }
 
-fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
+pub fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
     return setNativeWithData(a, root_shape, obj, name, len, f, null);
 }
 
@@ -20508,7 +20523,7 @@ fn collectionSizeGetter(comptime is_set_kind: bool) value.NativeFn {
 /// Install an accessor property `prop` on `obj` whose getter is the native `f`
 /// (a function named "get <prop>" with length 0, per spec), non-enumerable and
 /// configurable.
-fn setNativeGetter(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, comptime prop: []const u8, f: value.NativeFn) EvalError!void {
+pub fn setNativeGetter(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, comptime prop: []const u8, f: value.NativeFn) EvalError!void {
     const g = try a.create(value.Object);
     g.* = .{ .native = f };
     try installNativeProps(a, rs, g, "get " ++ prop, 0);

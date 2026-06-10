@@ -8,6 +8,8 @@ const vm = @import("vm.zig");
 const Shape = @import("shape.zig").Shape;
 const Parser = @import("parser.zig").Parser;
 const shared_buffer = @import("shared_buffer.zig");
+const gil_mod = @import("gil.zig");
+const jsthread = @import("jsthread.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -44,6 +46,13 @@ pub const Context = struct {
     /// Cooperative termination for worker contexts: the owning Worker's stop
     /// word, polled at the engines' step checkpoints (src/worker.zig).
     stop_flag: ?*const std.atomic.Value(bool) = null,
+    /// Phase 6: the VM lock for shared-Context `Thread` objects (heap-
+    /// allocated so its address is stable; null = the context stays
+    /// single-thread-affine and pays nothing).
+    gil: ?*gil_mod.Gil = null,
+    /// `Thread` records spawned in this realm (the records live in the
+    /// arena; the list is gpa-backed). `destroy` waits for all of them.
+    js_threads: std.ArrayListUnmanaged(*jsthread.ThreadRecord) = .empty,
     /// TDZ sentinel for uninitialized let/const bindings.
     tdz_marker: *value.Object,
     /// Active module graph state during `evaluateModule`, so runtime `import()`
@@ -56,7 +65,18 @@ pub const Context = struct {
     /// `import('./x.js')` resolves relative to the script's directory.
     script_referrer: []const u8 = "",
 
+    pub const Options = struct {
+        /// Install the `Thread` API and the GIL: spawned threads share this
+        /// Context's realm, serialized by one VM lock (issue #1 Phase 6,
+        /// docs/threads/P6-thread-api.md).
+        enable_threads: bool = false,
+    };
+
     pub fn create(gpa: std.mem.Allocator) !*Context {
+        return createWith(gpa, .{});
+    }
+
+    pub fn createWith(gpa: std.mem.Allocator, options: Options) !*Context {
         const arena_state = try gpa.create(std.heap.ArenaAllocator);
         arena_state.* = std.heap.ArenaAllocator.init(gpa);
         errdefer {
@@ -107,6 +127,14 @@ pub const Context = struct {
         if (self.env.get("$262")) |d| {
             if (d == .object) try d.object.setOwn(a, self.root_shape, "global", .{ .object = global_obj });
         }
+        if (options.enable_threads) {
+            const g = try gpa.create(gil_mod.Gil);
+            g.* = .{};
+            self.gil = g;
+            g.acquire();
+            defer g.release();
+            try jsthread.installThreadAPI(self);
+        }
         return self;
     }
 
@@ -126,11 +154,28 @@ pub const Context = struct {
             .sab_retains = &self.sab_retains,
             .async_waiters = &self.async_waiters,
             .stop_flag = self.stop_flag,
+            .gil = self.gil,
         };
     }
 
     pub fn destroy(self: *Context) void {
-        self.assertOwnerThread();
+        if (self.gil) |g| {
+            // Spawned threads need the lock to finish: park until each is
+            // done, then OS-join the handles.
+            g.acquire();
+            for (self.js_threads.items) |rec| {
+                while (!rec.done) g.wait(&rec.done_cond);
+            }
+            g.release();
+            for (self.js_threads.items) |rec| {
+                if (rec.thread) |t| t.join();
+            }
+            self.gpa.destroy(g);
+            self.gil = null;
+        } else {
+            self.assertOwnerThread();
+        }
+        self.js_threads.deinit(self.gpa);
         self.sab_retains.deinit();
         self.arena_state.deinit();
         self.gpa.destroy(self.arena_state);
@@ -142,12 +187,19 @@ pub const Context = struct {
         return std.Thread.getCurrentId() == self.owner_thread;
     }
 
-    /// Debug-only affinity check: panics with a clear message when a Context is
-    /// touched from a thread other than its creator. Compiles to nothing in
+    /// Debug-only affinity check: panics with a clear message when a Context
+    /// is touched from the wrong thread. For an `enable_threads` context the
+    /// invariant is GIL ownership (any thread, exactly one at a time);
+    /// otherwise it is creator-thread affinity. Compiles to nothing in
     /// release modes, so the single-threaded hot path pays zero cost.
     pub fn assertOwnerThread(self: *const Context) void {
         if (comptime builtin.mode == .Debug) {
-            if (!self.isOwnerThread()) std.debug.panic(
+            if (self.gil) |g| {
+                if (!g.holds()) std.debug.panic(
+                    "Context (enable_threads) used without holding the GIL (docs/threads/P6-thread-api.md)",
+                    .{},
+                );
+            } else if (!self.isOwnerThread()) std.debug.panic(
                 "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
                 .{ std.Thread.getCurrentId(), self.owner_thread },
             );
@@ -166,6 +218,8 @@ pub const Context = struct {
     /// constructs the compiler doesn't lower yet fall back to the tree-walker,
     /// so behavior is identical either way — the VM just handles the hot subset.
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
+        if (self.gil) |g| g.acquire();
+        defer if (self.gil) |g| g.release();
         self.assertOwnerThread();
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
@@ -242,6 +296,8 @@ pub const Context = struct {
     /// completion is the entry module having run; an uncaught throw leaves the
     /// reason in `self.exception` and returns `error.Throw`.
     pub fn evaluateModule(self: *Context, entry_path: []const u8, entry_source: []const u8, host: ModuleHost) RunError!value.Value {
+        if (self.gil) |g| g.acquire();
+        defer if (self.gil) |g| g.release();
         self.assertOwnerThread();
         var cache: std.StringHashMapUnmanaged(*Module) = .{};
         const root = try self.loadModule(entry_path, entry_source, host, &cache);
@@ -3101,5 +3157,54 @@ test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
         \\let threw = false;
         \\try { structuredClone(function () {}); } catch (e) { threw = e instanceof TypeError; }
         \\if (!threw) throw new Error("function clone did not throw");
+    );
+}
+
+test "Thread API (enable_threads): shared realm, identity, exceptions, ids" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\// one realm: results keep identity across the join
+        \\const obj = { marker: 1 };
+        \\if (new Thread(() => obj).join() !== obj) throw new Error("object identity");
+        \\if (new Thread(() => 42).join() !== 42) throw new Error("number");
+        \\if (!Object.is(new Thread(() => -0).join(), -0)) throw new Error("-0");
+        \\const nan = new Thread(() => NaN).join();
+        \\if (nan === nan) throw new Error("NaN");
+        \\const sym = Symbol("p");
+        \\if (new Thread(() => sym).join() !== sym) throw new Error("symbol");
+        \\// fn is [[Call]]ed with this === undefined
+        \\if (new Thread(function () { "use strict"; return this; }).join() !== undefined)
+        \\  throw new Error("strict this");
+        \\// one heap: the thread mutates, main observes (no clone, no copy)
+        \\const box = { n: 0 };
+        \\new Thread((b) => { b.n = 7; }, box).join();
+        \\if (box.n !== 7) throw new Error("shared heap");
+        \\// join rethrows the actual exception object
+        \\const err = new TypeError("boom");
+        \\let caught = null;
+        \\try { new Thread(() => { throw err; }).join(); } catch (e) { caught = e; }
+        \\if (caught !== err) throw new Error("exception identity");
+        \\// ctor errors
+        \\let threw = false;
+        \\try { Thread(() => {}); } catch (e) { threw = e instanceof TypeError; }
+        \\if (!threw) throw new Error("call without new must throw");
+        \\threw = false;
+        \\try { new Thread(42); } catch (e) { threw = e instanceof TypeError; }
+        \\if (!threw) throw new Error("non-callable must throw");
+        \\// ids and Thread.current
+        \\if (Thread.current.id !== 0) throw new Error("main id is 0");
+        \\const t = new Thread(() => Thread.current.id);
+        \\const tid = t.join();
+        \\if (tid !== t.id || tid === 0) throw new Error("Thread.current inside the thread");
+        \\// the thread's own microtask queue drains before join settles
+        \\let micro = false;
+        \\new Thread(() => { Promise.resolve().then(() => { micro = true; }); }).join();
+        \\if (!micro) throw new Error("thread microtasks must drain");
+        \\// cancellation via a shared boolean (the PR-249 headline pattern)
+        \\const ctl = { stop: false };
+        \\const spin = new Thread((c) => { while (!c.stop) {} return "done"; }, ctl);
+        \\ctl.stop = true;
+        \\if (spin.join() !== "done") throw new Error("spinner");
     );
 }
