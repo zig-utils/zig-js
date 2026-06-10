@@ -8401,6 +8401,7 @@ pub const Interpreter = struct {
     fn regexGroups(self: *Interpreter, re: *regex.Regex, m: regex.Match) EvalError!?*value.Object {
         if (re.named_captures.count() == 0) return null;
         const o = (try self.newObject()).object;
+        o.proto = null; // RegExpBuiltinExec: the groups object is ObjectCreate(null)
         var it = re.named_captures.iterator();
         while (it.next()) |e| {
             const v: Value = if (re.getNamedCapture(&m, e.key_ptr.*)) |capture|
