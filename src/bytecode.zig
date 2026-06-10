@@ -95,6 +95,9 @@ pub const Op = enum(u8) {
     new_array, // push a fresh []
     init_prop, // operand a: name index; pop value, set on object at top, leave object
     init_prop_computed, // pop key, pop value, set on object at top, leave object
+    init_spread, // pop source, CopyDataProperties into object at top, leave object
+    init_getter, // pop fn, pop key; install getter on object at top, leave object
+    init_setter, // pop fn, pop key; install setter on object at top, leave object
     array_append, // pop value, append to the array at top, leave array
     array_spread, // pop iterable, spread its elements into the array now at top, leave array
     get_prop, // operand a: name index; pop object -> push object[name]
@@ -126,6 +129,7 @@ pub const Op = enum(u8) {
     iter_of, // pop iterable -> push an iterator object (has a `.next()`); for `yield*`
     async_iter_of, // pop iterable -> push its async iterator (Symbol.asyncIterator, else a sync iterator); for `for await`
     enum_keys, // pop object -> push an array of its for-in keys (own enumerable + array indices)
+    iter_close, // pop iterator; normal-completion IteratorClose (call return() if present, validate result is Object)
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)
 

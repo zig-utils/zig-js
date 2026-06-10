@@ -637,6 +637,9 @@ pub const Parser = struct {
             },
             .member => node,
             .array_lit, .object_lit => try self.litToPattern(node),
+            // Already a destructuring pattern — e.g. a nested assignment element
+            // `[ {} = yield ]` whose inner `{} = …` was converted on the way up.
+            .obj_pattern, .arr_pattern => node,
             else => ParseError.InvalidAssignmentTarget,
         };
     }
@@ -1000,11 +1003,14 @@ pub const Parser = struct {
         var params: std.ArrayListUnmanaged(ast.Param) = .empty;
         while (!self.check(.rparen) and !self.check(.eof)) {
             const is_rest = self.match(.ellipsis);
-            // Destructuring parameter: `function f({a}, [b])`.
-            if (!is_rest and (self.check(.lbrace) or self.check(.lbracket))) {
+            // Destructuring parameter: `function f({a}, [b])`, and rest
+            // destructuring: `function f(...[a], ...{a})` (no default allowed
+            // on a rest element, and it must be last).
+            if (self.check(.lbrace) or self.check(.lbracket)) {
                 const pat = try self.parseBindingTarget();
-                const default = if (self.match(.assign)) try self.parseAssignment() else null;
-                try params.append(self.arena, .{ .name = "", .pattern = pat, .default = default });
+                const default = if (!is_rest and self.match(.assign)) try self.parseAssignment() else null;
+                try params.append(self.arena, .{ .name = "", .pattern = pat, .default = default, .is_rest = is_rest });
+                if (is_rest) break; // a rest parameter must be last
                 if (!self.match(.comma)) break;
                 continue;
             }

@@ -301,6 +301,17 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
                 try vm.setMember(obj, try propKey(vm, key), v);
             },
+            .init_spread => {
+                const src = stack.pop().?;
+                const obj = stack.items[stack.items.len - 1]; // leave object on stack
+                try vm.spreadDataProps(obj, src);
+            },
+            .init_getter, .init_setter => {
+                const fn_val = stack.pop().?;
+                const key = stack.pop().?;
+                const obj = stack.items[stack.items.len - 1]; // leave object on stack
+                try vm.vmInitAccessor(obj, key, fn_val, inst.op == .init_getter);
+            },
             .array_append => {
                 const v = stack.pop().?;
                 const arr = stack.items[stack.items.len - 1];
@@ -492,6 +503,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .enum_keys => {
                 const v = stack.pop().?;
                 try stack.append(vm.arena, try vm.forInKeysArray(v));
+            },
+            .iter_close => {
+                const it = stack.pop().?;
+                try vm.iteratorClose(it);
             },
             .array_spread => {
                 const iterable = stack.pop().?;

@@ -53,6 +53,73 @@ const FnScope = struct {
     }
 };
 
+/// Whether a node embeds a `yield` reachable without crossing a function
+/// boundary — used to decide whether a destructuring assignment must be lowered
+/// to bytecode (yield present) or can defer to the tree-walker via `bind_pattern`.
+fn nodeHasYield(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .yield_expr => true,
+        .function => false, // a nested function/arrow is its own yield scope
+        .unary => |u| nodeHasYield(u.operand),
+        .delete_expr => |d| nodeHasYield(d),
+        .update => |u| nodeHasYield(u.target),
+        .binary => |b| nodeHasYield(b.left) or nodeHasYield(b.right),
+        .logical => |b| nodeHasYield(b.left) or nodeHasYield(b.right),
+        .sequence => |s| nodeHasYield(s.first) or nodeHasYield(s.second),
+        .assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
+        .op_assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
+        .conditional => |c| nodeHasYield(c.cond) or nodeHasYield(c.consequent) or nodeHasYield(c.alternate),
+        .await_expr => |a| nodeHasYield(a.argument),
+        .optional_chain => |c| nodeHasYield(c),
+        .spread => |s| nodeHasYield(s),
+        .member => |m| nodeHasYield(m.object) or (m.computed != null and nodeHasYield(m.computed.?)),
+        .super_member => |m| (m.computed != null and nodeHasYield(m.computed.?)),
+        .call => |c| blk: {
+            if (nodeHasYield(c.callee)) break :blk true;
+            for (c.args) |a| if (nodeHasYield(a)) break :blk true;
+            break :blk false;
+        },
+        .new_expr => |c| blk: {
+            if (nodeHasYield(c.callee)) break :blk true;
+            for (c.args) |a| if (nodeHasYield(a)) break :blk true;
+            break :blk false;
+        },
+        .tagged_template => |t| blk: {
+            if (nodeHasYield(t.tag)) break :blk true;
+            for (t.exprs) |e| if (nodeHasYield(e)) break :blk true;
+            break :blk false;
+        },
+        .array_lit => |elems| blk: {
+            for (elems) |e| if (nodeHasYield(e)) break :blk true;
+            break :blk false;
+        },
+        .object_lit => |props| blk: {
+            for (props) |p| {
+                if (p.key_expr) |ke| if (nodeHasYield(ke)) break :blk true;
+                if (nodeHasYield(p.value)) break :blk true;
+            }
+            break :blk false;
+        },
+        .arr_pattern => |p| blk: {
+            for (p.elems) |e| {
+                if (e.target) |t| if (nodeHasYield(t)) break :blk true;
+                if (e.default) |d| if (nodeHasYield(d)) break :blk true;
+            }
+            if (p.rest) |r| if (nodeHasYield(r)) break :blk true;
+            break :blk false;
+        },
+        .obj_pattern => |p| blk: {
+            for (p.props) |pp| {
+                if (pp.key_expr) |ke| if (nodeHasYield(ke)) break :blk true;
+                if (pp.default) |d| if (nodeHasYield(d)) break :blk true;
+                if (nodeHasYield(pp.target)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 /// Where a referenced name lives.
 const Resolved = union(enum) {
     local: u32, // slot in the current frame
@@ -530,6 +597,251 @@ pub const Compiler = struct {
         self.popLoop();
     }
 
+    // ---- destructuring assignment (generator, yield-aware) ----------------
+
+    /// `pattern = value` as an expression. Evaluates `value`, leaves it on the
+    /// stack as the result, and destructures it into `pattern`.
+    fn compileDestructuringAssign(self: *Compiler, pattern: *Node, value: *Node) CompileError!void {
+        try self.compileExpr(value); // [v]
+        const src = try self.freshTemp();
+        _ = try self.chunk.emit(.dup, 0); // [v, v]
+        try self.emitDefine(src); // [v]   (define consumes one copy)
+        try self.compileAssignPattern(pattern, src);
+        // `src` (the rhs value) remains on the stack as the expression result.
+    }
+
+    fn compileAssignPattern(self: *Compiler, pattern: *Node, src: []const u8) CompileError!void {
+        switch (pattern.*) {
+            .arr_pattern => |p| try self.compileArrayAssign(p.elems, p.rest, src),
+            .obj_pattern => |p| try self.compileObjectAssign(p.props, p.rest, src),
+            else => return error.Unsupported,
+        }
+    }
+
+    /// Assign the value held in temp `val` to a destructuring target — an
+    /// identifier, a member reference (whose base/key were already evaluated
+    /// into `ref`), or a nested pattern.
+    fn compileAssignToTarget(self: *Compiler, target: *Node, val: []const u8) CompileError!void {
+        switch (target.*) {
+            .identifier => |name| {
+                try self.emitLoad(val);
+                try self.emitStore(name);
+                _ = try self.chunk.emit(.pop, 0);
+            },
+            .arr_pattern, .obj_pattern => {
+                // A yield-free nested pattern reuses the tree-walker (handles
+                // RequireObjectCoercible and every edge case); a yield-bearing
+                // one recurses into bytecode.
+                if (nodeHasYield(target)) {
+                    try self.compileAssignPattern(target, val);
+                } else {
+                    try self.emitLoad(val);
+                    const pi = try self.chunk.addPattern(target);
+                    _ = try self.chunk.emitAB(.bind_pattern, pi, 3);
+                }
+            },
+            else => return error.Unsupported, // member handled separately (ordered ref eval)
+        }
+    }
+
+    /// Pre-evaluate a member target's base (and computed key) into fresh temps,
+    /// BEFORE the iterator advances (the spec evaluates the reference first).
+    /// Returns the temp names, or null when `target` is not a member.
+    const MemberRef = struct { obj: []const u8, key: ?[]const u8 };
+    fn preEvalMemberRef(self: *Compiler, target: ?*Node) CompileError!?MemberRef {
+        const t = target orelse return null;
+        if (t.* != .member) return null;
+        const m = t.member;
+        const obj_tmp = try self.freshTemp();
+        try self.compileExpr(m.object);
+        try self.emitDefine(obj_tmp);
+        var key_tmp: ?[]const u8 = null;
+        if (m.computed) |ce| {
+            const kt = try self.freshTemp();
+            try self.compileExpr(ce);
+            try self.emitDefine(kt);
+            key_tmp = kt;
+        }
+        return .{ .obj = obj_tmp, .key = key_tmp };
+    }
+
+    /// Store the value in temp `val` through an already-evaluated member ref.
+    fn storeMemberRef(self: *Compiler, target: *Node, ref: MemberRef, val: []const u8) CompileError!void {
+        const m = target.member;
+        try self.emitLoad(ref.obj); // [obj]
+        if (ref.key) |kt| {
+            try self.emitLoad(kt); // [obj, key]
+            try self.emitLoad(val); // [obj, key, val]
+            _ = try self.chunk.emit(.set_index, 0);
+        } else {
+            try self.emitLoad(val); // [obj, val]
+            _ = try self.chunk.emit(.set_prop, try self.chunk.addName(m.property));
+        }
+        _ = try self.chunk.emit(.pop, 0); // discard the set result
+    }
+
+    /// `[ e0, e1, ... ] = src` (assignment form, in a generator). Drives the
+    /// iterator protocol, applies defaults (which may yield), and runs
+    /// IteratorClose when destructuring stops before exhausting the iterator —
+    /// on a normal early stop AND on an abrupt completion (a `yield` resumed
+    /// with `.return()`/`.throw()` mid-destructure), via a finally handler.
+    fn compileArrayAssign(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, src: []const u8) CompileError!void {
+        const none = std.math.maxInt(u32);
+        try self.emitLoad(src);
+        _ = try self.chunk.emit(.iter_of, 0);
+        const it = try self.freshTemp();
+        try self.emitDefine(it);
+        const done = try self.freshTemp();
+        _ = try self.chunk.emit(.load_false, 0);
+        try self.emitDefine(done);
+
+        // Wrap the element/rest processing in a finally handler so any abrupt
+        // completion (return/throw injected at an embedded yield) still closes
+        // the iterator before propagating.
+        const ph = try self.chunk.emitAB(.push_handler, none, none);
+        try self.compileArrayAssignBody(elems, rest, it, done);
+        _ = try self.chunk.emit(.pop_handler, 0);
+        _ = try self.chunk.emit(.push_completion, 0); // normal completion
+        // The normal path falls straight into the finally body (which the abrupt
+        // path also jumps to via finally_pc); `end_finally` then resumes the
+        // pushed completion — fall through on normal, re-propagate on abrupt.
+        self.chunk.code.items[ph].b = @intCast(self.chunk.here());
+        try self.emitLoad(done);
+        _ = try self.chunk.emit(.not, 0);
+        const skip = try self.chunk.emit(.jump_if_false, 0);
+        try self.emitLoad(it);
+        _ = try self.chunk.emit(.iter_close, 0);
+        self.chunk.patchToHere(skip);
+        _ = try self.chunk.emit(.end_finally, 0);
+    }
+
+    fn compileArrayAssignBody(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, it: []const u8, done: []const u8) CompileError!void {
+        for (elems) |elem| {
+            // Spec order: evaluate the target reference first, then step the
+            // iterator. Only member targets carry an observable reference eval.
+            const ref = try self.preEvalMemberRef(elem.target);
+            // ev = undefined; if (!done) { r = it.next(); if (r.done) done = true else ev = r.value }
+            const ev = try self.freshTemp();
+            _ = try self.chunk.emit(.load_undefined, 0);
+            try self.emitDefine(ev);
+            try self.emitLoad(done);
+            _ = try self.chunk.emit(.not, 0);
+            const skip_step = try self.chunk.emit(.jump_if_false, 0); // skip when done
+            {
+                const r = try self.freshTemp();
+                try self.emitLoad(it);
+                _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+                try self.emitDefine(r);
+                try self.emitLoad(r);
+                _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
+                const not_done = try self.chunk.emit(.jump_if_false, 0);
+                _ = try self.chunk.emit(.load_true, 0);
+                try self.emitStore(done);
+                _ = try self.chunk.emit(.pop, 0);
+                const after = try self.chunk.emit(.jump, 0);
+                self.chunk.patchToHere(not_done);
+                try self.emitLoad(r);
+                _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+                try self.emitStore(ev);
+                _ = try self.chunk.emit(.pop, 0);
+                self.chunk.patchToHere(after);
+            }
+            self.chunk.patchToHere(skip_step);
+            // default: if (ev === undefined) ev = <default>   (may yield)
+            if (elem.default) |d| {
+                try self.emitLoad(ev);
+                _ = try self.chunk.emit(.load_undefined, 0);
+                _ = try self.chunk.emit(.eq_strict, 0);
+                const has_val = try self.chunk.emit(.jump_if_false, 0);
+                try self.compileExpr(d);
+                try self.emitStore(ev);
+                _ = try self.chunk.emit(.pop, 0);
+                self.chunk.patchToHere(has_val);
+            }
+            // assign ev to the target
+            if (elem.target) |t| {
+                if (t.* == .member) {
+                    try self.storeMemberRef(t, ref.?, ev);
+                } else {
+                    try self.compileAssignToTarget(t, ev);
+                }
+            }
+        }
+
+        if (rest) |rest_target| {
+            // Spec order: evaluate the rest target reference (may yield) BEFORE
+            // collecting the remaining elements.
+            const rref = try self.preEvalMemberRef(rest_target);
+            // rest = []; while (!done) { r = it.next(); if (r.done) { done=true; break } rest.push(r.value) }
+            const ra = try self.freshTemp();
+            _ = try self.chunk.emit(.new_array, 0);
+            try self.emitDefine(ra);
+            const top = self.chunk.here();
+            try self.emitLoad(done);
+            _ = try self.chunk.emit(.not, 0);
+            const to_end = try self.chunk.emit(.jump_if_false, 0); // exit when done
+            const r = try self.freshTemp();
+            try self.emitLoad(it);
+            _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+            try self.emitDefine(r);
+            try self.emitLoad(r);
+            _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
+            const not_done = try self.chunk.emit(.jump_if_false, 0);
+            _ = try self.chunk.emit(.load_true, 0);
+            try self.emitStore(done);
+            _ = try self.chunk.emit(.pop, 0);
+            const to_end2 = try self.chunk.emit(.jump, 0);
+            self.chunk.patchToHere(not_done);
+            try self.emitLoad(ra);
+            try self.emitLoad(r);
+            _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+            _ = try self.chunk.emit(.array_append, 0);
+            _ = try self.chunk.emit(.pop, 0); // drop the array left by array_append
+            _ = try self.chunk.emit(.jump, @intCast(top));
+            self.chunk.patchToHere(to_end);
+            self.chunk.patchToHere(to_end2);
+            if (rest_target.* == .member)
+                try self.storeMemberRef(rest_target, rref.?, ra)
+            else
+                try self.compileAssignToTarget(rest_target, ra);
+        }
+        // The enclosing finally handler performs IteratorClose when `!done`.
+    }
+
+    /// `{ k0: t0 = d0, ... } = src` (assignment form, in a generator).
+    fn compileObjectAssign(self: *Compiler, props: []const ast.ObjPatProp, rest: ?[]const u8, src: []const u8) CompileError!void {
+        if (rest != null) return error.Unsupported; // object rest in a yield pattern → tree-walk fallback
+        for (props) |prop| {
+            // PropertyName (may be computed and yield), then the target reference.
+            const ref = try self.preEvalMemberRef(prop.target);
+            const ev = try self.freshTemp();
+            // ev = src[key]
+            try self.emitLoad(src);
+            if (prop.key_expr) |ke| {
+                try self.compileExpr(ke);
+                _ = try self.chunk.emit(.get_index, 0);
+            } else {
+                _ = try self.chunk.emit(.get_prop, try self.chunk.addName(prop.key));
+            }
+            try self.emitDefine(ev);
+            // default
+            if (prop.default) |d| {
+                try self.emitLoad(ev);
+                _ = try self.chunk.emit(.load_undefined, 0);
+                _ = try self.chunk.emit(.eq_strict, 0);
+                const has_val = try self.chunk.emit(.jump_if_false, 0);
+                try self.compileExpr(d);
+                try self.emitStore(ev);
+                _ = try self.chunk.emit(.pop, 0);
+                self.chunk.patchToHere(has_val);
+            }
+            if (prop.target.* == .member)
+                try self.storeMemberRef(prop.target, ref.?, ev)
+            else
+                try self.compileAssignToTarget(prop.target, ev);
+        }
+    }
+
     // ---- expressions ------------------------------------------------------
 
     fn compileExpr(self: *Compiler, node: *Node) CompileError!void {
@@ -627,6 +939,22 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.set_prop, ni);
                     }
                 },
+                // Destructuring assignment `[a,b] = v` / `{x} = v`. A pattern with
+                // no `yield` reuses the tree-walker via `bind_pattern` (proven,
+                // handles every edge case); a pattern that DOES embed `yield`
+                // (only reachable in a generator) is lowered to bytecode so the
+                // yield can suspend mid-destructure.
+                .arr_pattern, .obj_pattern => {
+                    if (self.scope != null) return error.Unsupported; // env-mode only
+                    if (nodeHasYield(a.target)) {
+                        try self.compileDestructuringAssign(a.target, a.value);
+                    } else {
+                        try self.compileExpr(a.value);
+                        _ = try self.chunk.emit(.dup, 0); // leave the rhs as the result
+                        const pi = try self.chunk.addPattern(a.target);
+                        _ = try self.chunk.emitAB(.bind_pattern, pi, 3);
+                    }
+                },
                 else => return error.Unsupported,
             },
             .op_assign => |oa| switch (oa.target.*) {
@@ -716,8 +1044,28 @@ pub const Compiler = struct {
             .object_lit => |props| {
                 _ = try self.chunk.emit(.new_object, 0);
                 for (props) |p| {
-                    // Spread + accessor properties need the tree-walker.
-                    if (p.is_spread or p.accessor != .none) return error.Unsupported;
+                    // Spread + accessor properties are lowered only inside
+                    // generators (where lowering is mandatory); plain code keeps
+                    // tree-walking, which has the fuller/faster path.
+                    if (p.is_spread or p.accessor != .none) {
+                        if (!self.in_generator) return error.Unsupported;
+                        if (p.is_spread) {
+                            try self.compileExpr(p.value); // CopyDataProperties source
+                            _ = try self.chunk.emit(.init_spread, 0);
+                            continue;
+                        }
+                        // Getter/setter: push key, push the function, install.
+                        if (p.key_expr) |ke| {
+                            try self.compileExpr(ke);
+                        } else {
+                            const ci = try self.chunk.addConst(.{ .string = p.key });
+                            _ = try self.chunk.emit(.load_const, ci);
+                        }
+                        const gi = try self.compileFunction(p.value.function, false);
+                        _ = try self.chunk.emit(.make_closure, gi);
+                        _ = try self.chunk.emit(if (p.accessor == .get) .init_getter else .init_setter, 0);
+                        continue;
+                    }
                     try self.compileExpr(p.value);
                     if (p.key_expr) |ke| {
                         try self.compileExpr(ke);

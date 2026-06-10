@@ -2654,7 +2654,7 @@ pub const Interpreter = struct {
                 const rest = try self.newArray();
                 var j = i;
                 while (j < args.len) : (j += 1) try rest.object.elements.append(self.arena, args[j]);
-                try self.env.put(p.name, rest);
+                if (p.pattern) |pat| try self.bindPattern(pat, rest, true) else try self.env.put(p.name, rest);
                 break;
             }
             var v: Value = if (i < args.len) args[i] else .undefined;
@@ -3181,29 +3181,47 @@ pub const Interpreter = struct {
         return if (p == .object) p.object else null;
     }
 
+    /// `{ ...src }` CopyDataProperties: copy `src`'s own enumerable properties /
+    /// array elements into `target` (a string spreads its chars by index).
+    /// Shared by the tree-walker object literal and the VM `init_spread` op.
+    pub fn spreadDataProps(self: *Interpreter, target: Value, src: Value) EvalError!void {
+        switch (src) {
+            .object => |so| {
+                if (so.is_array) {
+                    for (so.elements.items, 0..) |el, i| {
+                        try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), el);
+                    }
+                }
+                for (try so.enumerableKeys(self.arena)) |k| {
+                    try self.setMember(target, k, try self.getProperty(src, k));
+                }
+            },
+            .string => |s| for (s, 0..) |ch, i| {
+                try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), .{ .string = try self.arena.dupe(u8, &.{ch}) });
+            },
+            else => {}, // null/undefined/number/boolean spread → no own enumerable props
+        }
+    }
+
+    /// Install an object-literal getter/setter (the VM `init_getter`/`init_setter`
+    /// ops). Mirrors the `.get`/`.set` arms of `evalObjectLit`.
+    pub fn vmInitAccessor(self: *Interpreter, obj: Value, key: Value, fn_val: Value, is_get: bool) EvalError!void {
+        const k = try self.keyOf(key);
+        const name = try self.keyDisplayName(key);
+        if (funcOf(fn_val)) |f| f.home_object = obj.object;
+        try self.nameAccessor(fn_val, if (is_get) "get" else "set", name);
+        if (is_get)
+            try self.defineAccessor(obj.object, k, fn_val, null)
+        else
+            try self.defineAccessor(obj.object, k, null, fn_val);
+    }
+
     fn evalObjectLit(self: *Interpreter, props: []ast.Property) EvalError!Value {
         const v = try self.newObject();
         for (props) |p| {
             if (p.is_spread) {
-                // `{ ...src }`: copy src's own enumerable properties / array
-                // elements (a string spreads its chars by index).
                 const src = try self.eval(p.value);
-                switch (src) {
-                    .object => |so| {
-                        if (so.is_array) {
-                            for (so.elements.items, 0..) |el, i| {
-                                try self.setMember(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}), el);
-                            }
-                        }
-                        for (try so.enumerableKeys(self.arena)) |k| {
-                            try self.setMember(v, k, try self.getProperty(src, k));
-                        }
-                    },
-                    .string => |s| for (s, 0..) |ch, i| {
-                        try self.setMember(v, try std.fmt.allocPrint(self.arena, "{d}", .{i}), .{ .string = try self.arena.dupe(u8, &.{ch}) });
-                    },
-                    else => {}, // null/undefined/number/boolean spread → no own enumerable props
-                }
+                try self.spreadDataProps(v, src);
                 continue;
             }
             const kv: ?Value = if (p.key_expr) |ke| try self.eval(ke) else null;
