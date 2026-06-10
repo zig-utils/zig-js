@@ -6754,16 +6754,14 @@ pub const Interpreter = struct {
         return false;
     }
 
+    /// Methods that read an array-like through live short-circuiting [[Get]]
+    /// (returning as soon as a match is found, or only touching the tail) — so
+    /// they accept a huge-length array-like without iterating it to exhaustion.
+    /// Every OTHER method that loops the full length bails (returns null) on a
+    /// pathological array-like length to avoid an unbounded native loop.
     fn arraySearchReadsLive(name: []const u8) bool {
-        // Methods that operate purely through live [[Get]]/[[Set]] on the receiver
-        // (no materialized snapshot) — so they also handle a 2**53-1-length
-        // array-like without OOM-ing on the guard below. push/pop only touch the
-        // tail; shift/unshift loop the full length, so they keep the OOM guard.
         return eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes") or
             eq(name, "push") or eq(name, "pop") or
-            // The short-circuiting predicate methods iterate via live [[Get]] and
-            // return as soon as a match is found, so they also accept a huge-length
-            // array-like (the test corpus matches at a low index).
             eq(name, "some") or eq(name, "every") or eq(name, "find") or
             eq(name, "findIndex") or eq(name, "findLast") or eq(name, "findLastIndex");
     }
@@ -6971,29 +6969,26 @@ pub const Interpreter = struct {
         // Real arrays use the dense element store directly; an array-like `this`
         // (via `.call`) materializes its `length`/indexed properties into a
         // temporary slice so the read-only methods below work unchanged.
+        // An array-like `this` (via `.call`) is read on demand through [[Get]]
+        // (`arrIndexGet`) by each method, over the logical length computed here —
+        // no materialized snapshot (which would double-read getters). For a real
+        // array the dense element store is used directly.
         var array_like_len: usize = 0;
-        const items: []Value = if (o.is_array) o.elements.items else blk: {
+        if (!o.is_array) {
             // ToLength(ToNumber(obj.length)) — `toNumberV` runs valueOf/toString
             // and throws a TypeError for a Symbol/BigInt `length`.
             const lenf = try self.toNumberV(try self.getProperty(.{ .object = o }, "length"));
             // Result-creating methods ArraySpeciesCreate a result of ToLength(len);
-            // ArrayCreate rejects a length above 2^32-1 with a RangeError (this
-            // precedes the OOM guard, which silently bails for the read-only
-            // methods that would otherwise iterate a pathological length). Check
-            // the unclamped ToLength, since `toLen` caps at 2^32-1.
+            // ArrayCreate rejects a length above 2^32-1 with a RangeError. Check
+            // the unclamped ToLength, since `toArrayLikeLen` caps at 2^53-1.
             const real_len: f64 = if (std.math.isNan(lenf) or lenf <= 0) 0 else @min(@trunc(lenf), 9007199254740991.0);
             if (real_len > 4294967295 and arrayCreatesResult(name))
                 return self.throwError("RangeError", "Invalid array length");
-            const len = toArrayLikeLen(lenf);
-            array_like_len = len;
-            if (arraySearchReadsLive(name)) break :blk try self.arena.alloc(Value, 0);
-            if (len > (1 << 22)) return null; // guard against pathological array-like lengths (OOM)
-            const buf = try self.arena.alloc(Value, len);
-            for (buf, 0..) |*slot, i| {
-                slot.* = try self.getProperty(.{ .object = o }, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-            }
-            break :blk buf;
-        };
+            array_like_len = toArrayLikeLen(lenf);
+            // A full-length-iterating method on a pathological array-like length
+            // would spin a native loop forever — bail (matches the prior guard).
+            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22)) return null;
+        }
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
         // reduceRight take an initial value here instead and ignore it.
@@ -7258,20 +7253,29 @@ pub const Interpreter = struct {
             return Value{ .object = o };
         }
         // ES2023 "change array by copy": return a new array, leaving `this`
-        // untouched. They read `items` so they also work generically on an
-        // array-like `this` (via `.call`).
+        // untouched.
+        // The change-array-by-copy methods (toReversed/toSorted/with/toSpliced)
+        // read each KEPT source index through [[Get]] (`arrIndexGet`, which fast-
+        // paths a plain dense array and otherwise fires getters / walks the proto
+        // chain) in the exact spec order, over the logical length `ilen`. So they
+        // work on array-likes and accessor-indexed/sparse arrays, fire getters in
+        // order, and never read a discarded/replaced index. (`return null` on a
+        // pathological length mirrors the materialization OOM guard.)
         if (eq(name, "toReversed")) {
+            if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
-            var i = items.len;
-            while (i > 0) : (i -= 1) try result.object.elements.append(self.arena, items[i - 1]);
+            var k: usize = 0;
+            while (k < ilen) : (k += 1) try result.object.elements.append(self.arena, try self.arrIndexGet(o, ilen - 1 - k));
             return result;
         }
         if (eq(name, "toSorted")) {
             const cmp = arg0(args);
             if (cmp != .undefined and !cmp.isCallable())
                 return self.throwError("TypeError", "Array.prototype.toSorted comparator is not a function");
+            if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
-            try result.object.elements.appendSlice(self.arena, items);
+            var k: usize = 0;
+            while (k < ilen) : (k += 1) try result.object.elements.append(self.arena, try self.arrIndexGet(o, k));
             const ri = result.object.elements.items;
             var i: usize = 1;
             while (i < ri.len) : (i += 1) {
@@ -7283,18 +7287,23 @@ pub const Interpreter = struct {
             return result;
         }
         if (eq(name, "with")) {
-            const len = items.len;
+            const len = ilen;
             const raw = arg0(args).toNumber();
             const rel: f64 = if (std.math.isNan(raw)) 0 else @trunc(raw);
-            const actual: f64 = if (rel < 0) @as(f64, @floatFromInt(len)) + rel else rel;
-            if (actual < 0 or actual >= @as(f64, @floatFromInt(len))) return self.throwError("RangeError", "Invalid index");
+            const actual_f: f64 = if (rel < 0) @as(f64, @floatFromInt(len)) + rel else rel;
+            if (actual_f < 0 or actual_f >= @as(f64, @floatFromInt(len))) return self.throwError("RangeError", "Invalid index");
+            if (len > (1 << 22)) return null;
+            const actual: usize = @intFromFloat(actual_f);
             const result = try self.newArray();
-            try result.object.elements.appendSlice(self.arena, items);
-            result.object.elements.items[@intFromFloat(actual)] = arg(args, 1);
+            var k: usize = 0;
+            while (k < len) : (k += 1) {
+                const v = if (k == actual) arg(args, 1) else try self.arrIndexGet(o, k);
+                try result.object.elements.append(self.arena, v);
+            }
             return result;
         }
         if (eq(name, "toSpliced")) {
-            const len = items.len;
+            const len = ilen;
             const start = try relIndex(self, arg0(args), len, 0);
             const del: usize = if (args.len <= 1) len - start else blk: {
                 const d = arg(args, 1).toNumber();
@@ -7302,13 +7311,15 @@ pub const Interpreter = struct {
                 const du: usize = if (d > @as(f64, @floatFromInt(len))) len else @intFromFloat(@trunc(d));
                 break :blk if (start + du > len) len - start else du;
             };
+            const new_len = len - del + (if (args.len > 2) args.len - 2 else 0);
+            if (new_len > (1 << 22)) return null;
             const result = try self.newArray();
             const ra = result.object;
             var i: usize = 0;
-            while (i < start) : (i += 1) try ra.elements.append(self.arena, items[i]);
+            while (i < start) : (i += 1) try ra.elements.append(self.arena, try self.arrIndexGet(o, i));
             if (args.len > 2) for (args[2..]) |v| try ra.elements.append(self.arena, v);
             i = start + del;
-            while (i < len) : (i += 1) try ra.elements.append(self.arena, items[i]);
+            while (i < len) : (i += 1) try ra.elements.append(self.arena, try self.arrIndexGet(o, i));
             return result;
         }
         if (eq(name, "map")) {
