@@ -7,6 +7,7 @@ const compiler = @import("compiler.zig");
 const vm = @import("vm.zig");
 const Shape = @import("shape.zig").Shape;
 const Parser = @import("parser.zig").Parser;
+const shared_buffer = @import("shared_buffer.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -32,6 +33,10 @@ pub const Context = struct {
     /// persistent across `evaluate` calls, shared with each `Interpreter`.
     microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty,
     print_buffer: std.ArrayListUnmanaged(u8) = .empty,
+    /// SharedArrayBuffer storage references this realm holds (one per SAB
+    /// wrapper created here). Released in `destroy` — shared bytes live in
+    /// process-wide refcounted storage, not the arena (see shared_buffer.zig).
+    sab_retains: shared_buffer.RetainList,
     /// TDZ sentinel for uninitialized let/const bindings.
     tdz_marker: *value.Object,
     /// Active module graph state during `evaluateModule`, so runtime `import()`
@@ -66,6 +71,7 @@ pub const Context = struct {
             .gpa = gpa,
             .arena_state = arena_state,
             .owner_thread = std.Thread.getCurrentId(),
+            .sab_retains = .{ .gpa = gpa },
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
             .global_object = global_obj,
             .root_shape = try Shape.createRoot(a),
@@ -110,11 +116,13 @@ pub const Context = struct {
             .microtasks = &self.microtasks,
             .print_buffer = &self.print_buffer,
             .tdz_marker = self.tdz_marker,
+            .sab_retains = &self.sab_retains,
         };
     }
 
     pub fn destroy(self: *Context) void {
         self.assertOwnerThread();
+        self.sab_retains.deinit();
         self.arena_state.deinit();
         self.gpa.destroy(self.arena_state);
         self.gpa.destroy(self);

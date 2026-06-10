@@ -1,5 +1,6 @@
 const std = @import("std");
 const Shape = @import("shape.zig").Shape;
+const SharedBufferStorage = @import("shared_buffer.zig").SharedBufferStorage;
 
 /// The C-ABI shape of a host (Zig/C) function exposed to JS via
 /// `JSObjectMakeFunctionWithCallback`. Kept here so both the interpreter and
@@ -88,7 +89,15 @@ pub const TAKind = enum {
 /// An `ArrayBuffer`'s backing bytes. `detached` is set by `$262.detachArrayBuffer`
 /// / transfer; a detached buffer's views read undefined / throw on length checks.
 pub const ArrayBufferData = struct {
-    data: []u8,
+    /// Backing bytes of a NON-shared buffer (arena-owned; reallocated by
+    /// resize/transfer). Empty and unused when `shared` is set — a
+    /// SharedArrayBuffer's bytes live in process-wide refcounted storage so
+    /// they can outlive this realm and be seen by other agents. Always read
+    /// the live bytes through `bytes()`, never this field directly.
+    local_data: []u8,
+    /// Non-null iff `is_shared`: the cross-agent backing storage. The wrapper
+    /// holds one reference, tracked in the owning realm's `RetainList`.
+    shared: ?*SharedBufferStorage = null,
     detached: bool = false,
     /// For a resizable ArrayBuffer (or growable SharedArrayBuffer), the maximum
     /// byte length; null means fixed-length (not resizable/growable).
@@ -98,11 +107,19 @@ pub const ArrayBufferData = struct {
     /// An immutable ArrayBuffer (from `transferToImmutable`/`sliceToImmutable`):
     /// fixed-length, never detaches, and rejects every write.
     immutable: bool = false,
+
+    /// The buffer's live bytes: the shared storage's published slice for a
+    /// SharedArrayBuffer (always current, even after another realm grows it),
+    /// the arena bytes otherwise.
+    pub inline fn bytes(self: *const ArrayBufferData) []u8 {
+        if (self.shared) |s| return s.slice();
+        return self.local_data;
+    }
 };
 
 /// Read typed-array element `i` (within bounds, buffer attached) as a Number.
 pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
-    const bytes = ta.buffer.array_buffer.?.data;
+    const bytes = ta.buffer.array_buffer.?.bytes();
     const off = ta.byte_offset + i * ta.kind.byteSize();
     // A resizable buffer may have shrunk below the view's cached length; reading
     // out of bounds returns 0 rather than a panic.
@@ -128,7 +145,7 @@ pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
 /// Read a BigInt typed-array element `i` as an `i128` (the raw 64-bit value,
 /// sign-extended for BigInt64Array).
 pub fn taReadBig(ta: *const TypedArrayData, i: usize) i128 {
-    const bytes = ta.buffer.array_buffer.?.data;
+    const bytes = ta.buffer.array_buffer.?.bytes();
     const off = ta.byte_offset + i * ta.kind.byteSize();
     if (off + 8 > bytes.len) return 0;
     return switch (ta.kind) {
@@ -140,7 +157,7 @@ pub fn taReadBig(ta: *const TypedArrayData, i: usize) i128 {
 
 /// Write a BigInt typed-array element `i` from an `i128` (the low 64 bits).
 pub fn taWriteBig(ta: *const TypedArrayData, i: usize, val: i128) void {
-    const bytes = ta.buffer.array_buffer.?.data;
+    const bytes = ta.buffer.array_buffer.?.bytes();
     const off = ta.byte_offset + i * ta.kind.byteSize();
     if (off + 8 > bytes.len) return;
     const low: u64 = @truncate(@as(u128, @bitCast(val)));
@@ -162,7 +179,7 @@ fn taToInt(comptime T: type, num: f64) T {
 /// Write Number `num` into typed-array element `i`, coercing to the element type
 /// (integer wrap, Uint8Clamped rounding/clamping, float narrowing).
 pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
-    const bytes = ta.buffer.array_buffer.?.data;
+    const bytes = ta.buffer.array_buffer.?.bytes();
     const off = ta.byte_offset + i * ta.kind.byteSize();
     if (off + ta.kind.byteSize() > bytes.len) return; // shrunk resizable buffer
     switch (ta.kind) {
@@ -197,6 +214,115 @@ pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
     }
 }
 
+// ---- Atomic element access (the `Atomics.*` fast paths) -------------------
+//
+// Each helper performs ONE SeqCst hardware atomic on the element's bytes, so
+// racing agents over a SharedArrayBuffer can never tear an element or lose an
+// update. Raw bits travel as zero-extended u64 (preserving full 64-bit
+// precision for BigInt views, which the f64 route cannot). Alignment is
+// guaranteed: element offsets are spec-forced multiples of the element size,
+// and buffer allocations are at least 8-byte aligned (shared slabs are
+// page-aligned; `makeArrayBuffer` aligns its arena bytes). The byte order
+// matches the non-atomic paths' explicit little-endian on every supported
+// target. Out-of-bounds (a shrunk resizable buffer) mirrors `taRead`/`taWrite`:
+// loads read 0, stores no-op.
+
+/// The element's byte address, or null when the view is out of bounds.
+fn taElemPtr(ta: *const TypedArrayData, i: usize) ?[*]u8 {
+    const b = ta.buffer.array_buffer.?.bytes();
+    const off = ta.byte_offset + i * ta.kind.byteSize();
+    if (off + ta.kind.byteSize() > b.len) return null;
+    return b.ptr + off;
+}
+
+/// The element address as a typed pointer (alignment guaranteed, see above).
+fn elemAs(comptime T: type, p: [*]u8) *T {
+    return @ptrCast(@alignCast(p));
+}
+
+/// Sign-aware conversion of raw element bits to a Number (integer kinds only;
+/// BigInt/float kinds never take this path).
+pub fn taRawToF64(kind: TAKind, raw: u64) f64 {
+    return switch (kind) {
+        .i8 => @floatFromInt(@as(i8, @bitCast(@as(u8, @truncate(raw))))),
+        .u8, .u8c => @floatFromInt(@as(u8, @truncate(raw))),
+        .i16 => @floatFromInt(@as(i16, @bitCast(@as(u16, @truncate(raw))))),
+        .u16 => @floatFromInt(@as(u16, @truncate(raw))),
+        .i32 => @floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(raw))))),
+        .u32 => @floatFromInt(@as(u32, @truncate(raw))),
+        else => 0,
+    };
+}
+
+/// Wrap an integer Number into the element type, as zero-extended raw bits
+/// (the atomic-path counterpart of `taToInt` + write).
+pub fn taNumToRaw(kind: TAKind, num: f64) u64 {
+    return switch (kind) {
+        .i8 => @as(u8, @bitCast(taToInt(i8, num))),
+        .u8, .u8c => taToInt(u8, num),
+        .i16 => @as(u16, @bitCast(taToInt(i16, num))),
+        .u16 => taToInt(u16, num),
+        .i32 => @as(u32, @bitCast(taToInt(i32, num))),
+        .u32 => taToInt(u32, num),
+        .i64 => @as(u64, @bitCast(taToInt(i64, num))),
+        .u64 => taToInt(u64, num),
+        else => 0,
+    };
+}
+
+pub fn taAtomicLoadRaw(ta: *const TypedArrayData, i: usize) u64 {
+    const p = taElemPtr(ta, i) orelse return 0;
+    return switch (ta.kind.byteSize()) {
+        1 => @atomicLoad(u8, elemAs(u8, p), .seq_cst),
+        2 => @atomicLoad(u16, elemAs(u16, p), .seq_cst),
+        4 => @atomicLoad(u32, elemAs(u32, p), .seq_cst),
+        else => @atomicLoad(u64, elemAs(u64, p), .seq_cst),
+    };
+}
+
+pub fn taAtomicStoreRaw(ta: *const TypedArrayData, i: usize, raw: u64) void {
+    const p = taElemPtr(ta, i) orelse return;
+    switch (ta.kind.byteSize()) {
+        1 => @atomicStore(u8, elemAs(u8, p), @truncate(raw), .seq_cst),
+        2 => @atomicStore(u16, elemAs(u16, p), @truncate(raw), .seq_cst),
+        4 => @atomicStore(u32, elemAs(u32, p), @truncate(raw), .seq_cst),
+        else => @atomicStore(u64, elemAs(u64, p), raw, .seq_cst),
+    }
+}
+
+/// One atomic read-modify-write; returns the previous raw bits. Integer ops
+/// wrap modulo the element width, matching the spec's modular arithmetic.
+pub fn taAtomicRmwRaw(comptime op: std.builtin.AtomicRmwOp, ta: *const TypedArrayData, i: usize, raw: u64) u64 {
+    const p = taElemPtr(ta, i) orelse return 0;
+    return switch (ta.kind.byteSize()) {
+        1 => @atomicRmw(u8, elemAs(u8, p), op, @truncate(raw), .seq_cst),
+        2 => @atomicRmw(u16, elemAs(u16, p), op, @truncate(raw), .seq_cst),
+        4 => @atomicRmw(u32, elemAs(u32, p), op, @truncate(raw), .seq_cst),
+        else => @atomicRmw(u64, elemAs(u64, p), op, raw, .seq_cst),
+    };
+}
+
+/// One atomic compare-exchange; returns the previous raw bits (== `expected`
+/// when the swap happened, per `Atomics.compareExchange` semantics).
+pub fn taAtomicCasRaw(ta: *const TypedArrayData, i: usize, expected: u64, replacement: u64) u64 {
+    const p = taElemPtr(ta, i) orelse return 0;
+    switch (ta.kind.byteSize()) {
+        1 => {
+            const e: u8 = @truncate(expected);
+            return @cmpxchgStrong(u8, elemAs(u8, p), e, @truncate(replacement), .seq_cst, .seq_cst) orelse e;
+        },
+        2 => {
+            const e: u16 = @truncate(expected);
+            return @cmpxchgStrong(u16, elemAs(u16, p), e, @truncate(replacement), .seq_cst, .seq_cst) orelse e;
+        },
+        4 => {
+            const e: u32 = @truncate(expected);
+            return @cmpxchgStrong(u32, elemAs(u32, p), e, @truncate(replacement), .seq_cst, .seq_cst) orelse e;
+        },
+        else => return @cmpxchgStrong(u64, elemAs(u64, p), expected, replacement, .seq_cst, .seq_cst) orelse expected,
+    }
+}
+
 /// A typed-array view: `length` elements of `kind`, starting at `byte_offset`
 /// into `buffer`'s bytes.
 pub const TypedArrayData = struct {
@@ -217,9 +343,9 @@ pub const TypedArrayData = struct {
         const buf = self.buffer.array_buffer orelse return null;
         if (buf.detached) return null;
         const esz = self.kind.byteSize();
-        if (self.byte_offset > buf.data.len) return null;
-        if (self.track_length) return (buf.data.len - self.byte_offset) / esz;
-        if (self.byte_offset + self.length * esz > buf.data.len) return null;
+        if (self.byte_offset > buf.bytes().len) return null;
+        if (self.track_length) return (buf.bytes().len - self.byte_offset) / esz;
+        if (self.byte_offset + self.length * esz > buf.bytes().len) return null;
         return self.length;
     }
 };
@@ -238,9 +364,9 @@ pub const DataViewData = struct {
     pub fn currentByteLength(self: *const DataViewData) ?usize {
         const buf = self.buffer.array_buffer orelse return null;
         if (buf.detached) return null;
-        if (self.byte_offset > buf.data.len) return null;
-        if (self.track_length) return buf.data.len - self.byte_offset;
-        if (self.byte_offset + self.byte_length > buf.data.len) return null;
+        if (self.byte_offset > buf.bytes().len) return null;
+        if (self.track_length) return buf.bytes().len - self.byte_offset;
+        if (self.byte_offset + self.byte_length > buf.bytes().len) return null;
         return self.byte_length;
     }
 };
