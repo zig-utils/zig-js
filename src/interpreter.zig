@@ -3582,6 +3582,9 @@ pub const Interpreter = struct {
                 try self.setProp(arr.object, "input", .{ .string = input });
                 const groups = try self.regexGroups(&re, m);
                 try self.setProp(arr.object, "groups", if (groups) |g| .{ .object = g } else .undefined);
+                // The `d` (hasIndices) flag adds a parallel match-indices array.
+                if (std.mem.indexOfScalar(u8, flags, 'd') != null)
+                    try self.setProp(arr.object, "indices", .{ .object = try self.makeIndicesArray(&re, m, start) });
                 return arr;
             }
             if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -8396,6 +8399,49 @@ pub const Interpreter = struct {
             try self.setProp(o, e.key_ptr.*, v);
         }
         return o;
+    }
+
+    /// A two-element `[start, end]` array, as used by the match-indices array.
+    fn indexPair(self: *Interpreter, lo: usize, hi: usize) EvalError!Value {
+        const p = (try self.newArray()).object;
+        try p.elements.append(self.arena, .{ .number = @floatFromInt(lo) });
+        try p.elements.append(self.arena, .{ .number = @floatFromInt(hi) });
+        return .{ .object = p };
+    }
+
+    /// MakeIndicesArray: the `.indices` property an `exec` result carries when the
+    /// regexp has the `d` (hasIndices) flag — element 0 is `[start, end]` of the
+    /// whole match, element i+1 is the i-th capture's `[start, end]` (or undefined
+    /// if it did not participate), and `.groups` maps each named group likewise.
+    /// `base` is the offset of the search window within the original input.
+    fn makeIndicesArray(self: *Interpreter, re: *regex.Regex, m: regex.Match, base: usize) EvalError!*value.Object {
+        const idx = (try self.newArray()).object;
+        try idx.elements.append(self.arena, try self.indexPair(base + m.start, base + m.end));
+        for (0..m.captures.len) |i| {
+            const present = i < m.captures_present.len and m.captures_present[i];
+            if (present and i < m.capture_spans.len) {
+                try idx.elements.append(self.arena, try self.indexPair(base + m.capture_spans[i][0], base + m.capture_spans[i][1]));
+            } else {
+                try idx.elements.append(self.arena, .undefined);
+            }
+        }
+        if (re.named_capture_list.len > 0) {
+            const g = (try self.newObject()).object;
+            g.proto = null; // MakeIndicesArray: groups is ObjectCreate(null)
+            for (re.named_capture_list) |entry| {
+                const ci = entry.index; // 1-based capture index
+                const ok = ci >= 1 and ci - 1 < m.captures_present.len and m.captures_present[ci - 1] and ci - 1 < m.capture_spans.len;
+                const v: Value = if (ok)
+                    try self.indexPair(base + m.capture_spans[ci - 1][0], base + m.capture_spans[ci - 1][1])
+                else
+                    .undefined;
+                try self.setProp(g, entry.name, v);
+            }
+            try self.setProp(idx, "groups", .{ .object = g });
+        } else {
+            try self.setProp(idx, "groups", .undefined);
+        }
+        return idx;
     }
 
     /// GetSubstitution: append `template` to `buf`, expanding the `$` forms —
