@@ -19210,6 +19210,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, array_ns, "isArray", 1, builtins.arrayIsArray);
     try setNative(a, root_shape, array_ns, "of", 0, builtins.arrayOf);
     try setNative(a, root_shape, array_ns, "from", 1, builtins.arrayFrom);
+    try setNative(a, root_shape, array_ns, "fromAsync", 1, builtins.arrayFromAsync);
     try env.put("Array", .{ .object = array_ns });
 
     // ---- Real prototype objects ----------------------------------------

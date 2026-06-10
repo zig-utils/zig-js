@@ -8,6 +8,7 @@ const value = @import("value.zig");
 const interpreter = @import("interpreter.zig");
 const Interpreter = interpreter.Interpreter;
 const Parser = @import("parser.zig").Parser;
+const promise = @import("promise.zig");
 
 const Value = value.Value;
 const HostError = value.HostError;
@@ -1000,6 +1001,115 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
         const v = try self.getProperty(.{ .object = array_like }, key);
         const mapped: Value = if (mapping) try self.callValueWithThis(map_fn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg) else v;
+        try createDataIndexOrThrow(self, result, i, mapped);
+    }
+    try self.setMember(result, "length", .{ .number = @floatFromInt(len) });
+    return result;
+}
+
+/// `Array.fromAsync(asyncItems, mapfn, thisArg)` — ES2024. Returns a promise of
+/// an array built by async-iterating (Symbol.asyncIterator, else a sync iterable
+/// wrapped so each value is awaited, else an array-like). The synchronous-settling
+/// runtime settles every `Await` inline, so the whole thing runs to completion
+/// and the returned promise is already settled.
+pub fn arrayFromAsync(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    const self = interp(ctx);
+    const pobj = try promise.newPromise(self);
+    const p = promise.promiseOf(.{ .object = pobj }).?;
+    const result = arrayFromAsyncImpl(self, this, arg(args, 0), arg(args, 1), arg(args, 2)) catch |e| {
+        if (e == error.Throw) {
+            const reason = self.exception;
+            self.exception = .undefined;
+            try promise.reject(self, p, reason);
+            return .{ .object = pobj };
+        }
+        return e;
+    };
+    try promise.resolve(self, p, result);
+    return .{ .object = pobj };
+}
+
+fn arrayFromAsyncImpl(self: *Interpreter, C: Value, items: Value, mapfn: Value, this_arg: Value) HostError!Value {
+    var mapping = false;
+    if (mapfn != .undefined) {
+        if (!mapfn.isCallable()) return self.throwError("TypeError", "Array.fromAsync: mapping function is not callable");
+        mapping = true;
+    }
+    const use_ctor = interpreter.isConstructorValue(C);
+
+    // GetMethod(items, @@asyncIterator), else GetMethod(items, @@iterator).
+    var async_method: Value = .undefined;
+    var sync_method: Value = .undefined;
+    if (items != .undefined and items != .null) {
+        if (self.wellKnownSymbolKey("asyncIterator")) |ak| {
+            const m = try self.getProperty(items, ak);
+            if (m != .undefined and m != .null) {
+                if (!m.isCallable()) return self.throwError("TypeError", "Array.fromAsync: @@asyncIterator is not callable");
+                async_method = m;
+            }
+        }
+        if (async_method == .undefined) {
+            if (self.wellKnownSymbolKey("iterator")) |ik| {
+                const m = try self.getProperty(items, ik);
+                if (m != .undefined and m != .null) {
+                    if (!m.isCallable()) return self.throwError("TypeError", "Array.fromAsync: @@iterator is not callable");
+                    sync_method = m;
+                }
+            }
+        }
+    }
+
+    if (async_method != .undefined or sync_method != .undefined) {
+        const is_async = async_method != .undefined;
+        const method = if (is_async) async_method else sync_method;
+        const result: Value = if (use_ctor) try self.construct(C, &.{}) else try self.newArray();
+        const it = try self.callValueWithThis(method, &.{}, items);
+        var k: usize = 0;
+        while (true) {
+            var res = try self.callMethod(it, "next", &.{});
+            if (is_async) res = try self.awaitValue(res); // async next() yields a promise
+            if (res != .object) return self.throwError("TypeError", "Array.fromAsync: iterator result is not an object");
+            if ((try self.getProperty(res, "done")).toBoolean()) break;
+            var v = try self.getProperty(res, "value");
+            // A sync iterable is wrapped as an async-from-sync iterator, which
+            // awaits each produced value once.
+            if (!is_async) v = try self.awaitValue(v);
+            const mapped: Value = if (mapping) blk: {
+                const mv = self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(k) } }, this_arg) catch |e| {
+                    self.iteratorCloseKeepingThrow(it);
+                    return e;
+                };
+                break :blk self.awaitValue(mv) catch |e| {
+                    self.iteratorCloseKeepingThrow(it);
+                    return e;
+                };
+            } else v;
+            createDataIndexOrThrow(self, result, k, mapped) catch |e| {
+                self.iteratorCloseKeepingThrow(it);
+                return e;
+            };
+            k += 1;
+        }
+        try self.setMember(result, "length", .{ .number = @floatFromInt(k) });
+        return result;
+    }
+
+    // Not iterable: ToObject(items), await each index 0..length-1.
+    const array_like = try self.toObject(items);
+    // LengthOfArrayLike = ToLength(Get(arrayLike,"length")), clamped to 2^53-1.
+    // (`interpreter.toLen` over-clamps to 2^32-1, which would mask the too-long
+    // case below, so compute ToLength directly here.)
+    const raw_len = try self.toNumberV(try self.getProperty(.{ .object = array_like }, "length"));
+    const to_length: f64 = if (std.math.isNan(raw_len) or raw_len <= 0) 0 else @min(@trunc(raw_len), 9007199254740991.0);
+    // ArrayCreate(len) for the non-constructor case rejects len > 2^32 - 1.
+    if (!use_ctor and to_length > 4294967295.0) return self.throwError("RangeError", "Array.fromAsync: invalid array length");
+    const len: usize = @intFromFloat(@min(to_length, 4294967295.0));
+    const result: Value = if (use_ctor) try self.construct(C, &.{.{ .number = to_length }}) else try self.newArray();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        const v = try self.awaitValue(try self.getProperty(.{ .object = array_like }, key));
+        const mapped: Value = if (mapping) try self.awaitValue(try self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg)) else v;
         try createDataIndexOrThrow(self, result, i, mapped);
     }
     try self.setMember(result, "length", .{ .number = @floatFromInt(len) });
