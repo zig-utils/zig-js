@@ -62,6 +62,18 @@ pub const Gil = struct {
         cond.waitUncancelable(io, &g.mutex);
         g.holder.store(currentId(), .monotonic);
     }
+
+    /// `wait` with a deadline (property-Atomics timed waits). Reacquires the
+    /// lock before returning either way.
+    pub fn waitTimeout(g: *Gil, cond: *std.Io.Condition, timeout: std.Io.Timeout) error{Timeout}!void {
+        const io = agent.engineIo();
+        g.holder.store(0, .monotonic);
+        defer g.holder.store(currentId(), .monotonic);
+        cond.waitTimeout(io, &g.mutex, timeout) catch |err| switch (err) {
+            error.Timeout => return error.Timeout,
+            error.Canceled => {},
+        };
+    }
 };
 
 test "gil: mutual exclusion and contended yield handover" {

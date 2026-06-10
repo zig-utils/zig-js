@@ -3249,3 +3249,51 @@ test "Lock/Condition/ThreadLocal: mailbox handshake, mutual exclusion, TLS" {
         \\if (tls.value !== "main") throw new Error("tls main view");
     );
 }
+
+test "Atomics on plain properties: semantics, exact counter, wait/notify" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\const o = { x: 1 };
+        \\if (Atomics.load(o, "x") !== 1) throw new Error("load");
+        \\// the property path does NOT coerce values
+        \\if (Atomics.store(o, "x", 7.9) !== 7.9 || o.x !== 7.9) throw new Error("store uncoerced");
+        \\// store creates fresh properties with default attributes
+        \\Atomics.store(o, "fresh", "v");
+        \\const d = Object.getOwnPropertyDescriptor(o, "fresh");
+        \\if (!d.writable || !d.enumerable || !d.configurable) throw new Error("fresh attrs");
+        \\// any value round-trips by identity
+        \\const ref = { deep: true };
+        \\Atomics.store(o, "obj", ref);
+        \\if (Atomics.load(o, "obj") !== ref) throw new Error("identity");
+        \\// absent / RMW-on-absent / non-extensible all throw TypeError
+        \\let te = 0;
+        \\try { Atomics.load(o, "absent"); } catch (e) { if (e instanceof TypeError) te++; }
+        \\try { Atomics.add(o, "absent", 1); } catch (e) { if (e instanceof TypeError) te++; }
+        \\const ne = {}; Object.preventExtensions(ne);
+        \\try { Atomics.store(ne, "k", 1); } catch (e) { if (e instanceof TypeError) te++; }
+        \\if (te !== 3) throw new Error("error cases: " + te);
+        \\// compareExchange is SameValueZero (NaN CAS loops work)
+        \\Atomics.store(o, "n", NaN);
+        \\const oldn = Atomics.compareExchange(o, "n", NaN, 5);
+        \\if (!Number.isNaN(oldn) || o.n !== 5) throw new Error("SVZ CAS");
+        \\// exchange swaps any value
+        \\if (Atomics.exchange(o, "obj", null) !== ref || o.obj !== null) throw new Error("exchange");
+        \\// the PR's parallel-counter pattern: exact without any Lock
+        \\const c = { n: 0 };
+        \\const ts = [];
+        \\for (let i = 0; i < 4; i++) ts.push(new Thread(() => {
+        \\  for (let j = 0; j < 500; j++) Atomics.add(c, "n", 1);
+        \\}));
+        \\ts.forEach(t => t.join());
+        \\if (c.n !== 2000) throw new Error("lost update: " + c.n);
+        \\// wait/notify on a property: park a thread, wake it
+        \\const gate = { state: 0 };
+        \\const waiter = new Thread(() => Atomics.wait(gate, "state", 0, 5000));
+        \\while (Atomics.notify(gate, "state", 1) === 0) {} // yields until parked
+        \\if (waiter.join() !== "ok") throw new Error("wait/notify");
+        \\if (Atomics.wait(gate, "state", 999, 0) !== "not-equal") throw new Error("not-equal");
+        \\if (Atomics.wait(gate, "state", 0, 1) !== "timed-out") throw new Error("timed-out");
+        \\if (Atomics.notify(gate, "absent") !== 0) throw new Error("notify absent is 0");
+    );
+}

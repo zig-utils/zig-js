@@ -10,6 +10,7 @@ const shared_buffer = @import("shared_buffer.zig");
 const agent = @import("agent.zig");
 const structured_clone = @import("structured_clone.zig");
 const gil_mod = @import("gil.zig");
+const jsthread = @import("jsthread.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
@@ -18997,6 +18998,18 @@ fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = this;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (args.len > 0 and jsthread.isPropertyMode(self, args[0])) {
+                if (op == .exchange) return jsthread.propExchange(self, args);
+                const prop_op: jsthread.PropRmwOp = switch (op) {
+                    .add => .add,
+                    .sub => .sub,
+                    .and_ => .and_,
+                    .or_ => .or_,
+                    .xor => .xor,
+                    .exchange => unreachable,
+                };
+                return jsthread.propRmw(self, prop_op, args);
+            }
             const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true, false, false);
             const operand = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
             // One hardware RMW — agents racing over a SharedArrayBuffer can
@@ -19017,12 +19030,14 @@ fn atomicsRMWFn(comptime op: enum { add, sub, and_, or_, xor, exchange }) value.
 fn atomicsLoadFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and jsthread.isPropertyMode(self, args[0])) return jsthread.propLoad(self, args);
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, false, false);
     return atomicsRawToValue(self, vd.ta.kind, value.taAtomicLoadRaw(vd.ta, vd.i));
 }
 fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and jsthread.isPropertyMode(self, args[0])) return jsthread.propStore(self, args);
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true, false, false);
     const arg_v = if (args.len > 2) args[2] else Value.undefined;
     if (vd.ta.kind.isBigInt()) {
@@ -19040,6 +19055,7 @@ fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 fn atomicsCompareExchangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and jsthread.isPropertyMode(self, args[0])) return jsthread.propCompareExchange(self, args);
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, true, false, false);
     const expected = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     const replacement = try atomicsCoerceRaw(self, vd.ta, if (args.len > 3) args[3] else .undefined);
@@ -19056,6 +19072,11 @@ fn atomicsIsLockFreeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and jsthread.isPropertyMode(self, args[0])) {
+        const t_ms = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);
+        const t_ns: ?u64 = if (std.math.isNan(t_ms) or t_ms == std.math.inf(f64)) null else if (t_ms <= 0) 0 else if (t_ms >= 1e12) null else @intFromFloat(t_ms * std.time.ns_per_ms);
+        return jsthread.propWait(self, args, t_ns);
+    }
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
     const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     // ToNumber(timeout): NaN → wait forever; negative clamps to 0.
@@ -19104,6 +19125,7 @@ fn atomicsPauseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and jsthread.isPropertyMode(self, args[0])) return jsthread.propNotify(self, args);
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, false);
     // count: ToIntegerOrInfinity, default +∞, negatives clamp to 0.
     var count: usize = std.math.maxInt(usize);
@@ -19130,6 +19152,8 @@ fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and jsthread.isPropertyMode(self, args[0]))
+        return self.throwError("TypeError", "Atomics.waitAsync on object properties is not implemented yet");
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
     const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     const timeout_ms: f64 = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);

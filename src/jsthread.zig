@@ -340,3 +340,173 @@ fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     try rec.map.put(rec.arena, currentTid(), v);
     return .undefined;
 }
+
+// ---- Atomics on plain object properties (Phase 6 step 4) -------------------
+// PR-249 SPEC-api 4.5, spec'd line-by-line by
+// reference/webkit-249/threads-tests/atomics/property-*.js: each op is one
+// SeqCst step on an OWN DATA property (trivially so under the GIL). Values
+// are NOT coerced (any JS value round-trips by identity); load and the RMW
+// family require an existing own data property (absent/accessor/inherited
+// throw); store writes through preserving attributes and may create a fresh
+// default-attribute property on an extensible object; compareExchange is
+// SameValueZero; wait/notify key on (object, property). Property mode only
+// exists in enable_threads Contexts, so the test262-visible TypedArray path
+// is untouched.
+
+/// Whether an Atomics call should take the property path.
+pub fn isPropertyMode(self: *Interpreter, v: Value) bool {
+    return self.gil != null and v == .object and v.object.typed_array == null;
+}
+
+fn sameValueZero(a: Value, b: Value) bool {
+    if (a == .number and b == .number)
+        return a.number == b.number or (std.math.isNan(a.number) and std.math.isNan(b.number));
+    return value.strictEquals(a, b);
+}
+
+fn isAccessor(o: *value.Object, key: []const u8) bool {
+    if (o.accessors) |m| return m.get(key) != null;
+    return false;
+}
+
+fn ownDataOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: []const u8) value.HostError!Value {
+    if (isAccessor(o, key)) return self.throwError("TypeError", what);
+    return o.getOwn(key) orelse self.throwError("TypeError", what);
+}
+
+fn writableOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: []const u8) value.HostError!void {
+    if (!o.getAttr(key).writable) return self.throwError("TypeError", what);
+}
+
+fn argAt(args: []const Value, i: usize) Value {
+    return if (args.len > i) args[i] else .undefined;
+}
+
+pub fn propLoad(self: *Interpreter, args: []const Value) value.HostError!Value {
+    const o = args[0].object;
+    const key = try self.keyOf(argAt(args, 1));
+    return ownDataOrThrow(self, o, key, "Atomics.load: object has no own data property");
+}
+
+pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value {
+    const o = args[0].object;
+    const key = try self.keyOf(argAt(args, 1));
+    const v = argAt(args, 2);
+    if (isAccessor(o, key)) return self.throwError("TypeError", "Atomics.store: property is an accessor");
+    if (o.getOwn(key) != null) {
+        try writableOrThrow(self, o, key, "Atomics.store: property is not writable");
+    } else if (!o.extensible) {
+        return self.throwError("TypeError", "Atomics.store: cannot create a property on a non-extensible object");
+    }
+    try o.setOwn(self.arena, self.root_shape, key, v);
+    return v;
+}
+
+pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
+    const o = args[0].object;
+    const key = try self.keyOf(argAt(args, 1));
+    const old = try ownDataOrThrow(self, o, key, "Atomics.exchange: object has no own data property");
+    try writableOrThrow(self, o, key, "Atomics.exchange: property is not writable");
+    try o.setOwn(self.arena, self.root_shape, key, argAt(args, 2));
+    return old;
+}
+
+pub fn propCompareExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
+    const o = args[0].object;
+    const key = try self.keyOf(argAt(args, 1));
+    const old = try ownDataOrThrow(self, o, key, "Atomics.compareExchange: object has no own data property");
+    // The writability rule throws unconditionally — even when the compare
+    // would fail.
+    try writableOrThrow(self, o, key, "Atomics.compareExchange: property is not writable");
+    if (sameValueZero(old, argAt(args, 2)))
+        try o.setOwn(self.arena, self.root_shape, key, argAt(args, 3));
+    return old;
+}
+
+pub const PropRmwOp = enum { add, sub, and_, or_, xor };
+
+pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.HostError!Value {
+    const o = args[0].object;
+    const key = try self.keyOf(argAt(args, 1));
+    const old = try ownDataOrThrow(self, o, key, "Atomics RMW: object has no own data property");
+    try writableOrThrow(self, o, key, "Atomics RMW: property is not writable");
+    if (old != .number) return self.throwError("TypeError", "Atomics RMW: stored value is not a number");
+    const operand = try self.toNumberV(argAt(args, 2));
+    const result: f64 = switch (op) {
+        .add => old.number + operand,
+        .sub => old.number - operand,
+        // Bitwise ops use JS ToInt32 semantics on both sides.
+        .and_ => @floatFromInt(jsInt32(old.number) & jsInt32(operand)),
+        .or_ => @floatFromInt(jsInt32(old.number) | jsInt32(operand)),
+        .xor => @floatFromInt(jsInt32(old.number) ^ jsInt32(operand)),
+    };
+    try o.setOwn(self.arena, self.root_shape, key, .{ .number = result });
+    return old;
+}
+
+fn jsInt32(n: f64) i32 {
+    if (std.math.isNan(n) or std.math.isInf(n)) return 0;
+    const wrapped = @mod(@trunc(n), 4294967296.0);
+    const u: u32 = @intFromFloat(if (wrapped < 0) wrapped + 4294967296.0 else wrapped);
+    return @bitCast(u);
+}
+
+// One global FIFO of property waiters (GIL-serialized; tickets live on the
+// waiting thread's stack and are unlinked before wait returns).
+const PropTicket = struct {
+    obj: *value.Object,
+    key: []const u8,
+    cond: std.Io.Condition = .init,
+    woken: bool = false,
+};
+var prop_waiters: std.ArrayListUnmanaged(*PropTicket) = .empty;
+const prop_alloc = std.heap.page_allocator;
+
+pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value.HostError!Value {
+    const o = args[0].object;
+    const key_tmp = try self.keyOf(argAt(args, 1));
+    const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
+    const timeout: std.Io.Timeout = if (timeout_ns) |ns| (std.Io.Timeout{ .duration = .{
+        .raw = .fromNanoseconds(ns),
+        .clock = .awake,
+    } }).toDeadline(agent.engineIo()) else .none;
+    if (!sameValueZero(cur, argAt(args, 2))) return .{ .string = "not-equal" };
+    if (timeout_ns != null and timeout_ns.? == 0) return .{ .string = "timed-out" };
+    const key = try self.arena.dupe(u8, key_tmp);
+    var ticket = PropTicket{ .obj = o, .key = key };
+    prop_waiters.append(prop_alloc, &ticket) catch return error.OutOfMemory;
+    defer for (prop_waiters.items, 0..) |t, i| {
+        if (t == &ticket) {
+            _ = prop_waiters.orderedRemove(i);
+            break;
+        }
+    };
+    const g = self.gil.?;
+    while (!ticket.woken) {
+        g.waitTimeout(&ticket.cond, timeout) catch {
+            return .{ .string = if (ticket.woken) "ok" else "timed-out" };
+        };
+    }
+    return .{ .string = "ok" };
+}
+
+pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value {
+    const o = args[0].object;
+    const key = try self.keyOf(argAt(args, 1));
+    var count: usize = std.math.maxInt(usize);
+    if (args.len > 2 and args[2] != .undefined) {
+        const n = try self.toNumberV(args[2]);
+        if (std.math.isNan(n) or n <= 0) count = 0 else if (n != std.math.inf(f64) and n < 1e18) count = @intFromFloat(@trunc(n));
+    }
+    const io = agent.engineIo();
+    var n: usize = 0;
+    for (prop_waiters.items) |t| {
+        if (n >= count) break;
+        if (!t.woken and t.obj == o and std.mem.eql(u8, t.key, key)) {
+            t.woken = true;
+            t.cond.signal(io);
+            n += 1;
+        }
+    }
+    return .{ .number = @floatFromInt(n) };
+}
