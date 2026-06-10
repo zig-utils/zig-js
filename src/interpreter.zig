@@ -280,6 +280,11 @@ pub const Function = struct {
     home_object: ?*value.Object = null,
     /// For a derived class constructor: the superclass object, called by `super(...)`.
     super_ctor: ?*value.Object = null,
+    /// Arrow functions capture `this` lexically at creation (like `home_object`
+    /// and `super_ctor`); every call uses this captured value and ignores any
+    /// provided `this` (a `.call`/`.apply`/`.bind` thisArg, or the receiver of a
+    /// method/bare call). Only meaningful when `is_arrow` is set.
+    arrow_this: Value = .undefined,
     /// Class constructors have [[FunctionKind]] "classConstructor": they cannot
     /// be called without [[Construct]], and derived constructors must initialize
     /// `this` through `super()` before completing normally.
@@ -1961,6 +1966,7 @@ pub const Interpreter = struct {
         if (fnode.is_arrow) {
             func.home_object = self.home_object;
             func.super_ctor = self.super_ctor;
+            func.arrow_this = self.this_value; // captured lexically; used on every call
         }
         // Compile a generator body up front for the suspendable VM. Bodies
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
@@ -2191,7 +2197,20 @@ pub const Interpreter = struct {
             const name_str = if (kv) |k| try self.keyDisplayName(k) else m.key;
             if (m.is_field) {
                 if (m.is_static) {
-                    const fv2 = if (m.field_init) |init_node| try self.eval(init_node) else .undefined;
+                    // DefineField runs a static initializer with `this` = the class
+                    // (and the class as home object for `super`), so an arrow in the
+                    // initializer captures the class lexically.
+                    const saved_this = self.this_value;
+                    const saved_home = self.home_object;
+                    self.this_value = class_val;
+                    self.home_object = class_obj;
+                    const fv2 = if (m.field_init) |init_node| self.eval(init_node) catch |e| {
+                        self.this_value = saved_this;
+                        self.home_object = saved_home;
+                        return e;
+                    } else .undefined;
+                    self.this_value = saved_this;
+                    self.home_object = saved_home;
                     if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
                     try self.setProp(class_obj, key, fv2);
                 }
@@ -2581,7 +2600,10 @@ pub const Interpreter = struct {
         // realm's global object; primitive receivers are boxed in the callee
         // realm. Strict functions keep the original value, and arrows inherit
         // `this` lexically.
-        self.this_value = if (!func.is_strict and !func.is_arrow) blk: {
+        self.this_value = if (func.is_arrow)
+            // Arrows ignore the provided `this` and use the lexically captured one.
+            func.arrow_this
+        else if (!func.is_strict) blk: {
             if (this_val == .null or this_val == .undefined) {
                 if (self.env.get("globalThis")) |gt| if (gt == .object) break :blk gt;
                 break :blk if (self.global_object) |g| Value{ .object = g } else this_val;
