@@ -4020,7 +4020,7 @@ pub const Interpreter = struct {
     /// (Howard Hinnant's algorithm).
     fn civilFromDays(z0: i64) struct { y: i64, m: i64, d: i64 } {
         const z = z0 + 719468;
-        const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
+        const era = @divTrunc(if (z >= 0) z else z - 146096, 146097);
         const doe = z - era * 146097;
         const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
         const y = yoe + era * 400;
@@ -4040,7 +4040,7 @@ pub const Interpreter = struct {
     /// Days since the epoch for a civil date (inverse of `civilFromDays`).
     fn daysFromCivil(y0: i64, m: i64, d: i64) i64 {
         const y = y0 - @as(i64, if (m <= 2) 1 else 0);
-        const era = @divFloor(if (y >= 0) y else y - 399, 400);
+        const era = @divTrunc(if (y >= 0) y else y - 399, 400);
         const yoe = y - era * 400;
         const mp = if (m > 2) m - 3 else m + 9;
         const doy = @divFloor(153 * mp + 2, 5) + d - 1;
@@ -4075,6 +4075,12 @@ pub const Interpreter = struct {
         if (y >= 0 and y <= 9999) return std.fmt.allocPrint(self.arena, "{d:0>4}", .{@as(u64, @intCast(y))});
         if (y < 0) return std.fmt.allocPrint(self.arena, "-{d:0>6}", .{@as(u64, @intCast(-y))});
         return std.fmt.allocPrint(self.arena, "+{d:0>6}", .{@as(u64, @intCast(y))});
+    }
+
+    fn dateTimeClip(t: f64) f64 {
+        if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return std.math.nan(f64);
+        const tr = @trunc(t);
+        return if (tr == 0) 0 else tr;
     }
 
     /// Recompose broken-down components into an epoch-ms time, set it on `o`, and
@@ -4264,7 +4270,7 @@ pub const Interpreter = struct {
     /// Compute a Date's epoch-ms from constructor arguments.
     pub fn dateTimeFromArgs(args: []const Value) f64 {
         if (args.len == 0) return 0; // (a real clock isn't wired; epoch is deterministic)
-        if (args.len == 1) return args[0].toNumber();
+        if (args.len == 1) return dateTimeClip(args[0].toNumber());
         const nan = std.math.nan(f64);
         const fields = [_]f64{
             args[0].toNumber(),
@@ -4275,21 +4281,23 @@ pub const Interpreter = struct {
             if (args.len > 5) args[5].toNumber() else 0,
             if (args.len > 6) args[6].toNumber() else 0,
         };
-        for (fields) |f| {
-            if (!std.math.isFinite(f) or @abs(f) > 1e9) return nan;
-        }
-        var y: i64 = @intFromFloat(@trunc(fields[0]));
-        var mo: i64 = @intFromFloat(@trunc(fields[1]));
-        const d: i64 = @intFromFloat(@trunc(fields[2]));
-        const h: i64 = @intFromFloat(@trunc(fields[3]));
-        const mi: i64 = @intFromFloat(@trunc(fields[4]));
-        const s: i64 = @intFromFloat(@trunc(fields[5]));
-        const millis: i64 = @intFromFloat(@trunc(fields[6]));
+        for (fields) |f| if (!std.math.isFinite(f)) return nan;
+        const y_f = @trunc(fields[0]);
+        const mo_f = @trunc(fields[1]);
+        const d_f = @trunc(fields[2]);
+        const h = @trunc(fields[3]);
+        const mi = @trunc(fields[4]);
+        const s = @trunc(fields[5]);
+        const millis = @trunc(fields[6]);
+        if (@abs(y_f) > 1_000_000 or @abs(mo_f) > 12_000_000) return nan;
+        var y: i64 = @intFromFloat(y_f);
+        var mo: i64 = @intFromFloat(mo_f);
         y += @divFloor(mo, 12);
         mo = @mod(mo, 12);
-        const days = daysFromCivil(y, mo + 1, d);
-        const t: f64 = @floatFromInt(days * ms_per_day + h * 3600000 + mi * 60000 + s * 1000 + millis);
-        return if (@abs(t) > 8.64e15) nan else t;
+        const month_start: f64 = @floatFromInt(daysFromCivil(y, mo + 1, 1));
+        const day = month_start + d_f - 1;
+        const time = ((h * 3_600_000 + mi * 60_000) + s * 1000) + millis;
+        return dateTimeClip(day * @as(f64, @floatFromInt(ms_per_day)) + time);
     }
 
     /// Build a `Map`, optionally populated from an iterable of `[k,v]` pairs.
