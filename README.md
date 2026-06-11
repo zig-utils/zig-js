@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` when a host already targets the JSC C API.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **42,581 / 47,930 (88.8%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **42,604 / 47,930 (88.9%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
 
 ```zig
 const js = @import("js");
@@ -23,6 +23,7 @@ const v = try ctx.evaluate("let x = 40; x + 2");
 - [Performance](#performance)
 - [Language & runtime coverage](#language--runtime-coverage)
 - [Using it](#using-it)
+- [Used by](#used-by)
 - [Architecture](#architecture)
 - [Build & test](#build--test)
 - [Multithreading roadmap](#multithreading-roadmap)
@@ -45,10 +46,10 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **42,581 / 47,930 (88.8%)** |
+| **valid** | can we run the program? (scored corpus) | **42,604 / 47,930 (88.9%)** |
 | negative | do we reject invalid input? (early errors — partial) | 3,213 / 4,668 (68.8%) |
 
-Of the valid corpus: **119 parse failures**, **5,230 runtime failures**, **0 host failures**. The runner currently skips 581 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, Annex B, and the regex engine.
+Of the valid corpus: **119 parse failures**, **5,207 runtime failures**, **0 host failures**. The runner currently skips 581 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, Annex B, and the regex engine.
 
 ### Per area (valid)
 
@@ -186,6 +187,7 @@ Requires Zig **0.17.0-dev**.
 zig build                       # builds libzig-js.a (the JSC drop-in)
 zig build test                  # runs the unit + C-API test suite
 zig build conformance           # runs the always-green smoke suite (33/33)
+zig build threads-test          # runs the green WebKit PR-249 threads corpus (27/27)
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -195,19 +197,19 @@ The test262 corpus is vendored as the `test262/` git submodule (`git submodule u
 
 ## Multithreading roadmap
 
-Today a `Context` is single-thread-affine: the interpreter, VM, global object graph, environments, microtask queue, and arena allocator all assume one mutating thread. The first multithreaded target should be **isolated JavaScript agents**, not shared mutable ordinary objects.
+`Context.createWith(.{ .enable_threads = true })` now exposes an experimental shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and property-`Atomics.wait` surface. That path is serialized by a VM lock and is tracked against the vendored WebKit PR-249 threads corpus; the current green allowlist is **27/27**.
 
-To get there:
+That is a useful host-threading layer, but full JavaScript multithreading needs a broader agent model:
 
-- **Thread-affinity contract** — make `Context` ownership explicit, reject accidental cross-thread use, and document which C-API handles are agent-local.
-- **Worker agents** — one `Context` per OS thread with its own global object, realms, job queues, allocator state, and module loader hooks.
-- **Structured clone & transfer** — `structuredClone`, message passing, ArrayBuffer transfer/detach, and the host hooks for worker lifecycle and cancellation.
+- **Agent boundaries** — make ordinary `Context` ownership explicit, keep C-API handles agent-local, and define which values can cross threads.
+- **Worker agents** — one `Context` per OS thread with its own global object, realms, job queues, allocator state, module loader hooks, cancellation, and teardown.
+- **Structured clone & transfer** — implement `structuredClone`, message passing, ArrayBuffer transfer/detach, and host hooks for worker lifecycle.
 - **Shared-memory baseline** — finish `SharedArrayBuffer`, typed-array views over shared storage, `Atomics`, `Atomics.wait`/`notify`, and the real test262 `$262.agent` harness.
-- **Heap & lifetime model** — replace or contain the arena before shared lifetimes leak between agents; a future GC needs clear rooting, write barriers, and cross-agent ownership rules.
-- **Scheduler & queues** — separate per-agent microtask queues from host task queues, define blocking behavior for waits, and keep promise jobs deterministic within each agent.
-- **Concurrency tests** — stress transfer/detach races, shared typed-array atomics, worker teardown, and host callback reentrancy before optimizing.
+- **Scheduler & queues** — keep per-agent microtask queues separate from host task queues, define blocking behavior for waits, and preserve deterministic promise-job ordering.
+- **Heap & lifetime model** — replace or contain the arena before shared lifetimes leak between agents; a future GC needs roots, write barriers, and cross-agent ownership rules.
+- **Concurrency tests** — grow the PR-249 corpus, then stress transfer/detach races, shared typed-array atomics, worker teardown, and host callback reentrancy before optimizing.
 
-The [TC39 structs proposal](https://github.com/tc39/proposal-structs) (Stage 2) is worth tracking: fixed-layout structs, shared structs, and `Atomics.Mutex`/`Atomics.Condition`. Shared structs are designed to be passed between agents without copying, which makes them a good future data model for parallel JS — but they should come after the baseline worker, structured clone, `SharedArrayBuffer`, and `Atomics` stack is correct.
+The [TC39 structs proposal](https://github.com/tc39/proposal-structs) is worth tracking. Fixed-layout structs, shared structs, `Atomics.Mutex`, and `Atomics.Condition` could become a natural data model for parallel JS because shared structs are designed to cross agents without copying. They should layer on top of the worker, structured clone, `SharedArrayBuffer`, and `Atomics` foundation rather than replace it.
 
 ## License
 
