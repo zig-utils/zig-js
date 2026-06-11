@@ -22057,7 +22057,7 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
             const t = this.object.temporal.?;
             const y: i64 = t.year;
             return switch (f) {
-                .year => .{ .number = @floatFromInt(t.year) },
+                .year => .{ .number = @floatFromInt(calDisplayYear(t.calendar, t.year)) },
                 .month => .{ .number = @floatFromInt(t.month) },
                 .day => .{ .number = @floatFromInt(t.day) },
                 .day_of_week => .{ .number = @floatFromInt(isoDayOfWeek(y, t.month, t.day)) },
@@ -22109,8 +22109,11 @@ fn canonCalendarId(self: *Interpreter, id: []const u8) []const u8 {
     // Only FULLY-implemented calendars are stored as distinct ids; every other
     // (syntactically valid) id behaves as iso8601 (the engine's prior all-ISO
     // behavior), so partial id-tracking never regresses the trivially-all-iso8601
-    // round-trip tests. `gregory` shares ISO date math, adding BC/AD era reflection.
+    // round-trip tests. The solar-Gregorian family (gregory/buddhist/roc) shares
+    // ISO month/day math, differing only in the displayed year and era.
     if (std.mem.eql(u8, low, "gregory") or std.mem.eql(u8, low, "gregorian")) return "gregory";
+    if (std.mem.eql(u8, low, "buddhist")) return "buddhist";
+    if (std.mem.eql(u8, low, "roc") or std.mem.eql(u8, low, "minguo")) return "roc";
     return "iso8601";
 }
 
@@ -22118,6 +22121,89 @@ fn canonCalendarId(self: *Interpreter, id: []const u8) []const u8 {
 /// this engine, shares ISO date math but reports BC/AD eras).
 fn calIsGregory(t: *const value.TemporalData) bool {
     return std.mem.eql(u8, t.calendar, "gregory");
+}
+
+/// A calendar's displayed era + era-year for a given proleptic-ISO year. The
+/// solar-Gregorian family shares ISO month/day math; only the year labelling
+/// differs. ISO 8601 (and unsupported calendars stored as iso8601) have no era.
+const CalEra = struct { era: ?[]const u8, era_year: i64 };
+
+/// The displayed calendar year for a proleptic-ISO year (e.g. buddhist == ISO +
+/// 543, roc == ISO − 1911). The stored `TemporalData.year` is always the ISO
+/// year used by all date math; only the getter/round-trip surface remaps it.
+fn calDisplayYear(cal: []const u8, iso_year: i64) i64 {
+    if (std.mem.eql(u8, cal, "buddhist")) return iso_year + 543;
+    if (std.mem.eql(u8, cal, "roc")) return iso_year - 1911;
+    return iso_year; // gregory / iso8601
+}
+
+/// Era + eraYear for a calendar at the given ISO year.
+fn calEraOf(cal: []const u8, iso_year: i64) CalEra {
+    if (std.mem.eql(u8, cal, "buddhist")) return .{ .era = "be", .era_year = iso_year + 543 };
+    if (std.mem.eql(u8, cal, "roc")) {
+        const y = iso_year - 1911; // displayed ROC year
+        return if (y >= 1) .{ .era = "roc", .era_year = y } else .{ .era = "broc", .era_year = 1 - y };
+    }
+    if (std.mem.eql(u8, cal, "gregory"))
+        return if (iso_year >= 1) .{ .era = "ce", .era_year = iso_year } else .{ .era = "bce", .era_year = 1 - iso_year };
+    return .{ .era = null, .era_year = 0 }; // iso8601
+}
+
+/// Inverse of `calDisplayYear`: the ISO year for a displayed calendar year.
+fn calIsoFromDisplayYear(cal: []const u8, year: i64) i64 {
+    if (std.mem.eql(u8, cal, "buddhist")) return year - 543;
+    if (std.mem.eql(u8, cal, "roc")) return year + 1911;
+    return year; // gregory / iso8601
+}
+
+/// Resolve a property bag's `year` / `era` / `eraYear` fields to the proleptic
+/// ISO year for `cal`, returning null when none are present (the caller defaults,
+/// e.g. to the receiver's year in `with`). `era`/`eraYear` must appear together;
+/// a year given alongside an era must agree with it. For calendars without an era
+/// model only `year` is consulted (== the ISO year).
+fn bagIsoYear(self: *Interpreter, bag: Value, cal: []const u8) EvalError!?i64 {
+    // Only calendars with an era model (the solar-Gregorian family) read era
+    // fields; for iso8601 (and ids that collapse to it) era/eraYear are ignored,
+    // exactly as the spec's iso8601 field list omits them.
+    const has_era = calEraOf(cal, 0).era != null;
+    const ev = if (has_era) try self.getProperty(bag, "era") else Value.undefined;
+    const eyv = if (has_era) try self.getProperty(bag, "eraYear") else Value.undefined;
+    var from_era: ?i64 = null;
+    if (ev != .undefined or eyv != .undefined) {
+        if (ev == .undefined or eyv == .undefined)
+            return self.throwError("TypeError", "era and eraYear must be provided together");
+        if (ev != .string) return self.throwError("RangeError", "era must be a string");
+        const ey = try temporalIntArg(self, eyv, "eraYear");
+        from_era = calIsoFromEra(cal, ev.string, @intFromFloat(ey)) orelse
+            return self.throwError("RangeError", "invalid era for this calendar");
+    }
+    const yv = try self.getProperty(bag, "year");
+    if (yv != .undefined) {
+        const yy = try temporalIntArg(self, yv, "year");
+        const iso = calIsoFromDisplayYear(cal, @intFromFloat(yy));
+        if (from_era) |fe| if (fe != iso) return self.throwError("RangeError", "year does not agree with era/eraYear");
+        return iso;
+    }
+    return from_era;
+}
+
+/// The ISO year for an `{era, eraYear}` pair in `cal`, or null if the era name is
+/// not valid for that calendar. Non-positive era years remap across the epoch
+/// boundary (e.g. roc 0 == broc 1), matching the displayed-year inverse.
+fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
+    const be = asciiEqlIgnoreCase(era, "be");
+    if (std.mem.eql(u8, cal, "buddhist")) return if (be) era_year - 543 else null;
+    if (std.mem.eql(u8, cal, "roc")) {
+        if (asciiEqlIgnoreCase(era, "roc")) return calIsoFromDisplayYear(cal, era_year);
+        if (asciiEqlIgnoreCase(era, "broc")) return calIsoFromDisplayYear(cal, 1 - era_year);
+        return null;
+    }
+    if (std.mem.eql(u8, cal, "gregory")) {
+        if (asciiEqlIgnoreCase(era, "ce") or asciiEqlIgnoreCase(era, "ad")) return era_year;
+        if (asciiEqlIgnoreCase(era, "bce") or asciiEqlIgnoreCase(era, "bc")) return 1 - era_year;
+        return null;
+    }
+    return null;
 }
 
 /// ToTemporalCalendarIdentifier: a Temporal instance contributes its own calendar;
@@ -22161,12 +22247,12 @@ fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
             if (this != .object or this.object.temporal == null) return self.throwError("TypeError", "Temporal era accessor on incompatible receiver");
             const t = this.object.temporal.?;
             // ISO 8601 (and other calendars whose era model isn't implemented) have
-            // no eras: both accessors read undefined. Gregorian reports BC/AD eras.
-            if (!calIsGregory(t)) return .undefined;
-            // Proleptic Gregorian eras: ISO year >= 1 is the common era ("ce")
-            // with eraYear == year; year <= 0 is "bce" with eraYear == 1 - year.
-            if (want_year) return .{ .number = @floatFromInt(if (t.year >= 1) t.year else 1 - @as(i64, t.year)) };
-            return .{ .string = if (t.year >= 1) "ce" else "bce" };
+            // no eras: both accessors read undefined. The solar-Gregorian family
+            // (gregory ce/bce, buddhist be, roc roc/broc) reports its era here.
+            const ce = calEraOf(t.calendar, t.year);
+            const era = ce.era orelse return .undefined;
+            if (want_year) return .{ .number = @floatFromInt(ce.era_year) };
+            return .{ .string = era };
         }
     }.call;
 }
@@ -22327,24 +22413,12 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
     }
     if (v == .object) {
         const bag_cal = try readCalendarField(self, v);
-        var yv = try self.getProperty(v, "year");
-        const mv = try self.getProperty(v, "month");
+        // The displayed `year` (or an `{era, eraYear}` pair, for calendars with an
+        // era model) resolves to the proleptic ISO year used by all date math.
+        const iso_year = try bagIsoYear(self, v, bag_cal);
         const dv = try self.getProperty(v, "day");
-        // The Gregorian calendar admits `era`/`eraYear` in place of `year`: "ce"
-        // (alias "ad") years count forward from 1; "bce" ("bc") count backward so
-        // that ISO year == 1 - eraYear. (Other calendars' era models are unsupported.)
-        if (yv == .undefined and std.mem.eql(u8, bag_cal, "gregory")) {
-            const ev = try self.getProperty(v, "era");
-            const eyv = try self.getProperty(v, "eraYear");
-            if (ev == .string and eyv != .undefined) {
-                const ey = try temporalIntArg(self, eyv, "eraYear");
-                const is_bce = asciiEqlIgnoreCase(ev.string, "bce") or asciiEqlIgnoreCase(ev.string, "bc");
-                const is_ce = asciiEqlIgnoreCase(ev.string, "ce") or asciiEqlIgnoreCase(ev.string, "ad");
-                if (!is_bce and !is_ce) return self.throwError("RangeError", "invalid era for the gregory calendar");
-                yv = .{ .number = if (is_bce) 1 - ey else ey };
-            }
-        }
-        if (yv == .undefined or dv == .undefined) return self.throwError("TypeError", "PlainDate fields require year and day");
+        if (iso_year == null or dv == .undefined) return self.throwError("TypeError", "PlainDate fields require year and day");
+        const mv = try self.getProperty(v, "month");
         var m: f64 = undefined;
         if (mv != .undefined) {
             m = try temporalIntArg(self, mv, "month");
@@ -22353,9 +22427,8 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             if (mc != .string or mc.string.len < 3) return self.throwError("TypeError", "month or monthCode required");
             m = @floatFromInt(std.fmt.parseInt(u8, mc.string[1..3], 10) catch return self.throwError("RangeError", "bad monthCode"));
         }
-        const y = try temporalIntArg(self, yv, "year");
         const d = try temporalIntArg(self, dv, "day");
-        var r = try regulateIsoDate(self, y, m, d, constrain);
+        var r = try regulateIsoDate(self, @floatFromInt(iso_year.?), m, d, constrain);
         r.cal = bag_cal;
         return r;
     }
@@ -22924,7 +22997,7 @@ fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const t = this.object.temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (bag != .object) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: argument must be an object");
-    const y = try withIntField(self, bag, "year", t.year);
+    const y = (try bagIsoYear(self, bag, t.calendar)) orelse t.year;
     const m = try withMonthField(self, bag, t.month);
     const d = try withIntField(self, bag, "day", t.day);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined);
@@ -22964,7 +23037,7 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     const t = this.object.temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (bag != .object) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be an object");
-    const y = try withIntField(self, bag, "year", t.year);
+    const y = (try bagIsoYear(self, bag, t.calendar)) orelse t.year;
     const m = try withMonthField(self, bag, t.month);
     const d = try withIntField(self, bag, "day", t.day);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined);
@@ -22982,6 +23055,7 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     o.temporal.?.year = @intCast(r.y);
     o.temporal.?.month = r.m;
     o.temporal.?.day = r.d;
+    o.temporal.?.calendar = t.calendar; // with() preserves the calendar
     setTimeFields(o.temporal.?, vals);
     return .{ .object = o };
 }
@@ -23016,7 +23090,7 @@ fn temporalYearMonthGetter(comptime f: YearMonthField) value.NativeFn {
             const t = this.object.temporal.?;
             const y: i64 = t.year;
             return switch (f) {
-                .year => .{ .number = @floatFromInt(t.year) },
+                .year => .{ .number = @floatFromInt(calDisplayYear(t.calendar, t.year)) },
                 .month => .{ .number = @floatFromInt(t.month) },
                 .days_in_month => .{ .number = @floatFromInt(isoDaysInMonth(y, t.month)) },
                 .days_in_year => .{ .number = @floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365)) },
@@ -23043,21 +23117,20 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
 }
 
 /// Read year/month for a PlainYearMonth from an instance or a fields bag.
-const IsoYM = struct { y: i64, m: u8 };
+const IsoYM = struct { y: i64, m: u8, cal: []const u8 = "iso8601" };
 fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYM {
     if (tIsTemporal(v, .plain_year_month)) {
         const t = v.object.temporal.?;
-        return .{ .y = t.year, .m = t.month };
+        return .{ .y = t.year, .m = t.month, .cal = t.calendar };
     }
     if (v == .object) {
-        _ = try readCalendarField(self, v);
-        const yv = try self.getProperty(v, "year");
-        if (yv == .undefined) return self.throwError("TypeError", "PlainYearMonth fields require year");
-        const y = try temporalIntArg(self, yv, "year");
+        const bag_cal = try readCalendarField(self, v);
+        const iso_year = try bagIsoYear(self, v, bag_cal);
+        if (iso_year == null) return self.throwError("TypeError", "PlainYearMonth fields require year");
         const m = try withMonthField(self, v, 0);
         _ = constrain;
         if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
-        return .{ .y = @intFromFloat(y), .m = m };
+        return .{ .y = iso_year.?, .m = m, .cal = bag_cal };
     }
     if (v == .string) {
         // Accept a bare "YYYY-MM" (annotations allowed) as well as a full ISO
@@ -23081,11 +23154,12 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
     return self.throwError("TypeError", "cannot convert to a PlainYearMonth");
 }
 
-fn makeYearMonth(self: *Interpreter, y: i64, m: u8) EvalError!Value {
+fn makeYearMonth(self: *Interpreter, y: i64, m: u8, cal: []const u8) EvalError!Value {
     const o = try makeTemporal(self, .plain_year_month, "\x00T.PlainYearMonth");
     o.temporal.?.year = @intCast(y);
     o.temporal.?.month = m;
     o.temporal.?.day = 1;
+    o.temporal.?.calendar = cal;
     return .{ .object = o };
 }
 
@@ -23094,7 +23168,7 @@ fn temporalYearMonthFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined);
     const f = try toYearMonthFields(self, if (args.len > 0) args[0] else .undefined, !reject);
-    return makeYearMonth(self, f.y, f.m);
+    return makeYearMonth(self, f.y, f.m, f.cal);
 }
 
 fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -23103,13 +23177,13 @@ fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const t = this.object.temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (bag != .object) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be an object");
-    const y = try withIntField(self, bag, "year", t.year);
+    const y = (try bagIsoYear(self, bag, t.calendar)) orelse t.year;
     const m = try withMonthField(self, bag, t.month);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined);
     if (reject and (m < 1 or m > 12)) return self.throwError("RangeError", "month out of range");
     const mc: u8 = @max(1, @min(12, m)); // constrain
     if (y < -271821 or y > 275760) return self.throwError("RangeError", "year out of range");
-    return makeYearMonth(self, y, mc);
+    return makeYearMonth(self, y, mc, t.calendar);
 }
 
 fn temporalYearMonthEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -23142,7 +23216,7 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
             const ny = @divFloor(total, 12);
             if (ny < -271821 or ny > 275760) return self.throwError("RangeError", "year out of range");
             total = @mod(total, 12);
-            return makeYearMonth(self, ny, @intCast(total + 1));
+            return makeYearMonth(self, ny, @intCast(total + 1), t.calendar);
         }
     }.call;
 }
@@ -23879,6 +23953,7 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
             o.temporal.?.year = @intCast(cc.y);
             o.temporal.?.month = cc.m;
             o.temporal.?.day = cc.d;
+            o.temporal.?.calendar = t.calendar; // add/subtract preserve the calendar
             nsToTime(o.temporal.?, time_ns);
             return .{ .object = o };
         }
@@ -24015,6 +24090,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
         t.year = @intCast(f.y);
         t.month = f.m;
         t.day = f.d;
+        t.calendar = f.cal;
         t.hour = tm.hour;
         t.minute = tm.minute;
         t.second = tm.second;
@@ -24090,7 +24166,7 @@ fn temporalDateTimeToPlainYearMonthFn(ctx: *anyopaque, this: Value, args: []cons
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const t = this.object.temporal.?;
-    return makeYearMonth(self, t.year, t.month);
+    return makeYearMonth(self, t.year, t.month, t.calendar);
 }
 
 fn temporalDateTimeToPlainMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -24202,7 +24278,7 @@ fn temporalDateToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const t = this.object.temporal.?;
-    return makeYearMonth(self, t.year, t.month);
+    return makeYearMonth(self, t.year, t.month, t.calendar);
 }
 
 /// `Temporal.<Type>.prototype.valueOf` is a poison pill: it always throws, so a
@@ -24681,7 +24757,7 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
             const l = zdtLocal(t);
             const y: i64 = l.year;
             return switch (f) {
-                .year => .{ .number = @floatFromInt(l.year) },
+                .year => .{ .number = @floatFromInt(calDisplayYear(t.calendar, l.year)) },
                 .month => .{ .number = @floatFromInt(l.month) },
                 .day => .{ .number = @floatFromInt(l.day) },
                 .hour => .{ .number = @floatFromInt(l.hour) },
@@ -24812,8 +24888,9 @@ fn temporalZdtToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) v
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const l = zdtLocal(this.object.temporal.?);
-    return makeYearMonth(self, l.year, l.month);
+    const t = this.object.temporal.?;
+    const l = zdtLocal(t);
+    return makeYearMonth(self, l.year, l.month, t.calendar);
 }
 fn temporalZdtToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
