@@ -86,6 +86,28 @@ const Channel = struct {
     }
 };
 
+/// A module-graph entry point for a module worker. The host's `load`
+/// callback runs on the worker thread, so it must be thread-safe (an
+/// embedder-owned static module map is the canonical pattern); the source
+/// strings it returns need only be valid for the duration of the call (they
+/// are duped into the worker realm's arena). `entry_path`/`entry_source` are
+/// owned by the worker.
+const ModuleConfig = struct {
+    entry_path: []const u8,
+    entry_source: []const u8,
+    host: ContextMod.Context.ModuleHost,
+};
+
+/// Embedder integration hook: a host with its own event loop sets this so it
+/// is woken when the worker has main-side work pending (a queued message, or
+/// the worker closing its outbox). `notify` may fire from the worker thread,
+/// so it must be thread-safe and non-blocking — schedule a `receive` drain on
+/// the worker's owning thread rather than draining inline.
+pub const HostHooks = struct {
+    ctx: *anyopaque,
+    notify: *const fn (ctx: *anyopaque) void,
+};
+
 pub const Worker = struct {
     thread: ?std.Thread = null,
     /// main → worker messages.
@@ -95,6 +117,23 @@ pub const Worker = struct {
     /// The stop word the worker context's step checkpoints poll.
     stop: std.atomic.Value(bool) = .init(false),
     src: []const u8,
+    /// When set, the worker evaluates a module graph instead of `src`.
+    module: ?ModuleConfig = null,
+    /// Optional embedder wake hook, loaded atomically (the worker thread reads
+    /// it; the owning thread may install it after spawn). Pointer is owned by
+    /// the embedder and must outlive the worker.
+    hooks: std.atomic.Value(?*const HostHooks) = .init(null),
+
+    /// Install (or clear) the embedder wake hook. The embedder should call
+    /// this immediately after spawn and perform one initial `receive` drain,
+    /// since a message posted before the hook lands fires no wake.
+    pub fn setHostHooks(w: *Worker, hooks: ?*const HostHooks) void {
+        w.hooks.store(hooks, .release);
+    }
+
+    fn notifyHost(w: *Worker) void {
+        if (w.hooks.load(.acquire)) |h| h.notify(h.ctx);
+    }
 
     /// Spawn a worker running `src` in a fresh realm on its own thread. The
     /// returned worker must be `terminate`d or have its inbox closed, then
@@ -104,6 +143,30 @@ pub const Worker = struct {
         errdefer alloc.destroy(w);
         w.* = .{ .src = try alloc.dupe(u8, src) };
         errdefer alloc.free(w.src);
+        w.thread = std.Thread.spawn(.{}, workerMain, .{w}) catch return error.OutOfMemory;
+        return w;
+    }
+
+    /// Spawn a *module* worker: the realm evaluates the module graph rooted at
+    /// `entry_path`/`entry_source`, resolving imports through `host` (whose
+    /// `load` callback is invoked on the worker thread — it must be
+    /// thread-safe). Module top-level code installs `globalThis.onmessage`,
+    /// then the delivery loop runs as for a script worker.
+    pub fn spawnModule(
+        entry_path: []const u8,
+        entry_source: []const u8,
+        host: ContextMod.Context.ModuleHost,
+    ) error{OutOfMemory}!*Worker {
+        const w = try alloc.create(Worker);
+        errdefer alloc.destroy(w);
+        const path_copy = try alloc.dupe(u8, entry_path);
+        errdefer alloc.free(path_copy);
+        const src_copy = try alloc.dupe(u8, entry_source);
+        errdefer alloc.free(src_copy);
+        w.* = .{
+            .src = &.{},
+            .module = .{ .entry_path = path_copy, .entry_source = src_copy, .host = host },
+        };
         w.thread = std.Thread.spawn(.{}, workerMain, .{w}) catch return error.OutOfMemory;
         return w;
     }
@@ -142,7 +205,12 @@ pub const Worker = struct {
         std.debug.assert(w.thread == null);
         w.inbox.deinit();
         w.outbox.deinit();
-        alloc.free(w.src);
+        if (w.module) |mc| {
+            alloc.free(mc.entry_path);
+            alloc.free(mc.entry_source);
+        } else {
+            alloc.free(w.src);
+        }
         alloc.destroy(w);
     }
 };
@@ -159,7 +227,11 @@ fn workerMain(w: *Worker) void {
         return;
     };
 
-    _ = ctx.evaluate(w.src) catch {};
+    if (w.module) |mc| {
+        _ = ctx.evaluateModule(mc.entry_path, mc.entry_source, mc.host) catch {};
+    } else {
+        _ = ctx.evaluate(w.src) catch {};
+    }
 
     // Delivery loop: park on the inbox, hand each message to onmessage.
     while (!w.stop.load(.monotonic)) {
@@ -176,6 +248,7 @@ fn workerMain(w: *Worker) void {
         machine.settleAsyncWaiters();
     }
     w.outbox.close();
+    w.notifyHost(); // wake the embedder so its final `receive` sees the close
 }
 
 /// Worker-realm globals: `postMessage(value)` and `close()`. Each native
@@ -206,6 +279,7 @@ fn workerPostMessageFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const v = if (args.len > 0) args[0] else Value.undefined;
     const bytes = try structured_clone.serialize(self, alloc, v);
     w.outbox.push(bytes);
+    w.notifyHost(); // wake the embedder's loop to drain via `receive`
     return .undefined;
 }
 
@@ -259,4 +333,99 @@ test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
     spinner.terminate();
     spinner.join();
     spinner.destroy();
+}
+
+// A static, read-only module map shared with module workers. Read-only after
+// construction, so the `load` callback is trivially thread-safe.
+const StaticModules = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "helper.js",
+            .source = "export const bump = (sab) => Atomics.add(new Int32Array(sab), 0, 1);",
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { bump } from "./helper.js";
+            \\globalThis.onmessage = (e) => {
+            \\  bump(e.data.sab);
+            \\  postMessage({ done: true });
+            \\  close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        // Strip a leading "./" so "./helper.js" matches "helper.js".
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() ContextMod.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
+// An embedder loop integration: the wake hook bumps a counter the owning
+// thread can poll instead of blocking in `receive`.
+const HookSink = struct {
+    woken: std.atomic.Value(u32) = .init(0),
+    fn notify(ctx: *anyopaque) void {
+        const self: *HookSink = @ptrCast(@alignCast(ctx));
+        _ = self.woken.fetchAdd(1, .acq_rel);
+    }
+};
+
+test "workers: host hook wakes on message and on outbox close" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    var sink = HookSink{};
+    var hooks = HostHooks{ .ctx = &sink, .notify = HookSink.notify };
+
+    const w = try Worker.spawn(
+        \\globalThis.onmessage = (e) => { postMessage(e.data * 2); close(); };
+    );
+    w.setHostHooks(&hooks);
+    try w.postMessage(&machine, .{ .number = 21 });
+
+    // The worker fires the hook for the reply message and again at outbox close.
+    const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 42), reply.number);
+    w.join();
+    w.destroy();
+    try std.testing.expect(sink.woken.load(.acquire) >= 1);
+}
+
+test "workers: module-graph worker resolves imports and round-trips a message" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const msg = try ctx.evaluate(
+        \\globalThis.__msg = { sab: new SharedArrayBuffer(8) };
+        \\globalThis.__msg
+    );
+
+    const w = try Worker.spawnModule("entry.js", StaticModules.entries[1].source, StaticModules.host());
+    try w.postMessage(&machine, msg);
+    const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
+    const done = try machine.getProperty(reply, "done");
+    try std.testing.expect(done == .boolean and done.boolean);
+    w.join();
+    w.destroy();
+
+    // The imported `bump` ran against the shared storage.
+    const count = try ctx.evaluate("new Int32Array(globalThis.__msg.sab)[0]");
+    try std.testing.expectEqual(@as(f64, 1), count.number);
 }
