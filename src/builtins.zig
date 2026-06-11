@@ -1665,6 +1665,11 @@ pub fn objectFreeze(ctx: *anyopaque, this: Value, args: []const Value) HostError
 /// returns false — or throws — surfaces a TypeError, and the trap's reported
 /// keys drive the loop). An ordinary object uses the direct attribute path.
 fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
+    if (freeze) if (o.typed_array) |ta| {
+        const ab = ta.buffer.array_buffer orelse return self.throwError("TypeError", "TypedArray has no backing ArrayBuffer");
+        if (ab.max_byte_length != null)
+            return self.throwError("TypeError", "Cannot freeze a TypedArray backed by a resizable ArrayBuffer");
+    };
     if (o.proxy_handler != null or o.proxy_revoked) {
         if (!try self.proxyPreventExt(o))
             return self.throwError("TypeError", "Object.seal/freeze: [[PreventExtensions]] returned false");
