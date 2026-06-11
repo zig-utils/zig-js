@@ -20567,7 +20567,13 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     var val: Value = .undefined;
     var advance: usize = 1;
     switch (src) {
-        .object => |so| if (so.is_array) {
+        .object => |so| if (so.is_arguments) {
+            const len = toLen(try self.toNumberV(try self.getProperty(src, "length")));
+            if (i < len) {
+                val = try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+                done = false;
+            }
+        } else if (so.is_array) {
             // Arrays iterate the *logical* length, reading via [[Get]] so a hole
             // (or the sparse tail) yields `undefined` and accessor indices run.
             if (i < @max(so.elements.items.len, so.array_len)) {
