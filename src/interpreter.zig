@@ -11796,7 +11796,7 @@ fn iteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
             return self.throwError("TypeError", "Abstract class Iterator not directly constructable");
     }
     const o = (try self.newObject()).object;
-    o.proto = try self.protoObject(self.new_target.object);
+    o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Iterator");
     return .{ .object = o };
 }
 
@@ -11992,7 +11992,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
 
     // The `Iterator` constructor (abstract) with `.prototype` = %IteratorProto%.
     const ctor = try a.create(value.Object);
-    ctor.* = .{ .native = iteratorConstructorFn, .native_ctor = true };
+    ctor.* = .{ .native = iteratorConstructorFn, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, ctor, "Iterator", 0);
     try setNative(a, rs, ctor, "from", 1, iteratorFromFn);
     try setNative(a, rs, ctor, "concat", 0, iteratorConcatFn);

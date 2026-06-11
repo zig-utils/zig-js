@@ -2504,6 +2504,15 @@ test "dynamic Function observes NewTarget and constructor realms" {
     )).boolean);
 }
 
+test "Iterator constructor uses NewTarget realm prototype fallback" {
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\var C = new other.Function();
+        \\C.prototype = null;
+        \\Object.getPrototypeOf(Reflect.construct(Iterator, [], C)) === other.Iterator.prototype
+    )).boolean);
+}
+
 test "Date call remains string-returning through bind" {
     try std.testing.expect((try evalIn("typeof Date(0, 0, 0) === 'string'")).boolean);
     try std.testing.expect((try evalIn("typeof Date.bind(null)(0, 0, 0) === 'string'")).boolean);
