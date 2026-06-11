@@ -75,6 +75,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_threads_test = b.addRunArtifact(threads_test);
+    if (b.args) |args| run_threads_test.addArgs(args);
     const threads_test_step = b.step("threads-test", "Run the vendored PR-249 threads corpus allowlist");
     threads_test_step.dependOn(&run_threads_test.step);
 

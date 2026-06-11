@@ -170,6 +170,7 @@ pub const Context = struct {
             for (self.js_threads.items) |rec| {
                 if (rec.thread) |t| t.join();
             }
+            jsthread.abandonPropAsync(@ptrCast(g));
             self.gpa.destroy(g);
             self.gil = null;
         } else {

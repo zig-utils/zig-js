@@ -3075,6 +3075,7 @@ pub const Interpreter = struct {
     /// abandoned pending, the host's prerogative). Called after the main
     /// microtask drain in Context.evaluate/evaluateModule and agent realms.
     pub fn settleAsyncWaiters(self: *Interpreter) void {
+        if (self.gil != null) jsthread.pollPropAsync(self);
         const listp = self.async_waiters orelse return;
         if (listp.items.len == 0) return;
         const owner: *const anyopaque = @ptrCast(listp);
@@ -3202,6 +3203,7 @@ pub const Interpreter = struct {
                 // settle hangs the awaiting thread, as in any real engine;
                 // the host watchdog is the backstop.
                 if (self.gil) |g| {
+                    jsthread.pollPropAsync(self); // expire property waitAsync deadlines
                     g.release();
                     std.Thread.yield() catch {};
                     g.acquire();
@@ -5023,8 +5025,28 @@ pub const Interpreter = struct {
             try list.appendSlice(self.arena, symbols.items);
             return list.items;
         }
+        var indices: std.ArrayListUnmanaged([]const u8) = .empty;
+        var strings: std.ArrayListUnmanaged([]const u8) = .empty;
+        var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (try t.ownKeys(self.arena)) |k| {
+            if (value.isPrivateKey(k)) continue;
+            if (value.isSymbolKey(k)) {
+                if (value.isRealSymbolKey(k)) try symbols.append(self.arena, k);
+            } else if (value.canonicalIndex(k) != null) {
+                try indices.append(self.arena, k);
+            } else {
+                try strings.append(self.arena, k);
+            }
+        }
+        std.mem.sort([]const u8, indices.items, {}, struct {
+            fn lt(_: void, x: []const u8, y: []const u8) bool {
+                return value.canonicalIndex(x).? < value.canonicalIndex(y).?;
+            }
+        }.lt);
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (try t.ownKeys(self.arena)) |k| try appendReflectable(self.arena, &list, k);
+        try list.appendSlice(self.arena, indices.items);
+        try list.appendSlice(self.arena, strings.items);
+        try list.appendSlice(self.arena, symbols.items);
         return list.items;
     }
 
@@ -5083,7 +5105,7 @@ pub const Interpreter = struct {
 
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         if (recv == .object) if (recv.object.restricted_to) |tid| if (tid != @as(u64, @intCast(std.Thread.getCurrentId())))
-            return self.throwError("TypeError", "ConcurrentAccessError: object is restricted to another thread");
+            return self.throwError("ConcurrentAccessError", "object is restricted to another thread");
         return self.getPropertyWithReceiver(recv, key, recv);
     }
 
@@ -5624,7 +5646,7 @@ pub const Interpreter = struct {
     /// the boolean directly.
     pub fn setMemberResult(self: *Interpreter, recv: Value, key: []const u8, v: Value, receiver: Value) EvalError!bool {
         if (recv == .object) if (recv.object.restricted_to) |tid| if (tid != @as(u64, @intCast(std.Thread.getCurrentId())))
-            return self.throwError("TypeError", "ConcurrentAccessError: object is restricted to another thread");
+            return self.throwError("ConcurrentAccessError", "object is restricted to another thread");
         if (recv == .object and (recv.object.is_symbol or recv.object.is_bigint))
             return self.setPrimitiveMemberResult(recv, key, v);
         if (recv != .object) {
@@ -19169,8 +19191,11 @@ fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (args.len > 0 and jsthread.isPropertyMode(self, args[0]))
-        return self.throwError("TypeError", "Atomics.waitAsync on object properties is not implemented yet");
+    if (args.len > 0 and jsthread.isPropertyMode(self, args[0])) {
+        const t_ms = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);
+        const t_ns: ?u64 = if (std.math.isNan(t_ms) or t_ms == std.math.inf(f64)) null else if (t_ms <= 0) 0 else if (t_ms >= 1e12) null else @intFromFloat(t_ms * std.time.ns_per_ms);
+        return jsthread.propWaitAsync(self, args, t_ns);
+    }
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
     const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     const timeout_ms: f64 = if (args.len > 3) try self.toNumberV(args[3]) else std.math.nan(f64);
@@ -25386,9 +25411,14 @@ fn dateUTCFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
 
 /// `Date.now()` — v1 uses a deterministic epoch (no wall clock wired).
 fn dateNow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = ctx;
     _ = this;
     _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    // Threads mode gets a real clock: the corpus harness computes rendezvous
+    // deadlines from Date.now(), and a frozen epoch turns every stuck
+    // rendezvous into a silent hang instead of a loud 30s failure. The
+    // deterministic epoch stays for everything else (test262 reproducibility).
+    if (self.gil != null) return .{ .number = agent.monotonicNowMs() };
     return .{ .number = 0 };
 }
 
