@@ -22142,6 +22142,7 @@ fn canonCalendarId(self: *Interpreter, id: []const u8) []const u8 {
     if (std.mem.eql(u8, low, "gregory") or std.mem.eql(u8, low, "gregorian")) return "gregory";
     if (std.mem.eql(u8, low, "buddhist")) return "buddhist";
     if (std.mem.eql(u8, low, "roc") or std.mem.eql(u8, low, "minguo")) return "roc";
+    if (std.mem.eql(u8, low, "japanese")) return "japanese";
     return "iso8601";
 }
 
@@ -22165,8 +22166,23 @@ fn calDisplayYear(cal: []const u8, iso_year: i64) i64 {
     return iso_year; // gregory / iso8601
 }
 
-/// Era + eraYear for a calendar at the given ISO year.
-fn calEraOf(cal: []const u8, iso_year: i64) CalEra {
+/// The five modern Japanese eras Temporal represents, with their (ISO) start
+/// date and the offset that maps an ISO year to the era year (eraYear == ISO
+/// year − offset). Dates before Meiji 6 (1873-01-01) use the proleptic Gregorian
+/// "ce"/"bce" eras. Ordered latest-first for the boundary search.
+const JapaneseEra = struct { name: []const u8, sy: i64, sm: u8, sd: u8, off: i64 };
+const japanese_eras = [_]JapaneseEra{
+    .{ .name = "reiwa", .sy = 2019, .sm = 5, .sd = 1, .off = 2018 },
+    .{ .name = "heisei", .sy = 1989, .sm = 1, .sd = 8, .off = 1988 },
+    .{ .name = "showa", .sy = 1926, .sm = 12, .sd = 25, .off = 1925 },
+    .{ .name = "taisho", .sy = 1912, .sm = 7, .sd = 30, .off = 1911 },
+    .{ .name = "meiji", .sy = 1873, .sm = 1, .sd = 1, .off = 1867 },
+};
+
+/// Era + eraYear for a calendar at the given ISO date. Only the Japanese calendar
+/// consults the month/day (its era boundaries fall mid-year); the solar-Gregorian
+/// family depends on the year alone.
+fn calEraOf(cal: []const u8, iso_year: i64, month: u8, day: u8) CalEra {
     if (std.mem.eql(u8, cal, "buddhist")) return .{ .era = "be", .era_year = iso_year + 543 };
     if (std.mem.eql(u8, cal, "roc")) {
         const y = iso_year - 1911; // displayed ROC year
@@ -22174,6 +22190,14 @@ fn calEraOf(cal: []const u8, iso_year: i64) CalEra {
     }
     if (std.mem.eql(u8, cal, "gregory"))
         return if (iso_year >= 1) .{ .era = "ce", .era_year = iso_year } else .{ .era = "bce", .era_year = 1 - iso_year };
+    if (std.mem.eql(u8, cal, "japanese")) {
+        const ord = @as(i64, iso_year) * 10000 + @as(i64, month) * 100 + day;
+        for (japanese_eras) |e| {
+            if (ord >= e.sy * 10000 + @as(i64, e.sm) * 100 + e.sd)
+                return .{ .era = e.name, .era_year = iso_year - e.off };
+        }
+        return if (iso_year >= 1) .{ .era = "ce", .era_year = iso_year } else .{ .era = "bce", .era_year = 1 - iso_year };
+    }
     return .{ .era = null, .era_year = 0 }; // iso8601
 }
 
@@ -22193,7 +22217,7 @@ fn bagIsoYear(self: *Interpreter, bag: Value, cal: []const u8) EvalError!?i64 {
     // Only calendars with an era model (the solar-Gregorian family) read era
     // fields; for iso8601 (and ids that collapse to it) era/eraYear are ignored,
     // exactly as the spec's iso8601 field list omits them.
-    const has_era = calEraOf(cal, 0).era != null;
+    const has_era = calEraOf(cal, 0, 1, 1).era != null;
     const ev = if (has_era) try self.getProperty(bag, "era") else Value.undefined;
     const eyv = if (has_era) try self.getProperty(bag, "eraYear") else Value.undefined;
     var from_era: ?i64 = null;
@@ -22229,6 +22253,15 @@ fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
     if (std.mem.eql(u8, cal, "gregory")) {
         if (asciiEqlIgnoreCase(era, "ce") or asciiEqlIgnoreCase(era, "ad")) return era_year;
         if (asciiEqlIgnoreCase(era, "bce") or asciiEqlIgnoreCase(era, "bc")) return 1 - era_year;
+        return null;
+    }
+    if (std.mem.eql(u8, cal, "japanese")) {
+        if (asciiEqlIgnoreCase(era, "ce") or asciiEqlIgnoreCase(era, "ad")) return era_year;
+        if (asciiEqlIgnoreCase(era, "bce") or asciiEqlIgnoreCase(era, "bc")) return 1 - era_year;
+        // A modern era's year maps by its offset; the actual era is re-derived from
+        // the resolved ISO date (a date outside the named era's range reads back as
+        // its true era, e.g. reiwa 1 on 04-30 → heisei 31).
+        for (japanese_eras) |e| if (asciiEqlIgnoreCase(era, e.name)) return e.off + era_year;
         return null;
     }
     return null;
@@ -22277,7 +22310,7 @@ fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
             // ISO 8601 (and other calendars whose era model isn't implemented) have
             // no eras: both accessors read undefined. The solar-Gregorian family
             // (gregory ce/bce, buddhist be, roc roc/broc) reports its era here.
-            const ce = calEraOf(t.calendar, t.year);
+            const ce = calEraOf(t.calendar, t.year, t.month, t.day);
             const era = ce.era orelse return .undefined;
             if (want_year) return .{ .number = @floatFromInt(ce.era_year) };
             return .{ .string = era };
