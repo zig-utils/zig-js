@@ -16,7 +16,10 @@ const corpus_root = "reference/webkit-249/threads-tests";
 
 const allowlist = [_][]const u8{
     "api/condition-basic.js",
+    "api/condition-async-wait.js",
     "api/lock-basic.js",
+    "api/lock-async-hold.js",
+    "api/park-no-microtask-drain.js",
     "api/thread-basic.js",
     "api/thread-ctor-errors.js",
     "api/thread-exc.js",
@@ -25,10 +28,6 @@ const allowlist = [_][]const u8{
     "api/thread-lifecycle.js",
     "api/threadlocal-basic.js",
     // Off the list, with reasons:
-    //   api/lock-async-hold.js — hangs (under investigation).
-    //   api/condition-async-wait.js — throws undefined (under investigation).
-    //   api/park-no-microtask-drain.js — the joinee's 4.6.1 completion drain
-    //     must run reactions queued onto it cross-thread.
     //   api/thread-id-bounds.js — id-space exhaustion semantics.
     //   api/condition-wait-termination.js — VM-wide termination machinery.
     "atomics/property-cas-samevaluezero.js",

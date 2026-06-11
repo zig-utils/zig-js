@@ -261,7 +261,16 @@ pub const Context = struct {
             var i: usize = 0;
             while (i < self.js_threads.items.len) : (i += 1) {
                 const rec = self.js_threads.items[i];
-                while (!rec.done) g.wait(&rec.done_cond);
+                while (!rec.done) {
+                    // Parked keepalive still serves run-loop tasks: a waiting
+                    // thread may need a grant delivery pumped to finish.
+                    jsthread.pumpTasks(&machine);
+                    if (rec.done) break;
+                    g.waitTimeout(&rec.done_cond, .{ .duration = .{
+                        .raw = .fromMilliseconds(5),
+                        .clock = .awake,
+                    } }) catch {};
+                }
             }
             machine.drainMicrotasks() catch {};
             machine.settleAsyncWaiters();

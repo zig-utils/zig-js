@@ -3085,7 +3085,10 @@ pub const Interpreter = struct {
     /// abandoned pending, the host's prerogative). Called after the main
     /// microtask drain in Context.evaluate/evaluateModule and agent realms.
     pub fn settleAsyncWaiters(self: *Interpreter) void {
-        if (self.gil != null) jsthread.pollPropAsync(self);
+        if (self.gil != null) {
+            jsthread.pumpTasks(self);
+            jsthread.pollPropAsync(self);
+        }
         const listp = self.async_waiters orelse return;
         if (listp.items.len == 0) return;
         const owner: *const anyopaque = @ptrCast(listp);
@@ -3213,6 +3216,7 @@ pub const Interpreter = struct {
                 // settle hangs the awaiting thread, as in any real engine;
                 // the host watchdog is the backstop.
                 if (self.gil) |g| {
+                    jsthread.pumpTasks(self);
                     jsthread.pollPropAsync(self); // expire property waitAsync deadlines
                     g.release();
                     std.Thread.yield() catch {};

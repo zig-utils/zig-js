@@ -174,9 +174,9 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer g.release();
     t_current = rec;
     // A per-thread interpreter over the SHARED realm: same arena, environment,
-    // global object, and shapes (safe under the GIL) — but its own microtask
-    // queue and async-waiter list, per the PR-249 rule that each thread
-    // drains its own jobs before its join settles.
+    // global object, and shapes (safe under the GIL), with its own job queues.
+    // join() performs the joiner's completion checkpoint before observing the
+    // result, which is the only cross-thread microtask drain point.
     var microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty;
     var async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty;
     var machine = rec.ctx.interpreter();
@@ -184,6 +184,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     machine.async_waiters = &async_waiters;
     if (machine.callValueWithThis(fn_v, args, .undefined)) |out| {
         machine.drainMicrotasks() catch {};
+        pumpTasks(&machine);
         machine.settleAsyncWaiters();
         rec.result = out;
     } else |_| {
@@ -219,7 +220,8 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     // always allowed.
     if (!rec.done and !agent.main_can_block)
         return self.throwError("TypeError", "Thread.prototype.join cannot block the current thread");
-    while (!rec.done) rec.gil.wait(&rec.done_cond);
+    while (!rec.done) parkPump(self, rec.gil, &rec.done_cond);
+    self.drainMicrotasks() catch {};
     if (rec.threw) {
         self.exception = rec.result;
         return error.Throw;
@@ -259,6 +261,22 @@ const LockRecord = struct {
     cond: std.Io.Condition = .init,
     /// Queued asyncHold jobs, granted FIFO at release time.
     pending: std.ArrayListUnmanaged(*HoldJob) = .empty,
+    /// An async grant exists but its job hasn't run yet (D6: a
+    /// granted-but-UNDELIVERED hold is NOT "held" — consuming it would
+    /// unlock the lock under the not-yet-run fn).
+    grant_pending: bool = false,
+    /// A delivered no-fn grant's live release() state (4.3(b): asyncWait may
+    /// consume it, poisoning the release function).
+    active_release: ?*ReleaseState = null,
+    /// Thread currently running a delivered asyncHold(fn) grant. It is allowed
+    /// to consume the grant via cond.asyncWait(lock), but it is not a sync
+    /// lock owner for cond.wait(lock).
+    async_runner: u64 = 0,
+    /// Threads currently parked acquiring this lock (hold contention or a
+    /// Condition.wait reacquire). Release serves them before queued async
+    /// jobs — a parked thread arrived first, and an async grant handed to a
+    /// parker's own undrained queue would deadlock its join.
+    sync_waiting: usize = 0,
 };
 
 const CondRecord = struct {
@@ -379,12 +397,14 @@ fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.hold called on incompatible receiver");
     const cb = if (args.len > 0) args[0] else Value.undefined;
     if (!cb.isCallable()) return self.throwError("TypeError", "Lock.prototype.hold requires a callable argument");
-    if (rec.locked and rec.holder == currentTid())
+    if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid()))
         return self.throwError("Error", "Lock is not recursive");
     // tryLock-first: only a CONTENDED hold blocks, so only it gates.
     if (rec.locked and !agent.main_can_block)
         return self.throwError("TypeError", "Lock.prototype.hold cannot block the current thread");
-    while (rec.locked) rec.gil.wait(&rec.cond);
+    rec.sync_waiting += 1;
+    while (rec.locked) parkPump(self, rec.gil, &rec.cond);
+    rec.sync_waiting -= 1;
     rec.locked = true;
     rec.holder = currentTid();
     const out = self.callValueWithThis(cb, &.{}, .undefined);
@@ -407,17 +427,20 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     const rec = recOf(CondRecord, this) orelse return self.throwError("TypeError", "Condition.prototype.wait called on incompatible receiver");
     const lock = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
         return self.throwError("TypeError", "Condition.prototype.wait requires a Lock argument");
-    if (!lock.locked) return self.throwError("TypeError", "Condition.prototype.wait requires the lock to be held by the caller");
+    if (!lock.locked or lock.holder != currentTid())
+        return self.throwError("TypeError", "Condition.prototype.wait requires the lock to be held by the caller");
     if (!agent.main_can_block)
         return self.throwError("TypeError", "Condition.prototype.wait cannot block the current thread");
     // Atomic under the GIL: nothing else runs between the release below and
     // our park inside gil.wait (which registers before unlocking).
     lockRelease(self, lock);
     rec.waiting += 1;
-    rec.gil.wait(&rec.cond);
+    while (rec.signalled == 0) parkPump(self, rec.gil, &rec.cond);
     rec.waiting -= 1;
-    if (rec.signalled > 0) rec.signalled -= 1;
-    while (lock.locked) rec.gil.wait(&lock.cond);
+    rec.signalled -= 1;
+    lock.sync_waiting += 1;
+    while (lock.locked) parkPump(self, rec.gil, &lock.cond);
+    lock.sync_waiting -= 1;
     lock.locked = true;
     lock.holder = currentTid();
     return .undefined;
@@ -438,13 +461,16 @@ fn condNotifyFn(comptime all: bool) value.NativeFn {
                     wakeAsyncCondWaiter(self, rec.async_waiting.orderedRemove(0));
                     n += 1;
                 }
-                // The corpus's scheduling contract (notify-all-shared-lock):
-                // notifyAll performs an unconditional depth-free GIL handoff,
-                // so every woken waiter runs before the notifier proceeds —
-                // a notifier spinning on the waiters' progress otherwise
-                // starves them until its next contended checkpoint.
-                if (n > 0) {
-                    if (self.gil) |g| {
+                // The corpus's scheduling contracts: notifyAll performs an
+                // unconditional depth-free GIL handoff (notify-all-shared-
+                // lock), and FIFO between woken sync waiters and async
+                // waiters (condition-async-wait) requires every issued wake
+                // to be CONSUMED before the notifier proceeds — a woken
+                // waiter re-registers on the lock within a single GIL hold,
+                // so once `signalled` drains, the sync waiters are queued
+                // ahead of any async regrant.
+                if (self.gil) |g| {
+                    while (rec.signalled > 0) {
                         g.release();
                         std.Thread.yield() catch {};
                         g.acquire();
@@ -697,10 +723,6 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
     const o = args[0].object;
     const key_tmp = try self.keyOf(argAt(args, 1));
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
-    const timeout: std.Io.Timeout = if (timeout_ns) |ns| (std.Io.Timeout{ .duration = .{
-        .raw = .fromNanoseconds(ns),
-        .clock = .awake,
-    } }).toDeadline(agent.engineIo()) else .none;
     if (!sameValueZero(cur, argAt(args, 2))) return .{ .string = "not-equal" };
     if (timeout_ns != null and timeout_ns.? == 0) return .{ .string = "timed-out" };
     if (!agent.main_can_block)
@@ -715,10 +737,23 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
         }
     };
     const g = self.gil.?;
+    const deadline_ns: ?i96 = if (timeout_ns) |ns|
+        std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + ns
+    else
+        null;
     while (!ticket.woken) {
-        g.waitTimeout(&ticket.cond, timeout) catch {
-            return .{ .string = if (ticket.woken) "ok" else "timed-out" };
-        };
+        pumpTasks(self);
+        if (ticket.woken) break;
+        var tick_ns: u64 = 5 * std.time.ns_per_ms;
+        if (deadline_ns) |d| {
+            const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+            if (d <= now) return .{ .string = "timed-out" };
+            tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
+        }
+        g.waitTimeout(&ticket.cond, .{ .duration = .{
+            .raw = .fromNanoseconds(tick_ns),
+            .clock = .awake,
+        } }) catch {};
     }
     return .{ .string = "ok" };
 }
@@ -817,8 +852,6 @@ const HoldJob = struct {
     outer: *value.Object,
     /// User fn (with-fn arity), or null = resolve with a release() function.
     cb: ?Value,
-    /// For asyncWait: settle with undefined while KEEPING the lock held.
-    keep_held: bool = false,
 };
 
 const ReleaseState = struct { lock: *LockRecord, used: bool = false };
@@ -832,9 +865,17 @@ const async_holder: u64 = std.math.maxInt(u64);
 /// (granted on this, the releasing thread), else open it and wake a parked
 /// hold.
 fn lockRelease(self: *Interpreter, rec: *LockRecord) void {
+    if (rec.sync_waiting > 0) {
+        rec.locked = false;
+        rec.holder = 0;
+        rec.cond.signal(agent.engineIo());
+        return;
+    }
     if (rec.pending.items.len > 0) {
         const job = rec.pending.orderedRemove(0);
-        rec.holder = async_holder; // granted to the job, not to a thread
+        rec.locked = false;
+        rec.holder = 0;
+        rec.grant_pending = false;
         enqueueHoldJob(self, job) catch {};
         return;
     }
@@ -843,46 +884,75 @@ fn lockRelease(self: *Interpreter, rec: *LockRecord) void {
     rec.cond.signal(agent.engineIo());
 }
 
-/// Push `job` onto the current thread's microtask queue via a reaction on a
-/// pre-resolved internal promise.
+/// Queue `job` on the realm's run-loop TASK queue (gil.tasks). Tasks are
+/// pumped at the drain tail and at every park — a grant delivery must make
+/// progress even while its granting thread is blocked (the corpus's
+/// waitUntil/sleepMs rendezvous depend on it).
 fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
-    const internal = try promise.newPromise(self);
-    const pp = promise.promiseOf(.{ .object = internal }).?;
-    const runner = try self.arena.create(value.Object);
-    runner.* = .{ .native = holdJobRunFn, .private_data = job };
-    try promise.resolve(self, pp, .undefined);
-    _ = try promise.then(self, pp, .{ .object = runner }, .undefined);
+    const g = self.gil orelse return;
+    try g.tasks.append(self.arena, @ptrCast(job));
 }
 
-fn holdJobRunFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
-    _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const native = self.active_native orelse return .undefined;
-    const job: *HoldJob = @ptrCast(@alignCast(native.private_data.?));
-    const outer_pp = promise.promiseOf(.{ .object = job.outer }).?;
-    if (job.keep_held) {
-        // asyncWait: resolves holding the lock again.
-        try promise.resolve(self, outer_pp, .undefined);
-        return .undefined;
+/// Pump the realm's run-loop tasks: run each pending grant delivery as its
+/// own turn (draining the pumping thread's microtasks after each). Called
+/// from the drain tail and from every parking point.
+pub fn pumpTasks(self: *Interpreter) void {
+    const g = self.gil orelse return;
+    while (g.tasks.items.len > 0) {
+        const raw = g.tasks.orderedRemove(0);
+        const job: *HoldJob = @ptrCast(@alignCast(raw));
+        runHoldJob(self, job) catch {};
+        self.drainMicrotasks() catch {};
     }
+}
+
+/// Pump-then-park tick: serve pending run-loop tasks, then wait on `cond`
+/// briefly (tasks have no dedicated wakeup; parked pumpers poll).
+fn parkPump(self: *Interpreter, g: *gil_mod.Gil, cond: *std.Io.Condition) void {
+    pumpTasks(self);
+    g.waitTimeout(cond, .{ .duration = .{
+        .raw = .fromMilliseconds(5),
+        .clock = .awake,
+    } }) catch {};
+}
+
+fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
+    const outer_pp = promise.promiseOf(.{ .object = job.outer }).?;
+    if (!job.lock.locked) {
+        job.lock.locked = true;
+        job.lock.holder = async_holder;
+    } else if (!job.lock.grant_pending or job.lock.holder != async_holder) {
+        try job.lock.pending.insert(self.arena, 0, job);
+        return;
+    }
+    // The grant is now DELIVERED.
+    job.lock.grant_pending = false;
     if (job.cb) |cb| {
+        // A live with-fn grant is async-held by the thread running fn (D12):
+        // cond.asyncWait may consume it, but sync cond.wait still requires a
+        // genuine sync hold.
+        job.lock.async_runner = currentTid();
         const out = self.callValueWithThis(cb, &.{}, .undefined);
-        lockRelease(self, job.lock); // implicit release, throw or not
+        // fn may itself have consumed the hold (same-thread asyncWait, I23);
+        // only release when this grant still owns the lock.
+        if (job.lock.locked and job.lock.async_runner == currentTid()) {
+            job.lock.async_runner = 0;
+            lockRelease(self, job.lock); // implicit release, throw or not
+        }
         if (out) |v| {
             try promise.resolve(self, outer_pp, v);
         } else |_| {
             try promise.reject(self, outer_pp, self.exception);
         }
-        return .undefined;
+        return;
     }
     // no-fn arity: resolve with a once-only release() function.
     const st = try self.arena.create(ReleaseState);
     st.* = .{ .lock = job.lock };
+    job.lock.active_release = st;
     const rel = try self.arena.create(value.Object);
     rel.* = .{ .native = releaseFnNative, .private_data = st };
     try promise.resolve(self, outer_pp, .{ .object = rel });
-    return .undefined;
 }
 
 fn releaseFnNative(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -893,6 +963,7 @@ fn releaseFnNative(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     const st: *ReleaseState = @ptrCast(@alignCast(native.private_data.?));
     if (st.used) return self.throwError("Error", "Lock release function called more than once");
     st.used = true;
+    if (st.lock.active_release == st) st.lock.active_release = null;
     lockRelease(self, st.lock);
     return .undefined;
 }
@@ -910,6 +981,7 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     if (!rec.locked) {
         rec.locked = true; // the grant happens at registration (5.5a)
         rec.holder = async_holder;
+        rec.grant_pending = true;
         try enqueueHoldJob(self, job);
     } else {
         try rec.pending.append(self.arena, job);
@@ -926,7 +998,19 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     const rec = recOf(CondRecord, this) orelse return self.throwError("TypeError", "Condition.prototype.asyncWait called on incompatible receiver");
     const lock = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
         return self.throwError("TypeError", "Condition.prototype.asyncWait requires a Lock argument");
-    if (!lock.locked) return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
+    // 4.3(b) hold-state rules: an UNDELIVERED grant is not held; a delivered
+    // no-fn grant is consumable from anywhere (poisoning its release()); a
+    // delivered with-fn grant or sync hold is held only for its own thread.
+    if (!lock.locked or lock.grant_pending)
+        return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
+    if (lock.active_release) |st| {
+        st.used = true; // consume: the original release() now throws
+        lock.active_release = null;
+    } else if (lock.async_runner == currentTid()) {
+        lock.async_runner = 0;
+    } else if (lock.holder != currentTid()) {
+        return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
+    }
     const outer = try promise.newPromise(self);
     const w = try self.arena.create(AsyncCondWaiter);
     w.* = .{ .lock = lock, .outer = outer };
@@ -943,7 +1027,8 @@ fn wakeAsyncCondWaiter(self: *Interpreter, w: *AsyncCondWaiter) void {
     job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null };
     if (!w.lock.locked) {
         w.lock.locked = true;
-        w.lock.holder = currentTid();
+        w.lock.holder = async_holder;
+        w.lock.grant_pending = true;
         enqueueHoldJob(self, job) catch {};
     } else {
         w.lock.pending.append(self.arena, job) catch {};

@@ -20,6 +20,12 @@ pub const Gil = struct {
     /// Threads currently blocked in `acquire` — the step checkpoints' cheap
     /// "should I yield" signal.
     contenders: std.atomic.Value(u32) = .init(0),
+    /// The realm's run-loop TASK queue (engine tasks: lock-grant deliveries),
+    /// distinct from per-thread microtask queues. Parks pump it (a parked
+    /// thread's run loop still serves tasks; each pumped task drains
+    /// microtasks as its own turn) — the semantics the threads corpus pins.
+    /// Entries are type-erased `*jsthread.HoldJob` (owned by their arena).
+    tasks: std.ArrayListUnmanaged(*anyopaque) = .empty,
 
     fn currentId() u64 {
         return @intCast(std.Thread.getCurrentId());
