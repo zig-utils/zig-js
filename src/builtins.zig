@@ -2527,7 +2527,7 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
     const val = try self.getProperty(holder, key);
     if (val == .object and !val.object.isCallableObject()) {
         const o = val.object;
-        if (o.is_array) {
+        if (try interpreter.objectToStringIsArray(self, o)) {
             var i: usize = 0;
             // LengthOfArrayLike: Get(val, "length") — observable, and propagates a
             // throw if the reviver replaced `length` with a throwing accessor.
