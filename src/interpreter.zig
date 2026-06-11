@@ -9019,8 +9019,8 @@ pub const Interpreter = struct {
             .add => blk: {
                 // String concatenation if either operand is a string.
                 if (l == .string or r == .string) {
-                    const ls = try l.toString(self.arena);
-                    const rs = try r.toString(self.arena);
+                    const ls = try self.toStringV(l);
+                    const rs = try self.toStringV(r);
                     break :blk .{ .string = try std.mem.concat(self.arena, u8, &.{ ls, rs }) };
                 }
                 break :blk .{ .number = l.toNumber() + r.toNumber() };

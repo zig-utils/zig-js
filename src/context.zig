@@ -2282,6 +2282,12 @@ test "Symbol() and Symbol.for() ToString their argument" {
     try std.testing.expectError(error.Throw, evalIn("Symbol.for({ toString() { throw new TypeError('x'); } })"));
 }
 
+test "string concatenation rejects Symbols through ToString" {
+    try std.testing.expectError(error.Throw, evalIn("'x' + Symbol.iterator"));
+    try std.testing.expectError(error.Throw, evalIn("Symbol.iterator + 'x'"));
+    try expectEvalStr("x1", "'x' + 1n");
+}
+
 test "Reflect: prototype, toStringTag, array-like argumentsList" {
     try std.testing.expect((try evalIn("Object.getPrototypeOf(Reflect) === Object.prototype")).boolean);
     try expectEvalStr("Reflect", "Reflect[Symbol.toStringTag]");
