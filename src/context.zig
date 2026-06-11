@@ -3322,6 +3322,20 @@ test "TypedArray default sort orders negative zero before positive zero" {
     )).boolean);
 }
 
+test "TypedArray sort skips writeback when comparator shrinks fixed view out of bounds" {
+    try std.testing.expect((try evalIn(
+        \\var rab = new ArrayBuffer(4, { maxByteLength: 8 });
+        \\var fixed = new Uint8Array(rab, 0, 4);
+        \\var full = new Uint8Array(rab);
+        \\full.set([10, 9, 8, 7]);
+        \\fixed.sort(function(a, b) {
+        \\  rab.resize(2);
+        \\  return a - b;
+        \\});
+        \\full.length === 2 && full[0] === 10 && full[1] === 9;
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

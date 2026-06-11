@@ -13398,7 +13398,8 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             for (buf, 0..) |v, k| try self.taStore(result.typed_array.?, k, v);
             return .{ .object = result };
         }
-        for (buf, 0..) |v, k| try self.taStore(ta, k, v);
+        const live_len = ta.currentLength() orelse return recv;
+        for (buf[0..@min(buf.len, live_len)], 0..) |v, k| try self.taStore(ta, k, v);
         return recv;
     }
     if (eq(name, "set")) {
