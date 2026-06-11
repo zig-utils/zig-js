@@ -438,6 +438,18 @@ fn condNotifyFn(comptime all: bool) value.NativeFn {
                     wakeAsyncCondWaiter(self, rec.async_waiting.orderedRemove(0));
                     n += 1;
                 }
+                // The corpus's scheduling contract (notify-all-shared-lock):
+                // notifyAll performs an unconditional depth-free GIL handoff,
+                // so every woken waiter runs before the notifier proceeds —
+                // a notifier spinning on the waiters' progress otherwise
+                // starves them until its next contended checkpoint.
+                if (n > 0) {
+                    if (self.gil) |g| {
+                        g.release();
+                        std.Thread.yield() catch {};
+                        g.acquire();
+                    }
+                }
                 return .{ .number = @floatFromInt(n) };
             }
             if (wakeable > 0) {

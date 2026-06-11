@@ -31,8 +31,6 @@ const allowlist = [_][]const u8{
     //     and this runner sets the flag for blocking-gate.js when it joins.
     //   api/thread-id-bounds.js — id-space exhaustion semantics.
     //   api/condition-wait-termination.js — VM-wide termination machinery.
-    //   sync/condition-notify-all-shared-lock.js — exceeds the step budget
-    //     (under investigation).
     "atomics/property-cas-samevaluezero.js",
     "atomics/property-errors.js",
     "atomics/property-load-store.js",
@@ -41,6 +39,7 @@ const allowlist = [_][]const u8{
     "sync/atomics-futex-lock.js",
     "sync/atomics-object-basic.js",
     "sync/condition-notify-all-multi-waiter.js",
+    "sync/condition-notify-all-shared-lock.js",
     "sync/condition-notify-all.js",
     "sync/condition-wait-notify.js",
     "sync/condition-worker-waiter.js",
