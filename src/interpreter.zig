@@ -20265,6 +20265,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // not brand-checked: ToObject(this), ToPrimitive(number); a non-finite value
     // returns null, otherwise Invoke(O, "toISOString").
     try setNative(a, root_shape, date_proto, "toJSON", 1, dateToJSONFn);
+    try setNative(a, root_shape, date_proto, "toTemporalInstant", 0, dateToTemporalInstantFn);
     // Date.prototype[Symbol.toPrimitive] — non-enumerable, non-writable,
     // configurable; OrdinaryToPrimitive with a validated hint.
     if (env.get("Symbol")) |sym| if (sym == .object) {
@@ -20768,6 +20769,18 @@ fn dateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const iso = try self.getProperty(.{ .object = o }, "toISOString");
     if (!iso.isCallable()) return self.throwError("TypeError", "toISOString is not callable");
     return self.callValueWithThis(iso, &.{}, .{ .object = o });
+}
+
+fn dateToTemporalInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or !this.object.is_date)
+        return self.throwError("TypeError", "Date.prototype.toTemporalInstant called on a non-Date");
+    const ms = this.object.date_ms;
+    if (!std.math.isFinite(ms)) return self.throwError("RangeError", "invalid Date");
+    const o = try makeTemporal(self, .instant, "\x00T.Instant");
+    o.temporal.?.epoch_ns = @as(i128, @intFromFloat(ms)) * 1_000_000;
+    return .{ .object = o };
 }
 
 /// A `Set.prototype` method that brand-checks `this` then dispatches to
