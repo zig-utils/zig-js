@@ -6278,6 +6278,19 @@ pub const Interpreter = struct {
         return @min(std.math.maxInt(usize) / size, max_typed_array_bytes / size);
     }
 
+    fn initTypedArrayProto(self: *Interpreter, o: *value.Object, kind: value.TAKind) EvalError!void {
+        // GetPrototypeFromConstructor(newTarget, %TAPrototype%): newTarget.prototype
+        // (a getter runs and may throw), or — when that is not an Object — the
+        // *newTarget's realm's* typed-array prototype for this kind.
+        if (self.new_target == .object) {
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, kind.ctorName());
+        } else if (self.env.get(kind.ctorName())) |c| {
+            if (c == .object) {
+                o.proto = try self.protoObject(c.object);
+            }
+        }
+    }
+
     /// Construct a typed array of `kind` from the constructor arguments: a
     /// length, an `(buffer, byteOffset?, length?)` view, or a copy of a typed
     /// array / array-like / iterable.
@@ -6285,14 +6298,6 @@ pub const Interpreter = struct {
         const size = kind.byteSize();
         const a0 = if (args.len > 0) args[0] else Value.undefined;
         const o = (try self.newObject()).object;
-        // GetPrototypeFromConstructor(newTarget, %TAPrototype%): newTarget.prototype
-        // (a getter runs and may throw), or — when that is not an Object — the
-        // *newTarget's realm's* typed-array prototype for this kind.
-        if (self.new_target == .object) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, kind.ctorName());
-        } else if (self.env.get(kind.ctorName())) |c| {
-            if (c == .object) o.proto = try self.protoObject(c.object);
-        }
         const ta = try self.arena.create(value.TypedArrayData);
         o.typed_array = ta;
 
@@ -6323,6 +6328,7 @@ pub const Interpreter = struct {
                 length = (buflen - byte_offset) / size;
             }
             if (byte_offset + length * size > buflen) return self.throwError("RangeError", "invalid typed array length");
+            try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind, .track_length = track };
             return .{ .object = o };
         }
@@ -6331,7 +6337,8 @@ pub const Interpreter = struct {
             // BigInt and a non-BigInt element type can't be mixed.
             const src = a0.object.typed_array.?;
             if (src.kind.isBigInt() != kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when constructing a TypedArray");
-            const length = src.length;
+            const length = src.currentLength() orelse return self.throwError("TypeError", "Cannot construct from an out-of-bounds TypedArray");
+            try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
             var i: usize = 0;
             while (i < length) : (i += 1) {
@@ -6354,6 +6361,7 @@ pub const Interpreter = struct {
                 break :blk try self.arrayLikeToListLen(a0, len);
             };
             if (list.len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
+            try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(list.len * size), .byte_offset = 0, .length = list.len, .kind = kind };
             var i: usize = 0;
             while (i < list.len) : (i += 1) try self.taStore(ta, i, list[i]);
@@ -6364,6 +6372,7 @@ pub const Interpreter = struct {
         const len_idx = try toIndexArg(self, a0);
         if (len_idx > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
         const length: usize = @intCast(len_idx);
+        try self.initTypedArrayProto(o, kind);
         ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
         return .{ .object = o };
     }

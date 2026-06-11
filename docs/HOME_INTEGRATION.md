@@ -98,7 +98,7 @@ tests):
 
 ## Measuring
 
-- zig-js standalone: `tc39/test262` score (today **42,404 / 47,930 = 88.5%**).
+- zig-js standalone: `tc39/test262` score (today **42,406 / 47,930 = 88.5%**).
 - Home integration: the full-VM corpus pass/fail/crash/hang counts from
   `~/Code/Home/lang/scripts/vm-corpus-scan.sh`, compared JSC-vs-zig-js per
   subsystem. Cut over only at parity-or-better.

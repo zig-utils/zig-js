@@ -3241,6 +3241,32 @@ test "TypedArray Reflect.set honors ordinary receiver failures" {
     )).boolean);
 }
 
+test "TypedArray constructor processes arguments before prototype allocation" {
+    try std.testing.expect((try evalIn(
+        \\function Marker() {}
+        \\var newTarget = function() {}.bind(null);
+        \\Object.defineProperty(newTarget, "prototype", {
+        \\  get() { throw new Marker(); }
+        \\});
+        \\try {
+        \\  Reflect.construct(Uint8Array, [Symbol()], newTarget);
+        \\} catch (e) {
+        \\  e instanceof TypeError;
+        \\}
+    )).boolean);
+}
+
+test "TypedArray constructor copies live source typed array length" {
+    try std.testing.expect((try evalIn(
+        \\var rab = new ArrayBuffer(16, { maxByteLength: 32 });
+        \\var source = new Uint8Array(rab, 4);
+        \\new Uint8Array(rab).set([1, 2, 3, 4, 5, 6]);
+        \\rab.resize(8);
+        \\var copy = new Uint8Array(source);
+        \\copy.length === 4 && copy[0] === 5 && copy[1] === 6 && copy[2] === 0 && copy[3] === 0;
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
