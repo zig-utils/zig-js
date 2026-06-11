@@ -2589,6 +2589,15 @@ test "property descriptors: defineProperty attrs + getOwnPropertyDescriptor" {
     )).boolean);
 }
 
+test "Object.getOwnPropertySymbols rejects nullish inputs" {
+    try std.testing.expect((try evalIn(
+        \\var count = 0;
+        \\try { Object.getOwnPropertySymbols(undefined); } catch (e) { count += e instanceof TypeError ? 1 : 0; }
+        \\try { Object.getOwnPropertySymbols(null); } catch (e) { count += e instanceof TypeError ? 1 : 0; }
+        \\count === 2 && Object.getOwnPropertySymbols(1).length === 0
+    )).boolean);
+}
+
 test "Object.freeze / seal / preventExtensions" {
     // freeze: writes ignored, not extensible, isFrozen true.
     try std.testing.expect((try evalIn(

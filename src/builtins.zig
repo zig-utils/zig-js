@@ -1827,14 +1827,12 @@ pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, this: Value, args: []const V
     _ = this;
     const self = interp(ctx);
     const result = try self.newArray();
-    if (arg(args, 0) == .object) {
-        const o = arg(args, 0).object;
-        // [[OwnPropertyKeys]] (proxy-aware: the ownKeys trap + its invariants run
-        // here and may throw), then keep only the symbol keys.
-        for (try self.objectOwnKeysList(o)) |k| {
-            if (value.isRealSymbolKey(k))
-                try result.object.elements.append(self.arena, self.keyToValue(k));
-        }
+    const o = try self.toObject(arg(args, 0));
+    // [[OwnPropertyKeys]] (proxy-aware: the ownKeys trap + its invariants run
+    // here and may throw), then keep only the symbol keys.
+    for (try self.objectOwnKeysList(o)) |k| {
+        if (value.isRealSymbolKey(k))
+            try result.object.elements.append(self.arena, self.keyToValue(k));
     }
     return result;
 }
