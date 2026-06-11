@@ -2042,6 +2042,16 @@ pub const Interpreter = struct {
         return null;
     }
 
+    pub fn jsFunctionHasOwnPrototypeSlot(o: *value.Object) bool {
+        const erased = o.js_func orelse return false;
+        const f: *Function = @ptrCast(@alignCast(erased));
+        // Ordinary functions expose a constructor `.prototype`; generator and
+        // async-generator functions expose one for the yielded iterator
+        // prototype. Arrows, concise methods/accessors, and plain async
+        // functions do not have an own `prototype` property.
+        return !f.is_method and !f.is_arrow and (!f.is_async or f.is_generator);
+    }
+
     /// `Function.prototype.toString`. A user function returns its exact captured
     /// source; a native, bound, or not-yet-captured function returns the spec's
     /// NativeFunction syntax `function NAME() { [native code] }`.
@@ -26614,6 +26624,15 @@ test "interpreter getters and setters" {
         \\o.v = 21;
         \\o.v
     )).number);
+    try std.testing.expect((try evalSource(a,
+        \\let getter = Object.getOwnPropertyDescriptor({ get f() {} }, "f").get;
+        \\let method = ({ m() {} }).m;
+        \\let getterBefore = Object.prototype.hasOwnProperty.call(getter, "prototype");
+        \\let methodBefore = Object.prototype.hasOwnProperty.call(method, "prototype");
+        \\Object.defineProperty(getter, "prototype", { get() { return 1; }, configurable: true });
+        \\Object.defineProperty(method, "prototype", { value: 2, configurable: true });
+        \\getterBefore === false && methodBefore === false && getter.prototype === 1 && method.prototype === 2
+    )).boolean);
     // class getter via prototype
     try std.testing.expectEqual(@as(f64, 25), (try evalSource(a,
         \\class Sq { constructor(n) { this.n = n; } get area() { return this.n * this.n; } }

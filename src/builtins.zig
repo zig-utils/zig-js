@@ -1479,7 +1479,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             }
         }
     }
-    if (std.mem.eql(u8, key, "prototype") and target.js_func != null and target.getOwn("prototype") == null and target.getAccessor("prototype") == null)
+    if (std.mem.eql(u8, key, "prototype") and Interpreter.jsFunctionHasOwnPrototypeSlot(target) and target.getOwn("prototype") == null and target.getAccessor("prototype") == null)
         _ = try self.getProperty(.{ .object = target }, key);
     // A dense array element lives in the element store (not `slots`/`accessors`),
     // so [[GetOwnProperty]] must surface it here too: redefining one — reaching
