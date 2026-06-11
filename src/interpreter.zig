@@ -19864,6 +19864,11 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try function_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, func_proto, function_ns);
     try env.put("Function", .{ .object = function_ns });
+    inline for (.{ "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "String", "Number", "Object", "Array" }) |name| {
+        if (env.get(name)) |cv| {
+            if (cv == .object) cv.object.proto = func_proto;
+        }
+    }
 
     // Boolean.prototype (Boolean wrapper objects aren't modeled, but the prototype
     // and its `constructor`/`toString`/`valueOf` are still observable).
@@ -19960,7 +19965,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Symbol is callable and has [[Construct]] for IsConstructor probes, but
     // the constructor path throws inside symbolFn.
     const symbol_ns = try a.create(value.Object);
-    symbol_ns.* = .{ .native = symbolFn, .native_ctor = true };
+    symbol_ns.* = .{ .native = symbolFn, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, symbol_ns, "Symbol", 0);
     // Symbol.prototype: toString/valueOf/constructor, protoing to Object.prototype.
     const symbol_proto = try a.create(value.Object);
@@ -20088,7 +20093,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Proxy (constructor) + Proxy.revocable.
     const proxy_ns = try a.create(value.Object);
-    proxy_ns.* = .{ .native = proxyConstructorFn, .native_ctor = true };
+    proxy_ns.* = .{ .native = proxyConstructorFn, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, proxy_ns, "Proxy", 2);
     try setNative(a, root_shape, proxy_ns, "revocable", 2, proxyRevocableFn);
     try env.put("Proxy", .{ .object = proxy_ns });
@@ -20155,7 +20160,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Date — callable + constructable, with Date.now and a prototype.
     const date_ns = try a.create(value.Object);
-    date_ns.* = .{ .native = dateConstructor, .native_ctor = true };
+    date_ns.* = .{ .native = dateConstructor, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, date_ns, "Date", 7);
     try setNative(a, root_shape, date_ns, "now", 0, dateNow);
     try setNative(a, root_shape, date_ns, "UTC", 7, dateUTCFn);
@@ -20217,7 +20222,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             };
         };
         const bi_ns = try a.create(value.Object);
-        bi_ns.* = .{ .native = bigIntFn, .native_ctor = true };
+        bi_ns.* = .{ .native = bigIntFn, .native_ctor = true, .proto = func_proto };
         try installNativeProps(a, root_shape, bi_ns, "BigInt", 1);
         try setNative(a, root_shape, bi_ns, "asIntN", 2, bigIntAsIntNFn(true));
         try setNative(a, root_shape, bi_ns, "asUintN", 2, bigIntAsIntNFn(false));
