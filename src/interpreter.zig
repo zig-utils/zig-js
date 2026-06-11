@@ -3230,6 +3230,12 @@ pub const Interpreter = struct {
                     g.acquire();
                     continue;
                 }
+                if (self.async_waiters) |waiters| {
+                    if (waiters.items.len > 0) {
+                        self.settleAsyncWaiters();
+                        continue;
+                    }
+                }
                 break; // nothing left to settle it
             }
             const job = queue.orderedRemove(0);
@@ -9791,6 +9797,26 @@ fn printFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
     }
     try buf.append(self.arena, '\n');
     return .undefined;
+}
+
+/// Host timer used by test262's Atomics helper. This intentionally blocks the
+/// current agent for the delay, services finite waitAsync tickets, then queues
+/// the callback; the engine has no browser event loop yet.
+fn setTimeoutFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const cb = if (args.len > 0) args[0] else Value.undefined;
+    if (!cb.isCallable()) return .{ .number = 0 };
+    const ms = if (args.len > 1) try self.toNumberV(args[1]) else 0;
+    if (!std.math.isNan(ms) and ms > 0) agent.sleepMs(ms);
+    if (self.async_waiters) |waiters| {
+        if (waiters.items.len > 0) self.settleAsyncWaiters();
+    }
+    const tick = try promise.newPromise(self);
+    const pp: *promise.Promise = @ptrCast(@alignCast(tick.promise.?));
+    try promise.resolve(self, pp, .undefined);
+    _ = try promise.then(self, pp, cb, .undefined);
+    return .{ .number = 0 };
 }
 
 /// `Object.prototype.toString` → `"[object Tag]"`. The tag comes from the
@@ -19060,7 +19086,8 @@ fn host262AgentReceiveBroadcastFn(ctx: *anyopaque, this: Value, args: []const Va
     const cb = arg0(args);
     const storage = agent.parkUntilBroadcast() orelse return .undefined;
     const sab = try makeSharedArrayBufferWrapper(self, storage);
-    _ = try self.callValueWithThis(cb, &.{.{ .object = sab }}, .undefined);
+    const out = try self.callValueWithThis(cb, &.{.{ .object = sab }}, .undefined);
+    _ = try self.awaitValue(out);
     return .undefined;
 }
 
@@ -19544,6 +19571,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "decodeURIComponent", 1, builtins.decodeURIComponentFn);
     try defineGlobalFn(env, root_shape, "escape", 1, builtins.escapeFn);
     try defineGlobalFn(env, root_shape, "unescape", 1, builtins.unescapeFn);
+    try defineGlobalFn(env, root_shape, "setTimeout", 2, setTimeoutFn);
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
     try installRegExpProto(env, root_shape);
     if (env.get("RegExp")) |re| {
