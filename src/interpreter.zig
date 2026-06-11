@@ -13467,6 +13467,8 @@ fn typedArrayCreateLen(self: *Interpreter, constructor: Value, length: usize) Ev
         return self.throwError("TypeError", "TypedArrayCreate did not return a TypedArray");
     const cur = result.object.typed_array.?.currentLength();
     if (cur == null) return self.throwError("TypeError", "TypedArrayCreate returned a detached TypedArray");
+    if (result.object.typed_array.?.buffer.array_buffer.?.immutable)
+        return self.throwError("TypeError", "TypedArrayCreate returned a TypedArray backed by an immutable buffer");
     if (cur.? < length) return self.throwError("TypeError", "TypedArrayCreate returned a TypedArray smaller than requested");
     return result;
 }
@@ -13490,10 +13492,38 @@ fn typedArrayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const mapfn = if (args.len > 1) args[1] else Value.undefined;
     if (mapfn != .undefined and !mapfn.isCallable()) return self.throwError("TypeError", "%TypedArray%.from mapfn is not callable");
     const this_arg = if (args.len > 2) args[2] else Value.undefined;
-    const list = try self.iterableOrArrayLikeToList(source);
-    const result = try typedArrayCreateLen(self, this, list.len);
+
+    const using_iter = if (self.symbolIteratorKey()) |ik| try self.getProperty(source, ik) else Value.undefined;
+    if (using_iter != .undefined and using_iter != .null) {
+        if (!using_iter.isCallable()) return self.throwError("TypeError", "%TypedArray%.from source iterator is not callable");
+        const iterator = try self.callValueWithThis(using_iter, &.{}, source);
+        if (iterator != .object) return self.throwError("TypeError", "%TypedArray%.from iterator is not an object");
+        const next = try self.getProperty(iterator, "next");
+        if (!next.isCallable()) return self.throwError("TypeError", "%TypedArray%.from iterator next is not callable");
+        var list: std.ArrayListUnmanaged(Value) = .empty;
+        while (true) {
+            const r = try self.callValueWithThis(next, &.{}, iterator);
+            if (r != .object) return self.throwError("TypeError", "%TypedArray%.from iterator result is not an object");
+            if ((try self.getProperty(r, "done")).toBoolean()) break;
+            try list.append(self.arena, try self.getProperty(r, "value"));
+        }
+        const result = try typedArrayCreateLen(self, this, list.items.len);
+        const ta = result.object.typed_array.?;
+        for (list.items, 0..) |v, i| {
+            const mapped = if (mapfn.isCallable()) try self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg) else v;
+            try self.taStore(ta, i, mapped);
+        }
+        return result;
+    }
+
+    const len = toLen(try self.toNumberV(try self.getProperty(source, "length")));
+    const result = try typedArrayCreateLen(self, this, len);
     const ta = result.object.typed_array.?;
-    for (list, 0..) |v, i| {
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        var kb: [24]u8 = undefined;
+        const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+        const v = try self.getProperty(source, k);
         const mapped = if (mapfn.isCallable()) try self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg) else v;
         try self.taStore(ta, i, mapped);
     }

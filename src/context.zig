@@ -3181,6 +3181,43 @@ test "ArrayBuffer byteLength copied onto SharedArrayBuffer keeps brand check" {
     )).boolean);
 }
 
+test "TypedArray from/of reject immutable constructor result before writes" {
+    try std.testing.expect((try evalIn(
+        \\var calls = [];
+        \\function immutable(len) {
+        \\  calls.push("construct(" + len + ")");
+        \\  return new Uint8Array((new ArrayBuffer(len)).transferToImmutable());
+        \\}
+        \\var item = { valueOf() { calls.push("item.valueOf"); return 1; } };
+        \\try {
+        \\  Uint8Array.of.call(immutable, item);
+        \\} catch (e) {
+        \\  if (!(e instanceof TypeError)) throw e;
+        \\}
+        \\calls.join("|") === "construct(1)";
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var calls = [];
+        \\function immutable(len) {
+        \\  calls.push("construct(" + len + ")");
+        \\  return new Uint8Array((new ArrayBuffer(len)).transferToImmutable());
+        \\}
+        \\var source = {
+        \\  get length() { calls.push("length"); return 1; },
+        \\  get 0() { calls.push("get 0"); return 7; }
+        \\};
+        \\Object.defineProperty(source, Symbol.iterator, {
+        \\  get: function() { calls.push("iterator"); return undefined; }
+        \\});
+        \\try {
+        \\  Uint8Array.from.call(immutable, source);
+        \\} catch (e) {
+        \\  if (!(e instanceof TypeError)) throw e;
+        \\}
+        \\calls.join("|") === "iterator|length|construct(1)";
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
