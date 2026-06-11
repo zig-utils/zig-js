@@ -17,19 +17,18 @@ const corpus_root = "reference/webkit-249/threads-tests";
 const allowlist = [_][]const u8{
     "api/condition-basic.js",
     "api/condition-async-wait.js",
+    "api/condition-wait-termination.js",
     "api/lock-basic.js",
     "api/lock-async-hold.js",
     "api/park-no-microtask-drain.js",
     "api/thread-basic.js",
     "api/thread-ctor-errors.js",
     "api/thread-exc.js",
+    "api/thread-id-bounds.js",
     "api/thread-restrict.js",
     "api/blocking-gate.js",
     "api/thread-lifecycle.js",
     "api/threadlocal-basic.js",
-    // Off the list, with reasons:
-    //   api/thread-id-bounds.js — id-space exhaustion semantics.
-    //   api/condition-wait-termination.js — VM-wide termination machinery.
     "atomics/property-cas-samevaluezero.js",
     "atomics/property-errors.js",
     "atomics/property-load-store.js",
@@ -131,17 +130,43 @@ pub fn main(init: std.process.Init) !void {
         try buf.appendSlice(gpa, "\n");
         try buf.appendSlice(gpa, test_src);
 
-        // blocking-gate.js runs under the per-VM can-block-is-false config
-        // (their run-tests.sh appends the flag for exactly this file).
+        // Per-file configs, mirroring their run-tests.sh / //@ runDefault
+        // lines: blocking-gate runs can-block-is-false; thread-id-bounds runs
+        // --maxJSThreads=4; condition-wait-termination runs --watchdog=500
+        // with the termination throw as its PASSING outcome.
         js.agent.main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js");
         defer js.agent.main_can_block = true;
+        js.jsthread.max_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null;
+        defer js.jsthread.max_threads = null;
+        const expect_termination = std.mem.endsWith(u8, name, "condition-wait-termination.js");
         const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
             std.debug.print("  FAIL  {s} (context)\n", .{name});
             failed += 1;
             continue;
         };
         defer ctx.destroy();
+
+        // The 500ms watchdog: arms a stop flag the engine's park quanta and
+        // step checkpoints poll (the engine's termination request).
+        var stop = std.atomic.Value(bool).init(false);
+        var watchdog: ?std.Thread = null;
+        if (expect_termination) {
+            ctx.stop_flag = &stop;
+            const Dog = struct {
+                fn run(flag: *std.atomic.Value(bool)) void {
+                    std.Io.sleep(js.agent.engineIo(), .fromMilliseconds(500), .awake) catch {};
+                    flag.store(true, .monotonic);
+                }
+            };
+            watchdog = std.Thread.spawn(.{}, Dog.run, .{&stop}) catch null;
+        }
+        defer if (watchdog) |w| w.join();
         if (ctx.evaluate(buf.items)) |_| {
+            if (expect_termination) {
+                failed += 1;
+                std.debug.print("  FAIL  {s}: returned normally under termination\n", .{name});
+                continue;
+            }
             const balanced = ctx.evaluate("__asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undefined;
             if (balanced == .boolean and balanced.boolean) {
                 std.debug.print("  PASS  {s}\n", .{name});
@@ -150,6 +175,17 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("  FAIL  {s}: async completions not reached\n", .{name});
             }
         } else |_| {
+            if (expect_termination) {
+                // The watchdog-exception-ok contract: the termination throw IS
+                // the pass; the D9-violation paths print FAILURE first.
+                if (std.mem.indexOf(u8, ctx.print_buffer.items, "FAILURE") == null) {
+                    std.debug.print("  PASS  {s}\n", .{name});
+                } else {
+                    failed += 1;
+                    std.debug.print("  FAIL  {s}: D9 violated\n", .{name});
+                }
+                continue;
+            }
             failed += 1;
             // Stringifying the exception can run JS (Error.prototype.toString):
             // hold the GIL like any other entry into the realm.

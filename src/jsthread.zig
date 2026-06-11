@@ -129,7 +129,9 @@ fn threadProtoOf(ctx: *Context, ctor: *value.Object) !?*value.Object {
     return if (p == .object) p.object else null;
 }
 
-var next_thread_id = std.atomic.Value(u32).init(1);
+/// Host knob (runner: --maxJSThreads): cap on LIVE spawned threads;
+/// exceeding it is a RangeError at spawn.
+pub var max_threads: ?u32 = null;
 
 fn recordOf(self: *Interpreter, this: Value) ?*ThreadRecord {
     _ = self;
@@ -154,9 +156,23 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     if (!fn_v.isCallable())
         return self.throwError("TypeError", "Thread constructor requires a callable argument");
 
+    // Live cap and id-space checks come BEFORE the id is consumed — a
+    // refused spawn must not burn a TID or leak a live entry (I17).
+    if (max_threads) |cap| {
+        var live: u32 = 0;
+        for (ctx.js_threads.items) |r| {
+            if (!r.done) live += 1;
+        }
+        if (live >= cap)
+            return self.throwError("RangeError", "too many live Threads (or thread-ID space exhausted)");
+    }
+    if (g.next_thread_id > 0x7ffe)
+        return self.throwError("RangeError", "too many live Threads (or thread-ID space exhausted)");
+
     const a = ctx.arena();
     const rec = try a.create(ThreadRecord);
-    rec.* = .{ .id = next_thread_id.fetchAdd(1, .monotonic), .gil = g, .ctx = ctx };
+    rec.* = .{ .id = g.next_thread_id, .gil = g, .ctx = ctx };
+    g.next_thread_id += 1;
     rec.js_obj = makeWrapper(ctx, rec) catch return error.OutOfMemory;
     const call_args = try a.dupe(Value, if (args.len > 1) args[1..] else &.{});
     try ctx.js_threads.append(ctx.gpa, rec);
@@ -220,7 +236,7 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     // always allowed.
     if (!rec.done and !agent.main_can_block)
         return self.throwError("TypeError", "Thread.prototype.join cannot block the current thread");
-    while (!rec.done) parkPump(self, rec.gil, &rec.done_cond);
+    while (!rec.done) try parkPump(self, rec.gil, &rec.done_cond);
     self.drainMicrotasks() catch {};
     if (rec.threw) {
         self.exception = rec.result;
@@ -412,13 +428,18 @@ fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     // tryLock-first: only a CONTENDED hold blocks, so only it gates.
     if (rec.locked and !agent.main_can_block)
         return self.throwError("TypeError", "Lock.prototype.hold cannot block the current thread");
-    rec.sync_waiting += 1;
-    while (rec.locked) parkPump(self, rec.gil, &rec.cond);
-    rec.sync_waiting -= 1;
+    if (rec.locked) {
+        rec.sync_waiting += 1;
+        errdefer rec.sync_waiting -= 1;
+        while (rec.locked) try parkPump(self, rec.gil, &rec.cond);
+        rec.sync_waiting -= 1;
+    }
     rec.locked = true;
     rec.holder = currentTid();
     const out = self.callValueWithThis(cb, &.{}, .undefined);
-    lockRelease(self, rec);
+    // Epilogue guard: a termination thrown from a cond.wait inside cb left
+    // the lock unheld (D9) — releasing here would corrupt the lock state.
+    if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
     return out;
 }
 
@@ -450,13 +471,18 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     const ticket = try self.arena.create(SyncCondTicket);
     ticket.* = .{};
     try rec.queue.append(self.arena, .{ .sync = ticket });
-    while (!ticket.woken) parkPump(self, rec.gil, &rec.cond);
+    // A termination observed here propagates WITHOUT reacquiring the lock
+    // (the enclosing hold's epilogue guard skips its release — D9).
+    while (!ticket.woken) try parkPump(self, rec.gil, &rec.cond);
     // Re-register on the lock BEFORE acking the wake, so notifyAll's
     // consume-loop guarantees FIFO against async regrants.
-    lock.sync_waiting += 1;
-    ticket.consumed = true;
-    while (lock.locked) parkPump(self, rec.gil, &lock.cond);
-    lock.sync_waiting -= 1;
+    {
+        lock.sync_waiting += 1;
+        errdefer lock.sync_waiting -= 1;
+        ticket.consumed = true;
+        while (lock.locked) try parkPump(self, rec.gil, &lock.cond);
+        lock.sync_waiting -= 1;
+    }
     lock.locked = true;
     lock.holder = currentTid();
     return .undefined;
@@ -759,6 +785,8 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
         null;
     while (!ticket.woken) {
         pumpTasks(self);
+        if (self.stop_flag) |sf| if (sf.load(.monotonic))
+            return self.throwError("Error", "worker terminated");
         if (ticket.woken) break;
         var tick_ns: u64 = 5 * std.time.ns_per_ms;
         if (deadline_ns) |d| {
@@ -922,10 +950,13 @@ pub fn pumpTasks(self: *Interpreter) void {
     }
 }
 
-/// Pump-then-park tick: serve pending run-loop tasks, then wait on `cond`
-/// briefly (tasks have no dedicated wakeup; parked pumpers poll).
-fn parkPump(self: *Interpreter, g: *gil_mod.Gil, cond: *std.Io.Condition) void {
+/// Pump-then-park tick: serve pending run-loop tasks, poll the termination
+/// request (D9: parked waiters cannot be woken by traps, so every park
+/// quantum checks), then wait on `cond` briefly.
+fn parkPump(self: *Interpreter, g: *gil_mod.Gil, cond: *std.Io.Condition) value.HostError!void {
     pumpTasks(self);
+    if (self.stop_flag) |sf| if (sf.load(.monotonic))
+        return self.throwError("Error", "worker terminated");
     g.waitTimeout(cond, .{ .duration = .{
         .raw = .fromMilliseconds(5),
         .clock = .awake,

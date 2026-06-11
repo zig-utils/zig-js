@@ -35,6 +35,8 @@ pub const agent = @import("agent.zig");
 // Worker agents: one Context per OS thread, postMessage over the
 // structured-clone wire format, cooperative terminate.
 pub const Worker = @import("worker.zig").Worker;
+// Shared-realm Thread API internals (host knobs: max_threads live cap).
+pub const jsthread = @import("jsthread.zig");
 
 // Bytecode pipeline (tier-1 VM): compiler lowers the AST, vm executes it.
 pub const bytecode = @import("bytecode.zig");

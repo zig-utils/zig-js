@@ -26,6 +26,9 @@ pub const Gil = struct {
     /// microtasks as its own turn) — the semantics the threads corpus pins.
     /// Entries are type-erased `*jsthread.HoldJob` (owned by their arena).
     tasks: std.ArrayListUnmanaged(*anyopaque) = .empty,
+    /// Per-realm Thread-id allocator: ids in [1, 0x7ffe], monotonically
+    /// fresh (no reuse before a rebias lands), main = 0.
+    next_thread_id: u32 = 1,
 
     fn currentId() u64 {
         return @intCast(std.Thread.getCurrentId());
