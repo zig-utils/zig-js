@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const lex = @import("lexer.zig");
 const value = @import("value.zig");
 const bc = @import("bytecode.zig");
 const builtins = @import("builtins.zig");
@@ -598,13 +599,25 @@ pub const Interpreter = struct {
 
     /// An own data property of the global object, used as the fallback for a
     /// bare global reference (`this.x = 1` at top level → bare `x`).
+    fn currentGlobalObject(self: *Interpreter) ?*value.Object {
+        var env: ?*Environment = self.env;
+        while (env) |e| {
+            if (e.get("globalThis")) |gt| {
+                if (gt == .object) return gt.object;
+            }
+            if (e.parent == null) break;
+            env = e.parent;
+        }
+        return self.global_object;
+    }
+
     pub fn globalProp(self: *Interpreter, name: []const u8) ?Value {
-        const g = self.global_object orelse return null;
+        const g = self.currentGlobalObject() orelse return null;
         return g.getOwn(name);
     }
 
     fn globalBindingObject(self: *Interpreter, name: []const u8) ?*value.Object {
-        const g = self.global_object orelse return null;
+        const g = self.currentGlobalObject() orelse return null;
         var env: ?*Environment = self.env;
         while (env) |e| {
             if (e.vars.contains(name))
@@ -5259,7 +5272,9 @@ pub const Interpreter = struct {
                         if (f.is_generator) {
                             const tag = if (f.is_async) "\x00AsyncGenProto" else "\x00GenProto";
                             const proto = try self.arena.create(value.Object);
-                            proto.* = .{ .proto = if (self.env.get(tag)) |gp| (if (gp == .object) gp.object else null) else null };
+                            const gen_proto = (try self.functionRealmIntrinsicObject(o, tag)) orelse
+                                if (Interpreter.envIntrinsicObject(self.env, tag)) |gp| gp else null;
+                            proto.* = .{ .proto = gen_proto };
                             try o.setOwn(self.arena, self.root_shape, "prototype", .{ .object = proto });
                             try o.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
                             return .{ .object = proto };
@@ -5669,7 +5684,7 @@ pub const Interpreter = struct {
         if (self.env.get(name) == null) {
             if (self.strict and self.globalProp(name) == null)
                 return self.throwError("ReferenceError", name);
-            if (self.global_object) |g| return self.setMember(.{ .object = g }, name, v);
+            if (self.currentGlobalObject()) |g| return self.setMember(.{ .object = g }, name, v);
         }
         if (self.globalBindingObject(name)) |g| {
             try self.setMember(.{ .object = g }, name, v);
@@ -12696,6 +12711,15 @@ fn dynamicFunctionPrototypeKey(comptime kind: DynFnKind) []const u8 {
     };
 }
 
+fn dynamicGeneratorParamsContainYield(arena: std.mem.Allocator, source: []const u8) lex.LexError!bool {
+    var lx = lex.Lexer.init(arena, source);
+    while (true) {
+        const t = try lx.next();
+        if (t.kind == .eof) return false;
+        if (t.kind == .identifier and std.mem.eql(u8, t.text, "yield")) return true;
+    }
+}
+
 fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -12710,6 +12734,11 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                     try params.appendSlice(self.arena, try self.toStringV(args[i]));
                 }
                 body = try self.toStringV(args[args.len - 1]);
+            }
+            if (kind == .generator or kind == .async_generator) {
+                const has_yield = dynamicGeneratorParamsContainYield(self.arena, params.items) catch
+                    return self.throwError("SyntaxError", "Function: invalid parameters or body");
+                if (has_yield) return self.throwError("SyntaxError", "Function: invalid parameters or body");
             }
             const prefix = switch (kind) {
                 .generator => "function* anonymous",

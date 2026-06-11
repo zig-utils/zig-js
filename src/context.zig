@@ -2573,6 +2573,55 @@ test "dynamic AsyncFunction uses NewTarget realm prototype fallback" {
     )).boolean);
 }
 
+test "dynamic generator functions validate params and prototype realms" {
+    try std.testing.expect((try evalIn(
+        \\var GeneratorFunction = Object.getPrototypeOf(function*() {}).constructor;
+        \\var ok = false;
+        \\try { GeneratorFunction('x = yield', ''); } catch (e) { ok = e instanceof SyntaxError; }
+        \\ok
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var AsyncGeneratorFunction = Object.getPrototypeOf(async function*() {}).constructor;
+        \\var ok = false;
+        \\try { AsyncGeneratorFunction('x = yield', ''); } catch (e) { ok = e instanceof SyntaxError; }
+        \\ok
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var realmA = $262.createRealm().global;
+        \\realmA.calls = 0;
+        \\var realmB = $262.createRealm().global;
+        \\var GeneratorFunction = realmA.eval('(function* () {})').constructor;
+        \\var aGeneratorPrototype = Object.getPrototypeOf(realmA.eval('(function* () {})').prototype);
+        \\var bGeneratorFunction = realmB.eval('(function* () {})').constructor;
+        \\var newTarget = new realmB.Function();
+        \\newTarget.prototype = null;
+        \\var fn = Reflect.construct(GeneratorFunction, ['calls += 1;'], newTarget);
+        \\var gen = fn();
+        \\gen.next();
+        \\Object.getPrototypeOf(fn) === bGeneratorFunction.prototype &&
+        \\Object.getPrototypeOf(fn.prototype) === aGeneratorPrototype &&
+        \\gen instanceof realmA.Object &&
+        \\realmA.calls === 1
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var realmA = $262.createRealm().global;
+        \\realmA.calls = 0;
+        \\var realmB = $262.createRealm().global;
+        \\var AsyncGeneratorFunction = realmA.eval('(async function* () {})').constructor;
+        \\var aAsyncGeneratorPrototype = Object.getPrototypeOf(realmA.eval('(async function* () {})').prototype);
+        \\var bAsyncGeneratorFunction = realmB.eval('(async function* () {})').constructor;
+        \\var newTarget = new realmB.Function();
+        \\newTarget.prototype = null;
+        \\var fn = Reflect.construct(AsyncGeneratorFunction, ['calls += 1;'], newTarget);
+        \\var gen = fn();
+        \\gen.next();
+        \\Object.getPrototypeOf(fn) === bAsyncGeneratorFunction.prototype &&
+        \\Object.getPrototypeOf(fn.prototype) === aAsyncGeneratorPrototype &&
+        \\gen instanceof realmA.Object &&
+        \\realmA.calls === 1
+    )).boolean);
+}
+
 test "Iterator constructor uses NewTarget realm prototype fallback" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
