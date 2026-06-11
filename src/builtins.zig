@@ -1648,10 +1648,7 @@ pub fn objectSeal(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
     const self = interp(ctx);
     _ = this;
     const o = arg(args, 0);
-    if (o == .object) {
-        o.object.extensible = false;
-        try lockKeys(self, o.object, false);
-    }
+    if (o == .object) try setIntegrityLevel(ctx, self, o.object, false);
     return o;
 }
 
@@ -1659,11 +1656,34 @@ pub fn objectFreeze(ctx: *anyopaque, this: Value, args: []const Value) HostError
     const self = interp(ctx);
     _ = this;
     const o = arg(args, 0);
-    if (o == .object) {
-        o.object.extensible = false;
-        try lockKeys(self, o.object, true);
-    }
+    if (o == .object) try setIntegrityLevel(ctx, self, o.object, true);
     return o;
+}
+
+/// SetIntegrityLevel(O, sealed|frozen): a Proxy runs the spec algorithm through
+/// its internal methods (so a `preventExtensions`/`defineProperty` trap that
+/// returns false — or throws — surfaces a TypeError, and the trap's reported
+/// keys drive the loop). An ordinary object uses the direct attribute path.
+fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
+    if (o.proxy_handler != null or o.proxy_revoked) {
+        if (!try self.proxyPreventExt(o))
+            return self.throwError("TypeError", "Object.seal/freeze: [[PreventExtensions]] returned false");
+        for (try self.objectOwnKeysList(o)) |k| {
+            const cur = try objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ .{ .object = o }, self.keyToValue(k) });
+            if (cur != .object) continue; // [[GetOwnProperty]] returned undefined
+            const is_accessor = cur.object.getOwn("get") != null or cur.object.getOwn("set") != null;
+            const d = (try self.newObject()).object;
+            try self.setProp(d, "configurable", .{ .boolean = false });
+            // A frozen *data* property is also made non-writable; an accessor only
+            // gets {configurable:false} (writable is invalid on an accessor).
+            if (freeze and !is_accessor) try self.setProp(d, "writable", .{ .boolean = false });
+            if (!try defineOneResult(self, o, k, d))
+                return self.throwError("TypeError", "Object.seal/freeze: could not redefine property");
+        }
+        return;
+    }
+    o.extensible = false;
+    try lockKeys(self, o, freeze);
 }
 
 /// Make every own property non-configurable (and, when `freeze`, every data
