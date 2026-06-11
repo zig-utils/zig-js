@@ -396,6 +396,11 @@ pub const TemporalData = struct {
     tz_offset_ns: i64 = 0,
     // Duration components (signed, may be fractional only for the smallest set).
     dur: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, // years,months,weeks,days,hours,minutes,seconds,ms,us,ns
+    // The calendar identifier for a date-bearing value. "iso8601" is the default
+    // and the only one whose date arithmetic is the engine's native (proleptic
+    // Gregorian) math; other ids (e.g. "gregory") share that math but differ in
+    // era/eraYear reflection and the toString `[u-ca=…]` annotation.
+    calendar: []const u8 = "iso8601",
 };
 
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).

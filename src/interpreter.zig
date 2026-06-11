@@ -21976,10 +21976,13 @@ fn temporalPlainDateConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     const m = try temporalIntArg(self, if (args.len > 1) args[1] else .undefined, "month");
     const d = try temporalIntArg(self, if (args.len > 2) args[2] else .undefined, "day");
     try checkIsoDate(self, y, m, d);
+    // Optional 4th argument is the calendar (defaults to iso8601).
+    const cal = if (args.len > 3 and args[3] != .undefined) try toCalendarId(self, args[3]) else "iso8601";
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intFromFloat(y);
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(d);
+    o.temporal.?.calendar = cal;
     if (self.new_target == .object) o.proto = try self.protoObject(self.new_target.object);
     return .{ .object = o };
 }
@@ -22020,19 +22023,93 @@ fn temporalMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value) va
 }
 fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
-    _ = this;
-    _ = ctx;
-    return .{ .string = "iso8601" };
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or this.object.temporal == null) return self.throwError("TypeError", "Temporal calendarId accessor on incompatible receiver");
+    return .{ .string = this.object.temporal.?.calendar };
+}
+
+/// Whether `id` is a recognized BCP-47 calendar identifier (case-insensitive),
+/// including the aliases that canonicalize elsewhere. Unknown ids (e.g. "notexist")
+/// are rejected by callers; recognized-but-unimplemented ones behave as iso8601.
+fn isKnownCalendar(id: []const u8) bool {
+    const known = [_][]const u8{
+        "iso8601", "gregory", "gregorian", "japanese", "buddhist", "roc", "persian",
+        "indian", "islamic", "islamic-civil", "islamicc", "islamic-tbla",
+        "islamic-umalqura", "islamic-rgsa", "hebrew", "ethiopic", "ethioaa",
+        "ethiopic-amete-alem", "coptic", "chinese", "dangi",
+    };
+    for (known) |k| if (asciiEqlIgnoreCase(id, k)) return true;
+    return false;
+}
+
+/// Normalize a calendar identifier to its canonical (lowercase) form, mapping
+/// the common aliases. Unknown ids are returned lowercased as-is (the engine
+/// treats every calendar's date math as ISO; only gregory adds era reflection).
+fn canonCalendarId(self: *Interpreter, id: []const u8) []const u8 {
+    const low = std.ascii.allocLowerString(self.arena, id) catch return "iso8601";
+    // Only FULLY-implemented calendars are stored as distinct ids; every other
+    // (syntactically valid) id behaves as iso8601 (the engine's prior all-ISO
+    // behavior), so partial id-tracking never regresses the trivially-all-iso8601
+    // round-trip tests. `gregory` shares ISO date math, adding BC/AD era reflection.
+    if (std.mem.eql(u8, low, "gregory") or std.mem.eql(u8, low, "gregorian")) return "gregory";
+    return "iso8601";
+}
+
+/// Whether a date-bearing Temporal value uses the Gregorian calendar (which, for
+/// this engine, shares ISO date math but reports BC/AD eras).
+fn calIsGregory(t: *const value.TemporalData) bool {
+    return std.mem.eql(u8, t.calendar, "gregory");
+}
+
+/// ToTemporalCalendarIdentifier: a Temporal instance contributes its own calendar;
+/// a string is either a bare calendar id (canonicalized) or a Temporal ISO string
+/// whose `[u-ca=…]` annotation gives the calendar (default iso8601). Any other
+/// value is a TypeError; a malformed string is a RangeError. Every id is accepted
+/// (the engine's date math is ISO for all; only gregory adds era reflection).
+fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
+    if (v == .object and v.object.temporal != null) return v.object.temporal.?.calendar;
+    if (v != .string) return self.throwError("TypeError", "calendar must be a string or a Temporal object");
+    const s = v.string;
+    if (isCalendarId(s)) {
+        if (isKnownCalendar(s)) return canonCalendarId(self, s);
+        // A syntactically-valid-but-unknown id may actually be a basic-format
+        // Temporal time string (e.g. "152330" == 15:23:30): per spec the time
+        // production is tried before the bare CalendarName fallback, so such a
+        // string yields the iso8601 calendar rather than an "unknown calendar".
+        _ = toPlainTimeDataOpt(self, v, true, false) catch return self.throwError("RangeError", "unknown calendar");
+        return "iso8601";
+    }
+    const ann = stripTemporalAnnotations(self, s) catch return self.throwError("RangeError", "invalid calendar string");
+    if (ann.cal) |c| return canonCalendarId(self, c);
+    // No `[u-ca=…]` annotation: the calendar defaults to iso8601 only when the
+    // body is itself a valid Temporal string (a date/datetime, or a bare time);
+    // an empty or otherwise unparseable string is a RangeError (not iso8601).
+    _ = parseTemporalBody(self, ann.body) catch {
+        _ = toPlainTimeDataOpt(self, .{ .string = ann.body }, true, false) catch
+            return self.throwError("RangeError", "invalid calendar string");
+    };
+    return "iso8601";
 }
 
 /// `era`/`eraYear` accessors. The ISO 8601 calendar has no eras, so both read as
 /// `undefined`; they still brand-check the receiver is a Temporal date-bearing
 /// object.
-fn temporalEraGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object or this.object.temporal == null) return self.throwError("TypeError", "Temporal era accessor on incompatible receiver");
-    return .undefined;
+fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            if (this != .object or this.object.temporal == null) return self.throwError("TypeError", "Temporal era accessor on incompatible receiver");
+            const t = this.object.temporal.?;
+            // ISO 8601 (and other calendars whose era model isn't implemented) have
+            // no eras: both accessors read undefined. Gregorian reports BC/AD eras.
+            if (!calIsGregory(t)) return .undefined;
+            // Proleptic Gregorian eras: ISO year >= 1 is the common era ("ce")
+            // with eraYear == year; year <= 0 is "bce" with eraYear == 1 - year.
+            if (want_year) return .{ .number = @floatFromInt(if (t.year >= 1) t.year else 1 - @as(i64, t.year)) };
+            return .{ .string = if (t.year >= 1) "ce" else "bce" };
+        }
+    }.call;
 }
 
 /// `yearOfWeek` accessor: the ISO week-numbering year for the receiver's date.
@@ -22065,17 +22142,19 @@ fn readCalendarName(self: *Interpreter, options: Value) EvalError!CalName {
 
 /// Whether the calendar annotation (and, for YearMonth/MonthDay, the reference
 /// day/year that makes the ISO string complete) must be emitted.
-fn calShowsAnnotation(name: CalName) bool {
-    return name == .always or name == .critical;
+fn calShowsAnnotation(name: CalName, calendar: []const u8) bool {
+    // `auto` shows the annotation for a non-iso8601 calendar; always/critical
+    // always show; never never shows.
+    return name == .always or name == .critical or (name == .auto and !std.mem.eql(u8, calendar, "iso8601"));
 }
 
 /// Append "[u-ca=iso8601]" (or the critical variant) per the show option.
-fn appendCalAnnotation(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), name: CalName) EvalError!void {
-    switch (name) {
-        .always => try buf.appendSlice(self.arena, "[u-ca=iso8601]"),
-        .critical => try buf.appendSlice(self.arena, "[!u-ca=iso8601]"),
-        .auto, .never => {},
-    }
+fn appendCalAnnotation(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), name: CalName, calendar: []const u8) EvalError!void {
+    if (!calShowsAnnotation(name, calendar)) return;
+    const critical = name == .critical;
+    try buf.appendSlice(self.arena, if (critical) "[!u-ca=" else "[u-ca=");
+    try buf.appendSlice(self.arena, calendar);
+    try buf.appendSlice(self.arena, "]");
 }
 
 fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -22086,7 +22165,7 @@ fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, t.year);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ t.month, t.day });
-    try appendCalAnnotation(self, &buf, cal);
+    try appendCalAnnotation(self, &buf, cal, t.calendar);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -22110,11 +22189,11 @@ fn isCalendarId(s: []const u8) bool {
     return true;
 }
 
-fn readCalendarField(self: *Interpreter, bag: Value) EvalError!void {
+fn readCalendarField(self: *Interpreter, bag: Value) EvalError![]const u8 {
     const c = try self.getProperty(bag, "calendar");
-    if (c == .undefined) return;
+    if (c == .undefined) return "iso8601";
     if (c == .object and !c.object.is_symbol and !c.object.is_bigint) {
-        if (c.object.temporal != null) return; // a Temporal value → ISO calendar
+        if (c.object.temporal != null) return c.object.temporal.?.calendar; // a Temporal value → its calendar
     } else if (c != .string) {
         // A symbol or bigint (or any non-string primitive) is not a valid
         // calendar identifier — a TypeError, not a string-coercion RangeError.
@@ -22122,13 +22201,18 @@ fn readCalendarField(self: *Interpreter, bag: Value) EvalError!void {
     }
     const s = try self.toStringV(c);
     if (s.len == 0) return self.throwError("RangeError", "empty string is not a valid calendar ID");
-    // Accept any syntactically valid calendar id (all treated as ISO, matching
-    // the engine's ISO-only calendar support — never reject an unknown calendar
-    // here, which would break the non-ISO calendars the intl402 tests rely on).
-    if (isCalendarId(s)) return;
-    // Not a bare id: it must be a Temporal ISO string (date, date-time, time,
-    // year-month, or month-day) from which the calendar is taken.
+    // Accept any syntactically valid calendar id (treated as ISO date math,
+    // matching the engine's support; only gregory adds era reflection) — never
+    // reject an unknown id here, which would break the intl402 calendar tests.
+    if (isCalendarId(s)) {
+        if (!isKnownCalendar(s)) return self.throwError("RangeError", "unknown calendar");
+        return canonCalendarId(self, s);
+    }
+    // Not a bare id: it must be a Temporal ISO string whose `[u-ca=…]` annotation
+    // (default iso8601) gives the calendar.
     if (!isTemporalIsoString(self, s)) return self.throwError("RangeError", "invalid calendar ID");
+    const ann2 = stripTemporalAnnotations(self, s) catch return "iso8601";
+    return if (ann2.cal) |cc| canonCalendarId(self, cc) else "iso8601";
 }
 
 /// Whether `s` parses as some Temporal ISO string — a date/date-time, a bare
@@ -22174,18 +22258,33 @@ fn readOverflowReject(self: *Interpreter, options: Value) EvalError!bool {
     return self.throwError("RangeError", "invalid overflow option");
 }
 
-/// Read year/month/day from a PlainDate, a PlainDateTime, or a fields object.
-const IsoYMD = struct { y: i64, m: u8, d: u8 };
+/// Read year/month/day (and the calendar) from a PlainDate, a PlainDateTime, or
+/// a fields object.
+const IsoYMD = struct { y: i64, m: u8, d: u8, cal: []const u8 = "iso8601" };
 fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYMD {
     if (tIsTemporal(v, .plain_date) or tIsTemporal(v, .plain_date_time)) {
         const t = v.object.temporal.?;
-        return .{ .y = t.year, .m = t.month, .d = t.day };
+        return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
     if (v == .object) {
-        try readCalendarField(self, v);
-        const yv = try self.getProperty(v, "year");
+        const bag_cal = try readCalendarField(self, v);
+        var yv = try self.getProperty(v, "year");
         const mv = try self.getProperty(v, "month");
         const dv = try self.getProperty(v, "day");
+        // The Gregorian calendar admits `era`/`eraYear` in place of `year`: "ce"
+        // (alias "ad") years count forward from 1; "bce" ("bc") count backward so
+        // that ISO year == 1 - eraYear. (Other calendars' era models are unsupported.)
+        if (yv == .undefined and std.mem.eql(u8, bag_cal, "gregory")) {
+            const ev = try self.getProperty(v, "era");
+            const eyv = try self.getProperty(v, "eraYear");
+            if (ev == .string and eyv != .undefined) {
+                const ey = try temporalIntArg(self, eyv, "eraYear");
+                const is_bce = asciiEqlIgnoreCase(ev.string, "bce") or asciiEqlIgnoreCase(ev.string, "bc");
+                const is_ce = asciiEqlIgnoreCase(ev.string, "ce") or asciiEqlIgnoreCase(ev.string, "ad");
+                if (!is_bce and !is_ce) return self.throwError("RangeError", "invalid era for the gregory calendar");
+                yv = .{ .number = if (is_bce) 1 - ey else ey };
+            }
+        }
         if (yv == .undefined or dv == .undefined) return self.throwError("TypeError", "PlainDate fields require year and day");
         var m: f64 = undefined;
         if (mv != .undefined) {
@@ -22197,7 +22296,9 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
         }
         const y = try temporalIntArg(self, yv, "year");
         const d = try temporalIntArg(self, dv, "day");
-        return regulateIsoDate(self, y, m, d, constrain);
+        var r = try regulateIsoDate(self, y, m, d, constrain);
+        r.cal = bag_cal;
+        return r;
     }
     if (v == .string) return parseIsoDate(self, v.string);
     return self.throwError("TypeError", "cannot convert to a PlainDate");
@@ -22264,7 +22365,10 @@ fn stripTemporalAnnotations(self: *Interpreter, s: []const u8) EvalError!AnnResu
         }
     }
     if (cal_count > 1 and cal_critical) return self.throwError("RangeError", "reject more than one calendar annotation if any critical");
-    if (cal) |c| if (!asciiEqlIgnoreCase(c, "iso8601")) return self.throwError("RangeError", "unknown calendar");
+    // Accept any syntactically valid calendar id in a `[u-ca=…]` annotation; the
+    // caller canonicalizes it (a fully-supported id like gregory is kept, others
+    // collapse to iso8601). A malformed id is still a RangeError.
+    if (cal) |c| if (!isKnownCalendar(c)) return self.throwError("RangeError", "unknown calendar annotation");
     return .{ .body = s[0..lb], .cal = cal };
 }
 
@@ -22418,7 +22522,8 @@ fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
     const ann = try stripTemporalAnnotations(self, s_in);
     const b = try parseTemporalBody(self, ann.body);
     if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainDate");
-    return .{ .y = b.y, .m = b.mo, .d = b.d };
+    const cal = if (ann.cal) |c| canonCalendarId(self, c) else "iso8601";
+    return .{ .y = b.y, .m = b.mo, .d = b.d, .cal = cal };
 }
 
 /// Parsed ISO date-time with its epoch nanoseconds (offset/`Z` applied).
@@ -22454,6 +22559,7 @@ fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
     o.temporal.?.year = @intCast(f.y);
     o.temporal.?.month = f.m;
     o.temporal.?.day = f.d;
+    o.temporal.?.calendar = f.cal;
     return .{ .object = o };
 }
 
@@ -22500,6 +22606,7 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
             o.temporal.?.year = @intCast(c.y);
             o.temporal.?.month = c.m;
             o.temporal.?.day = c.d;
+            o.temporal.?.calendar = t.calendar; // add/subtract preserve the calendar
             return .{ .object = o };
         }
     }.call;
@@ -22726,7 +22833,7 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     try isoYearStr(self, &buf, t.year);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ t.month, t.day });
     try isoTimeStr(self, &buf, t);
-    try appendCalAnnotation(self, &buf, cal);
+    try appendCalAnnotation(self, &buf, cal, t.calendar);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -22767,6 +22874,7 @@ fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     o.temporal.?.year = @intCast(r.y);
     o.temporal.?.month = r.m;
     o.temporal.?.day = r.d;
+    o.temporal.?.calendar = t.calendar; // with() preserves the calendar
     return .{ .object = o };
 }
 
@@ -22870,8 +22978,8 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     try tfmt(self, &buf, "-{d:0>2}", .{t.month});
     // When the calendar annotation is shown the reference day completes the
     // ISO string ("YYYY-MM-DD[u-ca=iso8601]").
-    if (calShowsAnnotation(cal)) try tfmt(self, &buf, "-{d:0>2}", .{t.day});
-    try appendCalAnnotation(self, &buf, cal);
+    if (calShowsAnnotation(cal, t.calendar)) try tfmt(self, &buf, "-{d:0>2}", .{t.day});
+    try appendCalAnnotation(self, &buf, cal, t.calendar);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -22883,7 +22991,7 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
         return .{ .y = t.year, .m = t.month };
     }
     if (v == .object) {
-        try readCalendarField(self, v);
+        _ = try readCalendarField(self, v);
         const yv = try self.getProperty(v, "year");
         if (yv == .undefined) return self.throwError("TypeError", "PlainYearMonth fields require year");
         const y = try temporalIntArg(self, yv, "year");
@@ -22896,6 +23004,10 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
         // Accept a bare "YYYY-MM" (annotations allowed) as well as a full ISO
         // date string. A UTC designator makes it an exact-time string → reject.
         const ann = try stripTemporalAnnotations(self, v.string);
+        // A PlainYearMonth string only accepts the iso8601 calendar (a non-ISO
+        // `[u-ca=…]` annotation, e.g. gregory/hebrew, is rejected).
+        if (ann.cal) |c| if (!asciiEqlIgnoreCase(c, "iso8601"))
+            return self.throwError("RangeError", "PlainYearMonth supports only the iso8601 calendar from a string");
         const s = ann.body;
         if (s.len == 7 and s[4] == '-' and std.ascii.isDigit(s[0])) {
             const y = std.fmt.parseInt(i64, s[0..4], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
@@ -23087,13 +23199,13 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     // The reference year (1972) renders the short "MM-DD" form; a non-reference
     // year, or a shown calendar annotation, forces the full "YYYY-MM-DD".
-    if (t.year != 1972 or calShowsAnnotation(cal)) {
+    if (t.year != 1972 or calShowsAnnotation(cal, t.calendar)) {
         try isoYearStr(self, &buf, t.year);
         try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ t.month, t.day });
     } else {
         try tfmt(self, &buf, "{d:0>2}-{d:0>2}", .{ t.month, t.day });
     }
-    try appendCalAnnotation(self, &buf, cal);
+    try appendCalAnnotation(self, &buf, cal, t.calendar);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -23104,7 +23216,7 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
         return .{ .m = t.month, .d = t.day };
     }
     if (v == .object) {
-        try readCalendarField(self, v);
+        _ = try readCalendarField(self, v);
         const dv = try self.getProperty(v, "day");
         if (dv == .undefined) return self.throwError("TypeError", "PlainMonthDay fields require day");
         const m = try withMonthField(self, v, 0);
@@ -23119,6 +23231,10 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
         // Accept "MM-DD" and "--MM-DD" (annotations allowed) as well as a full
         // ISO date string; a UTC designator is rejected.
         const ann = try stripTemporalAnnotations(self, v.string);
+        // A PlainMonthDay string only accepts the iso8601 calendar (a non-ISO
+        // `[u-ca=…]` annotation, e.g. gregory/hebrew, is rejected).
+        if (ann.cal) |c| if (!asciiEqlIgnoreCase(c, "iso8601"))
+            return self.throwError("RangeError", "PlainMonthDay supports only the iso8601 calendar from a string");
         var s = ann.body;
         if (std.mem.startsWith(u8, s, "--")) s = s[2..];
         if (s.len == 5 and s[2] == '-' and std.ascii.isDigit(s[0])) {
@@ -24078,22 +24194,24 @@ fn requireIsoCalendarArg(self: *Interpreter, v: Value) value.HostError!void {
 fn temporalPlainDateWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    try requireIsoCalendarArg(self, if (args.len > 0) args[0] else .undefined);
+    const cal = try toCalendarId(self, if (args.len > 0) args[0] else .undefined);
     const t = this.object.temporal.?;
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = t.year;
     o.temporal.?.month = t.month;
     o.temporal.?.day = t.day;
+    o.temporal.?.calendar = cal;
     return .{ .object = o };
 }
 
 fn temporalDateTimeWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    try requireIsoCalendarArg(self, if (args.len > 0) args[0] else .undefined);
+    const cal = try toCalendarId(self, if (args.len > 0) args[0] else .undefined);
     const t = this.object.temporal.?;
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.* = t.*;
+    o.temporal.?.calendar = cal;
     return .{ .object = o };
 }
 
@@ -24792,10 +24910,11 @@ fn temporalZdtWithTimeZoneFn(ctx: *anyopaque, this: Value, args: []const Value) 
 fn temporalZdtWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    if (args.len == 0 or args[0] != .string or !std.ascii.eqlIgnoreCase(args[0].string, "iso8601"))
-        return self.throwError("RangeError", "only the iso8601 calendar is supported");
+    const cal = try toCalendarId(self, if (args.len > 0) args[0] else .undefined);
     const t = this.object.temporal.?;
-    return zdtMake(self, t.epoch_ns, t.tz_name, t.tz_offset_ns);
+    const r = try zdtMake(self, t.epoch_ns, t.tz_name, t.tz_offset_ns);
+    r.object.temporal.?.calendar = cal;
+    return r;
 }
 
 fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -24943,8 +25062,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "monthsInYear", temporalPlainDateGetter(.months_in_year));
         try setNativeGetter(a, rs, p, "inLeapYear", temporalPlainDateGetter(.in_leap_year));
         try setNativeGetter(a, rs, p, "monthCode", temporalMonthCodeGetter);
-        try setNativeGetter(a, rs, p, "era", temporalEraGetter);
-        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
+        try setNativeGetter(a, rs, p, "era", temporalEraGetter(false));
+        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter(true));
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNative(a, rs, p, "toString", 0, temporalPlainDateToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
@@ -25014,8 +25133,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "daysInWeek", temporalPlainDateGetter(.days_in_week));
         try setNativeGetter(a, rs, p, "weekOfYear", temporalPlainDateGetter(.week_of_year));
         try setNativeGetter(a, rs, p, "yearOfWeek", temporalYearOfWeekGetter);
-        try setNativeGetter(a, rs, p, "era", temporalEraGetter);
-        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
+        try setNativeGetter(a, rs, p, "era", temporalEraGetter(false));
+        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter(true));
         try setNative(a, rs, p, "toString", 0, temporalPlainDateTimeToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
@@ -25050,8 +25169,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "daysInYear", temporalYearMonthGetter(.days_in_year));
         try setNativeGetter(a, rs, p, "monthsInYear", temporalYearMonthGetter(.months_in_year));
         try setNativeGetter(a, rs, p, "inLeapYear", temporalYearMonthGetter(.in_leap_year));
-        try setNativeGetter(a, rs, p, "era", temporalEraGetter);
-        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
+        try setNativeGetter(a, rs, p, "era", temporalEraGetter(false));
+        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter(true));
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNative(a, rs, p, "toString", 0, temporalYearMonthToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
@@ -25138,8 +25257,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNativeGetter(a, rs, p, "weekOfYear", temporalZdtGetter(.week_of_year));
         try setNativeGetter(a, rs, p, "yearOfWeek", temporalZdtGetter(.year_of_week));
         try setNativeGetter(a, rs, p, "monthCode", temporalZdtMonthCodeGetter);
-        try setNativeGetter(a, rs, p, "era", temporalEraGetter);
-        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter);
+        try setNativeGetter(a, rs, p, "era", temporalEraGetter(false));
+        try setNativeGetter(a, rs, p, "eraYear", temporalEraGetter(true));
         try setNativeGetter(a, rs, p, "calendarId", temporalCalendarIdGetter);
         try setNativeGetter(a, rs, p, "epochMilliseconds", temporalZdtEpochGetter(true));
         try setNativeGetter(a, rs, p, "epochNanoseconds", temporalZdtEpochGetter(false));
