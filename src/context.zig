@@ -3218,6 +3218,29 @@ test "TypedArray from/of reject immutable constructor result before writes" {
     )).boolean);
 }
 
+test "TypedArray Reflect.set honors ordinary receiver failures" {
+    try std.testing.expect((try evalIn(
+        \\var target = new Uint8Array([0]);
+        \\var valueOfCalls = 0;
+        \\var value = { valueOf() { valueOfCalls++; return 9; } };
+        \\var receiver = {
+        \\  get 0() { return 1; },
+        \\  set 0(v) { throw new Error("setter should not run"); }
+        \\};
+        \\Reflect.set(target, 0, value, receiver) === false &&
+        \\target[0] === 0 &&
+        \\receiver[0] === 1 &&
+        \\valueOfCalls === 0;
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var target = new BigInt64Array([0n, 0n]);
+        \\var receiver = new BigInt64Array([1n]);
+        \\Reflect.set(target, 1, { valueOf() { throw new Error("coerce"); } }, receiver) === false &&
+        \\target[1] === 0n &&
+        \\receiver.hasOwnProperty(1) === false;
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

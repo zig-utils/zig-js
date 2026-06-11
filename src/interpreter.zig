@@ -5745,8 +5745,27 @@ pub const Interpreter = struct {
                     }
                     return true;
                 }
-                // CreateDataProperty(Receiver, P, V): an own data property (no
-                // prototype [[Set]]/setter walk, unlike an ordinary assignment).
+                if (rcv.proxy_handler != null or rcv.proxy_revoked) {
+                    const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ .{ .object = rcv }, self.keyToValue(key) });
+                    const desc = (try self.newObject()).object;
+                    try desc.setOwn(self.arena, self.root_shape, "value", v);
+                    if (existing == .object) {
+                        if (existing.object.getOwn("get") != null or existing.object.getOwn("set") != null) return false;
+                        if (existing.object.getOwn("writable")) |w| if (!w.toBoolean()) return false;
+                    } else {
+                        try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
+                        try desc.setOwn(self.arena, self.root_shape, "enumerable", .{ .boolean = true });
+                        try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
+                    }
+                    return try builtins.defineOneResult(self, rcv, key, desc);
+                }
+                if (rcv.getAccessor(key) != null) return false;
+                if (rcv.getOwn(key)) |_| {
+                    if (!rcv.getAttr(key).writable) return false;
+                    try self.setProp(rcv, key, v);
+                    return true;
+                }
+                if (!rcv.extensible) return false;
                 const desc = (try self.newObject()).object;
                 try desc.setOwn(self.arena, self.root_shape, "value", v);
                 try desc.setOwn(self.arena, self.root_shape, "writable", .{ .boolean = true });
@@ -7031,6 +7050,7 @@ pub const Interpreter = struct {
         var cur: ?*value.Object = self.effectiveProto(o);
         while (cur) |c| {
             if (c.proxy_handler != null or c.proxy_revoked) return true;
+            if (c.typed_array != null and canonicalNumericIndexString(key) != null) return true;
             if (c.getAccessor(key) != null) return true;
             cur = self.effectiveProto(c);
         }
