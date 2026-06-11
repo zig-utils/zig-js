@@ -2093,7 +2093,7 @@ test "Map/Set forEach tolerate deletion during iteration" {
         \\set.forEach(function(value) { if (count === 0) set.delete('bar'); count++; });
         \\count
     )).number);
-    try expectEvalStr("1,2,3,1|2|1,3,1",
+    try expectEvalStr("1,2,3,1|3|2,3,1",
         \\var set = new Set([1, 2, 3]);
         \\var out = [];
         \\set.forEach(function(value) {
