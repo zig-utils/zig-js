@@ -13476,6 +13476,11 @@ fn taSortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f
     const bn = b.number;
     if (std.math.isNan(an)) return if (std.math.isNan(bn)) 0 else 1;
     if (std.math.isNan(bn)) return -1;
+    if (an == 0 and bn == 0) {
+        const a_neg = std.math.signbit(an);
+        const b_neg = std.math.signbit(bn);
+        if (a_neg != b_neg) return if (a_neg) -1 else 1;
+    }
     if (an < bn) return -1;
     if (an > bn) return 1;
     return 0;

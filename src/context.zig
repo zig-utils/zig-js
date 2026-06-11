@@ -3314,6 +3314,14 @@ test "TypedArray toString shares Array.prototype function object" {
     )).boolean);
 }
 
+test "TypedArray default sort orders negative zero before positive zero" {
+    try std.testing.expect((try evalIn(
+        \\var sample = new Float64Array([1, 0, -0, 2]).sort();
+        \\Object.is(sample[0], -0) && Object.is(sample[1], 0) &&
+        \\sample[2] === 1 && sample[3] === 2;
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
