@@ -1942,8 +1942,6 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             const target_data = target_obj.getOwn("value");
             if (!target_attr.configurable and !try compatibleRedefine(target_attr, target_data, target_acc, result_desc))
                 return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' reported an incompatible descriptor");
-            if (!target_extensible and !try compatibleRedefine(target_attr, target_data, target_acc, result_desc))
-                return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' reported a descriptor incompatible with a non-extensible target");
             if (!result_attr.configurable) {
                 if (target_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a configurable target property as non-configurable");
                 if (result_desc.getOwn("writable")) |w| {
