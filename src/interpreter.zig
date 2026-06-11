@@ -6548,9 +6548,17 @@ pub const Interpreter = struct {
         }
     }
 
+    fn makeAsyncFromSyncIterator(self: *Interpreter, sync_iter: Value) EvalError!Value {
+        const it = (try self.newObject()).object;
+        try self.setProp(it, "__sync", sync_iter);
+        try setNative(self.arena, self.root_shape, it, "next", 1, asyncFromSyncNextFn);
+        try setNative(self.arena, self.root_shape, it, "return", 1, asyncFromSyncReturnFn);
+        try setNative(self.arena, self.root_shape, it, "throw", 1, asyncFromSyncThrowFn);
+        return .{ .object = it };
+    }
+
     /// The async iterator for `for await`: `obj[Symbol.asyncIterator]()` if
-    /// present, else the sync iterator (whose `{value,done}` results `await`
-    /// trivially resolves).
+    /// present, else an Async-from-Sync wrapper over `obj[Symbol.iterator]()`.
     pub fn asyncIteratorOf(self: *Interpreter, v: Value) EvalError!Value {
         if (self.symbolAsyncIteratorKey()) |ik| {
             if (v == .object and hasProperty(v.object, ik)) {
@@ -6564,7 +6572,7 @@ pub const Interpreter = struct {
                 }
             }
         }
-        return self.iteratorOf(v);
+        return self.makeAsyncFromSyncIterator(try self.iteratorOf(v));
     }
 
     /// Wrap an array/string/collection in an iterator object: `__src` + `__i`
@@ -9306,6 +9314,81 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     return self.eval(prog);
 }
 
+fn promiseRejectAbrupt(self: *Interpreter, err: value.HostError) value.HostError!Value {
+    if (err != error.Throw) return err;
+    const reason = self.exception;
+    self.exception = .undefined;
+    return promiseRejectValue(self, reason);
+}
+
+fn asyncFromSyncUnderlying(self: *Interpreter, this: Value) value.HostError!Value {
+    if (this != .object) return self.throwError("TypeError", "Async-from-Sync iterator method called on a non-object");
+    return this.object.getOwn("__sync") orelse self.throwError("TypeError", "Async-from-Sync iterator missing underlying iterator");
+}
+
+fn asyncFromSyncContinuation(self: *Interpreter, sync_iter: Value, result: Value, close_on_rejection: bool) value.HostError!Value {
+    if (result != .object)
+        return promiseRejectValue(self, try self.makeError("TypeError", "iterator result is not an object"));
+    const done = (self.getProperty(result, "done") catch |err| return promiseRejectAbrupt(self, err)).toBoolean();
+    const value_v = self.getProperty(result, "value") catch |err| return promiseRejectAbrupt(self, err);
+    const wrapped = promiseResolveValue(self, value_v) catch |err| {
+        if (err != error.Throw) return err;
+        const reason = self.exception;
+        if (close_on_rejection and !done) {
+            self.iteratorCloseKeepingThrow(sync_iter);
+        }
+        self.exception = .undefined;
+        return promiseRejectValue(self, reason);
+    };
+    const unwrapped = self.awaitValue(wrapped) catch |err| {
+        if (err != error.Throw) return err;
+        const reason = self.exception;
+        if (close_on_rejection and !done) {
+            self.iteratorCloseKeepingThrow(sync_iter);
+        }
+        self.exception = .undefined;
+        return promiseRejectValue(self, reason);
+    };
+    return promiseResolveValue(self, try self.iterResultObj(unwrapped, done));
+}
+
+fn asyncFromSyncNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const sync_iter = try asyncFromSyncUnderlying(self, this);
+    const call_args = if (args.len > 0) args[0..1] else args[0..0];
+    const result = self.callMethod(sync_iter, "next", call_args) catch |err| return promiseRejectAbrupt(self, err);
+    return asyncFromSyncContinuation(self, sync_iter, result, true);
+}
+
+fn asyncFromSyncReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const sync_iter = try asyncFromSyncUnderlying(self, this);
+    const sent = if (args.len > 0) args[0] else Value.undefined;
+    const ret = self.getProperty(sync_iter, "return") catch |err| return promiseRejectAbrupt(self, err);
+    if (ret == .undefined or ret == .null) {
+        const resolved = self.awaitValue(sent) catch |err| return promiseRejectAbrupt(self, err);
+        return promiseResolveValue(self, try self.iterResultObj(resolved, true));
+    }
+    if (!ret.isCallable()) return promiseRejectValue(self, try self.makeError("TypeError", "iterator return is not callable"));
+    const call_args = if (args.len > 0) args[0..1] else args[0..0];
+    const result = self.callValueWithThis(ret, call_args, sync_iter) catch |err| return promiseRejectAbrupt(self, err);
+    return asyncFromSyncContinuation(self, sync_iter, result, false);
+}
+
+fn asyncFromSyncThrowFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const sync_iter = try asyncFromSyncUnderlying(self, this);
+    const throw_m = self.getProperty(sync_iter, "throw") catch |err| return promiseRejectAbrupt(self, err);
+    if (throw_m == .undefined or throw_m == .null) {
+        self.iteratorClose(sync_iter) catch |err| return promiseRejectAbrupt(self, err);
+        return promiseRejectValue(self, try self.makeError("TypeError", "iterator throw is not callable"));
+    }
+    if (!throw_m.isCallable()) return promiseRejectValue(self, try self.makeError("TypeError", "iterator throw is not callable"));
+    const call_args = if (args.len > 0) args[0..1] else args[0..0];
+    const result = self.callValueWithThis(throw_m, call_args, sync_iter) catch |err| return promiseRejectAbrupt(self, err);
+    return asyncFromSyncContinuation(self, sync_iter, result, true);
+}
+
 // --- Promise built-ins ----------------------------------------------------
 
 /// `new Promise(executor)` — create a pending promise and synchronously call
@@ -9448,12 +9531,16 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     return self.callMethod(this, "then", &.{ .{ .object = onf }, .{ .object = onr } });
 }
 
-/// Internal `PromiseResolve(%Promise%, v)`: `v` itself if already a native
-/// promise, else a fresh native promise fulfilled with `v` (adopting a
-/// thenable). Used by the combinators/`finally` where the constructor is always
-/// the intrinsic `Promise` — no observable `this` or capability involved.
+/// Internal `PromiseResolve(%Promise%, v)`: `v` itself only when it is a native
+/// promise whose observable `constructor` is the intrinsic Promise, else a fresh
+/// native promise fulfilled with `v` (adopting a thenable).
 fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
-    if (promise.promiseOf(v) != null) return v;
+    if (promise.promiseOf(v) != null) {
+        if (self.env.get("Promise")) |pc| if (pc == .object) {
+            const ctor = try self.getProperty(v, "constructor");
+            if (ctor == .object and ctor.object == pc.object) return v;
+        };
+    }
     const pobj = try promise.newPromise(self);
     try promise.resolve(self, @ptrCast(@alignCast(pobj.promise.?)), v);
     return .{ .object = pobj };
