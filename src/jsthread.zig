@@ -215,6 +215,10 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.join called on incompatible receiver");
     if (rec == t_current) return self.throwError("Error", "Thread cannot join itself");
+    // The gate guards the BLOCK, not the call: joining a finished thread is
+    // always allowed.
+    if (!rec.done and !agent.main_can_block)
+        return self.throwError("TypeError", "Thread.prototype.join cannot block the current thread");
     while (!rec.done) rec.gil.wait(&rec.done_cond);
     if (rec.threw) {
         self.exception = rec.result;
@@ -377,6 +381,9 @@ fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     if (!cb.isCallable()) return self.throwError("TypeError", "Lock.prototype.hold requires a callable argument");
     if (rec.locked and rec.holder == currentTid())
         return self.throwError("Error", "Lock is not recursive");
+    // tryLock-first: only a CONTENDED hold blocks, so only it gates.
+    if (rec.locked and !agent.main_can_block)
+        return self.throwError("TypeError", "Lock.prototype.hold cannot block the current thread");
     while (rec.locked) rec.gil.wait(&rec.cond);
     rec.locked = true;
     rec.holder = currentTid();
@@ -401,6 +408,8 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     const lock = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
         return self.throwError("TypeError", "Condition.prototype.wait requires a Lock argument");
     if (!lock.locked) return self.throwError("TypeError", "Condition.prototype.wait requires the lock to be held by the caller");
+    if (!agent.main_can_block)
+        return self.throwError("TypeError", "Condition.prototype.wait cannot block the current thread");
     // Atomic under the GIL: nothing else runs between the release below and
     // our park inside gil.wait (which registers before unlocking).
     lockRelease(self, lock);
@@ -682,6 +691,8 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
     } }).toDeadline(agent.engineIo()) else .none;
     if (!sameValueZero(cur, argAt(args, 2))) return .{ .string = "not-equal" };
     if (timeout_ns != null and timeout_ns.? == 0) return .{ .string = "timed-out" };
+    if (!agent.main_can_block)
+        return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const key = try self.arena.dupe(u8, key_tmp);
     var ticket = PropTicket{ .obj = o, .key = key };
     prop_waiters.append(prop_alloc, &ticket) catch return error.OutOfMemory;
@@ -800,13 +811,18 @@ const HoldJob = struct {
 
 const ReleaseState = struct { lock: *LockRecord, used: bool = false };
 
+/// `holder` value for an asyncHold grant: the hold belongs to the JOB, not
+/// to any thread — a same-thread sync `hold` must read as CONTENDED (block
+/// or gate), never as recursive.
+const async_holder: u64 = std.math.maxInt(u64);
+
 /// Centralized release: hand the lock to the next queued asyncHold job
 /// (granted on this, the releasing thread), else open it and wake a parked
 /// hold.
 fn lockRelease(self: *Interpreter, rec: *LockRecord) void {
     if (rec.pending.items.len > 0) {
         const job = rec.pending.orderedRemove(0);
-        rec.holder = currentTid(); // granted; the job runs on this thread's turn
+        rec.holder = async_holder; // granted to the job, not to a thread
         enqueueHoldJob(self, job) catch {};
         return;
     }
@@ -881,7 +897,7 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     job.* = .{ .lock = rec, .outer = outer, .cb = if (cb == .undefined) null else cb };
     if (!rec.locked) {
         rec.locked = true; // the grant happens at registration (5.5a)
-        rec.holder = currentTid();
+        rec.holder = async_holder;
         try enqueueHoldJob(self, job);
     } else {
         try rec.pending.append(self.arena, job);

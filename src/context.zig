@@ -3322,3 +3322,43 @@ test "Atomics on plain properties: semantics, exact counter, wait/notify" {
         \\if (Atomics.notify(gate, "absent") !== 0) throw new Error("notify absent is 0");
     );
 }
+
+test "Thread blocking APIs respect the main can-block gate" {
+    const agent = @import("agent.zig");
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    const saved_can_block = agent.main_can_block;
+    agent.main_can_block = false;
+    defer agent.main_can_block = saved_can_block;
+
+    _ = try ctx.evaluate(
+        \\function expectTypeError(fn, msg) {
+        \\  try { fn(); } catch (e) {
+        \\    if (e instanceof TypeError && e.message === msg) return;
+        \\    throw e;
+        \\  }
+        \\  throw new Error("missing TypeError: " + msg);
+        \\}
+        \\const lockA = new Lock();
+        \\if (lockA.hold(() => "ok") !== "ok") throw new Error("uncontended hold");
+        \\lockA.asyncHold();
+        \\if (!lockA.locked) throw new Error("asyncHold did not grant synchronously");
+        \\expectTypeError(() => lockA.hold(() => 0), "Lock.prototype.hold cannot block the current thread");
+        \\
+        \\const lockB = new Lock();
+        \\const condB = new Condition();
+        \\lockB.hold(() => {
+        \\  expectTypeError(() => condB.wait(lockB), "Condition.prototype.wait cannot block the current thread");
+        \\});
+        \\if (lockB.locked) throw new Error("gated wait leaked lock hold");
+        \\if (condB.notify() !== 0) throw new Error("gated wait enqueued waiter");
+        \\
+        \\const o = { k: 0 };
+        \\if (Atomics.wait(o, "k", 1) !== "not-equal") throw new Error("wait fast path");
+        \\expectTypeError(() => Atomics.wait(o, "k", 0), "Atomics.wait cannot be called from the current thread.");
+        \\
+        \\const t = new Thread(() => 7);
+        \\expectTypeError(() => t.join(), "Thread.prototype.join cannot block the current thread");
+    );
+}

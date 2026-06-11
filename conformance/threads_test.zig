@@ -23,10 +23,12 @@ const allowlist = [_][]const u8{
     "api/thread-restrict.js",
     "api/threadlocal-basic.js",
     // Off the list, with reasons:
-    //   api/lock-async-hold.js, api/condition-async-wait.js,
-    //   api/park-no-microtask-drain.js, api/thread-lifecycle.js — depend on
-    //     run-loop turn semantics beyond the synchronous-settling runtime.
-    //   api/blocking-gate.js — needs a --can-block-is-false runner mode.
+    //   api/blocking-gate.js, api/lock-async-hold.js,
+    //   api/condition-async-wait.js, api/park-no-microtask-drain.js,
+    //   api/thread-lifecycle.js — depend on run-loop turn semantics beyond
+    //     the synchronous-settling runtime (await must SUSPEND, not settle
+    //     inline). The can-block-is-false gates themselves are implemented
+    //     and this runner sets the flag for blocking-gate.js when it joins.
     //   api/thread-id-bounds.js — id-space exhaustion semantics.
     //   api/condition-wait-termination.js — VM-wide termination machinery.
     //   sync/condition-notify-all-shared-lock.js — exceeds the step budget
@@ -131,6 +133,10 @@ pub fn main(init: std.process.Init) !void {
         try buf.appendSlice(gpa, "\n");
         try buf.appendSlice(gpa, test_src);
 
+        // blocking-gate.js runs under the per-VM can-block-is-false config
+        // (their run-tests.sh appends the flag for exactly this file).
+        js.agent.main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js");
+        defer js.agent.main_can_block = true;
         const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
             std.debug.print("  FAIL  {s} (context)\n", .{name});
             failed += 1;
