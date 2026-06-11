@@ -96,6 +96,7 @@ fn installConcurrentAccessError(ctx: *Context) !void {
 
     const ctor = try a.create(value.Object);
     ctor.* = .{ .error_ctor = name, .private_data = @ptrCast(&ctx.env), .proto = base_v.object };
+    try interp.installNativeProps(a, rs, ctor, name, 1);
     const proto = try a.create(value.Object);
     proto.* = .{ .proto = base_proto_v.object };
     const ro = value.PropAttr{ .writable = true, .enumerable = false, .configurable = true };
@@ -767,7 +768,7 @@ fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
         !o.is_date and !o.is_regex and !o.is_map and !o.is_set and !o.is_weak and
         o.promise == null and !o.is_symbol and !o.is_bigint and o.module_ns == null and
         o.weak_ref_target == null and !o.is_arguments and !o.is_error and
-        o.error_ctor == null and o.getOwn("constructor") == null;
+        o.prim == null and o.error_ctor == null and o.getOwn("constructor") == null;
     if (!plain) return self.throwError("TypeError", "cannot restrict this object");
     const tid: u64 = @intCast(std.Thread.getCurrentId());
     if (o.restricted_to) |owner| {

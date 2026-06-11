@@ -4762,6 +4762,7 @@ pub const Interpreter = struct {
 
     /// [[SetPrototypeOf]] honoring Proxy targets and Proxy invariants.
     pub fn setPrototypeOfObject(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
+        try self.checkRestricted(o);
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxySetProto(o, new_proto);
         return self.ordinarySetPrototypeOf(o, new_proto);
     }
@@ -5103,9 +5104,15 @@ pub const Interpreter = struct {
         return self.objectOwnKeysList(target);
     }
 
-    pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
-        if (recv == .object) if (recv.object.restricted_to) |tid| if (tid != @as(u64, @intCast(std.Thread.getCurrentId())))
+    /// `Thread.restrict` enforcement: every essential-internal-method funnel
+    /// calls this (get/set/has/delete/define/ownKeys/proto/extensibility).
+    pub fn checkRestricted(self: *Interpreter, o: *value.Object) EvalError!void {
+        if (o.restricted_to) |tid| if (tid != @as(u64, @intCast(std.Thread.getCurrentId())))
             return self.throwError("ConcurrentAccessError", "object is restricted to another thread");
+    }
+
+    pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
+        if (recv == .object) try self.checkRestricted(recv.object);
         return self.getPropertyWithReceiver(recv, key, recv);
     }
 
@@ -5645,8 +5652,7 @@ pub const Interpreter = struct {
     /// translate a false result into a strict-mode TypeError; Reflect.set returns
     /// the boolean directly.
     pub fn setMemberResult(self: *Interpreter, recv: Value, key: []const u8, v: Value, receiver: Value) EvalError!bool {
-        if (recv == .object) if (recv.object.restricted_to) |tid| if (tid != @as(u64, @intCast(std.Thread.getCurrentId())))
-            return self.throwError("ConcurrentAccessError", "object is restricted to another thread");
+        if (recv == .object) try self.checkRestricted(recv.object);
         if (recv == .object and (recv.object.is_symbol or recv.object.is_bigint))
             return self.setPrimitiveMemberResult(recv, key, v);
         if (recv != .object) {
@@ -5898,6 +5904,7 @@ pub const Interpreter = struct {
     /// no longer has it. Non-configurable own properties can't be deleted
     /// (returns false); a missing property "deletes" successfully (true).
     pub fn deleteOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        try self.checkRestricted(o);
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyDelete(o, key);
         // A module namespace's own properties (exports + @@toStringTag) are
         // non-configurable → [[Delete]] returns false; a non-own key "deletes".
@@ -9039,6 +9046,7 @@ pub const Interpreter = struct {
     }
 
     pub fn inOperator(self: *Interpreter, l: Value, r: Value) EvalError!bool {
+        if (r == .object) try self.checkRestricted(r.object);
         if (r != .object) return self.throwError("TypeError", "cannot use 'in' on a non-object");
         const o = r.object;
         const key = try self.keyOf(l);
@@ -10080,6 +10088,7 @@ fn reflectDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.ownKeys called on non-object");
     // objectOwnKeysList is proxy- and module-namespace-aware (sorted exotic keys).
@@ -10147,6 +10156,7 @@ fn reflectGetOwnDescFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 /// `Reflect.isExtensible(target)` — TypeError on a non-Object (Object.* returns false).
 fn reflectIsExtensibleFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     if (!builtins.isRealObject(if (args.len > 0) args[0] else .undefined))
         return self.throwError("TypeError", "Reflect.isExtensible called on non-object");
     return builtins.objectIsExtensible(ctx, this, args);
@@ -10157,6 +10167,7 @@ fn reflectIsExtensibleFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 fn reflectPreventExtFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target))
         return self.throwError("TypeError", "Reflect.preventExtensions called on non-object");
@@ -20309,7 +20320,7 @@ pub fn installFunctionProps(
 /// property the function is reached through; `length` is its spec arity. Mirrors
 /// `installFunctionProps` for user functions — test262's propertyHelper checks
 /// `name.js` / `length.js` for essentially every built-in method.
-fn installNativeProps(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, name: []const u8, len: usize) EvalError!void {
+pub fn installNativeProps(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, name: []const u8, len: usize) EvalError!void {
     const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
     try obj.setOwn(a, rs, "length", .{ .number = @floatFromInt(len) });
     try obj.setAttr(a, "length", ro_attr);

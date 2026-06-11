@@ -506,8 +506,8 @@ pub const Object = struct {
     /// surfaced to host callbacks via private-data accessors later.
     private_data: ?*anyopaque = null,
     /// `Thread.restrict(obj)`: the only OS thread allowed to touch this
-    /// object's properties (null = unrestricted). Enforced at the property
-    /// get/set chokepoints with a ConcurrentAccessError-style TypeError.
+    /// object through the enforced internal-method funnels (null =
+    /// unrestricted). Foreign access throws `ConcurrentAccessError`.
     restricted_to: ?u64 = null,
     /// True for `Error`-family instances; drives `toString` and `instanceof`.
     is_error: bool = false,

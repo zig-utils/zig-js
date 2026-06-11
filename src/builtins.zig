@@ -650,6 +650,7 @@ pub fn mathRandom(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 /// live in the dense `elements` store (not the shape), so they're added here;
 /// a per-index `enumerable:false` (from defineProperty) hides one.
 pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const []const u8 {
+    try self.checkRestricted(o);
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     // A module namespace's enumerable own keys are exactly its (sorted) string
     // export names; the @@toStringTag is non-enumerable.
@@ -748,12 +749,14 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
 pub fn objectKeys(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     return enumerableOwnProperties(self, arg(args, 0), .key);
 }
 
 pub fn objectValues(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     return enumerableOwnProperties(self, arg(args, 0), .value);
 }
 
@@ -826,6 +829,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
 pub fn objectEntries(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     return enumerableOwnProperties(self, arg(args, 0), .key_value);
 }
 
@@ -1243,6 +1247,7 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
     const self = interp(ctx);
     const target = arg(args, 0);
     if (!isRealObject(target)) return self.throwError("TypeError", "Object.defineProperty called on non-object");
+    try self.checkRestricted(target.object);
     const key = try self.keyOf(arg(args, 1));
     const desc = arg(args, 2);
     // ToPropertyDescriptor requires an Object — a BigInt or Symbol value (boxed
@@ -1625,6 +1630,7 @@ fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) Host
 pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     const o = arg(args, 0);
     if (o == .object) {
         if (o.object.proxy_handler != null or o.object.proxy_revoked) {
@@ -1638,6 +1644,7 @@ pub fn objectPreventExtensions(ctx: *anyopaque, this: Value, args: []const Value
 pub fn objectIsExtensible(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     const o = arg(args, 0);
     if (o != .object) return .{ .boolean = false };
     if (o.object.proxy_handler != null or o.object.proxy_revoked) return .{ .boolean = try self.proxyIsExtensible(o.object) };
@@ -2034,6 +2041,7 @@ fn arrayIndexOf(key: []const u8) ?usize {
 pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    if (args.len > 0 and args[0] == .object) try self.checkRestricted(args[0].object);
     const result = try self.newArray();
     // ToObject(arg): null/undefined throw; a primitive boxes (a String exposes
     // its character indices + "length").

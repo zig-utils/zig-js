@@ -20,10 +20,9 @@ const allowlist = [_][]const u8{
     "api/thread-basic.js",
     "api/thread-ctor-errors.js",
     "api/thread-exc.js",
+    "api/thread-restrict.js",
     "api/threadlocal-basic.js",
     // Off the list, with reasons:
-    //   api/thread-restrict.js — enforcement is get/set-chokepoint only so
-    //     far (delete/define/enumerate paths pending).
     //   api/lock-async-hold.js, api/condition-async-wait.js,
     //   api/park-no-microtask-drain.js, api/thread-lifecycle.js — depend on
     //     run-loop turn semantics beyond the synchronous-settling runtime.
