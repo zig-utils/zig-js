@@ -3336,6 +3336,43 @@ test "TypedArray sort skips writeback when comparator shrinks fixed view out of 
     )).boolean);
 }
 
+test "TypedArray toLocaleString uses empty strings after shrink" {
+    try std.testing.expect((try evalIn(
+        \\var old = Number.prototype.toLocaleString;
+        \\var rab = new ArrayBuffer(4, { maxByteLength: 8 });
+        \\var fixed = new Uint8Array(rab, 0, 4);
+        \\var calls = 0;
+        \\Number.prototype.toLocaleString = function() {
+        \\  calls++;
+        \\  if (calls === 2) rab.resize(2);
+        \\  return old.call(this);
+        \\};
+        \\try {
+        \\  fixed.toLocaleString() === "0,0,,";
+        \\} finally {
+        \\  Number.prototype.toLocaleString = old;
+        \\}
+    )).boolean);
+}
+
+test "TypedArray set skips writes after source getters shrink target" {
+    try std.testing.expect((try evalIn(
+        \\var rab = new ArrayBuffer(4, { maxByteLength: 8 });
+        \\var fixed = new Uint8Array(rab, 0, 4);
+        \\var full = new Uint8Array(rab);
+        \\full.set([0, 2, 4, 6]);
+        \\var source = new Proxy({ length: 4 }, {
+        \\  get(target, prop) {
+        \\    if (prop === "length") return 4;
+        \\    if (prop === "1") rab.resize(3);
+        \\    return 1;
+        \\  }
+        \\});
+        \\fixed.set(source);
+        \\full.length === 3 && full[0] === 1 && full[1] === 2 && full[2] === 4;
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

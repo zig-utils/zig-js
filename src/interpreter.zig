@@ -6386,12 +6386,13 @@ pub const Interpreter = struct {
         if (ta.kind.isBigInt()) {
             const bv = try self.toBigIntValueImpl(v, false);
             // TypedArraySetElement coerces first, then skips the store for an
-            // immutable buffer (a silent no-op, not a throw).
-            if (ta.buffer.array_buffer.?.immutable) return;
+            // invalid/out-of-bounds index or immutable buffer (a silent no-op,
+            // not a throw).
+            if (i >= (ta.currentLength() orelse 0) or ta.buffer.array_buffer.?.immutable) return;
             value.taWriteBig(ta, i, bv.object.bigint);
         } else {
             const num = try self.toNumberV(v);
-            if (ta.buffer.array_buffer.?.immutable) return;
+            if (i >= (ta.currentLength() orelse 0) or ta.buffer.array_buffer.?.immutable) return;
             value.taWrite(ta, i, num);
         }
     }
@@ -13147,7 +13148,8 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         var i: usize = 0;
         while (i < len) : (i += 1) {
             if (i > 0) try buf.append(self.arena, ',');
-            const el = try self.taLoad(ta, i);
+            const el = try self.taLoadIdx(ta, i);
+            if (el == .undefined) continue;
             const method = try self.getProperty(el, "toLocaleString");
             const r = try self.callValueWithThis(method, &.{}, el);
             try buf.appendSlice(self.arena, try self.toStringV(r));
