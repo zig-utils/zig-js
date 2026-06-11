@@ -1442,6 +1442,16 @@ test "Error.prototype.stack accessor" {
     // A non-String value throws a TypeError; assigning to %Error.prototype% throws.
     try std.testing.expect((try evalIn("var e = new Error('x'); try { e.stack = 42; false } catch (x) { x instanceof TypeError }")).boolean);
     try std.testing.expect((try evalIn("try { Error.prototype.stack = 's'; false } catch (x) { x instanceof TypeError }")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var setA = Object.getOwnPropertyDescriptor(Error.prototype, "stack").set;
+        \\var realmB = $262.createRealm().global;
+        \\try {
+        \\  setA.call(realmB.Error.prototype, "x");
+        \\  false;
+        \\} catch (e) {
+        \\  Object.getPrototypeOf(e) === realmB.TypeError.prototype;
+        \\}
+    )).boolean);
 }
 
 test "AggregateError" {

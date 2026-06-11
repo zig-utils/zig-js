@@ -9879,8 +9879,14 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 fn setterIgnoringProto(self: *Interpreter, this: Value, home: ?*value.Object, key: []const u8, v: Value) EvalError!Value {
     if (this != .object or this.object.is_symbol or this.object.is_bigint)
         return self.throwError("TypeError", "setter requires an object receiver");
-    if (home) |h| if (this.object == h)
-        return self.throwError("TypeError", "Cannot assign to the read-only property of the home object");
+    if (home) |h| if (this.object == h) {
+        const proto: ?*value.Object = if (h.getOwn("constructor")) |ctor|
+            (if (ctor == .object) try self.functionRealmIntrinsicProto(ctor.object, "TypeError") else null)
+        else
+            null;
+        self.exception = try self.makeErrorWithProto("TypeError", "Cannot assign to the read-only property of the home object", proto);
+        return error.Throw;
+    };
     const o = this.object;
     // [[GetOwnProperty]](this, key): own data slot, own accessor, or proxy trap.
     const has_own = if (o.proxy_handler != null or o.proxy_revoked) blk: {
