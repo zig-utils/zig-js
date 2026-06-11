@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` when a host already targets the JSC C API.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **42,311 / 47,930 (88.3%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **42,312 / 47,930 (88.3%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
 
 ```zig
 const js = @import("js");
@@ -45,10 +45,10 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **42,311 / 47,930 (88.3%)** |
+| **valid** | can we run the program? (scored corpus) | **42,312 / 47,930 (88.3%)** |
 | negative | do we reject invalid input? (early errors — partial) | 3,213 / 4,668 (68.8%) |
 
-Of the valid corpus: **119 parse failures**, **5,500 runtime failures**, **0 host failures**. The runner currently skips 581 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, Annex B, and the regex engine.
+Of the valid corpus: **119 parse failures**, **5,499 runtime failures**, **0 host failures**. The runner currently skips 581 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, Annex B, and the regex engine.
 
 ### Per area (valid)
 
