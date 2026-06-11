@@ -3127,6 +3127,60 @@ test "SharedArrayBuffer resolves newTarget prototype before data allocation" {
     )).boolean);
 }
 
+test "ArrayBuffer immutable methods preserve spec ordering" {
+    try std.testing.expect((try evalIn(
+        \\var ab = (new ArrayBuffer(4)).transferToImmutable();
+        \\var calls = [];
+        \\try {
+        \\  ab.transfer({ valueOf() { calls.push("newLength.valueOf"); return 1; } });
+        \\} catch (e) {
+        \\  if (!(e instanceof TypeError)) throw e;
+        \\}
+        \\calls.length === 1 && calls[0] === "newLength.valueOf";
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var source = new ArrayBuffer(10, { maxByteLength: 10 });
+        \\var start = { valueOf() { source.resize(9); return -7; } };
+        \\var end = { valueOf() { source.resize(5); return -4; } };
+        \\try {
+        \\  source.sliceToImmutable(start, end);
+        \\} catch (e) {
+        \\  e instanceof RangeError;
+        \\}
+    )).boolean);
+}
+
+test "ArrayBuffer slice rejects immutable species result" {
+    try std.testing.expect((try evalIn(
+        \\var calls = [];
+        \\var source = new ArrayBuffer(8);
+        \\source.constructor = {
+        \\  [Symbol.species]: function(length) {
+        \\    calls.push(length);
+        \\    return source.sliceToImmutable();
+        \\  }
+        \\};
+        \\try {
+        \\  source.slice(1, 2);
+        \\} catch (e) {
+        \\  e instanceof TypeError && calls.length === 1 && calls[0] === 1;
+        \\}
+    )).boolean);
+}
+
+test "ArrayBuffer byteLength copied onto SharedArrayBuffer keeps brand check" {
+    try std.testing.expect((try evalIn(
+        \\var byteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength");
+        \\var sab = new SharedArrayBuffer(4);
+        \\Object.defineProperties(sab, { byteLength });
+        \\try {
+        \\  sab.byteLength;
+        \\} catch (e) {
+        \\  e instanceof TypeError;
+        \\}
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

@@ -5206,7 +5206,8 @@ pub const Interpreter = struct {
                     }
                 }
                 if (o.array_buffer) |ab| {
-                    if (std.mem.eql(u8, key, "byteLength")) return .{ .number = @floatFromInt(if (ab.detached) 0 else ab.bytes().len) };
+                    if (std.mem.eql(u8, key, "byteLength") and o.getOwn(key) == null and o.getAccessor(key) == null)
+                        return .{ .number = @floatFromInt(if (ab.detached) 0 else ab.bytes().len) };
                 }
                 if (o.typed_array) |ta| {
                     const cur = ta.currentLength(); // null when detached / out of bounds
@@ -13035,6 +13036,7 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     if (nb.is_shared != want_shared)
         return self.throwError("TypeError", "ArrayBuffer species constructor returned a buffer of the wrong shared-ness");
     if (!want_shared and nb.detached) return self.throwError("TypeError", "species constructor returned a detached ArrayBuffer");
+    if (!want_shared and nb.immutable) return self.throwError("TypeError", "species constructor returned an immutable ArrayBuffer");
     if (new_v.object == this.object) return self.throwError("TypeError", "ArrayBuffer species constructor returned the same buffer");
     if (nb.bytes().len < safe_count) return self.throwError("TypeError", "ArrayBuffer species constructor returned too small a buffer");
     if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
@@ -13907,9 +13909,9 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
     const count = if (end > start) end - start else 0;
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const src_len = ab.bytes().len;
-    const safe_count = if (start >= src_len) 0 else @min(count, src_len - start);
-    const out = try self.makeArrayBuffer(safe_count);
-    @memcpy(out.array_buffer.?.bytes()[0..safe_count], ab.bytes()[start .. start + safe_count]);
+    if (src_len < end) return self.throwError("RangeError", "ArrayBuffer shrank below resolved slice end");
+    const out = try self.makeArrayBuffer(count);
+    @memcpy(out.array_buffer.?.bytes()[0..count], ab.bytes()[start .. start + count]);
     out.array_buffer.?.immutable = true;
     return .{ .object = out };
 }
@@ -13941,9 +13943,9 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             if (this != .object or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
             const ab = this.object.array_buffer.?;
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
+            const new_len: usize = if (args.len > 0 and args[0] != .undefined) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
             if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
             if (ab.immutable) return self.throwError("TypeError", "an immutable ArrayBuffer cannot be transferred");
-            const new_len: usize = if (args.len > 0 and args[0] != .undefined) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
             const out = try self.makeArrayBuffer(new_len);
             @memcpy(out.array_buffer.?.bytes()[0..@min(new_len, ab.bytes().len)], ab.bytes()[0..@min(new_len, ab.bytes().len)]);
             if (!fixed) out.array_buffer.?.max_byte_length = ab.max_byte_length;
