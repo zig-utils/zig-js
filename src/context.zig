@@ -3275,6 +3275,27 @@ test "TypedArray constructor copies live source typed array length" {
     )).boolean);
 }
 
+test "TypedArray subarray omits species length for length-tracking views" {
+    try std.testing.expect((try evalIn(
+        \\var rab = new ArrayBuffer(16, { maxByteLength: 32 });
+        \\var sample = new Uint8Array(rab);
+        \\var seen;
+        \\sample.constructor = {
+        \\  [Symbol.species]: function(buffer, offset, length) {
+        \\    seen = arguments;
+        \\    return new Uint8Array(buffer, offset, length);
+        \\  }
+        \\};
+        \\var result = sample.subarray(1);
+        \\seen.length === 2 &&
+        \\seen[0] === rab &&
+        \\seen[1] === 1 &&
+        \\result.length === 15 &&
+        \\(rab.resize(8), true) &&
+        \\result.length === 7;
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

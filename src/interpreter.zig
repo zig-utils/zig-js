@@ -6235,19 +6235,22 @@ pub const Interpreter = struct {
         return res.object;
     }
 
-    /// TypedArraySpeciesCreate(exemplar, «buffer, byteOffset, length») — the
+    /// TypedArraySpeciesCreate(exemplar, «buffer, byteOffset, length?») — the
     /// form `subarray` uses: the species constructor is `new`-ed with the shared
     /// buffer and a byte range (so the result is a view, not a copy). Constructing
     /// over a detached buffer throws TypeError (ValidateTypedArray); a wrong
     /// content type or non-TypedArray result also throws.
-    fn typedArraySubarrayCreate(self: *Interpreter, exemplar: *value.Object, buffer: *value.Object, byte_offset: usize, len: usize) EvalError!Value {
+    fn typedArraySubarrayCreate(self: *Interpreter, exemplar: *value.Object, buffer: *value.Object, byte_offset: usize, len: ?usize) EvalError!Value {
         const kind = exemplar.typed_array.?.kind;
         const default_ctor = self.env.get(kind.ctorName()) orelse return self.throwError("TypeError", "missing TypedArray constructor");
         const ctor = try self.speciesConstructor(.{ .object = exemplar }, default_ctor);
-        const res = try self.construct(ctor, &.{
+        const res = if (len) |length| try self.construct(ctor, &.{
             .{ .object = buffer },
             .{ .number = @floatFromInt(byte_offset) },
-            .{ .number = @floatFromInt(len) },
+            .{ .number = @floatFromInt(length) },
+        }) else try self.construct(ctor, &.{
+            .{ .object = buffer },
+            .{ .number = @floatFromInt(byte_offset) },
         });
         if (res != .object or res.object.typed_array == null)
             return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
@@ -13327,14 +13330,16 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         return recv;
     }
     if (eq(name, "subarray")) {
-        // subarray returns TypedArraySpeciesCreate(O, «buffer, beginByteOffset,
-        // newLength») — a view (sharing the buffer) built through the species
-        // constructor, so a non-constructor species or a detached buffer throws.
+        // subarray returns a view (sharing the buffer) built through the species
+        // constructor. Length-tracking views over resizable buffers omit
+        // `newLength` when `end` is undefined so the result stays length-tracking.
         const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, len, 0);
-        const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, @floatFromInt(len));
+        const end_is_undefined = args.len < 2 or args[1] == .undefined;
+        const end = try relIndex(self, if (!end_is_undefined) args[1] else .undefined, len, @floatFromInt(len));
         const count = if (end > start) end - start else 0;
         const begin_byte = ta.byte_offset + start * ta.kind.byteSize();
-        const sub = try self.typedArraySubarrayCreate(o, ta.buffer, begin_byte, count);
+        const sub_len: ?usize = if (ta.track_length and end_is_undefined) null else count;
+        const sub = try self.typedArraySubarrayCreate(o, ta.buffer, begin_byte, sub_len);
         return sub;
     }
     if (eq(name, "slice")) {
