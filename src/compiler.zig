@@ -861,6 +861,10 @@ pub const Compiler = struct {
                 const ci = try self.chunk.addConst(.{ .number = n });
                 _ = try self.chunk.emit(.load_const, ci);
             },
+            .bigint_lit => |b| {
+                const text = b.text orelse try std.fmt.allocPrint(self.arena, "{d}", .{b.value});
+                _ = try self.chunk.emit(.load_bigint, try self.chunk.addName(text));
+            },
             .string => |s| {
                 const ci = try self.chunk.addConst(.{ .string = s });
                 _ = try self.chunk.emit(.load_const, ci);

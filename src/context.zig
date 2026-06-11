@@ -2697,6 +2697,14 @@ test "generators: locals persist across yields, closures captured" {
     )).number);
 }
 
+test "generators: BigInt literal yields feed BigInt typed arrays" {
+    try std.testing.expect((try evalIn(
+        \\function* g() { yield 7n; yield 42n; }
+        \\var ta = new BigInt64Array(g());
+        \\ta.length === 2 && ta[0] === 7n && ta[1] === 42n;
+    )).boolean);
+}
+
 test "identifiers: unicode escapes decode to the canonical name" {
     // \uXXXX in an identifier resolves to the same name written literally.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("var \\u0061 = 1; a")).number);

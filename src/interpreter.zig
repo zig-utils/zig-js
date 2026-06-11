@@ -10752,14 +10752,14 @@ fn makeBigIntFromManaged(self: *Interpreter, managed: *const std.math.big.int.Ma
     return self.makeBigIntText(text);
 }
 
-fn negateBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {
+pub fn negateBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {
     if (big.bigint_text == null) return self.makeBigInt(-%big.bigint);
     var input = try managedBigIntFromObject(self.arena, big);
     input.negate();
     return makeBigIntFromManaged(self, &input);
 }
 
-fn bitNotBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {
+pub fn bitNotBigIntObject(self: *Interpreter, big: *value.Object) EvalError!Value {
     if (big.bigint_text == null) return self.makeBigInt(~big.bigint);
     var input = try managedBigIntFromObject(self.arena, big);
     input.negate();

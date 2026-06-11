@@ -194,6 +194,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         ip += 1;
         switch (inst.op) {
             .load_const => try stack.append(vm.arena, chunk.consts.items[inst.a]),
+            .load_bigint => try stack.append(vm.arena, try vm.makeBigIntText(chunk.names.items[inst.a])),
             .load_undefined => try stack.append(vm.arena, .undefined),
             .load_null => try stack.append(vm.arena, .null),
             .load_true => try stack.append(vm.arena, .{ .boolean = true }),
@@ -248,11 +249,16 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .neg => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, .{ .number = -v.toNumber() });
+                if (v == .object and v.object.is_bigint)
+                    try stack.append(vm.arena, try interp.negateBigIntObject(vm, v.object))
+                else
+                    try stack.append(vm.arena, .{ .number = -(try vm.toNumberV(v)) });
             },
             .pos => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, .{ .number = v.toNumber() });
+                if (v == .object and v.object.is_bigint)
+                    return vm.throwError("TypeError", "Cannot convert a BigInt value to a number");
+                try stack.append(vm.arena, .{ .number = try vm.toNumberV(v) });
             },
             .not => {
                 const v = stack.pop().?;
@@ -264,7 +270,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .bit_not => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, .{ .number = @floatFromInt(~v.toInt32()) });
+                if (v == .object and v.object.is_bigint)
+                    try stack.append(vm.arena, try interp.bitNotBigIntObject(vm, v.object))
+                else
+                    try stack.append(vm.arena, .{ .number = @floatFromInt(~v.toInt32()) });
             },
             .void_op => {
                 _ = stack.pop().?;

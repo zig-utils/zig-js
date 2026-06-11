@@ -29,6 +29,7 @@ pub const InlineCache = struct {
 pub const Op = enum(u8) {
     // --- stack / constants ---
     load_const, // operand: const-pool index
+    load_bigint, // operand: name-pool index containing canonical BigInt text
     load_undefined,
     load_null,
     load_true,
