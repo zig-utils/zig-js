@@ -58,7 +58,9 @@ pub const Gil = struct {
     pub fn yieldIfContended(g: *Gil) void {
         if (g.contenders.load(.monotonic) == 0) return;
         g.release();
-        std.Thread.yield() catch {};
+        while (g.contenders.load(.acquire) != 0) {
+            std.Thread.yield() catch {};
+        }
         g.acquire();
     }
 
