@@ -6234,7 +6234,7 @@ pub const Interpreter = struct {
     /// `Symbol.species` (a real constructor, else TypeError) is `new`-ed with the
     /// length; the result must be a non-detached typed array of at least `len`
     /// elements and the same content type (BigInt vs Number) as the exemplar.
-    fn typedArraySpeciesCreate(self: *Interpreter, exemplar: *value.Object, len: usize) EvalError!*value.Object {
+    fn typedArraySpeciesCreate(self: *Interpreter, exemplar: *value.Object, len: usize, immutable_same_buffer_ok: ?*value.Object) EvalError!*value.Object {
         const kind = exemplar.typed_array.?.kind;
         const default_ctor = self.env.get(kind.ctorName()) orelse return newTypedArray(self, kind, len);
         const ctor = try self.speciesConstructor(.{ .object = exemplar }, default_ctor);
@@ -6247,9 +6247,12 @@ pub const Interpreter = struct {
         const rta = res.object.typed_array.?;
         if (rta.kind.isBigInt() != kind.isBigInt())
             return self.throwError("TypeError", "TypedArray species content type does not match");
-        // The callers (map/filter/slice) write into the result, so ValidateTypedArray
-        // is in ~write~ mode: an immutable destination buffer is a TypeError.
-        if (rta.buffer.array_buffer.?.immutable)
+        // The callers write into the result, so ValidateTypedArray is normally
+        // in ~write~ mode: an immutable destination buffer is a TypeError. Slice
+        // has one spec-visible overlap case where the species result aliases the
+        // source buffer; its byte-copy loop is allowed to perform those internal
+        // writes even when the shared buffer is immutable.
+        if (rta.buffer.array_buffer.?.immutable and (immutable_same_buffer_ok == null or rta.buffer != immutable_same_buffer_ok.?))
             return self.throwError("TypeError", "TypedArray species result is backed by an immutable buffer");
         // ValidateTypedArray + the single-Number length guard use the LIVE length:
         // a result whose (resizable) buffer is detached/out-of-bounds, or now
@@ -6406,19 +6409,23 @@ pub const Interpreter = struct {
 
     /// Store `v` into typed-array element `i`, coercing per the element type:
     /// ToBigInt for a BigInt view (rejecting a Number), ToNumber otherwise.
-    fn taStore(self: *Interpreter, ta: *value.TypedArrayData, i: usize, v: Value) EvalError!void {
+    fn taStoreInternal(self: *Interpreter, ta: *value.TypedArrayData, i: usize, v: Value, allow_immutable: bool) EvalError!void {
         if (ta.kind.isBigInt()) {
             const bv = try self.toBigIntValueImpl(v, false);
             // TypedArraySetElement coerces first, then skips the store for an
             // invalid/out-of-bounds index or immutable buffer (a silent no-op,
             // not a throw).
-            if (i >= (ta.currentLength() orelse 0) or ta.buffer.array_buffer.?.immutable) return;
+            if (i >= (ta.currentLength() orelse 0) or (ta.buffer.array_buffer.?.immutable and !allow_immutable)) return;
             value.taWriteBig(ta, i, bv.object.bigint);
         } else {
             const num = try self.toNumberV(v);
-            if (i >= (ta.currentLength() orelse 0) or ta.buffer.array_buffer.?.immutable) return;
+            if (i >= (ta.currentLength() orelse 0) or (ta.buffer.array_buffer.?.immutable and !allow_immutable)) return;
             value.taWrite(ta, i, num);
         }
+    }
+
+    fn taStore(self: *Interpreter, ta: *value.TypedArrayData, i: usize, v: Value) EvalError!void {
+        return self.taStoreInternal(ta, i, v, false);
     }
 
     /// Read typed-array element `i` as a Value (a BigInt for a BigInt view, a
@@ -13208,7 +13215,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     }
     if (eq(name, "map")) {
         const cb = if (args.len > 0) args[0] else Value.undefined;
-        const result = try self.typedArraySpeciesCreate(o, len);
+        const result = try self.typedArraySpeciesCreate(o, len, null);
         var i: usize = 0;
         while (i < len) : (i += 1) {
             const r = try self.callValueWithThis(cb, &.{ try self.taLoadIdx(ta, i), .{ .number = @floatFromInt(i) }, recv }, cb_this);
@@ -13225,7 +13232,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, recv }, cb_this)).toBoolean())
                 try kept.append(self.arena, el);
         }
-        const result = try self.typedArraySpeciesCreate(o, kept.items.len);
+        const result = try self.typedArraySpeciesCreate(o, kept.items.len, null);
         for (kept.items, 0..) |x, k| try self.taStore(result.typed_array.?, k, x);
         return .{ .object = result };
     }
@@ -13397,14 +13404,15 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, len, 0);
         const end = try relIndex(self, if (args.len > 1) args[1] else .undefined, len, @floatFromInt(len));
         const count = if (end > start) end - start else 0;
-        const result = try self.typedArraySpeciesCreate(o, count);
+        const result = try self.typedArraySpeciesCreate(o, count, ta.buffer);
         // TypedArraySpeciesCreate can run user code (the `constructor`/@@species
         // getters) that detaches O's buffer; per spec slice re-checks before the
         // copy when count > 0.
         if (count > 0 and ta.currentLength() == null)
             return self.throwError("TypeError", "Cannot slice a TypedArray whose buffer is detached or out of bounds");
+        const aliases_immutable = result.typed_array.?.buffer == ta.buffer and ta.buffer.array_buffer.?.immutable;
         var i: usize = 0;
-        while (i < count) : (i += 1) try self.taStore(result.typed_array.?, i, try self.taLoad(ta, start + i));
+        while (i < count) : (i += 1) try self.taStoreInternal(result.typed_array.?, i, try self.taLoad(ta, start + i), aliases_immutable);
         return .{ .object = result };
     }
     if (eq(name, "with")) {
