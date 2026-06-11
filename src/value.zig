@@ -528,6 +528,9 @@ pub const Object = struct {
     /// `elements`; a Set keeps values directly. `size` is a maintained property.
     is_map: bool = false,
     is_set: bool = false,
+    /// Internal tombstone for SetData slots deleted during observable iteration.
+    /// User code can never obtain one; Set/iterator helpers skip these slots.
+    is_set_deleted: bool = false,
     /// A WeakMap/WeakSet reuses the `is_map`/`is_set` storage but carries this
     /// flag so the brand checks can tell a Map from a WeakMap (and Set/WeakSet).
     is_weak: bool = false,

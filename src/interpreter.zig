@@ -4463,23 +4463,25 @@ pub const Interpreter = struct {
         const key = canonicalCollectionKey(arg0(args));
         if (eq(name, "add")) {
             for (o.elements.items) |e| {
-                if (value.sameValueZero(e, key)) return self_v;
+                if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
             }
             try o.elements.append(self.arena, key);
             return self_v;
         }
         if (eq(name, "has")) {
             for (o.elements.items) |e| {
-                if (value.sameValueZero(e, key)) return Value{ .boolean = true };
+                if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return Value{ .boolean = true };
             }
             return Value{ .boolean = false };
         }
         if (eq(name, "delete")) {
             for (o.elements.items, 0..) |e, i| {
-                if (value.sameValueZero(e, key)) {
-                    _ = o.elements.orderedRemove(i);
+                if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) {
+                    const tomb = try self.arena.create(value.Object);
+                    tomb.* = .{ .is_set_deleted = true };
+                    o.elements.items[i] = .{ .object = tomb };
                     return Value{ .boolean = true };
-                }
+                };
             }
             return Value{ .boolean = false };
         }
@@ -4492,7 +4494,7 @@ pub const Interpreter = struct {
             if (!cb.isCallable()) return self.throwError("TypeError", "Set.prototype.forEach callback is not callable");
             var i: usize = 0;
             while (i < o.elements.items.len) : (i += 1) {
-                const e = o.elements.items[i];
+                const e = liveSetEntry(o.elements.items[i]) orelse continue;
                 _ = try self.callValueWithThis(cb, &.{ e, e, self_v }, arg(args, 1));
             }
             return Value.undefined;
@@ -4507,17 +4509,21 @@ pub const Interpreter = struct {
             const rec = try self.getSetRecord(arg0(args));
             if (eq(name, "union")) {
                 const result = (try self.makeSet(.undefined)).object;
-                for (o.elements.items) |e| _ = try self.setMethod(result, "add", &.{e});
+                for (o.elements.items) |e| {
+                    const entry = liveSetEntry(e) orelse continue;
+                    _ = try self.setMethod(result, "add", &.{entry});
+                }
                 for (try self.collectSetKeys(rec)) |k| _ = try self.setMethod(result, "add", &.{k});
                 return .{ .object = result };
             }
-            const this_size: f64 = @floatFromInt(o.elements.items.len);
+            const this_size: f64 = @floatFromInt(liveSetEntryCount(o));
             if (eq(name, "intersection")) {
                 const result = (try self.makeSet(.undefined)).object;
                 if (this_size <= rec.size) {
                     // Smaller `this`: walk this, probe the other set's `has`.
                     for (o.elements.items) |e| {
-                        if (try self.recordHas(rec, e)) _ = try self.setMethod(result, "add", &.{e});
+                        const entry = liveSetEntry(e) orelse continue;
+                        if (try self.recordHas(rec, entry)) _ = try self.setMethod(result, "add", &.{entry});
                     }
                 } else {
                     // Smaller other: walk the other set's keys, keep those in this.
@@ -4530,10 +4536,14 @@ pub const Interpreter = struct {
             if (eq(name, "difference")) {
                 // result starts as a copy of this; the smaller operand drives the walk.
                 const result = (try self.makeSet(.undefined)).object;
-                for (o.elements.items) |e| _ = try self.setMethod(result, "add", &.{e});
+                for (o.elements.items) |e| {
+                    const entry = liveSetEntry(e) orelse continue;
+                    _ = try self.setMethod(result, "add", &.{entry});
+                }
                 if (this_size <= rec.size) {
                     for (o.elements.items) |e| {
-                        if (try self.recordHas(rec, e)) _ = try self.setMethod(result, "delete", &.{e});
+                        const entry = liveSetEntry(e) orelse continue;
+                        if (try self.recordHas(rec, entry)) _ = try self.setMethod(result, "delete", &.{entry});
                     }
                 } else {
                     for (try self.collectSetKeys(rec)) |k| {
@@ -4544,7 +4554,10 @@ pub const Interpreter = struct {
             }
             if (eq(name, "symmetricDifference")) {
                 const result = (try self.makeSet(.undefined)).object;
-                for (o.elements.items) |e| _ = try self.setMethod(result, "add", &.{e});
+                for (o.elements.items) |e| {
+                    const entry = liveSetEntry(e) orelse continue;
+                    _ = try self.setMethod(result, "add", &.{entry});
+                }
                 for (try self.collectSetKeys(rec)) |k| {
                     if ((try self.setMethod(o, "has", &.{k})).?.boolean)
                         _ = try self.setMethod(result, "delete", &.{k})
@@ -4561,7 +4574,8 @@ pub const Interpreter = struct {
                 // skipped rather than re-probed from a stale snapshot.
                 var i: usize = 0;
                 while (i < o.elements.items.len) : (i += 1) {
-                    if (!(try self.recordHas(rec, o.elements.items[i])))
+                    const entry = liveSetEntry(o.elements.items[i]) orelse continue;
+                    if (!(try self.recordHas(rec, entry)))
                         return Value{ .boolean = false };
                 }
                 return Value{ .boolean = true };
@@ -4576,7 +4590,8 @@ pub const Interpreter = struct {
                 if (this_size <= rec.size) {
                     var i: usize = 0;
                     while (i < o.elements.items.len) : (i += 1) {
-                        if (try self.recordHas(rec, o.elements.items[i])) return Value{ .boolean = false };
+                        const entry = liveSetEntry(o.elements.items[i]) orelse continue;
+                        if (try self.recordHas(rec, entry)) return Value{ .boolean = false };
                     }
                     return Value{ .boolean = true };
                 }
@@ -4617,7 +4632,10 @@ pub const Interpreter = struct {
     /// are exhausted without a match, `false` (no close — the iterator finished).
     fn setKeysAny(self: *Interpreter, rec: SetRecord, o: *value.Object, want: bool) EvalError!bool {
         if (rec.is_set) {
-            for (rec.obj.elements.items) |k| if (setContains(o, k) == want) return true;
+            for (rec.obj.elements.items) |k| {
+                const entry = liveSetEntry(k) orelse continue;
+                if (setContains(o, entry) == want) return true;
+            }
             return false;
         }
         const iter = try self.callValueWithThis(rec.keys, &.{}, .{ .object = rec.obj });
@@ -4637,7 +4655,10 @@ pub const Interpreter = struct {
     /// SetDataHas: whether the native Set `o` contains `elem` (SameValueZero) —
     /// used by the set operations when they iterate the *other* operand.
     fn setContains(o: *value.Object, elem: Value) bool {
-        for (o.elements.items) |e| if (value.sameValueZero(e, elem)) return true;
+        for (o.elements.items) |e| {
+            const entry = liveSetEntry(e) orelse continue;
+            if (value.sameValueZero(entry, elem)) return true;
+        }
         return false;
     }
 
@@ -4645,7 +4666,10 @@ pub const Interpreter = struct {
     /// set-like calls its `has`).
     fn recordHas(self: *Interpreter, rec: SetRecord, elem: Value) EvalError!bool {
         if (rec.is_set) {
-            for (rec.obj.elements.items) |e| if (value.sameValueZero(e, elem)) return true;
+            for (rec.obj.elements.items) |e| {
+                const entry = liveSetEntry(e) orelse continue;
+                if (value.sameValueZero(entry, elem)) return true;
+            }
             return false;
         }
         return (try self.callValueWithThis(rec.has, &.{elem}, .{ .object = rec.obj })).toBoolean();
@@ -4653,7 +4677,14 @@ pub const Interpreter = struct {
 
     /// The set-like's elements (a native Set's `elements`, else its `keys()`).
     fn collectSetKeys(self: *Interpreter, rec: SetRecord) EvalError![]Value {
-        if (rec.is_set) return rec.obj.elements.items;
+        if (rec.is_set) {
+            var list: std.ArrayListUnmanaged(Value) = .empty;
+            for (rec.obj.elements.items) |e| {
+                const entry = liveSetEntry(e) orelse continue;
+                try list.append(self.arena, entry);
+            }
+            return list.items;
+        }
         const iter = try self.callValueWithThis(rec.keys, &.{}, .{ .object = rec.obj });
         // GetIteratorDirect: capture `next` ONCE, then call it each step (the
         // spec does not re-read the `next` property on every iteration).
@@ -20181,6 +20212,19 @@ fn liveMapEntryCount(o: *value.Object) usize {
     return n;
 }
 
+fn liveSetEntry(v: Value) ?Value {
+    if (v == .object and v.object.is_set_deleted) return null;
+    return v;
+}
+
+fn liveSetEntryCount(o: *value.Object) usize {
+    var n: usize = 0;
+    for (o.elements.items) |entry| {
+        if (liveSetEntry(entry) != null) n += 1;
+    }
+    return n;
+}
+
 /// The byte length of the well-formed UTF-8 sequence starting at `s[i]`; 1 for a
 /// lone/invalid byte (so iteration always progresses without ever decoding past
 /// the end of the string).
@@ -20275,17 +20319,22 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 advance = j + 1 - i;
                 break;
             }
-        } else if (so.is_set and i < so.elements.items.len) {
-            const e = so.elements.items[i];
-            if (kind == 2) {
-                const pair = (try self.newArray()).object;
-                try pair.elements.append(self.arena, e);
-                try pair.elements.append(self.arena, e);
-                val = .{ .object = pair };
-            } else {
-                val = e;
+        } else if (so.is_set) {
+            var j = i;
+            while (j < so.elements.items.len) : (j += 1) {
+                const e = liveSetEntry(so.elements.items[j]) orelse continue;
+                if (kind == 2) {
+                    const pair = (try self.newArray()).object;
+                    try pair.elements.append(self.arena, e);
+                    try pair.elements.append(self.arena, e);
+                    val = .{ .object = pair };
+                } else {
+                    val = e;
+                }
+                done = false;
+                advance = j + 1 - i;
+                break;
             }
-            done = false;
         },
         .string => |s| if (i < s.len) {
             // A String iterator yields one JS code point, not one byte. That is
@@ -20608,7 +20657,7 @@ fn collectionSizeGetter(comptime is_set_kind: bool) value.NativeFn {
             const ok = this == .object and !this.object.is_weak and
                 (if (is_set_kind) this.object.is_set else this.object.is_map);
             if (!ok) return self.throwError("TypeError", if (is_set_kind) "Set.prototype.size getter called on a non-Set" else "Map.prototype.size getter called on a non-Map");
-            const size = if (is_set_kind) this.object.elements.items.len else liveMapEntryCount(this.object);
+            const size = if (is_set_kind) liveSetEntryCount(this.object) else liveMapEntryCount(this.object);
             return .{ .number = @floatFromInt(size) };
         }
     }.call;

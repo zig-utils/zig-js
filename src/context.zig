@@ -2093,6 +2093,16 @@ test "Map/Set forEach tolerate deletion during iteration" {
         \\set.forEach(function(value) { if (count === 0) set.delete('bar'); count++; });
         \\count
     )).number);
+    try expectEvalStr("1,2,3,1|2|1,3,1",
+        \\var set = new Set([1, 2, 3]);
+        \\var out = [];
+        \\set.forEach(function(value) {
+        \\  out.push(value);
+        \\  if (value === 2) set.delete(1);
+        \\  if (value === 3) set.add(1);
+        \\});
+        \\out.join(',') + '|' + set.size + '|' + Array.from(set).join(',')
+    );
     try expectEvalStr("foo:0|bar:1|foo:baz",
         \\var map = new Map([['foo', 0], ['bar', 1]]);
         \\var out = [];
