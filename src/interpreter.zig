@@ -5929,10 +5929,17 @@ pub const Interpreter = struct {
             return try builtins.defineOneResult(self, ro, key, desc);
         }
         if (ro.getAccessor(key) != null) return false;
-        if (ro.getOwn(key)) |_| {
+        const had_receiver_own = ro.getOwn(key) != null;
+        if (had_receiver_own) {
             if (!ro.getAttr(key).writable) return false;
         } else if (!ro.extensible) return false;
         try self.setProp(ro, key, v);
+        if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {
+            const root = rootEnv(self.env);
+            if (!root.consts.contains(key)) {
+                if (root.vars.getPtr(key)) |slot| slot.* = v;
+            }
+        }
         return true;
     }
 

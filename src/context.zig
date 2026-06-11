@@ -2598,6 +2598,17 @@ test "Object.getOwnPropertySymbols rejects nullish inputs" {
     )).boolean);
 }
 
+test "global object writes update object-backed global bindings" {
+    try std.testing.expect((try evalIn(
+        \\var original = Object;
+        \\function fakeObject() {}
+        \\globalThis.Object = fakeObject;
+        \\var ok = Object === fakeObject && globalThis.Object === fakeObject;
+        \\globalThis.Object = original;
+        \\ok && Object === original
+    )).boolean);
+}
+
 test "Object.freeze / seal / preventExtensions" {
     // freeze: writes ignored, not extensible, isFrozen true.
     try std.testing.expect((try evalIn(
