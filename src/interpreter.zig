@@ -3085,9 +3085,16 @@ pub const Interpreter = struct {
     /// abandoned pending, the host's prerogative). Called after the main
     /// microtask drain in Context.evaluate/evaluateModule and agent realms.
     pub fn settleAsyncWaiters(self: *Interpreter) void {
-        if (self.gil != null) {
-            jsthread.pumpTasks(self);
-            jsthread.pollPropAsync(self);
+        if (self.gil) |g| {
+            // Quiescence loop: pumped tasks queue microtasks which can queue
+            // further tasks — keep going until both are empty.
+            while (true) {
+                jsthread.pumpTasks(self);
+                jsthread.pollPropAsync(self);
+                self.drainMicrotasks() catch {};
+                const q_empty = if (self.microtasks) |q| q.items.len == 0 else true;
+                if (q_empty and g.tasks.items.len == 0) break;
+            }
         }
         const listp = self.async_waiters orelse return;
         if (listp.items.len == 0) return;

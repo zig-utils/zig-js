@@ -279,16 +279,26 @@ const LockRecord = struct {
     sync_waiting: usize = 0,
 };
 
+/// A parked sync waiter's ticket (on the waiting thread's stack; unlinked
+/// before wait returns).
+const SyncCondTicket = struct {
+    woken: bool = false,
+    /// Set once the woken waiter has re-registered on the lock — notifyAll's
+    /// handoff loops until every wake is consumed.
+    consumed: bool = false,
+};
+
+const CondEntry = union(enum) {
+    sync: *SyncCondTicket,
+    asynchronous: *AsyncCondWaiter,
+};
+
 const CondRecord = struct {
     gil: *gil_mod.Gil,
     cond: std.Io.Condition = .init,
-    /// JS-level waiters currently parked (GIL-protected) and how many of
-    /// them already have an unconsumed wake — notify must report exactly how
-    /// many it woke, and back-to-back notifies must not overcount.
-    waiting: usize = 0,
-    signalled: usize = 0,
-    /// asyncWait waiters, woken FIFO after the parked ones.
-    async_waiting: std.ArrayListUnmanaged(*AsyncCondWaiter) = .empty,
+    /// ONE FIFO domain for sync and async waiters (4.3: notify wakes them
+    /// uniformly in arrival order — cross-kind).
+    queue: std.ArrayListUnmanaged(CondEntry) = .empty,
 };
 
 const TLRecord = struct {
@@ -432,13 +442,19 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     if (!agent.main_can_block)
         return self.throwError("TypeError", "Condition.prototype.wait cannot block the current thread");
     // Atomic under the GIL: nothing else runs between the release below and
-    // our park inside gil.wait (which registers before unlocking).
+    // our enqueue+park (parks register before the VM lock drops).
     lockRelease(self, lock);
-    rec.waiting += 1;
-    while (rec.signalled == 0) parkPump(self, rec.gil, &rec.cond);
-    rec.waiting -= 1;
-    rec.signalled -= 1;
+    // Arena-allocated, NOT stack: the notifier's consume-loop reads the
+    // ticket after this frame may have returned (a stack ticket dangles —
+    // it read clobbered memory and spun forever).
+    const ticket = try self.arena.create(SyncCondTicket);
+    ticket.* = .{};
+    try rec.queue.append(self.arena, .{ .sync = ticket });
+    while (!ticket.woken) parkPump(self, rec.gil, &rec.cond);
+    // Re-register on the lock BEFORE acking the wake, so notifyAll's
+    // consume-loop guarantees FIFO against async regrants.
     lock.sync_waiting += 1;
+    ticket.consumed = true;
     while (lock.locked) parkPump(self, rec.gil, &lock.cond);
     lock.sync_waiting -= 1;
     lock.locked = true;
@@ -452,42 +468,42 @@ fn condNotifyFn(comptime all: bool) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
             const rec = recOf(CondRecord, this) orelse return self.throwError("TypeError", "Condition.prototype.notify called on incompatible receiver");
-            const wakeable = rec.waiting - rec.signalled;
-            if (all) {
-                rec.signalled = rec.waiting;
-                rec.cond.broadcast(agent.engineIo());
-                var n = wakeable;
-                while (rec.async_waiting.items.len > 0) {
-                    wakeAsyncCondWaiter(self, rec.async_waiting.orderedRemove(0));
-                    n += 1;
+            // ONE FIFO domain: wake in arrival order regardless of kind.
+            var n: usize = 0;
+            var woken_sync: std.ArrayListUnmanaged(*SyncCondTicket) = .empty;
+            defer woken_sync.deinit(self.arena);
+            while (rec.queue.items.len > 0 and (all or n == 0)) {
+                const entry = rec.queue.orderedRemove(0);
+                switch (entry) {
+                    .sync => |t| {
+                        t.woken = true;
+                        woken_sync.append(self.arena, t) catch {};
+                    },
+                    .asynchronous => |w| wakeAsyncCondWaiter(self, w),
                 }
-                // The corpus's scheduling contracts: notifyAll performs an
-                // unconditional depth-free GIL handoff (notify-all-shared-
-                // lock), and FIFO between woken sync waiters and async
-                // waiters (condition-async-wait) requires every issued wake
-                // to be CONSUMED before the notifier proceeds — a woken
-                // waiter re-registers on the lock within a single GIL hold,
-                // so once `signalled` drains, the sync waiters are queued
-                // ahead of any async regrant.
-                if (self.gil) |g| {
-                    while (rec.signalled > 0) {
-                        g.release();
-                        std.Thread.yield() catch {};
-                        g.acquire();
+                n += 1;
+            }
+            if (woken_sync.items.len > 0) rec.cond.broadcast(agent.engineIo());
+            // Depth-free handoff (notify-all-shared-lock) + FIFO against
+            // async regrants (condition-async-wait): loop until every woken
+            // sync waiter has re-registered on its lock.
+            if (self.gil) |g| {
+                var pending = true;
+                while (pending) {
+                    pending = false;
+                    for (woken_sync.items) |t| {
+                        if (!t.consumed) pending = true;
                     }
+                    if (!pending) break;
+                    g.release();
+                    // A real sleep, not a bare yield: the woken waiter must
+                    // win the GIL to ack, and a tight relock loop can starve
+                    // it indefinitely (no mutex fairness).
+                    std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+                    g.acquire();
                 }
-                return .{ .number = @floatFromInt(n) };
             }
-            if (wakeable > 0) {
-                rec.signalled += 1;
-                rec.cond.signal(agent.engineIo());
-                return .{ .number = 1 };
-            }
-            if (rec.async_waiting.items.len > 0) {
-                wakeAsyncCondWaiter(self, rec.async_waiting.orderedRemove(0));
-                return .{ .number = 1 };
-            }
-            return .{ .number = 0 };
+            return .{ .number = @floatFromInt(n) };
         }
     }.call;
 }
@@ -1014,7 +1030,7 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     const outer = try promise.newPromise(self);
     const w = try self.arena.create(AsyncCondWaiter);
     w.* = .{ .lock = lock, .outer = outer };
-    try rec.async_waiting.append(self.arena, w);
+    try rec.queue.append(self.arena, .{ .asynchronous = w });
     lockRelease(self, lock);
     return .{ .object = outer };
 }
