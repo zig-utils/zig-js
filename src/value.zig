@@ -505,6 +505,10 @@ pub const Object = struct {
     /// Opaque `data` pointer carried for `JSObjectMake(ctx, class, data)` and
     /// surfaced to host callbacks via private-data accessors later.
     private_data: ?*anyopaque = null,
+    /// `Thread.restrict(obj)`: the only OS thread allowed to touch this
+    /// object's properties (null = unrestricted). Enforced at the property
+    /// get/set chokepoints with a ConcurrentAccessError-style TypeError.
+    restricted_to: ?u64 = null,
     /// True for `Error`-family instances; drives `toString` and `instanceof`.
     is_error: bool = false,
     /// True for `RegExp` instances (carries `source`/`flags` properties; matching

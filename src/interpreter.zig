@@ -3195,7 +3195,20 @@ pub const Interpreter = struct {
         const q = self.microtasks;
         while (p.state == .pending) {
             const queue = q orelse break;
-            if (queue.items.len == 0) break; // nothing left to settle it
+            if (queue.items.len == 0) {
+                // Threads mode: another thread can settle this shared promise
+                // (asyncJoin, cross-thread resolve) — hand the GIL over and
+                // re-check instead of bailing. A promise nothing will ever
+                // settle hangs the awaiting thread, as in any real engine;
+                // the host watchdog is the backstop.
+                if (self.gil) |g| {
+                    g.release();
+                    std.Thread.yield() catch {};
+                    g.acquire();
+                    continue;
+                }
+                break; // nothing left to settle it
+            }
             const job = queue.orderedRemove(0);
             try promise.runJob(self, job);
         }
@@ -5069,6 +5082,8 @@ pub const Interpreter = struct {
     }
 
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
+        if (recv == .object) if (recv.object.restricted_to) |tid| if (tid != @as(u64, @intCast(std.Thread.getCurrentId())))
+            return self.throwError("TypeError", "ConcurrentAccessError: object is restricted to another thread");
         return self.getPropertyWithReceiver(recv, key, recv);
     }
 
@@ -5608,6 +5623,8 @@ pub const Interpreter = struct {
     /// translate a false result into a strict-mode TypeError; Reflect.set returns
     /// the boolean directly.
     pub fn setMemberResult(self: *Interpreter, recv: Value, key: []const u8, v: Value, receiver: Value) EvalError!bool {
+        if (recv == .object) if (recv.object.restricted_to) |tid| if (tid != @as(u64, @intCast(std.Thread.getCurrentId())))
+            return self.throwError("TypeError", "ConcurrentAccessError: object is restricted to another thread");
         if (recv == .object and (recv.object.is_symbol or recv.object.is_bigint))
             return self.setPrimitiveMemberResult(recv, key, v);
         if (recv != .object) {

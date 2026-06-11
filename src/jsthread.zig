@@ -17,6 +17,8 @@ const ContextMod = @import("context.zig");
 const gil_mod = @import("gil.zig");
 const agent = @import("agent.zig");
 
+const promise = @import("promise.zig");
+
 const Context = ContextMod.Context;
 const Value = value.Value;
 const Interpreter = interp.Interpreter;
@@ -34,6 +36,11 @@ pub const ThreadRecord = struct {
     done_cond: std.Io.Condition = .init,
     /// The realm's wrapper object (`Thread.current` returns it).
     js_obj: ?*value.Object = null,
+    /// Promises handed out by `asyncJoin` before completion; settled by the
+    /// finishing thread (reactions run on the settling thread's queue — the
+    /// PR's ordinary-promise rule; awaiters elsewhere observe the shared
+    /// state via awaitValue's GIL-yield loop).
+    pending_joins: std.ArrayListUnmanaged(*value.Object) = .empty,
 };
 
 threadlocal var t_current: ?*ThreadRecord = null;
@@ -47,6 +54,7 @@ pub fn installThreadAPI(ctx: *Context) !void {
     const proto = try a.create(value.Object);
     proto.* = .{};
     try interp.setNative(a, rs, proto, "join", 0, threadJoinFn);
+    try interp.setNative(a, rs, proto, "asyncJoin", 0, threadAsyncJoinFn);
 
     const ctor = try a.create(value.Object);
     ctor.* = .{ .native = threadCtorFn, .native_ctor = true, .private_data = ctx };
@@ -54,6 +62,7 @@ pub fn installThreadAPI(ctx: *Context) !void {
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try interp.setConstructor(a, rs, proto, ctor);
     try interp.setNativeGetter(a, rs, ctor, "current", threadCurrentGetter);
+    try interp.setNative(a, rs, ctor, "restrict", 1, threadRestrictFn);
 
     try ctx.env.put("Thread", .{ .object = ctor });
     try ctx.global_object.setOwn(a, rs, "Thread", .{ .object = ctor });
@@ -151,6 +160,18 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         rec.result = machine.exception;
     }
     rec.done = true;
+    // Settle asyncJoin promises on this (the settling) thread, then drain
+    // the reactions it just queued.
+    for (rec.pending_joins.items) |p_obj| {
+        if (promise.promiseOf(.{ .object = p_obj })) |pp| {
+            if (rec.threw)
+                promise.reject(&machine, pp, rec.result) catch {}
+            else
+                promise.resolve(&machine, pp, rec.result) catch {};
+        }
+    }
+    rec.pending_joins.clearRetainingCapacity();
+    machine.drainMicrotasks() catch {};
     rec.done_cond.broadcast(agent.engineIo());
 }
 
@@ -188,6 +209,9 @@ fn threadCurrentGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) va
 const LockRecord = struct {
     gil: *gil_mod.Gil,
     locked: bool = false,
+    /// Holding thread (0 = unheld) — recursion detection: a nested hold on
+    /// the same thread must throw, not self-deadlock.
+    holder: u64 = 0,
     cond: std.Io.Condition = .init,
 };
 
@@ -214,6 +238,7 @@ fn installSyncAPI(ctx: *Context) !void {
     const lock_proto = try a.create(value.Object);
     lock_proto.* = .{};
     try interp.setNative(a, rs, lock_proto, "hold", 1, lockHoldFn);
+    try interp.setNativeGetter(a, rs, lock_proto, "locked", lockLockedGetter);
     try installCtor(ctx, "Lock", lockCtorFn, lock_proto);
 
     const cond_proto = try a.create(value.Object);
@@ -287,12 +312,23 @@ fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.hold called on a non-Lock");
     const cb = if (args.len > 0) args[0] else Value.undefined;
     if (!cb.isCallable()) return self.throwError("TypeError", "Lock.hold requires a callable");
+    if (rec.locked and rec.holder == currentTid())
+        return self.throwError("Error", "Lock is not recursive");
     while (rec.locked) rec.gil.wait(&rec.cond);
     rec.locked = true;
+    rec.holder = currentTid();
     const out = self.callValueWithThis(cb, &.{}, .undefined);
     rec.locked = false;
+    rec.holder = 0;
     rec.cond.signal(agent.engineIo());
     return out;
+}
+
+fn lockLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.locked called on incompatible receiver");
+    return .{ .boolean = rec.locked };
 }
 
 /// `Condition.prototype.wait(lock)` — atomically release the lock and park;
@@ -307,10 +343,12 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     // Atomic under the GIL: nothing else runs between the release below and
     // our park inside gil.wait (which registers before unlocking).
     lock.locked = false;
+    lock.holder = 0;
     lock.cond.signal(agent.engineIo());
     rec.gil.wait(&rec.cond);
     while (lock.locked) rec.gil.wait(&lock.cond);
     lock.locked = true;
+    lock.holder = currentTid();
     return .undefined;
 }
 
@@ -329,13 +367,13 @@ fn condNotifyFn(comptime all: bool) value.NativeFn {
 fn tlValueGetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.value read on a non-ThreadLocal");
+    const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.prototype.value called on incompatible receiver");
     return rec.map.get(currentTid()) orelse .undefined;
 }
 
 fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.value set on a non-ThreadLocal");
+    const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.prototype.value called on incompatible receiver");
     const v = if (args.len > 0) args[0] else Value.undefined;
     try rec.map.put(rec.arena, currentTid(), v);
     return .undefined;
@@ -371,7 +409,12 @@ fn isAccessor(o: *value.Object, key: []const u8) bool {
 
 fn ownDataOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: []const u8) value.HostError!Value {
     if (isAccessor(o, key)) return self.throwError("TypeError", what);
-    return o.getOwn(key) orelse self.throwError("TypeError", what);
+    if (o.getOwn(key)) |v| return v;
+    // Array dense elements (and other index-shaped own data) live outside the
+    // shape slots; the generic own check + [[Get]] covers them (one step
+    // under the GIL either way).
+    if (interp.objectHasOwn(o, key)) return self.getProperty(.{ .object = o }, key);
+    return self.throwError("TypeError", what);
 }
 
 fn writableOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: []const u8) value.HostError!void {
@@ -393,12 +436,14 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
     const key = try self.keyOf(argAt(args, 1));
     const v = argAt(args, 2);
     if (isAccessor(o, key)) return self.throwError("TypeError", "Atomics.store: property is an accessor");
-    if (o.getOwn(key) != null) {
+    if (interp.objectHasOwn(o, key)) {
         try writableOrThrow(self, o, key, "Atomics.store: property is not writable");
     } else if (!o.extensible) {
         return self.throwError("TypeError", "Atomics.store: cannot create a property on a non-extensible object");
     }
-    try o.setOwn(self.arena, self.root_shape, key, v);
+    // [[Set]] writes shape props and index elements alike, preserving
+    // attributes and creating fresh default-attribute properties.
+    try self.setMember(.{ .object = o }, key, v);
     return v;
 }
 
@@ -407,7 +452,7 @@ pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Val
     const key = try self.keyOf(argAt(args, 1));
     const old = try ownDataOrThrow(self, o, key, "Atomics.exchange: object has no own data property");
     try writableOrThrow(self, o, key, "Atomics.exchange: property is not writable");
-    try o.setOwn(self.arena, self.root_shape, key, argAt(args, 2));
+    try self.setMember(.{ .object = o }, key, argAt(args, 2));
     return old;
 }
 
@@ -419,7 +464,7 @@ pub fn propCompareExchange(self: *Interpreter, args: []const Value) value.HostEr
     // would fail.
     try writableOrThrow(self, o, key, "Atomics.compareExchange: property is not writable");
     if (sameValueZero(old, argAt(args, 2)))
-        try o.setOwn(self.arena, self.root_shape, key, argAt(args, 3));
+        try self.setMember(.{ .object = o }, key, argAt(args, 3));
     return old;
 }
 
@@ -440,7 +485,7 @@ pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.Hos
         .or_ => @floatFromInt(jsInt32(old.number) | jsInt32(operand)),
         .xor => @floatFromInt(jsInt32(old.number) ^ jsInt32(operand)),
     };
-    try o.setOwn(self.arena, self.root_shape, key, .{ .number = result });
+    try self.setMember(.{ .object = o }, key, .{ .number = result });
     return old;
 }
 
@@ -509,4 +554,33 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
         }
     }
     return .{ .number = @floatFromInt(n) };
+}
+
+/// `Thread.prototype.asyncJoin()` — a promise for the thread's completion.
+/// Settles immediately when already done; otherwise the finishing thread
+/// settles it (reactions run there — the settling-thread rule; an `await`
+/// on any other thread observes the shared state via the GIL-yield loop).
+fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.asyncJoin called on a non-Thread");
+    const p_obj = try promise.newPromise(self);
+    const pp = promise.promiseOf(.{ .object = p_obj }).?;
+    if (rec.done) {
+        if (rec.threw) try promise.reject(self, pp, rec.result) else try promise.resolve(self, pp, rec.result);
+    } else {
+        try rec.pending_joins.append(self.arena, p_obj);
+    }
+    return .{ .object = p_obj };
+}
+
+/// `Thread.restrict(obj)` — pin `obj` to the calling thread; any property
+/// access from another thread throws (ConcurrentAccessError semantics).
+fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const v = if (args.len > 0) args[0] else Value.undefined;
+    if (v != .object) return self.throwError("TypeError", "cannot restrict this object");
+    v.object.restricted_to = @intCast(std.Thread.getCurrentId());
+    return v;
 }

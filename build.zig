@@ -63,6 +63,21 @@ pub fn build(b: *std.Build) void {
     const conformance_step = b.step("conformance", "Run the JS conformance suite");
     conformance_step.dependOn(&run_conformance.step);
 
+    // Threads corpus: `zig build threads-test` runs the vendored WebKit
+    // PR-249 thread tests (the green allowlist) against the Phase-6 API.
+    const threads_test = b.addExecutable(.{
+        .name = "threads-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/threads_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    const run_threads_test = b.addRunArtifact(threads_test);
+    const threads_test_step = b.step("threads-test", "Run the vendored PR-249 threads corpus allowlist");
+    threads_test_step.dependOn(&run_threads_test.step);
+
     // test262 ingestion: `zig build test262 [-Dtest262=<root>]` runs the real
     // tc39/test262 corpus through the engine and reports the (partial) pass
     // rate. The default root is the pinned `test262` git submodule, so we always
