@@ -3060,6 +3060,10 @@ test "Context is thread-affine: owner recognized, foreign thread rejected" {
 test "real agents: broadcast rendezvous, blocking wait, notify, report" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
+    // Join the agent threads before this test returns — group teardown
+    // otherwise waits for the NEXT $262 install, letting an agent outlive
+    // the test (a determinism hole TSan flagged against the test runner).
+    defer @import("agent.zig").reset();
     _ = try ctx.evaluate(
         \\const sab = new SharedArrayBuffer(8);
         \\const view = new Int32Array(sab);
@@ -3082,6 +3086,7 @@ test "real agents: broadcast rendezvous, blocking wait, notify, report" {
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
+    defer @import("agent.zig").reset();
     _ = try ctx.evaluate(
         \\const sab = new SharedArrayBuffer(8);
         \\const view = new Int32Array(sab);
