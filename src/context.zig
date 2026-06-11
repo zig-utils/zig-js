@@ -3112,6 +3112,21 @@ test "real agents: broadcast rendezvous, blocking wait, notify, report" {
     );
 }
 
+test "SharedArrayBuffer resolves newTarget prototype before data allocation" {
+    try std.testing.expect((try evalIn(
+        \\function MarkerError() {}
+        \\var newTarget = function() {}.bind(null);
+        \\Object.defineProperty(newTarget, "prototype", {
+        \\  get: function() { throw new MarkerError(); }
+        \\});
+        \\try {
+        \\  Reflect.construct(SharedArrayBuffer, [7 * 1125899906842624], newTarget);
+        \\} catch (e) {
+        \\  e instanceof MarkerError;
+        \\}
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

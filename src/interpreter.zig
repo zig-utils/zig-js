@@ -18746,7 +18746,6 @@ fn sharedArrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor SharedArrayBuffer requires 'new'");
     const len = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
-    if (len > 0x7fffffff) return self.throwError("RangeError", "Invalid SharedArrayBuffer length");
     var max: ?usize = null;
     if (args.len > 1 and args[1] == .object) {
         const mv = try self.getProperty(args[1], "maxByteLength");
@@ -18756,10 +18755,15 @@ fn sharedArrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
             max = @intCast(m);
         }
     }
+    // AllocateSharedArrayBuffer creates the object (including
+    // GetPrototypeFromConstructor) before CreateByteDataBlock, so a throwing
+    // newTarget.prototype getter wins over allocation/length RangeError.
+    const proto = try self.protoFromCtor("SharedArrayBuffer");
+    if (len > 0x7fffffff) return self.throwError("RangeError", "Invalid SharedArrayBuffer length");
     const storage = shared_buffer.SharedBufferStorage.create(@intCast(len), max) catch
         return self.throwError("RangeError", "SharedArrayBuffer allocation failed");
     const o = try makeSharedArrayBufferWrapper(self, storage);
-    if (try self.protoFromCtor("SharedArrayBuffer")) |pr| o.proto = pr;
+    if (proto) |pr| o.proto = pr;
     return .{ .object = o };
 }
 
