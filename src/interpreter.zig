@@ -4066,6 +4066,17 @@ pub const Interpreter = struct {
         };
     }
 
+    fn dateYearString(self: *Interpreter, y: i64) EvalError![]const u8 {
+        if (y < 0) return std.fmt.allocPrint(self.arena, "-{d:0>4}", .{@as(u64, @intCast(-y))});
+        return std.fmt.allocPrint(self.arena, "{d:0>4}", .{@as(u64, @intCast(y))});
+    }
+
+    fn dateISOYearString(self: *Interpreter, y: i64) EvalError![]const u8 {
+        if (y >= 0 and y <= 9999) return std.fmt.allocPrint(self.arena, "{d:0>4}", .{@as(u64, @intCast(y))});
+        if (y < 0) return std.fmt.allocPrint(self.arena, "-{d:0>6}", .{@as(u64, @intCast(-y))});
+        return std.fmt.allocPrint(self.arena, "+{d:0>6}", .{@as(u64, @intCast(y))});
+    }
+
     /// Recompose broken-down components into an epoch-ms time, set it on `o`, and
     /// return it — the shared back half of every `Date.prototype.set*`. Out-of-range
     /// fields roll over (e.g. `setHours(0,0,0,-1)`); a non-finite or absurd field, or
@@ -4207,8 +4218,8 @@ pub const Interpreter = struct {
         if (eq(name, "toUTCString") or eq(name, "toGMTString")) {
             if (std.math.isNan(t)) return Value{ .string = "Invalid Date" };
             const c = dateDecompose(t);
-            return Value{ .string = try std.fmt.allocPrint(self.arena, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-                day_names[@intCast(c.wday)], dnz(c.d), month_names[@intCast(c.mo)], dnz(c.y), dnz(c.h), dnz(c.mi), dnz(c.s),
+            return Value{ .string = try std.fmt.allocPrint(self.arena, "{s}, {d:0>2} {s} {s} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+                day_names[@intCast(c.wday)], dnz(c.d), month_names[@intCast(c.mo)], try self.dateYearString(c.y), dnz(c.h), dnz(c.mi), dnz(c.s),
             }) };
         }
         if (eq(name, "toDateString") or eq(name, "toString") or eq(name, "toTimeString") or
@@ -4216,7 +4227,7 @@ pub const Interpreter = struct {
         {
             if (std.math.isNan(t)) return Value{ .string = "Invalid Date" };
             const c = dateDecompose(t);
-            const date_str = try std.fmt.allocPrint(self.arena, "{s} {s} {d:0>2} {d:0>4}", .{ day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), dnz(c.y) });
+            const date_str = try std.fmt.allocPrint(self.arena, "{s} {s} {d:0>2} {s}", .{ day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), try self.dateYearString(c.y) });
             const time_str = try std.fmt.allocPrint(self.arena, "{d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{ dnz(c.h), dnz(c.mi), dnz(c.s) });
             if (eq(name, "toDateString") or eq(name, "toLocaleDateString")) return Value{ .string = date_str };
             if (eq(name, "toTimeString") or eq(name, "toLocaleTimeString")) return Value{ .string = time_str };
@@ -4245,8 +4256,8 @@ pub const Interpreter = struct {
     /// ISO 8601 rendering of a finite epoch-ms time (`2020-01-15T00:00:00.000Z`).
     fn dateISO(self: *Interpreter, t: f64) EvalError![]const u8 {
         const c = dateDecompose(t);
-        return std.fmt.allocPrint(self.arena, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-            dnz(c.y), dnz(c.mo + 1), dnz(c.d), dnz(c.h), dnz(c.mi), dnz(c.s), dnz(c.ms),
+        return std.fmt.allocPrint(self.arena, "{s}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+            try self.dateISOYearString(c.y), dnz(c.mo + 1), dnz(c.d), dnz(c.h), dnz(c.mi), dnz(c.s), dnz(c.ms),
         });
     }
 
@@ -4267,13 +4278,15 @@ pub const Interpreter = struct {
         for (fields) |f| {
             if (!std.math.isFinite(f) or @abs(f) > 1e9) return nan;
         }
-        const y: i64 = @intFromFloat(@trunc(fields[0]));
-        const mo: i64 = @intFromFloat(@trunc(fields[1]));
+        var y: i64 = @intFromFloat(@trunc(fields[0]));
+        var mo: i64 = @intFromFloat(@trunc(fields[1]));
         const d: i64 = @intFromFloat(@trunc(fields[2]));
         const h: i64 = @intFromFloat(@trunc(fields[3]));
         const mi: i64 = @intFromFloat(@trunc(fields[4]));
         const s: i64 = @intFromFloat(@trunc(fields[5]));
         const millis: i64 = @intFromFloat(@trunc(fields[6]));
+        y += @divFloor(mo, 12);
+        mo = @mod(mo, 12);
         const days = daysFromCivil(y, mo + 1, d);
         const t: f64 = @floatFromInt(days * ms_per_day + h * 3600000 + mi * 60000 + s * 1000 + millis);
         return if (@abs(t) > 8.64e15) nan else t;
@@ -25731,6 +25744,9 @@ fn dateParseISO(s_in: []const u8) f64 {
     const nan = std.math.nan(f64);
     const s = std.mem.trim(u8, s_in, " \t\n\r\x0c\x0b");
     if (s.len == 0) return nan;
+    if (s[0] < '0' or s[0] > '9') {
+        if (s[0] != '+' and s[0] != '-') return dateParseLegacyUTC(s);
+    }
     var i: usize = 0;
     const readN = struct {
         fn f(str: []const u8, idx: *usize, count: usize) ?i64 {
@@ -25755,6 +25771,7 @@ fn dateParseISO(s_in: []const u8) f64 {
         ylen = 6;
     }
     const yv = readN(s, &i, ylen) orelse return nan;
+    if (ysign < 0 and yv == 0) return nan;
     const year = ysign * yv;
     var month: i64 = 1;
     var day: i64 = 1;
@@ -25810,6 +25827,71 @@ fn dateParseISO(s_in: []const u8) f64 {
     if (hour == 24 and (minute != 0 or sec != 0 or ms != 0)) return nan;
     const days = Interpreter.daysFromCivil(year, month, day);
     const total = days * 86_400_000 + hour * 3_600_000 + minute * 60_000 + sec * 1000 + ms;
+    const f: f64 = @floatFromInt(total);
+    if (std.math.isNan(f) or @abs(f) > 8.64e15) return nan;
+    return f;
+}
+
+fn dateMonthIndex(s: []const u8) ?i64 {
+    inline for (Interpreter.month_names, 0..) |m, i| {
+        if (std.mem.eql(u8, s, m)) return @intCast(i + 1);
+    }
+    return null;
+}
+
+fn dateParseTime(s: []const u8, hour: *i64, minute: *i64, sec: *i64) bool {
+    if (s.len != 8 or s[2] != ':' or s[5] != ':') return false;
+    const read2 = struct {
+        fn f(x: []const u8) ?i64 {
+            if (x.len != 2 or x[0] < '0' or x[0] > '9' or x[1] < '0' or x[1] > '9') return null;
+            return (x[0] - '0') * 10 + (x[1] - '0');
+        }
+    }.f;
+    hour.* = read2(s[0..2]) orelse return false;
+    minute.* = read2(s[3..5]) orelse return false;
+    sec.* = read2(s[6..8]) orelse return false;
+    return hour.* <= 24 and minute.* <= 59 and sec.* <= 59;
+}
+
+fn dateParseLegacyUTC(s: []const u8) f64 {
+    const nan = std.math.nan(f64);
+    var toks: [8][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, s, ' ');
+    while (it.next()) |tok| {
+        if (n == toks.len) break;
+        toks[n] = tok;
+        n += 1;
+    }
+    if (n < 6) return nan;
+
+    var day_tok: []const u8 = "";
+    var month_tok: []const u8 = "";
+    var year_tok: []const u8 = "";
+    var time_tok: []const u8 = "";
+    if (dateMonthIndex(toks[1]) != null) {
+        day_tok = toks[2];
+        month_tok = toks[1];
+        year_tok = toks[3];
+        time_tok = toks[4];
+    } else if (dateMonthIndex(toks[2]) != null) {
+        day_tok = toks[1];
+        month_tok = toks[2];
+        year_tok = toks[3];
+        time_tok = toks[4];
+    } else return nan;
+
+    const month = dateMonthIndex(month_tok) orelse return nan;
+    const day = std.fmt.parseInt(i64, day_tok, 10) catch return nan;
+    const year = std.fmt.parseInt(i64, year_tok, 10) catch return nan;
+    var hour: i64 = 0;
+    var minute: i64 = 0;
+    var sec: i64 = 0;
+    if (!dateParseTime(time_tok, &hour, &minute, &sec)) return nan;
+    if (day < 1 or day > 31) return nan;
+
+    const days = Interpreter.daysFromCivil(year, month, day);
+    const total = days * 86_400_000 + hour * 3_600_000 + minute * 60_000 + sec * 1000;
     const f: f64 = @floatFromInt(total);
     if (std.math.isNan(f) or @abs(f) > 8.64e15) return nan;
     return f;
