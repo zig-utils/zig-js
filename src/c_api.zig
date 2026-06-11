@@ -21,6 +21,8 @@
 //! The supported multithreading pattern is one context per thread, sharing
 //! only `SharedArrayBuffer` storage — see docs/threads/bindings.md and
 //! https://github.com/zig-utils/zig-js/issues/1 for the worker/agent roadmap.
+//! The `JSWorker*` surface (below) spawns such per-thread contexts and moves
+//! values between them as structured-clone bytes.
 //! `JSStringRef`s are immutable and may be created and released on any thread,
 //! but a given string must not be used from two threads concurrently (its
 //! refcount is not atomic).
@@ -29,6 +31,7 @@ const std = @import("std");
 const value = @import("value.zig");
 const ContextMod = @import("context.zig");
 const interp = @import("interpreter.zig");
+const WorkerMod = @import("worker.zig");
 const JsString = @import("jsstring.zig").JsString;
 
 const Context = ContextMod.Context;
@@ -448,6 +451,78 @@ export fn JSStringGetUTF8CString(str: JSStringRef, buffer: [*]u8, buffer_size: u
     return copy_len + 1; // bytes written, including the null terminator
 }
 
+// ---- JSWorker: embedder worker agents (issue #1 Phase 5) ----------------
+//
+// A minimal C surface over `src/worker.zig`: each worker owns its own OS
+// thread and `Context`, and messages cross the boundary as structured-clone
+// bytes (the only safe inter-realm transfer — see the threading rules above).
+// A `JSWorkerRef` is itself thread-affine to its creator: post/receive/
+// terminate/release must all run on the thread that called `JSWorkerCreate`.
+// Values posted or received are (de)serialized against the `JSContextRef`
+// passed to each call, so only that context's handles are ever touched here.
+
+pub const JSWorkerRef = ?*anyopaque;
+
+fn workerFrom(ref: JSWorkerRef) ?*WorkerMod.Worker {
+    return @ptrCast(@alignCast(ref orelse return null));
+}
+
+/// Spawn a worker running `source` (a script) in a fresh realm on its own
+/// thread. Returns null on spawn failure. The worker installs
+/// `globalThis.onmessage` from its own script and replies via `postMessage`.
+export fn JSWorkerCreate(source: JSStringRef) callconv(.c) JSWorkerRef {
+    const s = strFrom(source) orelse return null;
+    const w = WorkerMod.Worker.spawn(s.bytes) catch return null;
+    return @ptrCast(w);
+}
+
+/// Serialize `value` from `ctx`'s realm and deliver it to the worker's inbox.
+/// Returns false (and sets `exception`) if serialization fails (e.g. the value
+/// holds a function or symbol, which structured clone refuses).
+export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
+    const w = workerFrom(worker) orelse return false;
+    const c = ctxFrom(ctx) orelse return false;
+    var machine = c.interpreter();
+    w.postMessage(&machine, unbox(value_ref)) catch |err| {
+        if (err == error.Throw) {
+            if (exception != null) exception[0] = box(c, c.exception orelse .{ .string = "DataCloneError" });
+        } else setException(c, exception, @errorName(err));
+        return false;
+    };
+    return true;
+}
+
+/// Block up to `timeout_ms` (0 = wait indefinitely) for the next worker→main
+/// message, deserialized into `ctx`'s realm. Returns null when the worker has
+/// closed its side and drained, or the timeout elapsed.
+export fn JSWorkerReceive(worker: JSWorkerRef, ctx: JSContextRef, timeout_ms: u64, exception: ExceptionRef) callconv(.c) JSValueRef {
+    const w = workerFrom(worker) orelse return null;
+    const c = ctxFrom(ctx) orelse return null;
+    var machine = c.interpreter();
+    const tmo: ?u64 = if (timeout_ms == 0) null else timeout_ms;
+    const v = w.receive(&machine, tmo) catch |err| {
+        setException(c, exception, @errorName(err));
+        return null;
+    };
+    return box(c, v orelse return null);
+}
+
+/// Request cooperative termination: running JS throws at the next step
+/// checkpoint and the worker's delivery loop ends.
+export fn JSWorkerTerminate(worker: JSWorkerRef) callconv(.c) void {
+    const w = workerFrom(worker) orelse return;
+    w.terminate();
+}
+
+/// Join the worker thread and free it. If the worker was not terminated, this
+/// first closes its inbox so the delivery loop drains and exits.
+export fn JSWorkerRelease(worker: JSWorkerRef) callconv(.c) void {
+    const w = workerFrom(worker) orelse return;
+    w.close();
+    w.join();
+    w.destroy();
+}
+
 // ---------------------------------------------------------------------------
 // Tests — exercise the C-API exactly as a C/Zig consumer (e.g. Home's
 // extern_fns.zig) would, mirroring lang's M3 smoke tests plus real evaluation.
@@ -515,4 +590,23 @@ test "C-API: string value evaluation round-trips through JSValueToStringCopy" {
     var buf: [32]u8 = undefined;
     const written = JSStringGetUTF8CString(out, &buf, buf.len);
     try std.testing.expectEqualStrings("craft-js", buf[0 .. written - 1]);
+}
+
+test "C-API: worker create, post a number, receive the doubled reply" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const src = JSStringCreateWithUTF8CString(
+        "globalThis.onmessage = (e) => { postMessage(e.data * 2); close(); };",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(src);
+
+    const w = JSWorkerCreate(src) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(w);
+
+    const arg = JSValueMakeNumber(ctx, 21);
+    try std.testing.expect(JSWorkerPostMessage(w, ctx, arg, null));
+
+    const reply = JSWorkerReceive(w, ctx, 10_000, null) orelse return error.NoReply;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, reply, null));
 }

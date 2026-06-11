@@ -193,6 +193,13 @@ pub const Worker = struct {
         w.inbox.close();
     }
 
+    /// Graceful shutdown: close the inbox so the delivery loop drains any
+    /// remaining messages and exits, without the stop-flag interrupt that
+    /// `terminate` injects into in-flight JS.
+    pub fn close(w: *Worker) void {
+        w.inbox.close();
+    }
+
     pub fn join(w: *Worker) void {
         if (w.thread) |t| {
             t.join();
