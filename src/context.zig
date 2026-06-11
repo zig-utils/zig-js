@@ -253,6 +253,19 @@ pub const Context = struct {
         // them, and drain again until quiescent.
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
+        // Shell keepalive (threads mode): a pending Thread completion is a
+        // pending settlement — the realm stays alive until every spawned
+        // thread finishes (each drains its own queue and settles its
+        // asyncJoins), then drains whatever those settlements queued here.
+        if (self.gil) |g| {
+            var i: usize = 0;
+            while (i < self.js_threads.items.len) : (i += 1) {
+                const rec = self.js_threads.items[i];
+                while (!rec.done) g.wait(&rec.done_cond);
+            }
+            machine.drainMicrotasks() catch {};
+            machine.settleAsyncWaiters();
+        }
 
         return outcome catch |err| {
             if (err == error.Throw) self.exception = machine.exception;
@@ -1359,6 +1372,11 @@ test "built-in prototypes carry constructor; Boolean.prototype exists" {
     try std.testing.expect((try evalIn("Number.prototype.constructor === Number")).boolean);
     try std.testing.expect((try evalIn("Function.prototype.constructor === Function")).boolean);
     try std.testing.expect((try evalIn("Date.prototype.constructor === Date")).boolean);
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Object)")).boolean);
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Array)")).boolean);
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(String)")).boolean);
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Date)")).boolean);
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(RegExp)")).boolean);
     // `constructor` is non-enumerable.
     try std.testing.expect((try evalIn("Object.keys(Array.prototype).indexOf('constructor') === -1")).boolean);
     // Boolean.prototype now exists with constructor + generic toString/valueOf.

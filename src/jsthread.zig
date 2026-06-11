@@ -935,11 +935,12 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     return .{ .object = outer };
 }
 
-/// Notify-side wake of an async cond waiter: reacquire (or queue for) the
-/// lock with a keep-held job that settles the waiter's promise.
+/// Notify-side wake of an async cond waiter: the wake is a no-fn asyncHold
+/// grant — the promise resolves holding the lock again, with a release()
+/// function (the corpus consumes `p.then(release => ...)`).
 fn wakeAsyncCondWaiter(self: *Interpreter, w: *AsyncCondWaiter) void {
     const job = self.arena.create(HoldJob) catch return;
-    job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null, .keep_held = true };
+    job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null };
     if (!w.lock.locked) {
         w.lock.locked = true;
         w.lock.holder = currentTid();

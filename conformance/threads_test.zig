@@ -21,14 +21,14 @@ const allowlist = [_][]const u8{
     "api/thread-ctor-errors.js",
     "api/thread-exc.js",
     "api/thread-restrict.js",
+    "api/blocking-gate.js",
+    "api/thread-lifecycle.js",
     "api/threadlocal-basic.js",
     // Off the list, with reasons:
-    //   api/blocking-gate.js, api/lock-async-hold.js,
-    //   api/condition-async-wait.js, api/park-no-microtask-drain.js,
-    //   api/thread-lifecycle.js — depend on run-loop turn semantics beyond
-    //     the synchronous-settling runtime (await must SUSPEND, not settle
-    //     inline). The can-block-is-false gates themselves are implemented
-    //     and this runner sets the flag for blocking-gate.js when it joins.
+    //   api/lock-async-hold.js — hangs (under investigation).
+    //   api/condition-async-wait.js — throws undefined (under investigation).
+    //   api/park-no-microtask-drain.js — the joinee's 4.6.1 completion drain
+    //     must run reactions queued onto it cross-thread.
     //   api/thread-id-bounds.js — id-space exhaustion semantics.
     //   api/condition-wait-termination.js — VM-wide termination machinery.
     "atomics/property-cas-samevaluezero.js",
