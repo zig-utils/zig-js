@@ -1353,6 +1353,7 @@ test "built-in methods are non-enumerable" {
 
 test "built-in prototypes carry constructor; Boolean.prototype exists" {
     // Every built-in prototype links back to its constructor (non-enumerable).
+    try std.testing.expect((try evalIn("Object.prototype.constructor === Object")).boolean);
     try std.testing.expect((try evalIn("Array.prototype.constructor === Array")).boolean);
     try std.testing.expect((try evalIn("String.prototype.constructor === String")).boolean);
     try std.testing.expect((try evalIn("Number.prototype.constructor === Number")).boolean);

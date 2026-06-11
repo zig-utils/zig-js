@@ -19736,6 +19736,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // propertyHelper/verifyProperty (and many built-ins tests) depend on.
     const object_proto = try a.create(value.Object);
     object_proto.* = .{};
+    try setConstructor(a, root_shape, object_proto, object_ns);
     const early_ctors = [_][]const u8{ "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Boolean" };
     for (early_ctors) |ctor_name| {
         if (env.get(ctor_name)) |cv| if (cv == .object) {
