@@ -9546,6 +9546,17 @@ fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
     return .{ .object = pobj };
 }
 
+fn promiseResolveAfterTick(self: *Interpreter, v: Value) EvalError!Value {
+    const result = try promise.newPromise(self);
+    const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    const tick = try promise.newPromise(self);
+    const tp: *promise.Promise = @ptrCast(@alignCast(tick.promise.?));
+    const nr = try promise.nativeResolveReject(self, rp);
+    try promise.performThen(self, tp, .undefined, .undefined, nr.resolve, nr.reject);
+    try promise.resolve(self, tp, v);
+    return .{ .object = result };
+}
+
 /// A fresh promise already rejected with `reason`.
 fn promiseRejectValue(self: *Interpreter, reason: Value) EvalError!Value {
     const pobj = try promise.newPromise(self);
@@ -12910,7 +12921,10 @@ fn dispUseFn(comptime is_async: bool) value.NativeFn {
             if (!isDispStackOf(this, is_async)) return self.throwError("TypeError", "use called on an incompatible receiver");
             if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
             const v = if (args.len > 0) args[0] else Value.undefined;
-            if (v == .undefined or v == .null) return v;
+            if (v == .undefined or v == .null) {
+                if (is_async) try dispPush(self, this.object, v, .undefined, 3);
+                return v;
+            }
             const key = self.wellKnownSymbolKey(if (is_async) "asyncDispose" else "dispose") orelse return self.throwError("TypeError", "Symbol.dispose unavailable");
             var method = self.getProperty(v, key) catch return error.Throw;
             if (is_async and (method == .undefined or method == .null)) {
@@ -12980,9 +12994,20 @@ fn dispOne(self: *Interpreter, entry: *value.Object, is_async: bool) EvalError!v
     const r = switch (@as(u8, @intFromFloat(kind))) {
         1 => try self.callValueWithThis(f, &.{v}, .undefined), // adopt: onDispose(value)
         2 => try self.callValueWithThis(f, &.{}, .undefined), // defer: onDispose()
+        3 => return, // async null/undefined sentinel: disposeAsync awaits a tick
         else => try self.callValueWithThis(f, &.{}, v), // use: value[@@dispose]()
     };
     if (is_async) _ = try self.awaitValue(r);
+}
+
+fn dispOnlyAsyncSentinels(o: *value.Object) bool {
+    const res = o.getOwn("\x00ds_res").?.object;
+    if (res.elements.items.len == 0) return false;
+    for (res.elements.items) |entry_v| {
+        const entry = entry_v.object;
+        if (@as(u8, @intFromFloat(entry.elements.items[2].number)) != 3) return false;
+    }
+    return true;
 }
 
 /// Run a stack's disposal: dispose every resource in reverse, chaining throws
@@ -13040,6 +13065,7 @@ fn dispDisposeAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStackOf(this, true)) return promiseRejectValue(self, try self.makeError("TypeError", "disposeAsync called on an incompatible receiver"));
     if (dispDisposed(this.object)) return promiseResolveValue(self, .undefined);
+    const needs_tick = dispOnlyAsyncSentinels(this.object);
     try dsHidden(self, this.object, "\x00ds_done", .{ .boolean = true });
     const r = dispRunAll(self, this.object, true) catch {
         const exc = self.exception;
@@ -13047,6 +13073,7 @@ fn dispDisposeAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         return promiseRejectValue(self, exc);
     };
     if (r) |err| return promiseRejectValue(self, err);
+    if (needs_tick) return promiseResolveAfterTick(self, .undefined);
     return promiseResolveValue(self, .undefined);
 }
 
