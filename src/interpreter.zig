@@ -7859,8 +7859,13 @@ pub const Interpreter = struct {
             return try self.iteratorOf(arr);
         }
         if (eq(name, "toString")) {
-            // Array.prototype.toString delegates to join with ",".
-            return try self.arrayMethod(o, "join", &.{});
+            // Array.prototype.toString does a dynamic Get(O, "join") and calls
+            // it when callable. Typed arrays share this function object, so this
+            // must reach %TypedArray%.prototype.join and its ValidateTypedArray.
+            const recv = Value{ .object = o };
+            const join = try self.getProperty(recv, "join");
+            if (join.isCallable()) return try self.callValueWithThis(join, &.{}, recv);
+            return try objectProtoToStringFn(@ptrCast(self), recv, &.{});
         }
         return null;
     }
@@ -21202,11 +21207,23 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         .{ "filter", 1 },  .{ "some", 1 },    .{ "every", 1 },   .{ "find", 1 },
         .{ "findIndex", 1 }, .{ "reduce", 1 }, .{ "indexOf", 1 }, .{ "lastIndexOf", 1 },
         .{ "includes", 1 }, .{ "fill", 1 },   .{ "reverse", 0 }, .{ "slice", 2 },
-        .{ "subarray", 2 }, .{ "set", 1 },    .{ "toString", 0 }, .{ "keys", 0 },
+        .{ "subarray", 2 }, .{ "set", 1 },    .{ "keys", 0 },
         .{ "values", 0 },   .{ "entries", 0 }, .{ "findLast", 1 },  .{ "findLastIndex", 1 },
         .{ "reduceRight", 1 }, .{ "sort", 1 }, .{ "toSorted", 1 },  .{ "toReversed", 0 },
         .{ "with", 2 },     .{ "copyWithin", 2 }, .{ "toLocaleString", 0 },
     }) |s| try setNative(a, rs, ta_proto, s[0], s[1], taProtoMethod(s[0]));
+    if (env.get("Array")) |arr| {
+        if (arr == .object) {
+            if (arr.object.getOwn("prototype")) |ap| {
+                if (ap == .object) {
+                    if (ap.object.getOwn("toString")) |array_to_string| {
+                        try ta_proto.setOwn(a, rs, "toString", array_to_string);
+                        try ta_proto.setAttr(a, "toString", .{ .enumerable = false, .configurable = true, .writable = true });
+                    }
+                }
+            }
+        }
+    }
     // %TypedArray%.prototype accessor getters live on the shared prototype, not
     // the instances (length/byteLength/byteOffset/buffer brand-check; the
     // @@toStringTag getter returns the view kind name, or undefined off-brand).

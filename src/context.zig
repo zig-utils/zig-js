@@ -3296,6 +3296,24 @@ test "TypedArray subarray omits species length for length-tracking views" {
     )).boolean);
 }
 
+test "TypedArray toString shares Array.prototype function object" {
+    try std.testing.expect((try evalIn(
+        \\var proto = Object.getPrototypeOf(Uint8Array.prototype);
+        \\var sample = new Uint8Array([1, 2]);
+        \\proto.toString === Array.prototype.toString &&
+        \\sample.toString() === "1,2";
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var sample = new Uint8Array([1]);
+        \\$262.detachArrayBuffer(sample.buffer);
+        \\try {
+        \\  sample.toString();
+        \\} catch (e) {
+        \\  e instanceof TypeError;
+        \\}
+    )).boolean);
+}
+
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
