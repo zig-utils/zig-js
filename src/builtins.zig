@@ -2245,7 +2245,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
 
     // Wrap the value in a holder { "": value } so toJSON/replacer apply to it.
     const holder = (try self.newObject()).object;
-    try self.setMember(.{ .object = holder }, "", arg(args, 0));
+    try holder.setOwn(self.arena, self.root_shape, "", arg(args, 0));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (!try st.serialize(&buf, .{ .object = holder }, "")) return .undefined;
     return .{ .string = try buf.toOwnedSlice(a) };
