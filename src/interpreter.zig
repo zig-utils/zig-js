@@ -799,10 +799,7 @@ pub const Interpreter = struct {
 
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
         self.steps += 1;
-        // Threads-mode contexts spin-and-yield at rendezvous by design; give
-        // them 10x headroom before calling it a runaway.
-        const budget: u64 = if (self.gil != null) max_steps * 10 else max_steps;
-        if (self.steps > budget) return self.throwError("RangeError", "evaluation step budget exceeded");
+        if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
         if ((self.steps & 1023) == 0) {
             if (self.stop_flag) |sf| if (sf.load(.monotonic))
                 return self.throwError("Error", "worker terminated");
