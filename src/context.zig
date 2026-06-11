@@ -2548,6 +2548,31 @@ test "dynamic Function observes NewTarget and constructor realms" {
     )).boolean);
 }
 
+test "dynamic AsyncFunction uses NewTarget realm prototype fallback" {
+    try std.testing.expect((try evalIn(
+        \\var AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+        \\var other = $262.createRealm().global;
+        \\var OtherAsyncFunction = Object.getPrototypeOf(other.eval('(0, async function() {})')).constructor;
+        \\var newTarget = new other.Function();
+        \\newTarget.prototype = null;
+        \\var ok = Object.getPrototypeOf(Reflect.construct(AsyncFunction, [], newTarget)) === OtherAsyncFunction.prototype;
+        \\newTarget.prototype = undefined;
+        \\ok = ok && Object.getPrototypeOf(Reflect.construct(AsyncFunction, [], newTarget)) === OtherAsyncFunction.prototype;
+        \\newTarget.prototype = true;
+        \\ok = ok && Object.getPrototypeOf(Reflect.construct(AsyncFunction, [], newTarget)) === OtherAsyncFunction.prototype;
+        \\newTarget.prototype = '';
+        \\ok = ok && Object.getPrototypeOf(Reflect.construct(AsyncFunction, [], newTarget)) === OtherAsyncFunction.prototype;
+        \\newTarget.prototype = Symbol();
+        \\ok = ok && Object.getPrototypeOf(Reflect.construct(AsyncFunction, [], newTarget)) === OtherAsyncFunction.prototype;
+        \\newTarget.prototype = 1;
+        \\ok && Object.getPrototypeOf(Reflect.construct(AsyncFunction, [], newTarget)) === OtherAsyncFunction.prototype
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\async function f() {}
+        \\f.prototype === undefined && !f.hasOwnProperty('prototype')
+    )).boolean);
+}
+
 test "Iterator constructor uses NewTarget realm prototype fallback" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;

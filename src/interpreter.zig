@@ -3004,6 +3004,13 @@ pub const Interpreter = struct {
         return null;
     }
 
+    fn envIntrinsicObject(env: *Environment, intrinsic: []const u8) ?*value.Object {
+        if (env.get(intrinsic)) |v| {
+            if (v == .object) return v.object;
+        }
+        return null;
+    }
+
     fn functionRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!?*value.Object {
         if (ctor.proxy_handler != null or ctor.proxy_revoked) {
             const target = ctor.proxy_target orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
@@ -3025,6 +3032,31 @@ pub const Interpreter = struct {
         if (ctor.bound) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             if (bf.target == .object) return try self.functionRealmIntrinsicProto(bf.target.object, intrinsic);
+        }
+        return null;
+    }
+
+    fn functionRealmIntrinsicObject(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!?*value.Object {
+        if (ctor.proxy_handler != null or ctor.proxy_revoked) {
+            const target = ctor.proxy_target orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
+            return try self.functionRealmIntrinsicObject(target, intrinsic);
+        }
+        if ((ctor.native_ctor or ctor.error_ctor != null) and ctor.private_data != null) {
+            const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
+            if (envIntrinsicObject(env, intrinsic)) |obj| return obj;
+        }
+        if (ctor.js_func) |jf| {
+            const fnp: *Function = @ptrCast(@alignCast(jf));
+            var env: ?*Environment = fnp.closure;
+            while (env) |e| {
+                if (envIntrinsicObject(e, intrinsic)) |obj| return obj;
+                if (e.parent == null) break;
+                env = e.parent;
+            }
+        }
+        if (ctor.bound) |erased| {
+            const bf: *BoundFn = @ptrCast(@alignCast(erased));
+            if (bf.target == .object) return try self.functionRealmIntrinsicObject(bf.target.object, intrinsic);
         }
         return null;
     }
@@ -5218,7 +5250,7 @@ pub const Interpreter = struct {
                 // function has one, with a `constructor` back-reference. Without
                 // this a plain `Test262Error.prototype.toString = …` (and any
                 // `f.prototype.x = …`) read undefined and threw.
-                if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null) {
+                if (std.mem.eql(u8, key, "prototype") and o.js_func != null and Interpreter.jsFunctionHasOwnPrototypeSlot(o) and o.getOwn("prototype") == null and o.getAccessor("prototype") == null) {
                     if (funcOf(recv)) |f| {
                         // A generator function's `.prototype` is a fresh object whose
                         // [[Prototype]] is %GeneratorPrototype% and which has NO
@@ -12656,6 +12688,14 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
 
 const DynFnKind = enum { generator, async_fn, async_generator };
 
+fn dynamicFunctionPrototypeKey(comptime kind: DynFnKind) []const u8 {
+    return switch (kind) {
+        .generator => "\x00GenFuncProto",
+        .async_fn => "\x00AsyncFuncProto",
+        .async_generator => "\x00AsyncGenFuncProto",
+    };
+}
+
 fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -12682,13 +12722,33 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             const prog = parser.parseProgram() catch
                 return self.throwError("SyntaxError", "Function: invalid parameters or body");
             const nt = self.new_target;
+            const saved_env = self.env;
+            var swapped = false;
+            if (self.active_native) |callee| {
+                if (callee.private_data) |pd| {
+                    self.env = @ptrCast(@alignCast(pd));
+                    swapped = true;
+                }
+            }
+            defer if (swapped) {
+                self.env = saved_env;
+            };
             const fnval = try self.eval(prog);
             // GetPrototypeFromConstructor: a real new.target subclass overrides
             // the function object's [[Prototype]] (the default kind-prototype is
             // already installed by makeFunction).
             if (nt == .object and fnval == .object) {
                 const p = try self.getProperty(nt, "prototype");
-                if (p == .object) fnval.object.proto = p.object;
+                if (p == .object and !p.object.is_symbol) {
+                    fnval.object.proto = p.object;
+                } else {
+                    const key = dynamicFunctionPrototypeKey(kind);
+                    if (try self.functionRealmIntrinsicObject(nt.object, key)) |proto| {
+                        fnval.object.proto = proto;
+                    } else if (Interpreter.envIntrinsicObject(self.env, key)) |proto| {
+                        fnval.object.proto = proto;
+                    }
+                }
             }
             return fnval;
         }
@@ -12701,6 +12761,7 @@ fn installOneFunctionKind(
     func_ctor: *value.Object,
     func_proto: *value.Object,
     sym_tag: ?[]const u8,
+    env: *Environment,
     name: []const u8,
     native_fn: value.NativeFn,
     instance_proto: ?*value.Object,
@@ -12710,7 +12771,7 @@ fn installOneFunctionKind(
     kproto.* = .{ .proto = func_proto };
     // %XFunction% constructor: [[Prototype]] %Function% (the Function ctor).
     const ctor = try a.create(value.Object);
-    ctor.* = .{ .native = native_fn, .native_ctor = true, .proto = func_ctor };
+    ctor.* = .{ .native = native_fn, .native_ctor = true, .proto = func_ctor, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, ctor, name, 1);
     try ctor.setOwn(a, rs, "prototype", .{ .object = kproto });
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -12757,11 +12818,11 @@ fn installFunctionKinds(env: *Environment, rs: *Shape) EvalError!void {
         break :blk null;
     };
 
-    const genfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, "GeneratorFunction", dynamicFunctionFn(.generator), gen_proto);
+    const genfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, env, "GeneratorFunction", dynamicFunctionFn(.generator), gen_proto);
     try env.put("\x00GenFuncProto", .{ .object = genfp });
-    const asyncfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, "AsyncFunction", dynamicFunctionFn(.async_fn), null);
+    const asyncfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, env, "AsyncFunction", dynamicFunctionFn(.async_fn), null);
     try env.put("\x00AsyncFuncProto", .{ .object = asyncfp });
-    const agenfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, "AsyncGeneratorFunction", dynamicFunctionFn(.async_generator), agen_proto);
+    const agenfp = try installOneFunctionKind(a, rs, func_ctor, func_proto, sym_tag, env, "AsyncGeneratorFunction", dynamicFunctionFn(.async_generator), agen_proto);
     try env.put("\x00AsyncGenFuncProto", .{ .object = agenfp });
 }
 
