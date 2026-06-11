@@ -10757,6 +10757,17 @@ fn canonicalBigIntRadixString(arena: std.mem.Allocator, digits: []const u8, radi
 fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const saved_env = self.env;
+    var swapped_env = false;
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| {
+            self.env = @ptrCast(@alignCast(pd));
+            swapped_env = true;
+        }
+    }
+    defer if (swapped_env) {
+        self.env = saved_env;
+    };
     if (self.new_target != .undefined) return self.throwError("TypeError", "BigInt is not a constructor");
     return self.toBigIntValueImpl(if (args.len > 0) args[0] else .undefined, true);
 }
@@ -19637,7 +19648,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // String — callable, with statics.
     const string_ns = try a.create(value.Object);
-    string_ns.* = .{ .native = builtins.stringFn, .native_ctor = true };
+    string_ns.* = .{ .native = builtins.stringFn, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, string_ns, "String", 1);
     try setNative(a, root_shape, string_ns, "fromCharCode", 1, builtins.stringFromCharCode);
     try setNative(a, root_shape, string_ns, "fromCodePoint", 1, builtins.stringFromCodePoint);
@@ -19646,7 +19657,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Number — callable, with statics and constants.
     const number_ns = try a.create(value.Object);
-    number_ns.* = .{ .native = builtins.numberFn, .native_ctor = true };
+    number_ns.* = .{ .native = builtins.numberFn, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, number_ns, "Number", 1);
     try setNative(a, root_shape, number_ns, "isInteger", 1, builtins.numberIsInteger);
     try setNative(a, root_shape, number_ns, "isSafeInteger", 1, builtins.numberIsSafeInteger);
@@ -19738,7 +19749,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Object namespace.
     const object_ns = try a.create(value.Object);
-    object_ns.* = .{ .native = builtins.objectConstructor, .native_ctor = true };
+    object_ns.* = .{ .native = builtins.objectConstructor, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, object_ns, "Object", 1);
     try setNative(a, root_shape, object_ns, "keys", 1, builtins.objectKeys);
     try setNative(a, root_shape, object_ns, "values", 1, builtins.objectValues);
@@ -19767,7 +19778,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Array namespace (callable constructor + isArray/of/from).
     const array_ns = try a.create(value.Object);
-    array_ns.* = .{ .native = builtins.arrayConstructor, .native_ctor = true };
+    array_ns.* = .{ .native = builtins.arrayConstructor, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, array_ns, "Array", 1);
     try setNative(a, root_shape, array_ns, "isArray", 1, builtins.arrayIsArray);
     try setNative(a, root_shape, array_ns, "of", 0, builtins.arrayOf);
@@ -20012,7 +20023,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Symbol is callable and has [[Construct]] for IsConstructor probes, but
     // the constructor path throws inside symbolFn.
     const symbol_ns = try a.create(value.Object);
-    symbol_ns.* = .{ .native = symbolFn, .native_ctor = true, .proto = func_proto };
+    symbol_ns.* = .{ .native = symbolFn, .native_ctor = true, .proto = func_proto, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, symbol_ns, "Symbol", 0);
     // Symbol.prototype: toString/valueOf/constructor, protoing to Object.prototype.
     const symbol_proto = try a.create(value.Object);
@@ -20207,7 +20218,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Date — callable + constructable, with Date.now and a prototype.
     const date_ns = try a.create(value.Object);
-    date_ns.* = .{ .native = dateConstructor, .native_ctor = true, .proto = func_proto };
+    date_ns.* = .{ .native = dateConstructor, .native_ctor = true, .proto = func_proto, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, date_ns, "Date", 7);
     try setNative(a, root_shape, date_ns, "now", 0, dateNow);
     try setNative(a, root_shape, date_ns, "UTC", 7, dateUTCFn);
@@ -20269,7 +20280,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             };
         };
         const bi_ns = try a.create(value.Object);
-        bi_ns.* = .{ .native = bigIntFn, .native_ctor = true, .proto = func_proto };
+        bi_ns.* = .{ .native = bigIntFn, .native_ctor = true, .proto = func_proto, .private_data = @ptrCast(env) };
         try installNativeProps(a, root_shape, bi_ns, "BigInt", 1);
         try setNative(a, root_shape, bi_ns, "asIntN", 2, bigIntAsIntNFn(true));
         try setNative(a, root_shape, bi_ns, "asUintN", 2, bigIntAsIntNFn(false));

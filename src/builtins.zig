@@ -918,6 +918,17 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
 pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const saved_env = self.env;
+    var swapped_env = false;
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| {
+            self.env = @ptrCast(@alignCast(pd));
+            swapped_env = true;
+        }
+    }
+    defer if (swapped_env) {
+        self.env = saved_env;
+    };
     const v = arg(args, 0);
     if (v == .object and !v.object.is_bigint and !v.object.is_symbol) return v;
     if (v == .undefined or v == .null) {
