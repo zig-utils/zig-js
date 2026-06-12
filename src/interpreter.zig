@@ -20491,7 +20491,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     }
 
     const array_proto = try gc_mod.allocObj(a);
-    array_proto.* = .{ .proto = object_proto };
+    array_proto.* = .{ .proto = object_proto, .is_array = true };
     try array_proto.setOwn(a, root_shape, "length", .{ .number = 0 });
     try array_proto.setAttr(a, "length", .{ .writable = true, .enumerable = false, .configurable = false });
     try setArrayProtoMethods(a, root_shape, array_proto, .{

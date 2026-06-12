@@ -1143,10 +1143,22 @@ pub fn identity1(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 }
 
 pub fn arrayIsArray(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    // The arguments exotic object is array-like but not an Array.
-    return .{ .boolean = arg(args, 0) == .object and arg(args, 0).object.is_array and !arg(args, 0).object.is_arguments };
+    return .{ .boolean = try isArrayValue(interp(ctx), arg(args, 0)) };
+}
+
+fn isArrayValue(self: *Interpreter, v: Value) HostError!bool {
+    if (v != .object) return false;
+    var o = v.object;
+    while (true) {
+        if (o.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'IsArray' on a revoked proxy");
+        if (o.proxy_handler != null) {
+            o = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'IsArray' on a revoked proxy");
+            continue;
+        }
+        // The arguments exotic object is array-like but not an Array.
+        return o.is_array and !o.is_arguments;
+    }
 }
 
 pub fn mapFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

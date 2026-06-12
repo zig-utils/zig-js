@@ -3444,6 +3444,23 @@ test "Object.keys/values/entries enumerate array indices" {
     try expectEvalStr("1", "var a = [10, 20]; Object.defineProperty(a, 0, { enumerable: false }); Object.keys(a).join(',')");
 }
 
+test "Array.isArray follows proxies and recognizes Array.prototype" {
+    try std.testing.expect((try evalIn("Array.isArray(Array.prototype)")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var objectProxy = new Proxy({}, {});
+        \\var arrayProxy = new Proxy([], {});
+        \\var arrayProxyProxy = new Proxy(arrayProxy, {});
+        \\Array.isArray(objectProxy) === false &&
+        \\Array.isArray(arrayProxy) === true &&
+        \\Array.isArray(arrayProxyProxy) === true
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var handle = Proxy.revocable([], {});
+        \\handle.revoke();
+        \\try { Array.isArray(handle.proxy); false; } catch (e) { e instanceof TypeError; }
+    )).boolean);
+}
+
 test "sloppy-mode property set on a primitive is a no-op; null/undefined throws" {
     // No-op on a primitive: doesn't throw, doesn't store.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("var n = 5; n.foo = 1; n.foo === undefined ? 1 : 0")).number);
