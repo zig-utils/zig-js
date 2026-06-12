@@ -8586,7 +8586,7 @@ pub const Interpreter = struct {
 
             // Regex pattern: replace each match (all matches when global/replaceAll),
             // expanding `$` substitutions or invoking a function replacer.
-            if (arg0(args) == .object and arg0(args).object.is_regex) {
+            if (!all and arg0(args) == .object and arg0(args).object.is_regex) {
                 const ro = arg0(args).object;
                 const g = all or std.mem.indexOfScalar(u8, ro.regex_flags, 'g') != null;
                 var re = try self.compileRegex(ro);
