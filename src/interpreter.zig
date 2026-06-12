@@ -5067,6 +5067,9 @@ pub const Interpreter = struct {
     fn ordinarySetPrototypeOf(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
         const current = if (o.proto) |p| Value{ .object = p } else Value.null;
         if (sameProtoValue(new_proto, current)) return true;
+        if (self.objectProto()) |op| {
+            if (o == op) return false;
+        }
         if (!o.extensible) return false;
         var cur = new_proto;
         while (cur) |c| {
@@ -10269,11 +10272,10 @@ fn objectProtoToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value
 fn protoGetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return switch (this) {
-        .object => |o| if (o.proto) |p| .{ .object = p } else .null,
-        .undefined, .null => self.throwError("TypeError", "Cannot convert undefined or null to object"),
-        else => .null, // primitives box to a wrapper whose proto we don't track here
-    };
+    const o = try self.toObject(this);
+    if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGetProto(o);
+    if (self.effectiveProto(o)) |p| return .{ .object = p };
+    return .null;
 }
 
 /// Setter for `Object.prototype.__proto__` — sets the prototype to an object or
@@ -10285,7 +10287,7 @@ fn protoSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         return self.throwError("TypeError", "Object.prototype.__proto__ setter called on null or undefined");
     const v = if (args.len > 0) args[0] else .undefined;
     // Only an Object or null is a candidate prototype; anything else is a no-op.
-    if (v != .object and v != .null) return .undefined;
+    if (v != .null and !builtins.isRealObject(v)) return .undefined;
     if (this != .object) return .undefined; // a primitive `this` has no own [[Prototype]]
     const o = this.object;
     const new_proto: ?*value.Object = if (v == .object) v.object else null;

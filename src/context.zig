@@ -2589,6 +2589,18 @@ test "plain objects inherit from Object.prototype" {
     try expectEvalStr("[object Object]", "({}).toString()");
     // Object.prototype.valueOf returns the object itself.
     try std.testing.expect((try evalIn("var o = {}; o.valueOf() === o")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var subject = {};
+        \\var set = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__").set;
+        \\set.call(subject, Symbol());
+        \\Object.getPrototypeOf(subject) === Object.prototype
+    )).boolean);
+    try std.testing.expectError(error.Throw, evalIn(
+        \\var get = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__").get;
+        \\get.call(new Proxy({}, { getPrototypeOf() { throw new Error("boom"); } }));
+    ));
+    try std.testing.expectError(error.Throw, evalIn("Object.setPrototypeOf(Object.prototype, {})"));
+    try std.testing.expect(!(try evalIn("Reflect.setPrototypeOf(Object.prototype, {})")).boolean);
     // A user toString on the chain still wins.
     try expectEvalStr("hi", "var o = { toString() { return 'hi'; } }; o.toString()");
     // Object.create(null) keeps a null prototype; for-in over {} sees no inherited keys.
@@ -2637,6 +2649,7 @@ test "Reflect.* require a real Object target (Symbol/primitive throws)" {
     try std.testing.expectError(error.Throw, evalIn("Reflect.getOwnPropertyDescriptor(1, 'x')"));
     try std.testing.expectError(error.Throw, evalIn("Reflect.preventExtensions('s')"));
     try std.testing.expectError(error.Throw, evalIn("Reflect.setPrototypeOf(Symbol(), null)"));
+    try std.testing.expectError(error.Throw, evalIn("Object.setPrototypeOf({}, Symbol())"));
     // setPrototypeOf returns a boolean: true on success, false (not a throw) on
     // a non-extensible target.
     try std.testing.expect((try evalIn("Reflect.setPrototypeOf({}, null)")).boolean);

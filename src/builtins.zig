@@ -1818,7 +1818,7 @@ pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) H
     if (o == .null or o == .undefined)
         return self.throwError("TypeError", "Object.setPrototypeOf called on null or undefined");
     const p = arg(args, 1);
-    if (p != .object and p != .null)
+    if (p != .null and !isRealObject(p))
         return self.throwError("TypeError", "Object prototype may only be an Object or null");
     if (o != .object) return o; // a primitive `this` has no own [[Prototype]] to set
     const new_proto: ?*value.Object = if (p == .object) p.object else null;
