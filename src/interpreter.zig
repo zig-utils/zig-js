@@ -8327,6 +8327,25 @@ pub const Interpreter = struct {
         return try self.callValueWithThis(method, argv.items, target);
     }
 
+    fn replaceAllProtocolDispatch(self: *Interpreter, receiver: Value, args: []const Value) EvalError!?Value {
+        const search = arg0(args);
+        if (search == .undefined or search == .null) return null;
+        if (try self.isRegExp(search)) {
+            const flags_v = try self.getProperty(search, "flags");
+            if (flags_v == .undefined or flags_v == .null)
+                return self.throwError("TypeError", "String.prototype.replaceAll called with a RegExp whose flags is undefined or null");
+            const flags_s = try self.toStringV(flags_v);
+            if (std.mem.indexOfScalar(u8, flags_s, 'g') == null)
+                return self.throwError("TypeError", "String.prototype.replaceAll must be called with a global RegExp");
+        }
+        if (!builtins.isRealObject(search)) return null;
+        const key = self.wellKnownSymbolKey("replace") orelse return null;
+        const method = try self.getProperty(search, key);
+        if (method == .undefined or method == .null) return null;
+        if (!method.isCallable()) return self.throwError("TypeError", "searchValue[Symbol.replace] is not callable");
+        return try self.callValueWithThis(method, &.{ receiver, arg(args, 1) }, search);
+    }
+
     /// ToIntegerOrInfinity(v) clamped into `[0, len]` — the position argument of
     /// `includes`/`startsWith`/`endsWith` (a Symbol/BigInt throws via toNumberV).
     fn clampPos(self: *Interpreter, v: Value, len: usize) EvalError!usize {
@@ -8339,31 +8358,8 @@ pub const Interpreter = struct {
 
     fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool) EvalError!?Value {
         if (eq(name, "valueOf") or eq(name, "toString")) return Value{ .string = s };
-        // String.prototype.replaceAll: a RegExp searchValue must be global, and an
-        // object searchValue's @@replace (if any) is used — checked before the
-        // generic protocol block so the flag invariant and dispatch order hold.
-        if (eq(name, "replaceAll")) {
-            const search = arg0(args);
-            if (search != .undefined and search != .null) {
-                if (try self.isRegExp(search)) {
-                    const flags_v = try self.getProperty(search, "flags");
-                    if (flags_v == .undefined or flags_v == .null)
-                        return self.throwError("TypeError", "String.prototype.replaceAll called with a RegExp whose flags is undefined or null");
-                    const flags_s = try self.toStringV(flags_v);
-                    if (std.mem.indexOfScalar(u8, flags_s, 'g') == null)
-                        return self.throwError("TypeError", "String.prototype.replaceAll must be called with a global RegExp");
-                }
-                // GetMethod(search, @@replace) — only an object carries one (a
-                // BigInt/Symbol primitive is left to the string path below).
-                if (isRegExpObjectValue(search)) if (self.wellKnownSymbolKey("replace")) |key| {
-                    const m = try self.getProperty(search, key);
-                    if (m != .undefined and m != .null) {
-                        if (!m.isCallable()) return self.throwError("TypeError", "searchValue[Symbol.replace] is not callable");
-                        return try self.callValueWithThis(m, &.{ .{ .string = s }, arg(args, 1) }, search);
-                    }
-                };
-            }
-        }
+        if (check_protocol and eq(name, "replaceAll"))
+            if (try self.replaceAllProtocolDispatch(.{ .string = s }, args)) |r| return r;
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
         // `replace`/`replaceAll` first check their first argument for the matching
         // `Symbol.*` method and, if it is callable, delegate to it (with `this` =
@@ -8585,7 +8581,6 @@ pub const Interpreter = struct {
             const all = eq(name, "replaceAll");
             const repl_val = arg(args, 1);
             const is_func = repl_val.isCallable();
-            const template: []const u8 = if (is_func) "" else try repl_val.toString(self.arena);
             const a = self.arena;
             var buf: std.ArrayListUnmanaged(u8) = .empty;
 
@@ -8595,6 +8590,7 @@ pub const Interpreter = struct {
                 const ro = arg0(args).object;
                 const g = all or std.mem.indexOfScalar(u8, ro.regex_flags, 'g') != null;
                 var re = try self.compileRegex(ro);
+                const template: []const u8 = if (is_func) "" else try self.toStringV(repl_val);
                 var last: usize = 0; // end of the last copied region
                 var search: usize = 0; // absolute scan cursor
                 while (search <= s.len) {
@@ -8609,7 +8605,7 @@ pub const Interpreter = struct {
                         try call_args.append(a, .{ .number = @floatFromInt(mstart) });
                         try call_args.append(a, .{ .string = s });
                         const r = try self.callValue(repl_val, call_args.items);
-                        try buf.appendSlice(a, try r.toString(a));
+                        try buf.appendSlice(a, try self.toStringV(r));
                     } else {
                         const groups = try self.regexGroups(&re, m);
                         try self.getSubstitution(&buf, template, m.slice, s, mstart, m.captures, groups);
@@ -8623,14 +8619,15 @@ pub const Interpreter = struct {
             }
 
             // String pattern: replace the first occurrence (or all for replaceAll).
-            const pat = try arg0(args).toString(a);
+            const pat = try self.toStringV(arg0(args));
+            const template: []const u8 = if (is_func) "" else try self.toStringV(repl_val);
             var from: usize = 0;
             while (from <= s.len) { // `from` stays in-bounds so the search never reads past the end
                 const idx = std.mem.indexOfPos(u8, s, from, pat) orelse break;
                 try buf.appendSlice(a, s[from..idx]);
                 if (is_func) {
                     const r = try self.callValue(repl_val, &.{ .{ .string = pat }, .{ .number = @floatFromInt(idx) }, .{ .string = s } });
-                    try buf.appendSlice(a, try r.toString(a));
+                    try buf.appendSlice(a, try self.toStringV(r));
                 } else {
                     try self.getSubstitution(&buf, template, pat, s, idx, &.{}, null);
                 }
@@ -21193,6 +21190,8 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this == .null or this == .undefined)
                 return self.throwError("TypeError", "String.prototype." ++ name ++ " called on null or undefined");
+            if (comptime std.mem.eql(u8, name, "replaceAll"))
+                if (try self.replaceAllProtocolDispatch(this, args)) |r| return r;
             if (try self.stringProtocolDispatch(name, this, args)) |r| return r;
             const s = try self.toStringV(this);
             return (try self.stringMethod(s, name, args, false)) orelse .undefined;
