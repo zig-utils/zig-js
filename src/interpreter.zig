@@ -3827,6 +3827,24 @@ pub const Interpreter = struct {
         return .{ .string = try self.stringFromCodeUnit(cu.unit) };
     }
 
+    fn appendStringUtf16Prefix(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), s: []const u8, units: usize) EvalError!void {
+        var copied: usize = 0;
+        var i: usize = 0;
+        while (i < s.len and copied < units) {
+            const seq_len = jsStringSeqLen(s, i);
+            const seq_units = utf16LenOfSeq(s, i);
+            if (copied + seq_units <= units) {
+                try buf.appendSlice(self.arena, s[i .. i + seq_len]);
+                copied += seq_units;
+            } else {
+                const cu = stringCodeUnitAt(s, copied) orelse return;
+                try buf.appendSlice(self.arena, try self.stringFromCodeUnit(cu.unit));
+                copied += 1;
+            }
+            i += seq_len;
+        }
+    }
+
     fn stringPosition(self: *Interpreter, s: []const u8, v: Value) EvalError!?usize {
         const n = try self.toNumberV(v);
         const pos = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
@@ -8518,14 +8536,16 @@ pub const Interpreter = struct {
         }
         if (eq(name, "padStart") or eq(name, "padEnd")) {
             const target = toLen(try self.toNumberV(arg0(args)));
-            if (s.len >= target) return Value{ .string = try self.arena.dupe(u8, s) };
+            const len = utf16LenOfString(s);
+            if (len >= target) return Value{ .string = try self.arena.dupe(u8, s) };
             const pad = if (args.len > 1 and args[1] != .undefined) try self.toStringV(args[1]) else " ";
-            if (pad.len == 0) return Value{ .string = try self.arena.dupe(u8, s) };
+            const pad_units = utf16LenOfString(pad);
+            if (pad_units == 0) return Value{ .string = try self.arena.dupe(u8, s) };
             var buf: std.ArrayListUnmanaged(u8) = .empty;
-            const fill_len = target - s.len;
+            var fill_len = target - len;
             if (eq(name, "padEnd")) try buf.appendSlice(self.arena, s);
-            var k: usize = 0;
-            while (k < fill_len) : (k += 1) try buf.append(self.arena, pad[k % pad.len]);
+            while (fill_len >= pad_units) : (fill_len -= pad_units) try buf.appendSlice(self.arena, pad);
+            if (fill_len > 0) try self.appendStringUtf16Prefix(&buf, pad, fill_len);
             if (eq(name, "padStart")) try buf.appendSlice(self.arena, s);
             return Value{ .string = try buf.toOwnedSlice(self.arena) };
         }
@@ -27165,6 +27185,10 @@ test "interpreter String.prototype methods" {
         \\boxed[0] === "\uD83D" &&
         \\boxed[1] === "\uDC06" &&
         \\!("2" in boxed)
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\"abc".padStart(6, "\uD83D\uDCA9") === "\uD83D\uDCA9\uD83Dabc" &&
+        \\"abc".padEnd(6, "\uD83D\uDCA9") === "abc\uD83D\uDCA9\uD83D"
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let o = Object.create(null);
