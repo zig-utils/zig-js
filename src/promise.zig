@@ -39,16 +39,27 @@ pub const Promise = struct {
     value: Value = .undefined,
     on_fulfill: std.ArrayListUnmanaged(Reaction) = .empty,
     on_reject: std.ArrayListUnmanaged(Reaction) = .empty,
-    /// Guards the executor's resolve/reject so only the first call wins.
-    resolved: bool = false,
+};
+
+/// Shared state for one promise resolving-function pair. ECMAScript's
+/// [[AlreadyResolved]] belongs to the resolve/reject functions, not to the
+/// promise itself: resolving with a pending thenable must ignore the paired
+/// reject function while still allowing the follow-up thenable job to settle.
+pub const Resolving = struct {
+    promise: *Promise,
+    already: bool = false,
 };
 
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
 pub const Microtask = struct {
+    kind: enum { reaction, thenable } = .reaction,
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
+    thenable: Value = .undefined,
+    then_fn: Value = .undefined,
+    promise: ?*Promise = null,
 };
 
 /// Shared aggregation state for the combinators (`Promise.all`/`allSettled`/
@@ -83,7 +94,10 @@ fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return .undefined;
-    try resolve(self, @ptrCast(@alignCast(fnobj.private_data.?)), if (args.len > 0) args[0] else .undefined);
+    const data: *Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
+    if (data.already) return .undefined;
+    data.already = true;
+    try resolve(self, data.promise, if (args.len > 0) args[0] else .undefined);
     return .undefined;
 }
 
@@ -91,7 +105,10 @@ fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return .undefined;
-    try reject(self, @ptrCast(@alignCast(fnobj.private_data.?)), if (args.len > 0) args[0] else .undefined);
+    const data: *Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
+    if (data.already) return .undefined;
+    data.already = true;
+    try reject(self, data.promise, if (args.len > 0) args[0] else .undefined);
     return .undefined;
 }
 
@@ -120,6 +137,11 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
     if (p.state != .pending) return;
     // Thenable assimilation: resolving with a promise/thenable chains to it.
     if (promiseOf(v)) |inner| {
+        if (inner == p) {
+            const err = try self.makeError("TypeError", "Cannot resolve promise with itself");
+            try reject(self, p, err);
+            return;
+        }
         // `await`/`then` on the inner: when it settles, settle `p`.
         const nr = try nativeResolveReject(self, p);
         const reaction_f = Reaction{ .handler = null, .resolve = nr.resolve, .reject = nr.reject };
@@ -138,19 +160,25 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
     // bound to this promise (a throw rejects). The pending-state guard makes any
     // settle beyond the first a no-op.
     if (v == .object and !v.object.is_array) {
-        const then_fn = try self.getProperty(v, "then");
-        if (then_fn.isCallable()) {
-            const res = try self.arena.create(Object);
-            res.* = .{ .native = resolveThunk, .private_data = @ptrCast(p) };
-            const rej = try self.arena.create(Object);
-            rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(p) };
-            if (self.callValueWithThis(then_fn, &.{ .{ .object = res }, .{ .object = rej } }, v)) |_| {} else |err| {
-                if (err == error.Throw) {
-                    const reason = self.exception;
-                    self.exception = .undefined;
-                    try reject(self, p, reason);
-                } else return err;
+        const then_fn = self.getProperty(v, "then") catch |err| {
+            if (err == error.Throw) {
+                const reason = self.exception;
+                self.exception = .undefined;
+                try reject(self, p, reason);
+                return;
             }
+            return err;
+        };
+        if (then_fn.isCallable()) {
+            try enqueue(self, .{
+                .kind = .thenable,
+                .reaction = undefined,
+                .argument = .undefined,
+                .fulfilled = true,
+                .thenable = v,
+                .then_fn = then_fn,
+                .promise = p,
+            });
             return;
         }
     }
@@ -176,10 +204,12 @@ pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
 /// Native resolve/reject closures over `p`'s state (a capability whose promise
 /// is the native `p`). Used wherever the result is an intrinsic promise.
 pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { resolve: Value, reject: Value } {
+    const data = try self.arena.create(Resolving);
+    data.* = .{ .promise = p };
     const res = try self.arena.create(Object);
-    res.* = .{ .native = resolveThunk, .private_data = @ptrCast(p) };
+    res.* = .{ .native = resolveThunk, .private_data = @ptrCast(data) };
     const rej = try self.arena.create(Object);
-    rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(p) };
+    rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(data) };
     return .{ .resolve = .{ .object = res }, .reject = .{ .object = rej } };
 }
 
@@ -218,6 +248,19 @@ fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
 /// Run one reaction job: invoke the handler (or pass through) and settle the
 /// dependent promise. A handler that throws rejects the dependent promise.
 pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
+    if (task.kind == .thenable) {
+        const p = task.promise orelse return;
+        if (p.state != .pending) return;
+        const nr = try nativeResolveReject(self, p);
+        if (self.callValueWithThis(task.then_fn, &.{ nr.resolve, nr.reject }, task.thenable)) |_| {} else |err| {
+            if (err == error.Throw) {
+                const reason = self.exception;
+                self.exception = .undefined;
+                _ = try self.callValue(nr.reject, &.{reason});
+            } else return err;
+        }
+        return;
+    }
     const r = task.reaction;
     if (r.handler) |h| {
         if (self.callValueWithThis(h, &.{task.argument}, .undefined)) |res| {

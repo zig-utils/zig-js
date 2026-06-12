@@ -799,7 +799,7 @@ pub const Interpreter = struct {
         return .{ .object = obj };
     }
 
-    fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
+    pub fn makeError(self: *Interpreter, name: []const u8, message: []const u8) EvalError!Value {
         return self.makeErrorWithProto(name, message, null);
     }
 
@@ -9451,10 +9451,12 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const pobj = try promise.newPromise(self);
     if (self.new_target == .object) pobj.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Promise");
     const pp = pobj.promise.?;
+    const resolving = try self.arena.create(promise.Resolving);
+    resolving.* = .{ .promise = @ptrCast(@alignCast(pp)) };
     const res_fn = try self.arena.create(value.Object);
-    res_fn.* = .{ .native = promiseResolveClosure, .private_data = pp };
+    res_fn.* = .{ .native = promiseResolveClosure, .private_data = @ptrCast(resolving) };
     const rej_fn = try self.arena.create(value.Object);
-    rej_fn.* = .{ .native = promiseRejectClosure, .private_data = pp };
+    rej_fn.* = .{ .native = promiseRejectClosure, .private_data = @ptrCast(resolving) };
     // The resolve/reject functions are anonymous, length 1 (spec).
     try installNativeProps(self.arena, self.root_shape, res_fn, "", 1);
     try installNativeProps(self.arena, self.root_shape, rej_fn, "", 1);
@@ -9462,7 +9464,10 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
         if (err == error.Throw) {
             const reason = self.exception;
             self.exception = .undefined;
-            try promise.reject(self, @ptrCast(@alignCast(pp)), reason);
+            if (!resolving.already) {
+                resolving.already = true;
+                try promise.reject(self, resolving.promise, reason);
+            }
         } else return err;
     }
     return .{ .object = pobj };
@@ -9472,7 +9477,10 @@ fn promiseResolveClosure(ctx: *anyopaque, this: Value, args: []const Value) valu
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return .undefined;
-    try promise.resolve(self, @ptrCast(@alignCast(fnobj.private_data.?)), if (args.len > 0) args[0] else .undefined);
+    const resolving: *promise.Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
+    if (resolving.already) return .undefined;
+    resolving.already = true;
+    try promise.resolve(self, resolving.promise, if (args.len > 0) args[0] else .undefined);
     return .undefined;
 }
 
@@ -9480,7 +9488,10 @@ fn promiseRejectClosure(ctx: *anyopaque, this: Value, args: []const Value) value
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return .undefined;
-    try promise.reject(self, @ptrCast(@alignCast(fnobj.private_data.?)), if (args.len > 0) args[0] else .undefined);
+    const resolving: *promise.Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
+    if (resolving.already) return .undefined;
+    resolving.already = true;
+    try promise.reject(self, resolving.promise, if (args.len > 0) args[0] else .undefined);
     return .undefined;
 }
 
@@ -9617,7 +9628,8 @@ fn promiseRejectValue(self: *Interpreter, reason: Value) EvalError!Value {
 /// subclass instance).
 fn promiseResolveStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object) return self.throwError("TypeError", "Promise.resolve called on a non-object");
+    if (this != .object or this.object.is_symbol or this.object.is_bigint)
+        return self.throwError("TypeError", "Promise.resolve called on a non-object");
     const v = if (args.len > 0) args[0] else .undefined;
     if (promise.promiseOf(v) != null) {
         const ctor = try self.getProperty(v, "constructor");

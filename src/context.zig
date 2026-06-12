@@ -1253,6 +1253,69 @@ test "ShadowRealm symbol values use caller realm wrappers" {
     );
 }
 
+test "Promise.resolve queues thenable jobs" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var seq = [];
+        \\var thenable = {
+        \\  then: function (resolve) {
+        \\    seq.push(3);
+        \\    resolve("ok");
+        \\  }
+        \\};
+        \\seq.push(1);
+        \\var p = Promise.resolve(thenable);
+        \\seq.push(2);
+        \\p.then(function () { seq.push(4); });
+    );
+    const v = try ctx.evaluate("seq.join('')");
+    try std.testing.expectEqualStrings("1234", v.string);
+}
+
+test "Promise resolving function rejects self resolution" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var resolveP;
+        \\var p = new Promise(function (resolve) { resolveP = resolve; });
+        \\resolveP(p);
+        \\var result = "pending";
+        \\p.then(function () { result = "fulfilled"; }, function (err) { result = err.name; });
+    );
+    const v = try ctx.evaluate("result");
+    try std.testing.expectEqualStrings("TypeError", v.string);
+}
+
+test "Promise.resolve rejects poisoned then getter" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var err = new Error("poison");
+        \\var poisoned = {};
+        \\Object.defineProperty(poisoned, "then", { get: function () { throw err; } });
+        \\var result = "pending";
+        \\Promise.resolve(poisoned).then(function () { result = "fulfilled"; }, function (reason) {
+        \\  result = reason === err ? "same" : "other";
+        \\});
+    );
+    const v = try ctx.evaluate("result");
+    try std.testing.expectEqualStrings("same", v.string);
+}
+
+test "Promise thenable job ignores throw after resolve" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var result = "pending";
+        \\var inner = { then: function (resolve) { resolve("ok"); } };
+        \\var outer = { then: function (resolve) { resolve(inner); throw new Error("ignored"); } };
+        \\Promise.resolve(outer).then(function (value) { result = value; }, function () { result = "rejected"; });
+    );
+    const v = try ctx.evaluate("result");
+    try std.testing.expectEqualStrings("ok", v.string);
+}
+
 /// Evaluate `src` in a fresh context and return its completion value. Only safe
 /// for by-value results (numbers/booleans); a returned `.string` points into the
 /// context arena, so use `expectEvalStr` for those (it compares before teardown).
