@@ -20506,6 +20506,11 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         .{ "toString", 0 },   .{ "toReversed", 0 },   .{ "toSorted", 1 },   .{ "toSpliced", 2 },
         .{ "with", 2 },       .{ "toLocaleString", 0 },
     });
+    const array_values_fn = try gc_mod.allocObj(a);
+    array_values_fn.* = .{ .native = arrayValuesIterFn };
+    try installFunctionProps(a, root_shape, array_values_fn, &.{}, "values");
+    try array_proto.setOwn(a, root_shape, "values", .{ .object = array_values_fn });
+    try array_proto.setAttr(a, "values", .{ .writable = true, .enumerable = false, .configurable = true });
     try array_ns.setOwn(a, root_shape, "prototype", .{ .object = array_proto });
     try array_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, array_proto, array_ns);
@@ -20735,10 +20740,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // spread / `for-of`. (Symbol must already exist, hence after its setup.)
     if (symbol_ns.getOwn("iterator")) |it_sym| {
         if (it_sym == .object and it_sym.object.is_symbol) {
-            const it_fn = try gc_mod.allocObj(a);
-            it_fn.* = .{ .native = arrayValuesIterFn };
-            try installFunctionProps(a, root_shape, it_fn, &.{}, "[Symbol.iterator]");
-            try array_proto.setOwn(a, root_shape, it_sym.object.sym_key, .{ .object = it_fn });
+            const it_fn = array_proto.getOwn("values") orelse Value.undefined;
+            try array_proto.setOwn(a, root_shape, it_sym.object.sym_key, it_fn);
             try array_proto.setAttr(a, it_sym.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
             // `String.prototype[Symbol.iterator]` — a String Iterator over the
             // ToString of `this` (so `""[Symbol.iterator]()`, for-of, and spread
@@ -20846,6 +20849,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 fn arrayValuesIterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this == .undefined or this == .null)
+        return self.throwError("TypeError", "Array.prototype.values called on null or undefined");
     return self.makeCursorIterator(this);
 }
 

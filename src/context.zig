@@ -3461,6 +3461,14 @@ test "Array.isArray follows proxies and recognizes Array.prototype" {
     )).boolean);
 }
 
+test "Array.prototype Symbol.iterator aliases values and rejects nullish this" {
+    try std.testing.expect((try evalIn("Array.prototype[Symbol.iterator] === Array.prototype.values")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var it = Array.prototype[Symbol.iterator];
+        \\try { it(); false; } catch (e) { e instanceof TypeError; }
+    )).boolean);
+}
+
 test "sloppy-mode property set on a primitive is a no-op; null/undefined throws" {
     // No-op on a primitive: doesn't throw, doesn't store.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("var n = 5; n.foo = 1; n.foo === undefined ? 1 : 0")).number);
