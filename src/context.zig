@@ -1215,6 +1215,14 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
         \\};
         \\RegExp.prototype[Symbol.replace].call(rx3, "x", "$<a>$&") === "Ax"
     )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var rx4 = {
+        \\  flags: "",
+        \\  exec: function() { return { 0: "", length: 1, index: 0, groups: null }; }
+        \\};
+        \\try { RegExp.prototype[Symbol.replace].call(rx4, "x", ""); false }
+        \\catch (e) { e.name === "TypeError" }
+    )).boolean);
 }
 
 test "RegExp builtin exec exposes UTF-16 positions" {

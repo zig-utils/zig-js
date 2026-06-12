@@ -3981,8 +3981,12 @@ pub const Interpreter = struct {
                 if (named_captures != .undefined) try call_args.append(self.arena, named_captures);
                 replacement = try self.toStringV(try self.callValue(replace_value, call_args.items));
             } else {
+                const substitution_groups: Value = if (named_captures == .undefined)
+                    .undefined
+                else
+                    .{ .object = try self.toObject(named_captures) };
                 var repl_buf: std.ArrayListUnmanaged(u8) = .empty;
-                try self.getSubstitutionValues(&repl_buf, replace_string, matched, s, position, captures.items, named_captures);
+                try self.getSubstitutionValues(&repl_buf, replace_string, matched, s, position, captures.items, substitution_groups);
                 replacement = try repl_buf.toOwnedSlice(self.arena);
             }
 
