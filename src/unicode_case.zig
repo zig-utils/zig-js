@@ -89,6 +89,7 @@ fn isCased(cp: Codepoint) bool {
         0x2C00...0x2D2F => true, // Glagolitic / Georgian Supplement
         0xFB00...0xFB17 => true, // Latin/Armenian ligatures
         0xFF21...0xFF3A, 0xFF41...0xFF5A => true, // fullwidth Latin
+        0x1D400...0x1D7CB => true, // mathematical alphanumeric symbols
         else => false,
     };
 }
@@ -96,12 +97,13 @@ fn isCased(cp: Codepoint) bool {
 /// Combining marks / MidLetter chars are transparent to the Final_Sigma scan.
 fn isCaseIgnorable(cp: Codepoint) bool {
     return switch (cp) {
-        0x27, 0x2019, 0xB7, 0x387 => true, // MidLetter apostrophes / middots
-        0x2D, 0x55A, 0x58A => true,
+        0x27, 0x2E, 0x2019, 0xB7, 0x387 => true, // MidLetter apostrophes / middots / full stop
+        0x2D, 0xAD, 0x55A, 0x58A, 0x180E => true,
         0x300...0x36F => true, // combining diacritical marks
         0x2B0...0x2FF => true, // spacing modifier letters (incl. 0x2BC ʼ)
         0x483...0x489 => true, // Cyrillic combining marks
         0x591...0x5BD, 0x5BF, 0x5C1, 0x5C2 => true, // Hebrew points
+        0x1D165...0x1D169, 0x1D16D...0x1D172, 0x1D242...0x1D244 => true, // musical combining marks
         0x1AB0...0x1AFF, 0x1DC0...0x1DFF => true, // combining marks extended
         0x2000...0x200F => true, // spaces/format (treated transparent)
         0xFE20...0xFE2F => true, // combining half marks
@@ -257,6 +259,21 @@ test "final sigma" {
     const l2 = try toLower(a, "ΣΟ"); // Σ at start → σ
     defer a.free(l2);
     try std.testing.expectEqualStrings("σο", l2);
+}
+
+test "final sigma case-ignorable context" {
+    const a = std.testing.allocator;
+    const l = try toLower(a, "A\u{180E}\u{03A3}");
+    defer a.free(l);
+    try std.testing.expectEqualStrings("a\u{180E}\u{03C2}", l);
+
+    const l2 = try toLower(a, "\u{1D4A2}\u{03A3}");
+    defer a.free(l2);
+    try std.testing.expectEqualStrings("\u{1D4A2}\u{03C2}", l2);
+
+    const l3 = try toLower(a, "A.\u{03A3}");
+    defer a.free(l3);
+    try std.testing.expectEqualStrings("a.\u{03C2}", l3);
 }
 
 test "greek extended full upper" {
