@@ -8821,18 +8821,29 @@ pub const Interpreter = struct {
     /// group — or null when the pattern has no named groups (then `groups` is
     /// `undefined`).
     fn regexGroups(self: *Interpreter, re: *regex.Regex, m: regex.Match) EvalError!?*value.Object {
-        if (re.named_captures.count() == 0) return null;
+        if (re.named_capture_list.len == 0) return null;
         const o = (try self.newObject()).object;
         o.proto = null; // RegExpBuiltinExec: the groups object is ObjectCreate(null)
-        var it = re.named_captures.iterator();
-        while (it.next()) |e| {
-            const v: Value = if (re.getNamedCapture(&m, e.key_ptr.*)) |capture|
+        for (re.named_capture_list) |entry| {
+            const v: Value = if (re.getNamedCapture(&m, entry.name)) |capture|
                 .{ .string = try self.arena.dupe(u8, capture) }
             else
                 .undefined;
-            try self.setProp(o, e.key_ptr.*, v);
+            try self.setProp(o, entry.name, v);
         }
         return o;
+    }
+
+    fn namedCaptureSpan(re: *regex.Regex, m: regex.Match, name: []const u8) ?[2]usize {
+        for (re.named_capture_list) |entry| {
+            if (!std.mem.eql(u8, entry.name, name)) continue;
+            if (entry.index == 0) continue;
+            const i = entry.index - 1;
+            if (i >= m.captures_present.len or i >= m.capture_spans.len) continue;
+            if (!m.captures_present[i]) continue;
+            return m.capture_spans[i];
+        }
+        return null;
     }
 
     /// A two-element `[start, end]` array, as used by the match-indices array.
@@ -8869,12 +8880,10 @@ pub const Interpreter = struct {
             const g = (try self.newObject()).object;
             g.proto = null; // MakeIndicesArray: groups is ObjectCreate(null)
             for (re.named_capture_list) |entry| {
-                const ci = entry.index; // 1-based capture index
-                const ok = ci >= 1 and ci - 1 < m.captures_present.len and m.captures_present[ci - 1] and ci - 1 < m.capture_spans.len;
-                const v: Value = if (ok)
+                const v: Value = if (namedCaptureSpan(re, m, entry.name)) |span|
                     try self.indexPair(
-                        utf16IndexForByteOffset(input, base + m.capture_spans[ci - 1][0]),
-                        utf16IndexForByteOffset(input, base + m.capture_spans[ci - 1][1]),
+                        utf16IndexForByteOffset(input, base + span[0]),
+                        utf16IndexForByteOffset(input, base + span[1]),
                     )
                 else
                     .undefined;
