@@ -3596,8 +3596,10 @@ pub const Interpreter = struct {
     }
 
     fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!regex.Regex {
-        const src = o.regex_source;
+        const raw_src = o.regex_source;
         const flags = o.regex_flags;
+        const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+        const src = if (unicode) raw_src else try self.regexpSearchInput(raw_src, false);
         const cf = regex.common.CompileFlags{
             .case_insensitive = std.mem.indexOfScalar(u8, flags, 'i') != null,
             .multiline = std.mem.indexOfScalar(u8, flags, 'm') != null,
@@ -3605,7 +3607,7 @@ pub const Interpreter = struct {
             .dot_all = std.mem.indexOfScalar(u8, flags, 's') != null,
             // `u`/`v` (unicode): pattern is interpreted as Unicode code points
             // (enables `\u{...}` and code-point-aware classes in the engine).
-            .unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null,
+            .unicode = unicode,
             .unicode_sets = std.mem.indexOfScalar(u8, flags, 'v') != null,
         };
         return regex.Regex.compileWithFlags(self.arena, src, cf) catch
