@@ -8739,7 +8739,9 @@ pub const Interpreter = struct {
         }
         if (eq(name, "localeCompare")) {
             const other = try arg0(args).toString(self.arena);
-            return Value{ .number = switch (std.mem.order(u8, s, other)) {
+            const left = try unicode_normalize.normalize(self.arena, s, .nfd);
+            const right = try unicode_normalize.normalize(self.arena, other, .nfd);
+            return Value{ .number = switch (std.mem.order(u8, left, right)) {
                 .lt => -1,
                 .eq => 0,
                 .gt => 1,

@@ -18,12 +18,28 @@ const Decomp = struct {
 
 const decomp_table = [_]Decomp{
     .{ .cp = 0x00C5, .canonical = &.{ 'A', 0x030A } },
+    .{ .cp = 0x00C7, .canonical = &.{ 'C', 0x0327 } },
+    .{ .cp = 0x00E4, .canonical = &.{ 'a', 0x0308 } },
+    .{ .cp = 0x00F4, .canonical = &.{ 'o', 0x0302 } },
+    .{ .cp = 0x00F6, .canonical = &.{ 'o', 0x0308 } },
+    .{ .cp = 0x0103, .canonical = &.{ 'a', 0x0306 } },
+    .{ .cp = 0x01B0, .canonical = &.{ 'u', 0x031B } },
     .{ .cp = 0x0344, .canonical = &.{ 0x0308, 0x0301 } },
     .{ .cp = 0x0958, .canonical = &.{ 0x0915, 0x093C } },
+    .{ .cp = 0x1E0B, .canonical = &.{ 'd', 0x0307 } },
+    .{ .cp = 0x1E0D, .canonical = &.{ 'd', 0x0323 } },
+    .{ .cp = 0x1E61, .canonical = &.{ 's', 0x0307 } },
+    .{ .cp = 0x1E63, .canonical = &.{ 's', 0x0323 } },
     .{ .cp = 0x1E9B, .canonical = &.{ 0x017F, 0x0307 } },
     .{ .cp = 0x1E69, .canonical = &.{ 's', 0x0323, 0x0307 } },
+    .{ .cp = 0x1EA1, .canonical = &.{ 'a', 0x0323 } },
+    .{ .cp = 0x1EE5, .canonical = &.{ 'u', 0x0323 } },
+    .{ .cp = 0x1EF1, .canonical = &.{ 'u', 0x031B, 0x0323 } },
     .{ .cp = 0x2126, .canonical = &.{0x03A9} },
+    .{ .cp = 0x212B, .canonical = &.{ 'A', 0x030A } },
     .{ .cp = 0x2ADC, .canonical = &.{ 0x2ADD, 0x0338 } },
+    .{ .cp = 0xAC00, .canonical = &.{ 0x1100, 0x1161 } },
+    .{ .cp = 0xD4DB, .canonical = &.{ 0x1111, 0x1171, 0x11B6 } },
     .{ .cp = 0x017F, .canonical = &.{}, .compatibility = &.{'s'} },
 };
 
@@ -41,8 +57,10 @@ fn canonicalCombiningClass(cp: Codepoint) u8 {
     return switch (cp) {
         0x0338 => 1,
         0x093C => 7,
+        0x0327 => 202,
+        0x031B => 216,
         0x0323 => 220,
-        0x0301, 0x0307, 0x0308, 0x030A => 230,
+        0x0301, 0x0302, 0x0306, 0x0307, 0x0308, 0x030A => 230,
         else => 0,
     };
 }
@@ -175,4 +193,26 @@ test "normalizes test262 sample forms" {
     const nfc = try normalize(a, s2, .nfc);
     defer a.free(nfc);
     try std.testing.expectEqualStrings("\u{00C5}\u{2ADD}\u{0338}\u{0915}\u{093C}\u{03A9}\u{0308}\u{0301}", nfc);
+}
+
+test "nfd canonical equivalence samples" {
+    const a = std.testing.allocator;
+
+    const l = try normalize(a, "o\u{0308}", .nfd);
+    defer a.free(l);
+    const r = try normalize(a, "\u{00F6}", .nfd);
+    defer a.free(r);
+    try std.testing.expectEqualStrings(l, r);
+
+    const h1 = try normalize(a, "\u{1111}\u{1171}\u{11B6}", .nfd);
+    defer a.free(h1);
+    const h2 = try normalize(a, "\u{D4DB}", .nfd);
+    defer a.free(h2);
+    try std.testing.expectEqualStrings(h1, h2);
+
+    const u_left = try normalize(a, "\u{1EF1}", .nfd);
+    defer a.free(u_left);
+    const u_right = try normalize(a, "u\u{0323}\u{031B}", .nfd);
+    defer a.free(u_right);
+    try std.testing.expectEqualStrings(u_left, u_right);
 }
