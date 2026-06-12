@@ -257,6 +257,43 @@ pub fn allocObj(arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
     return arena.create(Object);
 }
 
+/// Per-side-cell allocation funnels — same thread-local-active-heap rule as
+/// `allocObj`, each tagged with its own `CellKind` so `trace`/`finalize`
+/// dispatch correctly. These make the *cell* heap uniform (every heap object a
+/// GC cell), the prerequisite for sound mid-run collection. (Cell
+/// sub-allocations — `Environment.vars`, `Object.slots`, … — stay arena for
+/// now; they are never passed to `mark`, so they pose no tracing hazard, only a
+/// reclaim-at-teardown vs reclaim-on-collect difference handled later.)
+fn allocCell(comptime T: type, kind: CellKind, arena: std.mem.Allocator) std.mem.Allocator.Error!*T {
+    if (active_heap) |h| {
+        const heap: *Heap = @ptrCast(@alignCast(h));
+        return heap.create(T, kind);
+    }
+    return arena.create(T);
+}
+
+pub fn allocEnv(arena: std.mem.Allocator) std.mem.Allocator.Error!*Environment {
+    return allocCell(Environment, .environment, arena);
+}
+pub fn allocFunction(arena: std.mem.Allocator) std.mem.Allocator.Error!*interp.Function {
+    return allocCell(interp.Function, .function, arena);
+}
+pub fn allocPromise(arena: std.mem.Allocator) std.mem.Allocator.Error!*promise.Promise {
+    return allocCell(promise.Promise, .promise, arena);
+}
+pub fn allocGenerator(arena: std.mem.Allocator) std.mem.Allocator.Error!*vm.Generator {
+    return allocCell(vm.Generator, .generator, arena);
+}
+pub fn allocBoundFn(arena: std.mem.Allocator) std.mem.Allocator.Error!*interp.Interpreter.BoundFn {
+    return allocCell(interp.Interpreter.BoundFn, .bound_fn, arena);
+}
+pub fn allocIterHelper(arena: std.mem.Allocator) std.mem.Allocator.Error!*value.IterHelper {
+    return allocCell(value.IterHelper, .iter_helper, arena);
+}
+pub fn allocModuleNs(arena: std.mem.Allocator) std.mem.Allocator.Error!*interp.ModuleNs {
+    return allocCell(interp.ModuleNs, .module_ns, arena);
+}
+
 // ---------------------------------------------------------------------------
 // Test — validate the real `traceObject` logic against real `value.Object`s,
 // driven by a minimal test binding (roots are a list, not a Context). Proves

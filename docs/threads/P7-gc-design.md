@@ -207,14 +207,26 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   full test262 **42,753/47,930, 0 crashes**, conformance 33/33, and the **whole
   unit suite leak-checked** with GC defaulted on. (`global_obj`/`tdz` predate the
   heap so they stay arena for now — fine while collection is teardown-only.)
+  *Uniform cell heap landed:* the 28 side-cell sites (`Environment`×17,
+  `Function`×2, `Generator`×3, `BoundFn`, `Promise`, `IterHelper`×3, `ModuleNs`)
+  now funnel through per-type `gc_mod.allocEnv`/`allocFunction`/… (each tagged
+  its own `CellKind`), and `createWith` was reordered so `global_obj`/`tdz` are
+  GC cells too. **Every heap cell a GC cell when enabled** — the corruption-free
+  prerequisite for mid-run marking (a GC cell never references arena memory that
+  `mark` would mis-read). Validated: flag off byte-identical; flag on full
+  test262 **42,757/47,930, 0 crashes, host-fail 0**, conformance 33/33, whole
+  unit suite leak-checked. (Cell *sub-allocations* — `Object.slots`/`elements`,
+  `Environment.vars`, promise reaction lists — stay arena; they are never passed
+  to `mark`, so no tracing hazard, only a reclaim-at-teardown-vs-on-collect
+  difference, addressed after mid-run lands.)
   *Remaining for the M1 deliverable* (weak refs/finalizers correct + no-leak
-  long-running contexts): migrate the side cells (`Environment`/`Function`/
-  `Promise`/`Generator`/`BoundFn`/`IterHelper`/`ModuleNs`) and the Object
-  sub-allocations (`slots`/`elements`) so tracing never crosses into arena
-  memory; make `global_obj`/`tdz` GC cells; complete `traceRoots` with the live
-  `Interpreter` transient state; add the C-API `Boxed` handle table; then enable
-  **mid-run** `collect` at the safepoints. Until all that lands, collection stays
-  teardown-only (sound, but no reclamation win yet).
+  long-running contexts): complete `traceRoots` with the live `Interpreter`
+  transient state (value stack, `this`, `exception`, `with_stack`, …); add the
+  C-API `Boxed` handle table; then enable **mid-run** `collect` at the
+  `(steps & 1023)` safepoints — the reclamation win. Migrating the cell
+  sub-allocations to gpa (so `finalize` frees them on collect, not just at
+  teardown) is the follow-up that turns "collect reclaims cells" into "collect
+  reclaims everything." Until mid-run lands, collection stays teardown-only.
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per

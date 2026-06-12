@@ -594,7 +594,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
 
     // The generator's scope: a child of the closure, so free variables resolve
     // outward while params/locals live here and persist across yields.
-    const genv = try vm.arena.create(Environment);
+    const genv = try gc_mod.allocEnv(vm.arena);
     genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
 
     const args_obj = try vm.newArray(); // generators are never arrow functions
@@ -610,7 +610,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     defer vm.env = saved_env;
     try vm.bindParams(func.params, args);
 
-    const g = try vm.arena.create(Generator);
+    const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
         .env = genv,
@@ -826,7 +826,7 @@ fn injectThrowAt(vm: *Interpreter, g: *Generator, e: Value) EvalError!bool {
 /// return its result promise.
 pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
     const chunk = func.async_chunk.?;
-    const genv = try vm.arena.create(Environment);
+    const genv = try gc_mod.allocEnv(vm.arena);
     genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
     const args_obj = try vm.newArray();
     for (args) |av| try args_obj.object.elements.append(vm.arena, av);
@@ -836,7 +836,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     defer vm.env = saved_env;
     try vm.bindParams(func.params, args);
 
-    const g = try vm.arena.create(Generator);
+    const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
         .env = genv,
@@ -948,7 +948,7 @@ fn asyncOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
     const chunk = func.gen_chunk orelse
         return vm.throwError("TypeError", "async generator body uses syntax not yet supported by the VM");
-    const genv = try vm.arena.create(Environment);
+    const genv = try gc_mod.allocEnv(vm.arena);
     genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
     const args_obj = try vm.newArray();
     for (args) |av| try args_obj.object.elements.append(vm.arena, av);
@@ -958,7 +958,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     defer vm.env = saved_env;
     try vm.bindParams(func.params, args);
 
-    const g = try vm.arena.create(Generator);
+    const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
         .env = genv,
@@ -1275,7 +1275,7 @@ fn binOp(op: bc.Op) @import("ast.zig").BinaryOp {
 /// closure's upvalue source. Tagged with the compiled `chunk` so calls take the
 /// VM path; `closure` (the global env) is kept only to satisfy the shared type.
 fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
-    const func = try vm.arena.create(Function);
+    const func = try gc_mod.allocFunction(vm.arena);
     // A named function expression binds its own name as an immutable binding in
     // a fresh scope enclosing the body, so the body can recurse via that name and
     // can't rebind it. `runFunction` installs `func.closure` as `vm.env` for the

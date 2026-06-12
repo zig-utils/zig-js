@@ -757,7 +757,7 @@ pub const Interpreter = struct {
     /// Evaluate a `{…}` block in its own lexical scope, disposing any `using`
     /// resources declared in it when it exits (normally or abruptly).
     fn evalBlockScope(self: *Interpreter, stmts: []*Node) EvalError!Value {
-        const block_env = try self.arena.create(Environment);
+        const block_env = try gc_mod.allocEnv(self.arena);
         block_env.* = .{ .arena = self.arena, .parent = self.env };
         if (self.mark_fn_body) {
             block_env.fn_body = true;
@@ -966,7 +966,7 @@ pub const Interpreter = struct {
                 // immutable binding in a fresh scope enclosing the body, so the
                 // body can refer to itself (recursion) and can't rebind the name.
                 if (fnode.has_name_binding and !fnode.is_arrow) {
-                    const fenv = try self.arena.create(Environment);
+                    const fenv = try gc_mod.allocEnv(self.arena);
                     fenv.* = .{ .arena = self.arena, .parent = self.env };
                     const fv = try self.makeFunction(fnode, fenv);
                     try fenv.putFnName(fnode.name, fv);
@@ -1208,7 +1208,7 @@ pub const Interpreter = struct {
                 // function defined in the body captures it via its closure, and a
                 // binding declared inside the body shadows it — both fall out of
                 // the chain position automatically.
-                const wenv = try self.arena.create(Environment);
+                const wenv = try gc_mod.allocEnv(self.arena);
                 wenv.* = .{ .arena = self.arena, .parent = self.env, .with_object = obj };
                 const saved_env = self.env;
                 self.env = wenv;
@@ -1247,7 +1247,7 @@ pub const Interpreter = struct {
         // captured there sees them uninitialized (`typeof x` throws).
         var iter: Value = undefined;
         if (lexical and self.tdz_marker != null) {
-            const head_env = try self.arena.create(Environment);
+            const head_env = try gc_mod.allocEnv(self.arena);
             head_env.* = .{ .arena = self.arena, .parent = outer_env };
             self.env = head_env;
             self.tdzBindPattern(target, self.tdzVal());
@@ -1274,7 +1274,7 @@ pub const Interpreter = struct {
                 const saved_env = self.env;
                 defer self.env = saved_env;
                 if (lexical) {
-                    const iter_env = try self.arena.create(Environment);
+                    const iter_env = try gc_mod.allocEnv(self.arena);
                     iter_env.* = .{ .arena = self.arena, .parent = saved_env };
                     self.env = iter_env;
                 }
@@ -1315,7 +1315,7 @@ pub const Interpreter = struct {
                         const saved_env = self.env;
                         defer self.env = saved_env;
                         if (lexical) {
-                            const ie = try self.arena.create(Environment);
+                            const ie = try gc_mod.allocEnv(self.arena);
                             ie.* = .{ .arena = self.arena, .parent = saved_env };
                             self.env = ie;
                         }
@@ -1417,7 +1417,7 @@ pub const Interpreter = struct {
         // in any case is block-scoped to the switch (and case-test expressions
         // evaluate within it).
         const disc = try self.eval(disc_node);
-        const block_env = try self.arena.create(Environment);
+        const block_env = try gc_mod.allocEnv(self.arena);
         block_env.* = .{ .arena = self.arena, .parent = self.env };
         const saved_env = self.env;
         self.env = block_env;
@@ -1523,7 +1523,7 @@ pub const Interpreter = struct {
         if (init_node) |ini| {
             if (lexical) {
                 // The loop's lexical declaration lives in its own environment.
-                const loop_env = try self.arena.create(Environment);
+                const loop_env = try gc_mod.allocEnv(self.arena);
                 loop_env.* = .{ .arena = self.arena, .parent = outer };
                 self.env = loop_env;
             }
@@ -1550,7 +1550,7 @@ pub const Interpreter = struct {
     /// A fresh per-iteration environment for a `for (let …; …; …)` loop: a child
     /// of `outer` holding each lexical binding, value-copied from `prev`.
     fn perIterEnv(self: *Interpreter, outer: *Environment, names: []const []const u8, prev: *Environment) EvalError!*Environment {
-        const e = try self.arena.create(Environment);
+        const e = try gc_mod.allocEnv(self.arena);
         e.* = .{ .arena = self.arena, .parent = outer };
         for (names) |n| try e.put(n, prev.get(n) orelse .undefined);
         return e;
@@ -1987,7 +1987,7 @@ pub const Interpreter = struct {
     }
 
     fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {
-        const func = try self.arena.create(Function);
+        const func = try gc_mod.allocFunction(self.arena);
         func.* = .{
             .params = fnode.params,
             .body = fnode.body,
@@ -2470,7 +2470,7 @@ pub const Interpreter = struct {
     }
 
     fn makeBound(self: *Interpreter, target: *value.Object, this: Value, bound_args: []const Value) EvalError!Value {
-        const bf = try self.arena.create(BoundFn);
+        const bf = try gc_mod.allocBoundFn(self.arena);
         bf.* = .{ .target = .{ .object = target }, .this = this, .args = try self.arena.dupe(Value, bound_args) };
         const obj = try gc_mod.allocObj(self.arena);
         const target_proto = if (target.proxy_handler != null or target.proxy_revoked) blk: {
@@ -2631,7 +2631,7 @@ pub const Interpreter = struct {
         self.depth += 1;
         defer self.depth -= 1;
 
-        const call_env = try self.arena.create(Environment);
+        const call_env = try gc_mod.allocEnv(self.arena);
         call_env.* = .{ .arena = self.arena, .parent = func.closure, .fn_scope = true };
 
         const saved_env = self.env;
@@ -8885,7 +8885,7 @@ pub const Interpreter = struct {
             if (err == error.Throw and t.catch_block != null) {
                 const exc = self.exception;
                 self.exception = .undefined;
-                const catch_env = try self.arena.create(Environment);
+                const catch_env = try gc_mod.allocEnv(self.arena);
                 catch_env.* = .{ .arena = self.arena, .parent = self.env };
                 const saved = self.env;
                 self.env = catch_env;
@@ -9373,7 +9373,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         };
     }
 
-    const eval_env = try self.arena.create(Environment);
+    const eval_env = try gc_mod.allocEnv(self.arena);
     // Eval's lexical environment holds the eval'd code's let/const/class. In
     // *sloppy* eval its top-level function/var declarations target the
     // surrounding variable scope (EvalDeclarationInstantiation) — `fn_body`
@@ -10659,7 +10659,7 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const a = self.arena;
-    const genv = try a.create(Environment);
+    const genv = try gc_mod.allocEnv(a);
     genv.* = .{ .arena = a, .fn_scope = true };
     const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
@@ -10733,7 +10733,7 @@ fn install262AbstractModuleSource(env: *Environment, rs: *Shape, host: *value.Ob
 /// the creating realm's well-known symbols. Returns the new Environment.
 fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
     const a = self.arena;
-    const genv = try a.create(Environment);
+    const genv = try gc_mod.allocEnv(a);
     genv.* = .{ .arena = a, .fn_scope = true };
     const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
@@ -11360,7 +11360,7 @@ fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) v
 /// Build a lazy iterator-helper object (`map`/`filter`/…) wrapping `src`.
 fn makeIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, func: Value, limit: f64) EvalError!Value {
     const o = (try self.newObject()).object;
-    const h = try self.arena.create(value.IterHelper);
+    const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = src, .kind = kind, .func = func, .limit = limit };
     // GetIteratorDirect: capture the source iterator's `next` method once at
     // creation (the concat/zip kinds hold an array of iterables, not a single
@@ -12196,7 +12196,7 @@ fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.
     const flags = (try self.newArray()).object;
     for (iters.elements.items) |_| try flags.elements.append(self.arena, .{ .boolean = false });
     const o = (try self.newObject()).object;
-    const h = try self.arena.create(value.IterHelper);
+    const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = .{ .object = iters }, .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = .{ .object = flags }, .padding = padding };
     o.iter_helper = h;
     if (self.env.get("\x00IterHelperProto")) |p| if (p == .object) {
@@ -12564,7 +12564,7 @@ fn asyncIterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) va
 /// iterator) with the given kind/callback/limit.
 fn makeAsyncIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, func: Value, limit: f64) EvalError!Value {
     const o = (try self.newObject()).object;
-    const h = try self.arena.create(value.IterHelper);
+    const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = src, .kind = kind, .func = func, .limit = limit, .is_async = true };
     o.iter_helper = h;
     if (self.env.get("\x00AsyncIterHelperProto")) |p| if (p == .object) {

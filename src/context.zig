@@ -105,14 +105,6 @@ pub const Context = struct {
         }
         const a = arena_state.allocator();
 
-        const global_obj = try gc_mod.allocObj(a);
-        global_obj.* = .{};
-
-        // A unique sentinel object marking a `let`/`const` binding in its
-        // temporal dead zone (declared but not yet initialized).
-        const tdz = try gc_mod.allocObj(a);
-        tdz.* = .{};
-
         const self = try gpa.create(Context);
         self.* = .{
             .gpa = gpa,
@@ -120,9 +112,9 @@ pub const Context = struct {
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = gpa },
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
-            .global_object = global_obj,
+            .global_object = undefined, // set below, once the heap exists
             .root_shape = try Shape.createRoot(a),
-            .tdz_marker = tdz,
+            .tdz_marker = undefined, // set below
         };
         if (options.enable_gc) {
             // GC cells are gpa-backed (the collector frees them individually);
@@ -134,11 +126,23 @@ pub const Context = struct {
             self.gc = h;
             self.gc_binding = bind;
         }
-        // Route intrinsic allocation (installGlobals + the mirror loop below)
-        // through the GC when enabled; restore on return so a nested
-        // createWith on this thread is unaffected.
+        // Route all cell allocation (the global object + TDZ sentinel,
+        // installGlobals, and the mirror loop below) through the GC when
+        // enabled; restore on return so a nested createWith on this thread is
+        // unaffected. Creating the heap first means even these roots are GC
+        // cells (required once mid-run collection marks from them).
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
+
+        const global_obj = try gc_mod.allocObj(a);
+        global_obj.* = .{};
+        self.global_object = global_obj;
+        // A unique sentinel object marking a `let`/`const` binding in its
+        // temporal dead zone (declared but not yet initialized).
+        const tdz = try gc_mod.allocObj(a);
+        tdz.* = .{};
+        self.tdz_marker = tdz;
+
         try interp.installGlobals(&self.env, self.root_shape);
         // `globalThis` names the global object itself.
         try self.env.put("globalThis", .{ .object = global_obj });

@@ -122,7 +122,7 @@ pub fn promiseOf(v: Value) ?*Promise {
 
 /// Allocate a fresh pending Promise object (proto = `Promise.prototype`).
 pub fn newPromise(self: *Interpreter) EvalError!*Object {
-    const p = try self.arena.create(Promise);
+    const p = try gc_mod.allocPromise(self.arena);
     p.* = .{};
     const obj = try gc_mod.allocObj(self.arena);
     obj.* = .{ .promise = @ptrCast(p) };
