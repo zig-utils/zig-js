@@ -189,10 +189,21 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   allocates), so test262 is byte-identical (42,734/47,930). Lesson banked for
   M1: `finalize` must free a dying cell's non-arena sub-allocations
   (`slots`/`elements`/`accessors` backing) — the GC frees only the cell itself.
-- **M1 — single-threaded mark-sweep under the GIL.** Implement `traceRoots` +
-  per-`Kind` `trace` + the handle table; enable `collect`. **Deliverable: weak
-  refs/finalizers become correct; test262 stays green; long-running contexts
-  stop leaking.** This is shippable on its own, independent of Phase 7.
+- **M1 — single-threaded mark-sweep under the GIL.** *Foundation landed:*
+  `Context.Options.enable_gc` + `Context.gc`/`gc_binding` (the collector plus a
+  small `Binding` wrapping the `*Context`, so the shared `zig-gc` library needs
+  no change), `Interpreter.gc` plumbed, and `newObject` funnels through
+  `gc_mod.allocObject` (GC when on, arena when off). Flag **off** =
+  byte-identical (test262 unchanged); flag **on**, validated: full test262
+  **42,745/47,930, 0 crashes**, conformance 33/33, threads 29/29, and a
+  leak-checked `enable_gc` unit test (object-heavy run + clean teardown).
+  *Remaining for the M1 deliverable* (weak refs/finalizers correct + no-leak
+  long-running contexts): migrate the rest of the allocation surface (~136
+  scattered `value.Object` sites + the `installGlobals` intrinsics + the
+  side-cell creators) so the heap is uniform; complete `traceRoots` with the
+  live `Interpreter` transient state; add the C-API `Boxed` handle table; then
+  enable **mid-run** `collect` at the safepoints. Until the heap is uniform,
+  collection stays teardown-only (sound, but no reclamation win yet).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per

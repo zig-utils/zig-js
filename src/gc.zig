@@ -156,16 +156,25 @@ pub fn traceModuleNs(m: *interp.ModuleNs, v: anytype) void {
 
 // ---- The binding the collector instantiates over -------------------------
 
+/// A tiny stateful binding the collector instantiates over: it just wraps the
+/// `*Context` whose roots it traces, so the heap's `ctx: *Binding` indirects to
+/// the realm. (Keeping the collector's `Binding`-is-the-ctx contract unchanged
+/// means no edit to the shared `zig-gc` library.) Trace logic is the free
+/// functions above; root/finalize read `self.context`.
 pub const Binding = struct {
+    context: *ContextMod.Context,
+
     pub const Kind = CellKind;
 
     /// Persistent roots reachable from the realm. NOTE: M1 must additionally
     /// trace the *live* `Interpreter` execution state (value stack, `this`,
     /// `ret_value`, `exception`, `new_target`, `home_object`, `super_ctor`,
     /// `with_stack`, `active_native`, `symbols`, `import_meta_obj`) at the
-    /// safepoint where collection runs — see P7-gc-design.md. At M0 the GC only
-    /// ever runs at teardown (no live frames), so the persistent set suffices.
-    pub fn traceRoots(ctx: *ContextMod.Context, v: anytype) void {
+    /// safepoint where collection runs — see P7-gc-design.md and
+    /// `traceInterpreterRoots`. With collection only at teardown, the
+    /// persistent set suffices.
+    pub fn traceRoots(self: *Binding, v: anytype) void {
+        const ctx = self.context;
         v.mark(ctx.global_object);
         v.mark(ctx.tdz_marker);
         traceEnv(&ctx.env, v); // the global environment is embedded by value
@@ -180,7 +189,7 @@ pub const Binding = struct {
         markValue(v, ctx.exception orelse .undefined);
     }
 
-    pub fn trace(cell: *anyopaque, kind: @This().Kind, v: anytype) void {
+    pub fn trace(cell: *anyopaque, kind: Kind, v: anytype) void {
         switch (kind) {
             .object => traceObject(@ptrCast(@alignCast(cell)), v),
             .environment => traceEnv(@ptrCast(@alignCast(cell)), v),
@@ -193,19 +202,32 @@ pub const Binding = struct {
         }
     }
 
-    /// A cell is being reclaimed. M1 wires: release a non-shared
-    /// `ArrayBufferData`'s arena bytes is unnecessary (arena-owned), but a
-    /// SharedArrayBuffer wrapper must release its `SharedBufferStorage` retain
-    /// here. M0 has no GC-owned buffers, so this is a no-op.
-    pub fn finalize(ctx: *ContextMod.Context, cell: *anyopaque, kind: @This().Kind) void {
-        _ = ctx;
+    /// A cell is being reclaimed. A non-shared `ArrayBufferData`'s bytes are
+    /// arena-owned (freed with the arena), but a SharedArrayBuffer wrapper must
+    /// release its `SharedBufferStorage` retain here. No GC-owned buffers exist
+    /// until those allocation sites migrate, so this is currently a no-op.
+    pub fn finalize(self: *Binding, cell: *anyopaque, kind: Kind) void {
+        _ = self;
         _ = cell;
         _ = kind;
     }
 };
 
-/// The engine's GC heap type. M1 gives `Context` a field of this type.
+/// The engine's GC heap type. `Context` holds one behind `enable_gc`.
 pub const Heap = gc.Heap(Binding);
+
+/// Allocate an `Object` cell through the GC heap when present (tagged
+/// `.object`), else from the arena — today's engine. `heap_erased` is
+/// `Context.gc` passed type-erased so `interpreter.zig` need not name the Heap
+/// type (keeping the gc↔interpreter import edge to plain functions). The
+/// returned payload is uninitialized; the caller writes it immediately.
+pub fn allocObject(heap_erased: ?*anyopaque, arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
+    if (heap_erased) |h| {
+        const heap: *Heap = @ptrCast(@alignCast(h));
+        return heap.create(Object, .object);
+    }
+    return arena.create(Object);
+}
 
 // ---------------------------------------------------------------------------
 // Test — validate the real `traceObject` logic against real `value.Object`s,

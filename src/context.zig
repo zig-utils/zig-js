@@ -50,6 +50,12 @@ pub const Context = struct {
     /// allocated so its address is stable; null = the context stays
     /// single-thread-affine and pays nothing).
     gil: ?*gil_mod.Gil = null,
+    /// Phase 7: the precise tracing GC heap (null = arena engine, today's
+    /// default). When set, heap cells allocate through it and are reclaimed by
+    /// collection / freed at `destroy`. See docs/threads/P7-gc-design.md.
+    gc: ?*GcHeap = null,
+    /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
+    gc_binding: ?*GcBinding = null,
     /// `Thread` records spawned in this realm (the records live in the
     /// arena; the list is gpa-backed). `destroy` waits for all of them.
     js_threads: std.ArrayListUnmanaged(*jsthread.ThreadRecord) = .empty,
@@ -70,7 +76,20 @@ pub const Context = struct {
         /// Context's realm, serialized by one VM lock (issue #1 Phase 6,
         /// docs/threads/P6-thread-api.md).
         enable_threads: bool = false,
+        /// Allocate heap cells through the precise tracing GC instead of the
+        /// arena (issue #1 Phase 7, docs/threads/P7-gc-design.md). M1 work in
+        /// progress: OFF is today's arena engine (byte-identical); ON routes
+        /// cell allocation through `Context.gc` and frees them at teardown via
+        /// the collector. Mid-run collection is gated separately until the
+        /// whole allocation surface is migrated.
+        enable_gc: bool = false,
     };
+
+    /// The engine's precise-GC heap type and its root-tracing binding (issue #1
+    /// Phase 7). Held by pointer so addresses are stable; `null` costs nothing
+    /// when the GC is off.
+    pub const GcHeap = @import("gc.zig").Heap;
+    pub const GcBinding = @import("gc.zig").Binding;
 
     pub fn create(gpa: std.mem.Allocator) !*Context {
         return createWith(gpa, .{});
@@ -104,6 +123,16 @@ pub const Context = struct {
             .root_shape = try Shape.createRoot(a),
             .tdz_marker = tdz,
         };
+        if (options.enable_gc) {
+            // GC cells are gpa-backed (the collector frees them individually);
+            // the binding wraps this Context, whose roots it traces.
+            const bind = try gpa.create(GcBinding);
+            bind.* = .{ .context = self };
+            const h = try gpa.create(GcHeap);
+            h.* = GcHeap.init(gpa, bind);
+            self.gc = h;
+            self.gc_binding = bind;
+        }
         try interp.installGlobals(&self.env, self.root_shape);
         // `globalThis` names the global object itself.
         try self.env.put("globalThis", .{ .object = global_obj });
@@ -155,6 +184,7 @@ pub const Context = struct {
             .async_waiters = &self.async_waiters,
             .stop_flag = self.stop_flag,
             .gil = self.gil,
+            .gc = self.gc,
         };
     }
 
@@ -178,6 +208,18 @@ pub const Context = struct {
         }
         self.js_threads.deinit(self.gpa);
         self.sab_retains.deinit();
+        // Reclaim every GC cell (running finalizers) before the arena and the
+        // Context itself go away — GC cells are gpa-backed and disjoint from the
+        // arena, so this is independent of `arena_state.deinit()`.
+        if (self.gc) |h| {
+            h.deinit();
+            self.gpa.destroy(h);
+            self.gc = null;
+        }
+        if (self.gc_binding) |b| {
+            self.gpa.destroy(b);
+            self.gc_binding = null;
+        }
         self.arena_state.deinit();
         self.gpa.destroy(self.arena_state);
         self.gpa.destroy(self);
@@ -3901,4 +3943,27 @@ test "Thread blocking APIs respect the main can-block gate" {
         \\const t = new Thread(() => 7);
         \\expectTypeError(() => t.join(), "Thread.prototype.join cannot block the current thread");
     );
+}
+
+test "enable_gc: object-heavy program runs and tears down clean (no leaks)" {
+    // The Phase-7 M1 foundation: with the GC on, `newObject` allocates cells
+    // through the collector instead of the arena. Collection is teardown-only
+    // for now, so behavior matches the arena engine; this asserts correctness
+    // and — under the testing allocator — that `destroy` reclaims every GC cell
+    // (the heap's `deinit` frees them) with no leak.
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    try std.testing.expect(ctx.gc != null);
+
+    const result = try ctx.evaluate(
+        \\let acc = 0;
+        \\for (let i = 0; i < 200; i++) {
+        \\  const o = { a: i, b: { c: i * 2 }, arr: [i, i + 1, i + 2] };
+        \\  acc += o.a + o.b.c + o.arr[2];
+        \\}
+        \\const obj = Object.assign({}, { x: 1 }, { y: 2 });
+        \\acc + obj.x + obj.y;
+    );
+    // sum_{i=0..199}(i + 2i + (i+2)) = sum(4i+2) = 80000, plus obj.x+obj.y = 3.
+    try std.testing.expectEqual(@as(f64, 80003), result.number);
 }

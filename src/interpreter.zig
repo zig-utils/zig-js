@@ -11,6 +11,7 @@ const shared_buffer = @import("shared_buffer.zig");
 const agent = @import("agent.zig");
 const structured_clone = @import("structured_clone.zig");
 const gil_mod = @import("gil.zig");
+const gc_mod = @import("gc.zig");
 const jsthread = @import("jsthread.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
@@ -372,6 +373,10 @@ pub const Interpreter = struct {
     /// checkpoints yield it when contended, and blocking operations release
     /// it while parked. Null = no threads, zero cost.
     gil: ?*gil_mod.Gil = null,
+    /// Phase 7: the precise-GC heap (type-erased `Context.gc`), or null for the
+    /// arena engine. Cell allocation funnels through `gc_mod.allocObject` etc.,
+    /// which use this when set. See docs/threads/P7-gc-design.md.
+    gc: ?*anyopaque = null,
     /// The native-function object currently being invoked (set around each
     /// native call), so a native can reach its own `private_data` — used by
     /// Promise executor resolve/reject closures.
@@ -2958,7 +2963,7 @@ pub const Interpreter = struct {
     /// Allocate a fresh plain object. The single creation point so later tiers
     /// (object shapes) have one seam to hook.
     pub fn newObject(self: *Interpreter) EvalError!Value {
-        const obj = try self.arena.create(value.Object);
+        const obj = try gc_mod.allocObject(self.gc, self.arena);
         // An ordinary object's [[Prototype]] is %Object.prototype%. Callers that
         // need a null-proto object (`Object.create(null)`, dictionary holders)
         // overwrite `obj.proto` right after this returns.
