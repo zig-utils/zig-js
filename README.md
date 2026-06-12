@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` when a host already targets the JSC C API.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **42,604 / 47,930 (88.9%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **42,747 / 47,930 (89.2%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
 
 ```zig
 const js = @import("js");
@@ -46,18 +46,18 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **42,604 / 47,930 (88.9%)** |
+| **valid** | can we run the program? (scored corpus) | **42,747 / 47,930 (89.2%)** |
 | negative | do we reject invalid input? (early errors — partial) | 3,213 / 4,668 (68.8%) |
 
-Of the valid corpus: **119 parse failures**, **5,207 runtime failures**, **0 host failures**. The runner currently skips 581 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, Annex B, and the regex engine.
+Of the valid corpus: **119 parse failures**, **5,064 runtime failures**, **0 host failures**. The runner currently skips 579 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `language`, `staging`, `RegExp`, `String`, and Annex B.
 
 ### Per area (valid)
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 17,304 / 19,070 (90.7%) | `Object` | 3,367 / 3,411 (98.7%) |
-| `Array` | 2,958 / 3,081 (96.0%) | `RegExp` | 1,482 / 1,687 (87.8%) |
-| `String` | 1,118 / 1,223 (91.4%) | `TypedArray` | 1,445 / 1,446 (99.9%) |
+| `language` | 17,599 / 19,070 (92.3%) | `Object` | 3,368 / 3,411 (98.7%) |
+| `Array` | 2,977 / 3,081 (96.6%) | `RegExp` | 1,549 / 1,687 (91.8%) |
+| `String` | 1,119 / 1,223 (91.5%) | `TypedArray` | 1,446 / 1,446 (100%) |
 | `TypedArrayConstructors` | 738 / 738 (100%) | `Uint8Array` | 70 / 70 (100%) |
 | `Map` | 204 / 204 (100%) | `Set` | 383 / 383 (100%) |
 | `BigInt` | 77 / 77 (100%) | `Symbol` | 98 / 98 (100%) |
@@ -65,16 +65,16 @@ Of the valid corpus: **119 parse failures**, **5,207 runtime failures**, **0 hos
 | `DataView` | 561 / 561 (100%) | `Number` | 340 / 340 (100%) |
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 29 / 29 (100%) | `FinalizationRegistry` | 47 / 47 (100%) |
-| `Temporal` | 3,510 / 4,603 (76.3%) | `intl402` | 1,442 / 3,341 (43.2%) |
-| `annexB` | 961 / 1,071 (89.7%) | `staging` | 694 / 1,028 (67.5%) |
+| `Temporal` | 3,464 / 4,603 (75.3%) | `intl402` | 1,651 / 3,341 (49.4%) |
+| `annexB` | 962 / 1,071 (89.8%) | `staging` | 703 / 1,028 (68.4%) |
 | `SharedArrayBuffer` | 104 / 104 (100%) | `ArrayBuffer` | 221 / 221 (100%) |
-| `Atomics` | 308 / 388 (79.4%) | — | — |
+| `Atomics` | 390 / 390 (100%) | — | — |
 | `SuppressedError` | 22 / 22 (100%) | `ThrowTypeError` | 14 / 14 (100%) |
 | `AbstractModuleSource` | 8 / 8 (100%) | `AggregateError` | 25 / 25 (100%) |
 | `parseFloat` | 54 / 54 (100%) | `parseInt` | 55 / 55 (100%) |
 | `decodeURI` | 55 / 55 (100%) | `decodeURIComponent` | 56 / 56 (100%) |
 | `encodeURI` | 31 / 31 (100%) | `encodeURIComponent` | 31 / 31 (100%) |
-| `AsyncIteratorPrototype` | 9 / 9 (100%) | `eval` | 10 / 10 (100%) |
+| `AsyncIteratorPrototype` | 13 / 13 (100%) | `eval` | 10 / 10 (100%) |
 | `global` | 29 / 29 (100%) | `Function` | 509 / 509 (100%) |
 | `Proxy` | 310 / 310 (100%) | `Reflect` | 153 / 153 (100%) |
 
