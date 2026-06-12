@@ -3469,6 +3469,22 @@ test "Array.prototype Symbol.iterator aliases values and rejects nullish this" {
     )).boolean);
 }
 
+test "array mutators throw when final length set hits non-writable length" {
+    try std.testing.expect((try evalIn(
+        \\function throwsWith(method, setup) {
+        \\  var a = [];
+        \\  setup(a);
+        \\  try { a[method](); return false; } catch (e) { return e instanceof TypeError && a.length === 0; }
+        \\}
+        \\throwsWith("pop", function(a) { Object.defineProperty(a, "length", { writable: false }); }) &&
+        \\throwsWith("shift", function(a) { Object.defineProperty(a, "length", { writable: false }); }) &&
+        \\throwsWith("push", function(a) { Object.defineProperty(a, "length", { writable: false }); }) &&
+        \\throwsWith("unshift", function(a) { Object.defineProperty(a, "length", { writable: false }); }) &&
+        \\throwsWith("pop", Object.freeze) &&
+        \\throwsWith("shift", Object.freeze)
+    )).boolean);
+}
+
 test "sloppy-mode property set on a primitive is a no-op; null/undefined throws" {
     // No-op on a primitive: doesn't throw, doesn't store.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("var n = 5; n.foo = 1; n.foo === undefined ? 1 : 0")).number);

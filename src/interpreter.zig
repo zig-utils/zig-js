@@ -7393,9 +7393,9 @@ pub const Interpreter = struct {
     /// `Set(O, "length", newLen, true)` for a grow (push/unshift): a real array
     /// with non-writable `length` throws; otherwise the logical length advances.
     /// An array-like routes through [[Set]].
-    fn arraySetLengthThrowing(self: *Interpreter, o: *value.Object, old_len: usize, new_len: usize) EvalError!void {
+    fn arraySetLengthThrowing(self: *Interpreter, o: *value.Object, new_len: usize) EvalError!void {
         if (o.is_array) {
-            if (new_len != old_len and !arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+            if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
             if (new_len > o.elements.items.len and new_len > o.array_len) o.array_len = @intCast(new_len);
             return;
         }
@@ -7478,12 +7478,12 @@ pub const Interpreter = struct {
                 try self.arraySetIndexThrowing(o, len + k, args[k]);
             }
             const new_len = len + args.len;
-            try self.arraySetLengthThrowing(o, len, new_len);
+            try self.arraySetLengthThrowing(o, new_len);
             return Value{ .number = @floatFromInt(new_len) };
         }
         if (eq(name, "pop")) {
             if (ilen == 0) {
-                if (!o.is_array) try self.setMember(.{ .object = o }, "length", .{ .number = 0 });
+                try self.arraySetLengthThrowing(o, 0);
                 return Value.undefined;
             }
             const last = ilen - 1;
@@ -7504,7 +7504,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "shift")) {
             if (ilen == 0) {
-                if (!o.is_array) try self.setMember(.{ .object = o }, "length", .{ .number = 0 });
+                try self.arraySetLengthThrowing(o, 0);
                 return Value.undefined;
             }
             const first = try self.getProperty(.{ .object = o }, "0"); // fires accessor on a hole
@@ -7531,9 +7531,7 @@ pub const Interpreter = struct {
             if (args.len > 0) {
                 // Shift each existing element up by argCount (high to low, via
                 // [[Get]]/[[Set]]/[[Delete]] so holes move and inherited accessors
-                // fire), then place the new arguments at the front, then Set
-                // length — the spec protocol, also fed by a real array's dense
-                // store through setMember/getProperty.
+                // fire), then place the new arguments at the front.
                 var k: usize = len;
                 while (k > 0) : (k -= 1) {
                     const to = k - 1 + args.len;
@@ -7543,8 +7541,9 @@ pub const Interpreter = struct {
                         _ = try self.deleteOwn(o, try std.fmt.allocPrint(self.arena, "{d}", .{to}));
                 }
                 for (args, 0..) |a, j| try self.arraySetIndexThrowing(o, j, a);
-                try self.arraySetLengthThrowing(o, len, len + args.len);
             }
+            // Set(O, "length", len + argCount, true), even when argCount is 0.
+            try self.arraySetLengthThrowing(o, len + args.len);
             return Value{ .number = @floatFromInt(len + args.len) };
         }
         if (eq(name, "indexOf")) {
