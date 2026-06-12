@@ -1343,7 +1343,7 @@ pub const Interpreter = struct {
             // A String wrapper's own enumerable character indices "0".."len-1".
             if (o.prim) |p| if (p == .string) {
                 var i: usize = 0;
-                while (i < p.string.len) : (i += 1) {
+                while (i < utf16LenOfString(p.string)) : (i += 1) {
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
                     if (visited.contains(key)) continue;
                     try visited.put(self.arena, key, {});
@@ -3822,6 +3822,11 @@ pub const Interpreter = struct {
         return buf.toOwnedSlice(self.arena);
     }
 
+    fn stringIndexValue(self: *Interpreter, s: []const u8, index: usize) EvalError!?Value {
+        const cu = stringCodeUnitAt(s, index) orelse return null;
+        return .{ .string = try self.stringFromCodeUnit(cu.unit) };
+    }
+
     fn stringPosition(self: *Interpreter, s: []const u8, v: Value) EvalError!?usize {
         const n = try self.toNumberV(v);
         const pos = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
@@ -5473,9 +5478,9 @@ pub const Interpreter = struct {
                 // `[0] === "a"`).
                 if (o.prim) |p| {
                     if (p == .string) {
-                        if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(p.string.len) };
+                        if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(utf16LenOfString(p.string)) };
                         if (arrayIndex(key)) |i| {
-                            if (i < p.string.len) return .{ .string = try self.arena.dupe(u8, p.string[i .. i + 1]) };
+                            if (try self.stringIndexValue(p.string, i)) |v| return v;
                         }
                     }
                 }
@@ -5511,9 +5516,9 @@ pub const Interpreter = struct {
                     }
                     if (c.prim) |p| {
                         if (p == .string) {
-                            if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(p.string.len) };
+                            if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(utf16LenOfString(p.string)) };
                             if (arrayIndex(key)) |i| {
-                                if (i < p.string.len) return .{ .string = try self.arena.dupe(u8, p.string[i .. i + 1]) };
+                                if (try self.stringIndexValue(p.string, i)) |v| return v;
                             }
                         }
                     }
@@ -5546,9 +5551,9 @@ pub const Interpreter = struct {
     fn getPrimitiveMember(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         if (recv == .string) {
             const s = recv.string;
-            if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(s.len) };
+            if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(utf16LenOfString(s)) };
             if (arrayIndex(key)) |i| {
-                if (i < s.len) return .{ .string = try self.arena.dupe(u8, s[i .. i + 1]) };
+                if (try self.stringIndexValue(s, i)) |v| return v;
                 return .undefined;
             }
         }
@@ -5998,7 +6003,7 @@ pub const Interpreter = struct {
         if (o.prim) |p| {
             if (p == .string) {
                 if (std.mem.eql(u8, key, "length")) return false;
-                if (arrayIndex(key)) |i| if (i < p.string.len) return false;
+                if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.string)) return false;
             }
         }
         if (o.is_arguments) {
@@ -6206,7 +6211,7 @@ pub const Interpreter = struct {
         if (o.prim) |p| {
             if (p == .string) {
                 if (std.mem.eql(u8, key, "length")) return false;
-                if (arrayIndex(key)) |i| if (i < p.string.len) return false;
+                if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.string)) return false;
             }
         }
         // Accessor property.
@@ -26560,7 +26565,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
         if (value.canonicalIndex(name)) |idx| {
             if (c.is_array and idx < c.elements.items.len and !c.isHole(idx)) return true;
             if (c.typed_array) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
-            if (c.prim) |p| if (p == .string and idx < p.string.len) return true;
+            if (c.prim) |p| if (p == .string and idx < Interpreter.utf16LenOfString(p.string)) return true;
         }
         cur = c.proto;
     }
@@ -26632,7 +26637,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     if (o.prim) |p| {
         if (p == .string) {
             if (std.mem.eql(u8, name, "length")) return true;
-            if (Interpreter.arrayIndex(name)) |i| return i < p.string.len;
+            if (Interpreter.arrayIndex(name)) |i| return i < Interpreter.utf16LenOfString(p.string);
         }
     }
     if (o.is_array) {
@@ -27151,6 +27156,15 @@ test "interpreter String.prototype methods" {
         \\String.fromCharCode(-1).charCodeAt(0) === 65535 &&
         \\"gnulluna".substring(null, -3) === "" &&
         \\"ABCABC".charAt(-2) === "ABCABC".substring(-2, -1)
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let s = String.fromCodePoint(0x1F406);
+        \\let boxed = new String(s);
+        \\s.length === 2 &&
+        \\boxed.length === 2 &&
+        \\boxed[0] === "\uD83D" &&
+        \\boxed[1] === "\uDC06" &&
+        \\!("2" in boxed)
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let o = Object.create(null);
