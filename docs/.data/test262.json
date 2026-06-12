@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 41898,
-    "total": 47928,
-    "percentage": 87.4,
+    "passing": 42771,
+    "total": 47930,
+    "percentage": 89.2,
     "parseFail": 119,
-    "runtimeFail": 5911,
+    "runtimeFail": 5040,
     "hostFail": 0
   },
   "negative": {
@@ -12,44 +12,620 @@
     "total": 4668,
     "percentage": 68.8
   },
-  "skipped": 581,
-  "generatedAt": "2026-06-10",
+  "skipped": 579,
+  "generatedAt": "2026-06-11",
   "harness": "real (WebKit JSTests/test262 corpus)",
   "suites": [
     {
       "name": "language",
-      "passing": 17304,
+      "passing": 17600,
       "total": 19070,
-      "percentage": 90.7,
+      "percentage": 92.3,
       "parseFail": 63,
-      "runtimeFail": 1703,
+      "runtimeFail": 1407,
       "hostFail": 0
     },
     {
       "name": "annexB",
-      "passing": 961,
+      "passing": 962,
       "total": 1071,
-      "percentage": 89.7,
+      "percentage": 89.8,
       "parseFail": 13,
-      "runtimeFail": 97,
+      "runtimeFail": 96,
       "hostFail": 0
     },
     {
       "name": "intl402",
-      "passing": 1442,
+      "passing": 1651,
       "total": 3341,
-      "percentage": 43.2,
+      "percentage": 49.4,
       "parseFail": 0,
-      "runtimeFail": 1912,
+      "runtimeFail": 1690,
       "hostFail": 0
     },
     {
       "name": "staging",
-      "passing": 694,
+      "passing": 705,
       "total": 1028,
-      "percentage": 67.5,
+      "percentage": 68.6,
       "parseFail": 6,
-      "runtimeFail": 328,
+      "runtimeFail": 317,
+      "hostFail": 0
+    },
+    {
+      "name": "AbstractModuleSource",
+      "passing": 8,
+      "total": 8,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "AggregateError",
+      "passing": 25,
+      "total": 25,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Array",
+      "passing": 2977,
+      "total": 3081,
+      "percentage": 96.6,
+      "parseFail": 0,
+      "runtimeFail": 104,
+      "hostFail": 0
+    },
+    {
+      "name": "ArrayBuffer",
+      "passing": 221,
+      "total": 221,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "ArrayIteratorPrototype",
+      "passing": 27,
+      "total": 27,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "AsyncDisposableStack",
+      "passing": 104,
+      "total": 104,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "AsyncFromSyncIteratorPrototype",
+      "passing": 38,
+      "total": 38,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "AsyncFunction",
+      "passing": 18,
+      "total": 18,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "AsyncGeneratorFunction",
+      "passing": 23,
+      "total": 23,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "AsyncGeneratorPrototype",
+      "passing": 48,
+      "total": 48,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "AsyncIteratorPrototype",
+      "passing": 13,
+      "total": 13,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Atomics",
+      "passing": 390,
+      "total": 390,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "BigInt",
+      "passing": 77,
+      "total": 77,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Boolean",
+      "passing": 51,
+      "total": 51,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "DataView",
+      "passing": 561,
+      "total": 561,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Date",
+      "passing": 594,
+      "total": 594,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "decodeURI",
+      "passing": 55,
+      "total": 55,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "decodeURIComponent",
+      "passing": 56,
+      "total": 56,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "DisposableStack",
+      "passing": 93,
+      "total": 93,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "encodeURI",
+      "passing": 31,
+      "total": 31,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "encodeURIComponent",
+      "passing": 31,
+      "total": 31,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Error",
+      "passing": 93,
+      "total": 93,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "eval",
+      "passing": 10,
+      "total": 10,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "FinalizationRegistry",
+      "passing": 47,
+      "total": 47,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Function",
+      "passing": 509,
+      "total": 509,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "GeneratorFunction",
+      "passing": 23,
+      "total": 23,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "GeneratorPrototype",
+      "passing": 61,
+      "total": 61,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "global",
+      "passing": 29,
+      "total": 29,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Infinity",
+      "passing": 6,
+      "total": 6,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "isFinite",
+      "passing": 15,
+      "total": 15,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "isNaN",
+      "passing": 15,
+      "total": 15,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Iterator",
+      "passing": 514,
+      "total": 514,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "JSON",
+      "passing": 165,
+      "total": 165,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Map",
+      "passing": 204,
+      "total": 204,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "MapIteratorPrototype",
+      "passing": 11,
+      "total": 11,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Math",
+      "passing": 327,
+      "total": 327,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "NaN",
+      "passing": 6,
+      "total": 6,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "NativeErrors",
+      "passing": 94,
+      "total": 94,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Number",
+      "passing": 340,
+      "total": 340,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Object",
+      "passing": 3368,
+      "total": 3411,
+      "percentage": 98.7,
+      "parseFail": 0,
+      "runtimeFail": 43,
+      "hostFail": 0
+    },
+    {
+      "name": "parseFloat",
+      "passing": 54,
+      "total": 54,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "parseInt",
+      "passing": 55,
+      "total": 55,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Promise",
+      "passing": 617,
+      "total": 677,
+      "percentage": 91.1,
+      "parseFail": 0,
+      "runtimeFail": 60,
+      "hostFail": 0
+    },
+    {
+      "name": "Proxy",
+      "passing": 310,
+      "total": 310,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Reflect",
+      "passing": 153,
+      "total": 153,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "RegExp",
+      "passing": 1567,
+      "total": 1687,
+      "percentage": 92.9,
+      "parseFail": 36,
+      "runtimeFail": 84,
+      "hostFail": 0
+    },
+    {
+      "name": "RegExpStringIteratorPrototype",
+      "passing": 17,
+      "total": 17,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Set",
+      "passing": 383,
+      "total": 383,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "SetIteratorPrototype",
+      "passing": 11,
+      "total": 11,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "ShadowRealm",
+      "passing": 60,
+      "total": 60,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "SharedArrayBuffer",
+      "passing": 104,
+      "total": 104,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "String",
+      "passing": 1122,
+      "total": 1223,
+      "percentage": 91.7,
+      "parseFail": 1,
+      "runtimeFail": 100,
+      "hostFail": 0
+    },
+    {
+      "name": "StringIteratorPrototype",
+      "passing": 7,
+      "total": 7,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "SuppressedError",
+      "passing": 22,
+      "total": 22,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Symbol",
+      "passing": 98,
+      "total": 98,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Temporal",
+      "passing": 3464,
+      "total": 4603,
+      "percentage": 75.3,
+      "parseFail": 0,
+      "runtimeFail": 1139,
+      "hostFail": 0
+    },
+    {
+      "name": "ThrowTypeError",
+      "passing": 14,
+      "total": 14,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "TypedArray",
+      "passing": 1446,
+      "total": 1446,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "TypedArrayConstructors",
+      "passing": 738,
+      "total": 738,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "Uint8Array",
+      "passing": 70,
+      "total": 70,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "undefined",
+      "passing": 8,
+      "total": 8,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "WeakMap",
+      "passing": 141,
+      "total": 141,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "WeakRef",
+      "passing": 29,
+      "total": 29,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
+      "hostFail": 0
+    },
+    {
+      "name": "WeakSet",
+      "passing": 85,
+      "total": 85,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
       "hostFail": 0
     }
   ]
