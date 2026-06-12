@@ -9913,7 +9913,7 @@ fn objectGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     obj.proto = null; // groupBy result has a null prototype
     for (elems, 0..) |el, i| {
         const kv = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) } });
-        const key = if (kv == .object and kv.object.is_symbol) kv.object.sym_key else try kv.toString(self.arena);
+        const key = try self.keyOf(kv);
         if (obj.getOwn(key)) |bucket| {
             try bucket.object.elements.append(self.arena, el);
         } else {
@@ -27515,6 +27515,18 @@ test "interpreter JSON, Object, Number builtins" {
         \\Reflect.setPrototypeOf(falseTrap, {}) === false && objectThrows &&
         \\Reflect.setPrototypeOf(invariantProxy, fixedProto) === true && invariantThrows &&
         \\symbolProtoThrows
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let grouped = Object.groupBy([1, "1", { toString() { return 1; } }], function (v) { return v; });
+        \\let groupThrows = false;
+        \\try { Object.groupBy([1], function () { return { toString() { throw new TypeError("key"); } }; }); } catch (e) { groupThrows = e instanceof TypeError; }
+        \\class O extends Object {}
+        \\let o1 = new O({ a: 1 });
+        \\let o2 = Reflect.construct(Object, [{ b: 2 }], O);
+        \\grouped["1"].length === 3 && groupThrows &&
+        \\o1.a === undefined && o2.b === undefined &&
+        \\Object.getPrototypeOf(o1) === O.prototype &&
+        \\Object.getPrototypeOf(o2) === O.prototype
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let count = 0;

@@ -922,6 +922,15 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
     defer if (swapped_env) {
         self.env = saved_env;
     };
+    if (self.new_target == .object) {
+        if (self.active_native) |callee| {
+            if (self.new_target.object != callee) {
+                const obj = (try self.newObject()).object;
+                obj.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Object");
+                return .{ .object = obj };
+            }
+        }
+    }
     const v = arg(args, 0);
     if (v == .object and !v.object.is_bigint and !v.object.is_symbol) return v;
     if (v == .undefined or v == .null) {
@@ -1412,21 +1421,20 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 return self.throwError("TypeError", "Cannot assign to read only property 'length'");
             var new_len: usize = u;
             if (u < target.elements.items.len) {
-                // Only an array carrying per-index attributes can hold a
-                // non-configurable element; otherwise truncate straight to `u`.
-                if (target.attrs != null) {
-                    var i: usize = target.elements.items.len;
-                    while (i > u) {
-                        i -= 1;
-                        if (target.isHole(i)) continue;
-                        var kb: [24]u8 = undefined;
-                        const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
-                        if (!target.getAttr(k).configurable) {
-                            new_len = i + 1;
-                            blocked = true;
-                            break;
-                        }
+                var i: usize = target.elements.items.len;
+                while (i > u) {
+                    i -= 1;
+                    const has_data = !target.isHole(i);
+                    var kb: [24]u8 = undefined;
+                    const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+                    const has_accessor = target.getAccessor(k) != null;
+                    if (!has_data and !has_accessor) continue;
+                    if (!target.getAttr(k).configurable) {
+                        new_len = i + 1;
+                        blocked = true;
+                        break;
                     }
+                    _ = try self.deleteOwn(target, k);
                 }
                 target.elements.shrinkRetainingCapacity(new_len);
             }
