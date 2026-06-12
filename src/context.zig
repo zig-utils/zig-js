@@ -1,4 +1,5 @@
 const std = @import("std");
+const gc_mod = @import("gc.zig");
 const builtin = @import("builtin");
 const interp = @import("interpreter.zig");
 const ast = @import("ast.zig");
@@ -104,12 +105,12 @@ pub const Context = struct {
         }
         const a = arena_state.allocator();
 
-        const global_obj = try a.create(value.Object);
+        const global_obj = try gc_mod.allocObj(a);
         global_obj.* = .{};
 
         // A unique sentinel object marking a `let`/`const` binding in its
         // temporal dead zone (declared but not yet initialized).
-        const tdz = try a.create(value.Object);
+        const tdz = try gc_mod.allocObj(a);
         tdz.* = .{};
 
         const self = try gpa.create(Context);
@@ -133,6 +134,11 @@ pub const Context = struct {
             self.gc = h;
             self.gc_binding = bind;
         }
+        // Route intrinsic allocation (installGlobals + the mirror loop below)
+        // through the GC when enabled; restore on return so a nested
+        // createWith on this thread is unaffected.
+        const gc_saved = gc_mod.setActiveHeap(self.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
         try interp.installGlobals(&self.env, self.root_shape);
         // `globalThis` names the global object itself.
         try self.env.put("globalThis", .{ .object = global_obj });
@@ -264,6 +270,8 @@ pub const Context = struct {
         if (self.gil) |g| g.acquire();
         defer if (self.gil) |g| g.release();
         self.assertOwnerThread();
+        const gc_saved = gc_mod.setActiveHeap(self.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
         var parser = try Parser.init(a, owned_source);
@@ -364,6 +372,8 @@ pub const Context = struct {
         if (self.gil) |g| g.acquire();
         defer if (self.gil) |g| g.release();
         self.assertOwnerThread();
+        const gc_saved = gc_mod.setActiveHeap(self.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
         var cache: std.StringHashMapUnmanaged(*Module) = .{};
         const root = try self.loadModule(entry_path, entry_source, host, &cache);
         try self.linkModule(root);
@@ -574,7 +584,7 @@ pub const Context = struct {
     fn namespaceObject(self: *Context, module: *Module) RunError!*value.Object {
         if (module.ns) |ns| return ns;
         const a = self.arena();
-        const ns = try a.create(value.Object);
+        const ns = try gc_mod.allocObj(a);
         ns.* = .{};
         module.ns = ns;
         // Build the live Module Namespace exotic data now (at link time): the

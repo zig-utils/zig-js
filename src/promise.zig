@@ -11,6 +11,7 @@
 //! generators use); the interpreter casts back when dispatching.
 
 const std = @import("std");
+const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
 
@@ -123,7 +124,7 @@ pub fn promiseOf(v: Value) ?*Promise {
 pub fn newPromise(self: *Interpreter) EvalError!*Object {
     const p = try self.arena.create(Promise);
     p.* = .{};
-    const obj = try self.arena.create(Object);
+    const obj = try gc_mod.allocObj(self.arena);
     obj.* = .{ .promise = @ptrCast(p) };
     if (self.env.get("Promise")) |ctor| {
         if (ctor == .object) obj.proto = try self.protoObject(ctor.object);
@@ -206,9 +207,9 @@ pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
 pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { resolve: Value, reject: Value } {
     const data = try self.arena.create(Resolving);
     data.* = .{ .promise = p };
-    const res = try self.arena.create(Object);
+    const res = try gc_mod.allocObj(self.arena);
     res.* = .{ .native = resolveThunk, .private_data = @ptrCast(data) };
-    const rej = try self.arena.create(Object);
+    const rej = try gc_mod.allocObj(self.arena);
     rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(data) };
     return .{ .resolve = .{ .object = res }, .reject = .{ .object = rej } };
 }

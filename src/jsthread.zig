@@ -11,6 +11,7 @@
 //! Installed only on `enable_threads` Contexts.
 
 const std = @import("std");
+const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
 const ContextMod = @import("context.zig");
@@ -51,14 +52,14 @@ pub fn installThreadAPI(ctx: *Context) !void {
     const a = ctx.arena();
     const rs = ctx.root_shape;
 
-    const proto = try a.create(value.Object);
+    const proto = try gc_mod.allocObj(a);
     proto.* = .{};
     try interp.setNative(a, rs, proto, "join", 0, threadJoinFn);
     try interp.setNative(a, rs, proto, "asyncJoin", 0, threadAsyncJoinFn);
     try interp.setNativeGetter(a, rs, proto, "id", threadIdGetter);
     try setTag(ctx, proto, "Thread");
 
-    const ctor = try a.create(value.Object);
+    const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = threadCtorFn, .native_ctor = true, .private_data = ctx };
     try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -94,10 +95,10 @@ fn installConcurrentAccessError(ctx: *Context) !void {
     const base_proto_v = base_v.object.getOwn("prototype") orelse return;
     if (base_proto_v != .object) return;
 
-    const ctor = try a.create(value.Object);
+    const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .error_ctor = name, .private_data = @ptrCast(&ctx.env), .proto = base_v.object };
     try interp.installNativeProps(a, rs, ctor, name, 1);
-    const proto = try a.create(value.Object);
+    const proto = try gc_mod.allocObj(a);
     proto.* = .{ .proto = base_proto_v.object };
     const ro = value.PropAttr{ .writable = true, .enumerable = false, .configurable = true };
     try proto.setOwn(a, rs, "name", .{ .string = name });
@@ -115,7 +116,7 @@ fn installConcurrentAccessError(ctx: *Context) !void {
 
 fn makeWrapper(ctx: *Context, rec: *ThreadRecord) !*value.Object {
     const a = ctx.arena();
-    const o = try a.create(value.Object);
+    const o = try gc_mod.allocObj(a);
     o.* = .{ .private_data = rec };
     if (ctx.env.get("Thread")) |c| if (c == .object) {
         if (try threadProtoOf(ctx, c.object)) |p| o.proto = p;
@@ -332,7 +333,7 @@ fn installSyncAPI(ctx: *Context) !void {
     const a = ctx.arena();
     const rs = ctx.root_shape;
 
-    const lock_proto = try a.create(value.Object);
+    const lock_proto = try gc_mod.allocObj(a);
     lock_proto.* = .{};
     try interp.setNative(a, rs, lock_proto, "hold", 1, lockHoldFn);
     try interp.setNative(a, rs, lock_proto, "asyncHold", 1, lockAsyncHoldFn);
@@ -340,7 +341,7 @@ fn installSyncAPI(ctx: *Context) !void {
     try setTag(ctx, lock_proto, "Lock");
     try installCtor(ctx, "Lock", lockCtorFn, lock_proto);
 
-    const cond_proto = try a.create(value.Object);
+    const cond_proto = try gc_mod.allocObj(a);
     cond_proto.* = .{};
     try interp.setNative(a, rs, cond_proto, "wait", 1, condWaitFn);
     try interp.setNative(a, rs, cond_proto, "notify", 0, condNotifyFn(false));
@@ -349,11 +350,11 @@ fn installSyncAPI(ctx: *Context) !void {
     try setTag(ctx, cond_proto, "Condition");
     try installCtor(ctx, "Condition", condCtorFn, cond_proto);
 
-    const tl_proto = try a.create(value.Object);
+    const tl_proto = try gc_mod.allocObj(a);
     tl_proto.* = .{};
-    const getter = try a.create(value.Object);
+    const getter = try gc_mod.allocObj(a);
     getter.* = .{ .native = tlValueGetFn };
-    const setter = try a.create(value.Object);
+    const setter = try gc_mod.allocObj(a);
     setter.* = .{ .native = tlValueSetFn };
     try tl_proto.setAccessor(a, "value", .{ .object = getter }, .{ .object = setter });
     try tl_proto.setAttr(a, "value", .{ .enumerable = false, .configurable = true });
@@ -373,7 +374,7 @@ fn setTag(ctx: *Context, proto: *value.Object, name: []const u8) !void {
 fn installCtor(ctx: *Context, name: []const u8, f: value.NativeFn, proto: *value.Object) !void {
     const a = ctx.arena();
     const rs = ctx.root_shape;
-    const ctor = try a.create(value.Object);
+    const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = f, .native_ctor = true, .private_data = ctx };
     try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -397,7 +398,7 @@ fn syncCtor(comptime T: type, comptime ctor_name: []const u8) value.NativeFn {
             const a = ctx.arena();
             const rec = try a.create(T);
             rec.* = if (T == TLRecord) .{ .gil = g, .arena = a } else .{ .gil = g };
-            const o = try a.create(value.Object);
+            const o = try gc_mod.allocObj(a);
             o.* = .{ .private_data = rec };
             const p = try self.getProperty(.{ .object = native }, "prototype");
             if (p == .object) o.proto = p.object;
@@ -997,7 +998,7 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     const st = try self.arena.create(ReleaseState);
     st.* = .{ .lock = job.lock };
     job.lock.active_release = st;
-    const rel = try self.arena.create(value.Object);
+    const rel = try gc_mod.allocObj(self.arena);
     rel.* = .{ .native = releaseFnNative, .private_data = st };
     try promise.resolve(self, outer_pp, .{ .object = rel });
 }

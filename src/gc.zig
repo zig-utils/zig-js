@@ -229,6 +229,34 @@ pub fn allocObject(heap_erased: ?*anyopaque, arena: std.mem.Allocator) std.mem.A
     return arena.create(Object);
 }
 
+/// The GC heap whose cells the *current thread* allocates into, or null for the
+/// arena. Per-thread (a shared-Context GIL thread sets it to the same heap on
+/// entry), set/restored at the realm's allocation entry points — `createWith`
+/// for intrinsics, `evaluate`/`evaluateModule` for execution. This lets every
+/// scattered `*.create(value.Object)` site funnel through `allocObj(arena)`
+/// without threading the heap pointer through hundreds of signatures.
+threadlocal var active_heap: ?*anyopaque = null;
+
+/// Install `h` as this thread's active heap, returning the previous value (so
+/// nested entry points can restore it). Pass null for the arena engine.
+pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
+    const prev = active_heap;
+    active_heap = h;
+    return prev;
+}
+
+/// Allocate an `Object` cell from the thread's active GC heap (tagged
+/// `.object`), or `arena` when the GC is off. The dominant allocation funnel:
+/// the migrated `*.create(value.Object)` sites call this with the allocator
+/// they already had in scope as the fallback.
+pub fn allocObj(arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
+    if (active_heap) |h| {
+        const heap: *Heap = @ptrCast(@alignCast(h));
+        return heap.create(Object, .object);
+    }
+    return arena.create(Object);
+}
+
 // ---------------------------------------------------------------------------
 // Test — validate the real `traceObject` logic against real `value.Object`s,
 // driven by a minimal test binding (roots are a list, not a Context). Proves

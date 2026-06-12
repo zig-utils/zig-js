@@ -197,13 +197,24 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   byte-identical (test262 unchanged); flag **on**, validated: full test262
   **42,745/47,930, 0 crashes**, conformance 33/33, threads 29/29, and a
   leak-checked `enable_gc` unit test (object-heavy run + clean teardown).
+  *Uniform Object heap landed:* all ~171 `value.Object` allocation sites across
+  8 files now go through `gc_mod.allocObj(arena)`, which routes via a
+  **thread-local active heap** (`setActiveHeap`, set/restored in `createWith`
+  for intrinsics and `evaluate`/`evaluateModule` for execution) — so every site
+  funnels through the GC when on, the arena when off, *without* threading the
+  heap pointer through hundreds of signatures. Intrinsics (`installGlobals`) and
+  user objects are all GC cells now. Validated: flag off byte-identical; flag on
+  full test262 **42,753/47,930, 0 crashes**, conformance 33/33, and the **whole
+  unit suite leak-checked** with GC defaulted on. (`global_obj`/`tdz` predate the
+  heap so they stay arena for now — fine while collection is teardown-only.)
   *Remaining for the M1 deliverable* (weak refs/finalizers correct + no-leak
-  long-running contexts): migrate the rest of the allocation surface (~136
-  scattered `value.Object` sites + the `installGlobals` intrinsics + the
-  side-cell creators) so the heap is uniform; complete `traceRoots` with the
-  live `Interpreter` transient state; add the C-API `Boxed` handle table; then
-  enable **mid-run** `collect` at the safepoints. Until the heap is uniform,
-  collection stays teardown-only (sound, but no reclamation win yet).
+  long-running contexts): migrate the side cells (`Environment`/`Function`/
+  `Promise`/`Generator`/`BoundFn`/`IterHelper`/`ModuleNs`) and the Object
+  sub-allocations (`slots`/`elements`) so tracing never crosses into arena
+  memory; make `global_obj`/`tdz` GC cells; complete `traceRoots` with the live
+  `Interpreter` transient state; add the C-API `Boxed` handle table; then enable
+  **mid-run** `collect` at the safepoints. Until all that lands, collection stays
+  teardown-only (sound, but no reclamation win yet).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per

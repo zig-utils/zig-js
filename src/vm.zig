@@ -13,6 +13,7 @@
 //! calls VM closures plus host natives.
 
 const std = @import("std");
+const gc_mod = @import("gc.zig");
 const bc = @import("bytecode.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
@@ -617,7 +618,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
     };
-    const obj = try vm.arena.create(value.Object);
+    const obj = try gc_mod.allocObj(vm.arena);
     obj.* = .{ .gen = @ptrCast(g) };
     // The instance's [[Prototype]] is the generator function's own `.prototype`
     // object (whose own [[Prototype]] is %GeneratorPrototype%), per
@@ -907,9 +908,9 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         g.suspended = false;
         const awaited = try promise.newPromise(vm);
         try promise.resolve(vm, @ptrCast(@alignCast(awaited.promise.?)), v);
-        const onf = try vm.arena.create(value.Object);
+        const onf = try gc_mod.allocObj(vm.arena);
         onf.* = .{ .native = asyncOnFulfill, .private_data = @ptrCast(g) };
-        const onr = try vm.arena.create(value.Object);
+        const onr = try gc_mod.allocObj(vm.arena);
         onr.* = .{ .native = asyncOnReject, .private_data = @ptrCast(g) };
         _ = try promise.then(vm, @ptrCast(@alignCast(awaited.promise.?)), .{ .object = onf }, .{ .object = onr });
         return;
@@ -966,7 +967,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
         .super_ctor = func.super_ctor,
         .is_async_gen = true,
     };
-    const obj = try vm.arena.create(value.Object);
+    const obj = try gc_mod.allocObj(vm.arena);
     obj.* = .{ .gen = @ptrCast(g) };
     // The instance's [[Prototype]] is the async-generator function's own
     // `.prototype` object, whose own [[Prototype]] is %AsyncGeneratorPrototype%
@@ -1098,9 +1099,9 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
         .awaited => |awaited| {
             const ap = try promise.newPromise(vm);
             try promise.resolve(vm, @ptrCast(@alignCast(ap.promise.?)), awaited);
-            const onf = try vm.arena.create(value.Object);
+            const onf = try gc_mod.allocObj(vm.arena);
             onf.* = .{ .native = agOnFulfill, .private_data = @ptrCast(g) };
-            const onr = try vm.arena.create(value.Object);
+            const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agOnReject, .private_data = @ptrCast(g) };
             _ = try promise.then(vm, @ptrCast(@alignCast(ap.promise.?)), .{ .object = onf }, .{ .object = onr });
         },
@@ -1126,9 +1127,9 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
                 return;
             };
             g.done = true;
-            const onf = try vm.arena.create(value.Object);
+            const onf = try gc_mod.allocObj(vm.arena);
             onf.* = .{ .native = agReturnFulfill, .private_data = @ptrCast(g) };
-            const onr = try vm.arena.create(value.Object);
+            const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agReturnReject, .private_data = @ptrCast(g) };
             _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.object.promise.?)), .{ .object = onf }, .{ .object = onr });
         },
@@ -1178,9 +1179,9 @@ fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value
     };
     const data = try vm.arena.create(AgDoneReturn);
     data.* = .{ .result = result };
-    const onf = try vm.arena.create(value.Object);
+    const onf = try gc_mod.allocObj(vm.arena);
     onf.* = .{ .native = agDoneReturnFulfill, .private_data = @ptrCast(data) };
-    const onr = try vm.arena.create(value.Object);
+    const onr = try gc_mod.allocObj(vm.arena);
     onr.* = .{ .native = agDoneReturnReject, .private_data = @ptrCast(data) };
     _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.object.promise.?)), .{ .object = onf }, .{ .object = onr });
 }
@@ -1295,7 +1296,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .frame = frame,
         .local_count = tmpl.local_count,
     };
-    const obj = try vm.arena.create(value.Object);
+    const obj = try gc_mod.allocObj(vm.arena);
     obj.* = .{ .js_func = @ptrCast(func), .proto = vm.functionProto() };
     try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
     if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, .{ .object = obj });

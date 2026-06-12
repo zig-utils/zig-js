@@ -4,6 +4,7 @@
 //! via its arena and raise JS exceptions. Registered in `interpreter.installGlobals`.
 
 const std = @import("std");
+const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const interpreter = @import("interpreter.zig");
 const Interpreter = interpreter.Interpreter;
@@ -2477,7 +2478,7 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
     // The outermost value must be a primitive (not an object or array).
     if (v == .object and !v.object.is_bigint and !v.object.is_symbol)
         return self.throwError("SyntaxError", "JSON.rawJSON text must be a primitive JSON value");
-    const o = try self.arena.create(value.Object);
+    const o = try gc_mod.allocObj(self.arena);
     o.* = .{ .proto = null, .is_raw_json = true };
     try o.setOwn(self.arena, self.root_shape, "rawJSON", .{ .string = s });
     try o.setAttr(self.arena, "rawJSON", .{ .writable = false, .enumerable = true, .configurable = false });

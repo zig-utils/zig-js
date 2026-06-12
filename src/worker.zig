@@ -12,6 +12,7 @@
 //! serialized bytes (process-allocator-owned) and retained SAB storage.
 
 const std = @import("std");
+const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
 const ContextMod = @import("context.zig");
@@ -266,7 +267,7 @@ fn installWorkerGlobals(ctx: *Context, w: *Worker) !void {
         .{ "postMessage", workerPostMessageFn },
         .{ "close", workerCloseFn },
     }) |entry| {
-        const o = try a.create(value.Object);
+        const o = try gc_mod.allocObj(a);
         o.* = .{ .native = entry[1], .private_data = w };
         try ctx.env.put(entry[0], .{ .object = o });
         try ctx.global_object.setOwn(a, ctx.root_shape, entry[0], .{ .object = o });

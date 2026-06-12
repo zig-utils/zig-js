@@ -648,7 +648,7 @@ pub const Interpreter = struct {
             .object => |o| if (o.is_symbol) "Symbol" else if (o.is_bigint) "BigInt" else unreachable,
             else => unreachable,
         };
-        const o = try self.arena.create(value.Object);
+        const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .prim = v };
         if (self.env.get(ctor_name)) |ctor| {
             if (ctor == .object) o.proto = try self.protoObject(ctor.object);
@@ -782,7 +782,7 @@ pub const Interpreter = struct {
     }
 
     fn makeErrorWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: ?*value.Object) EvalError!Value {
-        const obj = try self.arena.create(value.Object);
+        const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .is_error = true, .error_name = name };
         // Link to `<name>.prototype` so `name` (and `toString`) are inherited and
         // `instanceof` / `Object.getPrototypeOf` see a real chain.
@@ -2046,7 +2046,7 @@ pub const Interpreter = struct {
             if (tag) |t| if (self.env.get(t)) |v| if (v == .object) break :blk v.object;
             break :blk self.functionProto();
         };
-        const obj = try self.arena.create(value.Object);
+        const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .js_func = @ptrCast(func), .proto = fproto };
         func.obj = obj;
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
@@ -2472,7 +2472,7 @@ pub const Interpreter = struct {
     fn makeBound(self: *Interpreter, target: *value.Object, this: Value, bound_args: []const Value) EvalError!Value {
         const bf = try self.arena.create(BoundFn);
         bf.* = .{ .target = .{ .object = target }, .this = this, .args = try self.arena.dupe(Value, bound_args) };
-        const obj = try self.arena.create(value.Object);
+        const obj = try gc_mod.allocObj(self.arena);
         const target_proto = if (target.proxy_handler != null or target.proxy_revoked) blk: {
             const p = try self.proxyGetProto(target);
             break :blk if (p == .object) p.object else null;
@@ -2887,7 +2887,7 @@ pub const Interpreter = struct {
             if (func.is_arrow or func.is_async or func.is_generator)
                 return self.throwError("TypeError", "value is not a constructor");
             // OrdinaryCreateFromConstructor: the instance proto comes from NewTarget.
-            const inst = try self.arena.create(value.Object);
+            const inst = try gc_mod.allocObj(self.arena);
             inst.* = .{ .ctor_ref = obj, .proto = if (new_target == .object) try self.ctorRealmIntrinsicProto(new_target.object, "Object") else try self.protoObject(obj) };
             const this_val = Value{ .object = inst };
             const ret = try self.callFunctionNT(func, args, this_val, new_target);
@@ -3186,7 +3186,7 @@ pub const Interpreter = struct {
     /// extensible object with a null [[Prototype]]), created once and cached.
     fn evalImportMeta(self: *Interpreter) EvalError!Value {
         if (self.import_meta_obj) |o| return .{ .object = o };
-        const o = try self.arena.create(value.Object);
+        const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .proto = null };
         self.import_meta_obj = o;
         return .{ .object = o };
@@ -3303,7 +3303,7 @@ pub const Interpreter = struct {
 
     /// A BigInt primitive value with the given `i128` magnitude.
     pub fn makeBigInt(self: *Interpreter, v: i128) EvalError!Value {
-        const o = try self.arena.create(value.Object);
+        const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .is_bigint = true, .bigint = v };
         try self.finishBigInt(o);
         return .{ .object = o };
@@ -3311,7 +3311,7 @@ pub const Interpreter = struct {
 
     pub fn makeBigIntText(self: *Interpreter, s: []const u8) EvalError!Value {
         if (std.fmt.parseInt(i128, s, 10)) |v| return self.makeBigInt(v) else |_| {}
-        const o = try self.arena.create(value.Object);
+        const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .is_bigint = true, .bigint_text = s };
         try self.finishBigInt(o);
         return .{ .object = o };
@@ -3377,7 +3377,7 @@ pub const Interpreter = struct {
     /// prototype is the in-flight constructor's `.prototype`, so methods,
     /// `instanceof`, and `[object Number|String|Boolean]` all resolve correctly.
     pub fn makeWrapper(self: *Interpreter, p: Value) EvalError!Value {
-        const o = try self.arena.create(value.Object);
+        const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .prim = p };
         if (self.new_target == .object) {
             const intrinsic: []const u8 = switch (p) {
@@ -3394,14 +3394,14 @@ pub const Interpreter = struct {
     /// Create an instance for `new ctor(...)`: a fresh object whose prototype is
     /// the constructor's `.prototype`.
     pub fn newInstance(self: *Interpreter, ctor: *value.Object) EvalError!Value {
-        const obj = try self.arena.create(value.Object);
+        const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .ctor_ref = ctor, .proto = try self.protoObject(ctor) };
         return .{ .object = obj };
     }
 
     /// Allocate a fresh array object.
     pub fn newArray(self: *Interpreter) EvalError!Value {
-        const obj = try self.arena.create(value.Object);
+        const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .is_array = true, .proto = self.arrayProto() };
         return .{ .object = obj };
     }
@@ -3849,7 +3849,7 @@ pub const Interpreter = struct {
     }
 
     fn createRegExpStringIterator(self: *Interpreter, matcher: Value, s: []const u8, global: bool, unicode: bool) EvalError!Value {
-        const it = try self.arena.create(value.Object);
+        const it = try gc_mod.allocObj(self.arena);
         it.* = .{};
         if (self.env.get("\x00ReStrIterProto")) |p| {
             if (p == .object) it.proto = p.object;
@@ -4565,7 +4565,7 @@ pub const Interpreter = struct {
         if (eq(name, "delete")) {
             for (o.elements.items, 0..) |e, i| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) {
-                    const tomb = try self.arena.create(value.Object);
+                    const tomb = try gc_mod.allocObj(self.arena);
                     tomb.* = .{ .is_set_deleted = true };
                     o.elements.items[i] = .{ .object = tomb };
                     return Value{ .boolean = true };
@@ -5276,7 +5276,7 @@ pub const Interpreter = struct {
                         // instance the generator produces.
                         if (f.is_generator) {
                             const tag = if (f.is_async) "\x00AsyncGenProto" else "\x00GenProto";
-                            const proto = try self.arena.create(value.Object);
+                            const proto = try gc_mod.allocObj(self.arena);
                             const gen_proto = (try self.functionRealmIntrinsicObject(o, tag)) orelse
                                 if (Interpreter.envIntrinsicObject(self.env, tag)) |gp| gp else null;
                             proto.* = .{ .proto = gen_proto };
@@ -6634,7 +6634,7 @@ pub const Interpreter = struct {
     }
 
     fn makeCursorIteratorWithKind(self: *Interpreter, src: Value, kind: u8) EvalError!Value {
-        const it = try self.arena.create(value.Object);
+        const it = try gc_mod.allocObj(self.arena);
         it.* = .{};
         try self.setProp(it, "__src", src);
         try self.setProp(it, "__i", .{ .number = 0 });
@@ -9458,9 +9458,9 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const pp = pobj.promise.?;
     const resolving = try self.arena.create(promise.Resolving);
     resolving.* = .{ .promise = @ptrCast(@alignCast(pp)) };
-    const res_fn = try self.arena.create(value.Object);
+    const res_fn = try gc_mod.allocObj(self.arena);
     res_fn.* = .{ .native = promiseResolveClosure, .private_data = @ptrCast(resolving) };
-    const rej_fn = try self.arena.create(value.Object);
+    const rej_fn = try gc_mod.allocObj(self.arena);
     rej_fn.* = .{ .native = promiseRejectClosure, .private_data = @ptrCast(resolving) };
     // The resolve/reject functions are anonymous, length 1 (spec).
     try installNativeProps(self.arena, self.root_shape, res_fn, "", 1);
@@ -9553,7 +9553,7 @@ fn finallyReactionFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const wp = promise.promiseOf(wrapped).?;
     // After onFinally's result settles, a thunk that ignores its argument and
     // reinstates the original completion.
-    const thunk = try self.arena.create(value.Object);
+    const thunk = try gc_mod.allocObj(self.arena);
     const td = try self.arena.create(FinallyData);
     td.* = .{ .on_finally = .undefined, .captured = incoming, .is_catch = d.is_catch };
     thunk.* = .{ .native = finallyThunkFn, .private_data = @ptrCast(td) };
@@ -9581,12 +9581,12 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const cb = if (args.len > 0) args[0] else .undefined;
     // A non-callable `onFinally` is used directly for both reactions (spec).
     if (!cb.isCallable()) return self.callMethod(this, "then", &.{ cb, cb });
-    const onf = try self.arena.create(value.Object);
+    const onf = try gc_mod.allocObj(self.arena);
     const ond = try self.arena.create(FinallyData);
     ond.* = .{ .on_finally = cb, .is_catch = false };
     onf.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ond) };
     try installNativeProps(self.arena, self.root_shape, onf, "", 1);
-    const onr = try self.arena.create(value.Object);
+    const onr = try gc_mod.allocObj(self.arena);
     const ord = try self.arena.create(FinallyData);
     ord.* = .{ .on_finally = cb, .is_catch = true };
     onr.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ord) };
@@ -9842,7 +9842,7 @@ fn newPromiseCapability(self: *Interpreter, c: Value) EvalError!Capability {
     if (!isConstructorValue(c)) return self.throwError("TypeError", "NewPromiseCapability called on a non-constructor");
     const capture = try self.arena.create(CapCapture);
     capture.* = .{};
-    const executor = try self.arena.create(value.Object);
+    const executor = try gc_mod.allocObj(self.arena);
     executor.* = .{ .native = capabilityExecutorFn, .private_data = @ptrCast(capture) };
     try installNativeProps(self.arena, self.root_shape, executor, "", 2);
     const p = try self.construct(c, &.{.{ .object = executor }});
@@ -9900,12 +9900,12 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         // functions — the element settles at most once.
         const already = try self.arena.create(bool);
         already.* = false;
-        const f = try self.arena.create(value.Object);
+        const f = try gc_mod.allocObj(self.arena);
         const fe = try self.arena.create(promise.Elem);
         fe.* = .{ .combine = combine, .index = index, .is_reject = false, .already = already };
         f.* = .{ .native = combineElemFn, .private_data = @ptrCast(fe) };
         try installNativeProps(self.arena, self.root_shape, f, "", 1); // anonymous, length 1
-        const r = try self.arena.create(value.Object);
+        const r = try gc_mod.allocObj(self.arena);
         const re = try self.arena.create(promise.Elem);
         re.* = .{ .combine = combine, .index = index, .is_reject = true, .already = already };
         r.* = .{ .native = combineElemFn, .private_data = @ptrCast(re) };
@@ -10326,7 +10326,7 @@ fn proxyConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const handler = if (args.len > 1) args[1] else .undefined;
     if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
         return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
-    const o = try self.arena.create(value.Object);
+    const o = try gc_mod.allocObj(self.arena);
     o.* = .{ .proxy_target = target.object, .proxy_handler = handler.object, .proxy_callable = target.object.isCallableObject() };
     return .{ .object = o };
 }
@@ -10342,9 +10342,9 @@ fn proxyRevocableFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const handler = if (args.len > 1) args[1] else .undefined;
     if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
         return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
-    const p = try self.arena.create(value.Object);
+    const p = try gc_mod.allocObj(self.arena);
     p.* = .{ .proxy_target = target.object, .proxy_handler = handler.object, .proxy_callable = target.object.isCallableObject() };
-    const revoke = try self.arena.create(value.Object);
+    const revoke = try gc_mod.allocObj(self.arena);
     revoke.* = .{ .native = proxyRevokeFn, .private_data = @ptrCast(p) };
     try installNativeProps(self.arena, self.root_shape, revoke, "", 0);
     const result = (try self.newObject()).object;
@@ -10625,7 +10625,7 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const a = self.arena;
     const genv = try a.create(Environment);
     genv.* = .{ .arena = a, .fn_scope = true };
-    const gobj = try a.create(value.Object);
+    const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
     // Share the creating realm's well-known symbols with the new realm.
     const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv == .object) sv.object else null) else null;
@@ -10639,7 +10639,7 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     // The realm record handed back to the caller (in the caller's realm).
     const realm = (try self.newObject()).object;
     try self.setProp(realm, "global", .{ .object = gobj });
-    const es = try a.create(value.Object);
+    const es = try gc_mod.allocObj(a);
     es.* = .{ .native = host262EvalScriptFn, .private_data = @ptrCast(genv) };
     try installNativeProps(a, self.root_shape, es, "evalScript", 1);
     try self.setProp(realm, "evalScript", .{ .object = es });
@@ -10663,10 +10663,10 @@ fn host262AbstractModuleSourceTagGetter(ctx: *anyopaque, this: Value, args: []co
 
 fn install262AbstractModuleSource(env: *Environment, rs: *Shape, host: *value.Object, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
-    const proto = try a.create(value.Object);
+    const proto = try gc_mod.allocObj(a);
     proto.* = .{ .proto = object_proto };
 
-    const ctor = try a.create(value.Object);
+    const ctor = try gc_mod.allocObj(a);
     const function_proto: ?*value.Object = blk: {
         if (env.get("Function")) |fv| if (fv == .object) {
             if (fv.object.getOwn("prototype")) |pv| if (pv == .object) break :blk pv.object;
@@ -10681,7 +10681,7 @@ fn install262AbstractModuleSource(env: *Environment, rs: *Shape, host: *value.Ob
 
     if (env.get("Symbol")) |sym| if (sym == .object) {
         if (sym.object.getOwn("toStringTag")) |tag| if (tag == .object and tag.object.is_symbol) {
-            const getter = try a.create(value.Object);
+            const getter = try gc_mod.allocObj(a);
             getter.* = .{ .native = host262AbstractModuleSourceTagGetter };
             try installNativeProps(a, rs, getter, "get [Symbol.toStringTag]", 0);
             try proto.setAccessor(a, tag.object.sym_key, .{ .object = getter }, null);
@@ -10699,7 +10699,7 @@ fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
     const a = self.arena;
     const genv = try a.create(Environment);
     genv.* = .{ .arena = a, .fn_scope = true };
-    const gobj = try a.create(value.Object);
+    const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
     const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv == .object) sv.object else null) else null;
     const parent_symbol_registry = try symbolRegistry(self);
@@ -10903,17 +10903,17 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 /// by the caller once the realm's global object exists).
 pub fn install262(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
-    const d = try a.create(value.Object);
+    const d = try gc_mod.allocObj(a);
     d.* = .{ .proto = object_proto };
     try setNative(a, rs, d, "gc", 0, host262GcFn);
     try setNative(a, rs, d, "detachArrayBuffer", 1, host262DetachFn);
     try setNative(a, rs, d, "createRealm", 0, host262CreateRealmFn);
     // $262.IsHTMLDDA — an [[IsHTMLDDA]] exotic (typeof "undefined", falsy,
     // loosely-equal to null/undefined), callable per its legacy [[Call]].
-    const htmldda = try a.create(value.Object);
+    const htmldda = try gc_mod.allocObj(a);
     htmldda.* = .{ .proto = object_proto, .native = host262IsHTMLDDACallFn, .is_htmldda = true };
     try d.setOwn(a, rs, "IsHTMLDDA", .{ .object = htmldda });
-    const es = try a.create(value.Object);
+    const es = try gc_mod.allocObj(a);
     es.* = .{ .native = host262EvalScriptFn, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, es, "evalScript", 1);
     try d.setOwn(a, rs, "evalScript", .{ .object = es });
@@ -12266,10 +12266,10 @@ fn iterProtoTagSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value
 /// Install an accessor with a native getter and setter (non-enumerable,
 /// configurable), naming them `get <display>` / `set <display>` per spec.
 fn setNativeGetSet(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, key: []const u8, comptime display: []const u8, getf: value.NativeFn, setf: value.NativeFn) EvalError!void {
-    const g = try a.create(value.Object);
+    const g = try gc_mod.allocObj(a);
     g.* = .{ .native = getf };
     try installNativeProps(a, rs, g, "get " ++ display, 0);
-    const s = try a.create(value.Object);
+    const s = try gc_mod.allocObj(a);
     s.* = .{ .native = setf };
     try installNativeProps(a, rs, s, "set " ++ display, 1);
     try obj.setAccessor(a, key, .{ .object = g }, .{ .object = s });
@@ -12299,7 +12299,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     };
 
     // %IteratorPrototype%.
-    const iter_proto = try a.create(value.Object);
+    const iter_proto = try gc_mod.allocObj(a);
     iter_proto.* = .{ .proto = object_proto };
     if (sym_iter) |k| try installSymbolMethod(a, rs, iter_proto, k, "[Symbol.iterator]", 0, iterProtoSymbolIteratorFn);
     if (sym_dispose) |k| try installSymbolMethod(a, rs, iter_proto, k, "[Symbol.dispose]", 0, iterProtoDisposeFn);
@@ -12319,7 +12319,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     // every generator instance — next/return/throw own methods and a
     // @@toStringTag of "Generator".
     {
-        const gen_proto = try a.create(value.Object);
+        const gen_proto = try gc_mod.allocObj(a);
         gen_proto.* = .{ .proto = iter_proto };
         try setNative(a, rs, gen_proto, "next", 1, genProtoMethod(.next));
         try setNative(a, rs, gen_proto, "return", 1, genProtoMethod(.ret));
@@ -12340,7 +12340,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         .{ "\x00SetIterProto", "Set Iterator" },
         .{ "\x00StrIterProto", "String Iterator" },
     }) |kp| {
-        const kproto = try a.create(value.Object);
+        const kproto = try gc_mod.allocObj(a);
         kproto.* = .{ .proto = iter_proto };
         try setNative(a, rs, kproto, "next", 0, cursorIterNext);
         if (sym_tag) |k| {
@@ -12353,7 +12353,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     // %RegExpStringIteratorPrototype% (proto %IteratorPrototype%): the lazy
     // iterator returned by String.prototype.matchAll / RegExp.prototype[@@matchAll].
     {
-        const re_iter_proto = try a.create(value.Object);
+        const re_iter_proto = try gc_mod.allocObj(a);
         re_iter_proto.* = .{ .proto = iter_proto };
         try setNative(a, rs, re_iter_proto, "next", 0, regexpStringIterNext);
         if (sym_tag) |k| {
@@ -12365,7 +12365,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
 
     // %IteratorHelperPrototype% (proto %IteratorPrototype%): next + return, plus
     // a @@toStringTag of "Iterator Helper".
-    const helper_proto = try a.create(value.Object);
+    const helper_proto = try gc_mod.allocObj(a);
     helper_proto.* = .{ .proto = iter_proto };
     try setNative(a, rs, helper_proto, "next", 0, iterHelperNextFn);
     try setNative(a, rs, helper_proto, "return", 0, iterHelperReturnFn);
@@ -12376,7 +12376,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     try env.put("\x00IterHelperProto", .{ .object = helper_proto });
 
     // The `Iterator` constructor (abstract) with `.prototype` = %IteratorProto%.
-    const ctor = try a.create(value.Object);
+    const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = iteratorConstructorFn, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, ctor, "Iterator", 0);
     try setNative(a, rs, ctor, "from", 1, iteratorFromFn);
@@ -12725,7 +12725,7 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     };
 
     // %AsyncIteratorPrototype%.
-    const proto = try a.create(value.Object);
+    const proto = try gc_mod.allocObj(a);
     proto.* = .{ .proto = object_proto };
     if (sym_async_iter) |k| try installSymbolMethod(a, rs, proto, k, "[Symbol.asyncIterator]", 0, asyncIterProtoSymbolFn);
     if (sym_async_dispose) |k| try installSymbolMethod(a, rs, proto, k, "[Symbol.asyncDispose]", 0, asyncIterProtoDisposeFn);
@@ -12743,7 +12743,7 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     // prototype of every async-generator instance — next/return/throw own
     // methods and a @@toStringTag of "AsyncGenerator".
     {
-        const agen_proto = try a.create(value.Object);
+        const agen_proto = try gc_mod.allocObj(a);
         agen_proto.* = .{ .proto = proto };
         try setNative(a, rs, agen_proto, "next", 1, asyncGenProtoMethod(.next));
         try setNative(a, rs, agen_proto, "return", 1, asyncGenProtoMethod(.ret));
@@ -12756,7 +12756,7 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     }
 
     // %AsyncIteratorHelperPrototype%.
-    const helper_proto = try a.create(value.Object);
+    const helper_proto = try gc_mod.allocObj(a);
     helper_proto.* = .{ .proto = proto };
     try setNative(a, rs, helper_proto, "next", 0, asyncIterHelperNextFn);
     try setNative(a, rs, helper_proto, "return", 0, asyncIterHelperReturnFn);
@@ -12767,7 +12767,7 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     try env.put("\x00AsyncIterHelperProto", .{ .object = helper_proto });
 
     // The `AsyncIterator` constructor (abstract).
-    const ctor = try a.create(value.Object);
+    const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = asyncIteratorConstructorFn, .native_ctor = true };
     try installNativeProps(a, rs, ctor, "AsyncIterator", 0);
     try setNative(a, rs, ctor, "from", 1, asyncIteratorFromFn);
@@ -12883,10 +12883,10 @@ fn installOneFunctionKind(
     instance_proto: ?*value.Object,
 ) EvalError!*value.Object {
     // %XFunction.prototype% (e.g. %Generator%): [[Prototype]] %Function.prototype%.
-    const kproto = try a.create(value.Object);
+    const kproto = try gc_mod.allocObj(a);
     kproto.* = .{ .proto = func_proto };
     // %XFunction% constructor: [[Prototype]] %Function% (the Function ctor).
-    const ctor = try a.create(value.Object);
+    const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = native_fn, .native_ctor = true, .proto = func_ctor, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, ctor, name, 1);
     try ctor.setOwn(a, rs, "prototype", .{ .object = kproto });
@@ -13276,7 +13276,7 @@ fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.O
 
     // Sync DisposableStack.
     {
-        const proto = try a.create(value.Object);
+        const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = object_proto };
         try setNative(a, rs, proto, "use", 1, dispUseFn(false));
         try setNative(a, rs, proto, "adopt", 2, dispAdoptFn);
@@ -13294,7 +13294,7 @@ fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.O
             try proto.setOwn(a, rs, k, .{ .string = "DisposableStack" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
-        const ctor = try a.create(value.Object);
+        const ctor = try gc_mod.allocObj(a);
         ctor.* = .{ .native = disposableStackConstructorFn(false), .native_ctor = true };
         try installNativeProps(a, rs, ctor, "DisposableStack", 0);
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
@@ -13304,7 +13304,7 @@ fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.O
     }
     // AsyncDisposableStack.
     {
-        const proto = try a.create(value.Object);
+        const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = object_proto };
         try setNative(a, rs, proto, "use", 1, dispUseFn(true));
         try setNative(a, rs, proto, "adopt", 2, dispAdoptFn);
@@ -13321,7 +13321,7 @@ fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.O
             try proto.setOwn(a, rs, k, .{ .string = "AsyncDisposableStack" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
-        const ctor = try a.create(value.Object);
+        const ctor = try gc_mod.allocObj(a);
         ctor.* = .{ .native = disposableStackConstructorFn(true), .native_ctor = true };
         try installNativeProps(a, rs, ctor, "AsyncDisposableStack", 0);
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
@@ -13341,14 +13341,14 @@ fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.O
     };
     // WeakRef.
     {
-        const proto = try a.create(value.Object);
+        const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = object_proto };
         try setNative(a, rs, proto, "deref", 0, weakRefDerefFn);
         if (tt) |k| {
             try proto.setOwn(a, rs, k, .{ .string = "WeakRef" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
-        const ctor = try a.create(value.Object);
+        const ctor = try gc_mod.allocObj(a);
         ctor.* = .{ .native = weakRefConstructorFn, .native_ctor = true };
         try installNativeProps(a, rs, ctor, "WeakRef", 1);
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
@@ -13358,7 +13358,7 @@ fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.O
     }
     // FinalizationRegistry.
     {
-        const proto = try a.create(value.Object);
+        const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = object_proto };
         try setNative(a, rs, proto, "register", 2, finRegRegisterFn);
         try setNative(a, rs, proto, "unregister", 1, finRegUnregisterFn);
@@ -13366,7 +13366,7 @@ fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.O
             try proto.setOwn(a, rs, k, .{ .string = "FinalizationRegistry" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
-        const ctor = try a.create(value.Object);
+        const ctor = try gc_mod.allocObj(a);
         ctor.* = .{ .native = finalizationRegistryConstructorFn, .native_ctor = true };
         try installNativeProps(a, rs, ctor, "FinalizationRegistry", 1);
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
@@ -13378,7 +13378,7 @@ fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.O
 
 fn installDataView(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
-    const proto = try a.create(value.Object);
+    const proto = try gc_mod.allocObj(a);
     proto.* = .{ .proto = object_proto };
     inline for (dv_types) |t| {
         try setNative(a, rs, proto, "get" ++ t.name, 1, dataViewGetFn(t));
@@ -13394,7 +13394,7 @@ fn installDataView(env: *Environment, rs: *Shape, object_proto: *value.Object) E
             try proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
-    const ctor = try a.create(value.Object);
+    const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = dataViewConstructorFn, .native_ctor = true };
     try installNativeProps(a, rs, ctor, "DataView", 1);
     try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
@@ -17963,7 +17963,7 @@ fn intlBoundAccessorFn(comptime service: []const u8, comptime prop: []const u8, 
 
 /// Install the `format` accessor + hidden `\x00fmtimpl` on a formatter prototype.
 fn installIntlFormat(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, comptime service: []const u8, impl_fn: value.NativeFn) EvalError!void {
-    const impl = try a.create(value.Object);
+    const impl = try gc_mod.allocObj(a);
     impl.* = .{ .native = impl_fn };
     try installNativeProps(a, rs, impl, "format", 1);
     try proto.setOwn(a, rs, "\x00fmtimpl", .{ .object = impl });
@@ -17973,7 +17973,7 @@ fn installIntlFormat(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, com
 
 /// Install the Collator `compare` accessor + hidden `\x00cmpimpl`.
 fn installIntlCompare(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, impl_fn: value.NativeFn) EvalError!void {
-    const impl = try a.create(value.Object);
+    const impl = try gc_mod.allocObj(a);
     impl.* = .{ .native = impl_fn };
     try installNativeProps(a, rs, impl, "compare", 2);
     try proto.setOwn(a, rs, "\x00cmpimpl", .{ .object = impl });
@@ -19025,7 +19025,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         };
         break :blk null;
     };
-    const ns = try a.create(value.Object);
+    const ns = try gc_mod.allocObj(a);
     ns.* = .{ .proto = object_proto };
     if (tag) |k| {
         try ns.setOwn(a, rs, k, .{ .string = "Intl" });
@@ -19045,9 +19045,9 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     // Helper to register one Intl service constructor with a prototype.
     const Svc = struct {
         fn install(self_a: std.mem.Allocator, shp: *Shape, e: *Environment, namespace: *value.Object, op: *value.Object, name: []const u8, arity: usize, ctor_fn: value.NativeFn, ttag: ?[]const u8) EvalError!*value.Object {
-            const proto = try self_a.create(value.Object);
+            const proto = try gc_mod.allocObj(self_a);
             proto.* = .{ .proto = op };
-            const ctor = try self_a.create(value.Object);
+            const ctor = try gc_mod.allocObj(self_a);
             ctor.* = .{ .native = ctor_fn, .native_ctor = true };
             try installNativeProps(self_a, shp, ctor, name, arity);
             try setNative(self_a, shp, ctor, "supportedLocalesOf", 1, intlSupportedLocalesOfFn);
@@ -19116,7 +19116,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         try setNative(a, rs, p, "resolvedOptions", 0, intlResolvedOptionsFn("Segmenter"));
         try setNative(a, rs, p, "segment", 1, intlSegmenterSegmentFn);
         // %Segments.prototype%: containing + [@@iterator].
-        const seg_proto = try a.create(value.Object);
+        const seg_proto = try gc_mod.allocObj(a);
         seg_proto.* = .{ .proto = object_proto };
         try setNative(a, rs, seg_proto, "containing", 1, intlSegmentsContainingFn);
         const iter_key: ?[]const u8 = blk: {
@@ -19133,7 +19133,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         }
         try env.put("\x00SegmentsProto", .{ .object = seg_proto });
         // %SegmentIterator.prototype% (proto %IteratorPrototype%): next + tag.
-        const seg_iter_proto = try a.create(value.Object);
+        const seg_iter_proto = try gc_mod.allocObj(a);
         seg_iter_proto.* = .{ .proto = if (env.get("\x00IterProto")) |ip| (if (ip == .object) ip.object else object_proto) else object_proto };
         try setNative(a, rs, seg_iter_proto, "next", 0, intlSegmentIterNextFn);
         if (tag) |k| {
@@ -19151,7 +19151,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
 
     // Intl.Locale.
     {
-        const proto = try a.create(value.Object);
+        const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = object_proto };
         try setNativeGetter(a, rs, proto, "baseName", intlLocaleGetter(.base_name));
         try setNativeGetter(a, rs, proto, "language", intlLocaleGetter(.language));
@@ -19179,7 +19179,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
             try proto.setOwn(a, rs, k, .{ .string = "Intl.Locale" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
-        const ctor = try a.create(value.Object);
+        const ctor = try gc_mod.allocObj(a);
         ctor.* = .{ .native = intlLocaleConstructorFn, .native_ctor = true };
         try installNativeProps(a, rs, ctor, "Locale", 1);
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
@@ -19341,13 +19341,13 @@ fn agentThreadRun(src: []const u8) void {
     var env = Environment{ .arena = a, .fn_scope = true };
     const root_shape = Shape.createRoot(a) catch return;
     installGlobals(&env, root_shape) catch return;
-    const global_obj = a.create(value.Object) catch return;
+    const global_obj = gc_mod.allocObj(a) catch return;
     global_obj.* = .{};
     env.put("globalThis", .{ .object = global_obj }) catch {};
     if (env.get("$262")) |d| if (d == .object) {
         d.object.setOwn(a, root_shape, "global", .{ .object = global_obj }) catch {};
     };
-    const tdz = a.create(value.Object) catch return;
+    const tdz = gc_mod.allocObj(a) catch return;
     tdz.* = .{};
     var microtasks: std.ArrayListUnmanaged(promise.Microtask) = .empty;
     var print_buffer: std.ArrayListUnmanaged(u8) = .empty;
@@ -19463,7 +19463,7 @@ fn host262AgentMonotonicNowFn(ctx: *anyopaque, this: Value, args: []const Value)
 /// Install `$262.agent` with the parent-side (start/broadcast/getReport) and
 /// agent-side (receiveBroadcast/report/leaving) primitives.
 fn installAgent(a: std.mem.Allocator, rs: *Shape, d: *value.Object) EvalError!void {
-    const ag = try a.create(value.Object);
+    const ag = try gc_mod.allocObj(a);
     ag.* = .{};
     try setNative(a, rs, ag, "start", 1, host262AgentStartFn);
     try setNative(a, rs, ag, "broadcast", 1, host262AgentBroadcastFn);
@@ -19874,7 +19874,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         "SuppressedError",
     };
     for (error_names) |name| {
-        const o = try a.create(value.Object);
+        const o = try gc_mod.allocObj(a);
         o.* = .{ .error_ctor = name, .private_data = @ptrCast(env) };
         // AggregateError(errors, message) has arity 2; SuppressedError(error,
         // suppressed, message) arity 3; the others (message) 1.
@@ -19937,12 +19937,12 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "print", 1, printFn);
 
     // Promise — constructor, prototype (then/catch/finally), and statics.
-    const promise_proto = try a.create(value.Object);
+    const promise_proto = try gc_mod.allocObj(a);
     promise_proto.* = .{};
     try setNative(a, root_shape, promise_proto, "then", 2, promiseThenFn);
     try setNative(a, root_shape, promise_proto, "catch", 1, promiseCatchFn);
     try setNative(a, root_shape, promise_proto, "finally", 1, promiseFinallyFn);
-    const promise_ns = try a.create(value.Object);
+    const promise_ns = try gc_mod.allocObj(a);
     promise_ns.* = .{ .native = promiseConstructorFn, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, promise_ns, "Promise", 1);
     try setNative(a, root_shape, promise_ns, "resolve", 1, promiseResolveStaticFn);
@@ -19959,7 +19959,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try env.put("Promise", .{ .object = promise_ns });
 
     // String — callable, with statics.
-    const string_ns = try a.create(value.Object);
+    const string_ns = try gc_mod.allocObj(a);
     string_ns.* = .{ .native = builtins.stringFn, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, string_ns, "String", 1);
     try setNative(a, root_shape, string_ns, "fromCharCode", 1, builtins.stringFromCharCode);
@@ -19968,7 +19968,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try env.put("String", .{ .object = string_ns });
 
     // Number — callable, with statics and constants.
-    const number_ns = try a.create(value.Object);
+    const number_ns = try gc_mod.allocObj(a);
     number_ns.* = .{ .native = builtins.numberFn, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, number_ns, "Number", 1);
     try setNative(a, root_shape, number_ns, "isInteger", 1, builtins.numberIsInteger);
@@ -19998,7 +19998,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try env.put("Number", .{ .object = number_ns });
 
     // JSON namespace.
-    const json_ns = try a.create(value.Object);
+    const json_ns = try gc_mod.allocObj(a);
     json_ns.* = .{};
     try setNative(a, root_shape, json_ns, "stringify", 3, builtins.jsonStringify);
     try setNative(a, root_shape, json_ns, "parse", 2, builtins.jsonParse);
@@ -20007,7 +20007,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try env.put("JSON", .{ .object = json_ns });
 
     // Math namespace.
-    const math_obj = try a.create(value.Object);
+    const math_obj = try gc_mod.allocObj(a);
     math_obj.* = .{};
     try setNative(a, root_shape, math_obj, "floor", 1, builtins.mathFloor);
     try setNative(a, root_shape, math_obj, "ceil", 1, builtins.mathCeil);
@@ -20060,7 +20060,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try env.put("Math", .{ .object = math_obj });
 
     // Object namespace.
-    const object_ns = try a.create(value.Object);
+    const object_ns = try gc_mod.allocObj(a);
     object_ns.* = .{ .native = builtins.objectConstructor, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, object_ns, "Object", 1);
     try setNative(a, root_shape, object_ns, "keys", 1, builtins.objectKeys);
@@ -20089,7 +20089,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try env.put("Object", .{ .object = object_ns });
 
     // Array namespace (callable constructor + isArray/of/from).
-    const array_ns = try a.create(value.Object);
+    const array_ns = try gc_mod.allocObj(a);
     array_ns.* = .{ .native = builtins.arrayConstructor, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, array_ns, "Array", 1);
     try setNative(a, root_shape, array_ns, "isArray", 1, builtins.arrayIsArray);
@@ -20104,7 +20104,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // `Array.prototype.join`, `Object.prototype.hasOwnProperty`, and crucially
     // `Function.prototype.call.bind(...)` resolve — the patterns test262's
     // propertyHelper/verifyProperty (and many built-ins tests) depend on.
-    const object_proto = try a.create(value.Object);
+    const object_proto = try gc_mod.allocObj(a);
     object_proto.* = .{};
     try setConstructor(a, root_shape, object_proto, object_ns);
     const early_ctors = [_][]const u8{ "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Boolean" };
@@ -20128,10 +20128,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, object_proto, "toString", 0, objectProtoToStringFn);
     // `Object.prototype.__proto__` accessor (the legacy prototype get/set).
     {
-        const getter = try a.create(value.Object);
+        const getter = try gc_mod.allocObj(a);
         getter.* = .{ .native = protoGetterFn };
         try installFunctionProps(a, root_shape, getter, &.{}, "get __proto__");
-        const setter = try a.create(value.Object);
+        const setter = try gc_mod.allocObj(a);
         setter.* = .{ .native = protoSetterFn };
         try installFunctionProps(a, root_shape, setter, &.{}, "set __proto__");
         try object_proto.setAccessor(a, "__proto__", .{ .object = getter }, .{ .object = setter });
@@ -20144,7 +20144,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // and protos to Object.prototype; each subclass (`TypeError.prototype`, …)
     // protos to `Error.prototype`. Instances are linked in `makeError`.
     const ro: value.PropAttr = .{ .enumerable = false, .configurable = true, .writable = true };
-    const error_proto = try a.create(value.Object);
+    const error_proto = try gc_mod.allocObj(a);
     error_proto.* = .{ .proto = object_proto };
     // The base `Error` constructor object, captured on the first iteration so the
     // NativeError constructors below can set it as their [[Prototype]] (spec:
@@ -20156,7 +20156,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         const is_base = std.mem.eql(u8, ename, "Error");
         if (is_base) error_ctor_obj = ctor else ctor.proto = error_ctor_obj; // NativeError [[Prototype]] is %Error%
         const proto = if (is_base) error_proto else blk: {
-            const p = try a.create(value.Object);
+            const p = try gc_mod.allocObj(a);
             p.* = .{ .proto = error_proto };
             break :blk p;
         };
@@ -20171,10 +20171,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             // `Error.prototype.stack` is a V8-style accessor (get brand-checks an
             // Error receiver; set installs an own data property), inherited by all
             // error subclasses.
-            const stack_get = try a.create(value.Object);
+            const stack_get = try gc_mod.allocObj(a);
             stack_get.* = .{ .native = errorStackGet };
             try installNativeProps(a, root_shape, stack_get, "get stack", 0);
-            const stack_set = try a.create(value.Object);
+            const stack_set = try gc_mod.allocObj(a);
             // private_data = the home object (%Error.prototype%) for the
             // SetterThatIgnoresPrototypeProperties same-as-home TypeError check.
             stack_set.* = .{ .native = errorStackSet, .private_data = @ptrCast(proto) };
@@ -20189,7 +20189,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         try ctor.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
     }
 
-    const func_proto = try a.create(value.Object);
+    const func_proto = try gc_mod.allocObj(a);
     // Function.prototype is a callable (noop) object, and its call/apply/bind/
     // toString brand-check that `this` is callable (TypeError otherwise).
     func_proto.* = .{ .proto = object_proto, .native = funcProtoNoop };
@@ -20211,7 +20211,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // or writing `fn.caller`/`fn.arguments` on a strict function walks the proto
     // chain to here and throws (the "restricted properties").
     {
-        const tte = try a.create(value.Object);
+        const tte = try gc_mod.allocObj(a);
         tte.* = .{ .native = throwTypeErrorFn, .private_data = @ptrCast(env) };
         try installFunctionProps(a, root_shape, tte, &.{}, "");
         tte.extensible = false;
@@ -20224,7 +20224,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             try func_proto.setAttr(a, pname, .{ .enumerable = false, .configurable = true });
         }
     }
-    const function_ns = try a.create(value.Object);
+    const function_ns = try gc_mod.allocObj(a);
     // The realm's global env is recorded so a dynamically-created function
     // (`new realm.Function()`) captures *that* realm's scope as its closure —
     // giving it the right [[Realm]] for GetPrototypeFromConstructor.
@@ -20245,7 +20245,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (env.get("Boolean")) |bv| {
         if (bv == .object) {
             bv.object.proto = func_proto;
-            const boolean_proto = try a.create(value.Object);
+            const boolean_proto = try gc_mod.allocObj(a);
             // Boolean.prototype is a Boolean Exotic Object with [[BooleanData]]
             // = false, so brand-checked methods (`Boolean.prototype.toString()`,
             // `valueOf()`) accept it as a Boolean and don't throw.
@@ -20258,7 +20258,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         }
     }
 
-    const array_proto = try a.create(value.Object);
+    const array_proto = try gc_mod.allocObj(a);
     array_proto.* = .{ .proto = object_proto };
     try array_proto.setOwn(a, root_shape, "length", .{ .number = 0 });
     try array_proto.setAttr(a, "length", .{ .writable = true, .enumerable = false, .configurable = false });
@@ -20278,7 +20278,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try array_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, array_proto, array_ns);
 
-    const string_proto = try a.create(value.Object);
+    const string_proto = try gc_mod.allocObj(a);
     // String.prototype is a String Exotic Object with [[StringData]] = "",
     // so brand-checked methods accept it as a String (e.g. `String.prototype.
     // toString()` returns "" rather than throwing).
@@ -20318,7 +20318,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try string_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, string_proto, string_ns);
 
-    const number_proto = try a.create(value.Object);
+    const number_proto = try gc_mod.allocObj(a);
     // Number.prototype is a Number Exotic Object with [[NumberData]] = +0, so
     // brand-checked methods (`Number.prototype.toString(radix)`, `valueOf()`,
     // `toFixed(...)`) accept it as a Number and return "0"/0 rather than throw.
@@ -20334,11 +20334,11 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // Symbol is callable and has [[Construct]] for IsConstructor probes, but
     // the constructor path throws inside symbolFn.
-    const symbol_ns = try a.create(value.Object);
+    const symbol_ns = try gc_mod.allocObj(a);
     symbol_ns.* = .{ .native = symbolFn, .native_ctor = true, .proto = func_proto, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, symbol_ns, "Symbol", 0);
     // Symbol.prototype: toString/valueOf/constructor, protoing to Object.prototype.
-    const symbol_proto = try a.create(value.Object);
+    const symbol_proto = try gc_mod.allocObj(a);
     symbol_proto.* = .{ .proto = object_proto };
     try setNative(a, root_shape, symbol_proto, "toString", 0, symbolToStringFn);
     try setNative(a, root_shape, symbol_proto, "valueOf", 0, symbolValueOfFn);
@@ -20346,7 +20346,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try symbol_proto.setAttr(a, "constructor", .{ .enumerable = false, .configurable = true, .writable = true });
     // `Symbol.prototype.description` — a configurable getter-only accessor.
     {
-        const get = try a.create(value.Object);
+        const get = try gc_mod.allocObj(a);
         get.* = .{ .native = symbolDescriptionGetFn };
         try installNativeProps(a, root_shape, get, "get description", 0);
         try symbol_proto.setAccessor(a, "description", .{ .object = get }, null);
@@ -20372,7 +20372,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     }
     // Symbol.prototype[@@toPrimitive] (a method) and [@@toStringTag] ("Symbol").
     if (symbol_ns.getOwn("toPrimitive")) |tp| if (tp == .object) {
-        const fnobj = try a.create(value.Object);
+        const fnobj = try gc_mod.allocObj(a);
         fnobj.* = .{ .native = symbolToPrimitiveFn };
         try installNativeProps(a, root_shape, fnobj, "[Symbol.toPrimitive]", 1);
         try symbol_proto.setOwn(a, root_shape, tp.object.sym_key, .{ .object = fnobj });
@@ -20385,7 +20385,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Array.prototype[@@unscopables]: a null-prototype object whose own data
     // properties (all `true`) hide the post-ES2015 method names from `with` scope.
     if (symbol_ns.getOwn("unscopables")) |usk| if (usk == .object) {
-        const unsc = try a.create(value.Object);
+        const unsc = try gc_mod.allocObj(a);
         unsc.* = .{ .proto = null };
         inline for (.{ "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values" }) |n| {
             try unsc.setOwn(a, root_shape, n, .{ .boolean = true });
@@ -20423,7 +20423,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // ordinary `instanceof` (installed now that the well-known symbol exists).
     if (symbol_ns.getOwn("hasInstance")) |hi| if (hi == .object) {
         if (func_proto.getOwn(hi.object.sym_key) == null) {
-            const m = try a.create(value.Object);
+            const m = try gc_mod.allocObj(a);
             m.* = .{ .native = functionHasInstanceFn };
             try installNativeProps(a, root_shape, m, "[Symbol.hasInstance]", 1);
             try func_proto.setOwn(a, root_shape, hi.object.sym_key, .{ .object = m });
@@ -20439,7 +20439,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         const skey = sp.object.sym_key;
         inline for (.{ "Promise", "Array", "Map", "Set", "RegExp", "ArrayBuffer" }) |ctor_name| {
             if (env.get(ctor_name)) |cv| if (cv == .object) {
-                const getter = try a.create(value.Object);
+                const getter = try gc_mod.allocObj(a);
                 getter.* = .{ .native = returnThisFn };
                 try installNativeProps(a, root_shape, getter, "get [Symbol.species]", 0);
                 try cv.object.setAccessor(a, skey, .{ .object = getter }, null);
@@ -20462,14 +20462,14 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     };
 
     // Proxy (constructor) + Proxy.revocable.
-    const proxy_ns = try a.create(value.Object);
+    const proxy_ns = try gc_mod.allocObj(a);
     proxy_ns.* = .{ .native = proxyConstructorFn, .native_ctor = true, .proto = func_proto };
     try installNativeProps(a, root_shape, proxy_ns, "Proxy", 2);
     try setNative(a, root_shape, proxy_ns, "revocable", 2, proxyRevocableFn);
     try env.put("Proxy", .{ .object = proxy_ns });
 
     // Reflect — the static reflection namespace.
-    const reflect_ns = try a.create(value.Object);
+    const reflect_ns = try gc_mod.allocObj(a);
     // Reflect is an ordinary object: [[Prototype]] = %Object.prototype%, with a
     // `Symbol.toStringTag` of "Reflect".
     reflect_ns.* = .{ .proto = object_proto };
@@ -20505,7 +20505,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // spread / `for-of`. (Symbol must already exist, hence after its setup.)
     if (symbol_ns.getOwn("iterator")) |it_sym| {
         if (it_sym == .object and it_sym.object.is_symbol) {
-            const it_fn = try a.create(value.Object);
+            const it_fn = try gc_mod.allocObj(a);
             it_fn.* = .{ .native = arrayValuesIterFn };
             try installFunctionProps(a, root_shape, it_fn, &.{}, "[Symbol.iterator]");
             try array_proto.setOwn(a, root_shape, it_sym.object.sym_key, .{ .object = it_fn });
@@ -20513,7 +20513,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             // `String.prototype[Symbol.iterator]` — a String Iterator over the
             // ToString of `this` (so `""[Symbol.iterator]()`, for-of, and spread
             // over a string all obtain a real %StringIteratorPrototype% iterator).
-            const str_it = try a.create(value.Object);
+            const str_it = try gc_mod.allocObj(a);
             str_it.* = .{ .native = stringIteratorFn };
             try installFunctionProps(a, root_shape, str_it, &.{}, "[Symbol.iterator]");
             try string_proto.setOwn(a, root_shape, it_sym.object.sym_key, .{ .object = str_it });
@@ -20529,13 +20529,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         try aliasIteratorToMethod(a, root_shape, env, pv.object, "values");
 
     // Date — callable + constructable, with Date.now and a prototype.
-    const date_ns = try a.create(value.Object);
+    const date_ns = try gc_mod.allocObj(a);
     date_ns.* = .{ .native = dateConstructor, .native_ctor = true, .proto = func_proto, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, date_ns, "Date", 7);
     try setNative(a, root_shape, date_ns, "now", 0, dateNow);
     try setNative(a, root_shape, date_ns, "UTC", 7, dateUTCFn);
     try setNative(a, root_shape, date_ns, "parse", 1, dateParseFn);
-    const date_proto = try a.create(value.Object);
+    const date_proto = try gc_mod.allocObj(a);
     date_proto.* = .{ .proto = object_proto };
     try setDateProtoMethods(a, root_shape, date_proto, .{
         .{ "getTime", 0 },      .{ "valueOf", 0 },      .{ "setTime", 1 },      .{ "toISOString", 0 },
@@ -20561,7 +20561,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // configurable; OrdinaryToPrimitive with a validated hint.
     if (env.get("Symbol")) |sym| if (sym == .object) {
         if (sym.object.getOwn("toPrimitive")) |tp| if (tp == .object and tp.object.is_symbol) {
-            const m = try a.create(value.Object);
+            const m = try gc_mod.allocObj(a);
             m.* = .{ .native = dateSymbolToPrimitiveFn };
             try installNativeProps(a, root_shape, m, "[Symbol.toPrimitive]", 1);
             try date_proto.setOwn(a, root_shape, tp.object.sym_key, .{ .object = m });
@@ -20579,7 +20579,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // BigInt is callable and has [[Construct]] for IsConstructor probes, but
     // the constructor path throws inside bigIntFn.
     {
-        const bi_proto = try a.create(value.Object);
+        const bi_proto = try gc_mod.allocObj(a);
         bi_proto.* = .{ .proto = object_proto };
         try setNative(a, root_shape, bi_proto, "toString", 0, bigIntToStringFn);
         try setNative(a, root_shape, bi_proto, "valueOf", 0, bigIntValueOfFn);
@@ -20592,7 +20592,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
                 try bi_proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
             };
         };
-        const bi_ns = try a.create(value.Object);
+        const bi_ns = try gc_mod.allocObj(a);
         bi_ns.* = .{ .native = bigIntFn, .native_ctor = true, .proto = func_proto, .private_data = @ptrCast(env) };
         try installNativeProps(a, root_shape, bi_ns, "BigInt", 1);
         try setNative(a, root_shape, bi_ns, "asIntN", 2, bigIntAsIntNFn(true));
@@ -20871,7 +20871,7 @@ fn defineGlobalFn(env: *Environment, rs: *Shape, name: []const u8, len: usize, f
 }
 
 fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, is_ctor: bool, f: value.NativeFn) EvalError!void {
-    const o = try env.arena.create(value.Object);
+    const o = try gc_mod.allocObj(env.arena);
     o.* = .{ .native = f, .native_ctor = is_ctor, .private_data = if (is_ctor) @ptrCast(env) else null };
     try installNativeProps(env.arena, rs, o, name, len);
     // A constructor's `.prototype` is an own, non-writable/-enumerable/
@@ -20879,7 +20879,7 @@ fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, 
     // and reflection see it). Methods still dispatch via `builtinMethod`, and
     // `instanceof` keeps working through its `ctor_ref`/`error_ctor` fallbacks.
     if (is_ctor) {
-        const proto = try env.arena.create(value.Object);
+        const proto = try gc_mod.allocObj(env.arena);
         proto.* = .{};
         try setConstructor(env.arena, rs, proto, o);
         try o.setOwn(env.arena, rs, "prototype", .{ .object = proto });
@@ -20889,7 +20889,7 @@ fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, 
 }
 
 fn setNativeWithData(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn, data: ?*anyopaque) EvalError!void {
-    const m = try a.create(value.Object);
+    const m = try gc_mod.allocObj(a);
     m.* = .{ .native = f, .private_data = data };
     try installNativeProps(a, root_shape, m, name, len);
     try obj.setOwn(a, root_shape, name, .{ .object = m });
@@ -21156,7 +21156,7 @@ pub fn setNativeGetter(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, com
 }
 
 pub fn setNativeGetterWithData(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, comptime prop: []const u8, f: value.NativeFn, data: ?*anyopaque) EvalError!void {
-    const g = try a.create(value.Object);
+    const g = try gc_mod.allocObj(a);
     g.* = .{ .native = f, .private_data = data };
     try installNativeProps(a, rs, g, "get " ++ prop, 0);
     try obj.setAccessor(a, prop, .{ .object = g }, null);
@@ -21553,12 +21553,12 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
         // The accessor functions are anonymous (name ""), matching other engines —
         // a name like "get $`" would not be a valid NativeFunction IdentifierName.
         fn f(arena: std.mem.Allocator, shape: *Shape, obj: *value.Object, name: []const u8, getf: value.NativeFn, setf: ?value.NativeFn) EvalError!void {
-            const g = try arena.create(value.Object);
+            const g = try gc_mod.allocObj(arena);
             g.* = .{ .native = getf };
             try installNativeProps(arena, shape, g, "", 0);
             var sv: ?Value = null;
             if (setf) |sf| {
-                const s = try arena.create(value.Object);
+                const s = try gc_mod.allocObj(arena);
                 s.* = .{ .native = sf };
                 try installNativeProps(arena, shape, s, "", 1);
                 sv = .{ .object = s };
@@ -21599,7 +21599,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     const object_proto = op.object;
 
     // ArrayBuffer.
-    const ab_proto = try a.create(value.Object);
+    const ab_proto = try gc_mod.allocObj(a);
     ab_proto.* = .{ .proto = object_proto };
     try setNative(a, rs, ab_proto, "slice", 2, arrayBufferSliceFn);
     try setNative(a, rs, ab_proto, "resize", 1, arrayBufferResizeFn);
@@ -21618,7 +21618,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
             try ab_proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
-    const ab_ctor = try a.create(value.Object);
+    const ab_ctor = try gc_mod.allocObj(a);
     ab_ctor.* = .{ .native = arrayBufferConstructorFn, .native_ctor = true };
     try installNativeProps(a, rs, ab_ctor, "ArrayBuffer", 1);
     try setNative(a, rs, ab_ctor, "isView", 1, arrayBufferIsViewFn);
@@ -21629,7 +21629,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     // pass runs before ArrayBuffer exists).
     if (env.get("Symbol")) |sym| if (sym == .object) {
         if (sym.object.getOwn("species")) |sp| if (sp == .object and sp.object.is_symbol) {
-            const g = try a.create(value.Object);
+            const g = try gc_mod.allocObj(a);
             g.* = .{ .native = returnThisFn };
             try installNativeProps(a, rs, g, "get [Symbol.species]", 0);
             try ab_ctor.setAccessor(a, sp.object.sym_key, .{ .object = g }, null);
@@ -21639,7 +21639,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try env.put("ArrayBuffer", .{ .object = ab_ctor });
 
     // %TypedArray%.prototype — shared methods for every view kind.
-    const ta_proto = try a.create(value.Object);
+    const ta_proto = try gc_mod.allocObj(a);
     ta_proto.* = .{ .proto = object_proto };
     inline for (.{
         .{ "at", 1 },      .{ "join", 1 },    .{ "forEach", 1 }, .{ "map", 1 },
@@ -21672,7 +21672,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try setNativeGetter(a, rs, ta_proto, "buffer", taProtoGetter(.buffer));
     if (env.get("Symbol")) |sym| if (sym == .object) {
         if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
-            const g = try a.create(value.Object);
+            const g = try gc_mod.allocObj(a);
             g.* = .{ .native = taProtoGetter(.tag) };
             try installNativeProps(a, rs, g, "get [Symbol.toStringTag]", 0);
             try ta_proto.setAccessor(a, tt.object.sym_key, .{ .object = g }, null);
@@ -21688,7 +21688,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     // %TypedArray% — the abstract superclass constructor. Not a global; reachable
     // as `Object.getPrototypeOf(Int8Array)`. Holds the shared prototype and is
     // the [[Prototype]] of every concrete view constructor.
-    const ta_ctor = try a.create(value.Object);
+    const ta_ctor = try gc_mod.allocObj(a);
     ta_ctor.* = .{ .native = typedArrayAbstractFn, .native_ctor = true };
     try installNativeProps(a, rs, ta_ctor, "TypedArray", 0);
     try setNative(a, rs, ta_ctor, "from", 1, typedArrayFromFn);
@@ -21699,7 +21699,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     // %TypedArray%[Symbol.species] — a getter returning the receiver.
     if (env.get("Symbol")) |sym| if (sym == .object) {
         if (sym.object.getOwn("species")) |sp| if (sp == .object and sp.object.is_symbol) {
-            const g = try a.create(value.Object);
+            const g = try gc_mod.allocObj(a);
             g.* = .{ .native = returnThisFn };
             try installNativeProps(a, rs, g, "get [Symbol.species]", 0);
             try ta_ctor.setAccessor(a, sp.object.sym_key, .{ .object = g }, null);
@@ -21713,11 +21713,11 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         value.TAKind.u32, value.TAKind.f16, value.TAKind.f32,
         value.TAKind.f64, value.TAKind.i64, value.TAKind.u64,
     }) |kind| {
-        const proto = try a.create(value.Object);
+        const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = ta_proto };
         try proto.setOwn(a, rs, "BYTES_PER_ELEMENT", .{ .number = @floatFromInt(kind.byteSize()) });
         try proto.setAttr(a, "BYTES_PER_ELEMENT", .{ .writable = false, .enumerable = false, .configurable = false });
-        const ctor = try a.create(value.Object);
+        const ctor = try gc_mod.allocObj(a);
         // A concrete view constructor's [[Prototype]] is %TypedArray%.
         ctor.* = .{ .native = typedArrayCtorFn(kind), .native_ctor = true, .proto = ta_ctor };
         try installNativeProps(a, rs, ctor, kind.ctorName(), 3);
@@ -21749,7 +21749,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installIntl(env, rs, object_proto);
     // ShadowRealm: a child realm with `evaluate` (and a minimal `importValue`).
     {
-        const proto = try a.create(value.Object);
+        const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = object_proto };
         try setNativeWithData(a, rs, proto, "evaluate", 1, shadowRealmEvaluateFn, @ptrCast(env));
         try setNativeWithData(a, rs, proto, "importValue", 2, shadowRealmImportValueFn, @ptrCast(env));
@@ -21759,7 +21759,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
                 try proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
             };
         };
-        const ctor = try a.create(value.Object);
+        const ctor = try gc_mod.allocObj(a);
         ctor.* = .{ .native = shadowRealmConstructorFn, .native_ctor = true, .private_data = @ptrCast(env) };
         try installNativeProps(a, rs, ctor, "ShadowRealm", 0);
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
@@ -25620,9 +25620,9 @@ fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 /// a constructor `ctor_fn`, link them, set the `@@toStringTag`, and register
 /// `Temporal.<name>`. Returns the prototype object for further method install.
 fn temporalType(self_a: std.mem.Allocator, rs: *Shape, env: *Environment, ns: *value.Object, object_proto: *value.Object, name: []const u8, proto_key: []const u8, arity: usize, ctor_fn: value.NativeFn, tag_key: ?[]const u8) EvalError!*value.Object {
-    const proto = try self_a.create(value.Object);
+    const proto = try gc_mod.allocObj(self_a);
     proto.* = .{ .proto = object_proto };
-    const ctor = try self_a.create(value.Object);
+    const ctor = try gc_mod.allocObj(self_a);
     ctor.* = .{ .native = ctor_fn, .native_ctor = true };
     try installNativeProps(self_a, rs, ctor, name, arity);
     try ctor.setOwn(self_a, rs, "prototype", .{ .object = proto });
@@ -25647,7 +25647,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         };
         break :blk null;
     };
-    const ns = try a.create(value.Object);
+    const ns = try gc_mod.allocObj(a);
     ns.* = .{ .proto = object_proto };
     if (tag) |k| {
         try ns.setOwn(a, rs, k, .{ .string = "Temporal" });
@@ -25924,7 +25924,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
 
     // Temporal.Now (a namespace object, not a constructor).
     {
-        const now = try a.create(value.Object);
+        const now = try gc_mod.allocObj(a);
         now.* = .{ .proto = object_proto };
         try setNative(a, rs, now, "instant", 0, temporalNowInstantFn);
         try setNative(a, rs, now, "zonedDateTimeISO", 0, temporalNowZonedDateTimeFn);
@@ -25953,7 +25953,7 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
     };
     // SharedArrayBuffer.
     {
-        const proto = try a.create(value.Object);
+        const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = object_proto };
         try setNative(a, rs, proto, "slice", 2, sharedArrayBufferSliceFn);
         try setNative(a, rs, proto, "grow", 1, sabGrowFn);
@@ -25964,7 +25964,7 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
             try proto.setOwn(a, rs, k, .{ .string = "SharedArrayBuffer" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
         }
-        const ctor = try a.create(value.Object);
+        const ctor = try gc_mod.allocObj(a);
         ctor.* = .{ .native = sharedArrayBufferConstructorFn, .native_ctor = true };
         try installNativeProps(a, rs, ctor, "SharedArrayBuffer", 1);
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
@@ -25974,7 +25974,7 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
     }
     // Atomics namespace.
     {
-        const atomics = try a.create(value.Object);
+        const atomics = try gc_mod.allocObj(a);
         atomics.* = .{ .proto = object_proto };
         try setNative(a, rs, atomics, "load", 2, atomicsLoadFn);
         try setNative(a, rs, atomics, "store", 3, atomicsStoreFn);
@@ -26066,7 +26066,7 @@ var symbol_counter = std.atomic.Value(usize).init(0);
 /// string that can't collide with user property names) and a `description`.
 fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*value.Object) EvalError!Value {
     _ = rs;
-    const o = try a.create(value.Object);
+    const o = try gc_mod.allocObj(a);
     o.* = .{ .is_symbol = true, .proto = proto, .sym_desc = desc };
     const n = symbol_counter.fetchAdd(1, .monotonic) + 1;
     o.sym_key = try std.fmt.allocPrint(a, "\x00s{d}", .{n});

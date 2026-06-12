@@ -28,6 +28,7 @@
 //! refcount is not atomic).
 
 const std = @import("std");
+const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const ContextMod = @import("context.zig");
 const interp = @import("interpreter.zig");
@@ -278,7 +279,7 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
     const c = ctxFrom(ctx) orelse return null;
     const val = unbox(v);
     if (val == .object) return v;
-    const obj = c.arena().create(Object) catch return null;
+    const obj = gc_mod.allocObj(c.arena()) catch return null;
     obj.* = .{};
     return box(c, .{ .object = obj });
 }
@@ -298,7 +299,7 @@ export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
 export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque) callconv(.c) JSObjectRef {
     _ = class;
     const c = ctxFrom(ctx) orelse return null;
-    const obj = c.arena().create(Object) catch return null;
+    const obj = gc_mod.allocObj(c.arena()) catch return null;
     obj.* = .{ .private_data = data };
     return box(c, .{ .object = obj });
 }
@@ -306,7 +307,7 @@ export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque)
 export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     _ = exception;
     const c = ctxFrom(ctx) orelse return null;
-    const obj = c.arena().create(Object) catch return null;
+    const obj = gc_mod.allocObj(c.arena()) catch return null;
     obj.* = .{ .is_array = true };
     var i: usize = 0;
     while (i < argc) : (i += 1) {
@@ -385,7 +386,7 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
     _ = name;
     const c = ctxFrom(ctx) orelse return null;
-    const obj = c.arena().create(Object) catch return null;
+    const obj = gc_mod.allocObj(c.arena()) catch return null;
     obj.* = .{ .callback = callback };
     return box(c, .{ .object = obj });
 }
