@@ -8,11 +8,20 @@ pub fn build(b: *std.Build) void {
     const regex_dep = b.dependency("zig_regex", .{ .target = target, .optimize = optimize });
     const regex_mod = regex_dep.module("regex");
 
+    // Precise tracing GC (issue #1 Phase 7). Wired but inert in M0 — the binding
+    // (src/gc.zig) compiles against the real engine types and is unit-tested,
+    // but the arena still allocates (no behavior change). See P7-gc-design.md.
+    const gc_dep = b.dependency("zig_gc", .{ .target = target, .optimize = optimize });
+    const gc_mod = gc_dep.module("gc");
+
     // The importable module: `@import("js")` once a consumer adds this package.
     const mod = b.addModule("js", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .imports = &.{.{ .name = "regex", .module = regex_mod }},
+        .imports = &.{
+            .{ .name = "regex", .module = regex_mod },
+            .{ .name = "gc", .module = gc_mod },
+        },
     });
 
     // A static library exposing the JavaScriptCore C-API drop-in symbols
@@ -25,7 +34,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "regex", .module = regex_mod }},
+            .imports = &.{
+                .{ .name = "regex", .module = regex_mod },
+                .{ .name = "gc", .module = gc_mod },
+            },
         }),
     });
     b.installArtifact(lib);
@@ -40,7 +52,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .sanitize_thread = tsan,
-            .imports = &.{.{ .name = "regex", .module = regex_mod }},
+            .imports = &.{
+                .{ .name = "regex", .module = regex_mod },
+                .{ .name = "gc", .module = gc_mod },
+            },
         }),
     });
     const run_tests = b.addRunArtifact(tests);
