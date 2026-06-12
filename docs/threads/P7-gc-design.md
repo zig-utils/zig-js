@@ -179,8 +179,16 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
 
 ## Staging plan
 
-- **M0 — interface, no behavior change.** The wiring above; GC disabled (still
-  arena-bump-allocating). Add the `gc_header`/`Kind` tags. test262 byte-identical.
+- **M0 — interface, no behavior change. ✅ DONE** (`0515c33`). `zig-gc` wired as
+  a dependency; `src/gc.zig` is the binding — `CellKind`, `traceObject`/
+  `traceEnv`/`traceFunction`/`traceBoundFn`/`tracePromise`/`traceGenerator`/
+  `traceIterHelper`/`traceModuleNs`, `Binding.traceRoots` over the `Context`
+  persistent roots, and `finalize` — all written against the real engine types
+  and **validated in isolation** on real `value.Object` graphs (cycles, proto,
+  slots, accessors, garbage; leak-checked). GC stays inert (the arena still
+  allocates), so test262 is byte-identical (42,734/47,930). Lesson banked for
+  M1: `finalize` must free a dying cell's non-arena sub-allocations
+  (`slots`/`elements`/`accessors` backing) — the GC frees only the cell itself.
 - **M1 — single-threaded mark-sweep under the GIL.** Implement `traceRoots` +
   per-`Kind` `trace` + the handle table; enable `collect`. **Deliverable: weak
   refs/finalizers become correct; test262 stays green; long-running contexts
