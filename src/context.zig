@@ -3050,6 +3050,14 @@ test "Object.prototype: hasOwnProperty / isPrototypeOf" {
         \\try { Object.prototype.hasOwnProperty.call(null, key); } catch (e) {}
         \\hint === "string"
     )).boolean);
+    try std.testing.expect(!(try evalIn("Object.prototype.isPrototypeOf.call(null, false)")).boolean);
+    try std.testing.expect(!(try evalIn("Object.prototype.isPrototypeOf.call(null, Symbol())")).boolean);
+    try std.testing.expect((try evalIn(
+        \\var proto = [];
+        \\var proxy = new Proxy({}, { getPrototypeOf() { return proto; } });
+        \\proto.isPrototypeOf(proxy)
+    )).boolean);
+    try std.testing.expect((try evalIn("typeof Object.prototype.valueOf.call(false) === 'object'")).boolean);
 }
 
 test "generators: manual next() yields values then done" {

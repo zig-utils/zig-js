@@ -6963,15 +6963,22 @@ pub const Interpreter = struct {
             const o = try self.toObject(recv);
             return Value{ .boolean = try self.objectProtoPropertyIsEnumerable(o, k) };
         }
-        const o = try self.toObject(recv);
         if (eq(name, "isPrototypeOf")) {
-            var cur: ?*value.Object = if (args.len > 0 and args[0] == .object) args[0].object.proto else null;
-            while (cur) |c| {
-                if (c == o) return Value{ .boolean = true };
-                cur = c.proto;
+            if (!(args.len > 0 and args[0] == .object and !args[0].object.is_symbol and !args[0].object.is_bigint)) return Value{ .boolean = false };
+            const o = try self.toObject(recv);
+            var cur: Value = args[0];
+            while (cur == .object) {
+                const next = if (cur.object.proxy_handler != null or cur.object.proxy_revoked)
+                    try self.proxyGetProto(cur.object)
+                else if (cur.object.proto) |p| Value{ .object = p } else Value.null;
+                if (next != .object) return Value{ .boolean = false };
+                if (next.object == o) return Value{ .boolean = true };
+                cur = next;
             }
             return Value{ .boolean = false };
         }
+        const o = try self.toObject(recv);
+        if (eq(name, "valueOf")) return Value{ .object = o };
         if (eq(name, "__defineGetter__") or eq(name, "__defineSetter__")) {
             const f = arg(args, 1);
             if (!f.isCallable()) return self.throwError("TypeError", "Object.prototype.__define[GS]etter__: Expecting function");
@@ -7044,10 +7051,15 @@ pub const Interpreter = struct {
                         return Value{ .boolean = try self.objectProtoPropertyIsEnumerable(o, k) };
                     }
                     if (eq(name, "isPrototypeOf")) {
-                        var cur: ?*value.Object = if (args.len > 0 and args[0] == .object) args[0].object.proto else null;
-                        while (cur) |c| {
-                            if (c == o) return Value{ .boolean = true };
-                            cur = c.proto;
+                        if (!(args.len > 0 and args[0] == .object and !args[0].object.is_symbol and !args[0].object.is_bigint)) return Value{ .boolean = false };
+                        var cur: Value = args[0];
+                        while (cur == .object) {
+                            const next = if (cur.object.proxy_handler != null or cur.object.proxy_revoked)
+                                try self.proxyGetProto(cur.object)
+                            else if (cur.object.proto) |p| Value{ .object = p } else Value.null;
+                            if (next != .object) return Value{ .boolean = false };
+                            if (next.object == o) return Value{ .boolean = true };
+                            cur = next;
                         }
                         return Value{ .boolean = false };
                     }
