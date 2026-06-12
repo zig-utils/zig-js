@@ -10,7 +10,7 @@ description: A JavaScript engine written in pure Zig — standalone interpreter 
 - a **standalone JavaScript interpreter** — a tree-walking evaluator backed by a tiered bytecode VM; and
 - a **drop-in replacement for the JavaScriptCore C-API** — link `libzig-js.a` in place of the system `JavaScriptCore.framework` and call the same `JSGlobalContextCreate` / `JSEvaluateScript` symbols unchanged.
 
-It exists to give [`craft`'s](/architecture) Loom web engine and a Bun-port runtime a single, dependency-free JS engine that they both own.
+It is built as a general embeddable JavaScript engine for Zig applications, language runtimes, tools, and hosts that want to own their JS stack.
 
 ## Status
 

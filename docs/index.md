@@ -49,4 +49,4 @@ hero:
 
 ## Where engines like this go
 
-zig-js exists to give [`craft`'s](/architecture) Loom web engine and a Bun-port runtime a single, dependency-free JS engine they both own. Read the [architecture](/architecture) deep-dive, the [conformance](/conformance) methodology, or the [C-API](/api) embedding guide.
+zig-js is built as a general embeddable JavaScript engine for Zig applications, language runtimes, tools, and hosts that want to own their JS stack. Read the [architecture](/architecture) deep-dive, the [conformance](/conformance) methodology, or the [C-API](/api) embedding guide.
