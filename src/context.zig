@@ -1029,7 +1029,14 @@ test "RegExp flags and toString use generic canonical accessors" {
         \\/foo/igym.toString() === "/foo/gimy" &&
         \\Object.getOwnPropertyDescriptor(RegExp.prototype, "flags").get.call({ sticky: 1, unicode: 1, global: 0 }) === "uy" &&
         \\Object.getOwnPropertyDescriptor(RegExp.prototype, "flags").get.call({ __proto__: { multiline: true } }) === "m" &&
-        \\RegExp.prototype.toString.call({ source: "foo", flags: "bar" }) === "/foo/bar"
+        \\RegExp.prototype.toString.call({ source: "foo", flags: "bar" }) === "/foo/bar" &&
+        \\(function(get) {
+        \\  var symbolThrows = false;
+        \\  try { get.call(Symbol()); } catch (e) { symbolThrows = e.name === "TypeError"; }
+        \\  var bigintThrows = false;
+        \\  try { get.call(4n); } catch (e) { bigintThrows = e.name === "TypeError"; }
+        \\  return symbolThrows && bigintThrows;
+        \\})(Object.getOwnPropertyDescriptor(RegExp.prototype, "flags").get)
     )).boolean);
 }
 

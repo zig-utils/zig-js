@@ -21409,7 +21409,7 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-object");
+    if (!builtins.isRealObject(this)) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-object");
     const o = this.object;
     if (self.isRegExpProto(o)) return .{ .string = "" };
 
