@@ -1206,6 +1206,20 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
     )).boolean);
 }
 
+test "RegExp builtin exec exposes UTF-16 positions" {
+    try std.testing.expect((try evalIn(
+        \\var s = "\ud834\udf06";
+        \\var trueUnicode = /^|\udf06/ug[Symbol.replace](s, "X") === "X\ud834\udf06";
+        \\var rx = /./dgu;
+        \\var m = rx.exec(s);
+        \\trueUnicode &&
+        \\  rx.lastIndex === 2 &&
+        \\  m.index === 0 &&
+        \\  m.indices[0][0] === 0 &&
+        \\  m.indices[0][1] === 2
+    )).boolean);
+}
+
 test "JSON stringify preserves proxy array shape" {
     try expectEvalStr("[\"a\",\"b\"]", "JSON.stringify(new Proxy(['a', 'b'], {}))");
 }

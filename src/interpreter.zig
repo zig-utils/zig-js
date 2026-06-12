@@ -3663,32 +3663,34 @@ pub const Interpreter = struct {
             const flags = o.regex_flags;
             const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
             const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
-            const start = if (global or sticky) li else 0;
-            if (start > input.len) {
+            const start_units = if (global or sticky) li else 0;
+            if (start_units > utf16LenOfString(input)) {
                 if (global or sticky) try self.setRegExpLastIndex(o, 0);
                 return Value.null;
             }
+            const start = byteOffsetForUtf16Index(input, start_units);
             var re = try self.compileRegex(o);
-            const found = re.find(input[start..]) catch null;
+            const found = re.findFrom(input, start) catch null;
             if (found) |m| {
                 // Sticky matches must begin exactly at lastIndex.
-                if (sticky and m.start != 0) {
+                if (sticky and m.start != start) {
                     try self.setRegExpLastIndex(o, 0);
                     return Value.null;
                 }
-                const mstart = start + m.start;
-                if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(start + m.end));
-                recordRegexpLegacy(self, input, mstart, start + m.end, m.captures);
+                const mstart = m.start;
+                const mend = m.end;
+                if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(input, mend)));
+                recordRegexpLegacy(self, input, mstart, mend, m.captures);
                 const arr = try self.newArray();
                 try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
                 for (0..m.captures.len) |i| try arr.object.elements.append(self.arena, try self.captureVal(m, i));
-                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(mstart) });
+                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(utf16IndexForByteOffset(input, mstart)) });
                 try self.setProp(arr.object, "input", .{ .string = input });
                 const groups = try self.regexGroups(&re, m);
                 try self.setProp(arr.object, "groups", if (groups) |g| .{ .object = g } else .undefined);
                 // The `d` (hasIndices) flag adds a parallel match-indices array.
                 if (std.mem.indexOfScalar(u8, flags, 'd') != null)
-                    try self.setProp(arr.object, "indices", .{ .object = try self.makeIndicesArray(&re, m, start) });
+                    try self.setProp(arr.object, "indices", .{ .object = try self.makeIndicesArray(&re, m, input, 0) });
                 return arr;
             }
             if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -3755,6 +3757,31 @@ pub const Interpreter = struct {
         var units: usize = 0;
         var i: usize = 0;
         while (i < s.len) {
+            units += utf16LenOfSeq(s, i);
+            i += jsStringSeqLen(s, i);
+        }
+        return units;
+    }
+
+    fn byteOffsetForUtf16Index(s: []const u8, index: usize) usize {
+        var units: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) {
+            if (index <= units) return i;
+            const seq_len = jsStringSeqLen(s, i);
+            const seq_units = utf16LenOfSeq(s, i);
+            if (index < units + seq_units) return i + seq_len;
+            units += seq_units;
+            i += seq_len;
+        }
+        return s.len;
+    }
+
+    fn utf16IndexForByteOffset(s: []const u8, byte_offset: usize) usize {
+        var units: usize = 0;
+        var i: usize = 0;
+        const target = @min(byte_offset, s.len);
+        while (i < s.len and i < target) {
             units += utf16LenOfSeq(s, i);
             i += jsStringSeqLen(s, i);
         }
@@ -8664,14 +8691,20 @@ pub const Interpreter = struct {
     /// regexp has the `d` (hasIndices) flag — element 0 is `[start, end]` of the
     /// whole match, element i+1 is the i-th capture's `[start, end]` (or undefined
     /// if it did not participate), and `.groups` maps each named group likewise.
-    /// `base` is the offset of the search window within the original input.
-    fn makeIndicesArray(self: *Interpreter, re: *regex.Regex, m: regex.Match, base: usize) EvalError!*value.Object {
+    /// `base` is the byte offset of the search window within the original input.
+    fn makeIndicesArray(self: *Interpreter, re: *regex.Regex, m: regex.Match, input: []const u8, base: usize) EvalError!*value.Object {
         const idx = (try self.newArray()).object;
-        try idx.elements.append(self.arena, try self.indexPair(base + m.start, base + m.end));
+        try idx.elements.append(self.arena, try self.indexPair(
+            utf16IndexForByteOffset(input, base + m.start),
+            utf16IndexForByteOffset(input, base + m.end),
+        ));
         for (0..m.captures.len) |i| {
             const present = i < m.captures_present.len and m.captures_present[i];
             if (present and i < m.capture_spans.len) {
-                try idx.elements.append(self.arena, try self.indexPair(base + m.capture_spans[i][0], base + m.capture_spans[i][1]));
+                try idx.elements.append(self.arena, try self.indexPair(
+                    utf16IndexForByteOffset(input, base + m.capture_spans[i][0]),
+                    utf16IndexForByteOffset(input, base + m.capture_spans[i][1]),
+                ));
             } else {
                 try idx.elements.append(self.arena, .undefined);
             }
@@ -8683,7 +8716,10 @@ pub const Interpreter = struct {
                 const ci = entry.index; // 1-based capture index
                 const ok = ci >= 1 and ci - 1 < m.captures_present.len and m.captures_present[ci - 1] and ci - 1 < m.capture_spans.len;
                 const v: Value = if (ok)
-                    try self.indexPair(base + m.capture_spans[ci - 1][0], base + m.capture_spans[ci - 1][1])
+                    try self.indexPair(
+                        utf16IndexForByteOffset(input, base + m.capture_spans[ci - 1][0]),
+                        utf16IndexForByteOffset(input, base + m.capture_spans[ci - 1][1]),
+                    )
                 else
                     .undefined;
                 try self.setProp(g, entry.name, v);
