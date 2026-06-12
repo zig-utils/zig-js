@@ -9207,6 +9207,7 @@ pub const Interpreter = struct {
         const own_ts = o.getOwn("toString");
         const ts_shadowed = (own_ts != null and !own_ts.?.isCallable()) or userMethodOf(o, "toString") != null;
         if (ts_shadowed) return self.throwError("TypeError", "Cannot convert object to primitive value");
+        if (!builtin_to_string) return self.throwError("TypeError", "Cannot convert object to primitive value");
         return .{ .string = try v.toString(self.arena) };
     }
 
@@ -27150,6 +27151,13 @@ test "interpreter String.prototype methods" {
         \\String.fromCharCode(-1).charCodeAt(0) === 65535 &&
         \\"gnulluna".substring(null, -3) === "" &&
         \\"ABCABC".charAt(-2) === "ABCABC".substring(-2, -1)
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let o = Object.create(null);
+        \\let ok = false;
+        \\try { "".charAt(o); } catch (e) { ok = e instanceof TypeError; }
+        \\ok = ok && (() => { try { "".charCodeAt(o); } catch (e) { return e instanceof TypeError; } return false; })();
+        \\ok
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let lo = '\uD834';
