@@ -3686,7 +3686,7 @@ pub const Interpreter = struct {
                 if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, mend)));
                 recordRegexpLegacy(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
-                try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
+                try arr.object.elements.append(self.arena, .{ .string = try self.stringSliceFromSearchSpan(input, search_input, mstart, mend) });
                 for (0..m.captures.len) |i| try arr.object.elements.append(self.arena, try self.captureVal(m, i));
                 try self.setProp(arr.object, "index", .{ .number = @floatFromInt(utf16IndexForByteOffset(search_input, mstart)) });
                 try self.setProp(arr.object, "input", .{ .string = input });
@@ -3945,6 +3945,14 @@ pub const Interpreter = struct {
             i += seq_len;
         }
         return if (changed) out.items else input;
+    }
+
+    fn stringSliceFromSearchSpan(self: *Interpreter, input: []const u8, search_input: []const u8, start: usize, end: usize) EvalError![]const u8 {
+        const start_units = utf16IndexForByteOffset(search_input, start);
+        const end_units = utf16IndexForByteOffset(search_input, end);
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        try appendUtf16Slice(&buf, self.arena, input, start_units, end_units);
+        return try buf.toOwnedSlice(self.arena);
     }
 
     fn appendUtf16Slice(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, start: usize, end: usize) !void {
