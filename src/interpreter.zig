@@ -10685,7 +10685,17 @@ fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
     const gobj = try a.create(value.Object);
     gobj.* = .{};
     const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv == .object) sv.object else null) else null;
+    const parent_symbol_registry = try symbolRegistry(self);
     try installGlobalsInner(genv, self.root_shape, parent_symbol);
+    if (parent_symbol_registry) |reg| {
+        if (genv.get("Symbol")) |sv| if (sv == .object)
+            try sv.object.setOwn(a, self.root_shape, "\x00registry", .{ .object = reg });
+    }
+    if (genv.get("Object")) |ov| if (ov == .object) {
+        if (ov.object.getOwn("prototype")) |pv| {
+            if (pv == .object) gobj.proto = pv.object;
+        }
+    };
     try genv.put("globalThis", .{ .object = gobj });
     try mirrorGlobalsOnto(genv, gobj, self.root_shape);
     if (genv.get("$262")) |d| {
@@ -10694,42 +10704,93 @@ fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
     return genv;
 }
 
+fn shadowRealmNativeRealm(self: *Interpreter) ?*Environment {
+    const native = self.active_native orelse return null;
+    return @ptrCast(@alignCast(native.private_data orelse return null));
+}
+
+fn throwErrorInRealm(self: *Interpreter, realm: *Environment, name: []const u8, message: []const u8) EvalError {
+    const saved_env = self.env;
+    self.env = realm;
+    defer self.env = saved_env;
+    return self.throwError(name, message);
+}
+
+fn objectFunctionRealm(o: *value.Object) ?*Environment {
+    if (o.js_func) |erased| {
+        const func: *Function = @ptrCast(@alignCast(erased));
+        return func.closure;
+    }
+    return null;
+}
+
+fn symbolProtoInRealm(realm: *Environment) ?*value.Object {
+    const sym = realm.get("Symbol") orelse return null;
+    if (sym != .object) return null;
+    const p = sym.object.getOwn("prototype") orelse return null;
+    return if (p == .object) p.object else null;
+}
+
+const SrWrappedData = struct {
+    target: *value.Object,
+    caller_env: *Environment,
+    target_env: *Environment,
+};
+
 /// GetWrappedValue across a ShadowRealm boundary: a primitive (incl. Symbol /
 /// BigInt) passes through; a callable becomes a forwarding wrapper function; any
 /// other object is a TypeError.
-fn srWrapValue(self: *Interpreter, v: Value) EvalError!Value {
+fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environment, v: Value) EvalError!Value {
     if (v != .object) return v;
     const o = v.object;
-    if (o.is_symbol or o.is_bigint) return v;
+    if (o.is_symbol) {
+        if (symbolProtoInRealm(wrap_env)) |p| o.proto = p;
+        return v;
+    }
+    if (o.is_bigint) return v;
     if (o.isCallableObject()) {
+        const saved_env = self.env;
+        self.env = wrap_env;
+        defer self.env = saved_env;
         const w = (try self.newObject()).object;
         w.native = srWrappedCallFn;
-        w.private_data = @ptrCast(o);
-        // The wrapper's [[Prototype]] is the *calling* realm's %Function.prototype%.
-        if (self.env.get("Function")) |fc| if (fc == .object) {
+        const data = try self.arena.create(SrWrappedData);
+        data.* = .{
+            .target = o,
+            .caller_env = wrap_env,
+            .target_env = objectFunctionRealm(o) orelse wrap_env,
+        };
+        w.private_data = @ptrCast(data);
+        // The wrapper's [[Prototype]] is the realm receiving the wrapped value.
+        if (wrap_env.get("Function")) |fc| if (fc == .object) {
             if (fc.object.getOwn("prototype")) |fp| if (fp == .object) {
                 w.proto = fp.object;
             };
         };
         // CopyNameAndLength(wrapped, target): a read that throws (a poisoned
-        // length/name getter) aborts the wrap with a TypeError in this realm.
+        // length/name getter) aborts the wrap with a TypeError in error_env.
         const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-        const len_v = self.getProperty(.{ .object = o }, "length") catch
-            return self.throwError("TypeError", "ShadowRealm: wrapped function length is not accessible");
+        const len_desc = builtins.objectGetOwnPropertyDescriptor(self, .undefined, &.{ .{ .object = o }, .{ .string = "length" } }) catch
+            return throwErrorInRealm(self, error_env, "TypeError", "ShadowRealm: wrapped function length is not accessible");
+        const len_v = if (len_desc == .undefined)
+            Value.undefined
+        else
+            self.getProperty(.{ .object = o }, "length") catch
+                return throwErrorInRealm(self, error_env, "TypeError", "ShadowRealm: wrapped function length is not accessible");
         // ToIntegerOrInfinity(targetLen): +∞ is preserved; otherwise clamp to ≥ 0.
         const len: f64 = if (len_v == .number and !std.math.isNan(len_v.number))
-            (if (std.math.isInf(len_v.number)) len_v.number else @max(0, @trunc(len_v.number)))
+            (if (std.math.isInf(len_v.number)) (if (len_v.number > 0) len_v.number else 0) else @max(0, @trunc(len_v.number)))
         else
             0;
         try w.setOwn(self.arena, self.root_shape, "length", .{ .number = len });
         try w.setAttr(self.arena, "length", ro_attr);
         const name_v = self.getProperty(.{ .object = o }, "name") catch
-            return self.throwError("TypeError", "ShadowRealm: wrapped function name is not accessible");
+            return throwErrorInRealm(self, error_env, "TypeError", "ShadowRealm: wrapped function name is not accessible");
         try w.setOwn(self.arena, self.root_shape, "name", .{ .string = if (name_v == .string) name_v.string else "" });
         try w.setAttr(self.arena, "name", ro_attr);
         return .{ .object = w };
     }
-    return self.throwError("TypeError", "ShadowRealm: a non-callable object cannot cross the realm boundary");
+    return throwErrorInRealm(self, error_env, "TypeError", "ShadowRealm: a non-callable object cannot cross the realm boundary");
 }
 
 /// A wrapped ShadowRealm callable: wrap each argument inward, call the target,
@@ -10738,23 +10799,27 @@ fn srWrappedCallFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return .undefined;
-    const target: *value.Object = @ptrCast(@alignCast(fnobj.private_data orelse return .undefined));
+    const data: *SrWrappedData = @ptrCast(@alignCast(fnobj.private_data orelse return .undefined));
     const wargs = try self.arena.alloc(Value, args.len);
-    for (args, 0..) |arg_v, i| wargs[i] = try srWrapValue(self, arg_v);
+    for (args, 0..) |arg_v, i| wargs[i] = try srWrapValue(self, data.target_env, data.caller_env, arg_v);
     // WrappedFunction [[Call]]: a normal completion is wrapped outward; an abrupt
     // one is re-thrown as a TypeError in the *calling* realm.
-    const r = self.callValueWithThis(.{ .object = target }, wargs, .undefined) catch |e| {
-        if (e == error.Throw) return self.throwError("TypeError", "WrappedFunction: the wrapped target threw");
+    const r = self.callValueWithThis(.{ .object = data.target }, wargs, .undefined) catch |e| {
+        if (e == error.Throw) return throwErrorInRealm(self, data.caller_env, "TypeError", "WrappedFunction: the wrapped target threw");
         return e;
     };
-    return srWrapValue(self, r);
+    return srWrapValue(self, data.caller_env, data.caller_env, r);
 }
 
 fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (self.new_target == .undefined) return self.throwError("TypeError", "Constructor ShadowRealm requires 'new'");
+    const ctor_env = shadowRealmNativeRealm(self) orelse self.env;
+    if (self.new_target == .undefined) return throwErrorInRealm(self, ctor_env, "TypeError", "Constructor ShadowRealm requires 'new'");
+    const saved_env = self.env;
+    self.env = ctor_env;
+    defer self.env = saved_env;
     const genv = try makeChildRealm(self);
     const o = (try self.newObject()).object;
     o.is_shadow_realm = true;
@@ -10779,17 +10844,21 @@ fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) v
 
 fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object or !this.object.is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
+    const caller_env = shadowRealmNativeRealm(self) orelse self.env;
+    if (this != .object or !this.object.is_shadow_realm) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
     const src = if (args.len > 0) args[0] else .undefined;
-    if (src != .string) return self.throwError("TypeError", "ShadowRealm.prototype.evaluate expects a string");
-    const genv: *Environment = @ptrCast(@alignCast(this.object.private_data orelse return self.throwError("TypeError", "ShadowRealm has no realm")));
-    var parser = Parser.init(self.arena, src.string) catch return self.throwError("SyntaxError", "evaluate: invalid source");
-    const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "evaluate: parse error");
+    if (src != .string) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate expects a string");
+    const genv: *Environment = @ptrCast(@alignCast(this.object.private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
+    var parser = Parser.init(self.arena, src.string) catch return throwErrorInRealm(self, caller_env, "SyntaxError", "evaluate: invalid source");
+    const prog = parser.parseProgram() catch return throwErrorInRealm(self, caller_env, "SyntaxError", "evaluate: parse error");
+    const prog_strict = parser.strict;
     const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g == .object) g.object else null) else null;
     const s_env = self.env;
     const s_this = self.this_value;
     const s_glob = self.global_object;
+    const s_strict = self.strict;
     self.env = genv;
+    self.strict = prog_strict;
     if (gobj) |go| {
         self.this_value = .{ .object = go };
         self.global_object = go;
@@ -10801,15 +10870,16 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     self.env = s_env;
     self.this_value = s_this;
     self.global_object = s_glob;
+    self.strict = s_strict;
     const result = eval_result catch |e| {
         // A throw inside the child realm surfaces as a TypeError in the caller
         // (the thrown value can't cross the boundary).
         if (e == error.Throw) {
-            return self.throwError("TypeError", "ShadowRealm.prototype.evaluate: the evaluated code threw");
+            return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate: the evaluated code threw");
         }
         return e;
     };
-    return srWrapValue(self, result);
+    return srWrapValue(self, caller_env, caller_env, result);
 }
 
 /// Install the test262 `$262` host object into `env` (its `global` is wired up
@@ -21635,8 +21705,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     {
         const proto = try a.create(value.Object);
         proto.* = .{ .proto = object_proto };
-        try setNative(a, rs, proto, "evaluate", 1, shadowRealmEvaluateFn);
-        try setNative(a, rs, proto, "importValue", 2, shadowRealmImportValueFn);
+        try setNativeWithData(a, rs, proto, "evaluate", 1, shadowRealmEvaluateFn, @ptrCast(env));
+        try setNativeWithData(a, rs, proto, "importValue", 2, shadowRealmImportValueFn, @ptrCast(env));
         if (env.get("Symbol")) |sym| if (sym == .object) {
             if (sym.object.getOwn("toStringTag")) |tt| if (tt == .object and tt.object.is_symbol) {
                 try proto.setOwn(a, rs, tt.object.sym_key, .{ .string = "ShadowRealm" });
@@ -21644,7 +21714,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
             };
         };
         const ctor = try a.create(value.Object);
-        ctor.* = .{ .native = shadowRealmConstructorFn, .native_ctor = true };
+        ctor.* = .{ .native = shadowRealmConstructorFn, .native_ctor = true, .private_data = @ptrCast(env) };
         try installNativeProps(a, rs, ctor, "ShadowRealm", 0);
         try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
         try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });

@@ -1175,6 +1175,84 @@ test "RegExp duplicate named captures use participating group" {
     )).boolean);
 }
 
+test "ShadowRealm uses ordinary globals and caller realm wrappers" {
+    try std.testing.expect((try evalIn(
+        \\var r = new ShadowRealm();
+        \\r.evaluate('Object.getPrototypeOf(globalThis) === Object.prototype') &&
+        \\r.evaluate('globalThis.constructor === Object') &&
+        \\Object.getPrototypeOf(r.evaluate('() => 1')) === Function.prototype
+    )).boolean);
+}
+
+test "ShadowRealm evaluate wraps child abrupt completions" {
+    try expectEvalStr("SyntaxError|TypeError|TypeError|TypeError|TypeError|TypeError",
+        \\var r = new ShadowRealm();
+        \\function caught(src) {
+        \\  try { r.evaluate(src); return "none"; }
+        \\  catch (e) { return e.name; }
+        \\}
+        \\[
+        \\  caught("..."),
+        \\  caught("throw 42"),
+        \\  caught("throw new ReferenceError('aaa')"),
+        \\  caught("throw new TypeError('aaa')"),
+        \\  caught("eval('...')"),
+        \\  caught("'use strict'; eval('var public = 1;')")
+        \\].join("|")
+    );
+}
+
+test "ShadowRealm constructor metadata" {
+    try std.testing.expect((try evalIn(
+        \\var d = Object.getOwnPropertyDescriptor(ShadowRealm, "name");
+        \\var before = ShadowRealm.name;
+        \\ShadowRealm.name = "unlikelyValue";
+        \\var still = ShadowRealm.name === before;
+        \\var deleted = delete ShadowRealm.name;
+        \\d.value === "ShadowRealm" && d.enumerable === false &&
+        \\d.writable === false && d.configurable === true &&
+        \\still && deleted && !Object.hasOwn(ShadowRealm, "name")
+    )).boolean);
+}
+
+test "ShadowRealm wrapped function length descriptors" {
+    try expectEvalStr("2|0|Infinity|0|0",
+        \\var r = new ShadowRealm();
+        \\function len(src) {
+        \\  var wrapped = r.evaluate(src);
+        \\  var d = Object.getOwnPropertyDescriptor(wrapped, "length");
+        \\  return d.value + ":" + d.enumerable + ":" + d.writable + ":" + d.configurable;
+        \\}
+        \\[
+        \\  len("function fn(foo, bar) {} fn;"),
+        \\  len("function fn() {} delete fn.length; fn;"),
+        \\  len("function fn() {} Object.defineProperty(fn, 'length', { get: () => Infinity, configurable: true }); fn;"),
+        \\  len("function fn() {} Object.defineProperty(fn, 'length', { get: () => -Infinity, configurable: true }); fn;"),
+        \\  len("function fn() {} Object.defineProperty(fn, 'length', { get: () => -1, configurable: true }); fn;")
+        \\].map(function (x) { return x.split(":")[0]; }).join("|")
+    );
+}
+
+test "ShadowRealm symbol values use caller realm wrappers" {
+    try expectEvalStr("11111111",
+        \\var r = new ShadowRealm();
+        \\var s = r.evaluate('Symbol("foobar")');
+        \\var shadowX = r.evaluate('Symbol.for("my symbol name")');
+        \\var myX = Symbol.for("my symbol name");
+        \\var desc = Object.getOwnPropertyDescriptor(Symbol.prototype, "description").get;
+        \\[
+        \\  typeof s === "symbol",
+        \\  s.constructor === Symbol,
+        \\  Object.getPrototypeOf(s) === Symbol.prototype,
+        \\  Symbol.prototype.toString.call(s) === "Symbol(foobar)",
+        \\  shadowX === myX,
+        \\  Symbol.keyFor(shadowX) === "my symbol name",
+        \\  Symbol.keyFor(s) === undefined,
+        \\  desc.call(s) === "foobar"
+        \\].map(function (x) { return x ? "1" : "0"; }).join("")
+    );
+}
+
 /// Evaluate `src` in a fresh context and return its completion value. Only safe
 /// for by-value results (numbers/booleans); a returned `.string` points into the
 /// context arena, so use `expectEvalStr` for those (it compares before teardown).
