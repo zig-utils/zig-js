@@ -3829,6 +3829,15 @@ pub const Interpreter = struct {
         return @intFromFloat(pos);
     }
 
+    fn stringClampPosition(self: *Interpreter, s: []const u8, v: Value, default_pos: usize) EvalError!usize {
+        if (v == .undefined) return default_pos;
+        const n = try self.toNumberV(v);
+        if (std.math.isNan(n) or n <= 0) return 0;
+        const len = utf16LenOfString(s);
+        if (n >= @as(f64, @floatFromInt(len))) return len;
+        return @intFromFloat(@trunc(n));
+    }
+
     fn byteOffsetForUtf16Index(s: []const u8, index: usize) usize {
         var units: usize = 0;
         var i: usize = 0;
@@ -8352,14 +8361,17 @@ pub const Interpreter = struct {
             return Value{ .string = if (start < end) try self.arena.dupe(u8, s[start..end]) else "" };
         }
         if (eq(name, "substring")) {
-            var a0 = try relIndex(self, arg0(args), s.len, 0);
-            var b0 = try relIndex(self, arg(args, 1), s.len, @floatFromInt(s.len));
+            const len = utf16LenOfString(s);
+            var a0 = try self.stringClampPosition(s, arg0(args), 0);
+            var b0 = try self.stringClampPosition(s, arg(args, 1), len);
             if (a0 > b0) {
                 const t = a0;
                 a0 = b0;
                 b0 = t;
             }
-            return Value{ .string = try self.arena.dupe(u8, s[a0..b0]) };
+            const start = byteOffsetForUtf16Index(s, a0);
+            const end = byteOffsetForUtf16Index(s, b0);
+            return Value{ .string = try self.arena.dupe(u8, s[start..end]) };
         }
         if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
             // toLocaleUpperCase delegates to the locale-independent full Unicode
@@ -27135,7 +27147,9 @@ test "interpreter String.prototype methods" {
         \\s.at(1) === "\uDCA9" &&
         \\"abc".charAt(-1) === "" &&
         \\Number.isNaN("abc".charCodeAt(-1)) &&
-        \\String.fromCharCode(-1).charCodeAt(0) === 65535
+        \\String.fromCharCode(-1).charCodeAt(0) === 65535 &&
+        \\"gnulluna".substring(null, -3) === "" &&
+        \\"ABCABC".charAt(-2) === "ABCABC".substring(-2, -1)
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let lo = '\uD834';
