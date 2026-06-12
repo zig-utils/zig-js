@@ -151,6 +151,13 @@ pub const Context = struct {
         try interp.installGlobals(&self.env, self.root_shape);
         // `globalThis` names the global object itself.
         try self.env.put("globalThis", .{ .object = global_obj });
+        if (self.env.get("Object")) |object_ctor| {
+            if (object_ctor == .object) {
+                if (object_ctor.object.getOwn("prototype")) |object_proto| {
+                    if (object_proto == .object) global_obj.proto = object_proto.object;
+                }
+            }
+        }
         // Mirror the installed globals onto the global object as real own
         // properties (with spec attributes), so `Object.getOwnPropertyDescriptor
         // (globalThis, "Math")`, `Object.keys`, `hasOwnProperty`, etc. see them.
@@ -955,6 +962,7 @@ test "context persists globals across evaluations" {
     _ = try ctx.evaluate("var counter = 41;");
     const v = try ctx.evaluate("counter = counter + 1;");
     try std.testing.expectEqual(@as(f64, 42), v.number);
+    try std.testing.expect((try ctx.evaluate("Object.getPrototypeOf(globalThis).isPrototypeOf(globalThis)")).boolean);
 }
 
 test "direct eval keeps lexical declarations local but hoists var" {

@@ -1749,23 +1749,36 @@ fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
 }
 
 pub fn objectIsSealed(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return .{ .boolean = isLocked(arg(args, 0), false) };
+    return .{ .boolean = try isLocked(interp(ctx), arg(args, 0), false) };
 }
 
 pub fn objectIsFrozen(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
-    _ = ctx;
     _ = this;
-    return .{ .boolean = isLocked(arg(args, 0), true) };
+    return .{ .boolean = try isLocked(interp(ctx), arg(args, 0), true) };
 }
 
 /// A non-object is trivially sealed/frozen. Otherwise: non-extensible, every own
 /// property non-configurable (and, for `frozen`, every data property
 /// non-writable). Arrays with elements can't be frozen (no per-index attrs yet).
-fn isLocked(ov: Value, frozen: bool) bool {
+fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     if (ov != .object) return true;
     const o = ov.object;
+    if (o.proxy_handler != null or o.proxy_revoked) {
+        if (try self.proxyIsExtensible(o)) return false;
+        const ov_obj: Value = .{ .object = o };
+        for (try self.objectOwnKeysList(o)) |k| {
+            const desc = try objectGetOwnPropertyDescriptor(self, .undefined, &.{ ov_obj, self.keyToValue(k) });
+            if (desc != .object) continue;
+            const configurable = try self.getProperty(desc, "configurable");
+            if (configurable.toBoolean()) return false;
+            if (frozen) {
+                const writable = try self.getProperty(desc, "writable");
+                if (writable.toBoolean()) return false;
+            }
+        }
+        return true;
+    }
     if (o.extensible) return false;
     // An array's dense element indices must each be non-configurable (and, for
     // frozen, non-writable). A frozen array additionally needs non-writable

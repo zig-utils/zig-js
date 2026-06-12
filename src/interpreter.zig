@@ -5383,15 +5383,18 @@ pub const Interpreter = struct {
         const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'ownKeys' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "ownKeys")) |trap| {
             const res = try self.callValueWithThis(trap, &.{.{ .object = target }}, .{ .object = o.proxy_handler.? });
-            if (res != .object or !res.object.is_array) return self.throwError("TypeError", "ownKeys trap must return an array");
+            if (res != .object) return self.throwError("TypeError", "ownKeys trap must return an object");
             // CreateListFromArrayLike(types: String, Symbol): every element must
             // be a String or Symbol.
-            for (res.object.elements.items) |k| {
+            const len = toLen(try self.toNumberV(try self.getProperty(res, "length")));
+            var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            var i: usize = 0;
+            while (i < len) : (i += 1) {
+                const k = try self.getProperty(res, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                 if (k != .string and !(k == .object and k.object.is_symbol))
                     return self.throwError("TypeError", "ownKeys trap result includes a non-String, non-Symbol key");
+                try list.append(self.arena, try self.keyOf(k));
             }
-            var list: std.ArrayListUnmanaged([]const u8) = .empty;
-            for (res.object.elements.items) |k| try list.append(self.arena, try self.keyOf(k));
             // [[OwnPropertyKeys]] invariants: no duplicates; every
             // non-configurable target key must be present; for a non-extensible
             // target the result must be exactly the target's keys.
@@ -20641,12 +20644,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     };
     try env.put("Symbol", .{ .object = symbol_ns });
 
-    // `Math` is an ordinary object: its [[Prototype]] is %Object.prototype% and
-    // it has a `Symbol.toStringTag` of "Math" (so `Object.getPrototypeOf(Math)
-    // === Object.prototype` and `Object.prototype.toString.call(Math)` is
-    // "[object Math]"). Wired here, now that both Object.prototype and Symbol.
-    // toStringTag exist.
+    // `Math`/`JSON` are ordinary objects with [[Prototype]] %Object.prototype%.
+    // Wired here, once Object.prototype exists.
     math_obj.proto = object_proto;
+    json_ns.proto = object_proto;
     if (symbol_ns.getOwn("toStringTag")) |mtt| if (mtt == .object and mtt.object.is_symbol) {
         try math_obj.setOwn(a, root_shape, mtt.object.sym_key, .{ .string = "Math" });
         try math_obj.setAttr(a, mtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
@@ -27527,6 +27528,25 @@ test "interpreter JSON, Object, Number builtins" {
         \\o1.a === undefined && o2.b === undefined &&
         \\Object.getPrototypeOf(o1) === O.prototype &&
         \\Object.getPrototypeOf(o2) === O.prototype
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let sym = Symbol();
+        \\let target = {};
+        \\target[sym] = 1;
+        \\target.foo = 2;
+        \\target[0] = 3;
+        \\Object.freeze(target);
+        \\let seen = [];
+        \\Object.isFrozen(new Proxy(target, {
+        \\  getOwnPropertyDescriptor(t, k) { seen.push(k); return Reflect.getOwnPropertyDescriptor(t, k); }
+        \\}));
+        \\let keys = Object.keys(new Proxy({}, {
+        \\  ownKeys() { return { length: 2, 0: "a", 1: "b" }; },
+        \\  getOwnPropertyDescriptor(t, k) { return { value: 1, enumerable: k === "a", configurable: true }; }
+        \\}));
+        \\Object.getPrototypeOf(JSON) === Object.prototype &&
+        \\seen.length === 3 && seen[0] === "0" && seen[1] === "foo" && seen[2] === sym &&
+        \\keys.length === 1 && keys[0] === "a"
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let count = 0;
