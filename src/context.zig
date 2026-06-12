@@ -270,12 +270,29 @@ pub const Context = struct {
     /// Fast path: compile to bytecode and run on the VM. Programs that use
     /// constructs the compiler doesn't lower yet fall back to the tree-walker,
     /// so behavior is identical either way — the VM just handles the hot subset.
+    /// Run a precise mark-sweep over the GC heap (Phase 7). **Only sound at a
+    /// quiescent point** — no JS executing on this thread, so every live object
+    /// is reachable from the `Context` roots `gc.zig`'s binding traces (the
+    /// interpreter recursion that would hold live `Value`s as Zig locals has
+    /// unwound). Conservatively skipped while threads or a module graph hold
+    /// objects the root set does not yet enumerate. No-op when the GC is off.
+    pub fn collectGarbage(self: *Context) void {
+        const h = self.gc orelse return;
+        if (self.js_threads.items.len != 0) return; // thread fns not yet rooted
+        if (self.mod_cache != null) return; // module graph not yet rooted
+        h.collect();
+    }
+
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
         if (self.gil) |g| g.acquire();
         defer if (self.gil) |g| g.release();
         self.assertOwnerThread();
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
+        // Quiescent point: reclaim garbage from prior evaluations on this
+        // context before running (nothing is executing yet, so the Context
+        // roots are complete).
+        self.collectGarbage();
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
         var parser = try Parser.init(a, owned_source);
@@ -4049,4 +4066,30 @@ test "enable_gc: object-heavy program runs and tears down clean (no leaks)" {
     );
     // sum_{i=0..199}(i + 2i + (i+2)) = sum(4i+2) = 80000, plus obj.x+obj.y = 3.
     try std.testing.expectEqual(@as(f64, 80003), result.number);
+}
+
+test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    // Create a large throwaway graph (unreachable after the statement) plus one
+    // object retained on globalThis.
+    _ = try ctx.evaluate(
+        \\globalThis.keep = { kept: 1, nested: { deep: [1, 2, 3] } };
+        \\for (let i = 0; i < 500; i++) { const tmp = { a: i, b: [i, i + 1, i + 2] }; }
+        \\0
+    );
+    const before = ctx.gc.?.live_cells;
+
+    // Quiescent collection (no JS running): the 500 temporaries and their arrays
+    // are unreachable from the Context roots and are reclaimed; the retained
+    // graph survives.
+    ctx.collectGarbage();
+    const after = ctx.gc.?.live_cells;
+    try std.testing.expect(after < before); // real reclamation happened
+    try std.testing.expect(ctx.gc.?.collections >= 1);
+
+    // The retained object is intact and usable after collection.
+    const r = try ctx.evaluate("globalThis.keep.kept + globalThis.keep.nested.deep[2]");
+    try std.testing.expectEqual(@as(f64, 4), r.number); // 1 + 3
 }

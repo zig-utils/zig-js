@@ -219,14 +219,31 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   `Environment.vars`, promise reaction lists — stay arena; they are never passed
   to `mark`, so no tracing hazard, only a reclaim-at-teardown-vs-on-collect
   difference, addressed after mid-run lands.)
-  *Remaining for the M1 deliverable* (weak refs/finalizers correct + no-leak
-  long-running contexts): complete `traceRoots` with the live `Interpreter`
-  transient state (value stack, `this`, `exception`, `with_stack`, …); add the
-  C-API `Boxed` handle table; then enable **mid-run** `collect` at the
-  `(steps & 1023)` safepoints — the reclamation win. Migrating the cell
-  sub-allocations to gpa (so `finalize` frees them on collect, not just at
-  teardown) is the follow-up that turns "collect reclaims cells" into "collect
-  reclaims everything." Until mid-run lands, collection stays teardown-only.
+  *Quiescent collection landed — the GC reclaims now.* `Context.collectGarbage()`
+  runs a precise mark-sweep, called automatically at the top of `evaluate`
+  (before the interpreter starts, so the Zig stack holds no live `Value`s and
+  the `Context` roots `gc.zig`'s binding traces are complete) and callable
+  directly by embedders at any quiescent point. Guarded to skip while threads or
+  a module graph hold objects the root set doesn't yet enumerate. Validated:
+  flag off byte-identical; flag on full test262 **42,771/47,930, 0 crashes,
+  host-fail 0** (collection runs on every one of ~24k contexts — proof the root
+  set is complete, since a missed root would free a live intrinsic and crash);
+  conformance 33/33; whole unit suite leak-checked *with collection on*; and a
+  reclamation test (`collectGarbage` frees 500 unreachable temporaries while a
+  `globalThis`-retained graph survives intact). Note: test262 doesn't *observe*
+  GC (no `$262.gc`; one `evaluate` per test), so the conformance number is
+  unchanged by design — the win is operational (memory reclamation for
+  long-running contexts).
+  *Remaining for the FULL deliverable:* (a) **arbitrary mid-script collection**
+  needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
+  locals/registers a precise GC can't see) — the quiescent points avoid this; a
+  Boehm-style stack scan with register spill would generalize it. (b) the C-API
+  `Boxed` handle table (so GC + embedder-held `JSValueRef`s across calls is
+  sound; today GC is off under the C-API). (c) migrate cell sub-allocations
+  (`slots`/`elements`/`vars`/reaction lists) to gpa so `finalize` frees them on
+  collect — turning "reclaims cells" into "reclaims everything" (today
+  sub-allocations are reclaimed at teardown, so a collected object's backing
+  buffers persist until `destroy`).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
