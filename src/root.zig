@@ -77,6 +77,7 @@ test {
     _ = @import("parser.zig");
     _ = @import("interpreter.zig");
     _ = @import("builtins.zig");
+    _ = @import("unicode_normalize.zig");
     _ = @import("bytecode.zig");
     _ = @import("compiler.zig");
     _ = @import("vm.zig");

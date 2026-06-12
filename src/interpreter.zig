@@ -16,6 +16,7 @@ const jsthread = @import("jsthread.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
+const unicode_normalize = @import("unicode_normalize.zig");
 const cldr_numbers = @import("cldr_numbers.zig");
 const numbering_systems = @import("numbering_systems.zig");
 const cldr_locale = @import("cldr_locale.zig");
@@ -8748,10 +8749,17 @@ pub const Interpreter = struct {
             // The form (default "NFC") is ToString'd — a Symbol throws TypeError —
             // and must be one of the four Unicode normalization forms.
             const form = if (args.len > 0 and arg0(args) != .undefined) try self.toStringV(arg0(args)) else "NFC";
-            if (!eq(form, "NFC") and !eq(form, "NFD") and !eq(form, "NFKC") and !eq(form, "NFKD"))
+            const nf: unicode_normalize.Form = if (eq(form, "NFC"))
+                .nfc
+            else if (eq(form, "NFD"))
+                .nfd
+            else if (eq(form, "NFKC"))
+                .nfkc
+            else if (eq(form, "NFKD"))
+                .nfkd
+            else
                 return self.throwError("RangeError", "The normalization form should be one of NFC, NFD, NFKC, NFKD");
-            // v1: ASCII-only engine, so normalization is the identity.
-            return Value{ .string = try self.arena.dupe(u8, s) };
+            return Value{ .string = try unicode_normalize.normalize(self.arena, s, nf) };
         }
         if (eq(name, "search")) {
             const re_obj = try self.toRegexObject(arg0(args));
