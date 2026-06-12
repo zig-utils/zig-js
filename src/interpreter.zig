@@ -2941,6 +2941,59 @@ pub const Interpreter = struct {
         return v.toNumber();
     }
 
+    /// ArraySetLength's numeric path: ToUint32(value), then ToNumber(value)
+    /// again, so observable coercions run in spec order before descriptor checks.
+    pub fn arrayLengthFromValue(self: *Interpreter, v: Value) EvalError!u32 {
+        const uint_n = try self.toNumberV(v);
+        const new_len = Value.uint32FromF64(uint_n);
+        const number_len = try self.toNumberV(v);
+        if (@as(f64, @floatFromInt(new_len)) != number_len)
+            return self.throwError("RangeError", "Invalid array length");
+        return new_len;
+    }
+
+    /// Apply the deletion half of ArraySetLength after writability/coercion
+    /// checks. Returns false when a non-configurable element blocks the shrink.
+    pub fn setArrayLength(self: *Interpreter, o: *value.Object, requested_len: usize) EvalError!bool {
+        const old_len = @max(o.elements.items.len, o.array_len);
+        var new_len = requested_len;
+        var blocked = false;
+
+        if (requested_len < old_len) {
+            const DeleteEntry = struct {
+                idx: usize,
+                key: []const u8,
+            };
+            var entries: std.ArrayListUnmanaged(DeleteEntry) = .empty;
+            for (try self.objectOwnKeysList(o)) |k| {
+                if (arrayElementIndex(k)) |idx| {
+                    if (idx >= requested_len and idx < old_len)
+                        try entries.append(self.arena, .{ .idx = idx, .key = k });
+                }
+            }
+            std.mem.sort(DeleteEntry, entries.items, {}, struct {
+                fn lt(_: void, a: DeleteEntry, b: DeleteEntry) bool {
+                    return a.idx > b.idx;
+                }
+            }.lt);
+
+            for (entries.items) |entry| {
+                if (!objectHasOwn(o, entry.key)) continue;
+                if (!o.getAttr(entry.key).configurable) {
+                    new_len = entry.idx + 1;
+                    blocked = true;
+                    break;
+                }
+                _ = try self.deleteOwn(o, entry.key);
+            }
+        }
+
+        if (new_len < o.elements.items.len)
+            o.elements.shrinkRetainingCapacity(new_len);
+        o.array_len = new_len;
+        return !blocked;
+    }
+
     pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
         if (k == .object and k.object.is_symbol) return self.registerSymbol(k.object);
         // ToPropertyKey: an object key is first ToPrimitive(key, string) — running
@@ -6099,25 +6152,12 @@ pub const Interpreter = struct {
         }
         if (o.is_array and !o.is_arguments) {
             if (std.mem.eql(u8, key, "length")) {
-                // ArraySetLength: newLen = ToUint32(value); if it differs from
-                // ToNumber(value) the length isn't a valid array index → RangeError.
-                // Both coercions run through the throwing ToNumber so a boolean,
-                // string, or `new Number(1)`/`new String("1")` wrapper is honored
-                // (`x.length = true` → 1, `x.length = new Number(1)` → 1).
-                const n = try self.toNumberV(v);
-                const u = value.Value.uint32FromF64(n);
-                if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
+                const u = try self.arrayLengthFromValue(v);
                 // ArraySetLength: a non-writable `length` rejects the assignment
                 // (the RangeError above still precedes this) — sloppy silently,
                 // strict throws.
                 if (o.attrs != null and !o.getAttr("length").writable) return false;
-                if (u < o.elements.items.len) {
-                    o.elements.shrinkRetainingCapacity(u);
-                    o.array_len = 0; // physical length is now exactly `u`
-                } else {
-                    o.array_len = u; // grow logically; don't materialize holes
-                }
-                return true;
+                return try self.setArrayLength(o, u);
             }
             // An accessor defined on an index routes the write to its setter
             // (handled by the prototype-chain setter walk below), not the store.

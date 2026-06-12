@@ -1404,26 +1404,22 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // Redefining it can change the value (ToUint32, truncating/extending) and
     // toggle writability, but not make it configurable/enumerable or an accessor.
     if (target.is_array and std.mem.eql(u8, key, "length")) {
-        if (get != null or set != null) return self.throwError("TypeError", "Cannot redefine 'length' as an accessor");
+        if (get != null or set != null) return false;
         // ArraySetLength (ES 10.4.2.4): ToUint32(value) is validated FIRST — a
         // value whose ToUint32 differs from its ToNumber is a RangeError, *before*
         // the (non-configurable / non-enumerable) attribute-compatibility checks.
         var new_len_opt: ?u32 = null;
         if (d.getOwn("value")) |val| {
-            // ToUint32(ToNumber(value)): a value object's valueOf/toString runs
-            // here (and a Symbol/BigInt throws) — newLen must equal numberLen.
-            const n = try self.toNumberV(val);
-            const u = Value.uint32FromF64(n);
-            if (@as(f64, @floatFromInt(u)) != n) return self.throwError("RangeError", "Invalid array length");
-            new_len_opt = u;
-        }
-        if (d.getOwn("configurable")) |c| {
-            if (c.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: length");
-        }
-        if (d.getOwn("enumerable")) |e| {
-            if (e.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: length");
+            new_len_opt = try self.arrayLengthFromValue(val);
         }
         const cur_writable = if (target.attrs != null) target.getAttr("length").writable else true;
+        const old_len = @max(target.elements.items.len, target.array_len);
+        if (d.getOwn("configurable")) |c| {
+            if (c.toBoolean()) return false;
+        }
+        if (d.getOwn("enumerable")) |e| {
+            if (e.toBoolean()) return false;
+        }
         if (!cur_writable) {
             if (d.getOwn("writable")) |w| {
                 if (w.toBoolean()) return false;
@@ -1432,36 +1428,15 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         // ArraySetLength: reducing `length` deletes elements from the top down; a
         // non-configurable element blocks the deletion — `length` stops just above
         // it and the redefinition fails. `length`/writability are still applied.
-        var blocked = false;
+        var ok = true;
         if (new_len_opt) |u| {
-            if (!cur_writable and u != @max(target.elements.items.len, target.array_len))
-                return self.throwError("TypeError", "Cannot assign to read only property 'length'");
-            var new_len: usize = u;
-            if (u < target.elements.items.len) {
-                var i: usize = target.elements.items.len;
-                while (i > u) {
-                    i -= 1;
-                    const has_data = !target.isHole(i);
-                    var kb: [24]u8 = undefined;
-                    const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
-                    const has_accessor = target.getAccessor(k) != null;
-                    if (!has_data and !has_accessor) continue;
-                    if (!target.getAttr(k).configurable) {
-                        new_len = i + 1;
-                        blocked = true;
-                        break;
-                    }
-                    _ = try self.deleteOwn(target, k);
-                }
-                target.elements.shrinkRetainingCapacity(new_len);
-            }
-            target.array_len = @intCast(new_len);
+            if (!cur_writable and u != old_len) return false;
+            ok = try self.setArrayLength(target, u);
         }
         var lattr: value.PropAttr = .{ .writable = cur_writable, .enumerable = false, .configurable = false };
         if (d.getOwn("writable")) |w| lattr.writable = w.toBoolean();
         try target.setAttr(self.arena, "length", lattr);
-        if (blocked) return false;
-        return true;
+        return ok;
     }
     // Array index with a data descriptor: keep the value in the dense element
     // store and record its attributes in the string-keyed `attrs` map (so
