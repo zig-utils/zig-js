@@ -1023,6 +1023,27 @@ test "RegExp flags and toString use generic canonical accessors" {
     )).boolean);
 }
 
+test "RegExp accessors use their own realm prototype" {
+    try std.testing.expect((try evalIn(
+        \\var other = $262.createRealm().global;
+        \\var mainProto = RegExp.prototype;
+        \\var otherProto = other.RegExp.prototype;
+        \\var mainUnicode = Object.getOwnPropertyDescriptor(mainProto, "unicode").get;
+        \\var otherUnicode = Object.getOwnPropertyDescriptor(otherProto, "unicode").get;
+        \\var mainSource = Object.getOwnPropertyDescriptor(mainProto, "source").get;
+        \\var otherSource = Object.getOwnPropertyDescriptor(otherProto, "source").get;
+        \\var ownDefaults = mainUnicode.call(mainProto) === undefined &&
+        \\  otherUnicode.call(otherProto) === undefined &&
+        \\  mainSource.call(mainProto) === "(?:)" &&
+        \\  otherSource.call(otherProto) === "(?:)";
+        \\var mainThrow = false;
+        \\try { mainUnicode.call(otherProto); } catch (e) { mainThrow = e.constructor === TypeError; }
+        \\var otherThrow = false;
+        \\try { otherUnicode.call(mainProto); } catch (e) { otherThrow = e.constructor === other.TypeError; }
+        \\ownDefaults && mainThrow && otherThrow
+    )).boolean);
+}
+
 test "RegExp exec coerces and preserves lastIndex per spec" {
     try std.testing.expect((try evalIn(
         \\var called = 0;

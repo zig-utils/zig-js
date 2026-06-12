@@ -21152,8 +21152,12 @@ fn collectionSizeGetter(comptime is_set_kind: bool) value.NativeFn {
 /// (a function named "get <prop>" with length 0, per spec), non-enumerable and
 /// configurable.
 pub fn setNativeGetter(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, comptime prop: []const u8, f: value.NativeFn) EvalError!void {
+    return setNativeGetterWithData(a, rs, obj, prop, f, null);
+}
+
+pub fn setNativeGetterWithData(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, comptime prop: []const u8, f: value.NativeFn, data: ?*anyopaque) EvalError!void {
     const g = try a.create(value.Object);
-    g.* = .{ .native = f };
+    g.* = .{ .native = f, .private_data = data };
     try installNativeProps(a, rs, g, "get " ++ prop, 0);
     try obj.setAccessor(a, prop, .{ .object = g }, null);
     try obj.setAttr(a, prop, .{ .enumerable = false, .configurable = true });
@@ -21312,19 +21316,42 @@ fn regexpEscapeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     return .{ .string = try out.toOwnedSlice(self.arena) };
 }
 
+/// A `RegExp.prototype` accessor remembers the realm/prototype it was installed
+/// for. Off-brand special-casing is SameValue against that accessor's home
+/// %RegExp.prototype%, not the caller's current realm.
+const RegExpAccessorData = struct {
+    proto: *value.Object,
+    realm: *Environment,
+};
+
+fn regExpAccessorData(self: *Interpreter) ?*RegExpAccessorData {
+    const native = self.active_native orelse return null;
+    return @ptrCast(@alignCast(native.private_data orelse return null));
+}
+
+fn isHomeRegExpProto(self: *Interpreter, o: *value.Object) bool {
+    if (regExpAccessorData(self)) |data| return data.proto == o;
+    return self.isRegExpProto(o);
+}
+
+fn throwRegExpAccessorTypeError(self: *Interpreter, message: []const u8) EvalError {
+    if (regExpAccessorData(self)) |data| return throwErrorInRealm(self, data.realm, "TypeError", message);
+    return self.throwError("TypeError", message);
+}
+
 /// A `RegExp.prototype` flag accessor (`global`/`ignoreCase`/…) — true iff the
-/// flag char is present in [[OriginalFlags]]. Off-brand on %RegExp.prototype%
-/// it returns undefined; on any other non-RegExp it throws.
+/// flag char is present in [[OriginalFlags]]. Off-brand on the accessor's home
+/// %RegExp.prototype% returns undefined; any other non-RegExp throws.
 fn regexFlagGetter(comptime flag: u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (this != .object) return self.throwError("TypeError", "RegExp.prototype accessor called on a non-object");
+            if (this != .object) return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-object");
             const o = this.object;
             if (!o.is_regex) {
-                if (self.isRegExpProto(o)) return .undefined;
-                return self.throwError("TypeError", "RegExp.prototype accessor called on a non-RegExp");
+                if (isHomeRegExpProto(self, o)) return .undefined;
+                return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-RegExp");
             }
             return .{ .boolean = std.mem.indexOfScalar(u8, o.regex_flags, flag) != null };
         }
@@ -21334,11 +21361,11 @@ fn regexFlagGetter(comptime flag: u8) value.NativeFn {
 fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object) return self.throwError("TypeError", "RegExp.prototype.source called on a non-object");
+    if (this != .object) return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-object");
     const o = this.object;
     if (!o.is_regex) {
-        if (self.isRegExpProto(o)) return .{ .string = "(?:)" };
-        return self.throwError("TypeError", "RegExp.prototype.source called on a non-RegExp");
+        if (isHomeRegExpProto(self, o)) return .{ .string = "(?:)" };
+        return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-RegExp");
     }
     return .{ .string = try escapeRegexSource(self.arena, o.regex_source) };
 }
@@ -21503,16 +21530,18 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     const pv = ctor.object.getOwn("prototype") orelse return;
     if (pv != .object) return;
     const p = pv.object;
-    try setNativeGetter(a, rs, p, "source", regexSourceGetter);
+    const accessor_data = try a.create(RegExpAccessorData);
+    accessor_data.* = .{ .proto = p, .realm = env };
+    try setNativeGetterWithData(a, rs, p, "source", regexSourceGetter, @ptrCast(accessor_data));
     try setNativeGetter(a, rs, p, "flags", regexFlagsGetter);
-    try setNativeGetter(a, rs, p, "global", regexFlagGetter('g'));
-    try setNativeGetter(a, rs, p, "ignoreCase", regexFlagGetter('i'));
-    try setNativeGetter(a, rs, p, "multiline", regexFlagGetter('m'));
-    try setNativeGetter(a, rs, p, "dotAll", regexFlagGetter('s'));
-    try setNativeGetter(a, rs, p, "sticky", regexFlagGetter('y'));
-    try setNativeGetter(a, rs, p, "unicode", regexFlagGetter('u'));
-    try setNativeGetter(a, rs, p, "unicodeSets", regexFlagGetter('v'));
-    try setNativeGetter(a, rs, p, "hasIndices", regexFlagGetter('d'));
+    try setNativeGetterWithData(a, rs, p, "global", regexFlagGetter('g'), @ptrCast(accessor_data));
+    try setNativeGetterWithData(a, rs, p, "ignoreCase", regexFlagGetter('i'), @ptrCast(accessor_data));
+    try setNativeGetterWithData(a, rs, p, "multiline", regexFlagGetter('m'), @ptrCast(accessor_data));
+    try setNativeGetterWithData(a, rs, p, "dotAll", regexFlagGetter('s'), @ptrCast(accessor_data));
+    try setNativeGetterWithData(a, rs, p, "sticky", regexFlagGetter('y'), @ptrCast(accessor_data));
+    try setNativeGetterWithData(a, rs, p, "unicode", regexFlagGetter('u'), @ptrCast(accessor_data));
+    try setNativeGetterWithData(a, rs, p, "unicodeSets", regexFlagGetter('v'), @ptrCast(accessor_data));
+    try setNativeGetterWithData(a, rs, p, "hasIndices", regexFlagGetter('d'), @ptrCast(accessor_data));
     try setNative(a, rs, p, "exec", 1, regexProtoMethod("exec"));
     try setNative(a, rs, p, "test", 1, regexProtoMethod("test"));
     try setNative(a, rs, p, "compile", 2, regexProtoMethod("compile"));
