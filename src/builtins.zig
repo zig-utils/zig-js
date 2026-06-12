@@ -766,17 +766,9 @@ pub fn objectValues(ctx: *anyopaque, this: Value, args: []const Value) HostError
 pub fn objectHasOwn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const o = try self.toObject(arg(args, 0));
     const key = try self.keyOf(arg(args, 1));
-    switch (arg(args, 0)) {
-        .undefined, .null => return self.throwError("TypeError", "Cannot convert undefined or null to object"),
-        .object => |o| return .{ .boolean = interpreter.objectHasOwn(o, key) },
-        .string => |s| {
-            if (std.mem.eql(u8, key, "length")) return .{ .boolean = true };
-            if (Interpreter.arrayIndex(key)) |i| return .{ .boolean = i < s.len };
-            return .{ .boolean = false };
-        },
-        else => return .{ .boolean = false },
-    }
+    return .{ .boolean = interpreter.objectHasOwn(o, key) };
 }
 
 pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

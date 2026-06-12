@@ -1992,6 +1992,14 @@ test "Object.hasOwn" {
         \\try { Object.hasOwn(null, "x"); } catch (e) { t = e.name === "TypeError"; }
         \\t
     )).boolean);
+    // Object.hasOwn performs ToObject before ToPropertyKey.
+    try std.testing.expect((try evalIn(
+        \\var touched = false;
+        \\var key = { get toString() { touched = true; throw new Error("key"); } };
+        \\var ok = false;
+        \\try { Object.hasOwn(null, key); } catch (e) { ok = e instanceof TypeError && !touched; }
+        \\ok
+    )).boolean);
 }
 
 test "defineProperty rejects incompatible redefinition of non-configurable props" {
@@ -3035,6 +3043,12 @@ test "Object.prototype: hasOwnProperty / isPrototypeOf" {
     )).boolean);
     try std.testing.expect((try evalIn(
         \\var a = [1, 2, 3]; a.hasOwnProperty("length") && a.hasOwnProperty(0) && !a.hasOwnProperty(9)
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var hint = "";
+        \\var key = { toString() { hint = "string"; throw new Error("key"); } };
+        \\try { Object.prototype.hasOwnProperty.call(null, key); } catch (e) {}
+        \\hint === "string"
     )).boolean);
 }
 

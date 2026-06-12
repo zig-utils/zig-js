@@ -6953,15 +6953,17 @@ pub const Interpreter = struct {
     /// stored as own properties). Returns null when `name` isn't a recognized
     /// builtin for `recv`, so the caller falls back to a property lookup + call.
     pub fn objectPrototypeMethod(self: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!?Value {
-        const o = try self.toObject(recv);
         if (eq(name, "hasOwnProperty")) {
             const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
+            const o = try self.toObject(recv);
             return Value{ .boolean = try self.objectProtoHasOwn(o, k) };
         }
         if (eq(name, "propertyIsEnumerable")) {
             const k = if (args.len > 0) try self.keyOf(args[0]) else "undefined";
+            const o = try self.toObject(recv);
             return Value{ .boolean = try self.objectProtoPropertyIsEnumerable(o, k) };
         }
+        const o = try self.toObject(recv);
         if (eq(name, "isPrototypeOf")) {
             var cur: ?*value.Object = if (args.len > 0 and args[0] == .object) args[0].object.proto else null;
             while (cur) |c| {
@@ -21140,13 +21142,9 @@ fn protoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            // Every Object/Array/String prototype method routed here begins with
-            // RequireObjectCoercible/ToObject(this), so a null or undefined
-            // receiver is a TypeError (e.g. `Array.prototype.map.call(undefined)`).
-            // `Object.prototype.toString` — the one method that tolerates them —
-            // is installed separately, not through here.
-            if (this == .null or this == .undefined)
-                return self.throwError("TypeError", "Cannot convert undefined or null to object");
+            // Object.prototype methods own their argument/receiver ordering in
+            // objectPrototypeMethod; e.g. hasOwnProperty coerces the key before
+            // ToObject(this), while isPrototypeOf coerces this first.
             if (try self.objectPrototypeMethod(this, name, args)) |r| return r;
             return (try self.builtinMethod(this, name, args)) orelse .undefined;
         }
