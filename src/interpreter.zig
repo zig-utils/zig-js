@@ -7143,23 +7143,6 @@ pub const Interpreter = struct {
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
                     return try self.stringMethod(try self.toStringV(recv), name, args, true);
                 }
-                // `Object.prototype.toString` ("[object Tag]") for a plain object.
-                // Plain objects don't proto-chain to Object.prototype, so the
-                // universal Object.prototype methods are provided here — but a
-                // `toString` defined on the prototype chain (e.g. a class method)
-                // wins, so defer to it when present.
-                if (o.getOwn(name) == null and eq(name, "toString")) {
-                    var p = o.proto;
-                    // A *user* `toString` on the chain wins; `Object.prototype`'s
-                    // own `objectProtoToStringFn` (now reachable since plain objects
-                    // link to it) is NOT an override — fall through to it directly.
-                    const proto_defined = while (p) |pp| : (p = pp.proto) {
-                        if (pp.getOwn(name)) |tv| {
-                            if (!(tv == .object and tv.object.native == objectProtoToStringFn)) break true;
-                        }
-                    } else false;
-                    if (!proto_defined) return try objectProtoToStringFn(@ptrCast(self), recv, args);
-                }
                 // `Object.prototype.valueOf` for an ordinary object returns the
                 // object itself (ToObject(this)). Reached only after the kind
                 // dispatch above (Date/Array/Map/… handle their own valueOf) and

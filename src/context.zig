@@ -3378,6 +3378,63 @@ test "array index property attributes (defineProperty honors writable/enumerable
     )).boolean);
 }
 
+test "array length defineProperty invariants" {
+    try std.testing.expect((try evalIn(
+        \\var a = [];
+        \\Object.defineProperty(a, "length", { writable: false });
+        \\try { Object.defineProperty(a, "length", { writable: true }); false; }
+        \\catch (e) { e instanceof TypeError && Object.getOwnPropertyDescriptor(a, "length").writable === false; }
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var a = [1, 2, 3];
+        \\Object.defineProperty(a, "length", { writable: false });
+        \\try { Object.defineProperty(a, "3", { value: "abc" }); false; }
+        \\catch (e) { e instanceof TypeError && !a.hasOwnProperty("3") && a.length === 3; }
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var a = [1, 2, 3];
+        \\Object.defineProperty(a, "length", { writable: false });
+        \\try { Object.defineProperties(a, { "4": { value: "abc" } }); false; }
+        \\catch (e) { e instanceof TypeError && !a.hasOwnProperty("4") && a.length === 3; }
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var a = [1, 2, 3];
+        \\Object.defineProperty(a, "length", { writable: false });
+        \\Reflect.defineProperty(a, "3", { value: "abc" }) === false &&
+        \\!a.hasOwnProperty("3") && a.length === 3
+    )).boolean);
+}
+
+test "Object defineProperties uses ToObject and proxy ownKeys" {
+    try std.testing.expect((try evalIn(
+        \\var threw = false;
+        \\try { Object.create({}, "hello"); } catch (e) { threw = e instanceof TypeError; }
+        \\threw
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var target = {};
+        \\target.foo = 2;
+        \\target[0] = 3;
+        \\var seen = [];
+        \\var proxy = new Proxy(target, {
+        \\  getOwnPropertyDescriptor: function(_target, key) { seen.push(key); }
+        \\});
+        \\Object.defineProperties({}, proxy);
+        \\seen.length === 2 && seen[0] === "0" && seen[1] === "foo"
+    )).boolean);
+}
+
+test "deleted Object.prototype.toString is not synthesized" {
+    try std.testing.expect((try evalIn(
+        \\var f = Object.prototype.toString;
+        \\var deleted = delete Object.prototype.toString;
+        \\var threw = false;
+        \\try { Object.prototype.toString(); } catch (e) { threw = e instanceof TypeError; }
+        \\Object.defineProperty(Object.prototype, "toString", { value: f, writable: true, configurable: true });
+        \\deleted && threw
+    )).boolean);
+}
+
 test "Object.keys/values/entries enumerate array indices" {
     try expectEvalStr("0,1,2", "Object.keys([10, 20, 30]).join(',')");
     try std.testing.expectEqual(@as(f64, 60), (try evalIn("Object.values([10, 20, 30]).reduce(function(a,b){return a+b;}, 0)")).number);

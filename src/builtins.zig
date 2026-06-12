@@ -1412,6 +1412,11 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             if (e.toBoolean()) return self.throwError("TypeError", "Cannot redefine property: length");
         }
         const cur_writable = if (target.attrs != null) target.getAttr("length").writable else true;
+        if (!cur_writable) {
+            if (d.getOwn("writable")) |w| {
+                if (w.toBoolean()) return false;
+            }
+        }
         // ArraySetLength: reducing `length` deletes elements from the top down; a
         // non-configurable element blocks the deletion — `length` stops just above
         // it and the redefinition fails. `length`/writability are still applied.
@@ -1454,6 +1459,8 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     if (target.is_array and get == null and set == null and !std.mem.eql(u8, key, "length") and target.getAccessor(key) == null) {
         if (arrayIndexOf(key)) |i| {
             if (i <= target.elements.items.len + 1024 and i < (1 << 24)) {
+                const old_len = @max(target.elements.items.len, target.array_len);
+                if (i >= old_len and target.attrs != null and !target.getAttr("length").writable) return false;
                 // A hole within bounds is NOT an existing property — treat it as a
                 // new definition (so attributes default correctly and the hole is
                 // materialized below), not a redefinition of a present element.
@@ -1502,6 +1509,12 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     if (target.is_array and target.getAccessor(key) == null) {
         if (arrayIndexOf(key)) |i| {
             if (i < target.elements.items.len and !target.isHole(i)) arr_elem_index = i;
+        }
+    }
+    if (target.is_array and !std.mem.eql(u8, key, "length")) {
+        if (arrayIndexOf(key)) |i| {
+            const old_len = @max(target.elements.items.len, target.array_len);
+            if (i >= old_len and target.attrs != null and !target.getAttr("length").writable) return false;
         }
     }
     const cur_data = target.getOwn(key) orelse (if (arr_elem_index) |i| target.elements.items[i] else null);
@@ -1624,16 +1637,16 @@ pub fn objectDefineProperties(ctx: *anyopaque, this: Value, args: []const Value)
 /// the shared core of `Object.defineProperties` and `Object.create`'s second
 /// argument. Each value must itself be an object (a property descriptor).
 fn applyProperties(self: *Interpreter, target: *value.Object, props: Value) HostError!void {
-    // ToObject(Properties): null/undefined throw; other primitives box to an
-    // object with no own enumerable properties (a no-op).
     if (props == .null or props == .undefined)
         return self.throwError("TypeError", "Cannot convert undefined or null to object");
-    if (props != .object) return;
+    const props_obj = try self.toObject(props);
     // Snapshot the enumerable own keys, then read each descriptor object via
     // [[Get]] (so an accessor-valued descriptor property runs its getter), per
     // ObjectDefineProperties — not the raw data slot.
-    for (try props.object.enumerableKeys(self.arena)) |k| {
-        const d = try self.getProperty(props, k);
+    for (try self.objectOwnKeysList(props_obj)) |k| {
+        const prop_desc = try objectGetOwnPropertyDescriptor(self, .undefined, &.{ .{ .object = props_obj }, self.keyToValue(k) });
+        if (prop_desc != .object or !completedDescAttr(prop_desc.object).enumerable) continue;
+        const d = try self.getProperty(.{ .object = props_obj }, k);
         if (!isRealObject(d)) return self.throwError("TypeError", "Property description must be an object");
         try defineOne(self, target, k, d.object);
     }
