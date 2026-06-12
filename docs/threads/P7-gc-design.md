@@ -145,11 +145,42 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   (`interpreter.zig` `eval`, `vm.zig` `execLoop`) and on allocation when the
   heap exceeds a growth threshold (e.g. 2× live-after-last-collect).
 
+## The library exists
+
+`zig-gc` is scaffolded as a sibling at `../zig-gc` (its own git repo, MIT,
+no deps): `gc.Heap(comptime Binding)` — a working precise non-moving mark-sweep
+collector with `create`/`collect`/`maybeCollect`/`deinit`, a `Visitor` with
+`mark`/`markWeak`, the `Binding` contract (`Kind` + `traceRoots`/`trace`/
+`finalize`), 16-byte-aligned single-word cell headers, and a 2×-live growth
+policy. `zig build test` is green (leak-checked: cycles survive via a root,
+garbage is swept, weak edges clear before their target is freed, finalizers
+run). This is the M1 mechanism; what remains is the zig-js *binding*.
+
+## Consuming it (M0 wiring — turnkey)
+
+Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
+(it carries the root set and the side-cell type definitions the binding traces):
+
+1. **Dependency.** `build.zig.zon`: add `.zig_gc = .{ .path = "../zig-gc" }`.
+   `build.zig`: `const gc_mod = b.dependency("zig_gc", .{...}).module("gc");`
+   and add `.{ .name = "gc", .module = gc_mod }` to every module's `imports`
+   (mirrors the existing `regex` wiring at `build.zig:7-15`).
+2. **The binding — `src/gc.zig`.** Define `Kind` (the cell taxonomy table
+   above), `traceRoots(ctx, v)` (the root set below), `trace(cell, kind, v)`
+   (the per-kind reference list above), `finalize(ctx, cell, kind)` (release
+   SAB retains / free non-shared `ArrayBufferData` bytes). `ctx` is `*Context`.
+3. **`Context` holds the heap.** Add `gc: gc.Heap(GcBinding)` next to
+   `arena_state` (`context.zig:22`); `create` inits it, `destroy` `deinit`s it.
+   Add the handle table for C-API `Boxed` roots.
+4. **M0 stays disabled by default.** Route `arena()`-style allocation through a
+   shim that still bump-allocates until M1 flips `create` on — so M0 is
+   byte-identical on test262 and the wiring lands independently of the collector
+   going live.
+
 ## Staging plan
 
-- **M0 — interface, no behavior change.** Land `zig-gc` skeleton + wire a
-  `GcAllocator` in zig-js that still bump-allocates from the arena (GC disabled).
-  Add the `gc_header` field and `Kind` tags. test262 byte-identical.
+- **M0 — interface, no behavior change.** The wiring above; GC disabled (still
+  arena-bump-allocating). Add the `gc_header`/`Kind` tags. test262 byte-identical.
 - **M1 — single-threaded mark-sweep under the GIL.** Implement `traceRoots` +
   per-`Kind` `trace` + the handle table; enable `collect`. **Deliverable: weak
   refs/finalizers become correct; test262 stays green; long-running contexts
