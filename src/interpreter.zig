@@ -3845,6 +3845,35 @@ pub const Interpreter = struct {
         }
     }
 
+    fn stringSliceUtf16(self: *Interpreter, s: []const u8, start: usize, end: usize) EvalError![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var units: usize = 0;
+        var i: usize = 0;
+        while (i < s.len and units < end) {
+            const seq_len = jsStringSeqLen(s, i);
+            const seq_units = utf16LenOfSeq(s, i);
+            const seq_start = units;
+            const seq_end = units + seq_units;
+            if (seq_end <= start) {
+                units = seq_end;
+                i += seq_len;
+                continue;
+            }
+            if (start <= seq_start and seq_end <= end) {
+                try buf.appendSlice(self.arena, s[i .. i + seq_len]);
+            } else {
+                var u = @max(start, seq_start);
+                while (u < @min(end, seq_end)) : (u += 1) {
+                    const cu = stringCodeUnitAt(s, u) orelse break;
+                    try buf.appendSlice(self.arena, try self.stringFromCodeUnit(cu.unit));
+                }
+            }
+            units = seq_end;
+            i += seq_len;
+        }
+        return buf.toOwnedSlice(self.arena);
+    }
+
     fn stringPosition(self: *Interpreter, s: []const u8, v: Value) EvalError!?usize {
         const n = try self.toNumberV(v);
         const pos = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
@@ -8379,9 +8408,10 @@ pub const Interpreter = struct {
             return Value{ .boolean = std.mem.endsWith(u8, s[0..end_pos], sub) };
         }
         if (eq(name, "slice")) {
-            const start = try relIndex(self, arg0(args), s.len, 0);
-            const end = try relIndex(self, arg(args, 1), s.len, @floatFromInt(s.len));
-            return Value{ .string = if (start < end) try self.arena.dupe(u8, s[start..end]) else "" };
+            const len = utf16LenOfString(s);
+            const start = try relIndex(self, arg0(args), len, 0);
+            const end = try relIndex(self, arg(args, 1), len, @floatFromInt(len));
+            return Value{ .string = if (start < end) try self.stringSliceUtf16(s, start, end) else "" };
         }
         if (eq(name, "substring")) {
             const len = utf16LenOfString(s);
@@ -8392,9 +8422,7 @@ pub const Interpreter = struct {
                 a0 = b0;
                 b0 = t;
             }
-            const start = byteOffsetForUtf16Index(s, a0);
-            const end = byteOffsetForUtf16Index(s, b0);
-            return Value{ .string = try self.arena.dupe(u8, s[start..end]) };
+            return Value{ .string = try self.stringSliceUtf16(s, a0, b0) };
         }
         if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
             // toLocaleUpperCase delegates to the locale-independent full Unicode
@@ -27189,6 +27217,13 @@ test "interpreter String.prototype methods" {
     try std.testing.expect((try evalSource(a,
         \\"abc".padStart(6, "\uD83D\uDCA9") === "\uD83D\uDCA9\uD83Dabc" &&
         \\"abc".padEnd(6, "\uD83D\uDCA9") === "abc\uD83D\uDCA9\uD83D"
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let s = String.fromCodePoint(0x1F4A9);
+        \\s.slice(0, 1) === "\uD83D" &&
+        \\s.slice(1) === "\uDCA9" &&
+        \\s.slice(0, 2) === s &&
+        \\s.substring(0, 1) === "\uD83D"
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let o = Object.create(null);
