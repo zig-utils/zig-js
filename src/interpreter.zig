@@ -20520,8 +20520,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         try string_proto.setAttr(a, "trimRight", .{ .enumerable = false, .configurable = true, .writable = true });
     }
     // `toString`/`valueOf` brand-check (a String primitive or wrapper), not ToString.
-    try setNative(a, root_shape, string_proto, "toString", 0, stringValueMethod);
-    try setNative(a, root_shape, string_proto, "valueOf", 0, stringValueMethod);
+    try setNativeWithData(a, root_shape, string_proto, "toString", 0, stringValueMethod, @ptrCast(env));
+    try setNativeWithData(a, root_shape, string_proto, "valueOf", 0, stringValueMethod, @ptrCast(env));
     try string_ns.setOwn(a, root_shape, "prototype", .{ .object = string_proto });
     try string_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, string_proto, string_ns);
@@ -21211,10 +21211,21 @@ fn stringValueMethod(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const s: []const u8 = switch (this) {
         .string => |str| str,
-        .object => |o| if (o.prim != null and o.prim.? == .string) o.prim.?.string else return self.throwError("TypeError", "String.prototype.toString/valueOf called on a non-String"),
-        else => return self.throwError("TypeError", "String.prototype.toString/valueOf called on a non-String"),
+        .object => |o| if (o.prim != null and o.prim.? == .string) o.prim.?.string else return throwStringValueTypeError(self),
+        else => return throwStringValueTypeError(self),
     };
     return .{ .string = s };
+}
+
+fn throwStringValueTypeError(self: *Interpreter) EvalError {
+    const message = "String.prototype.toString/valueOf called on a non-String";
+    if (self.active_native) |callee| {
+        if (callee.private_data) |pd| {
+            const realm: *Environment = @ptrCast(@alignCast(pd));
+            return throwErrorInRealm(self, realm, "TypeError", message);
+        }
+    }
+    return self.throwError("TypeError", message);
 }
 
 /// A `Function.prototype` method (`call`/`apply`/`bind`/`toString`) that first
