@@ -9174,6 +9174,7 @@ pub const Interpreter = struct {
         var user_tried: u8 = 0;
         var builtin_wrapper_value_of = false;
         var builtin_to_string = false;
+        var builtin_to_string_method: ?Value = null;
         outer: for (names) |m| {
             // OrdinaryToPrimitive resolves each method via `Get(O, name)`, so an
             // *accessor* `valueOf`/`toString` getter is run (and its abrupt
@@ -9202,7 +9203,10 @@ pub const Interpreter = struct {
                     // in the hint order — so stop here rather than trying a later
                     // user `valueOf` (e.g. String({ valueOf() {…} }) is
                     // "[object Object]", not the valueOf result).
-                    else if (std.mem.eql(u8, m, "toString") and fv.isCallable()) builtin_to_string = true;
+                    else if (std.mem.eql(u8, m, "toString") and fv.isCallable()) {
+                        builtin_to_string = true;
+                        builtin_to_string_method = fv;
+                    }
                     break; // native thunk or non-callable shadow → built-in coercion
                 }
             }
@@ -9261,7 +9265,11 @@ pub const Interpreter = struct {
         const ts_shadowed = (own_ts != null and !own_ts.?.isCallable()) or userMethodOf(o, "toString") != null;
         if (ts_shadowed) return self.throwError("TypeError", "Cannot convert object to primitive value");
         if (!builtin_to_string) return self.throwError("TypeError", "Cannot convert object to primitive value");
-        return .{ .string = try v.toString(self.arena) };
+        if (builtin_to_string_method) |m| {
+            const res = try self.callValueWithThis(m, &.{}, v);
+            if (res != .object or res.object.is_symbol or res.object.is_bigint) return res;
+        }
+        return self.throwError("TypeError", "Cannot convert object to primitive value");
     }
 
     /// A *user-defined* `name` method on `o`'s own properties or prototype chain
@@ -27231,6 +27239,11 @@ test "interpreter String.prototype methods" {
         \\try { "".charAt(o); } catch (e) { ok = e instanceof TypeError; }
         \\ok = ok && (() => { try { "".charCodeAt(o); } catch (e) { return e instanceof TypeError; } return false; })();
         \\ok
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\let args = (function(){ return arguments; })(1, 2, true);
+        \\String.prototype.trim.call(/test/) === "/test/" &&
+        \\String.prototype.trim.call(args) === "[object Arguments]"
     )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let lo = '\uD834';
