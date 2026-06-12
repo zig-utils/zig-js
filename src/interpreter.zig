@@ -3663,14 +3663,16 @@ pub const Interpreter = struct {
             const flags = o.regex_flags;
             const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
             const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
+            const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+            const search_input = try self.regexpSearchInput(input, unicode);
             const start_units = if (global or sticky) li else 0;
             if (start_units > utf16LenOfString(input)) {
                 if (global or sticky) try self.setRegExpLastIndex(o, 0);
                 return Value.null;
             }
-            const start = byteOffsetForUtf16Index(input, start_units);
+            const start = byteOffsetForUtf16Index(search_input, start_units);
             var re = try self.compileRegex(o);
-            const found = re.findFrom(input, start) catch null;
+            const found = re.findFrom(search_input, start) catch null;
             if (found) |m| {
                 // Sticky matches must begin exactly at lastIndex.
                 if (sticky and m.start != start) {
@@ -3679,18 +3681,18 @@ pub const Interpreter = struct {
                 }
                 const mstart = m.start;
                 const mend = m.end;
-                if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(input, mend)));
-                recordRegexpLegacy(self, input, mstart, mend, m.captures);
+                if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, mend)));
+                recordRegexpLegacy(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
                 try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
                 for (0..m.captures.len) |i| try arr.object.elements.append(self.arena, try self.captureVal(m, i));
-                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(utf16IndexForByteOffset(input, mstart)) });
+                try self.setProp(arr.object, "index", .{ .number = @floatFromInt(utf16IndexForByteOffset(search_input, mstart)) });
                 try self.setProp(arr.object, "input", .{ .string = input });
                 const groups = try self.regexGroups(&re, m);
                 try self.setProp(arr.object, "groups", if (groups) |g| .{ .object = g } else .undefined);
                 // The `d` (hasIndices) flag adds a parallel match-indices array.
                 if (std.mem.indexOfScalar(u8, flags, 'd') != null)
-                    try self.setProp(arr.object, "indices", .{ .object = try self.makeIndicesArray(&re, m, input, 0) });
+                    try self.setProp(arr.object, "indices", .{ .object = try self.makeIndicesArray(&re, m, search_input, 0) });
                 return arr;
             }
             if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -3792,6 +3794,30 @@ pub const Interpreter = struct {
         try buf.append(a, @intCast(0xE0 | (cu >> 12)));
         try buf.append(a, @intCast(0x80 | ((cu >> 6) & 0x3F)));
         try buf.append(a, @intCast(0x80 | (cu & 0x3F)));
+    }
+
+    fn regexpSearchInput(self: *Interpreter, input: []const u8, unicode: bool) ![]const u8 {
+        if (unicode) return input;
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var changed = false;
+        var i: usize = 0;
+        while (i < input.len) {
+            const seq_len = utf8SeqLen(input, i);
+            if (seq_len == 4) {
+                const cp = std.unicode.utf8Decode(input[i .. i + seq_len]) catch 0;
+                if (cp > 0xFFFF) {
+                    const u = cp - 0x10000;
+                    try appendWtf8CodeUnit(&out, self.arena, @intCast(0xD800 + (u >> 10)));
+                    try appendWtf8CodeUnit(&out, self.arena, @intCast(0xDC00 + (u & 0x3FF)));
+                    changed = true;
+                    i += seq_len;
+                    continue;
+                }
+            }
+            try out.appendSlice(self.arena, input[i .. i + seq_len]);
+            i += seq_len;
+        }
+        return if (changed) out.items else input;
     }
 
     fn appendUtf16Slice(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, start: usize, end: usize) !void {
@@ -3931,7 +3957,7 @@ pub const Interpreter = struct {
         const replace_string = if (functional_replace) "" else try self.toStringV(replace_value);
         const flags = try self.toStringV(try self.getProperty(rx, "flags"));
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
-        const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+        const full_unicode = global and (try self.getProperty(rx, "unicode")).toBoolean();
 
         if (global) try self.setRegExpLikeLastIndex(rx, 0);
 

@@ -1183,6 +1183,7 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
         \\var target = "---\uD83D\uDC38";
         \\var rx = {
         \\  get flags() { log += "flags,"; return "gu"; },
+        \\  unicode: true,
         \\  get lastIndex() { return [, 3, 4][n]; },
         \\  set lastIndex(v) {
         \\    log += "set:" + v + ",";
@@ -1234,6 +1235,12 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
         \\};
         \\rx5[Symbol.replace]("", "") === "" &&
         \\  rx5.lastIndex === Math.pow(2, 53)
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var r = /^|\udf06/g;
+        \\Object.defineProperty(r, "unicode", { writable: true });
+        \\r.unicode = undefined;
+        \\r[Symbol.replace]("\ud834\udf06", "XXX") === "XXX\ud834XXX"
     )).boolean);
 }
 
