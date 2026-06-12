@@ -3765,6 +3765,70 @@ pub const Interpreter = struct {
         return units;
     }
 
+    const StringCodeUnit = struct {
+        unit: u16,
+        astral: ?u21 = null,
+    };
+
+    fn stringCodeUnitAt(s: []const u8, index: usize) ?StringCodeUnit {
+        var units: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) {
+            if (wtf8SurrogateAt(s, i)) |cp| {
+                if (units == index) return .{ .unit = @intCast(cp) };
+                units += 1;
+                i += 3;
+                continue;
+            }
+
+            const seq_len = utf8SeqLen(s, i);
+            if (seq_len == 4 and i + seq_len <= s.len) {
+                if (std.unicode.utf8Decode(s[i .. i + seq_len])) |cp| {
+                    if (cp > 0xFFFF) {
+                        const u = cp - 0x10000;
+                        if (units == index) return .{ .unit = @intCast(0xD800 + (u >> 10)), .astral = cp };
+                        if (units + 1 == index) return .{ .unit = @intCast(0xDC00 + (u & 0x3FF)) };
+                        units += 2;
+                        i += seq_len;
+                        continue;
+                    }
+                } else |_| {}
+            }
+
+            const cp = if (seq_len > 1 and i + seq_len <= s.len)
+                std.unicode.utf8Decode(s[i .. i + seq_len]) catch @as(u21, s[i])
+            else
+                @as(u21, s[i]);
+            if (units == index) return .{ .unit = @intCast(cp & 0xFFFF) };
+            units += 1;
+            i += seq_len;
+        }
+        return null;
+    }
+
+    fn stringFromCodeUnit(self: *Interpreter, unit: u16) EvalError![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        if (unit >= 0xD800 and unit <= 0xDFFF) {
+            try appendWtf8CodeUnit(&buf, self.arena, unit);
+        } else {
+            var tmp: [3]u8 = undefined;
+            const n = std.unicode.utf8Encode(@intCast(unit), &tmp) catch 1;
+            if (n == 1 and unit > 0x7F) {
+                try appendWtf8CodeUnit(&buf, self.arena, unit);
+            } else {
+                try buf.appendSlice(self.arena, tmp[0..n]);
+            }
+        }
+        return buf.toOwnedSlice(self.arena);
+    }
+
+    fn stringPosition(self: *Interpreter, s: []const u8, v: Value) EvalError!?usize {
+        const n = try self.toNumberV(v);
+        const pos = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
+        if (pos < 0 or pos >= @as(f64, @floatFromInt(utf16LenOfString(s)))) return null;
+        return @intFromFloat(pos);
+    }
+
     fn byteOffsetForUtf16Index(s: []const u8, index: usize) usize {
         var units: usize = 0;
         var i: usize = 0;
@@ -8246,12 +8310,14 @@ pub const Interpreter = struct {
             }
         }
         if (eq(name, "charAt")) {
-            const i = try relIndex(self, arg0(args), s.len, 0);
-            return if (i < s.len) Value{ .string = try self.arena.dupe(u8, s[i .. i + 1]) } else Value{ .string = "" };
+            const pos = try self.stringPosition(s, arg0(args)) orelse return Value{ .string = "" };
+            const cu = stringCodeUnitAt(s, pos) orelse return Value{ .string = "" };
+            return Value{ .string = try self.stringFromCodeUnit(cu.unit) };
         }
         if (eq(name, "charCodeAt")) {
-            const i = toLen(try self.toNumberV(arg0(args)));
-            return if (i < s.len) Value{ .number = @floatFromInt(s[i]) } else Value{ .number = std.math.nan(f64) };
+            const pos = try self.stringPosition(s, arg0(args)) orelse return Value{ .number = std.math.nan(f64) };
+            const cu = stringCodeUnitAt(s, pos) orelse return Value{ .number = std.math.nan(f64) };
+            return Value{ .number = @floatFromInt(cu.unit) };
         }
         if (eq(name, "indexOf")) {
             // ToString(searchString) precedes ToInteger(position), and each runs
@@ -8381,11 +8447,13 @@ pub const Interpreter = struct {
             const n = try self.toNumberV(arg0(args));
             const fl = if (std.math.isNan(n)) 0 else @trunc(n);
             if (std.math.isInf(fl)) return Value.undefined;
-            const slen_f = @as(f64, @floatFromInt(s.len));
+            const slen = utf16LenOfString(s);
+            const slen_f = @as(f64, @floatFromInt(slen));
             if (fl < -slen_f or fl >= slen_f) return Value.undefined;
-            const idx: i64 = if (fl < 0) @as(i64, @intCast(s.len)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
-            if (idx < 0 or idx >= s.len) return Value.undefined;
-            return Value{ .string = try self.arena.dupe(u8, s[@intCast(idx) .. @as(usize, @intCast(idx)) + 1]) };
+            const idx: i64 = if (fl < 0) @as(i64, @intCast(slen)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
+            if (idx < 0 or idx >= slen) return Value.undefined;
+            const cu = stringCodeUnitAt(s, @intCast(idx)) orelse return Value.undefined;
+            return Value{ .string = try self.stringFromCodeUnit(cu.unit) };
         }
         if (eq(name, "trimStart")) return Value{ .string = jsTrim(s, true, false) };
         if (eq(name, "trimEnd")) return Value{ .string = jsTrim(s, false, true) };
@@ -8510,16 +8578,16 @@ pub const Interpreter = struct {
         if (eq(name, "codePointAt")) {
             // ToIntegerOrInfinity(pos): a position outside [0, len) yields undefined
             // (so a negative position is undefined, not clamped to index 0).
-            const pos_raw = try self.toNumberV(arg0(args));
-            const pos: f64 = if (std.math.isNan(pos_raw)) 0 else @trunc(pos_raw);
-            if (pos < 0 or pos >= @as(f64, @floatFromInt(s.len))) return Value.undefined;
-            const i: usize = @intFromFloat(pos);
-            // Decode the UTF-8 code point at byte offset `i` (a lone/invalid byte
-            // reports its own value, as a lone code unit would).
-            const n = utf8SeqLen(s, i);
-            if (n == 1) return Value{ .number = @floatFromInt(s[i]) };
-            const cp = std.unicode.utf8Decode(s[i .. i + n]) catch return Value{ .number = @floatFromInt(s[i]) };
-            return Value{ .number = @floatFromInt(cp) };
+            const pos = try self.stringPosition(s, arg0(args)) orelse return Value.undefined;
+            const cu = stringCodeUnitAt(s, pos) orelse return Value.undefined;
+            if (cu.astral) |cp| return Value{ .number = @floatFromInt(cp) };
+            if (isHighSurrogate(cu.unit)) {
+                if (stringCodeUnitAt(s, pos + 1)) |next| if (isLowSurrogate(next.unit)) {
+                    const cp: u21 = 0x10000 + ((@as(u21, cu.unit) - 0xD800) << 10) + (@as(u21, next.unit) - 0xDC00);
+                    return Value{ .number = @floatFromInt(cp) };
+                };
+            }
+            return Value{ .number = @floatFromInt(cu.unit) };
         }
         if (eq(name, "lastIndexOf")) {
             // ToString(searchString) then ToNumber(position): a NaN position
@@ -27057,6 +27125,18 @@ test "interpreter String.prototype methods" {
     try std.testing.expectEqualStrings("abab", (try evalSource(a, "'ab'.repeat(2)")).string);
     try std.testing.expectEqualStrings("a,b,c", (try evalSource(a, "'' + 'a-b-c'.split('-')")).string);
     try std.testing.expectEqualStrings("hi", (try evalSource(a, "'  hi  '.trim()")).string);
+    try std.testing.expect((try evalSource(a,
+        \\let s = String.fromCodePoint(0x1F4A9);
+        \\s.charCodeAt(0) === 0xD83D &&
+        \\s.charCodeAt(1) === 0xDCA9 &&
+        \\s.codePointAt(0) === 0x1F4A9 &&
+        \\s.codePointAt(1) === 0xDCA9 &&
+        \\s.charAt(0) === "\uD83D" &&
+        \\s.at(1) === "\uDCA9" &&
+        \\"abc".charAt(-1) === "" &&
+        \\Number.isNaN("abc".charCodeAt(-1)) &&
+        \\String.fromCharCode(-1).charCodeAt(0) === 65535
+    )).boolean);
     try std.testing.expect((try evalSource(a,
         \\let lo = '\uD834';
         \\let hi = '\uDF06';
