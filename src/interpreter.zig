@@ -7099,7 +7099,7 @@ pub const Interpreter = struct {
                 // methods take precedence over the generic Array-like coercion for
                 // names both share (slice/indexOf/lastIndexOf/includes/concat/at).
                 if (o.prim != null and o.prim.? == .string and o.getOwn(name) == null) {
-                    if (try self.stringMethod(o.prim.?.string, name, args)) |r| return r;
+                    if (try self.stringMethod(o.prim.?.string, name, args, true)) |r| return r;
                 }
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
                 // Generic Array.prototype methods on an array-like `this`
@@ -7110,7 +7110,7 @@ pub const Interpreter = struct {
                 // Generic String.prototype methods coerce `this` to string
                 // (`String.prototype.split.call(obj)`).
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
-                    return try self.stringMethod(try self.toStringV(recv), name, args);
+                    return try self.stringMethod(try self.toStringV(recv), name, args, true);
                 }
                 // `Object.prototype.toString` ("[object Tag]") for a plain object.
                 // Plain objects don't proto-chain to Object.prototype, so the
@@ -7143,14 +7143,14 @@ pub const Interpreter = struct {
                     }
                 }
             },
-            .string => |s| return try self.stringMethod(s, name, args),
+            .string => |s| return try self.stringMethod(s, name, args, true),
             .number => |n| {
                 if (try self.numberMethod(n, name, args)) |r| return r;
-                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args);
+                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true);
             },
             .boolean => |b| {
                 if (try self.booleanMethod(b, name, args)) |r| return r;
-                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args);
+                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true);
             },
             else => {},
         }
@@ -8313,6 +8313,20 @@ pub const Interpreter = struct {
         return v.object.is_regex;
     }
 
+    fn stringProtocolDispatch(self: *Interpreter, name: []const u8, receiver: Value, args: []const Value) EvalError!?Value {
+        const sym = self.stringProtocolSymbol(name) orelse return null;
+        const target = arg0(args);
+        if (!builtins.isRealObject(target)) return null;
+        const key = self.wellKnownSymbolKey(sym) orelse return null;
+        const method = try self.getProperty(target, key);
+        if (method == .undefined or method == .null) return null;
+        if (!method.isCallable()) return self.throwError("TypeError", "String.prototype protocol method is not callable");
+        var argv: std.ArrayListUnmanaged(Value) = .empty;
+        try argv.append(self.arena, receiver);
+        if (args.len > 1) try argv.appendSlice(self.arena, args[1..]);
+        return try self.callValueWithThis(method, argv.items, target);
+    }
+
     /// ToIntegerOrInfinity(v) clamped into `[0, len]` — the position argument of
     /// `includes`/`startsWith`/`endsWith` (a Symbol/BigInt throws via toNumberV).
     fn clampPos(self: *Interpreter, v: Value, len: usize) EvalError!usize {
@@ -8323,7 +8337,7 @@ pub const Interpreter = struct {
         return @intFromFloat(@trunc(n));
     }
 
-    fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value) EvalError!?Value {
+    fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool) EvalError!?Value {
         if (eq(name, "valueOf") or eq(name, "toString")) return Value{ .string = s };
         // String.prototype.replaceAll: a RegExp searchValue must be global, and an
         // object searchValue's @@replace (if any) is used — checked before the
@@ -8355,21 +8369,7 @@ pub const Interpreter = struct {
         // `Symbol.*` method and, if it is callable, delegate to it (with `this` =
         // that argument and the string as the first parameter). RegExp instances
         // use the protocol for methods whose spec algorithms are implemented.
-        if (self.stringProtocolSymbol(name)) |sym| {
-            const sep = arg0(args);
-            const allow_regex_protocol = sep == .object and sep.object.is_regex and (eq(name, "replace") or eq(name, "split"));
-            if (sep == .object and !sep.object.is_symbol and (!sep.object.is_regex or allow_regex_protocol)) {
-                if (self.wellKnownSymbolKey(sym)) |key| {
-                    const method = try self.getProperty(sep, key);
-                    if (method == .object and method.object.isCallableObject()) {
-                        var argv: std.ArrayListUnmanaged(Value) = .empty;
-                        try argv.append(self.arena, .{ .string = s });
-                        if (args.len > 1) try argv.appendSlice(self.arena, args[1..]);
-                        return try self.callValueWithThis(method, argv.items, sep);
-                    }
-                }
-            }
-        }
+        if (check_protocol) if (try self.stringProtocolDispatch(name, .{ .string = s }, args)) |r| return r;
         if (eq(name, "charAt")) {
             const pos = try self.stringPosition(s, arg0(args)) orelse return Value{ .string = "" };
             const cu = stringCodeUnitAt(s, pos) orelse return Value{ .string = "" };
@@ -8452,18 +8452,21 @@ pub const Interpreter = struct {
         if (eq(name, "split")) {
             const result = try self.newArray();
             const out = &result.object.elements;
-            // `limit` (ToUint32; absent → effectively unbounded). limit 0 → [].
-            const lim: usize = if (args.len > 1 and args[1] != .undefined) args[1].toUint32() else std.math.maxInt(u32);
-            if (lim == 0) return result;
             // No separator → the whole string as the sole element.
             if (args.len == 0 or args[0] == .undefined) {
+                const lim: usize = if (args.len > 1 and args[1] != .undefined) value.Value.uint32FromF64(try self.toNumberV(args[1])) else std.math.maxInt(u32);
+                if (lim == 0) return result;
                 try out.append(self.arena, .{ .string = try self.arena.dupe(u8, s) });
                 return result;
             }
+            // `limit` (ToUint32; absent -> effectively unbounded) is converted
+            // before the separator's ToString, but `limit === 0` is checked after.
+            const lim: usize = if (args.len > 1 and args[1] != .undefined) value.Value.uint32FromF64(try self.toNumberV(args[1])) else std.math.maxInt(u32);
             // Regex separator: split on each match, inserting capture groups, per
             // the String.prototype.split(@@split) algorithm.
             if (args[0] == .object and args[0].object.is_regex) {
                 var re = try self.compileRegex(args[0].object);
+                if (lim == 0) return result;
                 if (s.len == 0) {
                     // Empty input: [""] unless the pattern matches the empty string.
                     if ((re.find(s) catch null) == null) try out.append(self.arena, .{ .string = s });
@@ -8491,7 +8494,8 @@ pub const Interpreter = struct {
                 try out.append(self.arena, .{ .string = try self.arena.dupe(u8, s[p..]) });
                 return result;
             }
-            const sep = try args[0].toString(self.arena);
+            const sep = try self.toStringV(args[0]);
+            if (lim == 0) return result;
             if (sep.len == 0) {
                 for (s) |c| {
                     if (out.items.len >= lim) return result;
@@ -8744,27 +8748,19 @@ pub const Interpreter = struct {
         }
         if (eq(name, "search")) {
             const re_obj = try self.toRegexObject(arg0(args));
-            var re = try self.compileRegex(re_obj);
-            if (re.find(s) catch null) |m| return Value{ .number = @floatFromInt(m.start) };
-            return Value{ .number = -1 };
+            if (self.wellKnownSymbolKey("search")) |key| {
+                const method = try self.getProperty(.{ .object = re_obj }, key);
+                return try self.callValueWithThis(method, &.{.{ .string = s }}, .{ .object = re_obj });
+            }
+            return try self.regexpSearch(.{ .object = re_obj }, s);
         }
         if (eq(name, "match")) {
             const re_obj = try self.toRegexObject(arg0(args));
-            const global = std.mem.indexOfScalar(u8, re_obj.regex_flags, 'g') != null;
-            var re = try self.compileRegex(re_obj);
-            if (global) {
-                // Global match: an array of all matched substrings (or null).
-                const arr = try self.newArray();
-                var rest = s;
-                while (re.find(rest) catch null) |m| {
-                    try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, m.slice) });
-                    if (m.end <= m.start) break; // avoid an infinite loop on empty matches
-                    rest = rest[m.end..];
-                }
-                return if (arr.object.elements.items.len == 0) Value.null else arr;
+            if (self.wellKnownSymbolKey("match")) |key| {
+                const method = try self.getProperty(.{ .object = re_obj }, key);
+                return try self.callValueWithThis(method, &.{.{ .string = s }}, .{ .object = re_obj });
             }
-            // Non-global: defer to RegExp.prototype.exec (full result shape).
-            return (try self.regexMethod(re_obj, "exec", &.{.{ .string = s }})).?;
+            return try self.regexpMatch(.{ .object = re_obj }, s);
         }
         if (eq(name, "matchAll")) {
             // String.prototype.matchAll(regexp): dispatch to regexp[@@matchAll]
@@ -8813,7 +8809,7 @@ pub const Interpreter = struct {
     /// becomes `new RegExp(String(v))`.
     fn toRegexObject(self: *Interpreter, v: Value) EvalError!*value.Object {
         if (v == .object and v.object.is_regex) return v.object;
-        const pat = if (v == .undefined) "" else try v.toString(self.arena);
+        const pat = if (v == .undefined) "" else try self.toStringV(v);
         return (try self.makeRegex(pat, "")).object;
     }
 
@@ -21197,8 +21193,9 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this == .null or this == .undefined)
                 return self.throwError("TypeError", "String.prototype." ++ name ++ " called on null or undefined");
+            if (try self.stringProtocolDispatch(name, this, args)) |r| return r;
             const s = try self.toStringV(this);
-            return (try self.stringMethod(s, name, args)) orelse .undefined;
+            return (try self.stringMethod(s, name, args, false)) orelse .undefined;
         }
     }.call;
 }
@@ -21668,7 +21665,7 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, op, "matchAll")) {
                 return try self.regexpMatchAll(this, str);
             }
-            return (try self.stringMethod(str, op, &.{this})) orelse .undefined;
+            return (try self.stringMethod(str, op, &.{this}, false)) orelse .undefined;
         }
     }.call;
 }
