@@ -1021,15 +1021,22 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
             .return_ => {
                 // Run an enclosing finally if any; else the generator returns.
                 var fin: ?u32 = null;
-                while (g.exec.handlers.items.len > 0) {
-                    const h = g.exec.handlers.pop().?;
+                var keep_handlers: usize = g.exec.handlers.items.len;
+                var stack_depth: u32 = 0;
+                var i = g.exec.handlers.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const h = g.exec.handlers.items[i];
                     if (h.finally_pc != Handler.none) {
-                        g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
                         fin = h.finally_pc;
+                        keep_handlers = i;
+                        stack_depth = h.stack_depth;
                         break;
                     }
                 }
                 if (fin) |fpc| {
+                    g.exec.handlers.shrinkRetainingCapacity(keep_handlers);
+                    g.exec.stack.shrinkRetainingCapacity(stack_depth);
                     try g.exec.stack.append(vm.arena, val);
                     try g.exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
                     g.exec.ip = fpc;
@@ -1106,14 +1113,24 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
             // AsyncGeneratorAwaitReturn: await the return value, then resolve the
             // request as a done result (the front request stays queued until the
             // await callback settles it).
+            const can_resume_abrupt = g.started and !g.done;
+            const wrapped = interp.promiseResolveValue(vm, v) catch |err| {
+                if (err != error.Throw) return err;
+                const reason = vm.exception;
+                vm.exception = .undefined;
+                if (can_resume_abrupt) return agStep(vm, g, .throw_, reason);
+                g.done = true;
+                try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), reason);
+                _ = g.requests.orderedRemove(0);
+                try agDrainDone(vm, g);
+                return;
+            };
             g.done = true;
-            const ap = try promise.newPromise(vm);
-            try promise.resolve(vm, @ptrCast(@alignCast(ap.promise.?)), v);
             const onf = try vm.arena.create(value.Object);
             onf.* = .{ .native = agReturnFulfill, .private_data = @ptrCast(g) };
             const onr = try vm.arena.create(value.Object);
             onr.* = .{ .native = agReturnReject, .private_data = @ptrCast(g) };
-            _ = try promise.then(vm, @ptrCast(@alignCast(ap.promise.?)), .{ .object = onf }, .{ .object = onr });
+            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.object.promise.?)), .{ .object = onf }, .{ .object = onr });
         },
         .threw => |e| {
             g.done = true;
@@ -1131,6 +1148,43 @@ fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
     try agStep(vm, g, req.kind, req.value);
 }
 
+const AgDoneReturn = struct {
+    result: *value.Object,
+};
+
+fn agDoneReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const data: *AgDoneReturn = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try promise.resolve(vm, @ptrCast(@alignCast(data.result.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else .undefined, true));
+    return .undefined;
+}
+
+fn agDoneReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const vm: *Interpreter = @ptrCast(@alignCast(ctx));
+    const data: *AgDoneReturn = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try promise.reject(vm, @ptrCast(@alignCast(data.result.promise.?)), if (args.len > 0) args[0] else .undefined);
+    return .undefined;
+}
+
+fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value_v: Value) EvalError!void {
+    const wrapped = interp.promiseResolveValue(vm, value_v) catch |err| {
+        if (err != error.Throw) return err;
+        const reason = vm.exception;
+        vm.exception = .undefined;
+        try promise.reject(vm, @ptrCast(@alignCast(result.promise.?)), reason);
+        return;
+    };
+    const data = try vm.arena.create(AgDoneReturn);
+    data.* = .{ .result = result };
+    const onf = try vm.arena.create(value.Object);
+    onf.* = .{ .native = agDoneReturnFulfill, .private_data = @ptrCast(data) };
+    const onr = try vm.arena.create(value.Object);
+    onr.* = .{ .native = agDoneReturnReject, .private_data = @ptrCast(data) };
+    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.object.promise.?)), .{ .object = onf }, .{ .object = onr });
+}
+
 /// Once the generator is done, settle every still-queued request: a `next`
 /// yields `{ undefined, done:true }`, a `return` its value, a `throw` rejects.
 fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
@@ -1138,7 +1192,7 @@ fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
         const req = g.requests.orderedRemove(0);
         switch (req.kind) {
             .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promise.?)), req.value),
-            .return_ => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promise.?)), try makeIterResult(vm, req.value, true)),
+            .return_ => try settleAsyncGeneratorDoneReturn(vm, req.result, req.value),
             .send => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promise.?)), try makeIterResult(vm, .undefined, true)),
         }
     }

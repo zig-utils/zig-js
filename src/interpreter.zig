@@ -9581,7 +9581,7 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 /// Internal `PromiseResolve(%Promise%, v)`: `v` itself only when it is a native
 /// promise whose observable `constructor` is the intrinsic Promise, else a fresh
 /// native promise fulfilled with `v` (adopting a thenable).
-fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
+pub fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
     if (promise.promiseOf(v) != null) {
         if (self.env.get("Promise")) |pc| if (pc == .object) {
             const ctor = try self.getProperty(v, "constructor");
