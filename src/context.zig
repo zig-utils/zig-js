@@ -57,6 +57,11 @@ pub const Context = struct {
     gc: ?*GcHeap = null,
     /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
     gc_binding: ?*GcBinding = null,
+    /// C-API `Boxed` handles (`JSValueRef`s) that must survive collection — the
+    /// embedder may hold them across calls. Each `box()` registers its `Boxed`
+    /// here when the GC is on (`*Boxed` aliases `*Value`, its first field);
+    /// `gc.zig`'s `traceRoots` marks them. Off-GC contexts never touch it.
+    c_api_handles: std.ArrayListUnmanaged(*anyopaque) = .empty,
     /// `Thread` records spawned in this realm (the records live in the
     /// arena; the list is gpa-backed). `destroy` waits for all of them.
     js_threads: std.ArrayListUnmanaged(*jsthread.ThreadRecord) = .empty,
@@ -217,6 +222,7 @@ pub const Context = struct {
             self.assertOwnerThread();
         }
         self.js_threads.deinit(self.gpa);
+        self.c_api_handles.deinit(self.gpa);
         self.sab_retains.deinit();
         // Reclaim every GC cell (running finalizers) before the arena and the
         // Context itself go away — GC cells are gpa-backed and disjoint from the

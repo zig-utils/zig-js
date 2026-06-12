@@ -234,16 +234,25 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   GC (no `$262.gc`; one `evaluate` per test), so the conformance number is
   unchanged by design — the win is operational (memory reclamation for
   long-running contexts).
+  *C-API handle table landed:* `box()` registers each `Boxed` (`JSValueRef`) on
+  `Context.c_api_handles` when the GC is on (`*Boxed` aliases `*Value`), and
+  `traceRoots` marks them — so an embedder-held `JSValueRef` survives collection.
+  `JSGarbageCollect` is now a **real** precise mark-sweep (was a documented
+  no-op) when the context opts into the GC; the default arena-backed
+  `JSGlobalContextCreate` is unchanged, so it stays a no-op there. Validated by a
+  C-API test (`JSGarbageCollect` reclaims 500 garbage objects while a held
+  `JSValueRef` keeps its object — `tag === 123` after collection); conformance
+  33/33, threads 29/29, full unit suite leak-checked. (No `JSValueUnprotect`
+  yet, so a boxed object is pinned for the context's life — conservative but
+  sound.)
   *Remaining for the FULL deliverable:* (a) **arbitrary mid-script collection**
   needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
   locals/registers a precise GC can't see) — the quiescent points avoid this; a
-  Boehm-style stack scan with register spill would generalize it. (b) the C-API
-  `Boxed` handle table (so GC + embedder-held `JSValueRef`s across calls is
-  sound; today GC is off under the C-API). (c) migrate cell sub-allocations
-  (`slots`/`elements`/`vars`/reaction lists) to gpa so `finalize` frees them on
-  collect — turning "reclaims cells" into "reclaims everything" (today
-  sub-allocations are reclaimed at teardown, so a collected object's backing
-  buffers persist until `destroy`).
+  Boehm-style stack scan with register spill would generalize it. (b) migrate
+  cell sub-allocations (`slots`/`elements`/`vars`/reaction lists) to gpa so
+  `finalize` frees them on collect — turning "reclaims cells" into "reclaims
+  everything" (today sub-allocations are reclaimed at teardown, so a collected
+  object's backing buffers persist until `destroy`).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per

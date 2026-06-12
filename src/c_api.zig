@@ -85,6 +85,12 @@ fn ctxFrom(ref: JSContextRef) ?*Context {
 fn box(ctx: *Context, v: Value) JSValueRef {
     const b = ctx.arena().create(Boxed) catch return null;
     b.* = .{ .value = v };
+    // When the GC is on, an embedder-held `JSValueRef` must keep its object
+    // alive across collections: register the `Boxed` as a root (`*Boxed` aliases
+    // `*Value` — `value` is its only/first field). Off-GC contexts skip this, so
+    // the default C-API path pays nothing. (No `JSValueUnprotect` yet, so a
+    // boxed object is pinned for the context's life — conservative but sound.)
+    if (ctx.gc != null) ctx.c_api_handles.append(ctx.gpa, @ptrCast(b)) catch {};
     return @ptrCast(b);
 }
 
@@ -104,7 +110,12 @@ fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
 // ---- VM lifecycle ------------------------------------------------------
 
 export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
-    _ = ctx; // Arena-managed for v1; a real GC sweep lands with the heap rework.
+    // Real precise mark-sweep when the context has the GC enabled; a no-op on
+    // the default arena engine. Sound here because the C-API entry point is a
+    // quiescent point (no JS executing) and every live `JSValueRef` is rooted
+    // via the handle table (see `box`).
+    const c = ctxFrom(ctx) orelse return;
+    c.collectGarbage();
 }
 
 export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContextRef {
@@ -610,4 +621,34 @@ test "C-API: worker create, post a number, receive the doubled reply" {
 
     const reply = JSWorkerReceive(w, ctx, 10_000, null) orelse return error.NoReply;
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, reply, null));
+}
+
+test "C-API: JSGarbageCollect reclaims garbage and keeps held JSValueRefs (GC on)" {
+    // A GC-enabled context driven through the C-API (the default
+    // JSGlobalContextCreate stays arena-backed; here we opt in directly).
+    const ctx_obj = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx_obj.destroy();
+    const ctx: JSContextRef = @ptrCast(ctx_obj);
+
+    // Hold a JSValueRef to an object — it is registered as a GC handle.
+    const mk = JSStringCreateWithUTF8CString("({ tag: 123 })") orelse return error.StringInitFailed;
+    defer JSStringRelease(mk);
+    const held = JSEvaluateScript(ctx, mk, null, null, 0, null) orelse return error.EvalFailed;
+
+    // Produce a pile of unreferenced garbage.
+    const junk = JSStringCreateWithUTF8CString("for (let i = 0; i < 500; i++) { ({ a: i, b: [i] }); } 0") orelse return error.StringInitFailed;
+    defer JSStringRelease(junk);
+    _ = JSEvaluateScript(ctx, junk, null, null, 0, null);
+
+    const before = ctx_obj.gc.?.live_cells;
+    JSGarbageCollect(ctx); // real precise collection
+    const after = ctx_obj.gc.?.live_cells;
+    try std.testing.expect(after < before); // garbage reclaimed
+
+    // The held reference survived collection (rooted via the handle table) and
+    // is still usable.
+    const key = JSStringCreateWithUTF8CString("tag") orelse return error.StringInitFailed;
+    defer JSStringRelease(key);
+    const tag = JSObjectGetProperty(ctx, held, key, null) orelse return error.PropFailed;
+    try std.testing.expectEqual(@as(f64, 123), JSValueToNumber(ctx, tag, null));
 }

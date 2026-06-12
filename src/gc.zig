@@ -187,6 +187,12 @@ pub const Binding = struct {
         }
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
         markValue(v, ctx.exception orelse .undefined);
+        // C-API handles: each entry is a `*Boxed` ({ value: Value }), so the
+        // pointer aliases `*Value`. The embedder may hold these `JSValueRef`s.
+        for (ctx.c_api_handles.items) |h| {
+            const vp: *const Value = @ptrCast(@alignCast(h));
+            markValue(v, vp.*);
+        }
     }
 
     pub fn trace(cell: *anyopaque, kind: Kind, v: anytype) void {
