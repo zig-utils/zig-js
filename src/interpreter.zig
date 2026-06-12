@@ -3944,7 +3944,7 @@ pub const Interpreter = struct {
 
             const match = try self.toStringV(try self.getProperty(result, "0"));
             if (match.len == 0) {
-                const li = toLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
+                const li = toArrayLikeLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
                 try self.setRegExpLikeLastIndex(rx, @floatFromInt(advanceStringIndex(s, li, full_unicode)));
             }
         }
