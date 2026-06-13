@@ -194,7 +194,8 @@ pub const Parser = struct {
     fn letDeclAhead(self: *Parser) bool {
         if (!isKeyword(self.cur(), "let")) return false;
         return switch (self.peekKind(1)) {
-            .lbrace, .lbracket => true,
+            .lbrace => self.noNewlineBefore(1),
+            .lbracket => true,
             .identifier => !isReservedWord(self.tokens[self.pos + 1].text),
             else => false,
         };
