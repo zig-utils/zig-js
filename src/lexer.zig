@@ -316,7 +316,7 @@ pub const Lexer = struct {
     /// the previous token does not end an expression.
     fn regexAllowed(self: *Lexer) bool {
         return switch (self.prev_kind) {
-            .number, .string, .template, .regex, .rparen, .rbracket => false,
+            .number, .string, .template, .regex, .private_name, .rparen, .rbracket => false,
             // A `}` that closed an object literal ends an expression (division);
             // one that closed a block does not (regex allowed).
             .rbrace => !self.last_rbrace_object,
@@ -1040,7 +1040,7 @@ fn bracePosIsObject(prev_kind: TokenKind, prev_text: []const u8) bool {
 
 fn isOperandKeyword(text: []const u8) bool {
     const words = [_][]const u8{
-        "return", "typeof", "instanceof", "in",    "of",    "new",
+        "return", "typeof", "instanceof", "in",    "new",
         "delete", "void",   "throw",      "case",  "do",    "else",
         "yield",  "await",  "default",
     };

@@ -2299,7 +2299,7 @@ pub const Interpreter = struct {
             }
             // Class methods/accessors are non-enumerable (writable + configurable),
             // unlike object-literal properties.
-            try home.setAttr(self.arena, key, .{ .writable = true, .enumerable = false, .configurable = true });
+            try home.setAttr(self.arena, key, .{ .writable = !(value.isPrivateKey(key) and m.accessor == .none), .enumerable = false, .configurable = true });
         }
         try self.setProp(proto, "constructor", class_val);
         try proto.setAttr(self.arena, "constructor", .{ .writable = true, .enumerable = false, .configurable = true });
