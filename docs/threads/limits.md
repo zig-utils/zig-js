@@ -17,6 +17,8 @@ but it is not true parallel JavaScript heap mutation.
   agent waiter table.
 - Property-mode `Atomics.wait` / `notify` / `waitAsync` use per-context waiter
   queues on `Gil`.
+- `Atomics.Mutex` and `Atomics.Condition` are proposal-aligned aliases for the
+  shipped `Lock` and `Condition` constructors in threaded contexts.
 
 ## Not Supported Today
 

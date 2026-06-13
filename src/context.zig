@@ -4104,6 +4104,34 @@ test "Lock/Condition/ThreadLocal: mailbox handshake, mutual exclusion, TLS" {
     );
 }
 
+test "Atomics.Mutex and Atomics.Condition alias the shared-realm sync primitives" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\if (Atomics.Mutex !== Lock) throw new Error("Mutex alias");
+        \\if (Atomics.Condition !== Condition) throw new Error("Condition alias");
+        \\const lock = new Atomics.Mutex();
+        \\const cond = new Atomics.Condition();
+        \\if (!(lock instanceof Lock)) throw new Error("mutex instanceof");
+        \\if (!(cond instanceof Condition)) throw new Error("condition instanceof");
+        \\const box = { ready: false, value: 0 };
+        \\const waiter = new Thread(() => {
+        \\  let out = 0;
+        \\  lock.hold(() => {
+        \\    while (!box.ready) cond.wait(lock);
+        \\    out = box.value;
+        \\  });
+        \\  return out;
+        \\});
+        \\lock.hold(() => {
+        \\  box.value = 8;
+        \\  box.ready = true;
+        \\  cond.notify();
+        \\});
+        \\if (waiter.join() !== 8) throw new Error("alias condition");
+    );
+}
+
 test "Atomics on plain properties: semantics, exact counter, wait/notify" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
     defer ctx.destroy();

@@ -339,7 +339,7 @@ fn installSyncAPI(ctx: *Context) !void {
     try interp.setNative(a, rs, lock_proto, "asyncHold", 1, lockAsyncHoldFn);
     try interp.setNativeGetter(a, rs, lock_proto, "locked", lockLockedGetter);
     try setTag(ctx, lock_proto, "Lock");
-    try installCtor(ctx, "Lock", lockCtorFn, lock_proto);
+    const lock_ctor = try installCtor(ctx, "Lock", lockCtorFn, lock_proto);
 
     const cond_proto = try gc_mod.allocObj(a);
     cond_proto.* = .{};
@@ -348,7 +348,7 @@ fn installSyncAPI(ctx: *Context) !void {
     try interp.setNative(a, rs, cond_proto, "notifyAll", 0, condNotifyFn(true));
     try interp.setNative(a, rs, cond_proto, "asyncWait", 1, condAsyncWaitFn);
     try setTag(ctx, cond_proto, "Condition");
-    try installCtor(ctx, "Condition", condCtorFn, cond_proto);
+    const cond_ctor = try installCtor(ctx, "Condition", condCtorFn, cond_proto);
 
     const tl_proto = try gc_mod.allocObj(a);
     tl_proto.* = .{};
@@ -359,7 +359,17 @@ fn installSyncAPI(ctx: *Context) !void {
     try tl_proto.setAccessor(a, "value", .{ .object = getter }, .{ .object = setter });
     try tl_proto.setAttr(a, "value", .{ .enumerable = false, .configurable = true });
     try setTag(ctx, tl_proto, "ThreadLocal");
-    try installCtor(ctx, "ThreadLocal", tlCtorFn, tl_proto);
+    _ = try installCtor(ctx, "ThreadLocal", tlCtorFn, tl_proto);
+
+    // Phase 8 sync-primitive alignment: the current TC39 proposal names these
+    // Atomics.Mutex/Atomics.Condition. The semantics match our shipped
+    // Lock/Condition records, so expose aliases without duplicating machinery.
+    if (ctx.env.get("Atomics")) |atomics_v| if (atomics_v == .object) {
+        try atomics_v.object.setOwn(a, rs, "Mutex", .{ .object = lock_ctor });
+        try atomics_v.object.setAttr(a, "Mutex", .{ .writable = true, .enumerable = false, .configurable = true });
+        try atomics_v.object.setOwn(a, rs, "Condition", .{ .object = cond_ctor });
+        try atomics_v.object.setAttr(a, "Condition", .{ .writable = true, .enumerable = false, .configurable = true });
+    };
 }
 
 /// `Symbol.toStringTag` on a prototype (the corpus checks "[object Lock]").
@@ -371,7 +381,7 @@ fn setTag(ctx: *Context, proto: *value.Object, name: []const u8) !void {
     try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
 }
 
-fn installCtor(ctx: *Context, name: []const u8, f: value.NativeFn, proto: *value.Object) !void {
+fn installCtor(ctx: *Context, name: []const u8, f: value.NativeFn, proto: *value.Object) !*value.Object {
     const a = ctx.arena();
     const rs = ctx.root_shape;
     const ctor = try gc_mod.allocObj(a);
@@ -382,6 +392,7 @@ fn installCtor(ctx: *Context, name: []const u8, f: value.NativeFn, proto: *value
     try ctx.env.put(name, .{ .object = ctor });
     try ctx.global_object.setOwn(a, rs, name, .{ .object = ctor });
     try ctx.global_object.setAttr(a, name, .{ .writable = true, .enumerable = false, .configurable = true });
+    return ctor;
 }
 
 /// Shared ctor shape: a fresh instance whose private_data is a record of `T`.

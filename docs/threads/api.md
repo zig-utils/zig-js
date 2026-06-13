@@ -61,6 +61,10 @@ refused.
 `Lock` is non-recursive. `hold(fn)` acquires the lock, runs `fn`, and releases
 the lock even when `fn` throws.
 
+`Atomics.Mutex` is an alias for `Lock` in threaded contexts. It exists to align
+the shipped synchronization primitive with the TC39 proposal-structs naming
+without duplicating lock records or changing behavior.
+
 ```js
 const lock = new Lock();
 const counter = { n: 0 };
@@ -92,6 +96,8 @@ Supported behavior:
 `Condition.wait(lock)` atomically releases `lock`, parks the current thread, and
 reacquires the lock before returning. Spurious wakeups are allowed, so callers
 must loop on their predicate.
+
+`Atomics.Condition` is an alias for `Condition` in threaded contexts.
 
 ```js
 const lock = new Lock();

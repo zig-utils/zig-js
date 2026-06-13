@@ -31,8 +31,9 @@ objects, and promise state safe in today's engine.
 - `Context.createWith(.{ .enable_threads = false })` keeps the original
   single-thread affinity rule and installs no `Thread` globals.
 - `Context.createWith(.{ .enable_threads = true })` installs `Thread`, `Lock`,
-  `Condition`, `ThreadLocal`, `ConcurrentAccessError`, and property-mode
-  `Atomics.*`.
+  `Condition`, `ThreadLocal`, `ConcurrentAccessError`, property-mode
+  `Atomics.*`, and the proposal-aligned `Atomics.Mutex` / `Atomics.Condition`
+  aliases.
 - Blocking points release the GIL: `Thread.join`, contended `Lock.hold`,
   `Condition.wait`, property-mode `Atomics.wait`, and typed-array
   `Atomics.wait`.
