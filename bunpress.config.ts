@@ -212,7 +212,10 @@ export default {
           items: [
             { text: 'Architecture', link: '/architecture' },
             { text: 'Threading', link: '/threads/' },
-            { text: 'Thread API', link: '/threads/P6-thread-api' },
+            { text: 'Thread API Reference', link: '/threads/api' },
+            { text: 'Thread Testing', link: '/threads/testing' },
+            { text: 'Limits & Roadmap', link: '/threads/limits' },
+            { text: 'Thread API Design', link: '/threads/P6-thread-api' },
             { text: 'Thread State Audit', link: '/threads/bindings' },
             { text: 'test262 Conformance', link: '/conformance' },
           ],
