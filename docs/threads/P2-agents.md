@@ -1,6 +1,7 @@
 # Phase 2 design: real concurrent agents + blocking Atomics
 
-Status: design note (pre-implementation). Scope: Phase 2 of
+Status: implemented (`src/agent.zig`, typed-array Atomics hooks in
+`src/interpreter.zig`). Scope: Phase 2 of
 https://github.com/zig-utils/zig-js/issues/1 — replace the cooperative
 `$262.agent` model with real OS-thread agents, and make `Atomics.wait` /
 `Atomics.notify` genuinely block and wake. Builds on Phase 1

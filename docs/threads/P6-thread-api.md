@@ -1,6 +1,7 @@
 # Phase 6 design: `Thread`/`Lock`/`Condition`/`ThreadLocal` under a GIL
 
-Status: design note (pre-implementation). Scope: Phase 6 of
+Status: implemented (`src/gil.zig`, `src/jsthread.zig`, `src/context.zig`,
+`conformance/threads_test.zig`). Scope: Phase 6 of
 https://github.com/zig-utils/zig-js/issues/1 — the shared-memory Thread API
 from oven-sh/WebKit#249 (vendored at `reference/webkit-249/`), implemented
 under one VM lock. Concurrency, not parallelism: their phase 1 proved this
@@ -33,8 +34,10 @@ mode is independently shippable and testable; for this engine it is the
   `ConcurrentAccessError` on enforced foreign access.
 - `Atomics.*` extended to ordinary own data properties (SameValueZero CAS so
   NaN loops work; wait/notify on `(object, key)` — a second waiter table
-  keyed by object pointer + property key). Under the GIL each op is
-  trivially one atomic step; implement the *semantics* per their
+  keyed by object pointer + property key). The property waiter queues live on
+  the per-context `Gil`, not in process-global state, so independent threaded
+  contexts stay isolated while each op is trivially one atomic step under the
+  realm lock; implement the *semantics* per their
   `atomics/property-*.js` tests.
 - Promise rules: reactions run on the settling thread's queue; termination
   drops undrained microtasks but keeps published settlements; a terminated

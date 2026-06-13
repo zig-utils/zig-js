@@ -211,6 +211,9 @@ export default {
           text: 'Internals',
           items: [
             { text: 'Architecture', link: '/architecture' },
+            { text: 'Threading', link: '/threads/' },
+            { text: 'Thread API', link: '/threads/P6-thread-api' },
+            { text: 'Thread State Audit', link: '/threads/bindings' },
             { text: 'test262 Conformance', link: '/conformance' },
           ],
         },

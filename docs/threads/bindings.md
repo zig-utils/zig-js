@@ -23,11 +23,9 @@ mutable state without a written ruling (per-thread / locked / refused) in
 or a `threadlocal` — your PR must add a row to the appropriate table below.
 Phase 2c executes this document as its checklist.
 
-Line numbers below were measured at commit `e923761` (2026-06-10). They will
-drift; re-measure with the commands in [How to re-run this audit](#how-to-re-run-this-audit)
-before acting on one. Note in particular that issue #1's prose cites
-`g_agent` at interpreter.zig:18531 / `t_is_agent` at :18536 — those have since
-shifted to :18559 / :18564.
+Line numbers below were refreshed on 2026-06-13. They will drift; re-measure
+with the commands in [How to re-run this audit](#how-to-re-run-this-audit)
+before acting on one.
 
 ---
 
@@ -35,16 +33,41 @@ shifted to :18559 / :18564.
 
 | Symbol | Location | What it is | Ruling | Notes / phase |
 |---|---|---|---|---|
-| `math_prng` | `src/builtins.zig:634` | `std.Random.DefaultPrng` seeded with a fixed constant; mutated on every `Math.random()` call (`mathRandom`, :637). | **per-thread** | **Not anticipated by the issue #1 plan.** Concurrent `random()` calls from two agents are a data race on the Xoshiro state (UB, not just bad randomness). Move into `Interpreter`/`Context` (preferred — also fixes the determinism smell of a process-wide fixed seed) or make it `threadlocal`. Phase 2a. |
+| `math_prng` | `src/builtins.zig:638` | `threadlocal std.Random.DefaultPrng` seeded with a fixed constant; mutated on every `Math.random()` call. | **per-thread** | Completed: this is threadlocal, so agents/workers/threads never race the PRNG state. A future quality pass may seed per context instead of using the fixed deterministic seed. |
 
 ## Engine: `src/interpreter.zig`
 
 | Symbol | Location | What it is | Ruling | Notes / phase |
 |---|---|---|---|---|
-| `g_agent: AgentState` | `src/interpreter.zig:18559` | The cooperative `$262.agent` coordination state: `pending` agent sources, FIFO `reports`, and the latest broadcast's raw `bcast_ptr`/`bcast_len`. Mutated by `agent.start/broadcast/report/getReport` and reset in `installAgent` (`agentResetState`, :18567). | **locked** | Phase 2a replaces it wholesale with a mutex-protected `AgentGroup` (suggest `src/agent.zig`) owned by the main `Context`: locked report queue, agent-handle list, broadcast rendezvous. Until then it is only safe because agents run synchronously on the calling thread (`agentRunSync`, :18588). The raw `bcast_ptr` aliasing also dies in Phase 1 (`SharedBufferStorage` retain/release replaces `makeSharedArrayBufferOver`'s pointer wrap, :18576). |
-| `g_agent_alloc` | `src/interpreter.zig:18560` | `const` binding to `std.heap.page_allocator`; allocates agent sources and report strings so they outlive per-test arenas. | **locked** | The binding is immutable and `page_allocator` is internally thread-safe, so this is already sound. Folded into `AgentGroup`'s allocator in Phase 2a. Listed because it is the allocator that report-string copies (which cross threads) must keep using — never a context arena. |
-| `t_is_agent` | `src/interpreter.zig:18564` | `threadlocal var bool` — true while executing inside a cooperatively-spawned agent realm; keeps `installAgent` from resetting the parent's agent state. | **per-thread** | Already threadlocal (correct by construction). Phase 2a upgrades it from a bool to a threadlocal pointer/handle to the current agent record in the `AgentGroup`. |
-| `symbol_counter` | `src/interpreter.zig:24890` | `var usize` — monotonic id for unique `Symbol` property-key encodings (`"\x00s{d}"`, `makeSymbolObj` :24894). Its own doc comment says "single-threaded; test262 workers are separate processes". | **locked** | **Not anticipated by the issue #1 plan.** Two agents minting symbols concurrently race the increment and can mint *colliding* `sym_key`s. Replace with `std.atomic.Value(usize)` `fetchAdd` (cheapest), or make per-context with a per-context prefix. Atomic is preferred: key uniqueness must hold process-wide if any symbol-keyed structure ever crosses threads (Layer B `Thread.restrict`, shared structs). Phase 2a. |
+| `symbol_counter` | `src/interpreter.zig:26365` | `std.atomic.Value(usize)` — monotonic id for unique `Symbol` property-key encodings (`"\x00s{d}"`). | **locked** | Completed: `makeSymbolObj` uses atomic `fetchAdd`, so cross-agent and shared-realm symbol creation cannot collide. |
+
+## Engine: `src/agent.zig`
+
+| Symbol | Location | What it is | Ruling | Notes / phase |
+|---|---|---|---|---|
+| `io_threaded` / `io_state` | `src/agent.zig:26-27` | Lazy process-wide `std.Io.Threaded` bootstrap for mutexes, conditions, sleeping, and timestamps. | **locked** | `io_state` is atomic and publishes the initialized `io_threaded` before use. One Io backend is intentionally shared process-wide. |
+| `group` / `group_used` | `src/agent.zig:66-70` | The `$262.agent` group: agent records, reports, broadcast storage/generation, and teardown state. | **locked** | All group fields are guarded by `group.mutex`; `group_used` is an atomic fast-path guard for reset/takeReport when no agent API was touched. |
+| `main_can_block` | `src/agent.zig:74` | Host knob modeling the main agent's `[[CanBlock]]`. | **locked** | The conformance hosts set this around a single test before running JS. If embedders mutate it concurrently, make it an atomic or move it into host-owned context options. |
+| `t_agent` | `src/agent.zig:76` | Threadlocal pointer to the current spawned `$262.agent` record. | **per-thread** | Used by `canBlock`, broadcast receive, and report paths. Main/foreign threads see null. |
+| `mono_base` | `src/agent.zig:247` | Atomic monotonic-clock zero point for `$262.agent.monotonicNow()`. | **locked** | Initialized with compare-exchange; reads are atomic. |
+| `waiters`, `waiters_mutex`, `waiters_cond`, `waiters_used` | `src/agent.zig:288-293` | Typed-array `Atomics.wait` / `notify` / `waitAsync` waiter table. | **locked** | The table is guarded by `waiters_mutex`; `waiters_cond` wakes async harvesters; `waiters_used` is an atomic fast-path guard. |
+| `live_agents` | `src/agent.zig:296` | Atomic count of currently running spawned agents. | **locked** | Lets async waiter harvesting avoid waiting forever when no notifier can still exist. |
+| `async_id_counter` | `src/agent.zig:399` | Atomic id source for typed-array `Atomics.waitAsync` tickets. | **locked** | Uses atomic `fetchAdd`, unique process-wide. |
+
+## Engine: `src/gc.zig`
+
+| Symbol | Location | What it is | Ruling | Notes / phase |
+|---|---|---|---|---|
+| `active_heap` | `src/gc.zig:244` | Threadlocal pointer to the currently active GC heap used by allocation shims. | **per-thread** | `Context.createWith` and evaluation set/restore it around heap-cell allocation. Threadlocal keeps nested/parallel contexts isolated. |
+
+## Engine: `src/gil.zig` / `src/jsthread.zig`
+
+| Symbol | Location | What it is | Ruling | Notes / phase |
+|---|---|---|---|---|
+| `t_current` | `src/jsthread.zig:47` | Threadlocal pointer to the current shared-realm `ThreadRecord`. | **per-thread** | Drives `Thread.current`, self-join detection, and per-thread identity. |
+| `max_threads` | `src/jsthread.zig:135` | Host/test knob limiting live spawned shared-realm `Thread`s. | **locked** | The threads corpus runner sets this around a single test (`thread-id-bounds.js`). Concurrent embedders should prefer a per-context option before exposing this knob generally. |
+| `Gil.tasks` | `src/gil.zig:28` | Per-realm run-loop task queue for `Lock.asyncHold` grant delivery. | **locked** | Protected by the owning context GIL; backing is realm-arena owned. |
+| `Gil.prop_waiters` / `Gil.prop_async` | `src/gil.zig:31-34` | Per-realm property-mode `Atomics.wait` and `waitAsync` waiter queues. | **locked** | Protected by the owning context GIL and intentionally not process-global; independent `enable_threads` contexts cannot race or cross-notify each other. |
 
 ## Engine: `src/c_api.zig`
 
@@ -57,16 +80,14 @@ are locals inside `test` blocks.
 
 ## Engine: all other `src/*.zig`
 
-A brace-tracking scan of every file (see re-run section) found **no** other
-file-scope or container-scope `var`/`threadlocal` in `src/`. Specifically
-verified clean: `ast.zig`, `bytecode.zig`, `cldr_*.zig`, `compiler.zig`,
-`context.zig`, `jsstring.zig` (no string-interning table exists — strings live
-in context arenas), `lexer.zig`, `numbering_systems.zig` (its `var arr` at :91
-is inside a `comptime` block producing a `const`), `parser.zig` (reentrant, no
-statics), `promise.zig`, `root.zig`, `shape.zig`, `unicode_case*.zig`,
-`value.zig`, `vm.zig`. There are no date/time caches: nothing in `src/` calls
-`std.time` or caches a timezone — `Date` math is pure arithmetic on the
-`date_ms` slot (the engine is UTC-only).
+A file-scope scan found no other current `src/` mutable globals beyond the
+rows above. Specifically verified clean: `ast.zig`, `bytecode.zig`,
+`cldr_*.zig`, `compiler.zig`, `context.zig`, `jsstring.zig` (no string-interning
+table exists — strings live in context arenas), `lexer.zig`,
+`numbering_systems.zig` (its `var arr` is inside a `comptime` block producing a
+`const`), `parser.zig` (reentrant, no statics), `promise.zig`, `root.zig`,
+`shape.zig`, `shared_buffer.zig`, `structured_clone.zig`, `unicode_case*.zig`,
+`value.zig`, `vm.zig`, and `worker.zig`.
 
 ### `comptime` / `const` tables
 
@@ -129,19 +150,16 @@ RegExp is backed by the sibling zig-regex repo. Full scan of its `src/*.zig`:
 
 ## Summary
 
-- **10** process-global mutable (or globally stateful) items found:
-  **5** in `src/` (`math_prng`, `g_agent`, `g_agent_alloc`, `t_is_agent`,
-  `symbol_counter`), **4** in conformance hosts, **1** in zig-regex.
-- Rulings: **2 per-thread** (`math_prng`, `t_is_agent`),
-  **4 locked** (`g_agent`, `g_agent_alloc`, `symbol_counter`,
-  zig-regex `c_allocator`), **4 refused** (conformance-host state).
-- Plus **8** per-Context/per-Interpreter rulings recorded above
-  (7 per-thread, 1 locked) so Phase 2c can execute against a single list.
-- Surprises vs. the issue #1 plan: `math_prng` (a racing process-global PRNG
-  behind `Math.random()`) and `symbol_counter` (racy symbol-key uniqueness)
-  were not in the issue's known-globals list; zig-regex turned out to have no
-  static match state at all (better than feared), and its documented
-  `zig_regex_get_last_error` does not exist.
+- Every current file-scope `var`, `pub var`, and `threadlocal` hit in `src/*.zig`
+  has a ruling above.
+- The two original surprise hazards are fixed: `math_prng` is threadlocal, and
+  `symbol_counter` is atomic.
+- `$262.agent` and typed-array waiter state are explicitly locked in
+  `src/agent.zig`.
+- Shared-realm `Thread` state is either per-thread (`t_current`) or per-context
+  GIL-owned (`Gil.tasks`, `Gil.prop_waiters`, `Gil.prop_async`).
+- Conformance-host and zig-regex entries remain documented so the audit can be
+  rerun from one place.
 
 ---
 
