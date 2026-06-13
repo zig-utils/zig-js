@@ -3660,7 +3660,8 @@ pub const Interpreter = struct {
         try self.setRegExpLastIndexValue(o, .{ .number = n });
     }
 
-    fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!regex.Regex {
+    fn compileRegex(self: *Interpreter, o: *value.Object) EvalError!*regex.Regex {
+        if (o.regex_compiled) |cached| return @ptrCast(@alignCast(cached));
         const raw_src = o.regex_source;
         const flags = o.regex_flags;
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
@@ -3675,8 +3676,11 @@ pub const Interpreter = struct {
             .unicode = unicode,
             .unicode_sets = std.mem.indexOfScalar(u8, flags, 'v') != null,
         };
-        return regex.Regex.compileWithFlags(self.arena, src, cf) catch
+        const compiled = try self.arena.create(regex.Regex);
+        compiled.* = regex.Regex.compileWithFlags(self.arena, src, cf) catch
             return self.throwError("SyntaxError", "invalid regular expression");
+        o.regex_compiled = @ptrCast(compiled);
+        return compiled;
     }
 
     /// Whether `o` is the `%RegExp.prototype%` intrinsic (which the source/flags
@@ -3712,11 +3716,14 @@ pub const Interpreter = struct {
             const source = if (pattern.len == 0) "(?:)" else pattern;
             const old_source = o.regex_source;
             const old_flags = o.regex_flags;
+            const old_compiled = o.regex_compiled;
             o.regex_source = try self.arena.dupe(u8, source);
             o.regex_flags = try self.arena.dupe(u8, flags);
+            o.regex_compiled = null;
             _ = self.compileRegex(o) catch |err| {
                 o.regex_source = old_source;
                 o.regex_flags = old_flags;
+                o.regex_compiled = old_compiled;
                 return err;
             };
             try self.setRegExpLastIndex(o, 0);
@@ -3738,7 +3745,7 @@ pub const Interpreter = struct {
                 return Value.null;
             }
             const start = byteOffsetForUtf16Index(search_input, start_units);
-            var re = try self.compileRegex(o);
+            const re = try self.compileRegex(o);
             const found = re.findFrom(search_input, start) catch null;
             if (found) |m| {
                 // Sticky matches must begin exactly at lastIndex.
@@ -3755,11 +3762,11 @@ pub const Interpreter = struct {
                 for (0..m.captures.len) |i| try arr.object.elements.append(self.arena, try self.captureVal(m, i));
                 try self.setProp(arr.object, "index", .{ .number = @floatFromInt(utf16IndexForByteOffset(search_input, mstart)) });
                 try self.setProp(arr.object, "input", .{ .string = input });
-                const groups = try self.regexGroups(&re, m);
+                const groups = try self.regexGroups(re, m);
                 try self.setProp(arr.object, "groups", if (groups) |g| .{ .object = g } else .undefined);
                 // The `d` (hasIndices) flag adds a parallel match-indices array.
                 if (std.mem.indexOfScalar(u8, flags, 'd') != null)
-                    try self.setProp(arr.object, "indices", .{ .object = try self.makeIndicesArray(&re, m, search_input, 0) });
+                    try self.setProp(arr.object, "indices", .{ .object = try self.makeIndicesArray(re, m, search_input, 0) });
                 return arr;
             }
             if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -8525,7 +8532,7 @@ pub const Interpreter = struct {
             // Regex separator: split on each match, inserting capture groups, per
             // the String.prototype.split(@@split) algorithm.
             if (args[0] == .object and args[0].object.is_regex) {
-                var re = try self.compileRegex(args[0].object);
+                const re = try self.compileRegex(args[0].object);
                 if (lim == 0) return result;
                 if (s.len == 0) {
                     // Empty input: [""] unless the pattern matches the empty string.
@@ -8653,7 +8660,7 @@ pub const Interpreter = struct {
             if (!all and arg0(args) == .object and arg0(args).object.is_regex) {
                 const ro = arg0(args).object;
                 const g = all or std.mem.indexOfScalar(u8, ro.regex_flags, 'g') != null;
-                var re = try self.compileRegex(ro);
+                const re = try self.compileRegex(ro);
                 const template: []const u8 = if (is_func) "" else try self.toStringV(repl_val);
                 var last: usize = 0; // end of the last copied region
                 var search: usize = 0; // absolute scan cursor
@@ -8671,7 +8678,7 @@ pub const Interpreter = struct {
                         const r = try self.callValue(repl_val, call_args.items);
                         try buf.appendSlice(a, try self.toStringV(r));
                     } else {
-                        const groups = try self.regexGroups(&re, m);
+                        const groups = try self.regexGroups(re, m);
                         try self.getSubstitution(&buf, template, m.slice, s, mstart, m.captures, groups);
                     }
                     last = mend;

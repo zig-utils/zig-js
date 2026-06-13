@@ -595,6 +595,9 @@ pub const Object = struct {
     /// RegExp.prototype accessor getters (not instance own data properties).
     regex_source: []const u8 = "",
     regex_flags: []const u8 = "",
+    /// Cached `*regex.Regex`, type-erased to keep value.zig independent from the
+    /// regex package. Invalidated when `RegExp.prototype.compile` changes slots.
+    regex_compiled: ?*anyopaque = null,
     /// A `WeakRef`'s target (the held value). Non-null marks a WeakRef; with no
     /// real GC the target is never reclaimed, so `deref()` always returns it.
     weak_ref_target: ?Value = null,
