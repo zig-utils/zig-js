@@ -22225,31 +22225,51 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod };
     }
     if (rv == .object) {
-        // Property bag: require year, month, day.
-        const yv = try self.getProperty(rv, "year");
-        const mv = try self.getProperty(rv, "month");
-        const dv = try self.getProperty(rv, "day");
-        if (yv == .undefined or mv == .undefined or dv == .undefined)
-            return self.throwError("TypeError", "relativeTo object must have year, month, and day");
-        const y = try temporalIntArg(self, yv, "year");
-        const m = try temporalIntArg(self, mv, "month");
-        const d = try temporalIntArg(self, dv, "day");
-        try checkIsoDate(self, y, m, d);
+        _ = try self.getProperty(rv, "calendar");
+        var y: ?f64 = null;
+        var m: ?f64 = null;
+        var d: ?f64 = null;
         var vals: [6]f64 = .{ 0, 0, 0, 0, 0, 0 };
-        const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
-        const maxes = [_]f64{ 23, 59, 59, 999, 999, 999 };
-        for (names, 0..) |name, i| {
-            const tv = try self.getProperty(rv, name);
-            if (tv != .undefined) {
-                const n = try temporalIntArg(self, tv, name);
-                if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
-                vals[i] = n;
-            }
+
+        const dv = try self.getProperty(rv, "day");
+        if (dv != .undefined) d = try temporalIntArg(self, dv, "day");
+
+        const hv = try self.getProperty(rv, "hour");
+        if (hv != .undefined) vals[0] = try relativeTimeField(self, hv, "hour", 23);
+        const usv = try self.getProperty(rv, "microsecond");
+        if (usv != .undefined) vals[4] = try relativeTimeField(self, usv, "microsecond", 999);
+        const msv = try self.getProperty(rv, "millisecond");
+        if (msv != .undefined) vals[3] = try relativeTimeField(self, msv, "millisecond", 999);
+        const minv = try self.getProperty(rv, "minute");
+        if (minv != .undefined) vals[1] = try relativeTimeField(self, minv, "minute", 59);
+
+        const mv = try self.getProperty(rv, "month");
+        if (mv != .undefined) m = try temporalIntArg(self, mv, "month");
+        const mcv = try self.getProperty(rv, "monthCode");
+        if (mcv != .undefined) {
+            const mc = try self.toStringV(mcv);
+            if (mc.len < 3 or mc[0] != 'M') return self.throwError("RangeError", "bad monthCode");
+            const parsed_m: f64 = @floatFromInt(std.fmt.parseInt(u8, mc[1..3], 10) catch return self.throwError("RangeError", "bad monthCode"));
+            if (m == null) m = parsed_m;
         }
+
+        const nsv = try self.getProperty(rv, "nanosecond");
+        if (nsv != .undefined) vals[5] = try relativeTimeField(self, nsv, "nanosecond", 999);
+        const offv = try self.getProperty(rv, "offset");
+        if (offv != .undefined) _ = try self.toStringV(offv);
+        const sv = try self.getProperty(rv, "second");
+        if (sv != .undefined) vals[2] = try relativeTimeField(self, sv, "second", 59);
+        _ = try self.getProperty(rv, "timeZone");
+        const yv = try self.getProperty(rv, "year");
+        if (yv != .undefined) y = try temporalIntArg(self, yv, "year");
+
+        if (y == null or m == null or d == null)
+            return self.throwError("TypeError", "relativeTo object must have year, month, and day");
+        try checkIsoDate(self, y.?, m.?, d.?);
         return .{
-            .y = @intFromFloat(y),
-            .m = @intFromFloat(m),
-            .d = @intFromFloat(d),
+            .y = @intFromFloat(y.?),
+            .m = @intFromFloat(m.?),
+            .d = @intFromFloat(d.?),
             .time_ns = @as(i128, @intFromFloat(vals[0])) * nsPerUnit(.hour) +
                 @as(i128, @intFromFloat(vals[1])) * nsPerUnit(.minute) +
                 @as(i128, @intFromFloat(vals[2])) * nsPerUnit(.second) +
@@ -22259,6 +22279,12 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         };
     }
     return self.throwError("TypeError", "invalid relativeTo");
+}
+
+fn relativeTimeField(self: *Interpreter, v: Value, name: []const u8, max: f64) EvalError!f64 {
+    const n = try temporalIntArg(self, v, name);
+    if (n < 0 or n > max) return self.throwError("RangeError", "time component out of range");
+    return n;
 }
 
 const DAY_NS: i128 = 86_400_000_000_000;
@@ -22560,14 +22586,25 @@ fn readUnitArg(self: *Interpreter, v: Value, key: []const u8) EvalError!?TUnit {
     return null;
 }
 
+fn readUnitOption(self: *Interpreter, v: Value, key: []const u8) EvalError!?TUnit {
+    if (v == .string) return tUnitFromStr(v.string) orelse self.throwError("RangeError", "invalid unit");
+    if (v == .object) {
+        const u = try self.getProperty(v, key);
+        if (u == .undefined) return null;
+        return tUnitFromStr(try self.toStringV(u)) orelse self.throwError("RangeError", "invalid unit");
+    }
+    return null;
+}
+
 fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const dur = this.object.temporal.?.dur;
     const a0 = if (args.len > 0) args[0] else .undefined;
-    const unit = (try readUnitArg(self, a0, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
+    const rel = try resolveRelativeTo(self, a0);
+    const unit = (try readUnitOption(self, a0, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
     // With a relativeTo anchor, compute the calendar-aware (fractional) total.
-    if (try resolveRelativeTo(self, a0)) |rel| return .{ .number = totalDurationRel(self, dur, rel, unit) };
+    if (rel) |anchor| return .{ .number = totalDurationRel(self, dur, anchor, unit) };
     if (durHasCalendar(dur) or @intFromEnum(unit) < @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.total with calendar units requires relativeTo");
     const total_ns: f64 = @floatFromInt(durationTimeNs(dur));
