@@ -8,9 +8,8 @@ pub fn build(b: *std.Build) void {
     const regex_dep = b.dependency("zig_regex", .{ .target = target, .optimize = optimize });
     const regex_mod = regex_dep.module("regex");
 
-    // Precise tracing GC (issue #1 Phase 7). Wired but inert in M0 — the binding
-    // (src/gc.zig) compiles against the real engine types and is unit-tested,
-    // but the arena still allocates (no behavior change). See P7-gc-design.md.
+    // Precise tracing GC (issue #1 Phase 7). Opt-in contexts route heap cells
+    // through it; src/gc.zig supplies the engine binding. See P7-gc-design.md.
     const gc_dep = b.dependency("zig_gc", .{ .target = target, .optimize = optimize });
     const gc_mod = gc_dep.module("gc");
 

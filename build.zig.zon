@@ -7,8 +7,8 @@
         // Homegrown regex engine, reused to back JS RegExp (pantry: zig-regex).
         .zig_regex = .{ .path = "../zig-regex" },
         // Precise tracing GC to unblock Phase 7 (issue #1); see
-        // docs/threads/P7-gc-design.md. M0: wired but inert (arena still
-        // allocates); the binding lives in src/gc.zig.
+        // docs/threads/P7-gc-design.md. Opt-in contexts route heap cells
+        // through this collector; the binding lives in src/gc.zig.
         .zig_gc = .{ .path = "../zig-gc" },
     },
     .paths = .{

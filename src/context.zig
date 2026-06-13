@@ -4331,3 +4331,39 @@ test "enable_gc: WeakRef keeps target while strongly reachable" {
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
     try std.testing.expectEqual(true, cleared.boolean);
 }
+
+test "enable_gc: WeakMap value is live only while weak key is live" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.key = {};
+        \\globalThis.valueRef = new WeakRef({ tag: 11 });
+        \\globalThis.wm = new WeakMap();
+        \\globalThis.wm.set(globalThis.key, globalThis.valueRef.deref());
+        \\0
+    );
+    ctx.collectGarbage();
+    const alive = try ctx.evaluate("globalThis.valueRef.deref().tag");
+    try std.testing.expectEqual(@as(f64, 11), alive.number);
+
+    _ = try ctx.evaluate("globalThis.key = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.valueRef.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+}
+
+test "enable_gc: WeakSet does not keep value alive" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.valueRef = new WeakRef({ tag: 12 });
+        \\globalThis.ws = new WeakSet();
+        \\globalThis.ws.add(globalThis.valueRef.deref());
+        \\0
+    );
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.valueRef.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+}

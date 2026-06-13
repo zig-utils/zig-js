@@ -46,8 +46,8 @@ pub const vm = @import("vm.zig");
 // JavaScriptCore C-API drop-in (re-exported for documentation / direct use).
 pub const c_api = @import("c_api.zig");
 
-// The precise-GC binding (issue #1 Phase 7, M0: wired but inert). See
-// docs/threads/P7-gc-design.md.
+// The precise-GC binding (issue #1 Phase 7). Opt-in contexts allocate heap
+// cells through it; see docs/threads/P7-gc-design.md.
 pub const gc = @import("gc.zig");
 
 /// Convenience: evaluate a snippet in a throwaway context, returning the

@@ -4738,6 +4738,64 @@ pub const Interpreter = struct {
             if (!canBeHeldWeakly(arg0(args)))
                 return self.throwError("TypeError", "Invalid value used as WeakMap key");
         }
+        if (o.is_weak) {
+            const key_obj = weakKeyPtr(key);
+            if (eq(name, "set")) {
+                for (o.weak_entries.items) |*entry| {
+                    if (entry.key == key_obj) {
+                        entry.value = arg(args, 1);
+                        return self_v;
+                    }
+                }
+                try o.weak_entries.append(self.arena, .{ .key = key_obj, .value = arg(args, 1) });
+                return self_v;
+            }
+            if (eq(name, "get")) {
+                for (o.weak_entries.items) |entry| {
+                    if (entry.key == key_obj) return entry.value;
+                }
+                return Value.undefined;
+            }
+            if (eq(name, "has")) {
+                for (o.weak_entries.items) |entry| {
+                    if (entry.key == key_obj) return Value{ .boolean = true };
+                }
+                return Value{ .boolean = false };
+            }
+            if (eq(name, "delete")) {
+                for (o.weak_entries.items, 0..) |entry, i| {
+                    if (entry.key == key_obj) {
+                        _ = o.weak_entries.orderedRemove(i);
+                        return Value{ .boolean = true };
+                    }
+                }
+                return Value{ .boolean = false };
+            }
+            if (eq(name, "getOrInsert") or eq(name, "getOrInsertComputed")) {
+                const cb = if (eq(name, "getOrInsertComputed")) cb: {
+                    const candidate = arg(args, 1);
+                    if (!candidate.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed: callback is not a function");
+                    break :cb candidate;
+                } else Value.undefined;
+                for (o.weak_entries.items) |entry| {
+                    if (entry.key == key_obj) return entry.value;
+                }
+                const v = if (eq(name, "getOrInsertComputed")) blk: {
+                    break :blk try self.callValue(cb, &.{key});
+                } else arg(args, 1);
+                if (eq(name, "getOrInsertComputed")) {
+                    for (o.weak_entries.items) |*entry| {
+                        if (entry.key == key_obj) {
+                            entry.value = v;
+                            return v;
+                        }
+                    }
+                }
+                try o.weak_entries.append(self.arena, .{ .key = key_obj, .value = v });
+                return v;
+            }
+            return null;
+        }
         if (eq(name, "set")) {
             for (o.elements.items) |e| {
                 if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) {
@@ -4816,6 +4874,32 @@ pub const Interpreter = struct {
         if (o.is_weak and eq(name, "add") and !canBeHeldWeakly(arg0(args)))
             return self.throwError("TypeError", "Invalid value used in WeakSet");
         const key = canonicalCollectionKey(arg0(args));
+        if (o.is_weak) {
+            const key_obj = weakKeyPtr(key);
+            if (eq(name, "add")) {
+                for (o.weak_entries.items) |entry| {
+                    if (entry.key == key_obj) return self_v;
+                }
+                try o.weak_entries.append(self.arena, .{ .key = key_obj });
+                return self_v;
+            }
+            if (eq(name, "has")) {
+                for (o.weak_entries.items) |entry| {
+                    if (entry.key == key_obj) return Value{ .boolean = true };
+                }
+                return Value{ .boolean = false };
+            }
+            if (eq(name, "delete")) {
+                for (o.weak_entries.items, 0..) |entry, i| {
+                    if (entry.key == key_obj) {
+                        _ = o.weak_entries.orderedRemove(i);
+                        return Value{ .boolean = true };
+                    }
+                }
+                return Value{ .boolean = false };
+            }
+            return null;
+        }
         if (eq(name, "add")) {
             for (o.elements.items) |e| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
@@ -13239,6 +13323,11 @@ fn canBeHeldWeakly(v: Value) bool {
     if (v != .object or v.object.is_bigint) return false;
     if (v.object.is_symbol and v.object.getOwn("\x00forKey") != null) return false;
     return true;
+}
+
+fn weakKeyPtr(v: Value) ?*anyopaque {
+    if (v != .object) return null;
+    return @ptrCast(v.object);
 }
 
 fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {

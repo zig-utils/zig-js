@@ -6,8 +6,8 @@ concrete plan for the tracing GC that gates Phase 7 (GIL removal / Layer C),
 per the prerequisites audit in [`P7-gil-removal.md`](P7-gil-removal.md). It also
 delivers value *before* Phase 7: opt-in contexts already reclaim unreachable GC
 cells at quiescent points and clear `WeakRef` targets when their referent dies.
-`WeakMap` / `WeakSet` weak-key cleanup and `FinalizationRegistry` cleanup jobs
-remain follow-on work.
+`WeakMap` / `WeakSet` weak-key cleanup uses the same ephemeron/weak-slot pass.
+`FinalizationRegistry` cleanup jobs remain follow-on work.
 
 ## Decisions (and why)
 
@@ -80,7 +80,7 @@ The engine heap is one monolithic `Object` (`value.zig:430`) plus side cells.
 
 | Kind | Type | References to visit |
 |---|---|---|
-| `object` | `value.zig` `Object` | `shape`, `proto`, `ctor_ref`, `proxy_target`, `proxy_handler` (`*Object`); every `Value` in `slots` and `elements`; `accessors` map get/set Values; `prim` (`?Value`); `js_func`/`gen`/`bound`/`promise`/`iter_helper`/`module_ns`/`arg_map_env` (type-erased cells); `array_buffer`/`typed_array`/`data_view`/`temporal`; **weak**: `weak_ref_target`, and WeakMap/WeakSet entries in `elements` |
+| `object` | `value.zig` `Object` | `shape`, `proto`, `ctor_ref`, `proxy_target`, `proxy_handler` (`*Object`); every `Value` in `slots` and strong `elements`; `accessors` map get/set Values; `prim` (`?Value`); `js_func`/`gen`/`bound`/`promise`/`iter_helper`/`module_ns`/`arg_map_env` (type-erased cells); `array_buffer`/`typed_array`/`data_view`/`temporal`; **weak**: `weak_ref_target` and WeakMap/WeakSet `weak_entries`; **ephemeron**: WeakMap values when their keys are live |
 | `shape` | `shape.zig` `Shape` | `parent`; the `*Shape` values in `transitions` (the keys are property-name strings) |
 | `env` | `interpreter.zig:126` `Environment` | every `Value` in `vars`; `parent`; `aliases` (live cross-env bindings); `disposables` |
 | `function` | `interpreter.zig:266` `Function` | closure `env`; bound `this`/home-object Values (AST nodes are immutable — see below) |
@@ -137,10 +137,11 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   size classes are few.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
-- **Weak processing:** after the mark stack drains, every registered weak edge
-  whose target is still white is cleared; `FinalizationRegistry` cells whose
-  held target died queue their cleanup callback as a microtask (fired on the
-  owning thread's loop, per spec). `WeakMap`/`WeakSet` drop white-keyed entries.
+- **Weak processing:** after the strong mark stack drains, an ephemeron
+  fixed-point marks WeakMap values whose keys are live. Then every registered
+  weak edge whose target is still white is cleared, and WeakMap/WeakSet drop
+  white-keyed entries. `FinalizationRegistry` cleanup callbacks are still
+  deferred.
 - **Sweep:** walk blocks; white cells → `finalize` then return to the free
   list; flip black→white for next cycle. Lazy/incremental sweep is an M2 option.
 - **Trigger:** `maybeCollect` at the existing `(steps & 1023)` safepoints
@@ -254,6 +255,11 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   `undefined` after collection while continuing to brand-check the WeakRef
   object itself. Validated by GC-enabled tests for cleared weak-only targets and
   strongly reachable targets that survive collection.
+  *WeakMap/WeakSet ephemerons landed:* `zig-gc` now exposes optional
+  `traceEphemeron` and `afterWeak` hooks. WeakMap values are marked only at the
+  ephemeron fixed point when their keys are live; dead WeakMap/WeakSet keys are
+  cleared and pruned before sweep. Validated in `zig-gc` with an exact
+  ephemeron test and in zig-js with GC-enabled WeakMap/WeakSet tests.
   *Remaining for the FULL deliverable:* (a) **arbitrary mid-script collection**
   needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
   locals/registers a precise GC can't see) — the quiescent points avoid this; a
@@ -261,9 +267,8 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   cell sub-allocations (`slots`/`elements`/`vars`/reaction lists) to gpa so
   `finalize` frees them on collect — turning "reclaims cells" into "reclaims
   everything" (today sub-allocations are reclaimed at teardown, so a collected
-  object's backing buffers persist until `destroy`). (c) WeakMap/WeakSet need
-  typed weak-key table cleanup, and FinalizationRegistry still needs cleanup-job
-  scheduling.
+  object's backing buffers persist until `destroy`). (c) FinalizationRegistry
+  still needs cleanup-job scheduling.
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
@@ -276,7 +281,8 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
 - `zig-gc` unit tests: toy object graph with cycles, weak edges, finalizer
   queue — collect and assert exact reclamation (precise, so counts are exact).
 - zig-js: GC stress tests (allocate-heavy loop bounded heap, explicit
-  `collectGarbage` reclamation, and `WeakRef` clearing/retention), targeted
+  `collectGarbage` reclamation, `WeakRef` clearing/retention, and
+  WeakMap/WeakSet ephemeron behavior), targeted
   `WeakRef`/`FinalizationRegistry`/`WeakMap` test262 buckets as each weak
   semantic lands, `zig build test262` non-regression at each milestone, TSan on
   M3.

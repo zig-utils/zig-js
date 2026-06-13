@@ -57,17 +57,20 @@ inline fn markWeakObject(v: anytype, slot: *?*Object) void {
 
 // ---- Per-kind tracers (public so a test binding can reuse them) -----------
 
-/// Trace every strong reference out of an `Object`. `WeakRef` targets are
-/// registered as weak edges so collection clears them when the target is
-/// otherwise unreachable. WeakMap/WeakSet entries are still strong until their
-/// tables grow typed weak-key storage.
+/// Trace every strong reference out of an `Object`. WeakRef and WeakMap/WeakSet
+/// keys are registered as weak edges so collection clears them when the target
+/// is otherwise unreachable.
 pub fn traceObject(o: *Object, v: anytype) void {
     v.mark(o.proto);
     v.mark(o.ctor_ref);
     v.mark(o.proxy_target);
     v.mark(o.proxy_handler);
     for (o.slots.items) |slot| markValue(v, slot);
-    for (o.elements.items) |el| markValue(v, el);
+    if (o.is_weak and (o.is_map or o.is_set)) {
+        for (o.weak_entries.items) |*entry| v.markWeak(&entry.key);
+    } else {
+        for (o.elements.items) |el| markValue(v, el);
+    }
     if (o.accessors) |acc| {
         var it = acc.valueIterator();
         while (it.next()) |a| {
@@ -89,6 +92,25 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // The viewed ArrayBuffer object keeps a TypedArray/DataView's storage alive.
     if (o.typed_array) |ta| v.mark(ta.buffer);
     if (o.data_view) |dv| v.mark(dv.buffer);
+}
+
+pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
+    if (!(o.is_weak and o.is_map)) return;
+    for (o.weak_entries.items) |entry| {
+        if (v.isMarked(entry.key)) markValue(v, entry.value);
+    }
+}
+
+pub fn pruneDeadWeakEntries(o: *Object) void {
+    if (!(o.is_weak and (o.is_map or o.is_set))) return;
+    var i: usize = 0;
+    while (i < o.weak_entries.items.len) {
+        if (o.weak_entries.items[i].key == null) {
+            _ = o.weak_entries.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 pub fn traceEnv(e: *Environment, v: anytype) void {
@@ -209,6 +231,22 @@ pub const Binding = struct {
             .generator => traceGenerator(@ptrCast(@alignCast(cell)), v),
             .iter_helper => traceIterHelper(@ptrCast(@alignCast(cell)), v),
             .module_ns => traceModuleNs(@ptrCast(@alignCast(cell)), v),
+        }
+    }
+
+    pub fn traceEphemeron(self: *Binding, cell: *anyopaque, kind: Kind, v: anytype) void {
+        _ = self;
+        switch (kind) {
+            .object => traceObjectEphemeron(@ptrCast(@alignCast(cell)), v),
+            else => {},
+        }
+    }
+
+    pub fn afterWeak(self: *Binding, cell: *anyopaque, kind: Kind) void {
+        _ = self;
+        switch (kind) {
+            .object => pruneDeadWeakEntries(@ptrCast(@alignCast(cell))),
+            else => {},
         }
     }
 

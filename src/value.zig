@@ -421,6 +421,11 @@ pub const IterHelper = struct {
     running: bool = false, // GeneratorValidate: a re-entrant next() is a TypeError
 };
 
+pub const WeakCollectionEntry = struct {
+    key: ?*anyopaque = null,
+    value: Value = .undefined,
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -539,6 +544,9 @@ pub const Object = struct {
     /// A WeakMap/WeakSet reuses the `is_map`/`is_set` storage but carries this
     /// flag so the brand checks can tell a Map from a WeakMap (and Set/WeakSet).
     is_weak: bool = false,
+    /// WeakMap/WeakSet entries. Keys are weak GC edges; for WeakMap, `value`
+    /// becomes live iff `key` is live during the ephemeron fixed-point pass.
+    weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
     /// For error instances, the error class name (e.g. "TypeError"); for a
     /// builtin error *constructor* object, see `error_ctor`.
     error_name: []const u8 = "",
