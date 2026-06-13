@@ -34,6 +34,7 @@ const allowlist = [_][]const u8{
     "atomics/property-load-store.js",
     "atomics/property-rmw.js",
     "atomics/property-wait-notify.js",
+    "atomics/property-waitasync-timeout.js",
     "sync/atomics-futex-lock.js",
     "sync/atomics-object-basic.js",
     "sync/condition-notify-all-multi-waiter.js",

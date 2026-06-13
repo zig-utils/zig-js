@@ -3197,7 +3197,18 @@ pub const Interpreter = struct {
                 jsthread.pollPropAsync(self);
                 self.drainMicrotasks() catch {};
                 const q_empty = if (self.microtasks) |q| q.items.len == 0 else true;
-                if (q_empty and g.tasks.items.len == 0) break;
+                if (q_empty and g.tasks.items.len == 0) {
+                    if (jsthread.nextPropAsyncDeadline(self)) |deadline| {
+                        const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+                        if (deadline > now) {
+                            g.release();
+                            std.Io.sleep(agent.engineIo(), .fromNanoseconds(@intCast(deadline - now)), .awake) catch {};
+                            g.acquire();
+                        }
+                        continue;
+                    }
+                    break;
+                }
             }
         }
         const listp = self.async_waiters orelse return;

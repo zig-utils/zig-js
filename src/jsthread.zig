@@ -667,15 +667,15 @@ fn jsInt32(n: f64) i32 {
     return @bitCast(u);
 }
 
-// One global FIFO of property waiters (GIL-serialized; tickets live on the
-// waiting thread's stack and are unlinked before wait returns).
+// One FIFO of property waiters per threaded realm, stored on `Gil`.
+// The context GIL serializes the list; tickets live on waiting thread stacks
+// and are unlinked before wait returns.
 const PropTicket = struct {
     obj: *value.Object,
     key: []const u8,
     cond: std.Io.Condition = .init,
     woken: bool = false,
 };
-var prop_waiters: std.ArrayListUnmanaged(*PropTicket) = .empty;
 const prop_alloc = std.heap.page_allocator;
 
 const PropAsyncTicket = struct {
@@ -686,7 +686,6 @@ const PropAsyncTicket = struct {
     /// The realm's gil pointer — the abandon token at Context.destroy.
     owner: *const anyopaque,
 };
-var prop_async: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
 
 /// `Atomics.waitAsync(obj, key, expected, timeout)` — the property path.
 /// Settlement: a notify resolves "ok" on the notifying thread; expiry
@@ -716,7 +715,8 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         .promise = p_obj,
         .owner = @ptrCast(self.gil.?),
     };
-    prop_async.append(prop_alloc, t) catch {
+    const g = self.gil.?;
+    g.prop_async.append(self.arena, @ptrCast(t)) catch {
         prop_alloc.destroy(t);
         return error.OutOfMemory;
     };
@@ -735,13 +735,14 @@ fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8)
 /// Resolve expired property waitAsync tickets — called from the awaiters'
 /// poll points (awaitValue's GIL-handover loop, the drain tail).
 pub fn pollPropAsync(self: *Interpreter) void {
-    if (prop_async.items.len == 0) return;
+    const g = self.gil orelse return;
+    if (g.prop_async.items.len == 0) return;
     const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
     var i: usize = 0;
-    while (i < prop_async.items.len) {
-        const t = prop_async.items[i];
+    while (i < g.prop_async.items.len) {
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
         if (t.deadline_ns != null and t.deadline_ns.? <= now) {
-            _ = prop_async.orderedRemove(i);
+            _ = g.prop_async.orderedRemove(i);
             settlePropAsync(self, t, "timed-out");
             continue;
         }
@@ -749,13 +750,27 @@ pub fn pollPropAsync(self: *Interpreter) void {
     }
 }
 
+/// Earliest finite property `Atomics.waitAsync` deadline in this realm, or
+/// null when there are no finite timers to keep the shell alive for.
+pub fn nextPropAsyncDeadline(self: *Interpreter) ?i96 {
+    const g = self.gil orelse return null;
+    var nearest: ?i96 = null;
+    for (g.prop_async.items) |raw| {
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
+        if (t.deadline_ns) |d| nearest = if (nearest) |m| @min(m, d) else d;
+    }
+    return nearest;
+}
+
 /// Drop tickets of a dying realm (their promises die with the arena).
-pub fn abandonPropAsync(owner: *const anyopaque) void {
+pub fn abandonPropAsync(g: *gil_mod.Gil) void {
+    const owner: *const anyopaque = @ptrCast(g);
     var i: usize = 0;
-    while (i < prop_async.items.len) {
-        if (prop_async.items[i].owner == owner) {
-            prop_alloc.destroy(prop_async.items[i]);
-            _ = prop_async.orderedRemove(i);
+    while (i < g.prop_async.items.len) {
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
+        if (t.owner == owner) {
+            prop_alloc.destroy(t);
+            _ = g.prop_async.orderedRemove(i);
             continue;
         }
         i += 1;
@@ -772,14 +787,15 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const key = try self.arena.dupe(u8, key_tmp);
     var ticket = PropTicket{ .obj = o, .key = key };
-    prop_waiters.append(prop_alloc, &ticket) catch return error.OutOfMemory;
-    defer for (prop_waiters.items, 0..) |t, i| {
+    const g = self.gil.?;
+    g.prop_waiters.append(self.arena, @ptrCast(&ticket)) catch return error.OutOfMemory;
+    defer for (g.prop_waiters.items, 0..) |raw, i| {
+        const t: *PropTicket = @ptrCast(@alignCast(raw));
         if (t == &ticket) {
-            _ = prop_waiters.orderedRemove(i);
+            _ = g.prop_waiters.orderedRemove(i);
             break;
         }
     };
-    const g = self.gil.?;
     const deadline_ns: ?i96 = if (timeout_ns) |ns|
         std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + ns
     else
@@ -813,7 +829,9 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
     }
     const io = agent.engineIo();
     var n: usize = 0;
-    for (prop_waiters.items) |t| {
+    const g = self.gil.?;
+    for (g.prop_waiters.items) |raw| {
+        const t: *PropTicket = @ptrCast(@alignCast(raw));
         if (n >= count) break;
         if (!t.woken and t.obj == o and std.mem.eql(u8, t.key, key)) {
             t.woken = true;
@@ -822,10 +840,10 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
         }
     }
     var i: usize = 0;
-    while (i < prop_async.items.len and n < count) {
-        const t = prop_async.items[i];
+    while (i < g.prop_async.items.len and n < count) {
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
         if (t.obj == o and std.mem.eql(u8, t.key, key)) {
-            _ = prop_async.orderedRemove(i);
+            _ = g.prop_async.orderedRemove(i);
             settlePropAsync(self, t, "ok"); // settling-thread rule
             n += 1;
             continue;

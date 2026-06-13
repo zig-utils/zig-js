@@ -26,6 +26,12 @@ pub const Gil = struct {
     /// microtasks as its own turn) — the semantics the threads corpus pins.
     /// Entries are type-erased `*jsthread.HoldJob` (owned by their arena).
     tasks: std.ArrayListUnmanaged(*anyopaque) = .empty,
+    /// Property-mode `Atomics.wait` waiters for this realm. Entries are
+    /// type-erased `*jsthread.PropTicket` and live on waiting thread stacks.
+    prop_waiters: std.ArrayListUnmanaged(*anyopaque) = .empty,
+    /// Property-mode `Atomics.waitAsync` tickets for this realm. Entries are
+    /// type-erased `*jsthread.PropAsyncTicket` and are page-allocator owned.
+    prop_async: std.ArrayListUnmanaged(*anyopaque) = .empty,
     /// Per-realm Thread-id allocator: ids in [1, 0x7ffe], monotonically
     /// fresh (no reuse before a rebias lands), main = 0.
     next_thread_id: u32 = 1,

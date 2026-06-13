@@ -222,7 +222,7 @@ pub const Context = struct {
             for (self.js_threads.items) |rec| {
                 if (rec.thread) |t| t.join();
             }
-            jsthread.abandonPropAsync(@ptrCast(g));
+            jsthread.abandonPropAsync(g);
             self.gpa.destroy(g);
             self.gil = null;
         } else {
@@ -4149,6 +4149,23 @@ test "Atomics on plain properties: semantics, exact counter, wait/notify" {
         \\if (Atomics.wait(gate, "state", 999, 0) !== "not-equal") throw new Error("not-equal");
         \\if (Atomics.wait(gate, "state", 0, 1) !== "timed-out") throw new Error("timed-out");
         \\if (Atomics.notify(gate, "absent") !== 0) throw new Error("notify absent is 0");
+        \\// finite waitAsync timers keep the shell alive until they settle
+        \\const asyncGate = { state: 0 };
+        \\const asyncWait = Atomics.waitAsync(asyncGate, "state", 0, 2);
+        \\if (asyncWait.async !== true || !(asyncWait.value instanceof Promise)) throw new Error("waitAsync shape");
+        \\let settled = false;
+        \\asyncWait.value.then(() => { settled = true; });
+        \\if (settled) throw new Error("waitAsync settled synchronously");
+        \\globalThis.__waitAsyncOutcome = "pending";
+        \\async function checkWaitAsync() {
+        \\  const outcome = await asyncWait.value;
+        \\  globalThis.__waitAsyncOutcome = outcome;
+        \\}
+        \\checkWaitAsync();
+    );
+    _ = try ctx.evaluate(
+        \\if (globalThis.__waitAsyncOutcome !== "timed-out")
+        \\  throw new Error("waitAsync timeout: " + globalThis.__waitAsyncOutcome);
     );
 }
 
