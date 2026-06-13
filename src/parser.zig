@@ -542,6 +542,11 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "return")) return self.parseReturn();
             if (std.mem.eql(u8, t.text, "throw")) return self.parseThrow();
             if (std.mem.eql(u8, t.text, "try")) return self.parseTry();
+            if (std.mem.eql(u8, t.text, "debugger")) {
+                _ = self.advance();
+                _ = self.match(.semicolon);
+                return self.alloc(.{ .block = &[_]*Node{} });
+            }
             if (std.mem.eql(u8, t.text, "class")) {
                 // `class C {...}` declaration binds C; anonymous class is an expr.
                 const cls = try self.parseClassExpr();
