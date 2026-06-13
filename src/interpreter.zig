@@ -22620,8 +22620,8 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
 fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    _ = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else .undefined);
-    const d = this.object.temporal.?.dur;
+    const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else .undefined, .second);
+    const d = try durationApplyStringPrecision(self, this.object.temporal.?.dur, precision);
     const sign = durationSign(this.object.temporal.?);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (sign < 0) try buf.append(self.arena, '-');
@@ -22631,7 +22631,7 @@ fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
         if (u.v != 0) try tfmt(self, &buf, "{d}{c}", .{ @abs(u.v), u.c });
     }
     // Time part. Seconds combine s + ms + us + ns into a fractional second.
-    const have_time = d[4] != 0 or d[5] != 0 or d[6] != 0 or d[7] != 0 or d[8] != 0 or d[9] != 0;
+    const have_time = !precision.auto or d[4] != 0 or d[5] != 0 or d[6] != 0 or d[7] != 0 or d[8] != 0 or d[9] != 0;
     if (have_time) {
         try buf.append(self.arena, 'T');
         if (d[4] != 0) try tfmt(self, &buf, "{d}H", .{@abs(d[4])});
@@ -22650,13 +22650,16 @@ fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
             whole += @floor(frac_ns / 1_000_000_000);
             frac_ns = @mod(frac_ns, 1_000_000_000);
         }
-        if (whole != 0 or frac_ns != 0 or (d[4] == 0 and d[5] == 0)) {
-            if (frac_ns != 0) {
+        if (!precision.auto or whole != 0 or frac_ns != 0 or (d[4] == 0 and d[5] == 0)) {
+            const digits = precision.digits;
+            if (frac_ns != 0 or (digits != null and digits.? > 0)) {
                 var fb: [9]u8 = undefined;
                 const ns_int: u64 = @intFromFloat(frac_ns);
                 _ = std.fmt.bufPrint(&fb, "{d:0>9}", .{ns_int}) catch {};
-                var flen: usize = 9;
-                while (flen > 0 and fb[flen - 1] == '0') flen -= 1;
+                var flen: usize = if (digits) |digs| digs else 9;
+                if (digits == null) {
+                    while (flen > 0 and fb[flen - 1] == '0') flen -= 1;
+                }
                 try tfmt(self, &buf, "{d}.{s}S", .{ whole, fb[0..flen] });
             } else {
                 try tfmt(self, &buf, "{d}S", .{whole});
@@ -23722,7 +23725,7 @@ fn temporalPlainTimeGetter(comptime f: PlainTimeField) value.NativeFn {
 fn temporalPlainTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
-    const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else .undefined);
+    const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else .undefined, .minute);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     _ = try appendIsoTimeString(self, &buf, this.object.temporal.?, precision);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
@@ -23759,7 +23762,7 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const options = if (args.len > 0) args[0] else Value.undefined;
-    const precision = try readTemporalStringPrecision(self, options);
+    const precision = try readTemporalStringPrecision(self, options, .minute);
     const cal = try readCalendarName(self, options);
     const t = this.object.temporal.?;
     const rounded_time = roundNsForString(timeToNs(t), precision);
@@ -24423,14 +24426,18 @@ fn digitUnit(digits: u8) TUnit {
 
 fn readFractionalSecondDigits(self: *Interpreter, v: Value) EvalError!?u8 {
     if (v == .undefined) return null;
-    if (v == .string and std.mem.eql(u8, v.string, "auto")) return null;
-    const n = try self.toNumberV(v);
-    if (!std.math.isFinite(n) or @trunc(n) != n or n < 0 or n > 9)
-        return self.throwError("RangeError", "fractionalSecondDigits out of range");
-    return @intFromFloat(n);
+    if (v == .number) {
+        const n = @floor(v.number);
+        if (!std.math.isFinite(n) or n < 0 or n > 9)
+            return self.throwError("RangeError", "fractionalSecondDigits out of range");
+        return @intFromFloat(n);
+    }
+    const s = try self.toStringV(v);
+    if (std.mem.eql(u8, s, "auto")) return null;
+    return self.throwError("RangeError", "fractionalSecondDigits out of range");
 }
 
-fn readTemporalStringPrecision(self: *Interpreter, options: Value) EvalError!TemporalStringPrecision {
+fn readTemporalStringPrecision(self: *Interpreter, options: Value, min_unit: TUnit) EvalError!TemporalStringPrecision {
     var p = TemporalStringPrecision{};
     if (options == .undefined) return p;
     if (options != .object or options.object.is_symbol or options.object.is_bigint)
@@ -24445,11 +24452,16 @@ fn readTemporalStringPrecision(self: *Interpreter, options: Value) EvalError!Tem
         }
     }
 
+    const rmv = try self.getProperty(options, "roundingMode");
+    if (rmv != .undefined)
+        p.mode = roundModeFromStr(try self.toStringV(rmv)) orelse
+            return self.throwError("RangeError", "invalid roundingMode");
+
     const suv = try self.getProperty(options, "smallestUnit");
     if (suv != .undefined) {
         const su = tUnitFromStr(try self.toStringV(suv)) orelse
             return self.throwError("RangeError", "invalid smallestUnit");
-        if (@intFromEnum(su) < @intFromEnum(TUnit.minute))
+        if (@intFromEnum(su) < @intFromEnum(min_unit))
             return self.throwError("RangeError", "invalid smallestUnit");
         p.unit = su;
         p.auto = false;
@@ -24461,12 +24473,35 @@ fn readTemporalStringPrecision(self: *Interpreter, options: Value) EvalError!Tem
             else => unreachable,
         };
     }
-
-    const rmv = try self.getProperty(options, "roundingMode");
-    if (rmv != .undefined)
-        p.mode = roundModeFromStr(try self.toStringV(rmv)) orelse
-            return self.throwError("RangeError", "invalid roundingMode");
     return p;
+}
+
+fn durationStringLargestUnit(dur: [10]f64) TUnit {
+    if (dur[3] != 0) return .day;
+    if (dur[4] != 0) return .hour;
+    if (dur[5] != 0) return .minute;
+    return .second;
+}
+
+fn durationDayTimeNs(dur: [10]f64) i128 {
+    return @as(i128, @intFromFloat(dur[3])) * nsPerUnit(.day) +
+        @as(i128, @intFromFloat(dur[4])) * nsPerUnit(.hour) +
+        @as(i128, @intFromFloat(dur[5])) * nsPerUnit(.minute) +
+        @as(i128, @intFromFloat(dur[6])) * nsPerUnit(.second) +
+        @as(i128, @intFromFloat(dur[7])) * nsPerUnit(.millisecond) +
+        @as(i128, @intFromFloat(dur[8])) * nsPerUnit(.microsecond) +
+        @as(i128, @intFromFloat(dur[9]));
+}
+
+fn durationApplyStringPrecision(self: *Interpreter, dur: [10]f64, p: TemporalStringPrecision) EvalError![10]f64 {
+    if (p.auto) return dur;
+    const rounded = roundNsForString(durationDayTimeNs(dur), p);
+    var out = balanceTimeNs(rounded, durationStringLargestUnit(dur));
+    out[0] = dur[0];
+    out[1] = dur[1];
+    out[2] = dur[2];
+    if (!durInRange(out)) return self.throwError("RangeError", "duration out of range");
+    return out;
 }
 
 fn roundNsForString(ns: i128, p: TemporalStringPrecision) i128 {
@@ -25392,7 +25427,7 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     const options = if (args.len > 0) args[0] else Value.undefined;
-    const precision = try readTemporalStringPrecision(self, options);
+    const precision = try readTemporalStringPrecision(self, options, .minute);
     var tz = TimeZone{ .name = "UTC", .offset_ns = 0 };
     var z_suffix = true;
     if (options != .undefined) {
@@ -25742,7 +25777,7 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const options = if (args.len > 0) args[0] else Value.undefined;
-    const precision = try readTemporalStringPrecision(self, options);
+    const precision = try readTemporalStringPrecision(self, options, .minute);
     const cal = try readCalendarName(self, options);
     var show_offset = true;
     var time_zone_name: []const u8 = "auto";
