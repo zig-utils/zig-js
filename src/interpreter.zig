@@ -22587,11 +22587,12 @@ fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const dur = this.object.temporal.?.dur;
     if (args.len == 0 or args[0] == .undefined) return self.throwError("TypeError", "Temporal.Duration.prototype.round requires options");
-    // largestUnit defaults to "auto" → the largest unit present in the duration.
-    var opts = try readRoundOpts(self, args[0], .{ .largest = durPresentLargest(dur), .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
+    const read = try readDurationRoundOptions(self, args[0], dur);
+    var opts = read.opts;
+    if (!read.has_unit) return self.throwError("RangeError", "Temporal.Duration.prototype.round requires largestUnit or smallestUnit");
     // largestUnit must be ≥ smallestUnit.
     if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) opts.largest = opts.smallest;
-    if (try resolveRelativeTo(self, args[0])) |rel| return makeDuration(self, try roundDurationRel(self, dur, rel, opts));
+    if (read.relative_to) |rel| return makeDuration(self, try roundDurationRel(self, dur, rel, opts));
     if (durHasCalendar(dur) or @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.round with calendar units requires relativeTo");
     const rounded = roundNs(durationTimeNs(dur), opts.smallest, opts.increment, opts.mode);
@@ -24329,6 +24330,7 @@ fn balanceTimeNs(total: i128, largest: TUnit) [10]f64 {
 }
 
 const RoundOpts = struct { largest: TUnit, smallest: TUnit, mode: RoundMode, increment: f64 };
+const DurationRoundRead = struct { opts: RoundOpts, relative_to: ?RelTo, has_unit: bool };
 const RoundMode = enum { ceil, floor, expand, trunc, half_ceil, half_floor, half_expand, half_trunc, half_even };
 
 /// The rounding mode to use for a *negative* result (since() / a backward
@@ -24603,6 +24605,66 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
     if (largest_set and smallest_set and @intFromEnum(r.largest) > @intFromEnum(r.smallest))
         return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
     return r;
+}
+
+fn readDurationRoundOptions(self: *Interpreter, opts_v: Value, dur: [10]f64) EvalError!DurationRoundRead {
+    var r = RoundOpts{ .largest = durPresentLargest(dur), .smallest = .nanosecond, .mode = .half_expand, .increment = 1 };
+    if (opts_v == .string) {
+        r.smallest = tUnitFromStr(opts_v.string) orelse return self.throwError("RangeError", "invalid smallestUnit");
+        return .{ .opts = r, .relative_to = null, .has_unit = true };
+    }
+    if (opts_v != .object or opts_v.object.is_symbol or opts_v.object.is_bigint)
+        return self.throwError("TypeError", "options must be an object or undefined");
+
+    var largest_set = false;
+    var smallest_set = false;
+    const lu = try self.getProperty(opts_v, "largestUnit");
+    if (lu != .undefined) {
+        const s = try self.toStringV(lu);
+        largest_set = true;
+        if (!std.mem.eql(u8, s, "auto"))
+            r.largest = tUnitFromStr(s) orelse return self.throwError("RangeError", "invalid largestUnit");
+    }
+
+    const rel = try resolveRelativeTo(self, opts_v);
+
+    const ri = try self.getProperty(opts_v, "roundingIncrement");
+    if (ri != .undefined) {
+        const n = try self.toNumberV(ri);
+        if (std.math.isNan(n) or std.math.isInf(n)) return self.throwError("RangeError", "roundingIncrement must be finite");
+        const inc = @trunc(n);
+        if (inc < 1 or inc > 1e9) return self.throwError("RangeError", "invalid roundingIncrement");
+        r.increment = inc;
+    }
+
+    const rm = try self.getProperty(opts_v, "roundingMode");
+    if (rm != .undefined)
+        r.mode = roundModeFromStr(try self.toStringV(rm)) orelse return self.throwError("RangeError", "invalid roundingMode");
+
+    const su = try self.getProperty(opts_v, "smallestUnit");
+    if (su != .undefined) {
+        r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
+        smallest_set = true;
+    }
+
+    if (largest_set and smallest_set and @intFromEnum(r.largest) > @intFromEnum(r.smallest))
+        return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
+    try validateDurationRoundingIncrement(self, r.smallest, r.increment);
+    return .{ .opts = r, .relative_to = rel, .has_unit = largest_set or smallest_set };
+}
+
+fn validateDurationRoundingIncrement(self: *Interpreter, unit: TUnit, increment: f64) EvalError!void {
+    const max: ?i64 = switch (unit) {
+        .hour => 24,
+        .minute, .second => 60,
+        .millisecond, .microsecond, .nanosecond => 1000,
+        else => null,
+    };
+    if (max) |m| {
+        const inc: i64 = @intFromFloat(increment);
+        if (inc >= m or @mod(m, inc) != 0)
+            return self.throwError("RangeError", "roundingIncrement must divide evenly into the next larger unit");
+    }
 }
 
 /// Build a Temporal.Duration object from raw components (CreateTemporalDuration,
