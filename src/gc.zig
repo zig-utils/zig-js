@@ -55,6 +55,10 @@ inline fn markWeakObject(v: anytype, slot: *?*Object) void {
     v.markWeak(@ptrCast(slot));
 }
 
+inline fn markManaged(v: anytype, cell: anytype) void {
+    if (v.isManaged(cell)) v.mark(cell);
+}
+
 // ---- Per-kind tracers (public so a test binding can reuse them) -----------
 
 /// Trace every strong reference out of an `Object`. WeakRef and WeakMap/WeakSet
@@ -80,6 +84,14 @@ pub fn traceObject(o: *Object, v: anytype) void {
     }
     markValueOpt(v, o.prim);
     markWeakObject(v, &o.weak_ref_target);
+    if (o.is_finalization_registry) {
+        markValue(v, o.finalization_callback);
+        for (o.finalization_records.items) |*record| {
+            v.markWeak(&record.target);
+            if (record.token != null) v.markWeak(&record.token);
+            markValue(v, record.held);
+        }
+    }
 
     // Type-erased side-cells.
     if (o.js_func) |p| v.mark(p); // *Function (kind .function)
@@ -101,16 +113,27 @@ pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
     }
 }
 
-pub fn pruneDeadWeakEntries(o: *Object) void {
-    if (!(o.is_weak and (o.is_map or o.is_set))) return;
-    var i: usize = 0;
-    while (i < o.weak_entries.items.len) {
-        if (o.weak_entries.items[i].key == null) {
-            _ = o.weak_entries.orderedRemove(i);
-        } else {
-            i += 1;
+pub fn pruneDeadWeakEntries(o: *Object) bool {
+    var cleanup_ready = false;
+    if (o.is_weak and (o.is_map or o.is_set)) {
+        var i: usize = 0;
+        while (i < o.weak_entries.items.len) {
+            if (o.weak_entries.items[i].key == null) {
+                _ = o.weak_entries.orderedRemove(i);
+            } else {
+                i += 1;
+            }
         }
     }
+    if (o.is_finalization_registry) {
+        for (o.finalization_records.items) |*record| {
+            if (record.target == null and !record.ready) {
+                record.ready = true;
+                cleanup_ready = true;
+            }
+        }
+    }
+    return cleanup_ready;
 }
 
 pub fn traceEnv(e: *Environment, v: anytype) void {
@@ -121,13 +144,13 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
         markValue(v, d.method);
     }
     var ait = e.aliases.valueIterator();
-    while (ait.next()) |a| v.mark(a.env);
-    if (e.parent) |p| v.mark(p);
+    while (ait.next()) |a| markManaged(v, a.env);
+    if (e.parent) |p| markManaged(v, p);
     if (e.with_object) |o| v.mark(o);
 }
 
 pub fn traceFunction(f: *interp.Function, v: anytype) void {
-    v.mark(f.closure);
+    markManaged(v, f.closure);
     v.mark(f.home_object);
     v.mark(f.super_ctor);
     v.mark(f.obj);
@@ -212,6 +235,7 @@ pub const Binding = struct {
             if (mt.promise) |p| v.mark(p);
         }
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
+        for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
         markValue(v, ctx.exception orelse .undefined);
         // C-API handles: each entry is a `*Boxed` ({ value: Value }), so the
         // pointer aliases `*Value`. The embedder may hold these `JSValueRef`s.
@@ -243,9 +267,11 @@ pub const Binding = struct {
     }
 
     pub fn afterWeak(self: *Binding, cell: *anyopaque, kind: Kind) void {
-        _ = self;
         switch (kind) {
-            .object => pruneDeadWeakEntries(@ptrCast(@alignCast(cell))),
+            .object => {
+                const o: *Object = @ptrCast(@alignCast(cell));
+                if (pruneDeadWeakEntries(o)) self.context.queueFinalizationRegistryCleanup(o);
+            },
             else => {},
         }
     }
@@ -268,13 +294,18 @@ pub const Heap = gc.Heap(Binding);
 /// `.object`), else from the arena — today's engine. `heap_erased` is
 /// `Context.gc` passed type-erased so `interpreter.zig` need not name the Heap
 /// type (keeping the gc↔interpreter import edge to plain functions). The
-/// returned payload is uninitialized; the caller writes it immediately.
+/// returned payload is default-initialized so pointer slots are safe even for
+/// allocation sites that fill fields incrementally.
 pub fn allocObject(heap_erased: ?*anyopaque, arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
     if (heap_erased) |h| {
         const heap: *Heap = @ptrCast(@alignCast(h));
-        return heap.create(Object, .object);
+        const o = try heap.create(Object, .object);
+        o.* = .{};
+        return o;
     }
-    return arena.create(Object);
+    const o = try arena.create(Object);
+    o.* = .{};
+    return o;
 }
 
 /// The GC heap whose cells the *current thread* allocates into, or null for the
@@ -300,9 +331,13 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
 pub fn allocObj(arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
     if (active_heap) |h| {
         const heap: *Heap = @ptrCast(@alignCast(h));
-        return heap.create(Object, .object);
+        const o = try heap.create(Object, .object);
+        o.* = .{};
+        return o;
     }
-    return arena.create(Object);
+    const o = try arena.create(Object);
+    o.* = .{};
+    return o;
 }
 
 /// Per-side-cell allocation funnels — same thread-local-active-heap rule as

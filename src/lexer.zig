@@ -113,6 +113,7 @@ pub const Lexer = struct {
     brace_obj: [512]bool = undefined,
     brace_top: usize = 0,
     last_rbrace_object: bool = false,
+    pending_function_expr: bool = false,
 
     pub fn init(arena: std.mem.Allocator, src: []const u8) Lexer {
         return .{ .src = src, .arena = arena };
@@ -298,14 +299,20 @@ pub const Lexer = struct {
         t.end = self.i;
         if (t.kind == .lbrace) {
             if (self.brace_top < self.brace_obj.len) {
-                self.brace_obj[self.brace_top] = bracePosIsObject(prev, prev_text);
+                const function_expr_body = self.pending_function_expr and prev == .rparen;
+                self.brace_obj[self.brace_top] = function_expr_body or bracePosIsObject(prev, prev_text);
                 self.brace_top += 1;
+                if (function_expr_body) self.pending_function_expr = false;
             }
         } else if (t.kind == .rbrace) {
             self.last_rbrace_object = if (self.brace_top > 0) blk: {
                 self.brace_top -= 1;
                 break :blk self.brace_obj[self.brace_top];
             } else false;
+        } else if (t.kind == .identifier and std.mem.eql(u8, t.text, "function")) {
+            self.pending_function_expr = functionExprAllowed(prev, prev_text);
+        } else if (self.pending_function_expr and (t.kind == .semicolon or t.kind == .colon or t.kind == .eof)) {
+            self.pending_function_expr = false;
         }
         self.prev_kind = t.kind;
         self.prev_text = t.text;
@@ -1034,6 +1041,22 @@ fn bracePosIsObject(prev_kind: TokenKind, prev_text: []const u8) bool {
         .identifier => isOperandKeyword(prev_text) and
             !std.mem.eql(u8, prev_text, "do") and !std.mem.eql(u8, prev_text, "else") and
             !std.mem.eql(u8, prev_text, "case") and !std.mem.eql(u8, prev_text, "default"),
+        else => false,
+    };
+}
+
+fn functionExprAllowed(prev_kind: TokenKind, prev_text: []const u8) bool {
+    return switch (prev_kind) {
+        .lparen, .lbracket, .comma, .colon, .question,
+        .assign, .plus_eq, .minus_eq, .star_eq, .slash_eq, .percent_eq,
+        .star_star_eq, .shl_eq, .shr_eq, .ushr_eq, .amp_eq, .pipe_eq, .caret_eq,
+        .amp_amp_eq, .pipe_pipe_eq, .qq_eq,
+        .plus, .minus, .star, .star_star, .slash, .percent,
+        .eq, .eq_strict, .neq, .neq_strict, .lt, .le, .gt, .ge,
+        .bang, .tilde, .amp, .pipe, .caret, .amp_amp, .pipe_pipe, .qq,
+        .shl, .shr, .ushr,
+        => true,
+        .identifier => isOperandKeyword(prev_text),
         else => false,
     };
 }

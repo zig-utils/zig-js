@@ -46,6 +46,10 @@ pub const ThreadRecord = struct {
 
 threadlocal var t_current: ?*ThreadRecord = null;
 
+pub fn currentThreadId() u64 {
+    return if (t_current) |rec| rec.id else 0;
+}
+
 /// Install the `Thread` global into an `enable_threads` Context. Called by
 /// `Context.createWith` while still single-threaded.
 pub fn installThreadAPI(ctx: *Context) !void {
@@ -61,6 +65,7 @@ pub fn installThreadAPI(ctx: *Context) !void {
 
     const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = threadCtorFn, .native_ctor = true, .private_data = ctx };
+    try interp.installNativeProps(a, rs, ctor, "Thread", 1);
     try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try interp.setConstructor(a, rs, proto, ctor);
@@ -185,6 +190,8 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     const g = rec.gil;
     g.acquire();
     defer g.release();
+    const gc_saved = gc_mod.setActiveHeap(rec.ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
     t_current = rec;
     // A per-thread interpreter over the SHARED realm: same arena, environment,
     // global object, and shapes (safe under the GIL), with its own job queues.
@@ -265,7 +272,14 @@ fn threadCurrentGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) va
 // per-thread storage for any JS value. All parking goes through `Gil.wait`,
 // so the VM lock is never held while blocked.
 
+const SyncBrand = usize;
+const sync_brand_lock: SyncBrand = 0x6a73_7468_6c6f_636b;
+const sync_brand_condition: SyncBrand = 0x6a73_7468_636f_6e64;
+const sync_brand_thread_local: SyncBrand = 0x6a73_7468_746c_736c;
+const sync_brand_unlock_token: SyncBrand = 0x6a73_7468_7574_6f6b;
+
 const LockRecord = struct {
+    brand: SyncBrand = sync_brand_lock,
     gil: *gil_mod.Gil,
     locked: bool = false,
     /// Holding thread (0 = unheld) — recursion detection: a nested hold on
@@ -290,6 +304,10 @@ const LockRecord = struct {
     /// jobs — a parked thread arrived first, and an async grant handed to a
     /// parker's own undrained queue would deadlock its join.
     sync_waiting: usize = 0,
+    /// Release handoff generation for sync waiters. A waiter records the
+    /// current value before parking and can acquire only after a release
+    /// advances it, so a fresh barger cannot steal the signaled handoff.
+    sync_generation: u64 = 0,
 };
 
 /// A parked sync waiter's ticket (on the waiting thread's stack; unlinked
@@ -307,6 +325,7 @@ const CondEntry = union(enum) {
 };
 
 const CondRecord = struct {
+    brand: SyncBrand = sync_brand_condition,
     gil: *gil_mod.Gil,
     cond: std.Io.Condition = .init,
     /// ONE FIFO domain for sync and async waiters (4.3: notify wakes them
@@ -315,9 +334,15 @@ const CondRecord = struct {
 };
 
 const TLRecord = struct {
+    brand: SyncBrand = sync_brand_thread_local,
     gil: *gil_mod.Gil,
     arena: std.mem.Allocator,
     map: std.AutoHashMapUnmanaged(u64, Value) = .empty,
+};
+
+const UnlockTokenRecord = struct {
+    brand: SyncBrand = sync_brand_unlock_token,
+    lock: ?*LockRecord = null,
 };
 
 fn currentTid() u64 {
@@ -358,8 +383,10 @@ fn installSyncAPI(ctx: *Context) !void {
     _ = try installCtor(ctx, "ThreadLocal", tlCtorFn, tl_proto);
 
     // Phase 8 sync-primitive alignment: the current TC39 proposal names these
-    // Atomics.Mutex/Atomics.Condition. The semantics match our shipped
-    // Lock/Condition records, so expose aliases without duplicating machinery.
+    // Atomics.Mutex/Atomics.Condition. They reuse our shipped Lock/Condition
+    // records while exposing the draft's token-oriented static methods.
+    try installMutexStaticAPI(ctx, lock_ctor);
+    try installConditionStaticAPI(ctx, cond_ctor);
     if (ctx.env.get("Atomics")) |atomics_v| if (atomics_v == .object) {
         try atomics_v.object.setOwn(a, rs, "Mutex", .{ .object = lock_ctor });
         try atomics_v.object.setAttr(a, "Mutex", .{ .writable = true, .enumerable = false, .configurable = true });
@@ -391,6 +418,40 @@ fn installCtor(ctx: *Context, name: []const u8, f: value.NativeFn, proto: *value
     return ctor;
 }
 
+fn installMutexStaticAPI(ctx: *Context, lock_ctor: *value.Object) !void {
+    const a = ctx.arena();
+    const rs = ctx.root_shape;
+
+    const token_proto = try gc_mod.allocObj(a);
+    token_proto.* = .{};
+    try interp.setNativeGetter(a, rs, token_proto, "locked", unlockTokenLockedGetter);
+    try interp.setNative(a, rs, token_proto, "unlock", 0, unlockTokenUnlockFn);
+    var machine = ctx.interpreter();
+    if (machine.wellKnownSymbolKey("dispose")) |dispose_key|
+        try interp.setNative(a, rs, token_proto, dispose_key, 0, unlockTokenDisposeFn);
+    try setTag(ctx, token_proto, "Atomics.Mutex.UnlockToken");
+
+    const token_ctor = try gc_mod.allocObj(a);
+    token_ctor.* = .{ .native = unlockTokenCtorFn, .native_ctor = true, .private_data = ctx };
+    try interp.installNativeProps(a, rs, token_ctor, "UnlockToken", 0);
+    try token_ctor.setOwn(a, rs, "prototype", .{ .object = token_proto });
+    try token_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try interp.setConstructor(a, rs, token_proto, token_ctor);
+
+    try lock_ctor.setOwn(a, rs, "UnlockToken", .{ .object = token_ctor });
+    try lock_ctor.setAttr(a, "UnlockToken", .{ .writable = true, .enumerable = false, .configurable = true });
+    try interp.setNative(a, rs, lock_ctor, "lock", 1, mutexStaticLockFn);
+    try interp.setNative(a, rs, lock_ctor, "lockIfAvailable", 2, mutexStaticLockIfAvailableFn);
+}
+
+fn installConditionStaticAPI(ctx: *Context, cond_ctor: *value.Object) !void {
+    const a = ctx.arena();
+    const rs = ctx.root_shape;
+    try interp.setNative(a, rs, cond_ctor, "wait", 2, conditionStaticWaitFn);
+    try interp.setNative(a, rs, cond_ctor, "waitFor", 3, conditionStaticWaitForFn);
+    try interp.setNative(a, rs, cond_ctor, "notify", 1, conditionStaticNotifyFn);
+}
+
 /// Shared ctor shape: a fresh instance whose private_data is a record of `T`.
 fn syncCtor(comptime T: type, comptime ctor_name: []const u8) value.NativeFn {
     return struct {
@@ -418,10 +479,167 @@ const lockCtorFn = syncCtor(LockRecord, "Lock");
 const condCtorFn = syncCtor(CondRecord, "Condition");
 const tlCtorFn = syncCtor(TLRecord, "ThreadLocal");
 
+fn brandOf(comptime T: type) SyncBrand {
+    if (T == LockRecord) return sync_brand_lock;
+    if (T == CondRecord) return sync_brand_condition;
+    if (T == TLRecord) return sync_brand_thread_local;
+    if (T == UnlockTokenRecord) return sync_brand_unlock_token;
+    @compileError("unknown sync record type");
+}
+
 fn recOf(comptime T: type, this: Value) ?*T {
     if (this != .object) return null;
     const pd = this.object.private_data orelse return null;
+    const tag: *SyncBrand = @ptrCast(@alignCast(pd));
+    if (tag.* != brandOf(T)) return null;
     return @ptrCast(@alignCast(pd));
+}
+
+const AcquireResult = enum { acquired, timed_out };
+
+fn timeoutMillisToNs(ms: f64) value.HostError!?u64 {
+    if (std.math.isNan(ms) or ms == std.math.inf(f64)) return null;
+    if (ms <= 0 or ms == -std.math.inf(f64)) return 0;
+    const max_ms: f64 = @floatFromInt(std.math.maxInt(u64) / std.time.ns_per_ms);
+    const clamped = @min(ms, max_ms);
+    return @intFromFloat(@ceil(clamped * std.time.ns_per_ms));
+}
+
+fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name: []const u8) value.HostError!AcquireResult {
+    if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid())) {
+        if (timeout_ns != null and timeout_ns.? == 0) return .timed_out;
+        return self.throwError("TypeError", err_name);
+    }
+    if (rec.locked or rec.sync_waiting > 0) {
+        if (timeout_ns != null and timeout_ns.? == 0) return .timed_out;
+        if (!self.main_can_block)
+            return self.throwError("TypeError", err_name);
+        const deadline_ns: ?i96 = if (timeout_ns) |ns|
+            std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + ns
+        else
+            null;
+        const my_generation = rec.sync_generation;
+        rec.sync_waiting += 1;
+        errdefer rec.sync_waiting -= 1;
+        while (rec.locked or rec.sync_generation == my_generation) {
+            if (deadline_ns) |d| {
+                const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+                if (d <= now) {
+                    rec.sync_waiting -= 1;
+                    return .timed_out;
+                }
+            }
+            try parkPump(self, rec.gil, &rec.cond);
+        }
+        rec.sync_waiting -= 1;
+    }
+    rec.locked = true;
+    rec.holder = currentTid();
+    return .acquired;
+}
+
+fn unlockTokenCreate(self: *Interpreter, token_v: Value, lock: *LockRecord) value.HostError!Value {
+    const token = if (token_v == .undefined) blk: {
+        const rec = try self.arena.create(UnlockTokenRecord);
+        rec.* = .{};
+        const obj = try gc_mod.allocObj(self.arena);
+        obj.* = .{ .private_data = rec };
+        if (self.env.get("Atomics")) |atomics_v| if (atomics_v == .object) {
+            const mutex_v = try self.getProperty(.{ .object = atomics_v.object }, "Mutex");
+            if (mutex_v == .object) {
+                const token_ctor_v = try self.getProperty(mutex_v, "UnlockToken");
+                if (token_ctor_v == .object) {
+                    const proto_v = try self.getProperty(token_ctor_v, "prototype");
+                    if (proto_v == .object) obj.proto = proto_v.object;
+                }
+            }
+        };
+        break :blk obj;
+    } else blk: {
+        const rec = recOf(UnlockTokenRecord, token_v) orelse
+            return self.throwError("TypeError", "Atomics.Mutex expected an UnlockToken");
+        if (rec.lock != null)
+            return self.throwError("TypeError", "Atomics.Mutex UnlockToken is already locked");
+        break :blk token_v.object;
+    };
+    const rec = recOf(UnlockTokenRecord, .{ .object = token }).?;
+    rec.lock = lock;
+    return .{ .object = token };
+}
+
+fn unlockTokenCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    if (self.new_target == .undefined)
+        return self.throwError("TypeError", "calling Atomics.Mutex.UnlockToken constructor without new is invalid");
+    const native = self.active_native orelse return self.throwError("TypeError", "UnlockToken constructor lost its context");
+    const ctx: *Context = @ptrCast(@alignCast(native.private_data.?));
+    const rec = try ctx.arena().create(UnlockTokenRecord);
+    rec.* = .{};
+    const obj = try gc_mod.allocObj(ctx.arena());
+    obj.* = .{ .private_data = rec };
+    const proto = try self.getProperty(.{ .object = native }, "prototype");
+    if (proto == .object) obj.proto = proto.object;
+    return .{ .object = obj };
+}
+
+fn unlockTokenLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(UnlockTokenRecord, this) orelse
+        return self.throwError("TypeError", "Atomics.Mutex.UnlockToken.prototype.locked called on incompatible receiver");
+    return .{ .boolean = rec.lock != null };
+}
+
+fn unlockTokenUnlock(self: *Interpreter, rec: *UnlockTokenRecord) value.HostError!bool {
+    const lock = rec.lock orelse return false;
+    if (!lock.locked or lock.holder != currentTid())
+        return self.throwError("TypeError", "Atomics.Mutex.UnlockToken does not own the mutex");
+    rec.lock = null;
+    lockRelease(self, lock);
+    return true;
+}
+
+fn unlockTokenUnlockFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(UnlockTokenRecord, this) orelse
+        return self.throwError("TypeError", "Atomics.Mutex.UnlockToken.prototype.unlock called on incompatible receiver");
+    return .{ .boolean = try unlockTokenUnlock(self, rec) };
+}
+
+fn unlockTokenDisposeFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(UnlockTokenRecord, this) orelse
+        return self.throwError("TypeError", "Atomics.Mutex.UnlockToken.prototype[Symbol.dispose] called on incompatible receiver");
+    _ = try unlockTokenUnlock(self, rec);
+    return .undefined;
+}
+
+fn mutexStaticLockFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
+        return self.throwError("TypeError", "Atomics.Mutex.lock requires a Mutex argument");
+    _ = try acquireLock(self, rec, null, "Atomics.Mutex.lock cannot acquire the mutex");
+    return unlockTokenCreate(self, if (args.len > 1) args[1] else .undefined, rec);
+}
+
+fn mutexStaticLockIfAvailableFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
+        return self.throwError("TypeError", "Atomics.Mutex.lockIfAvailable requires a Mutex argument");
+    const timeout_v = if (args.len > 1) args[1] else Value.undefined;
+    if (timeout_v == .undefined)
+        return self.throwError("TypeError", "Atomics.Mutex.lockIfAvailable requires a timeout");
+    const timeout_ns = try timeoutMillisToNs(try self.toNumberV(timeout_v));
+    switch (try acquireLock(self, rec, timeout_ns, "Atomics.Mutex.lockIfAvailable cannot acquire the mutex")) {
+        .acquired => return unlockTokenCreate(self, if (args.len > 2) args[2] else .undefined, rec),
+        .timed_out => return .null,
+    }
 }
 
 /// `Lock.prototype.hold(fn)` — acquire (parking GIL-released while
@@ -433,17 +651,7 @@ fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     if (!cb.isCallable()) return self.throwError("TypeError", "Lock.prototype.hold requires a callable argument");
     if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid()))
         return self.throwError("Error", "Lock is not recursive");
-    // tryLock-first: only a CONTENDED hold blocks, so only it gates.
-    if (rec.locked and !self.main_can_block)
-        return self.throwError("TypeError", "Lock.prototype.hold cannot block the current thread");
-    if (rec.locked) {
-        rec.sync_waiting += 1;
-        errdefer rec.sync_waiting -= 1;
-        while (rec.locked) try parkPump(self, rec.gil, &rec.cond);
-        rec.sync_waiting -= 1;
-    }
-    rec.locked = true;
-    rec.holder = currentTid();
+    _ = try acquireLock(self, rec, null, "Lock.prototype.hold cannot block the current thread");
     const out = self.callValueWithThis(cb, &.{}, .undefined);
     // Epilogue guard: a termination thrown from a cond.wait inside cb left
     // the lock unheld (D9) — releasing here would corrupt the lock state.
@@ -458,6 +666,60 @@ fn lockLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
     return .{ .boolean = rec.locked };
 }
 
+fn removeSyncCondTicket(rec: *CondRecord, ticket: *SyncCondTicket) void {
+    for (rec.queue.items, 0..) |entry, i| {
+        switch (entry) {
+            .sync => |t| if (t == ticket) {
+                _ = rec.queue.orderedRemove(i);
+                return;
+            },
+            else => {},
+        }
+    }
+}
+
+fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout_ns: ?u64) value.HostError!bool {
+    if (!lock.locked or lock.holder != currentTid())
+        return self.throwError("TypeError", "Condition wait requires the lock to be held by the caller");
+    if ((timeout_ns == null or timeout_ns.? != 0) and !self.main_can_block)
+        return self.throwError("TypeError", "Condition wait cannot block the current thread");
+    // Atomic under the GIL: nothing else runs between the release below and
+    // our enqueue+park (parks register before the VM lock drops).
+    lockRelease(self, lock);
+    // Arena-allocated, NOT stack: the notifier's consume-loop reads the
+    // ticket after this frame may have returned (a stack ticket dangles —
+    // it read clobbered memory and spun forever).
+    const ticket = try self.arena.create(SyncCondTicket);
+    ticket.* = .{};
+    try rec.queue.append(self.arena, .{ .sync = ticket });
+    const deadline_ns: ?i96 = if (timeout_ns) |ns|
+        std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + ns
+    else
+        null;
+    // A termination observed here propagates WITHOUT reacquiring the lock
+    // (the enclosing hold's epilogue guard skips its release — D9).
+    while (!ticket.woken) {
+        if (deadline_ns) |d| {
+            const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+            if (d <= now) {
+                removeSyncCondTicket(rec, ticket);
+                switch (try acquireLock(self, lock, null, "Condition wait cannot reacquire the lock")) {
+                    .acquired => return false,
+                    .timed_out => unreachable,
+                }
+            }
+        }
+        try parkPump(self, rec.gil, &rec.cond);
+    }
+    // Re-register on the lock BEFORE acking the wake, so notifyAll's
+    // consume-loop guarantees FIFO against async regrants.
+    ticket.consumed = true;
+    switch (try acquireLock(self, lock, null, "Condition wait cannot reacquire the lock")) {
+        .acquired => return true,
+        .timed_out => unreachable,
+    }
+}
+
 /// `Condition.prototype.wait(lock)` — atomically release the lock and park;
 /// reacquire before returning. Spurious wakeups are permitted by spec, so
 /// callers loop on their predicate.
@@ -470,30 +732,47 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
         return self.throwError("TypeError", "Condition.prototype.wait requires the lock to be held by the caller");
     if (!self.main_can_block)
         return self.throwError("TypeError", "Condition.prototype.wait cannot block the current thread");
-    // Atomic under the GIL: nothing else runs between the release below and
-    // our enqueue+park (parks register before the VM lock drops).
-    lockRelease(self, lock);
-    // Arena-allocated, NOT stack: the notifier's consume-loop reads the
-    // ticket after this frame may have returned (a stack ticket dangles —
-    // it read clobbered memory and spun forever).
-    const ticket = try self.arena.create(SyncCondTicket);
-    ticket.* = .{};
-    try rec.queue.append(self.arena, .{ .sync = ticket });
-    // A termination observed here propagates WITHOUT reacquiring the lock
-    // (the enclosing hold's epilogue guard skips its release — D9).
-    while (!ticket.woken) try parkPump(self, rec.gil, &rec.cond);
-    // Re-register on the lock BEFORE acking the wake, so notifyAll's
-    // consume-loop guarantees FIFO against async regrants.
-    {
-        lock.sync_waiting += 1;
-        errdefer lock.sync_waiting -= 1;
-        ticket.consumed = true;
-        while (lock.locked) try parkPump(self, rec.gil, &lock.cond);
-        lock.sync_waiting -= 1;
-    }
-    lock.locked = true;
-    lock.holder = currentTid();
+    _ = try condWaitCore(self, rec, lock, null);
     return .undefined;
+}
+
+fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostError!usize {
+    // ONE FIFO domain: wake in arrival order regardless of kind.
+    var n: usize = 0;
+    var woken_sync: std.ArrayListUnmanaged(*SyncCondTicket) = .empty;
+    defer woken_sync.deinit(self.arena);
+    while (rec.queue.items.len > 0 and n < count) {
+        const entry = rec.queue.orderedRemove(0);
+        switch (entry) {
+            .sync => |t| {
+                t.woken = true;
+                woken_sync.append(self.arena, t) catch {};
+            },
+            .asynchronous => |w| wakeAsyncCondWaiter(self, w),
+        }
+        n += 1;
+    }
+    if (woken_sync.items.len > 0) rec.cond.broadcast(agent.engineIo());
+    // Depth-free handoff (notify-all-shared-lock) + FIFO against
+    // async regrants (condition-async-wait): loop until every woken
+    // sync waiter has re-registered on its lock.
+    if (self.gil) |g| {
+        var pending = true;
+        while (pending) {
+            pending = false;
+            for (woken_sync.items) |t| {
+                if (!t.consumed) pending = true;
+            }
+            if (!pending) break;
+            g.release();
+            // A real sleep, not a bare yield: the woken waiter must
+            // win the GIL to ack, and a tight relock loop can starve
+            // it indefinitely (no mutex fairness).
+            std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+            g.acquire();
+        }
+    }
+    return n;
 }
 
 fn condNotifyFn(comptime all: bool) value.NativeFn {
@@ -502,44 +781,75 @@ fn condNotifyFn(comptime all: bool) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
             const rec = recOf(CondRecord, this) orelse return self.throwError("TypeError", "Condition.prototype.notify called on incompatible receiver");
-            // ONE FIFO domain: wake in arrival order regardless of kind.
-            var n: usize = 0;
-            var woken_sync: std.ArrayListUnmanaged(*SyncCondTicket) = .empty;
-            defer woken_sync.deinit(self.arena);
-            while (rec.queue.items.len > 0 and (all or n == 0)) {
-                const entry = rec.queue.orderedRemove(0);
-                switch (entry) {
-                    .sync => |t| {
-                        t.woken = true;
-                        woken_sync.append(self.arena, t) catch {};
-                    },
-                    .asynchronous => |w| wakeAsyncCondWaiter(self, w),
-                }
-                n += 1;
-            }
-            if (woken_sync.items.len > 0) rec.cond.broadcast(agent.engineIo());
-            // Depth-free handoff (notify-all-shared-lock) + FIFO against
-            // async regrants (condition-async-wait): loop until every woken
-            // sync waiter has re-registered on its lock.
-            if (self.gil) |g| {
-                var pending = true;
-                while (pending) {
-                    pending = false;
-                    for (woken_sync.items) |t| {
-                        if (!t.consumed) pending = true;
-                    }
-                    if (!pending) break;
-                    g.release();
-                    // A real sleep, not a bare yield: the woken waiter must
-                    // win the GIL to ack, and a tight relock loop can starve
-                    // it indefinitely (no mutex fairness).
-                    std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
-                    g.acquire();
-                }
-            }
+            const n = try condNotify(self, rec, if (all) std.math.maxInt(usize) else 1);
             return .{ .number = @floatFromInt(n) };
         }
     }.call;
+}
+
+fn lockFromToken(self: *Interpreter, token_v: Value, name: []const u8) value.HostError!*LockRecord {
+    const token = recOf(UnlockTokenRecord, token_v) orelse
+        return self.throwError("TypeError", name);
+    return token.lock orelse self.throwError("TypeError", name);
+}
+
+fn conditionStaticWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(CondRecord, if (args.len > 0) args[0] else .undefined) orelse
+        return self.throwError("TypeError", "Atomics.Condition.wait requires a Condition argument");
+    const lock = try lockFromToken(self, if (args.len > 1) args[1] else .undefined, "Atomics.Condition.wait requires a locked UnlockToken");
+    _ = try condWaitCore(self, rec, lock, null);
+    return .undefined;
+}
+
+fn conditionStaticWaitForFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(CondRecord, if (args.len > 0) args[0] else .undefined) orelse
+        return self.throwError("TypeError", "Atomics.Condition.waitFor requires a Condition argument");
+    const lock = try lockFromToken(self, if (args.len > 1) args[1] else .undefined, "Atomics.Condition.waitFor requires a locked UnlockToken");
+    const timeout_v = if (args.len > 2) args[2] else Value.undefined;
+    if (timeout_v == .undefined)
+        return self.throwError("TypeError", "Atomics.Condition.waitFor requires a timeout");
+    const timeout_ns = try timeoutMillisToNs(try self.toNumberV(timeout_v));
+    const pred = if (args.len > 3) args[3] else Value.undefined;
+    if (pred != .undefined and !pred.isCallable())
+        return self.throwError("TypeError", "Atomics.Condition.waitFor predicate must be callable");
+
+    const start = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+    while (true) {
+        if (pred.isCallable()) {
+            const ok = try self.callValueWithThis(pred, &.{}, .undefined);
+            if (ok.toBoolean()) return .{ .boolean = true };
+        }
+        const remaining: ?u64 = if (timeout_ns) |ns| blk: {
+            const elapsed: u64 = @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds - start, 0));
+            if (elapsed >= ns) return .{ .boolean = false };
+            break :blk ns - elapsed;
+        } else null;
+        const notified = try condWaitCore(self, rec, lock, remaining);
+        if (!pred.isCallable()) return .{ .boolean = notified };
+    }
+}
+
+fn conditionNotifyCount(self: *Interpreter, v: Value) value.HostError!usize {
+    if (v == .undefined) return std.math.maxInt(usize);
+    const n = try self.toNumberV(v);
+    if (n == std.math.inf(f64)) return std.math.maxInt(usize);
+    if (std.math.isNan(n) or n < 0 or @trunc(n) != n)
+        return self.throwError("TypeError", "Atomics.Condition.notify count must be a non-negative integer or Infinity");
+    if (n > @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
+    return @intFromFloat(n);
+}
+
+fn conditionStaticNotifyFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
+    const rec = recOf(CondRecord, if (args.len > 0) args[0] else .undefined) orelse
+        return self.throwError("TypeError", "Atomics.Condition.notify requires a Condition argument");
+    const count = try conditionNotifyCount(self, if (args.len > 1) args[1] else .undefined);
+    return .{ .number = @floatFromInt(try condNotify(self, rec, count)) };
 }
 
 fn tlValueGetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -571,7 +881,12 @@ fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
 
 /// Whether an Atomics call should take the property path.
 pub fn isPropertyMode(self: *Interpreter, v: Value) bool {
-    return self.gil != null and v == .object and v.object.typed_array == null;
+    return self.gil != null and
+        v == .object and
+        !v.object.is_symbol and
+        !v.object.is_bigint and
+        v.object.typed_array == null and
+        v.object.data_view == null;
 }
 
 fn sameValueZero(a: Value, b: Value) bool {
@@ -938,6 +1253,7 @@ fn lockRelease(self: *Interpreter, rec: *LockRecord) void {
     if (rec.sync_waiting > 0) {
         rec.locked = false;
         rec.holder = 0;
+        rec.sync_generation +%= 1;
         rec.cond.signal(agent.engineIo());
         return;
     }
@@ -1014,8 +1330,11 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         }
         if (out) |v| {
             try promise.resolve(self, outer_pp, v);
-        } else |_| {
-            try promise.reject(self, outer_pp, self.exception);
+        } else |err| {
+            if (err != error.Throw) return err;
+            const reason = self.exception;
+            self.exception = .undefined;
+            try promise.reject(self, outer_pp, reason);
         }
         return;
     }
@@ -1048,6 +1367,8 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     const cb = if (args.len > 0) args[0] else Value.undefined;
     if (cb != .undefined and !cb.isCallable())
         return self.throwError("TypeError", "Lock.prototype.asyncHold requires a callable argument when one is provided");
+    if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid()))
+        return self.throwError("Error", "Lock is not recursive");
     const outer = try promise.newPromise(self);
     const job = try self.arena.create(HoldJob);
     job.* = .{ .lock = rec, .outer = outer, .cb = if (cb == .undefined) null else cb };

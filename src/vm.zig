@@ -1281,7 +1281,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
     // can't rebind it. `runFunction` installs `func.closure` as `vm.env` for the
     // call, so the body's free-variable lookups resolve the self name here.
     const closure_env = if (tmpl.self_name.len > 0) blk: {
-        const fenv = try vm.arena.create(interp.Environment);
+        const fenv = try gc_mod.allocEnv(vm.arena);
         fenv.* = .{ .arena = vm.arena, .parent = vm.env };
         break :blk fenv;
     } else vm.env;

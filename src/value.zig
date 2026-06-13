@@ -426,6 +426,13 @@ pub const WeakCollectionEntry = struct {
     value: Value = .undefined,
 };
 
+pub const FinalizationRecord = struct {
+    target: ?*anyopaque = null,
+    held: Value = .undefined,
+    token: ?*anyopaque = null,
+    ready: bool = false,
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
@@ -610,8 +617,11 @@ pub const Object = struct {
     /// may clear it while the WeakRef object itself remains branded.
     is_weak_ref: bool = false,
     weak_ref_target: ?*Object = null,
-    /// Marks a `FinalizationRegistry` (cleanup callbacks are still deferred).
+    /// Marks a `FinalizationRegistry`. Dead targets make records ready for
+    /// explicit `cleanupSome()` delivery at quiescent collection points.
     is_finalization_registry: bool = false,
+    finalization_callback: Value = .undefined,
+    finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
     /// Lazy Iterator-Helper state (`map`/`filter`/`take`/`drop`/`flatMap`/wrap),
     /// non-null on a helper iterator returned by those methods.
     iter_helper: ?*IterHelper = null,

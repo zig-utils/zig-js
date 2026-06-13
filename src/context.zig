@@ -44,6 +44,19 @@ pub const Context = struct {
     /// the list's address is the realm's waiter-table owner token). Settled by
     /// the drain tail in `evaluate`/`evaluateModule`.
     async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty,
+    /// FinalizationRegistry cleanup jobs made ready by a quiescent GC cycle.
+    /// The collector only enqueues registries; callbacks run later from the
+    /// normal interpreter checkpoint, outside the collector.
+    finalization_cleanup_jobs: std.ArrayListUnmanaged(*value.Object) = .empty,
+    /// A JS-visible shell `gc()` call requests collection, but the precise M1
+    /// collector is only sound at quiescent points. The request is serviced at
+    /// the next evaluate/evaluateModule entry rather than inside live Zig
+    /// interpreter recursion.
+    gc_requested: bool = false,
+    /// Realm-wide serial for class private-name storage keys. Private names are
+    /// per-class brands, so two unrelated classes declaring `#x` must not alias
+    /// even if both outlive separate evaluate calls.
+    private_name_serial: u64 = 0,
     /// Cooperative termination for worker contexts: the owning Worker's stop
     /// word, polled at the engines' step checkpoints (src/worker.zig).
     stop_flag: ?*const std.atomic.Value(bool) = null,
@@ -218,10 +231,13 @@ pub const Context = struct {
             .tdz_marker = self.tdz_marker,
             .sab_retains = &self.sab_retains,
             .async_waiters = &self.async_waiters,
+            .finalization_cleanup_jobs = &self.finalization_cleanup_jobs,
             .stop_flag = self.stop_flag,
             .main_can_block = self.main_can_block,
             .gil = self.gil,
             .gc = self.gc,
+            .gc_requested = &self.gc_requested,
+            .private_name_serial = &self.private_name_serial,
         };
     }
 
@@ -244,6 +260,7 @@ pub const Context = struct {
             self.assertOwnerThread();
         }
         self.js_threads.deinit(self.gpa);
+        self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
         self.sab_retains.deinit();
         // Reclaim every GC cell (running finalizers) before the arena and the
@@ -309,6 +326,19 @@ pub const Context = struct {
         if (self.js_threads.items.len != 0) return; // thread fns not yet rooted
         if (self.mod_cache != null) return; // module graph not yet rooted
         h.collect();
+        self.gc_requested = false;
+    }
+
+    fn collectRequestedGarbage(self: *Context) void {
+        if (!self.gc_requested) return;
+        self.collectGarbage();
+    }
+
+    pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
+        for (self.finalization_cleanup_jobs.items) |queued| {
+            if (queued == registry) return;
+        }
+        self.finalization_cleanup_jobs.append(self.gpa, registry) catch {};
     }
 
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
@@ -321,6 +351,7 @@ pub const Context = struct {
         // context before running (nothing is executing yet, so the Context
         // roots are complete).
         self.collectGarbage();
+        self.collectRequestedGarbage();
         const a = self.arena();
         const owned_source = try a.dupe(u8, source);
         var parser = try Parser.init(a, owned_source);
@@ -352,6 +383,9 @@ pub const Context = struct {
         // them, and drain again until quiescent.
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
+        machine.drainFinalizationCleanupJobs() catch {};
+        machine.drainMicrotasks() catch {};
+        machine.settleAsyncWaiters();
         // Shell keepalive (threads mode): a pending Thread completion is a
         // pending settlement — the realm stays alive until every spawned
         // thread finishes (each drains its own queue and settles its
@@ -371,6 +405,9 @@ pub const Context = struct {
                     } }) catch {};
                 }
             }
+            machine.drainMicrotasks() catch {};
+            machine.settleAsyncWaiters();
+            machine.drainFinalizationCleanupJobs() catch {};
             machine.drainMicrotasks() catch {};
             machine.settleAsyncWaiters();
         }
@@ -423,6 +460,9 @@ pub const Context = struct {
         self.assertOwnerThread();
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
+        // Quiescent point before module execution; a prior shell `gc()` request
+        // can be serviced before the live module graph is installed.
+        self.collectRequestedGarbage();
         var cache: std.StringHashMapUnmanaged(*Module) = .{};
         const root = try self.loadModule(entry_path, entry_source, host, &cache);
         try self.linkModule(root);
@@ -436,6 +476,9 @@ pub const Context = struct {
         // Populate any namespace objects after the whole graph has evaluated, so
         // every exported binding holds its final value.
         const outcome = self.evalModule(&machine, root);
+        machine.drainMicrotasks() catch {};
+        machine.settleAsyncWaiters();
+        machine.drainFinalizationCleanupJobs() catch {};
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
         outcome catch |err| {
@@ -456,7 +499,7 @@ pub const Context = struct {
         const prog = try parser.parseModule();
         const items = prog.program;
 
-        const env = try a.create(interp.Environment);
+        const env = try gc_mod.allocEnv(a);
         // A module environment is a variable scope whose parent is the global
         // scope (so globals resolve), but its own declarations stay module-local.
         env.* = .{ .arena = a, .parent = &self.env, .fn_scope = true };
@@ -738,7 +781,7 @@ pub const Context = struct {
             sorted_envs[dst_i] = envs.items[src_i];
             sorted_locals[dst_i] = locals.items[src_i];
         }
-        const modns = try a.create(interp.ModuleNs);
+        const modns = try gc_mod.allocModuleNs(a);
         modns.* = .{
             .names = sorted_names,
             .envs = sorted_envs,
@@ -4119,12 +4162,39 @@ test "Lock/Condition/ThreadLocal: mailbox handshake, mutual exclusion, TLS" {
     );
 }
 
-test "Atomics.Mutex and Atomics.Condition alias the shared-realm sync primitives" {
+test "Thread API preserves per-class private brands across shared realm threads" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
     defer ctx.destroy();
     _ = try ctx.evaluate(
-        \\if (Atomics.Mutex !== Lock) throw new Error("Mutex alias");
-        \\if (Atomics.Condition !== Condition) throw new Error("Condition alias");
+        \\class A {
+        \\  #x = "a";
+        \\  static read(o) { return o.#x; }
+        \\  static has(o) { return #x in o; }
+        \\}
+        \\class B {
+        \\  #x = "b";
+        \\  static read(o) { return o.#x; }
+        \\  static has(o) { return #x in o; }
+        \\}
+        \\const a = new A();
+        \\const b = new B();
+        \\if (A.read(a) !== "a" || B.read(b) !== "b") throw new Error("own private read");
+        \\if (!A.has(a) || A.has(b) || B.has(a) || !B.has(b)) throw new Error("brand check");
+        \\const reports = [
+        \\  new Thread(() => A.read(a)).join(),
+        \\  new Thread(() => B.read(b)).join(),
+        \\  new Thread(() => { try { A.read(b); return "no-throw"; } catch (e) { return e.name; } }).join(),
+        \\];
+        \\if (reports.join(",") !== "a,b,TypeError") throw new Error("cross-thread private brand: " + reports.join(","));
+    );
+}
+
+test "Atomics.Mutex and Atomics.Condition share the shared-realm sync constructors" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\if (Atomics.Mutex !== Lock) throw new Error("Mutex constructor identity");
+        \\if (Atomics.Condition !== Condition) throw new Error("Condition constructor identity");
         \\const lock = new Atomics.Mutex();
         \\const cond = new Atomics.Condition();
         \\if (!(lock instanceof Lock)) throw new Error("mutex instanceof");
@@ -4144,6 +4214,66 @@ test "Atomics.Mutex and Atomics.Condition alias the shared-realm sync primitives
         \\  cond.notify();
         \\});
         \\if (waiter.join() !== 8) throw new Error("alias condition");
+    );
+}
+
+test "Atomics.Mutex and Atomics.Condition proposal-style static APIs" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\if (typeof Atomics.Mutex.lock !== "function") throw new Error("missing Mutex.lock");
+        \\if (typeof Atomics.Mutex.lockIfAvailable !== "function") throw new Error("missing Mutex.lockIfAvailable");
+        \\if (typeof Atomics.Mutex.UnlockToken !== "function") throw new Error("missing UnlockToken");
+        \\if (typeof Atomics.Condition.wait !== "function") throw new Error("missing Condition.wait");
+        \\if (typeof Atomics.Condition.waitFor !== "function") throw new Error("missing Condition.waitFor");
+        \\if (typeof Atomics.Condition.notify !== "function") throw new Error("missing Condition.notify");
+        \\const mutex = new Atomics.Mutex();
+        \\let token = Atomics.Mutex.lock(mutex);
+        \\if (!(token instanceof Atomics.Mutex.UnlockToken)) throw new Error("token brand");
+        \\if (!token.locked || !mutex.locked) throw new Error("token did not hold mutex");
+        \\if (Atomics.Mutex.lockIfAvailable(mutex, 0) !== null) throw new Error("contended lockIfAvailable");
+        \\let threw = false;
+        \\try { Atomics.Mutex.lock(mutex); } catch (e) { threw = e instanceof TypeError; }
+        \\if (!threw) throw new Error("recursive Mutex.lock must throw");
+        \\if (token.unlock() !== true || token.locked || mutex.locked) throw new Error("unlock");
+        \\if (token.unlock() !== false) throw new Error("double unlock is false");
+        \\const reused = new Atomics.Mutex.UnlockToken();
+        \\const reusedResult = Atomics.Mutex.lockIfAvailable(mutex, 0, reused);
+        \\if (reusedResult !== reused || !reused.locked) throw new Error("reused token");
+        \\reused[Symbol.dispose]();
+        \\if (reused.locked || mutex.locked) throw new Error("dispose unlock");
+        \\threw = false;
+        \\try { Atomics.Mutex.lock(new Atomics.Condition()); } catch (e) { threw = e instanceof TypeError; }
+        \\if (!threw) throw new Error("wrong Mutex receiver");
+        \\
+        \\const cond = new Atomics.Condition();
+        \\const gate = { state: 0 };
+        \\const box = { ready: false, value: 0 };
+        \\const worker = new Thread(() => {
+        \\  const workerToken = Atomics.Mutex.lock(mutex);
+        \\  Atomics.store(gate, "state", 1);
+        \\  Atomics.notify(gate, "state");
+        \\  while (!box.ready) Atomics.Condition.wait(cond, workerToken);
+        \\  const out = box.value;
+        \\  workerToken.unlock();
+        \\  return out;
+        \\});
+        \\while (Atomics.load(gate, "state") !== 1) Atomics.wait(gate, "state", 0, 10);
+        \\token = Atomics.Mutex.lock(mutex);
+        \\box.value = 77;
+        \\box.ready = true;
+        \\if (Atomics.Condition.notify(cond, 1) !== 1) throw new Error("static notify count");
+        \\token.unlock();
+        \\if (worker.join() !== 77) throw new Error("static wait/notify");
+        \\
+        \\token = Atomics.Mutex.lock(mutex);
+        \\let predicateCalls = 0;
+        \\const timed = Atomics.Condition.waitFor(cond, token, 0, () => {
+        \\  predicateCalls++;
+        \\  return false;
+        \\});
+        \\if (timed !== false || predicateCalls !== 1 || !token.locked) throw new Error("waitFor timeout");
+        \\token.unlock();
     );
 }
 
@@ -4313,6 +4443,28 @@ test "enable_gc: WeakRef target clears when only weakly reachable" {
     try std.testing.expectEqual(true, r.boolean);
 }
 
+test "enable_gc: shell gc request is deferred to the next quiescent entry" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.ref = undefined;
+        \\{
+        \\  let target = { tag: 17 };
+        \\  globalThis.ref = new WeakRef(target);
+        \\  gc();
+        \\  if (globalThis.ref.deref().tag !== 17) throw new Error("gc collected during live stack");
+        \\}
+        \\0
+    );
+    try std.testing.expect(ctx.gc_requested);
+    const collections_before = ctx.gc.?.collections;
+
+    _ = try ctx.evaluate("0");
+    try std.testing.expect(!ctx.gc_requested);
+    try std.testing.expect(ctx.gc.?.collections > collections_before);
+}
+
 test "enable_gc: WeakRef keeps target while strongly reachable" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
@@ -4366,4 +4518,70 @@ test "enable_gc: WeakSet does not keep value alive" {
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.valueRef.deref() === undefined");
     try std.testing.expectEqual(true, cleared.boolean);
+}
+
+test "enable_gc: FinalizationRegistry cleanupSome delivers collected holdings" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.cleanup = [];
+        \\globalThis.registry = new FinalizationRegistry((held) => cleanup.push(held.tag));
+        \\globalThis.targetRef = new WeakRef({ id: 1 });
+        \\registry.register(targetRef.deref(), { tag: 21 });
+        \\0
+    );
+    ctx.collectGarbage();
+    const delivered = try ctx.evaluate(
+        \\if (globalThis.cleanup.length !== 0) throw new Error("cleanup ran too early");
+        \\registry.cleanupSome();
+        \\globalThis.cleanup.join(",");
+    );
+    try std.testing.expectEqualStrings("21", delivered.string);
+
+    const target_cleared = try ctx.evaluate("globalThis.targetRef.deref() === undefined");
+    try std.testing.expectEqual(true, target_cleared.boolean);
+}
+
+test "enable_gc: FinalizationRegistry cleanup callback runs as a host cleanup job" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.cleanup = [];
+        \\globalThis.registry = new FinalizationRegistry((held) => {
+        \\  cleanup.push(held);
+        \\  Promise.resolve().then(() => cleanup.push("microtask"));
+        \\});
+        \\let target = {};
+        \\registry.register(target, "auto");
+        \\target = undefined;
+        \\0
+    );
+    ctx.collectGarbage();
+    _ = try ctx.evaluate("0");
+    const delivered = try ctx.evaluate("globalThis.cleanup.join(',')");
+    try std.testing.expectEqualStrings("auto,microtask", delivered.string);
+}
+
+test "enable_gc: FinalizationRegistry unregister prevents cleanup delivery" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.cleanup = [];
+        \\globalThis.registry = new FinalizationRegistry((held) => cleanup.push(held));
+        \\globalThis.token = {};
+        \\let target = {};
+        \\registry.register(target, "gone", token);
+        \\registry.unregister(token);
+        \\target = undefined;
+        \\0
+    );
+    ctx.collectGarbage();
+    const r = try ctx.evaluate(
+        \\registry.cleanupSome();
+        \\globalThis.cleanup.length;
+    );
+    try std.testing.expectEqual(@as(f64, 0), r.number);
 }

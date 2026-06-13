@@ -35,8 +35,8 @@ pub const AsyncWaiterEntry = struct { id: u64, promise: Value };
 
 /// Robustness limits so adversarial input throws a catchable error instead of
 /// crashing the process (stack overflow / runaway loop).
-pub const max_call_depth: u32 = 256;
-pub const max_steps: u64 = 100_000_000;
+pub const max_call_depth: u32 = 128;
+pub const max_steps: u64 = 500_000_000;
 const max_typed_array_bytes: usize = 1 << 30;
 const max_temporal_instant_ns: i128 = 8_640_000_000_000_000_000_000;
 
@@ -365,6 +365,10 @@ pub const Interpreter = struct {
     /// token in the waiter table; `settleAsyncWaiters` resolves entries as
     /// their tickets settle.
     async_waiters: ?*std.ArrayListUnmanaged(AsyncWaiterEntry) = null,
+    /// Context-owned FinalizationRegistry cleanup job queue. GC marks records
+    /// ready and enqueues registries; this interpreter drains callbacks at host
+    /// checkpoints, outside collection.
+    finalization_cleanup_jobs: ?*std.ArrayListUnmanaged(*value.Object) = null,
     /// Cooperative termination (a worker's `terminate()`): when set and true,
     /// evaluation throws at the next step checkpoint in either engine (the
     /// tree-walker's `eval` and the VM's dispatch loop both poll it every
@@ -378,6 +382,14 @@ pub const Interpreter = struct {
     /// arena engine. Cell allocation funnels through `gc_mod.allocObject` etc.,
     /// which use this when set. See docs/threads/P7-gc-design.md.
     gc: ?*anyopaque = null,
+    /// Context-owned pending collection request set by the JS shell `gc()`
+    /// helper. M1 collection is precise and quiescent-only, so the request is
+    /// serviced by `Context` at the next safe entry point.
+    gc_requested: ?*bool = null,
+    /// Context-owned serial used to mint per-class private-name storage keys.
+    /// Null only in isolated interpreter unit helpers.
+    private_name_serial: ?*u64 = null,
+    private_name_serial_local: u64 = 0,
     /// Host-defined `[[CanBlock]]` policy for this VM. Spawned `$262.agent`
     /// threads override it through their threadlocal agent record.
     main_can_block: bool = true,
@@ -2143,6 +2155,195 @@ pub const Interpreter = struct {
         if (funcOf(val)) |f| f.name = name; // keep Function.name in sync
     }
 
+    fn nextPrivateStorageKey(self: *Interpreter, name: []const u8) ![]const u8 {
+        const id = if (self.private_name_serial) |serial| blk: {
+            const n = serial.*;
+            serial.* += 1;
+            break :blk n;
+        } else blk: {
+            const n = self.private_name_serial_local;
+            self.private_name_serial_local += 1;
+            break :blk n;
+        };
+        return std.fmt.allocPrint(self.arena, "{s}\x00{d}", .{ name, id });
+    }
+
+    fn remapPrivateName(map: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
+        if (!value.isPrivateKey(name)) return name;
+        return map.get(name) orelse name;
+    }
+
+    fn rewritePrivateNamesInFunction(self: *Interpreter, f: *ast.FunctionNode, map: *std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+        for (f.params) |p| {
+            if (p.default) |d| try self.rewritePrivateNamesInNode(d, map);
+            if (p.pattern) |pat| try self.rewritePrivateNamesInNode(pat, map);
+        }
+        try self.rewritePrivateNamesInNode(f.body, map);
+    }
+
+    fn rewritePrivateNamesInNode(self: *Interpreter, node: *Node, map: *std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+        switch (node.*) {
+            .identifier => |name| node.* = .{ .identifier = remapPrivateName(map, name) },
+            .unary => |u| try self.rewritePrivateNamesInNode(u.operand, map),
+            .delete_expr => |n| try self.rewritePrivateNamesInNode(n, map),
+            .update => |u| try self.rewritePrivateNamesInNode(u.target, map),
+            .binary => |b| {
+                try self.rewritePrivateNamesInNode(b.left, map);
+                try self.rewritePrivateNamesInNode(b.right, map);
+            },
+            .logical => |l| {
+                try self.rewritePrivateNamesInNode(l.left, map);
+                try self.rewritePrivateNamesInNode(l.right, map);
+            },
+            .sequence => |s| {
+                try self.rewritePrivateNamesInNode(s.first, map);
+                try self.rewritePrivateNamesInNode(s.second, map);
+            },
+            .assign => |a| {
+                try self.rewritePrivateNamesInNode(a.target, map);
+                try self.rewritePrivateNamesInNode(a.value, map);
+            },
+            .op_assign => |oa| {
+                try self.rewritePrivateNamesInNode(oa.target, map);
+                try self.rewritePrivateNamesInNode(oa.value, map);
+            },
+            .conditional => |c| {
+                try self.rewritePrivateNamesInNode(c.cond, map);
+                try self.rewritePrivateNamesInNode(c.consequent, map);
+                try self.rewritePrivateNamesInNode(c.alternate, map);
+            },
+            .function => |f| try self.rewritePrivateNamesInFunction(f, map),
+            .yield_expr => |y| if (y.argument) |a| try self.rewritePrivateNamesInNode(a, map),
+            .await_expr => |a| try self.rewritePrivateNamesInNode(a.argument, map),
+            .class_expr => {},
+            .super_call => |args| for (args) |arg_node| try self.rewritePrivateNamesInNode(arg_node, map),
+            .super_member => |sm| {
+                if (sm.computed) |c| {
+                    try self.rewritePrivateNamesInNode(c, map);
+                } else {
+                    node.* = .{ .super_member = .{ .property = remapPrivateName(map, sm.property), .computed = null } };
+                }
+            },
+            .call => |c| {
+                try self.rewritePrivateNamesInNode(c.callee, map);
+                for (c.args) |arg_node| try self.rewritePrivateNamesInNode(arg_node, map);
+            },
+            .new_expr => |n| {
+                try self.rewritePrivateNamesInNode(n.callee, map);
+                for (n.args) |arg_node| try self.rewritePrivateNamesInNode(arg_node, map);
+            },
+            .tagged_template => |t| {
+                try self.rewritePrivateNamesInNode(t.tag, map);
+                for (t.exprs) |expr| try self.rewritePrivateNamesInNode(expr, map);
+            },
+            .member => |m| {
+                try self.rewritePrivateNamesInNode(m.object, map);
+                if (m.computed) |c| {
+                    try self.rewritePrivateNamesInNode(c, map);
+                } else {
+                    node.* = .{ .member = .{ .object = m.object, .property = remapPrivateName(map, m.property), .computed = null, .optional = m.optional } };
+                }
+            },
+            .optional_chain => |n| try self.rewritePrivateNamesInNode(n, map),
+            .object_lit => |props| for (props) |p| {
+                if (p.key_expr) |ke| try self.rewritePrivateNamesInNode(ke, map);
+                try self.rewritePrivateNamesInNode(p.value, map);
+            },
+            .array_lit => |items| for (items) |item| try self.rewritePrivateNamesInNode(item, map),
+            .spread => |n| try self.rewritePrivateNamesInNode(n, map),
+            .obj_pattern => |pat| {
+                for (pat.props) |p| {
+                    if (p.key_expr) |ke| try self.rewritePrivateNamesInNode(ke, map);
+                    try self.rewritePrivateNamesInNode(p.target, map);
+                    if (p.default) |d| try self.rewritePrivateNamesInNode(d, map);
+                }
+            },
+            .arr_pattern => |pat| {
+                for (pat.elems) |el| {
+                    if (el.target) |t| try self.rewritePrivateNamesInNode(t, map);
+                    if (el.default) |d| try self.rewritePrivateNamesInNode(d, map);
+                }
+                if (pat.rest) |r| try self.rewritePrivateNamesInNode(r, map);
+            },
+            .var_decl => |vd| if (vd.init) |init| try self.rewritePrivateNamesInNode(init, map),
+            .destructure_decl => |dd| {
+                try self.rewritePrivateNamesInNode(dd.pattern, map);
+                try self.rewritePrivateNamesInNode(dd.init, map);
+            },
+            .func_decl => |f| try self.rewritePrivateNamesInFunction(f, map),
+            .return_stmt => |maybe| if (maybe) |r| try self.rewritePrivateNamesInNode(r, map),
+            .throw_stmt => |n| try self.rewritePrivateNamesInNode(n, map),
+            .try_stmt => |t| {
+                try self.rewritePrivateNamesInNode(t.block, map);
+                if (t.catch_param) |p| try self.rewritePrivateNamesInNode(p, map);
+                if (t.catch_block) |b| try self.rewritePrivateNamesInNode(b, map);
+                if (t.finally_block) |f| try self.rewritePrivateNamesInNode(f, map);
+            },
+            .labeled_stmt => |l| try self.rewritePrivateNamesInNode(l.body, map),
+            .expr_stmt => |n| try self.rewritePrivateNamesInNode(n, map),
+            .block, .decl_group, .program => |stmts| for (stmts) |stmt| try self.rewritePrivateNamesInNode(stmt, map),
+            .if_stmt => |i| {
+                try self.rewritePrivateNamesInNode(i.cond, map);
+                try self.rewritePrivateNamesInNode(i.consequent, map);
+                if (i.alternate) |a| try self.rewritePrivateNamesInNode(a, map);
+            },
+            .while_stmt => |w| {
+                try self.rewritePrivateNamesInNode(w.cond, map);
+                try self.rewritePrivateNamesInNode(w.body, map);
+            },
+            .do_while_stmt => |d| {
+                try self.rewritePrivateNamesInNode(d.body, map);
+                try self.rewritePrivateNamesInNode(d.cond, map);
+            },
+            .for_stmt => |f| {
+                if (f.init) |n| try self.rewritePrivateNamesInNode(n, map);
+                if (f.cond) |n| try self.rewritePrivateNamesInNode(n, map);
+                if (f.update) |n| try self.rewritePrivateNamesInNode(n, map);
+                try self.rewritePrivateNamesInNode(f.body, map);
+            },
+            .for_in => |f| {
+                try self.rewritePrivateNamesInNode(f.target, map);
+                try self.rewritePrivateNamesInNode(f.iterable, map);
+                try self.rewritePrivateNamesInNode(f.body, map);
+            },
+            .switch_stmt => |s| {
+                try self.rewritePrivateNamesInNode(s.disc, map);
+                for (s.cases) |case| {
+                    if (case.@"test") |t| try self.rewritePrivateNamesInNode(t, map);
+                    for (case.body) |stmt| try self.rewritePrivateNamesInNode(stmt, map);
+                }
+            },
+            .with_stmt => |w| {
+                try self.rewritePrivateNamesInNode(w.obj, map);
+                try self.rewritePrivateNamesInNode(w.body, map);
+            },
+            .export_decl => |e| {
+                if (e.declaration) |d| try self.rewritePrivateNamesInNode(d, map);
+            },
+            .import_call => |ic| {
+                try self.rewritePrivateNamesInNode(ic.specifier, map);
+                if (ic.options) |o| try self.rewritePrivateNamesInNode(o, map);
+            },
+            .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .break_stmt, .continue_stmt, .import_decl, .import_meta => {},
+        }
+    }
+
+    fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!void {
+        var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+        defer map.deinit(self.arena);
+        for (members) |m| {
+            if (m.key_expr != null or !value.isPrivateKey(m.key) or map.contains(m.key)) continue;
+            try map.put(self.arena, m.key, try self.nextPrivateStorageKey(m.key));
+        }
+        if (map.count() == 0) return;
+        for (members) |*m| {
+            m.key = remapPrivateName(&map, m.key);
+            if (m.field_init) |init| try self.rewritePrivateNamesInNode(init, &map);
+            if (m.func) |func| try self.rewritePrivateNamesInNode(func, &map);
+            if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, &map);
+        }
+    }
+
     /// Evaluate a `class` to a constructor function value: methods go on its
     /// `.prototype`, static members on the class object itself, and instance
     /// fields are desugared into the constructor (`this.f = init`). With
@@ -2161,6 +2362,8 @@ pub const Interpreter = struct {
     }
 
     fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8) EvalError!Value {
+        try self.rewriteClassPrivateNames(members);
+
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
         for (members) |m| {
@@ -3180,6 +3383,35 @@ pub const Interpreter = struct {
         var i: usize = 0;
         while (i < q.items.len) : (i += 1) {
             try promise.runJob(self, q.items[i]);
+        }
+        q.clearRetainingCapacity();
+    }
+
+    /// Host cleanup jobs for FinalizationRegistry. Explicit `cleanupSome()` and
+    /// automatic cleanup share the same ready-record queue; if user code already
+    /// consumed a record, the automatic job simply finds nothing to deliver.
+    pub fn drainFinalizationCleanupJobs(self: *Interpreter) EvalError!void {
+        const q = self.finalization_cleanup_jobs orelse return;
+        var i: usize = 0;
+        while (i < q.items.len) : (i += 1) {
+            const registry = q.items[i];
+            if (!registry.is_finalization_registry) continue;
+            const cb = registry.finalization_callback;
+            if (!cb.isCallable()) continue;
+            var r: usize = 0;
+            while (r < registry.finalization_records.items.len) {
+                const record = registry.finalization_records.items[r];
+                if (!record.ready) {
+                    r += 1;
+                    continue;
+                }
+                _ = registry.finalization_records.orderedRemove(r);
+                if (self.callValue(cb, &.{record.held})) |_| {} else |err| {
+                    if (err == error.Throw) {
+                        self.exception = .undefined;
+                    } else return err;
+                }
+            }
         }
         q.clearRetainingCapacity();
     }
@@ -9592,10 +9824,7 @@ pub const Interpreter = struct {
         return lf - rf;
     }
 
-    /// `x instanceof C`. v1 has a flat construction model: objects created by
-    /// `new F()` carry `ctor_ref` pointing at F's object, and builtin error
-    /// constructors carry `error_ctor`; this checks those links rather than a
-    /// full prototype chain.
+    /// `x instanceof C`: OrdinaryHasInstance walks the live prototype chain.
     /// Spec [[HasProperty]]: own property first, then prototype chain, invoking
     /// Proxy `has` traps at whichever object in the chain provides them.
     fn hasPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
@@ -9632,8 +9861,7 @@ pub const Interpreter = struct {
     }
 
     /// OrdinaryHasInstance(C=`rc`, O=`l`): is `rc.prototype` in `l`'s prototype
-    /// chain? Plus the engine's constructor-identity shortcuts. Assumes `rc` is
-    /// already known callable (false otherwise).
+    /// chain? Assumes `rc` is already known callable (false otherwise).
     /// An object's effective [[Prototype]]: its `proto`, or — for a callable
     /// (native/bound) function that was never given one — %Function.prototype%,
     /// which every function inherits.
@@ -9662,12 +9890,6 @@ pub const Interpreter = struct {
         while (cur == .object) {
             if (cur.object == p.object) return true;
             cur = try self.objectGetPrototypeValue(cur.object);
-        }
-        if (lo.ctor_ref) |cr| {
-            if (cr == rc) return true;
-            if (p == .object) {
-                if (cr.getOwn("prototype")) |cp| if (cp == .object and cp.object == p.object) return true;
-            }
         }
         if (rc.error_ctor) |name| {
             if (lo.is_error and (std.mem.eql(u8, lo.error_name, name) or std.mem.eql(u8, name, "Error")))
@@ -10366,6 +10588,28 @@ fn printFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
     return .undefined;
 }
 
+/// Test-shell compatibility: JSC's `noInline(fn)` affects tiering only. This
+/// engine's tiering is not JIT-driven, so the observable behavior is identity.
+fn noInlineFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    return if (args.len > 0) args[0] else .undefined;
+}
+
+/// Test-shell compatibility for PR-249 object-model/GC stress files. The M1
+/// collector is precise and only sound at quiescent points, so in GC-enabled
+/// contexts this requests collection for the next safe entry instead of tracing
+/// while live JS values still sit in Zig locals/registers.
+fn gcFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.gc != null) {
+        if (self.gc_requested) |requested| requested.* = true;
+    }
+    return .undefined;
+}
+
 /// Host timer used by test262's Atomics helper. This intentionally blocks the
 /// current agent for the delay, services finite waitAsync tickets, then queues
 /// the callback; the engine has no browser event loop yet.
@@ -10384,6 +10628,17 @@ fn setTimeoutFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     try promise.resolve(self, pp, .undefined);
     _ = try promise.then(self, pp, cb, .undefined);
     return .{ .number = 0 };
+}
+
+/// Test-shell helper used by the PR-249 corpus. This is a microtask checkpoint
+/// only: threaded run-loop tasks such as `Lock.asyncHold` grants are still
+/// delivered by the evaluate tail / park pump, not by this hook.
+fn drainMicrotasksFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    try self.drainMicrotasks();
+    return .undefined;
 }
 
 /// `Object.prototype.toString` → `"[object Tag]"`. The tag comes from the
@@ -13359,11 +13614,8 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry: cleanup callback must be callable");
     const o = (try self.newObject()).object;
     o.is_finalization_registry = true;
+    o.finalization_callback = cb;
     if (try self.protoFromCtor("FinalizationRegistry")) |pr| o.proto = pr;
-    // Cells `[target, heldValue, unregisterToken]`. Cleanup jobs are not wired
-    // yet, but `unregister` operates on this live set.
-    try self.setProp(o, "\x00fr_cells", try self.newArray());
-    try o.setAttr(self.arena, "\x00fr_cells", .{ .writable = true, .enumerable = false, .configurable = false });
     return .{ .object = o };
 }
 
@@ -13376,15 +13628,11 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (value.strictEquals(target, held)) return self.throwError("TypeError", "FinalizationRegistry.register: target and held value must not be the same");
     const token = if (args.len > 2) args[2] else Value.undefined;
     if (token != .undefined and !canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.register: unregister token must be an object or a symbol");
-    // No real GC, so the cleanup callback never runs; record the cell so a later
-    // `unregister(token)` can find it.
-    if (this.object.getOwn("\x00fr_cells")) |cv| if (cv == .object) {
-        const cell = (try self.newArray()).object;
-        try cell.elements.append(self.arena, target);
-        try cell.elements.append(self.arena, held);
-        try cell.elements.append(self.arena, token);
-        try cv.object.elements.append(self.arena, .{ .object = cell });
-    };
+    try this.object.finalization_records.append(self.arena, .{
+        .target = weakKeyPtr(target),
+        .held = held,
+        .token = if (token == .undefined) null else weakKeyPtr(token),
+    });
     return .undefined;
 }
 
@@ -13395,25 +13643,39 @@ fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (!canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.unregister: token must be an object or a symbol");
     // Remove every cell whose [[UnregisterToken]] is SameValue(token); return
     // whether any were removed.
-    const cv = this.object.getOwn("\x00fr_cells") orelse return .{ .boolean = false };
-    if (cv != .object) return .{ .boolean = false };
-    const cells = cv.object;
+    const token_ptr = weakKeyPtr(token);
     var removed = false;
     var i: usize = 0;
-    while (i < cells.elements.items.len) {
-        const cell = cells.elements.items[i].object;
-        const ctok = cell.elements.items[2];
-        if (ctok != .undefined and value.strictEquals(ctok, token)) {
-            _ = cells.elements.orderedRemove(i);
+    while (i < this.object.finalization_records.items.len) {
+        if (this.object.finalization_records.items[i].token == token_ptr) {
+            _ = this.object.finalization_records.orderedRemove(i);
             removed = true;
         } else i += 1;
     }
     return .{ .boolean = removed };
 }
 
+fn finRegCleanupSomeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this != .object or !this.object.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome called on an incompatible receiver");
+    const cb = if (args.len > 0 and args[0] != .undefined) args[0] else this.object.finalization_callback;
+    if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome callback is not callable");
+    var i: usize = 0;
+    while (i < this.object.finalization_records.items.len) {
+        const record = this.object.finalization_records.items[i];
+        if (!record.ready) {
+            i += 1;
+            continue;
+        }
+        _ = this.object.finalization_records.orderedRemove(i);
+        _ = try self.callValue(cb, &.{record.held});
+    }
+    return .undefined;
+}
+
 /// Install `WeakRef` and `FinalizationRegistry`. With the opt-in GC enabled,
-/// WeakRef targets clear when collected; FinalizationRegistry cleanup jobs are
-/// still deferred, but the full API surface and brand checks are present.
+/// WeakRef targets clear when collected and FinalizationRegistry records become
+/// observable through cleanupSome at quiescent collection points.
 // ===== DisposableStack / AsyncDisposableStack ========================
 // The explicit-resource-management container objects. The `using`/`await using`
 // *syntax* isn't wired, but the class API (use/adopt/defer/move/dispose) is.
@@ -13745,6 +14007,7 @@ fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.O
         proto.* = .{ .proto = object_proto };
         try setNative(a, rs, proto, "register", 2, finRegRegisterFn);
         try setNative(a, rs, proto, "unregister", 1, finRegUnregisterFn);
+        try setNative(a, rs, proto, "cleanupSome", 0, finRegCleanupSomeFn);
         if (tt) |k| {
             try proto.setOwn(a, rs, k, .{ .string = "FinalizationRegistry" });
             try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
@@ -19872,21 +20135,21 @@ fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, o
     // kind check runs BEFORE the index is coerced to ToIndex.
     if (only_int32) {
         if (ta.kind != .i32 and ta.kind != .i64)
-            return self.throwError("TypeError", "Atomics waitable op requires an Int32Array or BigInt64Array");
+            return self.throwError("TypeError", "Typed array argument must be an Int32Array or BigInt64Array.");
     } else switch (ta.kind) {
         .i8, .u8, .i16, .u16, .i32, .u32, .i64, .u64 => {},
-        else => return self.throwError("TypeError", "Atomics operand must be an integer TypedArray (not Float/Uint8Clamped)"),
+        else => return self.throwError("TypeError", "Typed array argument must be an Int8Array, Int16Array, Int32Array, Uint8Array, Uint16Array, Uint32Array, BigInt64Array, or BigUint64Array."),
     }
     // ValidateSharedIntegerTypedArray(true): `Atomics.wait` additionally
     // requires a SharedArrayBuffer, also checked before the index is coerced.
     if (require_shared and !ta.buffer.array_buffer.?.is_shared)
-        return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
+        return self.throwError("TypeError", "Typed array for wait/waitAsync/notify must wrap a SharedArrayBuffer.");
     // ValidateTypedArray(write): reject an immutable buffer before the index is
     // coerced (the value isn't coerced yet either).
     if (write and ta.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Atomics cannot write to an immutable ArrayBuffer");
     if (ta.buffer.array_buffer.?.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const i = try toIndexArg(self, idx_v);
-    if (i >= ta.length) return self.throwError("RangeError", "Atomics index out of range");
+    if (i >= ta.length) return self.throwError("RangeError", "Access index out of bounds for atomic access.");
     return .{ .ta = ta, .i = @intCast(i) };
 }
 
@@ -20016,6 +20279,8 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         const t_ns: ?u64 = if (std.math.isNan(t_ms) or t_ms == std.math.inf(f64)) null else if (t_ms <= 0) 0 else if (t_ms >= 1e12) null else @intFromFloat(t_ms * std.time.ns_per_ms);
         return jsthread.propWait(self, args, t_ns);
     }
+    if (args.len > 0 and args[0] == .object and args[0].object.typed_array != null and self.gil != null and jsthread.currentThreadId() != 0)
+        return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
     const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
     // ToNumber(timeout): NaN → wait forever; negative clamps to 0.
@@ -20286,6 +20551,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "escape", 1, builtins.escapeFn);
     try defineGlobalFn(env, root_shape, "unescape", 1, builtins.unescapeFn);
     try defineGlobalFn(env, root_shape, "setTimeout", 2, setTimeoutFn);
+    try defineGlobalFn(env, root_shape, "drainMicrotasks", 0, drainMicrotasksFn);
+    try defineGlobalFn(env, root_shape, "noInline", 1, noInlineFn);
+    try defineGlobalFn(env, root_shape, "gc", 0, gcFn);
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
     try installRegExpProto(env, root_shape);
     if (env.get("RegExp")) |re| {
@@ -27537,6 +27805,19 @@ test "interpreter new + constructor + this + instanceof" {
         \\function Point(x) { this.x = x; }
         \\let p = new Point(1);
         \\p instanceof Point
+    )).boolean);
+    try std.testing.expect((try evalSource(a,
+        \\function C() {}
+        \\let a = {};
+        \\let b = {};
+        \\C.prototype = a;
+        \\let o = new C();
+        \\let before = o instanceof C;
+        \\C.prototype = b;
+        \\let afterDetach = o instanceof C;
+        \\Object.setPrototypeOf(o, b);
+        \\let afterAttach = o instanceof C;
+        \\before === true && afterDetach === false && afterAttach === true
     )).boolean);
 }
 
