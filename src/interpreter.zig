@@ -378,6 +378,9 @@ pub const Interpreter = struct {
     /// arena engine. Cell allocation funnels through `gc_mod.allocObject` etc.,
     /// which use this when set. See docs/threads/P7-gc-design.md.
     gc: ?*anyopaque = null,
+    /// Host-defined `[[CanBlock]]` policy for this VM. Spawned `$262.agent`
+    /// threads override it through their threadlocal agent record.
+    main_can_block: bool = true,
     /// The native-function object currently being invoked (set around each
     /// native call), so a native can reach its own `private_data` — used by
     /// Promise executor resolve/reject closures.
@@ -19935,7 +19938,7 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     else
         @intFromFloat(timeout_ms * std.time.ns_per_ms);
     // AgentCanSuspend check runs after every coercion.
-    if (!agent.canBlock()) return self.throwError("TypeError", "Atomics.wait cannot block this agent");
+    if (!agent.canBlock(self.main_can_block)) return self.throwError("TypeError", "Atomics.wait cannot block this agent");
     const ab = vd.ta.buffer.array_buffer.?;
     const storage = ab.shared orelse return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
     const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();

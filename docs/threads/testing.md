@@ -32,6 +32,10 @@ agents, workers, shared buffers, property-mode Atomics, `Thread`, `Lock`,
 is the concurrency gate for shared-buffer storage, agent waiters, workers, and
 the shared-realm GIL path.
 
+The runner models PR-249 command-line options with `Context.Options`:
+`blocking-gate.js` runs with `.main_can_block = false`, and
+`thread-id-bounds.js` runs with `.max_js_threads = 4`.
+
 ## Focused Runs
 
 Use `-Dthreads-case=<path>` to run a single vendored thread test:

@@ -69,10 +69,6 @@ var group: Group = .{};
 /// never touches agents.
 var group_used = std.atomic.Value(bool).init(false);
 
-/// `[[CanBlock]]` of the *main* agent (host-set; spawned agents always may
-/// block). The runner flips this for `CanBlockIsFalse` tests.
-pub var main_can_block: bool = true;
-
 threadlocal var t_agent: ?*Agent = null;
 
 /// Non-null while the calling thread is a spawned agent.
@@ -80,8 +76,10 @@ pub fn currentAgent() ?*Agent {
     return t_agent;
 }
 
-/// Whether the calling agent may block in `Atomics.wait`.
-pub fn canBlock() bool {
+/// Whether the calling agent may block in `Atomics.wait`. Spawned `$262.agent`
+/// threads always may block; the main realm gets its host policy from
+/// `Context.Options.main_can_block`.
+pub fn canBlock(main_can_block: bool) bool {
     return t_agent != null or main_can_block;
 }
 

@@ -130,10 +130,6 @@ fn threadProtoOf(ctx: *Context, ctor: *value.Object) !?*value.Object {
     return if (p == .object) p.object else null;
 }
 
-/// Host knob (runner: --maxJSThreads): cap on LIVE spawned threads;
-/// exceeding it is a RangeError at spawn.
-pub var max_threads: ?u32 = null;
-
 fn recordOf(self: *Interpreter, this: Value) ?*ThreadRecord {
     _ = self;
     if (this != .object) return null;
@@ -159,7 +155,7 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
 
     // Live cap and id-space checks come BEFORE the id is consumed — a
     // refused spawn must not burn a TID or leak a live entry (I17).
-    if (max_threads) |cap| {
+    if (ctx.max_js_threads) |cap| {
         var live: u32 = 0;
         for (ctx.js_threads.items) |r| {
             if (!r.done) live += 1;
@@ -235,7 +231,7 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     if (rec == t_current) return self.throwError("Error", "Thread cannot join itself");
     // The gate guards the BLOCK, not the call: joining a finished thread is
     // always allowed.
-    if (!rec.done and !agent.main_can_block)
+    if (!rec.done and !self.main_can_block)
         return self.throwError("TypeError", "Thread.prototype.join cannot block the current thread");
     while (!rec.done) try parkPump(self, rec.gil, &rec.done_cond);
     self.drainMicrotasks() catch {};
@@ -438,7 +434,7 @@ fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid()))
         return self.throwError("Error", "Lock is not recursive");
     // tryLock-first: only a CONTENDED hold blocks, so only it gates.
-    if (rec.locked and !agent.main_can_block)
+    if (rec.locked and !self.main_can_block)
         return self.throwError("TypeError", "Lock.prototype.hold cannot block the current thread");
     if (rec.locked) {
         rec.sync_waiting += 1;
@@ -472,7 +468,7 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
         return self.throwError("TypeError", "Condition.prototype.wait requires a Lock argument");
     if (!lock.locked or lock.holder != currentTid())
         return self.throwError("TypeError", "Condition.prototype.wait requires the lock to be held by the caller");
-    if (!agent.main_can_block)
+    if (!self.main_can_block)
         return self.throwError("TypeError", "Condition.prototype.wait cannot block the current thread");
     // Atomic under the GIL: nothing else runs between the release below and
     // our enqueue+park (parks register before the VM lock drops).
@@ -794,7 +790,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
     if (!sameValueZero(cur, argAt(args, 2))) return .{ .string = "not-equal" };
     if (timeout_ns != null and timeout_ns.? == 0) return .{ .string = "timed-out" };
-    if (!agent.main_can_block)
+    if (!self.main_can_block)
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const key = try self.arena.dupe(u8, key_tmp);
     var ticket = PropTicket{ .obj = o, .key = key };

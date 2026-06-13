@@ -19,6 +19,8 @@ but it is not true parallel JavaScript heap mutation.
   queues on `Gil`.
 - `Atomics.Mutex` and `Atomics.Condition` are proposal-aligned aliases for the
   shipped `Lock` and `Condition` constructors in threaded contexts.
+- Host policies that used to be process-global test knobs are now stable
+  `Context.Options`: `main_can_block` and `max_js_threads`.
 
 ## Not Supported Today
 
@@ -29,20 +31,6 @@ but it is not true parallel JavaScript heap mutation.
   structured clone.
 - Treating PR-249 JIT, GC-stress, WebAssembly, object-model, CVE, or
   scaling/benchmark files as part of the default green suite.
-- Exposing test-only host knobs as stable embedder API.
-
-## Host Knobs
-
-Two knobs exist for tests and conformance hosts:
-
-- `js.jsthread.max_threads`: caps live shared-realm `Thread` spawns for corpus
-  cases such as `thread-id-bounds.js`.
-- `js.agent.main_can_block`: models the host's `[[CanBlock]]` bit for tests
-  such as `blocking-gate.js`.
-
-Do not expose these as general embedder API without a separate design. They are
-process-visible knobs today and are set around individual tests.
-
 ## C-API and Context Affinity
 
 The C API keeps the Phase-0 rule: handles are affine to the thread that owns

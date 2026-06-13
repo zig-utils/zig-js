@@ -353,12 +353,10 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []con
     }
     buf.appendSlice(gpa, src) catch return .skip;
 
-    const ctx = js.Context.create(gpa) catch return .skip;
+    const ctx = js.Context.createWith(gpa, .{
+        .main_can_block = !meta.can_block_false,
+    }) catch return .skip;
     defer ctx.destroy();
-
-    // The host-defined [[CanBlock]] of the main agent for this test.
-    js.agent.main_can_block = !meta.can_block_false;
-    defer js.agent.main_can_block = true;
 
     // Enable top-level-script dynamic `import()` (resolved relative to the test
     // file), so script tests that `import('./fixture.js')` work like the engine's
@@ -435,7 +433,9 @@ fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_pat
 /// Run a `flags: [module]` test: install the harness in the global scope, then
 /// link + evaluate the test body as a Module against its sibling fixtures.
 fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, meta: Meta) Outcome {
-    const ctx = js.Context.create(gpa) catch return .skip;
+    const ctx = js.Context.createWith(gpa, .{
+        .main_can_block = !meta.can_block_false,
+    }) catch return .skip;
     defer ctx.destroy();
     if (!meta.raw) {
         var hbuf: std.ArrayListUnmanaged(u8) = .empty;
@@ -682,9 +682,9 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
         driveSubtree(gpa, io, root, exe, sub, &stats);
         const vt = stats.validTotal();
         std.debug.print("  {s}: valid {d}/{d} ({d:.1}%)  [parse-fail {d} · runtime-fail {d} · host-fail {d}]  neg {d}/{d}\n", .{
-            sub,             stats.pass,        vt,             Stats.pct(stats.pass, vt),
-            stats.fail_parse, stats.fail_runtime, stats.fail_other,
-            stats.pass_negative, stats.negTotal(),
+            sub,              stats.pass,         vt,               Stats.pct(stats.pass, vt),
+            stats.fail_parse, stats.fail_runtime, stats.fail_other, stats.pass_negative,
+            stats.negTotal(),
         });
         total.merge(stats);
     }

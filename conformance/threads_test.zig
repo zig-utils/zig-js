@@ -135,12 +135,13 @@ pub fn main(init: std.process.Init) !void {
         // lines: blocking-gate runs can-block-is-false; thread-id-bounds runs
         // --maxJSThreads=4; condition-wait-termination runs --watchdog=500
         // with the termination throw as its PASSING outcome.
-        js.agent.main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js");
-        defer js.agent.main_can_block = true;
-        js.jsthread.max_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null;
-        defer js.jsthread.max_threads = null;
+        const options = js.Context.Options{
+            .enable_threads = true,
+            .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),
+            .max_js_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null,
+        };
         const expect_termination = std.mem.endsWith(u8, name, "condition-wait-termination.js");
-        const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+        const ctx = js.Context.createWith(gpa, options) catch {
             std.debug.print("  FAIL  {s} (context)\n", .{name});
             failed += 1;
             continue;

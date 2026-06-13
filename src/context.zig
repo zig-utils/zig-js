@@ -47,6 +47,12 @@ pub const Context = struct {
     /// Cooperative termination for worker contexts: the owning Worker's stop
     /// word, polled at the engines' step checkpoints (src/worker.zig).
     stop_flag: ?*const std.atomic.Value(bool) = null,
+    /// Host policy for whether this shared VM may block in synchronous waits.
+    /// Used by PR-249 and test262 `[[CanBlock]]` coverage.
+    main_can_block: bool = true,
+    /// Optional cap on live shared-realm `Thread`s. Null means only the
+    /// intrinsic id-space limit applies.
+    max_js_threads: ?u32 = null,
     /// Phase 6: the VM lock for shared-Context `Thread` objects (heap-
     /// allocated so its address is stable; null = the context stays
     /// single-thread-affine and pays nothing).
@@ -89,6 +95,12 @@ pub const Context = struct {
         /// the collector. Mid-run collection is gated separately until the
         /// whole allocation surface is migrated.
         enable_gc: bool = false,
+        /// Host-defined `[[CanBlock]]` for this VM. When false, blocking APIs
+        /// throw if they would have to park; non-blocking fast paths and async
+        /// APIs still work.
+        main_can_block: bool = true,
+        /// Stable host cap for live shared-realm `Thread` objects.
+        max_js_threads: ?u32 = null,
     };
 
     /// The engine's precise-GC heap type and its root-tracing binding (issue #1
@@ -120,6 +132,8 @@ pub const Context = struct {
             .global_object = undefined, // set below, once the heap exists
             .root_shape = try Shape.createRoot(a),
             .tdz_marker = undefined, // set below
+            .main_can_block = options.main_can_block,
+            .max_js_threads = options.max_js_threads,
         };
         if (options.enable_gc) {
             // GC cells are gpa-backed (the collector frees them individually);
@@ -205,6 +219,7 @@ pub const Context = struct {
             .sab_retains = &self.sab_retains,
             .async_waiters = &self.async_waiters,
             .stop_flag = self.stop_flag,
+            .main_can_block = self.main_can_block,
             .gil = self.gil,
             .gc = self.gc,
         };
@@ -4198,13 +4213,11 @@ test "Atomics on plain properties: semantics, exact counter, wait/notify" {
 }
 
 test "Thread blocking APIs respect the main can-block gate" {
-    const agent = @import("agent.zig");
-    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .main_can_block = false,
+    });
     defer ctx.destroy();
-
-    const saved_can_block = agent.main_can_block;
-    agent.main_can_block = false;
-    defer agent.main_can_block = saved_can_block;
 
     _ = try ctx.evaluate(
         \\function expectTypeError(fn, msg) {
