@@ -598,10 +598,11 @@ pub const Object = struct {
     /// Cached `*regex.Regex`, type-erased to keep value.zig independent from the
     /// regex package. Invalidated when `RegExp.prototype.compile` changes slots.
     regex_compiled: ?*anyopaque = null,
-    /// A `WeakRef`'s target (the held value). Non-null marks a WeakRef; with no
-    /// real GC the target is never reclaimed, so `deref()` always returns it.
-    weak_ref_target: ?Value = null,
-    /// Marks a `FinalizationRegistry` (its cleanup callback never fires — no GC).
+    /// Marks a `WeakRef` instance. The target is a weak GC edge, so collection
+    /// may clear it while the WeakRef object itself remains branded.
+    is_weak_ref: bool = false,
+    weak_ref_target: ?*Object = null,
+    /// Marks a `FinalizationRegistry` (cleanup callbacks are still deferred).
     is_finalization_registry: bool = false,
     /// Lazy Iterator-Helper state (`map`/`filter`/`take`/`drop`/`flatMap`/wrap),
     /// non-null on a helper iterator returned by those methods.

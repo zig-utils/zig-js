@@ -13248,7 +13248,8 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const target = if (args.len > 0) args[0] else .undefined;
     if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "WeakRef: target must be an object or a symbol");
     const o = (try self.newObject()).object;
-    o.weak_ref_target = target;
+    o.is_weak_ref = true;
+    o.weak_ref_target = target.object;
     if (try self.protoFromCtor("WeakRef")) |pr| o.proto = pr;
     return .{ .object = o };
 }
@@ -13256,8 +13257,9 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn weakRefDerefFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this != .object or this.object.weak_ref_target == null) return self.throwError("TypeError", "WeakRef.prototype.deref called on a non-WeakRef");
-    return this.object.weak_ref_target.?;
+    if (this != .object or !this.object.is_weak_ref) return self.throwError("TypeError", "WeakRef.prototype.deref called on a non-WeakRef");
+    const target = this.object.weak_ref_target orelse return .undefined;
+    return .{ .object = target };
 }
 
 fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -13269,8 +13271,8 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     const o = (try self.newObject()).object;
     o.is_finalization_registry = true;
     if (try self.protoFromCtor("FinalizationRegistry")) |pr| o.proto = pr;
-    // Cells `[target, heldValue, unregisterToken]` — there is no GC so they're
-    // never cleaned up, but `unregister` operates on this live set.
+    // Cells `[target, heldValue, unregisterToken]`. Cleanup jobs are not wired
+    // yet, but `unregister` operates on this live set.
     try self.setProp(o, "\x00fr_cells", try self.newArray());
     try o.setAttr(self.arena, "\x00fr_cells", .{ .writable = true, .enumerable = false, .configurable = false });
     return .{ .object = o };
@@ -13320,9 +13322,9 @@ fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     return .{ .boolean = removed };
 }
 
-/// Install `WeakRef` and `FinalizationRegistry` (the cleanup callback never
-/// fires — there is no garbage collector — but the full API surface and brand
-/// checks are present).
+/// Install `WeakRef` and `FinalizationRegistry`. With the opt-in GC enabled,
+/// WeakRef targets clear when collected; FinalizationRegistry cleanup jobs are
+/// still deferred, but the full API surface and brand checks are present.
 // ===== DisposableStack / AsyncDisposableStack ========================
 // The explicit-resource-management container objects. The `using`/`await using`
 // *syntax* isn't wired, but the class API (use/adopt/defer/move/dispose) is.

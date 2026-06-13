@@ -1,11 +1,13 @@
 # Phase 7 GC design: `zig-gc`, a precise non-moving collector
 
-Status: design (pre-implementation). This is the concrete plan for the tracing
-GC that gates Phase 7 (GIL removal / Layer C), per the prerequisites audit in
-[`P7-gil-removal.md`](P7-gil-removal.md). It also delivers value *before* Phase
-7: it makes `WeakRef` / `WeakMap` / `WeakSet` / `FinalizationRegistry` real
-(today they are approximations — `value.zig:598-602` literally notes "with no
-real GC the target is never reclaimed").
+Status: M1 foundation implemented behind `Context.Options.enable_gc`; arbitrary
+mid-script collection and Layer-C GIL removal remain future work. This is the
+concrete plan for the tracing GC that gates Phase 7 (GIL removal / Layer C),
+per the prerequisites audit in [`P7-gil-removal.md`](P7-gil-removal.md). It also
+delivers value *before* Phase 7: opt-in contexts already reclaim unreachable GC
+cells at quiescent points and clear `WeakRef` targets when their referent dies.
+`WeakMap` / `WeakSet` weak-key cleanup and `FinalizationRegistry` cleanup jobs
+remain follow-on work.
 
 ## Decisions (and why)
 
@@ -245,6 +247,13 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   33/33, threads 29/29, full unit suite leak-checked. (No `JSValueUnprotect`
   yet, so a boxed object is pinned for the context's life — conservative but
   sound.)
+  *WeakRef weak edges landed:* `Object` now keeps a separate WeakRef brand and
+  nullable target object slot; `gc.zig` registers that slot with
+  `Visitor.markWeak`, so a collection clears the slot before sweeping an
+  otherwise-unreachable referent. `WeakRef.prototype.deref()` now returns
+  `undefined` after collection while continuing to brand-check the WeakRef
+  object itself. Validated by GC-enabled tests for cleared weak-only targets and
+  strongly reachable targets that survive collection.
   *Remaining for the FULL deliverable:* (a) **arbitrary mid-script collection**
   needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
   locals/registers a precise GC can't see) — the quiescent points avoid this; a
@@ -252,7 +261,9 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   cell sub-allocations (`slots`/`elements`/`vars`/reaction lists) to gpa so
   `finalize` frees them on collect — turning "reclaims cells" into "reclaims
   everything" (today sub-allocations are reclaimed at teardown, so a collected
-  object's backing buffers persist until `destroy`).
+  object's backing buffers persist until `destroy`). (c) WeakMap/WeakSet need
+  typed weak-key table cleanup, and FinalizationRegistry still needs cleanup-job
+  scheduling.
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
@@ -264,9 +275,11 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
 
 - `zig-gc` unit tests: toy object graph with cycles, weak edges, finalizer
   queue — collect and assert exact reclamation (precise, so counts are exact).
-- zig-js: a GC stress test (allocate-heavy loop bounded heap), the existing
-  `WeakRef`/`FinalizationRegistry`/`WeakMap` test262 buckets now asserting real
-  collection, `zig build test262` non-regression at each milestone, TSan on M3.
+- zig-js: GC stress tests (allocate-heavy loop bounded heap, explicit
+  `collectGarbage` reclamation, and `WeakRef` clearing/retention), targeted
+  `WeakRef`/`FinalizationRegistry`/`WeakMap` test262 buckets as each weak
+  semantic lands, `zig build test262` non-regression at each milestone, TSan on
+  M3.
 
 ## Open questions
 

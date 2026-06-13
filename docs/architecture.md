@@ -40,7 +40,7 @@ Constructs the VM hasn't learned yet (e.g. `throw`/`try` in some paths) transpar
 
 ## Memory model
 
-A `Context` owns an **arena allocator**: values and objects are bump-allocated and freed wholesale when the context is released. There is no tracing GC yet, which is why `WeakMap`/`WeakSet` currently behave as their strong counterparts.
+A default `Context` owns an **arena allocator**: values and objects are bump-allocated and freed wholesale when the context is released. Opt-in contexts created with `Context.createWith(.{ .enable_gc = true })` route heap cells through the Phase-7 precise collector and can run quiescent `collectGarbage()`; this already reclaims unreachable cells and clears `WeakRef` targets. WeakMap/WeakSet weak-key cleanup and arbitrary mid-script collection remain future GC work.
 
 ## Why a C-API drop-in?
 

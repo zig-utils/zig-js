@@ -3,11 +3,10 @@
 //! (`../zig-gc`) owns the mechanism; this file is the policy: how to enumerate
 //! roots, how to trace each engine cell kind, and what to do when a cell dies.
 //!
-//! **Status: M0 — wired but inert.** The engine still allocates from the arena;
-//! nothing here runs in production yet. The trace/root logic is written against
-//! the real engine types and unit-tested in isolation (see the test below) so
-//! that M1 — routing allocation through `Heap.create` and enabling collection —
-//! is a contained change rather than a from-scratch effort.
+//! **Status: M1 — opt-in quiescent collection.** `Context.Options.enable_gc`
+//! routes heap cells through `zig-gc`, and `Context.collectGarbage()` runs a
+//! precise mark-sweep at quiescent points. Arbitrary mid-script collection and
+//! full sub-allocation reclamation are still future work.
 //!
 //! Tracing surface and root set are derived from a full audit of the heap; see
 //! the cell-kind table in P7-gc-design.md. Cells whose references all live in
@@ -52,11 +51,16 @@ inline fn markValueOpt(v: anytype, val: ?Value) void {
     if (val) |x| markValue(v, x);
 }
 
+inline fn markWeakObject(v: anytype, slot: *?*Object) void {
+    v.markWeak(@ptrCast(slot));
+}
+
 // ---- Per-kind tracers (public so a test binding can reuse them) -----------
 
-/// Trace every strong reference out of an `Object`. Weak edges
-/// (`weak_ref_target`, WeakMap/WeakSet entries) are marked **strongly** in M0 —
-/// i.e. today's "never collected" semantics — until M1 adds typed weak slots.
+/// Trace every strong reference out of an `Object`. `WeakRef` targets are
+/// registered as weak edges so collection clears them when the target is
+/// otherwise unreachable. WeakMap/WeakSet entries are still strong until their
+/// tables grow typed weak-key storage.
 pub fn traceObject(o: *Object, v: anytype) void {
     v.mark(o.proto);
     v.mark(o.ctor_ref);
@@ -72,7 +76,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
         }
     }
     markValueOpt(v, o.prim);
-    markValueOpt(v, o.weak_ref_target); // strong in M0 (see note above)
+    markWeakObject(v, &o.weak_ref_target);
 
     // Type-erased side-cells.
     if (o.js_func) |p| v.mark(p); // *Function (kind .function)

@@ -4298,3 +4298,36 @@ test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
     const r = try ctx.evaluate("globalThis.keep.kept + globalThis.keep.nested.deep[2]");
     try std.testing.expectEqual(@as(f64, 4), r.number); // 1 + 3
 }
+
+test "enable_gc: WeakRef target clears when only weakly reachable" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.ref = new WeakRef({ tag: 7 });
+        \\0
+    );
+    ctx.collectGarbage();
+
+    const r = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, r.boolean);
+}
+
+test "enable_gc: WeakRef keeps target while strongly reachable" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.keep = { tag: 9 };
+        \\globalThis.ref = new WeakRef(globalThis.keep);
+        \\0
+    );
+    ctx.collectGarbage();
+    const alive = try ctx.evaluate("globalThis.ref.deref().tag");
+    try std.testing.expectEqual(@as(f64, 9), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+}
