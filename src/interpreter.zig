@@ -22618,9 +22618,9 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
 
 /// `Temporal.Duration.prototype.toString` — ISO-8601 duration (P…T…).
 fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this != .object or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    _ = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else .undefined);
     const d = this.object.temporal.?.dur;
     const sign = durationSign(this.object.temporal.?);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -23720,11 +23720,11 @@ fn temporalPlainTimeGetter(comptime f: PlainTimeField) value.NativeFn {
 }
 
 fn temporalPlainTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
+    const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else .undefined);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try isoTimeStr(self, &buf, this.object.temporal.?);
+    _ = try appendIsoTimeString(self, &buf, this.object.temporal.?, precision);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -23758,12 +23758,17 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
 fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const cal = try readCalendarName(self, if (args.len > 0) args[0] else .undefined);
+    const options = if (args.len > 0) args[0] else Value.undefined;
+    const precision = try readTemporalStringPrecision(self, options);
+    const cal = try readCalendarName(self, options);
     const t = this.object.temporal.?;
+    const rounded_time = roundNsForString(timeToNs(t), precision);
+    const day_delta = @divFloor(rounded_time, 86_400_000_000_000);
+    const c = tCivilFromDays(tDaysFromCivil(t.year, t.month, t.day) + @as(i64, @intCast(day_delta)));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try isoYearStr(self, &buf, t.year);
-    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ t.month, t.day });
-    try isoTimeStr(self, &buf, t);
+    try isoYearStr(self, &buf, c.y);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ c.m, c.d });
+    try appendIsoTimeFromNs(self, &buf, rounded_time, precision);
     try appendCalAnnotation(self, &buf, cal, t.calendar);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
@@ -24391,6 +24396,129 @@ fn roundNs(total: i128, smallest: TUnit, increment: f64, mode: RoundMode) i128 {
     if (step == 0) return total;
     const rounded = applyRounding(total, step, mode);
     return rounded * step;
+}
+
+const TemporalStringPrecision = struct {
+    unit: TUnit = .nanosecond,
+    digits: ?u8 = null,
+    auto: bool = true,
+    mode: RoundMode = .trunc,
+};
+
+fn pow10u(comptime T: type, exp: u8) T {
+    var out: T = 1;
+    var i: u8 = 0;
+    while (i < exp) : (i += 1) out *= 10;
+    return out;
+}
+
+fn digitUnit(digits: u8) TUnit {
+    return switch (digits) {
+        0 => .second,
+        1...3 => .millisecond,
+        4...6 => .microsecond,
+        else => .nanosecond,
+    };
+}
+
+fn readFractionalSecondDigits(self: *Interpreter, v: Value) EvalError!?u8 {
+    if (v == .undefined) return null;
+    if (v == .string and std.mem.eql(u8, v.string, "auto")) return null;
+    const n = try self.toNumberV(v);
+    if (!std.math.isFinite(n) or @trunc(n) != n or n < 0 or n > 9)
+        return self.throwError("RangeError", "fractionalSecondDigits out of range");
+    return @intFromFloat(n);
+}
+
+fn readTemporalStringPrecision(self: *Interpreter, options: Value) EvalError!TemporalStringPrecision {
+    var p = TemporalStringPrecision{};
+    if (options == .undefined) return p;
+    if (options != .object or options.object.is_symbol or options.object.is_bigint)
+        return self.throwError("TypeError", "options must be an object or undefined");
+
+    const fdv = try self.getProperty(options, "fractionalSecondDigits");
+    if (fdv != .undefined) {
+        if (try readFractionalSecondDigits(self, fdv)) |d| {
+            p.digits = d;
+            p.unit = digitUnit(d);
+            p.auto = false;
+        }
+    }
+
+    const suv = try self.getProperty(options, "smallestUnit");
+    if (suv != .undefined) {
+        const su = tUnitFromStr(try self.toStringV(suv)) orelse
+            return self.throwError("RangeError", "invalid smallestUnit");
+        if (@intFromEnum(su) < @intFromEnum(TUnit.minute))
+            return self.throwError("RangeError", "invalid smallestUnit");
+        p.unit = su;
+        p.auto = false;
+        p.digits = switch (su) {
+            .minute, .second => 0,
+            .millisecond => 3,
+            .microsecond => 6,
+            .nanosecond => 9,
+            else => unreachable,
+        };
+    }
+
+    const rmv = try self.getProperty(options, "roundingMode");
+    if (rmv != .undefined)
+        p.mode = roundModeFromStr(try self.toStringV(rmv)) orelse
+            return self.throwError("RangeError", "invalid roundingMode");
+    return p;
+}
+
+fn roundNsForString(ns: i128, p: TemporalStringPrecision) i128 {
+    if (p.auto) return ns;
+    const step: i128 = if (p.unit == .minute)
+        nsPerUnit(.minute)
+    else if (p.digits) |d|
+        pow10u(i128, 9 - d)
+    else
+        nsPerUnit(p.unit);
+    return applyRounding(ns, step, p.mode) * step;
+}
+
+fn appendIsoTimeFromNs(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), ns_in: i128, p: TemporalStringPrecision) EvalError!void {
+    var ns = @mod(ns_in, 86_400_000_000_000);
+    if (ns < 0) ns += 86_400_000_000_000;
+    const hour = @divTrunc(ns, nsPerUnit(.hour));
+    ns = @mod(ns, nsPerUnit(.hour));
+    const minute = @divTrunc(ns, nsPerUnit(.minute));
+    ns = @mod(ns, nsPerUnit(.minute));
+    try tfmtPad(self, buf, @intCast(hour), 2);
+    try buf.append(self.arena, ':');
+    try tfmtPad(self, buf, @intCast(minute), 2);
+    if (!p.auto and p.unit == .minute) return;
+
+    const second = @divTrunc(ns, nsPerUnit(.second));
+    ns = @mod(ns, nsPerUnit(.second));
+    try buf.append(self.arena, ':');
+    try tfmtPad(self, buf, @intCast(second), 2);
+
+    if (p.auto) {
+        if (ns == 0) return;
+        var fb: [9]u8 = undefined;
+        _ = std.fmt.bufPrint(&fb, "{d:0>9}", .{@as(u64, @intCast(ns))}) catch {};
+        var flen: usize = 9;
+        while (flen > 0 and fb[flen - 1] == '0') flen -= 1;
+        try tfmt(self, buf, ".{s}", .{fb[0..flen]});
+        return;
+    }
+
+    const digits = p.digits orelse 9;
+    if (digits == 0) return;
+    var fb: [9]u8 = undefined;
+    _ = std.fmt.bufPrint(&fb, "{d:0>9}", .{@as(u64, @intCast(ns))}) catch {};
+    try tfmt(self, buf, ".{s}", .{fb[0..digits]});
+}
+
+fn appendIsoTimeString(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), t: *const value.TemporalData, p: TemporalStringPrecision) EvalError!i64 {
+    const raw = timeToNs(t);
+    const rounded = roundNsForString(raw, p);
+    try appendIsoTimeFromNs(self, buf, rounded, p);
+    return @intCast(@divFloor(rounded, 86_400_000_000_000));
 }
 
 /// Read `largestUnit`/`smallestUnit`/`roundingMode`/`roundingIncrement` from an
@@ -25261,20 +25389,22 @@ fn temporalInstantEpochGetter(comptime ms: bool) value.NativeFn {
 }
 
 fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
-    const ns = this.object.temporal.?.epoch_ns;
-    const total_ms = @divFloor(ns, 1_000_000);
-    const days = @divFloor(total_ms, 86_400_000);
+    const options = if (args.len > 0) args[0] else Value.undefined;
+    const precision = try readTemporalStringPrecision(self, options);
+    var tz = TimeZone{ .name = "UTC", .offset_ns = 0 };
+    var z_suffix = true;
+    if (options != .undefined) {
+        const tzv = try self.getProperty(options, "timeZone");
+        if (tzv != .undefined) {
+            tz = try resolveTimeZoneArg(self, tzv);
+            z_suffix = false;
+        }
+    }
+    const ns = roundNsForString(this.object.temporal.?.epoch_ns + @as(i128, tz.offset_ns), precision);
+    const days = @divFloor(ns, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
-    var rem = @mod(total_ms, 86_400_000);
-    const hh = @divFloor(rem, 3_600_000);
-    rem = @mod(rem, 3_600_000);
-    const mm = @divFloor(rem, 60_000);
-    rem = @mod(rem, 60_000);
-    const ss = @divFloor(rem, 1000);
-    const msec = @mod(rem, 1000);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, c.y);
     try buf.append(self.arena, '-');
@@ -25282,16 +25412,8 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
     try buf.append(self.arena, '-');
     try tfmtPad(self, &buf, c.d, 2);
     try buf.append(self.arena, 'T');
-    try tfmtPad(self, &buf, @intCast(hh), 2);
-    try buf.append(self.arena, ':');
-    try tfmtPad(self, &buf, @intCast(mm), 2);
-    try buf.append(self.arena, ':');
-    try tfmtPad(self, &buf, @intCast(ss), 2);
-    if (msec != 0) {
-        try buf.append(self.arena, '.');
-        try tfmtPad(self, &buf, @intCast(msec), 3);
-    }
-    try buf.append(self.arena, 'Z');
+    try appendIsoTimeFromNs(self, &buf, ns, precision);
+    if (z_suffix) try buf.append(self.arena, 'Z') else try buf.appendSlice(self.arena, try offsetNsToString(self, tz.offset_ns));
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
@@ -25617,19 +25739,33 @@ fn temporalZdtOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) va
 }
 
 fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
+    const options = if (args.len > 0) args[0] else Value.undefined;
+    const precision = try readTemporalStringPrecision(self, options);
+    const cal = try readCalendarName(self, options);
+    var show_offset = true;
+    var time_zone_name: []const u8 = "auto";
+    if (options != .undefined) {
+        const off = (try dtfGetStr(self, options, "offset", &.{ "auto", "never" }, "auto")).?;
+        show_offset = !std.mem.eql(u8, off, "never");
+        time_zone_name = (try dtfGetStr(self, options, "timeZoneName", &.{ "auto", "never", "critical" }, "auto")).?;
+    }
     const t = this.object.temporal.?;
-    const l = zdtLocal(t);
+    const local_ns = roundNsForString(t.epoch_ns + @as(i128, t.tz_offset_ns), precision);
+    const days = @divFloor(local_ns, 86_400_000_000_000);
+    const c = tCivilFromDays(@intCast(days));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try isoYearStr(self, &buf, l.year);
-    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ l.month, l.day });
-    try isoTimeStr(self, &buf, &l);
-    try buf.appendSlice(self.arena, try offsetNsToString(self, t.tz_offset_ns));
-    try buf.append(self.arena, '[');
-    try buf.appendSlice(self.arena, t.tz_name);
-    try buf.append(self.arena, ']');
+    try isoYearStr(self, &buf, c.y);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ c.m, c.d });
+    try appendIsoTimeFromNs(self, &buf, local_ns, precision);
+    if (show_offset) try buf.appendSlice(self.arena, try offsetNsToString(self, t.tz_offset_ns));
+    if (!std.mem.eql(u8, time_zone_name, "never")) {
+        try buf.appendSlice(self.arena, if (std.mem.eql(u8, time_zone_name, "critical")) "[!" else "[");
+        try buf.appendSlice(self.arena, t.tz_name);
+        try buf.append(self.arena, ']');
+    }
+    try appendCalAnnotation(self, &buf, cal, t.calendar);
     return .{ .string = try buf.toOwnedSlice(self.arena) };
 }
 
