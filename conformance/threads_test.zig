@@ -52,9 +52,9 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const cwd = std.Io.Dir.cwd();
 
-    // `zig build threads-test -- sweep` runs every api/atomics/sync file
+    // `zig build threads-test -Dthreads-sweep=true` runs every api/atomics/sync file
     // instead of the green allowlist (a panicking file kills the run — use
-    // `-- one <path>` to probe a single file safely).
+    // `-Dthreads-case=<path>` to probe a single file safely).
     var sweep = false;
     var one: ?[]const u8 = null;
     var args = std.process.Args.Iterator.init(init.minimal.args);

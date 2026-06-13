@@ -48,8 +48,8 @@ ungil prerequisites in [Phase 7](./P7-gil-removal.md) land.
 ```sh
 zig build test
 zig build threads-test
-zig build threads-test -- one atomics/property-waitasync-timeout.js
-zig build threads-test -- sweep
+zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
+zig build threads-test -Dthreads-sweep=true
 zig build test -Dtsan=true
 ```
 

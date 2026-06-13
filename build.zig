@@ -90,7 +90,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_threads_test = b.addRunArtifact(threads_test);
-    if (b.args) |args| run_threads_test.addArgs(args);
+    const threads_case = b.option([]const u8, "threads-case", "Run one vendored thread test path") orelse null;
+    const threads_sweep = b.option(bool, "threads-sweep", "Run every vendored api/atomics/sync thread test") orelse false;
+    if (threads_sweep) {
+        run_threads_test.addArg("sweep");
+    } else if (threads_case) |case| {
+        run_threads_test.addArgs(&.{ "one", case });
+    }
     const threads_test_step = b.step("threads-test", "Run the vendored PR-249 threads corpus allowlist");
     threads_test_step.dependOn(&run_threads_test.step);
 
@@ -115,7 +121,6 @@ pub fn build(b: *std.Build) void {
     });
     test262.root_module.addOptions("build_options", t262_options);
     const run_test262 = b.addRunArtifact(test262);
-    if (b.args) |args| run_test262.addArgs(args);
     const test262_step = b.step("test262", "Run the real test262 corpus and report pass rate");
     test262_step.dependOn(&run_test262.step);
 
@@ -131,7 +136,6 @@ pub fn build(b: *std.Build) void {
     });
     diag.root_module.addOptions("build_options", t262_options);
     const run_diag = b.addRunArtifact(diag);
-    if (b.args) |args| run_diag.addArgs(args);
     const diag_step = b.step("diag", "Throwaway parse-failure diagnostic");
     diag_step.dependOn(&run_diag.step);
 
