@@ -279,10 +279,11 @@ pub const Context = struct {
         self.js_threads.deinit(self.gpa);
         self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
-        self.sab_retains.deinit();
         // Reclaim every GC cell (running finalizers) before the arena and the
         // Context itself go away — GC cells are gpa-backed and disjoint from the
-        // arena, so this is independent of `arena_state.deinit()`.
+        // arena. Keep `sab_retains` alive until after finalizers run: live
+        // SharedArrayBuffer wrapper cells release their tracked storage refs
+        // there when GC is enabled.
         if (self.gc) |h| {
             h.deinit();
             self.gpa.destroy(h);
@@ -292,6 +293,7 @@ pub const Context = struct {
             self.gpa.destroy(b);
             self.gc_binding = null;
         }
+        self.sab_retains.deinit();
         self.arena_state.deinit();
         self.gpa.destroy(self.arena_state);
         self.gpa.destroy(self);
@@ -4641,6 +4643,29 @@ test "enable_gc: WeakRef keeps target while strongly reachable" {
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+}
+
+test "enable_gc: SharedArrayBuffer retain releases when wrapper is collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.keep = new SharedArrayBuffer(16);
+        \\globalThis.ref = new WeakRef(globalThis.keep);
+        \\0
+    );
+    try std.testing.expectEqual(@as(usize, 1), ctx.sab_retains.items.items.len);
+
+    ctx.collectGarbage();
+    try std.testing.expectEqual(@as(usize, 1), ctx.sab_retains.items.items.len);
+    const alive = try ctx.evaluate("globalThis.ref.deref().byteLength");
+    try std.testing.expectEqual(@as(f64, 16), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(@as(usize, 0), ctx.sab_retains.items.items.len);
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
     try std.testing.expectEqual(true, cleared.boolean);
 }

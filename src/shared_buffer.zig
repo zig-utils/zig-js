@@ -115,6 +115,20 @@ pub const RetainList = struct {
         };
     }
 
+    /// Release exactly one realm-owned reference. Multiple wrappers may point
+    /// at the same storage, so removing one list entry mirrors one dying
+    /// wrapper cell rather than dropping every reference for that backing slab.
+    pub fn releaseTracked(self: *RetainList, s: *SharedBufferStorage) bool {
+        for (self.items.items, 0..) |tracked, i| {
+            if (tracked == s) {
+                _ = self.items.swapRemove(i);
+                s.release();
+                return true;
+            }
+        }
+        return false;
+    }
+
     pub fn deinit(self: *RetainList) void {
         for (self.items.items) |s| s.release();
         self.items.deinit(self.gpa);
@@ -147,6 +161,23 @@ test "zero-length storage is valid" {
     const s = try SharedBufferStorage.create(0, null);
     defer s.release();
     try std.testing.expectEqual(@as(usize, 0), s.slice().len);
+}
+
+test "RetainList releases exactly one tracked reference" {
+    const a = std.testing.allocator;
+    const s = try SharedBufferStorage.create(4, null);
+    var list = RetainList{ .gpa = a };
+    defer list.deinit();
+
+    try list.track(s);
+    try list.track(s.retain());
+    try std.testing.expectEqual(@as(usize, 2), list.items.items.len);
+
+    try std.testing.expect(list.releaseTracked(s));
+    try std.testing.expectEqual(@as(usize, 1), list.items.items.len);
+    try std.testing.expect(list.releaseTracked(s));
+    try std.testing.expectEqual(@as(usize, 0), list.items.items.len);
+    try std.testing.expect(!list.releaseTracked(s));
 }
 
 test "cross-thread atomic increments land; refcount survives churn" {

@@ -302,13 +302,22 @@ pub const Binding = struct {
     }
 
     /// A cell is being reclaimed. A non-shared `ArrayBufferData`'s bytes are
-    /// arena-owned (freed with the arena), but a SharedArrayBuffer wrapper must
-    /// release its `SharedBufferStorage` retain here. No GC-owned buffers exist
-    /// until those allocation sites migrate, so this is currently a no-op.
+    /// arena-owned (freed with the arena), but a SharedArrayBuffer wrapper owns
+    /// one realm retain that must be released when the wrapper cell dies.
     pub fn finalize(self: *Binding, cell: *anyopaque, kind: Kind) void {
-        _ = self;
-        _ = cell;
-        _ = kind;
+        switch (kind) {
+            .object => {
+                const o: *Object = @ptrCast(@alignCast(cell));
+                if (o.array_buffer) |ab| {
+                    if (ab.shared) |storage| {
+                        const released = self.context.sab_retains.releaseTracked(storage);
+                        std.debug.assert(released);
+                        if (released) ab.shared = null;
+                    }
+                }
+            },
+            else => {},
+        }
     }
 };
 

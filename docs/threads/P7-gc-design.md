@@ -258,6 +258,14 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   stale stack-pointer hazard and allowing later quiescent collections to run.
   Validated by GC-enabled tests that a cached module environment survives
   collection and that a completed `evaluateModule` no longer blocks collection.
+  *SharedArrayBuffer retain finalization landed:* a dying SAB wrapper cell now
+  releases exactly one entry from the realm `RetainList`, so cross-agent shared
+  backing storage is no longer pinned until `Context.destroy()` when the JS
+  wrapper becomes unreachable. Multiple wrappers over the same backing store are
+  handled one retain at a time. Validated by a GC-enabled WeakRef test that keeps
+  a SAB alive while strongly reachable, then drops the strong reference and
+  observes both the WeakRef target and the realm retain list clear after
+  collection.
   *Shell `gc()` requests landed:* the test-shell `gc()` hook no longer calls
   `Heap.collect()` while JS is live on the Zig stack. It sets a per-Context
   pending bit, and `evaluate` / `evaluateModule` service that request at the
@@ -300,10 +308,10 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
   locals/registers a precise GC can't see) — the quiescent points avoid this; a
   Boehm-style stack scan with register spill would generalize it. (b) migrate
-  cell sub-allocations (`slots`/`elements`/`vars`/reaction lists) to gpa so
-  `finalize` frees them on collect — turning "reclaims cells" into "reclaims
-  everything" (today sub-allocations are reclaimed at teardown, so a collected
-  object's backing buffers persist until `destroy`).
+  remaining arena-backed cell sub-allocations (`slots`/`elements`/`vars`/
+  reaction lists, and non-shared ArrayBuffer bytes) to gpa so `finalize` frees
+  them on collect — turning "reclaims cells plus external SAB storage" into
+  "reclaims everything" (today those backing buffers persist until `destroy`).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
