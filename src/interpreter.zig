@@ -141,6 +141,13 @@ pub const Environment = struct {
     /// exporter's binding is visible here. Assigning to one is a TypeError.
     aliases: std.StringHashMapUnmanaged(Alias) = .{},
     arena: std.mem.Allocator,
+    /// Optional allocator for binding-table buckets and duplicated binding
+    /// names. Null keeps the legacy arena-owned path; GC contexts set this to
+    /// the context backing allocator so an Environment finalizer can reclaim
+    /// its side tables before context teardown.
+    bindings_allocator: ?std.mem.Allocator = null,
+    /// Internal accounting for GC-owned duplicated binding-name bytes.
+    gc_name_bytes_live: ?*usize = null,
     parent: ?*Environment = null,
     /// True for a function or the global scope (a *variable* environment); false
     /// for a block `{…}` scope. `var`/function declarations hoist to the nearest
@@ -161,23 +168,26 @@ pub const Environment = struct {
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
-        const gop = try self.vars.getOrPut(self.arena, name);
-        if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, name);
+        const a = self.bindingAllocator();
+        const gop = try self.vars.getOrPut(a, name);
+        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
         gop.value_ptr.* = v;
     }
 
     /// Define a `const` binding in this scope (marks it immutable for `assign`).
     pub fn putConst(self: *Environment, name: []const u8, v: Value) EvalError!void {
         try self.put(name, v);
-        const gop = try self.consts.getOrPut(self.arena, name);
-        if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, name);
+        const a = self.bindingAllocator();
+        const gop = try self.consts.getOrPut(a, name);
+        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
 
     /// Bind a named function expression's own name (immutable, non-strict).
     pub fn putFnName(self: *Environment, name: []const u8, v: Value) EvalError!void {
         try self.put(name, v);
-        const gop = try self.fn_names.getOrPut(self.arena, name);
-        if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, name);
+        const a = self.bindingAllocator();
+        const gop = try self.fn_names.getOrPut(a, name);
+        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
 
     /// Whether the nearest binding named `name` is a non-strict immutable
@@ -233,9 +243,10 @@ pub const Environment = struct {
 
     /// Install an indirect binding `local` → `target.name` (a module import).
     pub fn putAlias(self: *Environment, local: []const u8, target: *Environment, name: []const u8) EvalError!void {
-        const gop = try self.aliases.getOrPut(self.arena, local);
-        if (!gop.found_existing) gop.key_ptr.* = try self.arena.dupe(u8, local);
-        gop.value_ptr.* = .{ .env = target, .name = try self.arena.dupe(u8, name) };
+        const a = self.bindingAllocator();
+        const gop = try self.aliases.getOrPut(a, local);
+        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(local);
+        gop.value_ptr.* = .{ .env = target, .name = try self.dupeBindingName(name) };
     }
 
     /// Whether `name` resolves (in the nearest scope that binds it) to a module
@@ -260,6 +271,28 @@ pub const Environment = struct {
             env = e.parent;
         }
         return null;
+    }
+
+    pub fn bindingAllocator(self: *const Environment) std.mem.Allocator {
+        return self.bindings_allocator orelse self.arena;
+    }
+
+    fn dupeBindingName(self: *Environment, name: []const u8) EvalError![]u8 {
+        const copy = try self.bindingAllocator().dupe(u8, name);
+        if (self.bindings_allocator != null) {
+            if (self.gc_name_bytes_live) |live| live.* += copy.len;
+        }
+        return copy;
+    }
+
+    pub fn freeBindingName(self: *Environment, name: []const u8) void {
+        if (self.bindings_allocator) |a| {
+            a.free(name);
+            if (self.gc_name_bytes_live) |live| {
+                std.debug.assert(live.* >= name.len);
+                live.* -= name.len;
+            }
+        }
     }
 };
 
@@ -390,6 +423,8 @@ pub const Interpreter = struct {
     gc_array_buffer_bytes_live: ?*usize = null,
     /// Internal entry accounting for GC-owned Promise reaction lists.
     gc_promise_reactions_live: ?*usize = null,
+    /// Internal byte accounting for GC-owned Environment binding-name strings.
+    gc_environment_name_bytes_live: ?*usize = null,
     /// Context-owned pending collection request set by the JS shell `gc()`
     /// helper. M1 collection is precise and quiescent-only, so the request is
     /// serviced by `Context` at the next safe entry point.
@@ -755,7 +790,7 @@ pub const Interpreter = struct {
             method = try self.getProperty(val, k);
         }
         if (!method.isCallable()) return self.throwError("TypeError", "a 'using' declaration value must have a [Symbol.dispose] method");
-        try self.env.disposables.append(self.arena, .{ .value = val, .method = method, .is_async = is_async });
+        try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = val, .method = method, .is_async = is_async });
     }
 
     /// Dispose a scope's `using` resources in reverse declaration order, threading
@@ -780,15 +815,30 @@ pub const Interpreter = struct {
                     this_err;
             }
         }
-        env.disposables.clearRetainingCapacity();
+        if (env.bindings_allocator != null) {
+            env.disposables.deinit(env.bindingAllocator());
+            env.disposables = .empty;
+        } else {
+            env.disposables.clearRetainingCapacity();
+        }
         return pending;
+    }
+
+    pub fn initEnvironment(self: *Interpreter, env: *Environment, parent: ?*Environment, fn_scope: bool) void {
+        env.* = .{
+            .arena = self.arena,
+            .bindings_allocator = self.gc_backing,
+            .gc_name_bytes_live = self.gc_environment_name_bytes_live,
+            .parent = parent,
+            .fn_scope = fn_scope,
+        };
     }
 
     /// Evaluate a `{…}` block in its own lexical scope, disposing any `using`
     /// resources declared in it when it exits (normally or abruptly).
     fn evalBlockScope(self: *Interpreter, stmts: []*Node) EvalError!Value {
         const block_env = try gc_mod.allocEnv(self.arena);
-        block_env.* = .{ .arena = self.arena, .parent = self.env };
+        self.initEnvironment(block_env, self.env, false);
         if (self.mark_fn_body) {
             block_env.fn_body = true;
             self.mark_fn_body = false;
@@ -997,7 +1047,7 @@ pub const Interpreter = struct {
                 // body can refer to itself (recursion) and can't rebind the name.
                 if (fnode.has_name_binding and !fnode.is_arrow) {
                     const fenv = try gc_mod.allocEnv(self.arena);
-                    fenv.* = .{ .arena = self.arena, .parent = self.env };
+                    self.initEnvironment(fenv, self.env, false);
                     const fv = try self.makeFunction(fnode, fenv);
                     try fenv.putFnName(fnode.name, fv);
                     break :blk fv;
@@ -1236,7 +1286,8 @@ pub const Interpreter = struct {
                 // binding declared inside the body shadows it — both fall out of
                 // the chain position automatically.
                 const wenv = try gc_mod.allocEnv(self.arena);
-                wenv.* = .{ .arena = self.arena, .parent = self.env, .with_object = obj };
+                self.initEnvironment(wenv, self.env, false);
+                wenv.with_object = obj;
                 const saved_env = self.env;
                 self.env = wenv;
                 defer self.env = saved_env;
@@ -1275,7 +1326,7 @@ pub const Interpreter = struct {
         var iter: Value = undefined;
         if (lexical and self.tdz_marker != null) {
             const head_env = try gc_mod.allocEnv(self.arena);
-            head_env.* = .{ .arena = self.arena, .parent = outer_env };
+            self.initEnvironment(head_env, outer_env, false);
             self.env = head_env;
             self.tdzBindPattern(target, self.tdzVal());
             iter = self.eval(iterable) catch |e| {
@@ -1302,7 +1353,7 @@ pub const Interpreter = struct {
                 defer self.env = saved_env;
                 if (lexical) {
                     const iter_env = try gc_mod.allocEnv(self.arena);
-                    iter_env.* = .{ .arena = self.arena, .parent = saved_env };
+                    self.initEnvironment(iter_env, saved_env, false);
                     self.env = iter_env;
                 }
                 try self.bindLoopTarget(decl_kind, target, try self.getProperty(res, "value"));
@@ -1343,7 +1394,7 @@ pub const Interpreter = struct {
                         defer self.env = saved_env;
                         if (lexical) {
                             const ie = try gc_mod.allocEnv(self.arena);
-                            ie.* = .{ .arena = self.arena, .parent = saved_env };
+                            self.initEnvironment(ie, saved_env, false);
                             self.env = ie;
                         }
                         try self.bindLoopTarget(decl_kind, target, .{ .string = k });
@@ -1445,7 +1496,7 @@ pub const Interpreter = struct {
         // evaluate within it).
         const disc = try self.eval(disc_node);
         const block_env = try gc_mod.allocEnv(self.arena);
-        block_env.* = .{ .arena = self.arena, .parent = self.env };
+        self.initEnvironment(block_env, self.env, false);
         const saved_env = self.env;
         self.env = block_env;
         defer self.env = saved_env;
@@ -1551,7 +1602,7 @@ pub const Interpreter = struct {
             if (lexical) {
                 // The loop's lexical declaration lives in its own environment.
                 const loop_env = try gc_mod.allocEnv(self.arena);
-                loop_env.* = .{ .arena = self.arena, .parent = outer };
+                self.initEnvironment(loop_env, outer, false);
                 self.env = loop_env;
             }
             _ = try self.eval(ini);
@@ -1578,7 +1629,7 @@ pub const Interpreter = struct {
     /// of `outer` holding each lexical binding, value-copied from `prev`.
     fn perIterEnv(self: *Interpreter, outer: *Environment, names: []const []const u8, prev: *Environment) EvalError!*Environment {
         const e = try gc_mod.allocEnv(self.arena);
-        e.* = .{ .arena = self.arena, .parent = outer };
+        self.initEnvironment(e, outer, false);
         for (names) |n| try e.put(n, prev.get(n) orelse .undefined);
         return e;
     }
@@ -2850,7 +2901,7 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
 
         const call_env = try gc_mod.allocEnv(self.arena);
-        call_env.* = .{ .arena = self.arena, .parent = func.closure, .fn_scope = true };
+        self.initEnvironment(call_env, func.closure, true);
 
         const saved_env = self.env;
         const saved_signal = self.signal;
@@ -9504,7 +9555,7 @@ pub const Interpreter = struct {
                 const exc = self.exception;
                 self.exception = .undefined;
                 const catch_env = try gc_mod.allocEnv(self.arena);
-                catch_env.* = .{ .arena = self.arena, .parent = self.env };
+                self.initEnvironment(catch_env, self.env, false);
                 const saved = self.env;
                 self.env = catch_env;
                 // Bind the catch target (identifier or destructuring pattern)
@@ -9998,7 +10049,8 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // the caller / realm global) and the Annex B B.3.3 analysis runs. *Strict*
     // eval has its OWN variable environment (declarations stay local), so it is
     // a real variable scope (`fn_scope`).
-    eval_env.* = .{ .arena = self.arena, .parent = self.env, .fn_scope = parser.strict, .fn_body = !parser.strict };
+    self.initEnvironment(eval_env, self.env, parser.strict);
+    eval_env.fn_body = !parser.strict;
     self.env = eval_env;
     // Non-strict eval's var/function declarations target the surrounding
     // variable scope and, when that is the global object, must be deletable.
@@ -11339,7 +11391,7 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const a = self.arena;
     const genv = try gc_mod.allocEnv(a);
-    genv.* = .{ .arena = a, .fn_scope = true };
+    self.initEnvironment(genv, null, true);
     const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
     // Share the creating realm's well-known symbols with the new realm.
@@ -11413,7 +11465,7 @@ fn install262AbstractModuleSource(env: *Environment, rs: *Shape, host: *value.Ob
 fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
     const a = self.arena;
     const genv = try gc_mod.allocEnv(a);
-    genv.* = .{ .arena = a, .fn_scope = true };
+    self.initEnvironment(genv, null, true);
     const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
     const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv == .object) sv.object else null) else null;

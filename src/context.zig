@@ -82,6 +82,10 @@ pub const Context = struct {
     /// Not an embedder API; tests use it to prove settlement/finalization frees
     /// reaction-list backing before teardown.
     gc_promise_reactions_live: usize = 0,
+    /// Internal verification/accounting for GC-owned Environment binding-name
+    /// strings. Not an embedder API; tests use it to prove environment
+    /// finalization releases duplicated binding names before teardown.
+    gc_environment_name_bytes_live: usize = 0,
     /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
     gc_binding: ?*GcBinding = null,
     /// C-API `Boxed` handles (`JSValueRef`s) that must survive collection — the
@@ -262,6 +266,7 @@ pub const Context = struct {
             .gc_backing = if (self.gc != null) self.gpa else null,
             .gc_array_buffer_bytes_live = if (self.gc != null) &self.gc_array_buffer_bytes_live else null,
             .gc_promise_reactions_live = if (self.gc != null) &self.gc_promise_reactions_live else null,
+            .gc_environment_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
             .gc_requested = &self.gc_requested,
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
@@ -547,7 +552,13 @@ pub const Context = struct {
         const env = try gc_mod.allocEnv(a);
         // A module environment is a variable scope whose parent is the global
         // scope (so globals resolve), but its own declarations stay module-local.
-        env.* = .{ .arena = a, .parent = &self.env, .fn_scope = true };
+        env.* = .{
+            .arena = a,
+            .bindings_allocator = if (self.gc != null) self.gpa else null,
+            .gc_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
+            .parent = &self.env,
+            .fn_scope = true,
+        };
 
         const m = try a.create(Module);
         m.* = .{ .path = try a.dupe(u8, path), .items = items, .env = env };
@@ -4765,6 +4776,36 @@ test "enable_gc: settling Promise releases reaction lists" {
         \\0
     );
     try std.testing.expectEqual(baseline, ctx.gc_promise_reactions_live);
+}
+
+test "enable_gc: Environment binding names release when closure environment is collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const baseline = ctx.gc_environment_name_bytes_live;
+    _ = try ctx.evaluate(
+        \\with ({}) {
+        \\  let longLexicalBindingNameForGcEnvironment = { tag: 7 };
+        \\  const anotherCapturedConstBinding = 2;
+        \\  globalThis.keep = function () {
+        \\    return longLexicalBindingNameForGcEnvironment.tag + anotherCapturedConstBinding;
+        \\  };
+        \\}
+        \\globalThis.ref = new WeakRef(globalThis.keep);
+        \\0
+    );
+    try std.testing.expect(ctx.gc_environment_name_bytes_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_environment_name_bytes_live > baseline);
+    const alive = try ctx.evaluate("globalThis.keep()");
+    try std.testing.expectEqual(@as(f64, 9), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_environment_name_bytes_live);
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
 }
 
 test "enable_gc: WeakMap value is live only while weak key is live" {

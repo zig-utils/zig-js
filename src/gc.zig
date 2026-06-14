@@ -152,6 +152,35 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     if (e.with_object) |o| v.mark(o);
 }
 
+fn finalizeEnv(e: *Environment) void {
+    const a = e.bindings_allocator orelse return;
+    var vit = e.vars.keyIterator();
+    while (vit.next()) |key| e.freeBindingName(key.*);
+    e.vars.deinit(a);
+    e.vars = .{};
+
+    var cit = e.consts.keyIterator();
+    while (cit.next()) |key| e.freeBindingName(key.*);
+    e.consts.deinit(a);
+    e.consts = .{};
+
+    var fit = e.fn_names.keyIterator();
+    while (fit.next()) |key| e.freeBindingName(key.*);
+    e.fn_names.deinit(a);
+    e.fn_names = .{};
+
+    var ait = e.aliases.iterator();
+    while (ait.next()) |entry| {
+        e.freeBindingName(entry.key_ptr.*);
+        e.freeBindingName(entry.value_ptr.name);
+    }
+    e.aliases.deinit(a);
+    e.aliases = .{};
+
+    e.disposables.deinit(a);
+    e.disposables = .empty;
+}
+
 pub fn traceFunction(f: *interp.Function, v: anytype) void {
     markManaged(v, f.closure);
     v.mark(f.home_object);
@@ -326,6 +355,7 @@ pub const Binding = struct {
                     }
                 }
             },
+            .environment => finalizeEnv(@ptrCast(@alignCast(cell))),
             .promise => {
                 const p: *promise.Promise = @ptrCast(@alignCast(cell));
                 if (p.gc_owned) {
@@ -402,9 +432,10 @@ pub fn allocObj(arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
 /// `allocObj`, each tagged with its own `CellKind` so `trace`/`finalize`
 /// dispatch correctly. These make the *cell* heap uniform (every heap object a
 /// GC cell), the prerequisite for sound mid-run collection. (Cell
-/// sub-allocations — `Environment.vars`, `Object.slots`, … — stay arena for
-/// now; they are never passed to `mark`, so they pose no tracing hazard, only a
-/// reclaim-at-teardown vs reclaim-on-collect difference handled later.)
+/// sub-allocations still being migrated — `Object.slots`, generator queues,
+/// iterator buffers, … — are never passed to `mark`, so they pose no tracing
+/// hazard, only a reclaim-at-teardown vs reclaim-on-collect difference handled
+/// in later P7 slices.)
 fn allocCell(comptime T: type, kind: CellKind, arena: std.mem.Allocator) std.mem.Allocator.Error!*T {
     if (active_heap) |h| {
         const heap: *Heap = @ptrCast(@alignCast(h));

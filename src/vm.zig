@@ -595,7 +595,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     // The generator's scope: a child of the closure, so free variables resolve
     // outward while params/locals live here and persist across yields.
     const genv = try gc_mod.allocEnv(vm.arena);
-    genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
+    vm.initEnvironment(genv, func.closure, true);
 
     const args_obj = try vm.newArray(); // generators are never arrow functions
     for (args) |av| try args_obj.object.elements.append(vm.arena, av);
@@ -827,7 +827,7 @@ fn injectThrowAt(vm: *Interpreter, g: *Generator, e: Value) EvalError!bool {
 pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
     const chunk = func.async_chunk.?;
     const genv = try gc_mod.allocEnv(vm.arena);
-    genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
+    vm.initEnvironment(genv, func.closure, true);
     const args_obj = try vm.newArray();
     for (args) |av| try args_obj.object.elements.append(vm.arena, av);
     try genv.put("arguments", args_obj);
@@ -949,7 +949,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const chunk = func.gen_chunk orelse
         return vm.throwError("TypeError", "async generator body uses syntax not yet supported by the VM");
     const genv = try gc_mod.allocEnv(vm.arena);
-    genv.* = .{ .arena = vm.arena, .parent = func.closure, .fn_scope = true };
+    vm.initEnvironment(genv, func.closure, true);
     const args_obj = try vm.newArray();
     for (args) |av| try args_obj.object.elements.append(vm.arena, av);
     try genv.put("arguments", args_obj);
@@ -1302,7 +1302,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
     // call, so the body's free-variable lookups resolve the self name here.
     const closure_env = if (tmpl.self_name.len > 0) blk: {
         const fenv = try gc_mod.allocEnv(vm.arena);
-        fenv.* = .{ .arena = vm.arena, .parent = vm.env };
+        vm.initEnvironment(fenv, vm.env, false);
         break :blk fenv;
     } else vm.env;
     func.* = .{
