@@ -6875,7 +6875,7 @@ pub const Interpreter = struct {
     /// non-constructor species throws a TypeError, and any other constructor is
     /// `new`-ed with the length (its abrupt completion propagates).
     pub fn arraySpeciesCreate(self: *Interpreter, original: Value, len: usize) EvalError!Value {
-        if (original != .object or !original.object.is_array) return self.newArray();
+        if (original != .object or !try objectToStringIsArray(self, original.object)) return self.newArray();
         const c = try self.getProperty(original, "constructor");
         // GetFunctionRealm cross-realm check: a `constructor` that is another
         // realm's %Array% is treated as the default — ArrayCreate, WITHOUT
