@@ -862,11 +862,16 @@ pub const Parser = struct {
             isKeyword(self.cur(), "using") and
             self.peekIsKeyword(1, "of") and
             self.peekKind(2) == .assign;
+        const classic_async_of_arrow =
+            self.pos == save and
+            isKeyword(self.cur(), "async") and
+            self.peekIsKeyword(1, "of") and
+            self.peekKind(2) == .arrow;
         // Iteration form `for ([decl] target in/of iterable)`, where `target`
         // is an identifier, a destructuring pattern, or (assignment form) a
         // member expression. Parse a target, then require `in`/`of`; otherwise
         // rewind to `save` and parse a classic `for(;;)`.
-        if (!classic_using_of_decl) if (self.tryForTarget(decl_kind) catch null) |target| {
+        if (!classic_using_of_decl and !classic_async_of_arrow) if (self.tryForTarget(decl_kind) catch null) |target| {
             if (isKeyword(self.cur(), "in") or isKeyword(self.cur(), "of")) {
                 const is_of = isKeyword(self.advance(), "of"); // consume in/of
                 // `for-in` takes an Expression, `for-of` an AssignmentExpression.
@@ -925,8 +930,15 @@ pub const Parser = struct {
     fn tryForTarget(self: *Parser, decl_kind: ?ast.DeclKind) ParseError!?*Node {
         if (self.check(.lbrace) or self.check(.lbracket)) {
             if (decl_kind != null) return try self.parseBindingTarget();
-            // Assignment form: an array/object literal cover → destructuring pattern.
-            return try self.litToPattern(try self.parsePrimary());
+            const start = self.pos;
+            // Assignment form: an array/object literal cover is a destructuring
+            // target only when the head is immediately an in/of form. Otherwise
+            // let a classic for initializer parse the left-hand-side expression.
+            const node = try self.parsePostfix();
+            if (node.* == .member or node.* == .super_member) return node;
+            if (isKeyword(self.cur(), "in") or isKeyword(self.cur(), "of")) return try self.litToPattern(node);
+            self.pos = start;
+            return null;
         }
         if (decl_kind != null) {
             // A declaration binds a single BindingIdentifier.
@@ -1213,7 +1225,10 @@ pub const Parser = struct {
         // is a contextual keyword; a `=>` must follow its parameter list.)
         if (isKeyword(self.cur(), "async")) {
             const start = self.pos;
-            if (self.peekKind(1) == .identifier and self.peekKind(2) == .arrow and !isReservedWord(self.tokens[self.pos + 1].text)) {
+            if (self.peekKind(1) == .identifier and self.peekKind(2) == .arrow and
+                !isAlwaysReservedBinding(self.tokens[self.pos + 1].text) and
+                !(self.strict and isStrictReservedBinding(self.tokens[self.pos + 1].text)))
+            {
                 _ = self.advance(); // async
                 const param = self.advance().text;
                 const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
