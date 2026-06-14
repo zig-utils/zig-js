@@ -7852,6 +7852,14 @@ pub const Interpreter = struct {
     }
 
     fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
+        // sort/toSorted validate comparefn before LengthOfArrayLike(this), so a
+        // borrowed call with a poisoned `length` still reports the comparator
+        // TypeError first.
+        if (eq(name, "sort") or eq(name, "toSorted")) {
+            const cmp = arg0(args);
+            if (cmp != .undefined and !cmp.isCallable())
+                return self.throwError("TypeError", "Array.prototype sort comparator is not a function");
+        }
         // Real arrays use the dense element store directly; an array-like `this`
         // (via `.call`) materializes its `length`/indexed properties into a
         // temporary slice so the read-only methods below work unchanged.
