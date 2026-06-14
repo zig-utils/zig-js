@@ -97,7 +97,11 @@ GC never traces it; embedders that stash a cell there must root it themselves
 `traceRoots` enumerates, per live `Context`:
 - `global_object`, `env`, `root_shape`, `tdz_marker` (`context.zig`)
 - the `microtasks` queue (each `Microtask` holds callback + argument Values)
-- `exception` slot, `async_waiters`, `js_threads` records
+- `exception` slot, `async_waiters`, completed `js_threads` records, and
+  property-mode `waitAsync` tickets
+- active module caches (`Context.mod_cache`) while `evaluateModule` or host
+  script dynamic import is holding a module graph; each cached module roots its
+  module environment and namespace object
 - **the live interpreter's VM value stack + call frames** during execution —
   the transient roots; an executing thread parks at a safepoint with its stack
   in a scannable state.
@@ -228,8 +232,8 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   runs a precise mark-sweep, called automatically at the top of `evaluate`
   (before the interpreter starts, so the Zig stack holds no live `Value`s and
   the `Context` roots `gc.zig`'s binding traces are complete) and callable
-  directly by embedders at any quiescent point. Guarded to skip while threads or
-  a module graph hold objects the root set doesn't yet enumerate. Validated:
+  directly by embedders at any quiescent point. Guarded to skip while spawned
+  shared-realm threads still hold untraced live interpreter stacks. Validated:
   flag off byte-identical; flag on full test262 **42,771/47,930, 0 crashes,
   host-fail 0** (collection runs on every one of ~24k contexts — proof the root
   set is complete, since a missed root would free a live intrinsic and crash);
@@ -239,6 +243,21 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   GC (no `$262.gc`; one `evaluate` per test), so the conformance number is
   unchanged by design — the win is operational (memory reclamation for
   long-running contexts).
+  *Microtask-boundary shell GC landed:* `gc()` / `$vm.gc()` requests are now
+  serviced between microtask jobs after the previous job has unwound and the
+  remaining queue is rooted, including in threaded contexts once every spawned
+  `Thread` record is done. The tracer now covers completed thread records,
+  property-mode `waitAsync` tickets, promise resolving-function private data,
+  and VM async resume callback private data. This promotes
+  `cve/mc-dos-waiter-table-storm.js`, whose reclamation arm depends on
+  WeakRefs clearing across async microtask turns.
+  *Module-graph roots landed:* `gc.zig` now traces active `Context.mod_cache`
+  module graphs, marking each module environment and namespace object while
+  module evaluation or host script dynamic import owns the cache. `evaluateModule`
+  clears its transient `mod_cache`/`mod_host` pointers on exit, removing the old
+  stale stack-pointer hazard and allowing later quiescent collections to run.
+  Validated by GC-enabled tests that a cached module environment survives
+  collection and that a completed `evaluateModule` no longer blocks collection.
   *Shell `gc()` requests landed:* the test-shell `gc()` hook no longer calls
   `Heap.collect()` while JS is live on the Zig stack. It sets a per-Context
   pending bit, and `evaluate` / `evaluateModule` service that request at the

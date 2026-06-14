@@ -18,7 +18,7 @@ agents, workers, shared buffers, property-mode Atomics, `Thread`, `Lock`,
 `Condition`, `ThreadLocal`, and the main can-block gate.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current allowlist is 183/183 and
+`reference/webkit-249/threads-tests`. The current allowlist is 194/194 and
 covers:
 
 - `smoke.js`: the root shared-realm sanity check.
@@ -38,14 +38,24 @@ covers:
   data-format transitions, SAB lifetime churn, handler/teardown ordering,
   generator/async-generator claims, re-entrant coercion order, missing-indexed
   define races, date/rope tear checks, atom identity, LLInt cache churn,
-  multislot clone behavior, property-wait lost-wakeup protection, watchdog
-  delivery under notify storms, blocked-native-root GC coverage, thread-shell
-  finalizer storms, resizable-tail quarantine checks, and TID recycle storms.
+  multislot clone behavior, property-wait lost-wakeup protection, waiter-table
+  reclamation under async microtask GC, watchdog delivery under notify storms,
+  blocked-native-root GC coverage, thread-shell finalizer storms,
+  resizable-tail quarantine checks, and TID recycle storms.
+- `gc-stress/`: the green GIL-compatible GC stress subset for parked-frame
+  liveness, indexed-prototype bad-time transitions, watchpoint/prototype churn,
+  and zombie-canary reuse checks. These use the supported `$vm.gc` /
+  `$vm.edenGC` shell hooks, which request the same quiescent M1 collection as
+  global `gc()`.
 - `jit/`: the green tree-walker-compatible JIT audit subset, including
   deterministic constructor/fire benchmark checksums plus thread semantics for
-  tail-call data-IC argument preservation, OSR/catch-loop amplification,
-  spawned-thread butterfly stress, and TID-tag three-thread behavior. Real
-  `$vm` JIT artifact and disassembly hooks remain outside the default corpus.
+  tail-call data-IC argument preservation, direct-call relink churn,
+  fire-vs-execute and stop-budget smoke coverage, fixed golden-disasm workload
+  execution, tag-discipline workload execution, jettison-vs-execute smoke
+  coverage, OSR/catch-loop amplification, spawned-thread butterfly stress, and
+  TID-tag three-thread behavior. Real `$vm` JIT artifact counters, stop
+  counters, disassembly hooks, and ArrayStorage forcing remain outside the
+  default corpus until backed by real engine behavior.
 - `atomics/`: property load/store, RMW, SameValueZero compare-exchange, errors,
   CAS delete/race/storm cases, missing-property store races, wait/notify,
   wait termination, waitAsync timeout behavior, waiter-table isolation, and
@@ -80,7 +90,8 @@ covers:
 is the concurrency gate for shared-buffer storage, agent waiters, workers, and
 the shared-realm GIL path.
 
-The runner models PR-249 command-line options with `Context.Options`:
+The runner models PR-249 command-line options with
+`Context.createWithTestingOptions` and `Context.TestingOptions`:
 `blocking-gate.js` runs with `.main_can_block = false`,
 `thread-id-bounds.js` runs with `.max_js_threads = 4`, and
 `*-termination.js` cases run with a 500 ms watchdog whose termination throw is
@@ -89,7 +100,16 @@ runner-local sizing so the default corpus checks deterministic results without
 turning into a timing benchmark. Files that explicitly call the test-shell
 `gc()` helper run with `.enable_gc = true`; the helper requests a collection and
 the Context services that request at the next quiescent entry point, matching
-the M1 collector's root-completeness boundary.
+the M1 collector's root-completeness boundary. During a microtask drain, a
+pending shell GC request is also serviced between jobs once the previous job has
+unwound and the remaining jobs are rooted by the queue; shared-realm contexts
+still skip collection while any spawned JS thread is actively running. `$vm.gc`
+and `$vm.edenGC` are aliases for that same shell request, `$vm.useThreadGIL()`
+reports whether the current context is using the shared-realm GIL, and
+`$vm.indexingMode()` is a narrow PR-249 compatibility hook for array-mode
+feature checks. Other JSC `$vm` hooks, such as `sharedHeapTest`, dictionary
+conversion, and code/disassembly controls, are left absent until backed by real
+engine behavior.
 
 ## Focused Runs
 
@@ -124,17 +144,47 @@ requires machinery outside today's GIL'd tree-walker support, or because it
 targets a future Layer-C object-model invariant. Keep the default allowlist
 green; promote files only when their behavior is implemented and stable.
 
+## Remaining Reference-Only Areas
+
+The default corpus is intentionally not a "run every file" mode. Remaining
+PR-249 files are held back for specific, observed reasons:
+
+- Heap harness files (`heap-*`) still require real `$vm.sharedHeapTest` C-level
+  scenarios; the `$vm` object intentionally does not expose that hook.
+- WebAssembly CVE files remain out until WebAssembly construction, compilation,
+  and relocating grow surfaces exist in this engine.
+- Post-UNGIL JIT/CVE files require true GIL-off parallel mutation, ASAN or JIT
+  artifact hooks, stop-the-world counters, or JSC-specific shell controls. They
+  are not valid witnesses while the shared realm is serialized by the context
+  GIL.
+- `jit/ic-publish-reset-loops.js` currently stalls under the tree-walker and
+  scheduler envelope; keep it reference-only until it completes reliably.
+- `jit/shared-arraystorage-stress.js` self-skips without
+  `$vm.ensureArrayStorage`; it is not default coverage until backed by real
+  ArrayStorage behavior.
+- `semantics/stack-overflow-per-thread.js` expects 2000-deep recursion before
+  overflow storming. The tree-walker's native recursion cannot safely meet that
+  by raising `max_call_depth` alone; a 4096-depth experiment overflowed the
+  host stack in the unit suite. This needs iterative or trampolined calls, or a
+  VM-stack execution path.
+- `cve/mc-spec-timer-capability.js` needs SharedArrayBuffer-off option modeling
+  and true parallel property-Atomics timing. Under the context GIL it is not a
+  meaningful timing witness.
+- `semantics/oom-one-thread.js` remains out until there is a real heap cap and
+  per-thread OOM handling contract.
+
 ## Docs Checks
 
 ```sh
 bun run docs:build
-rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|16[8]/16[8]|17[6]/17[6]|18[2]/18[2]|18[4]/18[4]|18[6]/18[6]|18[7]/18[7]|threads-test -[-]' README.md docs bunpress.config.ts
+rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|16[8]/16[8]|17[6]/17[6]|18[2]/18[2]|18[3]/18[3]|18[4]/18[4]|18[6]/18[6]|18[7]/18[7]|18[8]/18[8]|19[3]/19[3]|threads-test -[-]' README.md docs bunpress.config.ts
 ```
 
 The search should find no stale 27-of-27, 30-of-30, 54-of-54, 69-of-69,
-130-of-130, 140-of-140, 168-of-168, 176-of-176, 182-of-182, 184-of-184,
-186-of-186, or 187-of-187 counts and no removed thread-test pass-through
-command syntax. Use the `-Dthreads-case` and `-Dthreads-sweep` options instead.
+130-of-130, 140-of-140, 168-of-168, 176-of-176, 182-of-182, 183-of-183,
+184-of-184, 186-of-186, 187-of-187, 188-of-188, or 193-of-193 counts and no
+removed thread-test pass-through command syntax. Use the `-Dthreads-case` and
+`-Dthreads-sweep` options instead.
 
 ## When Adding Thread Work
 

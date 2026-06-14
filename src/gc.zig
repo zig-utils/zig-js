@@ -21,6 +21,7 @@ const interp = @import("interpreter.zig");
 const promise = @import("promise.zig");
 const vm = @import("vm.zig");
 const ContextMod = @import("context.zig");
+const jsthread = @import("jsthread.zig");
 
 const Value = value.Value;
 const Object = value.Object;
@@ -101,6 +102,8 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (o.iter_helper) |p| v.mark(p); // (kind .iter_helper)
     if (o.module_ns) |p| v.mark(p); // *ModuleNs (kind .module_ns)
     if (o.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
+    promise.traceNativePrivateData(o, v);
+    vm.traceNativePrivateData(o, v);
     // The viewed ArrayBuffer object keeps a TypedArray/DataView's storage alive.
     if (o.typed_array) |ta| v.mark(ta.buffer);
     if (o.data_view) |dv| v.mark(dv.buffer);
@@ -203,6 +206,15 @@ pub fn traceModuleNs(m: *interp.ModuleNs, v: anytype) void {
     for (m.envs) |e| v.mark(e);
 }
 
+pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.Module), v: anytype) void {
+    var it = cache.valueIterator();
+    while (it.next()) |mp| {
+        const m = mp.*;
+        v.mark(m.env);
+        if (m.ns) |ns| v.mark(ns);
+    }
+}
+
 // ---- The binding the collector instantiates over -------------------------
 
 /// A tiny stateful binding the collector instantiates over: it just wraps the
@@ -236,6 +248,19 @@ pub const Binding = struct {
         }
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
         for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
+        for (ctx.js_threads.items) |rec| {
+            markValue(v, rec.result);
+            if (rec.js_obj) |o| v.mark(o);
+            for (rec.pending_joins.items) |p| v.mark(p);
+        }
+        if (ctx.gil) |g| {
+            for (g.prop_async.items) |raw| {
+                const t: *jsthread.PropAsyncTicket = @ptrCast(@alignCast(raw));
+                v.mark(t.obj);
+                v.mark(t.promise);
+            }
+        }
+        if (ctx.mod_cache) |cache| traceModuleGraph(cache, v);
         markValue(v, ctx.exception orelse .undefined);
         // C-API handles: each entry is a `*Boxed` ({ value: Value }), so the
         // pointer aliases `*Value`. The embedder may hold these `JSValueRef`s.

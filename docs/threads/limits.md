@@ -20,12 +20,15 @@ but it is not true parallel JavaScript heap mutation.
 - `Atomics.Mutex` and `Atomics.Condition` share the shipped `Lock` and
   `Condition` constructors in threaded contexts and expose proposal-style
   static token APIs on top of those records.
-- Host/test knobs that used to be process-global are now per-context options:
+- Host/test knobs that used to be process-global are now per-context
+  `Context.TestingOptions` controls for the conformance runners:
   `main_can_block` and `max_js_threads`.
 - Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`,
-  `noInline`, and `gc` exist for conformance coverage and corpus
-  compatibility. In GC-enabled contexts, `gc()` requests a collection that is
-  serviced at the next quiescent entry point.
+  `noInline`, `gc`, and the supported `$vm` compatibility hooks (`gc`,
+  `edenGC`, `indexingMode`, `useThreadGIL`, `noInline`) exist for conformance
+  coverage and corpus compatibility. In GC-enabled contexts, `gc()` /
+  `$vm.gc()` request a collection that is serviced at the next safe quiescent
+  point, including between microtask jobs after the previous job has unwound.
 
 ## Not Supported Today
 
@@ -34,9 +37,18 @@ but it is not true parallel JavaScript heap mutation.
   mutation.
 - Sharing ordinary JS values between isolated agents or workers without
   structured clone.
-- Treating `main_can_block` or `max_js_threads` as general embedder APIs with a
-  long-term compatibility contract.
-- Treating test-shell helpers as an embedder event-loop API.
+- Treating `Context.TestingOptions` as a general embedder API with a long-term
+  compatibility contract.
+- Treating test-shell helpers or `$vm` as an embedder event-loop/API surface.
+- Assuming unsupported JSC `$vm` hooks exist: `sharedHeapTest`, dictionary
+  conversion, code deletion, disassembly, and related JIT artifact controls are
+  intentionally absent until backed by real engine behavior.
+- Depending on shell GC while a spawned shared-realm JS thread is actively
+  running. Completed `Thread` records are traced, but live thread interpreter
+  stacks are still a Layer-C root-completeness blocker.
+- Treating deep recursive call tests as an implemented VM-stack feature. The
+  tree-walker still uses native recursion for calls, so PR-249 stack-overflow
+  tests that require thousands of pre-overflow calls remain future work.
 - Treating remaining PR-249 unpromoted JIT, GC-stress, WebAssembly, heap,
   unpromoted CVE, and unpromoted semantic files as part of the default green
   suite.

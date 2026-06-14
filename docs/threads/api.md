@@ -9,25 +9,6 @@ const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
 Without `enable_threads`, the context keeps the original single-thread affinity
 rule and none of the globals below are installed.
 
-Threaded contexts also accept the host/test knobs used by the PR-249 runner:
-
-```zig
-const ctx = try js.Context.createWith(gpa, .{
-    .enable_threads = true,
-    .main_can_block = false,
-    .max_js_threads = 4,
-});
-```
-
-`main_can_block` models the VM's host-defined `[[CanBlock]]` bit. When false,
-blocking APIs throw if they would have to park; non-blocking fast paths and
-async APIs still work. `max_js_threads` caps live spawned `Thread` objects for
-deterministic corpus coverage.
-
-These options are not a broad embedder thread-policy surface yet. Treat them as
-host/test controls until the C API and shared-realm lifecycle rules are promoted
-with their own compatibility contract.
-
 ## Model
 
 `new Thread(fn, ...args)` runs `fn` on a real OS thread in the same realm as the
@@ -77,6 +58,17 @@ thread. Enforced foreign access throws `ConcurrentAccessError`. Exotic objects
 such as functions, proxies, the global object, typed-array views, buffers,
 collections, dates, regexps, errors, promises, and builtin prototypes are
 refused.
+
+## `ConcurrentAccessError`
+
+`ConcurrentAccessError` is installed only in threaded contexts. It is thrown
+when a restricted object is touched from an OS thread other than the owner
+recorded by `Thread.restrict(obj)`.
+
+The restriction is a defensive tool for tests and host-owned objects that must
+not be shared accidentally. It is not a substitute for true parallel JS object
+mutation; ordinary shared-realm objects still rely on the context GIL for
+safety.
 
 ## `Lock`
 

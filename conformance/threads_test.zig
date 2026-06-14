@@ -59,6 +59,7 @@ const allowlist = [_][]const u8{
     "cve/mc-df-delete-reuse.js",
     "cve/mc-df-segmented-length.js",
     "cve/mc-df-ta-detach-resize.js",
+    "cve/mc-dos-waiter-table-storm.js",
     "cve/mc-gc-blocked-native-roots.js",
     "cve/mc-gc-thread-shell-finalizer-storm.js",
     "cve/mc-hand-dead-registrant-settle.js",
@@ -89,11 +90,21 @@ const allowlist = [_][]const u8{
     "cve/mc-val-llint-cache-storm.js",
     "cve/mc-val-multislot-clone.js",
     "cve/mc-wait-property-wait-lost-wakeup.js",
+    "gc-stress/conservative-scan-register.js",
+    "gc-stress/havebadtime-vs-indexed-fastpath.js",
+    "gc-stress/watchpoint-storm.js",
+    "gc-stress/zombie-uaf-canary.js",
     "jit/construction-shared-constructor.js",
     "jit/fires-per-sec.js",
     "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
     "jit/ftl-osr-entry-catch-loop-amplifier.js",
+    "jit/golden-disasm-corpus.js",
+    "jit/int-gate-fire-vs-execute.js",
+    "jit/int-gate-direct-call-relink.js",
+    "jit/int-gate-jettison-vs-execute.js",
+    "jit/int-gate-stop-budget.js",
     "jit/spawned-thread-butterfly-stress.js",
+    "jit/tag-discipline.js",
     "jit/tid-tag-3-threads.js",
     "atomics/property-cas-delete-undefined-sentinel-u5.js",
     "atomics/property-cas-dictionary-delete-u5.js",
@@ -338,7 +349,7 @@ pub fn main(init: std.process.Init) !void {
             // --maxJSThreads=4; *-termination runs --watchdog=500 with the
             // termination throw as its PASSING outcome.
             const enable_threads = !runsWithoutThreadGlobal(name);
-            const options = js.Context.Options{
+            const options = js.Context.TestingOptions{
                 .enable_threads = enable_threads,
                 .enable_gc = std.mem.indexOf(u8, test_src, "gc()") != null,
                 .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),
@@ -347,7 +358,7 @@ pub fn main(init: std.process.Init) !void {
             const directive = test_src[0 .. std.mem.indexOfScalar(u8, test_src, '\n') orelse test_src.len];
             const expect_termination = std.mem.endsWith(u8, name, "-termination.js") or
                 std.mem.indexOf(u8, directive, "--watchdog-exception-ok") != null;
-            const ctx = js.Context.createWith(gpa, options) catch {
+            const ctx = js.Context.createWithTestingOptions(gpa, options) catch {
                 std.debug.print("  FAIL  {s} (context)\n", .{name});
                 failed += 1;
                 continue;

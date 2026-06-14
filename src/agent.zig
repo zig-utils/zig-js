@@ -77,8 +77,8 @@ pub fn currentAgent() ?*Agent {
 }
 
 /// Whether the calling agent may block in `Atomics.wait`. Spawned `$262.agent`
-/// threads always may block; the main realm gets its host policy from
-/// `Context.Options.main_can_block`.
+/// threads always may block; conformance runners set the main realm policy via
+/// `Context.TestingOptions.main_can_block`.
 pub fn canBlock(main_can_block: bool) bool {
     return t_agent != null or main_can_block;
 }

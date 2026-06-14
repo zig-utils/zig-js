@@ -1001,7 +1001,7 @@ const PropTicket = struct {
 };
 const prop_alloc = std.heap.page_allocator;
 
-const PropAsyncTicket = struct {
+pub const PropAsyncTicket = struct {
     obj: *value.Object,
     key: []const u8,
     deadline_ns: ?i96,

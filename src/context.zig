@@ -108,11 +108,19 @@ pub const Context = struct {
         /// the collector. Mid-run collection is gated separately until the
         /// whole allocation surface is migrated.
         enable_gc: bool = false,
+    };
+
+    /// Test/conformance-only creation knobs. These model harness flags such as
+    /// `[[CanBlock]]` and the PR-249 max thread count without making them part
+    /// of the stable embedder options surface.
+    pub const TestingOptions = struct {
+        enable_threads: bool = false,
+        enable_gc: bool = false,
         /// Host-defined `[[CanBlock]]` for this VM. When false, blocking APIs
         /// throw if they would have to park; non-blocking fast paths and async
         /// APIs still work.
         main_can_block: bool = true,
-        /// Stable host cap for live shared-realm `Thread` objects.
+        /// Test cap for live shared-realm `Thread` objects.
         max_js_threads: ?u32 = null,
     };
 
@@ -127,6 +135,13 @@ pub const Context = struct {
     }
 
     pub fn createWith(gpa: std.mem.Allocator, options: Options) !*Context {
+        return createWithTestingOptions(gpa, .{
+            .enable_threads = options.enable_threads,
+            .enable_gc = options.enable_gc,
+        });
+    }
+
+    pub fn createWithTestingOptions(gpa: std.mem.Allocator, options: TestingOptions) !*Context {
         const arena_state = try gpa.create(std.heap.ArenaAllocator);
         arena_state.* = std.heap.ArenaAllocator.init(gpa);
         errdefer {
@@ -237,6 +252,8 @@ pub const Context = struct {
             .gil = self.gil,
             .gc = self.gc,
             .gc_requested = &self.gc_requested,
+            .gc_checkpoint_ctx = self,
+            .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
             .private_name_serial = &self.private_name_serial,
         };
     }
@@ -308,23 +325,27 @@ pub const Context = struct {
         return self.arena_state.allocator();
     }
 
-    /// Lex + parse + run `source`, returning the completion value. On an
-    /// uncaught JS exception this returns `error.Throw` and leaves the thrown
-    /// value in `self.exception` for the caller (e.g. the C-API boundary).
-    ///
-    /// Fast path: compile to bytecode and run on the VM. Programs that use
-    /// constructs the compiler doesn't lower yet fall back to the tree-walker,
-    /// so behavior is identical either way — the VM just handles the hot subset.
+    fn serviceRequestedGcCheckpoint(ctx: *anyopaque) void {
+        const self: *Context = @ptrCast(@alignCast(ctx));
+        self.collectRequestedGarbage();
+    }
+
+    fn hasRunningJsThreads(self: *const Context) bool {
+        for (self.js_threads.items) |rec| {
+            if (!rec.done) return true;
+        }
+        return false;
+    }
+
     /// Run a precise mark-sweep over the GC heap (Phase 7). **Only sound at a
     /// quiescent point** — no JS executing on this thread, so every live object
     /// is reachable from the `Context` roots `gc.zig`'s binding traces (the
     /// interpreter recursion that would hold live `Value`s as Zig locals has
-    /// unwound). Conservatively skipped while threads or a module graph hold
-    /// objects the root set does not yet enumerate. No-op when the GC is off.
+    /// unwound). Conservatively skipped while a spawned shared-realm thread is
+    /// still running. No-op when the GC is off.
     pub fn collectGarbage(self: *Context) void {
         const h = self.gc orelse return;
-        if (self.js_threads.items.len != 0) return; // thread fns not yet rooted
-        if (self.mod_cache != null) return; // module graph not yet rooted
+        if (self.hasRunningJsThreads()) return; // live thread interpreter stacks not yet rooted
         h.collect();
         self.gc_requested = false;
     }
@@ -341,6 +362,13 @@ pub const Context = struct {
         self.finalization_cleanup_jobs.append(self.gpa, registry) catch {};
     }
 
+    /// Lex + parse + run `source`, returning the completion value. On an
+    /// uncaught JS exception this returns `error.Throw` and leaves the thrown
+    /// value in `self.exception` for the caller (e.g. the C-API boundary).
+    ///
+    /// Fast path: compile to bytecode and run on the VM. Programs that use
+    /// constructs the compiler doesn't lower yet fall back to the tree-walker,
+    /// so behavior is identical either way — the VM just handles the hot subset.
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
         if (self.gil) |g| g.acquire();
         defer if (self.gil) |g| g.release();
@@ -471,6 +499,10 @@ pub const Context = struct {
         // Expose the graph to runtime dynamic `import()`.
         self.mod_host = host;
         self.mod_cache = &cache;
+        defer {
+            self.mod_cache = null;
+            self.mod_host = null;
+        }
         machine.dyn_import = dynImportHook;
         machine.dyn_import_ctx = self;
         // Populate any namespace objects after the whole graph has evaluated, so
@@ -4343,7 +4375,7 @@ test "Atomics on plain properties: semantics, exact counter, wait/notify" {
 }
 
 test "Thread blocking APIs respect the main can-block gate" {
-    const ctx = try Context.createWith(std.testing.allocator, .{
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,
         .main_can_block = false,
     });
@@ -4429,6 +4461,63 @@ test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
     try std.testing.expectEqual(@as(f64, 4), r.number); // 1 + 3
 }
 
+test "enable_gc: active module cache roots module environments during collection" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage(); // stabilize the post-intrinsics baseline
+
+    const a = ctx.arena();
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+
+    const env = try gc_mod.allocEnv(a);
+    env.* = .{ .arena = a, .parent = &ctx.env, .fn_scope = true };
+
+    const kept = try gc_mod.allocObj(a);
+    kept.* = .{};
+    try env.put("kept", .{ .object = kept });
+
+    const garbage = try gc_mod.allocObj(a);
+    garbage.* = .{};
+
+    const m = try a.create(Context.Module);
+    m.* = .{ .path = "module-root", .items = &.{}, .env = env };
+
+    var cache: std.StringHashMapUnmanaged(*Context.Module) = .{};
+    try cache.put(a, m.path, m);
+    ctx.mod_cache = &cache;
+    defer ctx.mod_cache = null;
+
+    const before = ctx.gc.?.live_cells;
+    ctx.collectGarbage();
+    const after = ctx.gc.?.live_cells;
+    try std.testing.expectEqual(before - 1, after);
+
+    ctx.mod_cache = null;
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc.?.live_cells < after);
+}
+
+test "enable_gc: evaluateModule clears transient module cache so later GC can run" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const Host = struct {
+        fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    var dummy: u8 = 0;
+    const mh = Context.ModuleHost{ .ctx = &dummy, .load = Host.load };
+    _ = try ctx.evaluateModule("entry.js", "export const value = { tag: 1 };", mh);
+    try std.testing.expect(ctx.mod_cache == null);
+    try std.testing.expect(ctx.mod_host == null);
+
+    const before = ctx.gc.?.collections;
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc.?.collections > before);
+}
+
 test "enable_gc: WeakRef target clears when only weakly reachable" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
@@ -4463,6 +4552,78 @@ test "enable_gc: shell gc request is deferred to the next quiescent entry" {
     _ = try ctx.evaluate("0");
     try std.testing.expect(!ctx.gc_requested);
     try std.testing.expect(ctx.gc.?.collections > collections_before);
+}
+
+test "$vm exposes only supported shell hooks" {
+    const threaded = try Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+    });
+    defer threaded.destroy();
+
+    _ = try threaded.evaluate(
+        \\if (typeof $vm !== "object") throw new Error("missing $vm");
+        \\if (typeof $vm.gc !== "function") throw new Error("missing $vm.gc");
+        \\if (typeof $vm.edenGC !== "function") throw new Error("missing $vm.edenGC");
+        \\if (typeof $vm.indexingMode !== "function") throw new Error("missing $vm.indexingMode");
+        \\if (typeof $vm.noInline !== "function") throw new Error("missing $vm.noInline");
+        \\if (typeof $vm.useThreadGIL !== "function") throw new Error("missing $vm.useThreadGIL");
+        \\if ($vm.useThreadGIL() !== true) throw new Error("thread GIL state");
+        \\if (!$vm.indexingMode([1, 2, 3]).includes("CopyOnWrite")) throw new Error("array indexing mode");
+        \\if ($vm.noInline(42) !== 42) throw new Error("noInline identity");
+        \\if ("sharedHeapTest" in $vm) throw new Error("sharedHeapTest is not supported");
+        \\if ("toCacheableDictionary" in $vm) throw new Error("dictionary hook is not supported");
+        \\globalThis.ref = new WeakRef({ tag: 31 });
+        \\$vm.gc();
+        \\$vm.edenGC();
+        \\if (globalThis.ref.deref().tag !== 31) throw new Error("gc ran mid-stack");
+    );
+    try std.testing.expect(threaded.gc_requested);
+
+    const gc_ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer gc_ctx.destroy();
+    _ = try gc_ctx.evaluate(
+        \\if ($vm.useThreadGIL() !== false) throw new Error("non-thread GIL state");
+        \\globalThis.ref = new WeakRef({ tag: 41 });
+        \\$vm.gc();
+        \\if (globalThis.ref.deref().tag !== 41) throw new Error("gc ran mid-stack");
+    );
+    try std.testing.expect(gc_ctx.gc_requested);
+    const before = gc_ctx.gc.?.collections;
+    _ = try gc_ctx.evaluate("0");
+    try std.testing.expect(!gc_ctx.gc_requested);
+    try std.testing.expect(gc_ctx.gc.?.collections > before);
+}
+
+test "enable_gc: requested GC runs between microtasks after joined threads" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+    });
+    defer ctx.destroy();
+
+    const before = ctx.gc.?.collections;
+    _ = try ctx.evaluate(
+        \\const t = new Thread(() => "done");
+        \\if (t.join() !== "done") throw new Error("thread did not join");
+        \\globalThis.__microtaskGcCollected = false;
+        \\Promise.resolve()
+        \\  .then(() => {
+        \\    let target = { tag: 91 };
+        \\    globalThis.__microtaskGcRef = new WeakRef(target);
+        \\    target = null;
+        \\    gc();
+        \\  })
+        \\  .then(() => {
+        \\    globalThis.__microtaskGcCollected =
+        \\      globalThis.__microtaskGcRef.deref() === undefined;
+        \\  });
+        \\0
+    );
+    try std.testing.expect(!ctx.gc_requested);
+    try std.testing.expect(ctx.gc.?.collections > before);
+    const collected = try ctx.evaluate("globalThis.__microtaskGcCollected");
+    try std.testing.expect(collected == .boolean and collected.boolean);
 }
 
 test "enable_gc: WeakRef keeps target while strongly reachable" {

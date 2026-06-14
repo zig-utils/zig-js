@@ -386,6 +386,12 @@ pub const Interpreter = struct {
     /// helper. M1 collection is precise and quiescent-only, so the request is
     /// serviced by `Context` at the next safe entry point.
     gc_requested: ?*bool = null,
+    /// Optional Context callback used by microtask checkpoints to service a
+    /// pending shell GC request after a job has unwound but before the next job
+    /// runs. The callback owns the full safety policy: no active thread stacks,
+    /// no untraced module graph, and no-op when GC is disabled.
+    gc_checkpoint_ctx: ?*anyopaque = null,
+    gc_checkpoint_fn: ?*const fn (ctx: *anyopaque) void = null,
     /// Context-owned serial used to mint per-class private-name storage keys.
     /// Null only in isolated interpreter unit helpers.
     private_name_serial: ?*u64 = null,
@@ -1089,16 +1095,13 @@ pub const Interpreter = struct {
                         }
                     }
                     try self.globalDefine(d.name, v);
-                } else if (d.kind == .@"const")
-                    {
-                        try self.checkRestrictedGlobalLexical(d.name);
-                        try self.env.putConst(d.name, v);
-                    }
-                else
-                    {
-                        try self.checkRestrictedGlobalLexical(d.name);
-                        try self.env.put(d.name, v);
-                    }
+                } else if (d.kind == .@"const") {
+                    try self.checkRestrictedGlobalLexical(d.name);
+                    try self.env.putConst(d.name, v);
+                } else {
+                    try self.checkRestrictedGlobalLexical(d.name);
+                    try self.env.put(d.name, v);
+                }
                 // A `using`/`await using` binding registers its resource for
                 // disposal when the enclosing scope exits.
                 if (d.dispose != 0) try self.addDisposable(v, d.dispose == 2);
@@ -3380,11 +3383,20 @@ pub const Interpreter = struct {
     /// checkpoint). Each job may enqueue more; the step budget bounds runaways.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
         const q = self.microtasks orelse return;
-        var i: usize = 0;
-        while (i < q.items.len) : (i += 1) {
-            try promise.runJob(self, q.items[i]);
+        while (q.items.len > 0) {
+            const job = q.orderedRemove(0);
+            try promise.runJob(self, job);
+            self.serviceRequestedGcCheckpoint();
         }
         q.clearRetainingCapacity();
+    }
+
+    fn serviceRequestedGcCheckpoint(self: *Interpreter) void {
+        const requested = self.gc_requested orelse return;
+        if (!requested.*) return;
+        const f = self.gc_checkpoint_fn orelse return;
+        const ctx = self.gc_checkpoint_ctx orelse return;
+        f(ctx);
     }
 
     /// Host cleanup jobs for FinalizationRegistry. Explicit `cleanupSome()` and
@@ -4608,10 +4620,14 @@ pub const Interpreter = struct {
         const tod = @mod(ti, ms_per_day);
         const c = civilFromDays(days);
         return .{
-            .y = c.y,                                  .mo = c.m - 1,
-            .d = c.d,                                  .h = @divFloor(tod, 3600000),
-            .mi = @mod(@divFloor(tod, 60000), 60),     .s = @mod(@divFloor(tod, 1000), 60),
-            .ms = @mod(tod, 1000),                     .wday = @mod(days + 4, 7),
+            .y = c.y,
+            .mo = c.m - 1,
+            .d = c.d,
+            .h = @divFloor(tod, 3600000),
+            .mi = @mod(@divFloor(tod, 60000), 60),
+            .s = @mod(@divFloor(tod, 1000), 60),
+            .ms = @mod(tod, 1000),
+            .wday = @mod(days + 4, 7),
         };
     }
 
@@ -7552,15 +7568,14 @@ pub const Interpreter = struct {
     /// `String.prototype.trim.call(42)` works). Excludes toString/valueOf.
     fn isStringGeneric(name: []const u8) bool {
         const names = [_][]const u8{
-            "charAt",      "charCodeAt", "codePointAt", "indexOf",  "lastIndexOf", "includes",
-            "startsWith",  "endsWith",   "slice",       "substring", "substr",     "toUpperCase",
-            "toLowerCase", "trim",       "trimStart",   "trimEnd",  "repeat",      "concat",
-            "split",       "at",         "padStart",    "padEnd",   "replace",     "replaceAll",
-            "localeCompare", "normalize", "search",     "match",     "toLocaleUpperCase", "toLocaleLowerCase",
-            "matchAll",      "trimLeft",  "trimRight", "isWellFormed", "toWellFormed",
-            "anchor",        "big",       "blink",       "bold",      "fixed",      "fontcolor",
-            "fontsize",      "italics",   "link",        "small",     "strike",     "sub",
-            "sup",
+            "charAt",        "charCodeAt", "codePointAt", "indexOf",      "lastIndexOf",       "includes",
+            "startsWith",    "endsWith",   "slice",       "substring",    "substr",            "toUpperCase",
+            "toLowerCase",   "trim",       "trimStart",   "trimEnd",      "repeat",            "concat",
+            "split",         "at",         "padStart",    "padEnd",       "replace",           "replaceAll",
+            "localeCompare", "normalize",  "search",      "match",        "toLocaleUpperCase", "toLocaleLowerCase",
+            "matchAll",      "trimLeft",   "trimRight",   "isWellFormed", "toWellFormed",      "anchor",
+            "big",           "blink",      "bold",        "fixed",        "fontcolor",         "fontsize",
+            "italics",       "link",       "small",       "strike",       "sub",               "sup",
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
@@ -7574,8 +7589,8 @@ pub const Interpreter = struct {
     /// RangeError. Read-only / in-place methods don't create such a result.
     fn arrayCreatesResult(name: []const u8) bool {
         const names = [_][]const u8{
-            "map",        "filter",   "slice",     "concat",     "splice",
-            "flat",       "flatMap",  "with",      "toReversed", "toSorted",
+            "map",       "filter",  "slice", "concat",     "splice",
+            "flat",      "flatMap", "with",  "toReversed", "toSorted",
             "toSpliced",
         };
         for (names) |n| if (eq(name, n)) return true;
@@ -7596,14 +7611,14 @@ pub const Interpreter = struct {
 
     fn isArrayGeneric(name: []const u8) bool {
         const names = [_][]const u8{
-            "join",      "indexOf", "lastIndexOf", "includes", "slice", "concat", "map",  "filter",
-            "forEach",   "reduce",  "reduceRight", "some",     "every", "find",   "findIndex", "findLast",
-            "findLastIndex", "at",  "flat",        "flatMap",  "keys",  "values", "entries",
-            "toReversed",    "toSorted", "toSpliced", "with",     "toLocaleString",
+            "join",          "indexOf",   "lastIndexOf", "includes",       "slice", "concat",     "map",       "filter",
+            "forEach",       "reduce",    "reduceRight", "some",           "every", "find",       "findIndex", "findLast",
+            "findLastIndex", "at",        "flat",        "flatMap",        "keys",  "values",     "entries",   "toReversed",
+            "toSorted",      "toSpliced", "with",        "toLocaleString",
             // fill/copyWithin operate purely through [[Get]]/[[Set]] over the
             // receiver, so they work on an array-like `this` (and read its
             // `length` via ToLength, throwing for a Symbol/BigInt length).
-            "fill",          "copyWithin",
+            "fill",  "copyWithin",
         };
         // NB: `toString` is intentionally NOT generic here — a plain object's
         // `.toString()` must reach `Object.prototype.toString` (the `[object
@@ -7825,9 +7840,9 @@ pub const Interpreter = struct {
         // The callback-driven methods require a callable first argument, checked
         // up front (so `[].map(undefined)` throws even on an empty array).
         const cb_methods = [_][]const u8{
-            "forEach", "map",      "filter",        "some",  "every",
-            "find",    "findIndex", "findLast",     "findLastIndex",
-            "reduce",  "reduceRight", "flatMap",
+            "forEach",     "map",       "filter",   "some",          "every",
+            "find",        "findIndex", "findLast", "findLastIndex", "reduce",
+            "reduceRight", "flatMap",
         };
         for (cb_methods) |m| {
             if (eq(name, m) and !arg0(args).isCallable())
@@ -9594,16 +9609,16 @@ pub const Interpreter = struct {
                 }
                 if (c.getOwn(m)) |fv| {
                     if (fv == .object and (fv.object.js_func != null or (c == o and fv.object.native != null))) method = fv
-                    // Primitive wrappers' native valueOf is a spec builtin that
-                    // produces the boxed primitive at this position in the
-                    // OrdinaryToPrimitive order, so do not continue to a later
-                    // user toString accessor for default/number hints.
+                        // Primitive wrappers' native valueOf is a spec builtin that
+                        // produces the boxed primitive at this position in the
+                        // OrdinaryToPrimitive order, so do not continue to a later
+                        // user toString accessor for default/number hints.
                     else if (std.mem.eql(u8, m, "valueOf") and o.prim != null and fv.isCallable()) builtin_wrapper_value_of = true
-                    // A callable native `toString` thunk yields a primitive string
-                    // (the built-in coercion below); it must run at *this* position
-                    // in the hint order — so stop here rather than trying a later
-                    // user `valueOf` (e.g. String({ valueOf() {…} }) is
-                    // "[object Object]", not the valueOf result).
+                        // A callable native `toString` thunk yields a primitive string
+                        // (the built-in coercion below); it must run at *this* position
+                        // in the hint order — so stop here rather than trying a later
+                        // user `valueOf` (e.g. String({ valueOf() {…} }) is
+                        // "[object Object]", not the valueOf result).
                     else if (std.mem.eql(u8, m, "toString") and fv.isCallable()) {
                         builtin_to_string = true;
                         builtin_to_string_method = fv;
@@ -10608,6 +10623,36 @@ fn gcFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value
         if (self.gc_requested) |requested| requested.* = true;
     }
     return .undefined;
+}
+
+fn vmUseThreadGILFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return .{ .boolean = self.gil != null };
+}
+
+fn vmIndexingModeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    const v = if (args.len > 0) args[0] else Value.undefined;
+    if (v == .object and v.object.is_array) return .{ .string = "Array CopyOnWrite" };
+    if (v == .object) {
+        if (v.object.typed_array) |ta| return .{ .string = ta.kind.ctorName() };
+    }
+    return .{ .string = "Object" };
+}
+
+fn installDollarVM(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const vm_obj = try gc_mod.allocObj(a);
+    vm_obj.* = .{ .proto = object_proto };
+    try setNative(a, rs, vm_obj, "gc", 0, gcFn);
+    try setNative(a, rs, vm_obj, "edenGC", 0, gcFn);
+    try setNative(a, rs, vm_obj, "indexingMode", 1, vmIndexingModeFn);
+    try setNative(a, rs, vm_obj, "noInline", 1, noInlineFn);
+    try setNative(a, rs, vm_obj, "useThreadGIL", 0, vmUseThreadGILFn);
+    try env.put("$vm", .{ .object = vm_obj });
 }
 
 /// Host timer used by test262's Atomics helper. This intentionally blocks the
@@ -12935,8 +12980,8 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     if (sym_iter) |k| try installSymbolMethod(a, rs, iter_proto, k, "[Symbol.iterator]", 0, iterProtoSymbolIteratorFn);
     if (sym_dispose) |k| try installSymbolMethod(a, rs, iter_proto, k, "[Symbol.dispose]", 0, iterProtoDisposeFn);
     inline for (.{
-        .{ "map", iterMapFn },        .{ "filter", iterFilterFn },
-        .{ "take", iterTakeFn },      .{ "drop", iterDropFn },
+        .{ "map", iterMapFn },         .{ "filter", iterFilterFn },
+        .{ "take", iterTakeFn },       .{ "drop", iterDropFn },
         .{ "flatMap", iterFlatMapFn }, .{ "reduce", iterReduceFn },
         .{ "forEach", iterForEachFn },
     }) |m| try setNative(a, rs, iter_proto, m[0], 1, m[1]);
@@ -13363,9 +13408,9 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     inline for (.{
         .{ "map", asyncIterMapFn },         .{ "filter", asyncIterFilterFn },
         .{ "take", asyncIterTakeFn },       .{ "drop", asyncIterDropFn },
-        .{ "flatMap", asyncIterFlatMapFn },  .{ "reduce", asyncIterReduceFn },
-        .{ "toArray", asyncIterToArrayFn },  .{ "forEach", asyncIterForEachFn },
-        .{ "some", asyncIterSomeFn },        .{ "every", asyncIterEveryFn },
+        .{ "flatMap", asyncIterFlatMapFn }, .{ "reduce", asyncIterReduceFn },
+        .{ "toArray", asyncIterToArrayFn }, .{ "forEach", asyncIterForEachFn },
+        .{ "some", asyncIterSomeFn },       .{ "every", asyncIterEveryFn },
         .{ "find", asyncIterFindFn },
     }) |m| try setNative(a, rs, proto, m[0], 1, m[1]);
     try env.put("\x00AsyncIterProto", .{ .object = proto });
@@ -15417,7 +15462,7 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
                 } else {
                     // Multiple replacements (e.g. SU): pick the member implied by
                     // the maximized language+script, else the first.
-                    var chosen: []const u8 = r[0 .. std.mem.indexOfScalar(u8, r, ' ').?];
+                    var chosen: []const u8 = r[0..std.mem.indexOfScalar(u8, r, ' ').?];
                     var slo: [8]u8 = undefined;
                     for (script, 0..) |c, i| slo[i] = std.ascii.toLower(c);
                     if (cldrMaximize(a, .{ .l = lang, .s = slo[0..script.len] })) |mx| {
@@ -15980,8 +16025,8 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
         }
         // Merge -u- keywords (option overrides input tag), emit in key order.
         const keys = [_]struct { k: []const u8, v: ?[]const u8 }{
-            .{ .k = "ca", .v = ca }, .{ .k = "co", .v = co },  .{ .k = "fw", .v = fw },
-            .{ .k = "hc", .v = hc }, .{ .k = "kf", .v = kf },  .{ .k = "kn", .v = kn },
+            .{ .k = "ca", .v = ca }, .{ .k = "co", .v = co }, .{ .k = "fw", .v = fw },
+            .{ .k = "hc", .v = hc }, .{ .k = "kf", .v = kf }, .{ .k = "kn", .v = kn },
             .{ .k = "nu", .v = nu },
         };
         var u_buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -16273,9 +16318,9 @@ fn dtfGetType(self: *Interpreter, opts: Value, name: []const u8) EvalError!?[]co
 /// The calendar types a full implementation reports from AvailableCalendars.
 /// An unsupported (or not-yet-adopted) request falls back to the locale default.
 const dtf_available_calendars = [_][]const u8{
-    "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory",
-    "hebrew", "indian", "islamic-civil", "islamic-tbla", "islamic-umalqura",
-    "iso8601", "japanese", "persian", "roc",
+    "buddhist", "chinese", "coptic",        "dangi",        "ethioaa",          "ethiopic", "gregory",
+    "hebrew",   "indian",  "islamic-civil", "islamic-tbla", "islamic-umalqura", "iso8601",  "japanese",
+    "persian",  "roc",
 };
 
 /// CanonicalizeUValue("ca", …): apply the well-known aliases and resolve the
@@ -16546,15 +16591,15 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalE
 /// The single units sanctioned for use in ECMAScript (ECMA-402). A unit
 /// identifier is one of these, or "<x>-per-<y>" with both sanctioned.
 const sanctioned_units = [_][]const u8{
-    "acre",          "bit",          "byte",        "celsius",   "centimeter",
-    "day",           "degree",       "fahrenheit",  "fluid-ounce", "foot",
-    "gallon",        "gigabit",      "gigabyte",    "gram",      "hectare",
-    "hour",          "inch",         "kilobit",     "kilobyte",  "kilogram",
-    "kilometer",     "liter",        "megabit",     "megabyte",  "meter",
-    "microsecond",   "mile",         "mile-scandinavian", "milliliter", "millimeter",
-    "millisecond",   "minute",       "month",       "nanosecond", "ounce",
-    "percent",       "petabyte",     "pound",       "second",    "stone",
-    "terabit",       "terabyte",     "week",        "yard",      "year",
+    "acre",        "bit",      "byte",              "celsius",     "centimeter",
+    "day",         "degree",   "fahrenheit",        "fluid-ounce", "foot",
+    "gallon",      "gigabit",  "gigabyte",          "gram",        "hectare",
+    "hour",        "inch",     "kilobit",           "kilobyte",    "kilogram",
+    "kilometer",   "liter",    "megabit",           "megabyte",    "meter",
+    "microsecond", "mile",     "mile-scandinavian", "milliliter",  "millimeter",
+    "millisecond", "minute",   "month",             "nanosecond",  "ounce",
+    "percent",     "petabyte", "pound",             "second",      "stone",
+    "terabit",     "terabyte", "week",              "yard",        "year",
 };
 
 fn isSanctionedSingleUnit(u: []const u8) bool {
@@ -17467,13 +17512,27 @@ fn localeNumberSymbols(locale: []const u8) cldr_numbers.NumSym {
 const CurrencyInfo = struct { symbol: []const u8, digits: u8 };
 fn currencyInfo(code: []const u8) CurrencyInfo {
     const pairs = .{
-        .{ "USD", "$", 2 },  .{ "EUR", "€", 2 },   .{ "GBP", "£", 2 },
-        .{ "JPY", "¥", 0 },  .{ "CNY", "CN¥", 2 }, .{ "INR", "₹", 2 },
-        .{ "KRW", "₩", 0 },  .{ "RUB", "₽", 2 },   .{ "BRL", "R$", 2 },
-        .{ "CAD", "CA$", 2 }, .{ "AUD", "A$", 2 },  .{ "CHF", "CHF", 2 },
-        .{ "HKD", "HK$", 2 }, .{ "NZD", "NZ$", 2 }, .{ "MXN", "MX$", 2 },
-        .{ "BHD", "BHD", 3 }, .{ "KWD", "KWD", 3 }, .{ "OMR", "OMR", 3 },
-        .{ "CLP", "CLP", 0 }, .{ "VND", "₫", 0 },   .{ "TWD", "NT$", 2 },
+        .{ "USD", "$", 2 },
+        .{ "EUR", "€", 2 },
+        .{ "GBP", "£", 2 },
+        .{ "JPY", "¥", 0 },
+        .{ "CNY", "CN¥", 2 },
+        .{ "INR", "₹", 2 },
+        .{ "KRW", "₩", 0 },
+        .{ "RUB", "₽", 2 },
+        .{ "BRL", "R$", 2 },
+        .{ "CAD", "CA$", 2 },
+        .{ "AUD", "A$", 2 },
+        .{ "CHF", "CHF", 2 },
+        .{ "HKD", "HK$", 2 },
+        .{ "NZD", "NZ$", 2 },
+        .{ "MXN", "MX$", 2 },
+        .{ "BHD", "BHD", 3 },
+        .{ "KWD", "KWD", 3 },
+        .{ "OMR", "OMR", 3 },
+        .{ "CLP", "CLP", 0 },
+        .{ "VND", "₫", 0 },
+        .{ "TWD", "NT$", 2 },
     };
     inline for (pairs) |p| if (std.mem.eql(u8, code, p[0])) return .{ .symbol = p[1], .digits = p[2] };
     return .{ .symbol = code, .digits = 2 };
@@ -19188,9 +19247,9 @@ const RtfResult = struct {
 fn rtfShortName(unit: []const u8, plural: bool) ?[]const u8 {
     const T = struct { k: []const u8, s: []const u8, p: []const u8 };
     const table = [_]T{
-        .{ .k = "second", .s = "sec.", .p = "sec." }, .{ .k = "minute", .s = "min.", .p = "min." },
-        .{ .k = "hour", .s = "hr.", .p = "hr." },     .{ .k = "day", .s = "day", .p = "days" },
-        .{ .k = "week", .s = "wk.", .p = "wk." },     .{ .k = "month", .s = "mo.", .p = "mo." },
+        .{ .k = "second", .s = "sec.", .p = "sec." },   .{ .k = "minute", .s = "min.", .p = "min." },
+        .{ .k = "hour", .s = "hr.", .p = "hr." },       .{ .k = "day", .s = "day", .p = "days" },
+        .{ .k = "week", .s = "wk.", .p = "wk." },       .{ .k = "month", .s = "mo.", .p = "mo." },
         .{ .k = "quarter", .s = "qtr.", .p = "qtrs." }, .{ .k = "year", .s = "yr.", .p = "yr." },
     };
     for (table) |t| if (std.mem.eql(u8, unit, t.k)) return if (plural) t.p else t.s;
@@ -20517,8 +20576,8 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol: ?*value.Object) EvalError!void {
     const a = env.arena;
     const error_names = [_][]const u8{
-        "Error",       "TypeError", "RangeError",     "ReferenceError",
-        "SyntaxError", "EvalError",  "URIError",      "AggregateError",
+        "Error",           "TypeError", "RangeError", "ReferenceError",
+        "SyntaxError",     "EvalError", "URIError",   "AggregateError",
         "SuppressedError",
     };
     for (error_names) |name| {
@@ -20767,10 +20826,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         };
     }
     try setProtoMethods(a, root_shape, object_proto, .{
-        .{ "hasOwnProperty", 1 },        .{ "propertyIsEnumerable", 1 }, .{ "isPrototypeOf", 1 },
-        .{ "valueOf", 0 },
-        .{ "__defineGetter__", 2 },      .{ "__defineSetter__", 2 },
-        .{ "__lookupGetter__", 1 },      .{ "__lookupSetter__", 1 },
+        .{ "hasOwnProperty", 1 },   .{ "propertyIsEnumerable", 1 }, .{ "isPrototypeOf", 1 },
+        .{ "valueOf", 0 },          .{ "__defineGetter__", 2 },     .{ "__defineSetter__", 2 },
+        .{ "__lookupGetter__", 1 }, .{ "__lookupSetter__", 1 },
     });
     // `Object.prototype.toString` is the dedicated `[object Tag]` native (not the
     // kind-dispatched `toString`, so `Object.prototype.toString.call([])` gives
@@ -20790,6 +20848,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     }
     try object_ns.setOwn(a, root_shape, "prototype", .{ .object = object_proto });
     try object_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try installDollarVM(env, root_shape, object_proto);
 
     // Error prototypes: `Error.prototype` carries name/message/constructor/toString
     // and protos to Object.prototype; each subclass (`TypeError.prototype`, …)
@@ -20914,16 +20973,16 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try array_proto.setOwn(a, root_shape, "length", .{ .number = 0 });
     try array_proto.setAttr(a, "length", .{ .writable = true, .enumerable = false, .configurable = false });
     try setArrayProtoMethods(a, root_shape, array_proto, .{
-        .{ "join", 1 },       .{ "push", 1 },         .{ "pop", 0 },        .{ "shift", 0 },
-        .{ "unshift", 1 },    .{ "slice", 2 },        .{ "splice", 2 },     .{ "concat", 1 },
-        .{ "reverse", 0 },    .{ "indexOf", 1 },      .{ "lastIndexOf", 1 }, .{ "includes", 1 },
-        .{ "map", 1 },        .{ "filter", 1 },       .{ "forEach", 1 },    .{ "reduce", 1 },
-        .{ "reduceRight", 1 }, .{ "some", 1 },        .{ "every", 1 },      .{ "find", 1 },
-        .{ "findIndex", 1 },  .{ "findLast", 1 },     .{ "findLastIndex", 1 }, .{ "fill", 1 },
-        .{ "flat", 0 },       .{ "flatMap", 1 },      .{ "sort", 1 },       .{ "keys", 0 },
-        .{ "values", 0 },     .{ "entries", 0 },      .{ "copyWithin", 2 }, .{ "at", 1 },
-        .{ "toString", 0 },   .{ "toReversed", 0 },   .{ "toSorted", 1 },   .{ "toSpliced", 2 },
-        .{ "with", 2 },       .{ "toLocaleString", 0 },
+        .{ "join", 1 },        .{ "push", 1 },           .{ "pop", 0 },           .{ "shift", 0 },
+        .{ "unshift", 1 },     .{ "slice", 2 },          .{ "splice", 2 },        .{ "concat", 1 },
+        .{ "reverse", 0 },     .{ "indexOf", 1 },        .{ "lastIndexOf", 1 },   .{ "includes", 1 },
+        .{ "map", 1 },         .{ "filter", 1 },         .{ "forEach", 1 },       .{ "reduce", 1 },
+        .{ "reduceRight", 1 }, .{ "some", 1 },           .{ "every", 1 },         .{ "find", 1 },
+        .{ "findIndex", 1 },   .{ "findLast", 1 },       .{ "findLastIndex", 1 }, .{ "fill", 1 },
+        .{ "flat", 0 },        .{ "flatMap", 1 },        .{ "sort", 1 },          .{ "keys", 0 },
+        .{ "values", 0 },      .{ "entries", 0 },        .{ "copyWithin", 2 },    .{ "at", 1 },
+        .{ "toString", 0 },    .{ "toReversed", 0 },     .{ "toSorted", 1 },      .{ "toSpliced", 2 },
+        .{ "with", 2 },        .{ "toLocaleString", 0 },
     });
     const array_values_fn = try gc_mod.allocObj(a);
     array_values_fn.* = .{ .native = arrayValuesIterFn };
@@ -20943,19 +21002,18 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // String-specific thunk (so `String.prototype.m.call(x)` uses String `m`,
     // propagates `toString`/`valueOf` throws, and rejects Symbol/null/undefined).
     inline for (.{
-        .{ "charAt", 1 },        .{ "charCodeAt", 1 },  .{ "codePointAt", 1 }, .{ "indexOf", 1 },
-        .{ "lastIndexOf", 1 },   .{ "includes", 1 },    .{ "startsWith", 1 },  .{ "endsWith", 1 },
-        .{ "slice", 2 },         .{ "substring", 2 },   .{ "substr", 2 },      .{ "toUpperCase", 0 },
-        .{ "toLowerCase", 0 },   .{ "trim", 0 },        .{ "trimStart", 0 },   .{ "trimEnd", 0 },
-        .{ "repeat", 1 },        .{ "concat", 1 },      .{ "split", 2 },       .{ "at", 1 },
-        .{ "padStart", 1 },      .{ "padEnd", 1 },      .{ "replace", 2 },     .{ "replaceAll", 2 },
-        .{ "localeCompare", 1 }, .{ "toLocaleUpperCase", 0 }, .{ "toLocaleLowerCase", 0 },
-        .{ "match", 1 },         .{ "matchAll", 1 },    .{ "search", 1 },      .{ "normalize", 0 },
-        .{ "isWellFormed", 0 },  .{ "toWellFormed", 0 },
-        .{ "anchor", 1 },        .{ "big", 0 },         .{ "blink", 0 },       .{ "bold", 0 },
-        .{ "fixed", 0 },         .{ "fontcolor", 1 },   .{ "fontsize", 1 },    .{ "italics", 0 },
-        .{ "link", 1 },          .{ "small", 0 },       .{ "strike", 0 },      .{ "sub", 0 },
-        .{ "sup", 0 },
+        .{ "charAt", 1 },        .{ "charCodeAt", 1 },        .{ "codePointAt", 1 },       .{ "indexOf", 1 },
+        .{ "lastIndexOf", 1 },   .{ "includes", 1 },          .{ "startsWith", 1 },        .{ "endsWith", 1 },
+        .{ "slice", 2 },         .{ "substring", 2 },         .{ "substr", 2 },            .{ "toUpperCase", 0 },
+        .{ "toLowerCase", 0 },   .{ "trim", 0 },              .{ "trimStart", 0 },         .{ "trimEnd", 0 },
+        .{ "repeat", 1 },        .{ "concat", 1 },            .{ "split", 2 },             .{ "at", 1 },
+        .{ "padStart", 1 },      .{ "padEnd", 1 },            .{ "replace", 2 },           .{ "replaceAll", 2 },
+        .{ "localeCompare", 1 }, .{ "toLocaleUpperCase", 0 }, .{ "toLocaleLowerCase", 0 }, .{ "match", 1 },
+        .{ "matchAll", 1 },      .{ "search", 1 },            .{ "normalize", 0 },         .{ "isWellFormed", 0 },
+        .{ "toWellFormed", 0 },  .{ "anchor", 1 },            .{ "big", 0 },               .{ "blink", 0 },
+        .{ "bold", 0 },          .{ "fixed", 0 },             .{ "fontcolor", 1 },         .{ "fontsize", 1 },
+        .{ "italics", 0 },       .{ "link", 1 },              .{ "small", 0 },             .{ "strike", 0 },
+        .{ "sub", 0 },           .{ "sup", 0 },
     }) |s| try setNative(a, root_shape, string_proto, s[0], s[1], stringProtoMethod(s[0]));
     // Annex B trimLeft/trimRight are the SAME function objects as trimStart/trimEnd
     // (so `trimLeft === trimStart` and `trimLeft.name === "trimStart"`).
@@ -20981,7 +21039,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     number_proto.* = .{ .proto = object_proto, .prim = .{ .number = 0 } };
     number_ns.proto = func_proto;
     inline for (.{
-        .{ "toString", 1 },     .{ "toFixed", 1 },        .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
+        .{ "toString", 1 },      .{ "toFixed", 1 },     .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
         .{ "toExponential", 1 }, .{ "toPrecision", 1 },
     }) |s| try setNative(a, root_shape, number_proto, s[0], s[1], numberProtoMethod(s[0]));
     try number_ns.setOwn(a, root_shape, "prototype", .{ .object = number_proto });
@@ -21190,19 +21248,18 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     const date_proto = try gc_mod.allocObj(a);
     date_proto.* = .{ .proto = object_proto };
     try setDateProtoMethods(a, root_shape, date_proto, .{
-        .{ "getTime", 0 },      .{ "valueOf", 0 },      .{ "setTime", 1 },      .{ "toISOString", 0 },
-        .{ "toUTCString", 0 },  .{ "getFullYear", 0 },  .{ "getUTCFullYear", 0 },
-        .{ "getMonth", 0 },     .{ "getUTCMonth", 0 },  .{ "getDate", 0 },      .{ "getUTCDate", 0 },
-        .{ "getDay", 0 },       .{ "getUTCDay", 0 },    .{ "getHours", 0 },     .{ "getUTCHours", 0 },
-        .{ "getMinutes", 0 },   .{ "getUTCMinutes", 0 }, .{ "getSeconds", 0 },  .{ "getUTCSeconds", 0 },
-        .{ "getMilliseconds", 0 }, .{ "getUTCMilliseconds", 0 }, .{ "getTimezoneOffset", 0 },
-        .{ "setFullYear", 3 },  .{ "setUTCFullYear", 3 }, .{ "setMonth", 2 },   .{ "setUTCMonth", 2 },
-        .{ "setDate", 1 },      .{ "setUTCDate", 1 },   .{ "setHours", 4 },     .{ "setUTCHours", 4 },
-        .{ "setMinutes", 3 },   .{ "setUTCMinutes", 3 }, .{ "setSeconds", 2 },  .{ "setUTCSeconds", 2 },
-        .{ "setMilliseconds", 1 }, .{ "setUTCMilliseconds", 1 },
-        .{ "toString", 0 },     .{ "toDateString", 0 }, .{ "toTimeString", 0 }, .{ "toGMTString", 0 },
-        .{ "toLocaleString", 0 }, .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
-        .{ "getYear", 0 },      .{ "setYear", 1 }, // Annex B B.2.4
+        .{ "getTime", 0 },            .{ "valueOf", 0 },            .{ "setTime", 1 },            .{ "toISOString", 0 },
+        .{ "toUTCString", 0 },        .{ "getFullYear", 0 },        .{ "getUTCFullYear", 0 },     .{ "getMonth", 0 },
+        .{ "getUTCMonth", 0 },        .{ "getDate", 0 },            .{ "getUTCDate", 0 },         .{ "getDay", 0 },
+        .{ "getUTCDay", 0 },          .{ "getHours", 0 },           .{ "getUTCHours", 0 },        .{ "getMinutes", 0 },
+        .{ "getUTCMinutes", 0 },      .{ "getSeconds", 0 },         .{ "getUTCSeconds", 0 },      .{ "getMilliseconds", 0 },
+        .{ "getUTCMilliseconds", 0 }, .{ "getTimezoneOffset", 0 },  .{ "setFullYear", 3 },        .{ "setUTCFullYear", 3 },
+        .{ "setMonth", 2 },           .{ "setUTCMonth", 2 },        .{ "setDate", 1 },            .{ "setUTCDate", 1 },
+        .{ "setHours", 4 },           .{ "setUTCHours", 4 },        .{ "setMinutes", 3 },         .{ "setUTCMinutes", 3 },
+        .{ "setSeconds", 2 },         .{ "setUTCSeconds", 2 },      .{ "setMilliseconds", 1 },    .{ "setUTCMilliseconds", 1 },
+        .{ "toString", 0 },           .{ "toDateString", 0 },       .{ "toTimeString", 0 },       .{ "toGMTString", 0 },
+        .{ "toLocaleString", 0 },     .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
+        .{ "getYear", 0 }, .{ "setYear", 1 }, // Annex B B.2.4
     });
     // Date.prototype.toJSON is intentionally *generic* (works on any object),
     // not brand-checked: ToObject(this), ToPrimitive(number); a non-finite value
@@ -22306,14 +22363,14 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     const ta_proto = try gc_mod.allocObj(a);
     ta_proto.* = .{ .proto = object_proto };
     inline for (.{
-        .{ "at", 1 },      .{ "join", 1 },    .{ "forEach", 1 }, .{ "map", 1 },
-        .{ "filter", 1 },  .{ "some", 1 },    .{ "every", 1 },   .{ "find", 1 },
-        .{ "findIndex", 1 }, .{ "reduce", 1 }, .{ "indexOf", 1 }, .{ "lastIndexOf", 1 },
-        .{ "includes", 1 }, .{ "fill", 1 },   .{ "reverse", 0 }, .{ "slice", 2 },
-        .{ "subarray", 2 }, .{ "set", 1 },    .{ "keys", 0 },
-        .{ "values", 0 },   .{ "entries", 0 }, .{ "findLast", 1 },  .{ "findLastIndex", 1 },
-        .{ "reduceRight", 1 }, .{ "sort", 1 }, .{ "toSorted", 1 },  .{ "toReversed", 0 },
-        .{ "with", 2 },     .{ "copyWithin", 2 }, .{ "toLocaleString", 0 },
+        .{ "at", 1 },         .{ "join", 1 },           .{ "forEach", 1 },       .{ "map", 1 },
+        .{ "filter", 1 },     .{ "some", 1 },           .{ "every", 1 },         .{ "find", 1 },
+        .{ "findIndex", 1 },  .{ "reduce", 1 },         .{ "indexOf", 1 },       .{ "lastIndexOf", 1 },
+        .{ "includes", 1 },   .{ "fill", 1 },           .{ "reverse", 0 },       .{ "slice", 2 },
+        .{ "subarray", 2 },   .{ "set", 1 },            .{ "keys", 0 },          .{ "values", 0 },
+        .{ "entries", 0 },    .{ "findLast", 1 },       .{ "findLastIndex", 1 }, .{ "reduceRight", 1 },
+        .{ "sort", 1 },       .{ "toSorted", 1 },       .{ "toReversed", 0 },    .{ "with", 2 },
+        .{ "copyWithin", 2 }, .{ "toLocaleString", 0 },
     }) |s| try setNative(a, rs, ta_proto, s[0], s[1], taProtoMethod(s[0]));
     if (env.get("Array")) |arr| {
         if (arr == .object) {
@@ -23258,10 +23315,9 @@ fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) v
 /// are rejected by callers; recognized-but-unimplemented ones behave as iso8601.
 fn isKnownCalendar(id: []const u8) bool {
     const known = [_][]const u8{
-        "iso8601", "gregory", "gregorian", "japanese", "buddhist", "roc", "persian",
-        "indian", "islamic", "islamic-civil", "islamicc", "islamic-tbla",
-        "islamic-umalqura", "islamic-rgsa", "hebrew", "ethiopic", "ethioaa",
-        "ethiopic-amete-alem", "coptic", "chinese", "dangi",
+        "iso8601", "gregory",  "gregorian",     "japanese",            "buddhist",     "roc",              "persian",
+        "indian",  "islamic",  "islamic-civil", "islamicc",            "islamic-tbla", "islamic-umalqura", "islamic-rgsa",
+        "hebrew",  "ethiopic", "ethioaa",       "ethiopic-amete-alem", "coptic",       "chinese",          "dangi",
     };
     for (known) |k| if (asciiEqlIgnoreCase(id, k)) return true;
     return false;
@@ -23871,7 +23927,12 @@ fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
         @as(i128, b.h) * nsPerUnit(.hour) + @as(i128, b.mi) * nsPerUnit(.minute) +
         @as(i128, b.s) * nsPerUnit(.second) + @as(i128, b.frac_ns);
     return .{
-        .y = b.y, .mo = b.mo, .d = b.d, .h = b.h, .mi = b.mi, .s = b.s,
+        .y = b.y,
+        .mo = b.mo,
+        .d = b.d,
+        .h = b.h,
+        .mi = b.mi,
+        .s = b.s,
         .ms = @intCast(b.frac_ns / 1_000_000),
         .us = @intCast((b.frac_ns / 1_000) % 1_000),
         .ns = @intCast(b.frac_ns % 1_000),
@@ -24657,13 +24718,13 @@ const TUnit = enum(u8) { year, month, week, day, hour, minute, second, milliseco
 /// Map a unit name (singular or plural) to a TUnit.
 fn tUnitFromStr(s: []const u8) ?TUnit {
     const pairs = .{
-        .{ "year", TUnit.year },        .{ "years", TUnit.year },
-        .{ "month", TUnit.month },      .{ "months", TUnit.month },
-        .{ "week", TUnit.week },        .{ "weeks", TUnit.week },
-        .{ "day", TUnit.day },          .{ "days", TUnit.day },
-        .{ "hour", TUnit.hour },        .{ "hours", TUnit.hour },
-        .{ "minute", TUnit.minute },    .{ "minutes", TUnit.minute },
-        .{ "second", TUnit.second },    .{ "seconds", TUnit.second },
+        .{ "year", TUnit.year },               .{ "years", TUnit.year },
+        .{ "month", TUnit.month },             .{ "months", TUnit.month },
+        .{ "week", TUnit.week },               .{ "weeks", TUnit.week },
+        .{ "day", TUnit.day },                 .{ "days", TUnit.day },
+        .{ "hour", TUnit.hour },               .{ "hours", TUnit.hour },
+        .{ "minute", TUnit.minute },           .{ "minutes", TUnit.minute },
+        .{ "second", TUnit.second },           .{ "seconds", TUnit.second },
         .{ "millisecond", TUnit.millisecond }, .{ "milliseconds", TUnit.millisecond },
         .{ "microsecond", TUnit.microsecond }, .{ "microseconds", TUnit.microsecond },
         .{ "nanosecond", TUnit.nanosecond },   .{ "nanoseconds", TUnit.nanosecond },
@@ -24708,8 +24769,8 @@ fn balanceTimeNs(total: i128, largest: TUnit) [10]f64 {
     var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     var rem = total;
     const order = [_]struct { idx: usize, u: TUnit }{
-        .{ .idx = 3, .u = .day },    .{ .idx = 4, .u = .hour },
-        .{ .idx = 5, .u = .minute }, .{ .idx = 6, .u = .second },
+        .{ .idx = 3, .u = .day },         .{ .idx = 4, .u = .hour },
+        .{ .idx = 5, .u = .minute },      .{ .idx = 6, .u = .second },
         .{ .idx = 7, .u = .millisecond }, .{ .idx = 8, .u = .microsecond },
         .{ .idx = 9, .u = .nanosecond },
     };
@@ -24744,9 +24805,9 @@ fn negateRoundMode(m: RoundMode) RoundMode {
 
 fn roundModeFromStr(s: []const u8) ?RoundMode {
     const pairs = .{
-        .{ "ceil", RoundMode.ceil },   .{ "floor", RoundMode.floor },
-        .{ "expand", RoundMode.expand }, .{ "trunc", RoundMode.trunc },
-        .{ "halfCeil", RoundMode.half_ceil }, .{ "halfFloor", RoundMode.half_floor },
+        .{ "ceil", RoundMode.ceil },              .{ "floor", RoundMode.floor },
+        .{ "expand", RoundMode.expand },          .{ "trunc", RoundMode.trunc },
+        .{ "halfCeil", RoundMode.half_ceil },     .{ "halfFloor", RoundMode.half_floor },
         .{ "halfExpand", RoundMode.half_expand }, .{ "halfTrunc", RoundMode.half_trunc },
         .{ "halfEven", RoundMode.half_even },
     };
@@ -25301,8 +25362,8 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
         }
         if (tb.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainTime");
         setTimeFields(&t, .{
-            @floatFromInt(tb.h),                     @floatFromInt(tb.mi),
-            @floatFromInt(tb.s),                     @floatFromInt(tb.frac_ns / 1_000_000),
+            @floatFromInt(tb.h),                         @floatFromInt(tb.mi),
+            @floatFromInt(tb.s),                         @floatFromInt(tb.frac_ns / 1_000_000),
             @floatFromInt((tb.frac_ns / 1_000) % 1_000), @floatFromInt(tb.frac_ns % 1_000),
         });
         return t;
@@ -26157,9 +26218,26 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
 }
 
 const ZdtField = enum {
-    year, month, day, hour, minute, second, millisecond, microsecond, nanosecond,
-    day_of_week, day_of_year, days_in_month, days_in_year, months_in_year, days_in_week,
-    in_leap_year, hours_in_day, offset_ns, week_of_year, year_of_week,
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    millisecond,
+    microsecond,
+    nanosecond,
+    day_of_week,
+    day_of_year,
+    days_in_month,
+    days_in_year,
+    months_in_year,
+    days_in_week,
+    in_leap_year,
+    hours_in_day,
+    offset_ns,
+    week_of_year,
+    year_of_week,
 };
 fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
     return struct {
@@ -26549,7 +26627,6 @@ fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 }
 
 /// Make a Temporal type prototype (stored under `proto_key` for `makeTemporal`),
-
 /// Make a Temporal type prototype (stored under `proto_key` for `makeTemporal`),
 /// a constructor `ctor_fn`, link them, set the `@@toStringTag`, and register
 /// `Temporal.<name>`. Returns the prototype object for further method install.
@@ -26940,8 +27017,8 @@ fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {
     if (proto_v != .object) return;
     const p = proto_v.object;
     const specs = .{
-        .{ "set", 2 },     .{ "get", 1 },     .{ "has", 1 },      .{ "delete", 1 },
-        .{ "clear", 0 },   .{ "forEach", 1 }, .{ "keys", 0 },     .{ "values", 0 },
+        .{ "set", 2 },     .{ "get", 1 },         .{ "has", 1 },                 .{ "delete", 1 },
+        .{ "clear", 0 },   .{ "forEach", 1 },     .{ "keys", 0 },                .{ "values", 0 },
         .{ "entries", 0 }, .{ "getOrInsert", 2 }, .{ "getOrInsertComputed", 2 },
     };
     inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], mapProtoMethod(s[0], false));
@@ -26959,9 +27036,9 @@ fn installSetProto(env: *Environment, rs: *Shape) EvalError!void {
     if (proto_v != .object) return;
     const p = proto_v.object;
     const specs = .{
-        .{ "add", 1 },       .{ "has", 1 },          .{ "delete", 1 },     .{ "clear", 0 },
-        .{ "forEach", 1 },   .{ "values", 0 },       .{ "keys", 0 },       .{ "entries", 0 },
-        .{ "union", 1 },     .{ "intersection", 1 }, .{ "difference", 1 }, .{ "symmetricDifference", 1 },
+        .{ "add", 1 },        .{ "has", 1 },          .{ "delete", 1 },         .{ "clear", 0 },
+        .{ "forEach", 1 },    .{ "values", 0 },       .{ "keys", 0 },           .{ "entries", 0 },
+        .{ "union", 1 },      .{ "intersection", 1 }, .{ "difference", 1 },     .{ "symmetricDifference", 1 },
         .{ "isSubsetOf", 1 }, .{ "isSupersetOf", 1 }, .{ "isDisjointFrom", 1 },
     };
     inline for (specs) |s| try setNative(a, rs, p, s[0], s[1], setProtoMethod(s[0], false));

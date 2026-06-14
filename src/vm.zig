@@ -1242,6 +1242,26 @@ fn agOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     return .undefined;
 }
 
+/// Trace engine-owned `private_data` carried by VM async resume callbacks.
+/// Host callbacks remain opaque; this recognizes only native functions
+/// allocated in this file.
+pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
+    const nf = o.native orelse return;
+    const pd = o.private_data orelse return;
+    if (nf == asyncOnFulfill or nf == asyncOnReject or
+        nf == agOnFulfill or nf == agOnReject or
+        nf == agReturnFulfill or nf == agReturnReject)
+    {
+        const g: *Generator = @ptrCast(@alignCast(pd));
+        v.mark(g);
+        return;
+    }
+    if (nf == agDoneReturnFulfill or nf == agDoneReturnReject) {
+        const data: *AgDoneReturn = @ptrCast(@alignCast(pd));
+        v.mark(data.result);
+    }
+}
+
 /// Map a binary opcode back to the shared `ast.BinaryOp`. The opcode set mirrors
 /// the operator set 1:1 (minus `instanceof`, which the compiler never emits).
 fn binOp(op: bc.Op) @import("ast.zig").BinaryOp {

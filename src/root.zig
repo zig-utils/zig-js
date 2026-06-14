@@ -29,8 +29,8 @@ pub const Parser = @import("parser.zig").Parser;
 pub const JsString = @import("jsstring.zig").JsString;
 pub const installGlobals = @import("interpreter.zig").installGlobals;
 
-// Agent/threading infrastructure ($262.agent, Atomics waiter table). Hosts set
-// `Context.Options.main_can_block` to model the main agent's [[CanBlock]].
+// Agent/threading infrastructure ($262.agent, Atomics waiter table). Conformance
+// runners use `Context.TestingOptions.main_can_block` to model [[CanBlock]].
 pub const agent = @import("agent.zig");
 // Worker agents: one Context per OS thread, postMessage over the
 // structured-clone wire format, cooperative terminate.

@@ -120,6 +120,18 @@ pub fn promiseOf(v: Value) ?*Promise {
     return null;
 }
 
+/// Trace engine-owned `private_data` carried by promise resolving functions.
+/// Host callbacks remain opaque; this recognizes only the native closures
+/// allocated in this file.
+pub fn traceNativePrivateData(o: *Object, v: anytype) void {
+    const nf = o.native orelse return;
+    const pd = o.private_data orelse return;
+    if (nf == resolveThunk or nf == rejectThunk) {
+        const data: *Resolving = @ptrCast(@alignCast(pd));
+        v.mark(data.promise);
+    }
+}
+
 /// Allocate a fresh pending Promise object (proto = `Promise.prototype`).
 pub fn newPromise(self: *Interpreter) EvalError!*Object {
     const p = try gc_mod.allocPromise(self.arena);

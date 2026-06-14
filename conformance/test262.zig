@@ -353,7 +353,7 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []con
     }
     buf.appendSlice(gpa, src) catch return .skip;
 
-    const ctx = js.Context.createWith(gpa, .{
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
         .main_can_block = !meta.can_block_false,
     }) catch return .skip;
     defer ctx.destroy();
@@ -433,7 +433,7 @@ fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_pat
 /// Run a `flags: [module]` test: install the harness in the global scope, then
 /// link + evaluate the test body as a Module against its sibling fixtures.
 fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, meta: Meta) Outcome {
-    const ctx = js.Context.createWith(gpa, .{
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
         .main_can_block = !meta.can_block_false,
     }) catch return .skip;
     defer ctx.destroy();
