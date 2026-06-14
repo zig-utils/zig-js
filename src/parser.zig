@@ -848,12 +848,25 @@ pub const Parser = struct {
             // `for (using x of …)` (but `for (using of …)` has `using` as the var).
             decl_kind = .@"const";
             _ = self.advance();
+        } else if (isKeyword(self.cur(), "await") and self.peekIsKeyword(1, "using") and
+            self.peekKind(2) == .identifier and self.noNewlineBefore(1) and self.noNewlineBefore(2))
+        {
+            // `for (await using x of …)`; `x` may itself be the contextual name
+            // `of`, so consume both declaration keywords before parsing target.
+            decl_kind = .@"const";
+            _ = self.advance(); // await
+            _ = self.advance(); // using
         }
+        const classic_using_of_decl =
+            self.pos == save and
+            isKeyword(self.cur(), "using") and
+            self.peekIsKeyword(1, "of") and
+            self.peekKind(2) == .assign;
         // Iteration form `for ([decl] target in/of iterable)`, where `target`
         // is an identifier, a destructuring pattern, or (assignment form) a
         // member expression. Parse a target, then require `in`/`of`; otherwise
         // rewind to `save` and parse a classic `for(;;)`.
-        if (self.tryForTarget(decl_kind) catch null) |target| {
+        if (!classic_using_of_decl) if (self.tryForTarget(decl_kind) catch null) |target| {
             if (isKeyword(self.cur(), "in") or isKeyword(self.cur(), "of")) {
                 const is_of = isKeyword(self.advance(), "of"); // consume in/of
                 // `for-in` takes an Expression, `for-of` an AssignmentExpression.
@@ -869,7 +882,7 @@ pub const Parser = struct {
                     .is_await = is_await,
                 } });
             }
-        }
+        };
         self.pos = save; // not an iteration form — rewind and parse a classic for
 
         var init_node: ?*Node = null;
@@ -885,6 +898,11 @@ pub const Parser = struct {
             // `for (using x = e; …)` — a using declaration head (the `using of`
             // lookahead restriction applies only to for-of, not the classic for).
             init_node = try self.parseVarDeclDispose(.@"const", 1);
+        } else if (isKeyword(self.cur(), "await") and self.peekIsKeyword(1, "using") and
+            self.peekKind(2) == .identifier and self.noNewlineBefore(1) and self.noNewlineBefore(2))
+        {
+            _ = self.advance(); // await
+            init_node = try self.parseVarDeclDispose(.@"const", 2);
         } else {
             init_node = try self.parseExpression();
             try self.expect(.semicolon);
