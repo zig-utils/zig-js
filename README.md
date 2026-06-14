@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` when a host already targets the JSC C API.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **43,294 / 47,930 (90.3%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **43,323 / 47,930 (90.4%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
 
 ```zig
 const js = @import("js");
@@ -46,16 +46,16 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **43,294 / 47,930 (90.3%)** |
+| **valid** | can we run the program? (scored corpus) | **43,323 / 47,930 (90.4%)** |
 | negative | do we reject invalid input? (early errors — partial) | 3,282 / 4,668 (70.3%) |
 
-Of the valid corpus: **65 parse failures**, **4,571 runtime failures**, **0 host failures**. The runner currently skips 579 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `language`, `staging`, and Annex B.
+Of the valid corpus: **61 parse failures**, **4,546 runtime failures**, **0 host failures**. The runner currently skips 579 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `language`, `staging`, and Annex B.
 
 ### Per area (valid)
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 17,644 / 19,070 (92.5%) | `Object` | 3,411 / 3,411 (100%) |
+| `language` | 17,674 / 19,070 (92.7%) | `Object` | 3,411 / 3,411 (100%) |
 | `Array` | 3,001 / 3,081 (97.4%) | `RegExp` | 1,687 / 1,687 (100%) |
 | `String` | 1,223 / 1,223 (100%) | `TypedArray` | 1,446 / 1,446 (100%) |
 | `TypedArrayConstructors` | 738 / 738 (100%) | `Uint8Array` | 70 / 70 (100%) |
@@ -66,7 +66,7 @@ Of the valid corpus: **65 parse failures**, **4,571 runtime failures**, **0 host
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 29 / 29 (100%) | `FinalizationRegistry` | 47 / 47 (100%) |
 | `Temporal` | 3,622 / 4,603 (78.7%) | `intl402` | 1,645 / 3,341 (49.2%) |
-| `annexB` | 965 / 1,071 (90.1%) | `staging` | 741 / 1,028 (72.1%) |
+| `annexB` | 965 / 1,071 (90.1%) | `staging` | 740 / 1,028 (72.0%) |
 | `SharedArrayBuffer` | 104 / 104 (100%) | `ArrayBuffer` | 221 / 221 (100%) |
 | `Atomics` | 390 / 390 (100%) | — | — |
 | `SuppressedError` | 22 / 22 (100%) | `ThrowTypeError` | 14 / 14 (100%) |

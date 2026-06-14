@@ -141,12 +141,12 @@ pub const Parser = struct {
     /// least some contexts, so this never false-rejects them.
     fn isAlwaysReservedBinding(text: []const u8) bool {
         const words = [_][]const u8{
-            "break",      "case",     "catch",   "class",   "const",   "continue",
-            "debugger",   "default",  "delete",  "do",      "else",    "enum",
-            "export",     "extends",  "false",   "finally", "for",     "function",
-            "if",         "import",   "in",      "instanceof", "new",   "null",
-            "return",     "super",    "switch",  "this",    "throw",   "true",
-            "try",        "typeof",   "var",     "void",    "while",   "with",
+            "break",    "case",    "catch",  "class",      "const", "continue",
+            "debugger", "default", "delete", "do",         "else",  "enum",
+            "export",   "extends", "false",  "finally",    "for",   "function",
+            "if",       "import",  "in",     "instanceof", "new",   "null",
+            "return",   "super",   "switch", "this",       "throw", "true",
+            "try",      "typeof",  "var",    "void",       "while", "with",
         };
         for (words) |w| if (std.mem.eql(u8, text, w)) return true;
         return false;
@@ -154,12 +154,13 @@ pub const Parser = struct {
 
     fn isReservedWord(text: []const u8) bool {
         const words = [_][]const u8{
-            "true",     "false",   "null",     "this",      "typeof",
-            "void",     "new",     "in",       "instanceof", "function", "return",
-            "var",      "let",     "const",    "if",        "else",  "while",
-            "do",       "for",     "switch",   "case",      "default", "break",
-            "continue", "throw",   "try",      "catch",     "finally", "delete",
-            "class",    "enum",    "export",   "extends",   "import", "super",
+            "true",   "false",   "null",    "this",       "typeof",
+            "void",   "new",     "in",      "instanceof", "function",
+            "return", "var",     "let",     "const",      "if",
+            "else",   "while",   "do",      "for",        "switch",
+            "case",   "default", "break",   "continue",   "throw",
+            "try",    "catch",   "finally", "delete",     "class",
+            "enum",   "export",  "extends", "import",     "super",
             "yield",
         };
         for (words) |w| {
@@ -170,8 +171,8 @@ pub const Parser = struct {
 
     fn isStrictReservedBinding(text: []const u8) bool {
         const words = [_][]const u8{
-            "implements", "interface", "let",     "package", "private",
-            "protected",  "public",    "static",  "yield",
+            "implements", "interface", "let",    "package", "private",
+            "protected",  "public",    "static", "yield",
         };
         for (words) |w| if (std.mem.eql(u8, text, w)) return true;
         return false;
@@ -516,7 +517,8 @@ pub const Parser = struct {
                 self.noNewlineBefore(1) and !isReservedWord(self.tokens[self.pos + 1].text))
                 return self.parseVarDeclDispose(.@"const", 1);
             if (std.mem.eql(u8, t.text, "await") and self.peekIsKeyword(1, "using") and
-                self.peekKind(2) == .identifier and self.noNewlineBefore(2)) {
+                self.peekKind(2) == .identifier and self.noNewlineBefore(2))
+            {
                 _ = self.advance(); // await
                 return self.parseVarDeclDispose(.@"const", 2);
             }
@@ -1518,7 +1520,8 @@ pub const Parser = struct {
                     e = try self.alloc(.{ .member = .{ .object = e, .computed = idx, .optional = true } });
                 } else {
                     const name = self.advance();
-                    if (name.kind != .identifier) return ParseError.UnexpectedToken;
+                    if (name.kind != .identifier and name.kind != .private_name) return ParseError.UnexpectedToken;
+                    if (name.kind == .private_name and !self.in_class) return ParseError.UnexpectedToken;
                     e = try self.alloc(.{ .member = .{ .object = e, .property = name.text, .optional = true } });
                 }
             } else if (self.match(.lbracket)) {
@@ -1890,7 +1893,7 @@ pub const Parser = struct {
             // discarded; decorators precede `static`).
             if (self.check(.at)) try self.parseDecorators();
             var is_static = false;
-            if (isKeyword(self.cur(), "static") and self.peekKind(1) != .lparen and self.peekKind(1) != .assign) {
+            if (isKeyword(self.cur(), "static") and self.peekKind(1) != .semicolon and self.peekKind(1) != .lparen and self.peekKind(1) != .assign) {
                 is_static = true;
                 _ = self.advance();
             }
