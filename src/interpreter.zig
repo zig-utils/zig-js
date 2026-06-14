@@ -8181,7 +8181,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "with")) {
             const len = ilen;
-            const raw = arg0(args).toNumber();
+            const raw = try self.toNumberV(arg0(args));
             const rel: f64 = if (std.math.isNan(raw)) 0 else @trunc(raw);
             const actual_f: f64 = if (rel < 0) @as(f64, @floatFromInt(len)) + rel else rel;
             if (actual_f < 0 or actual_f >= @as(f64, @floatFromInt(len))) return self.throwError("RangeError", "Invalid index");
