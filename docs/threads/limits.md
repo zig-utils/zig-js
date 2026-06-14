@@ -37,8 +37,9 @@ but it is not true parallel JavaScript heap mutation.
 - Treating `main_can_block` or `max_js_threads` as general embedder APIs with a
   long-term compatibility contract.
 - Treating test-shell helpers as an embedder event-loop API.
-- Treating remaining PR-249 JIT, GC-stress, WebAssembly, heap, unpromoted CVE,
-  and unpromoted semantic files as part of the default green suite.
+- Treating remaining PR-249 unpromoted JIT, GC-stress, WebAssembly, heap,
+  unpromoted CVE, and unpromoted semantic files as part of the default green
+  suite.
 
 ## C-API and Context Affinity
 

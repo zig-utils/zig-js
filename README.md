@@ -187,7 +187,7 @@ Requires Zig **0.17.0-dev**.
 zig build                       # builds libzig-js.a (the JSC drop-in)
 zig build test                  # runs the unit + C-API test suite
 zig build conformance           # runs the always-green smoke suite (33/33)
-zig build threads-test          # runs the green WebKit PR-249 threads corpus (176/176)
+zig build threads-test          # runs the green WebKit PR-249 threads corpus (183/183)
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -197,7 +197,7 @@ The test262 corpus is vendored as the `test262/` git submodule (`git submodule u
 
 ## Multithreading roadmap
 
-`Context.createWith(.{ .enable_threads = true })` now exposes an experimental shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and property-`Atomics.wait` surface. That path is serialized by a VM lock and is tracked against the vendored WebKit PR-249 threads corpus; the current green allowlist is **176/176**.
+`Context.createWith(.{ .enable_threads = true })` now exposes an experimental shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and property-`Atomics.wait` surface. That path is serialized by a VM lock and is tracked against the vendored WebKit PR-249 threads corpus; the current green allowlist is **183/183**.
 
 That is a useful host-threading layer, but full JavaScript multithreading needs a broader agent model:
 

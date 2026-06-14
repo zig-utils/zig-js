@@ -18,7 +18,7 @@ agents, workers, shared buffers, property-mode Atomics, `Thread`, `Lock`,
 `Condition`, `ThreadLocal`, and the main can-block gate.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current allowlist is 176/176 and
+`reference/webkit-249/threads-tests`. The current allowlist is 183/183 and
 covers:
 
 - `smoke.js`: the root shared-realm sanity check.
@@ -41,6 +41,11 @@ covers:
   multislot clone behavior, property-wait lost-wakeup protection, watchdog
   delivery under notify storms, blocked-native-root GC coverage, thread-shell
   finalizer storms, resizable-tail quarantine checks, and TID recycle storms.
+- `jit/`: the green tree-walker-compatible JIT audit subset, including
+  deterministic constructor/fire benchmark checksums plus thread semantics for
+  tail-call data-IC argument preservation, OSR/catch-loop amplification,
+  spawned-thread butterfly stress, and TID-tag three-thread behavior. Real
+  `$vm` JIT artifact and disassembly hooks remain outside the default corpus.
 - `atomics/`: property load/store, RMW, SameValueZero compare-exchange, errors,
   CAS delete/race/storm cases, missing-property store races, wait/notify,
   wait termination, waitAsync timeout behavior, waiter-table isolation, and
@@ -49,7 +54,10 @@ covers:
   handshakes, notify-all behavior, and thread-local isolation.
 - `races/`: GIL-valid counter, join-storm, transition/read/write interleavings,
   enumerator-cache invalidation, and wait/notify stress cases.
-- `heap-option-off.js`: the heap-option-off shell-mode guardrail.
+- Top-level heap witnesses: `heap-option-off.js` for the option-off shell-mode
+  guardrail and `heap-bench-allocation.js` for deterministic allocation-churn
+  checksum coverage. The `$vm.sharedHeapTest` heap harness remains outside the
+  default corpus until it exercises real shared-heap machinery here.
 - `invariants/`: all current delete quarantine, lost-property/element,
   time-travel, and torn-shape invariant tests.
 - `objectmodel/`: the green GIL-compatible subset of array resize/CAS,
@@ -120,13 +128,13 @@ green; promote files only when their behavior is implemented and stable.
 
 ```sh
 bun run docs:build
-rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|16[8]/16[8]|threads-test -[-]' README.md docs bunpress.config.ts
+rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|16[8]/16[8]|17[6]/17[6]|18[2]/18[2]|threads-test -[-]' README.md docs bunpress.config.ts
 ```
 
 The search should find no stale 27-of-27, 30-of-30, 54-of-54, 69-of-69,
-130-of-130, 140-of-140, or 168-of-168 counts and no removed thread-test
-pass-through command syntax. Use the `-Dthreads-case` and `-Dthreads-sweep`
-options instead.
+130-of-130, 140-of-140, 168-of-168, 176-of-176, or 182-of-182 counts and no
+removed thread-test pass-through command syntax. Use the `-Dthreads-case` and
+`-Dthreads-sweep` options instead.
 
 ## When Adding Thread Work
 

@@ -89,6 +89,12 @@ const allowlist = [_][]const u8{
     "cve/mc-val-llint-cache-storm.js",
     "cve/mc-val-multislot-clone.js",
     "cve/mc-wait-property-wait-lost-wakeup.js",
+    "jit/construction-shared-constructor.js",
+    "jit/fires-per-sec.js",
+    "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
+    "jit/ftl-osr-entry-catch-loop-amplifier.js",
+    "jit/spawned-thread-butterfly-stress.js",
+    "jit/tid-tag-3-threads.js",
     "atomics/property-cas-delete-undefined-sentinel-u5.js",
     "atomics/property-cas-dictionary-delete-u5.js",
     "atomics/property-cas-samevaluezero.js",
@@ -129,6 +135,7 @@ const allowlist = [_][]const u8{
     "races/transition-vs-read.js",
     "races/transition-vs-write.js",
     "races/wait-notify-storm.js",
+    "heap-bench-allocation.js",
     "heap-option-off.js",
     "invariants/delete-quarantine-dictionary.js",
     "invariants/delete-quarantine.js",
@@ -197,6 +204,13 @@ fn runsWithoutThreadGlobal(name: []const u8) bool {
     return std.mem.eql(u8, name, "objectmodel/i03-single-threaded-no-change.js") or
         std.mem.eql(u8, name, "vmstate/flags-off-baseline.js") or
         std.mem.eql(u8, name, "vmstate/vmlite-single-thread-identity.js");
+}
+
+fn usesBenchHarness(name: []const u8) bool {
+    return (std.mem.startsWith(u8, name, "bench/") and !std.mem.endsWith(u8, name, "/harness.js")) or
+        std.mem.eql(u8, name, "heap-bench-allocation.js") or
+        std.mem.eql(u8, name, "jit/construction-shared-constructor.js") or
+        std.mem.eql(u8, name, "jit/fires-per-sec.js");
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -295,7 +309,7 @@ pub fn main(init: std.process.Init) !void {
             try buf.appendSlice(gpa, "\n");
             try buf.appendSlice(gpa, harness_src);
             try buf.appendSlice(gpa, "\n");
-            if (std.mem.startsWith(u8, name, "bench/") and !std.mem.endsWith(u8, name, "/harness.js")) {
+            if (usesBenchHarness(name)) {
                 try buf.appendSlice(gpa, bench_harness_src);
                 try buf.appendSlice(gpa, "\n");
                 try buf.appendSlice(gpa,
