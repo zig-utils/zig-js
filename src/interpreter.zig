@@ -8645,11 +8645,11 @@ pub const Interpreter = struct {
     fn sortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f64 {
         if (cmp == .object and cmp.object.isCallableObject()) {
             const r = try self.callValue(cmp, &.{ a, b });
-            const n = r.toNumber();
+            const n = try self.toNumberV(r);
             return if (std.math.isNan(n)) 0 else n;
         }
-        const as = try a.toString(self.arena);
-        const bs = try b.toString(self.arena);
+        const as = try self.toStringV(a);
+        const bs = try self.toStringV(b);
         return switch (std.mem.order(u8, as, bs)) {
             .lt => -1,
             .eq => 0,
