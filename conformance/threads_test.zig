@@ -53,15 +53,20 @@ const allowlist = [_][]const u8{
     "bench/inline-property-write.js",
     "bench/megamorphic-access.js",
     "bench/transition-heavy-constructor.js",
+    "cve/mc-aint-terminate-notify-park-race.js",
     "cve/mc-code-deferred-fire-stale-window.js",
     "cve/mc-code-sleep-through-jettison-isb.js",
     "cve/mc-df-delete-reuse.js",
     "cve/mc-df-segmented-length.js",
     "cve/mc-df-ta-detach-resize.js",
+    "cve/mc-gc-blocked-native-roots.js",
+    "cve/mc-gc-thread-shell-finalizer-storm.js",
     "cve/mc-hand-dead-registrant-settle.js",
     "cve/mc-hand-restrict-claim.js",
     "cve/mc-init-lazy-global-first-touch.js",
     "cve/mc-init-rope-resolve-race.js",
+    "cve/mc-int-resizable-tail-quarantine.js",
+    "cve/mc-life-detach-quarantine-storm.js",
     "cve/mc-life-sab-refchurn.js",
     "cve/mc-lock-cow-materialize-race.js",
     "cve/mc-lock-n3-install-vs-owner-add.js",
@@ -72,7 +77,10 @@ const allowlist = [_][]const u8{
     "cve/mc-prim-indexed-missing-define-race.js",
     "cve/mc-reent-coercion-order.js",
     "cve/mc-reent-store-missing-indexed-define-race.js",
+    "cve/mc-safe-regexp-tts-watchdog.js",
+    "cve/mc-safe-spin-vs-classa-stop.js",
     "cve/mc-tdwn-exit-vs-settle.js",
+    "cve/mc-tdwn-tid-recycle-storm.js",
     "cve/mc-tdwn-vm-teardown-unjoined.js",
     "cve/mc-tear-date-cache.js",
     "cve/mc-tear-generator-resume.js",
@@ -322,8 +330,9 @@ pub fn main(init: std.process.Init) !void {
                 .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),
                 .max_js_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null,
             };
+            const directive = test_src[0 .. std.mem.indexOfScalar(u8, test_src, '\n') orelse test_src.len];
             const expect_termination = std.mem.endsWith(u8, name, "-termination.js") or
-                std.mem.indexOf(u8, test_src, "--watchdog-exception-ok") != null;
+                std.mem.indexOf(u8, directive, "--watchdog-exception-ok") != null;
             const ctx = js.Context.createWith(gpa, options) catch {
                 std.debug.print("  FAIL  {s} (context)\n", .{name});
                 failed += 1;

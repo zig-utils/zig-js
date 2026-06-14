@@ -18,7 +18,7 @@ agents, workers, shared buffers, property-mode Atomics, `Thread`, `Lock`,
 `Condition`, `ThreadLocal`, and the main can-block gate.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current allowlist is 168/168 and
+`reference/webkit-249/threads-tests`. The current allowlist is 176/176 and
 covers:
 
 - `smoke.js`: the root shared-realm sanity check.
@@ -38,7 +38,9 @@ covers:
   data-format transitions, SAB lifetime churn, handler/teardown ordering,
   generator/async-generator claims, re-entrant coercion order, missing-indexed
   define races, date/rope tear checks, atom identity, LLInt cache churn,
-  multislot clone behavior, and property-wait lost-wakeup protection.
+  multislot clone behavior, property-wait lost-wakeup protection, watchdog
+  delivery under notify storms, blocked-native-root GC coverage, thread-shell
+  finalizer storms, resizable-tail quarantine checks, and TID recycle storms.
 - `atomics/`: property load/store, RMW, SameValueZero compare-exchange, errors,
   CAS delete/race/storm cases, missing-property store races, wait/notify,
   wait termination, waitAsync timeout behavior, waiter-table isolation, and
@@ -118,12 +120,13 @@ green; promote files only when their behavior is implemented and stable.
 
 ```sh
 bun run docs:build
-rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|threads-test -[-]' README.md docs bunpress.config.ts
+rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|16[8]/16[8]|threads-test -[-]' README.md docs bunpress.config.ts
 ```
 
 The search should find no stale 27-of-27, 30-of-30, 54-of-54, 69-of-69,
-130-of-130, or 140-of-140 counts and no removed thread-test pass-through command
-syntax. Use the `-Dthreads-case` and `-Dthreads-sweep` options instead.
+130-of-130, 140-of-140, or 168-of-168 counts and no removed thread-test
+pass-through command syntax. Use the `-Dthreads-case` and `-Dthreads-sweep`
+options instead.
 
 ## When Adding Thread Work
 
