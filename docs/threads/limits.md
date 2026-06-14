@@ -17,10 +17,15 @@ but it is not true parallel JavaScript heap mutation.
   agent waiter table.
 - Property-mode `Atomics.wait` / `notify` / `waitAsync` use per-context waiter
   queues on `Gil`.
-- `Atomics.Mutex` and `Atomics.Condition` are proposal-aligned aliases for the
-  shipped `Lock` and `Condition` constructors in threaded contexts.
-- Host policies that used to be process-global test knobs are now stable
-  `Context.Options`: `main_can_block` and `max_js_threads`.
+- `Atomics.Mutex` and `Atomics.Condition` share the shipped `Lock` and
+  `Condition` constructors in threaded contexts and expose proposal-style
+  static token APIs on top of those records.
+- Host/test knobs that used to be process-global are now per-context options:
+  `main_can_block` and `max_js_threads`.
+- Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`,
+  `noInline`, and `gc` exist for conformance coverage and corpus
+  compatibility. In GC-enabled contexts, `gc()` requests a collection that is
+  serviced at the next quiescent entry point.
 
 ## Not Supported Today
 
@@ -29,8 +34,12 @@ but it is not true parallel JavaScript heap mutation.
   mutation.
 - Sharing ordinary JS values between isolated agents or workers without
   structured clone.
-- Treating PR-249 JIT, GC-stress, WebAssembly, object-model, CVE, or
-  scaling/benchmark files as part of the default green suite.
+- Treating `main_can_block` or `max_js_threads` as general embedder APIs with a
+  long-term compatibility contract.
+- Treating test-shell helpers as an embedder event-loop API.
+- Treating remaining PR-249 JIT, GC-stress, WebAssembly, heap, unpromoted CVE,
+  and unpromoted semantic files as part of the default green suite.
+
 ## C-API and Context Affinity
 
 The C API keeps the Phase-0 rule: handles are affine to the thread that owns

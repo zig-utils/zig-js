@@ -6,8 +6,9 @@ concrete plan for the tracing GC that gates Phase 7 (GIL removal / Layer C),
 per the prerequisites audit in [`P7-gil-removal.md`](P7-gil-removal.md). It also
 delivers value *before* Phase 7: opt-in contexts already reclaim unreachable GC
 cells at quiescent points and clear `WeakRef` targets when their referent dies.
-`WeakMap` / `WeakSet` weak-key cleanup uses the same ephemeron/weak-slot pass.
-`FinalizationRegistry` cleanup jobs remain follow-on work.
+`WeakMap` / `WeakSet` weak-key cleanup uses the same ephemeron/weak-slot pass,
+and `FinalizationRegistry` records are made available to `cleanupSome()` and to
+automatic cleanup jobs after quiescent collection.
 
 ## Decisions (and why)
 
@@ -139,9 +140,9 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron
   fixed-point marks WeakMap values whose keys are live. Then every registered
-  weak edge whose target is still white is cleared, and WeakMap/WeakSet drop
-  white-keyed entries. `FinalizationRegistry` cleanup callbacks are still
-  deferred.
+  weak edge whose target is still white is cleared, WeakMap/WeakSet drop
+  white-keyed entries, and FinalizationRegistry records whose targets died are
+  marked ready for `cleanupSome()` or automatic host cleanup jobs.
 - **Sweep:** walk blocks; white cells → `finalize` then return to the free
   list; flip black→white for next cycle. Lazy/incremental sweep is an M2 option.
 - **Trigger:** `maybeCollect` at the existing `(steps & 1023)` safepoints
@@ -203,10 +204,11 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   *Uniform Object heap landed:* all ~171 `value.Object` allocation sites across
   8 files now go through `gc_mod.allocObj(arena)`, which routes via a
   **thread-local active heap** (`setActiveHeap`, set/restored in `createWith`
-  for intrinsics and `evaluate`/`evaluateModule` for execution) — so every site
-  funnels through the GC when on, the arena when off, *without* threading the
-  heap pointer through hundreds of signatures. Intrinsics (`installGlobals`) and
-  user objects are all GC cells now. Validated: flag off byte-identical; flag on
+  for intrinsics, `evaluate`/`evaluateModule` for execution, and shared-realm
+  `Thread` entry for spawned JS threads) — so every site funnels through the GC
+  when on, the arena when off, *without* threading the heap pointer through
+  hundreds of signatures. Intrinsics (`installGlobals`) and user objects are all
+  GC cells now. Validated: flag off byte-identical; flag on
   full test262 **42,753/47,930, 0 crashes**, conformance 33/33, and the **whole
   unit suite leak-checked** with GC defaulted on. (`global_obj`/`tdz` predate the
   heap so they stay arena for now — fine while collection is teardown-only.)
@@ -237,6 +239,11 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   GC (no `$262.gc`; one `evaluate` per test), so the conformance number is
   unchanged by design — the win is operational (memory reclamation for
   long-running contexts).
+  *Shell `gc()` requests landed:* the test-shell `gc()` hook no longer calls
+  `Heap.collect()` while JS is live on the Zig stack. It sets a per-Context
+  pending bit, and `evaluate` / `evaluateModule` service that request at the
+  next quiescent entry point. This keeps PR-249 object-model flag identity tests
+  from crashing while preserving the M1 root-completeness rule.
   *C-API handle table landed:* `box()` registers each `Boxed` (`JSValueRef`) on
   `Context.c_api_handles` when the GC is on (`*Boxed` aliases `*Value`), and
   `traceRoots` marks them — so an embedder-held `JSValueRef` survives collection.
@@ -260,6 +267,16 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   ephemeron fixed point when their keys are live; dead WeakMap/WeakSet keys are
   cleared and pruned before sweep. Validated in `zig-gc` with an exact
   ephemeron test and in zig-js with GC-enabled WeakMap/WeakSet tests.
+  *FinalizationRegistry cleanup landed:* registries now store typed records
+  with weak target/token pointers and strong held values. Collection marks
+  records ready when their target dies, and
+  `FinalizationRegistry.prototype.cleanupSome()` delivers those holdings after
+  the quiescent collection point. The same ready records are queued as
+  per-context host cleanup jobs and drained by the interpreter checkpoint,
+  including promise microtasks queued by cleanup callbacks.
+  The GC binding also skips the embedded global environment when tracing
+  function closures, fixing a root-completeness bug exposed by live cleanup
+  callbacks.
   *Remaining for the FULL deliverable:* (a) **arbitrary mid-script collection**
   needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
   locals/registers a precise GC can't see) — the quiescent points avoid this; a
@@ -267,8 +284,7 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   cell sub-allocations (`slots`/`elements`/`vars`/reaction lists) to gpa so
   `finalize` frees them on collect — turning "reclaims cells" into "reclaims
   everything" (today sub-allocations are reclaimed at teardown, so a collected
-  object's backing buffers persist until `destroy`). (c) FinalizationRegistry
-  still needs cleanup-job scheduling.
+  object's backing buffers persist until `destroy`).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
@@ -282,7 +298,8 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   queue — collect and assert exact reclamation (precise, so counts are exact).
 - zig-js: GC stress tests (allocate-heavy loop bounded heap, explicit
   `collectGarbage` reclamation, `WeakRef` clearing/retention, and
-  WeakMap/WeakSet ephemeron behavior), targeted
+  WeakMap/WeakSet ephemeron behavior, and FinalizationRegistry explicit and
+  automatic cleanup delivery), targeted
   `WeakRef`/`FinalizationRegistry`/`WeakMap` test262 buckets as each weak
   semantic lands, `zig build test262` non-regression at each milestone, TSan on
   M3.

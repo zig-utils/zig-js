@@ -24,7 +24,7 @@ objects, and promise state safe in today's engine.
 | `$262.agent` and typed-array `Atomics.wait` / `notify` / `waitAsync` | Implemented in `src/agent.zig` with hooks in `src/interpreter.zig`. | Unit tests and real test262 agent cases. |
 | Structured clone | Implemented in `src/structured_clone.zig`. | Unit tests, workers, and agents. |
 | Embedder `Worker` API | Implemented in `src/worker.zig` with C-API hooks in `src/c_api.zig`. | Worker unit tests and C-API round trip. |
-| Shared-realm `Thread` API | Implemented in `src/gil.zig`, `src/jsthread.zig`, and `src/context.zig`. | `zig build threads-test` green allowlist: 30/30. |
+| Shared-realm `Thread` API | Implemented in `src/gil.zig`, `src/jsthread.zig`, and `src/context.zig`. | `zig build threads-test` green allowlist: 168/168. |
 
 ## Core Rules
 
@@ -32,8 +32,8 @@ objects, and promise state safe in today's engine.
   single-thread affinity rule and installs no `Thread` globals.
 - `Context.createWith(.{ .enable_threads = true })` installs `Thread`, `Lock`,
   `Condition`, `ThreadLocal`, `ConcurrentAccessError`, property-mode
-  `Atomics.*`, and the proposal-aligned `Atomics.Mutex` / `Atomics.Condition`
-  aliases.
+  `Atomics.*`, and proposal-aligned `Atomics.Mutex` / `Atomics.Condition`
+  static methods.
 - Blocking points release the GIL: `Thread.join`, contended `Lock.hold`,
   `Condition.wait`, property-mode `Atomics.wait`, and typed-array
   `Atomics.wait`.

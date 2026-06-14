@@ -9,7 +9,7 @@ const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
 Without `enable_threads`, the context keeps the original single-thread affinity
 rule and none of the globals below are installed.
 
-Threaded contexts also accept stable host policies:
+Threaded contexts also accept the host/test knobs used by the PR-249 runner:
 
 ```zig
 const ctx = try js.Context.createWith(gpa, .{
@@ -22,7 +22,11 @@ const ctx = try js.Context.createWith(gpa, .{
 `main_can_block` models the VM's host-defined `[[CanBlock]]` bit. When false,
 blocking APIs throw if they would have to park; non-blocking fast paths and
 async APIs still work. `max_js_threads` caps live spawned `Thread` objects for
-hosts that want a deterministic resource limit.
+deterministic corpus coverage.
+
+These options are not a broad embedder thread-policy surface yet. Treat them as
+host/test controls until the C API and shared-realm lifecycle rules are promoted
+with their own compatibility contract.
 
 ## Model
 
@@ -64,6 +68,9 @@ Supported behavior:
 - `thread.asyncJoin()` returns a promise for the same completion. If the thread
   is still running, the finishing thread settles the promise.
 - Joining the current thread throws.
+- The test-shell `drainMicrotasks()` helper drains only the current
+  interpreter's promise jobs. It does not deliver threaded task-queue work such
+  as `Lock.asyncHold` grants.
 
 `Thread.restrict(obj)` pins a plain object or plain array to the calling OS
 thread. Enforced foreign access throws `ConcurrentAccessError`. Exotic objects
@@ -76,9 +83,10 @@ refused.
 `Lock` is non-recursive. `hold(fn)` acquires the lock, runs `fn`, and releases
 the lock even when `fn` throws.
 
-`Atomics.Mutex` is an alias for `Lock` in threaded contexts. It exists to align
-the shipped synchronization primitive with the TC39 proposal-structs naming
-without duplicating lock records or changing behavior.
+`Atomics.Mutex` is the proposal-aligned constructor in threaded contexts. It is
+the same constructor as `Lock`, so `new Atomics.Mutex()` creates the existing
+non-recursive lock record, while static `Atomics.Mutex.*` methods expose the
+proposal-style unlock-token API.
 
 ```js
 const lock = new Lock();
@@ -105,6 +113,16 @@ Supported behavior:
 - `lock.asyncHold(fn?)` grants the lock through the realm task queue. With a
   function, the function runs when the grant is delivered; without one, the
   promise resolves with a release function.
+- An `asyncHold(fn)` callback return resolves the promise with the returned
+  value. A thrown callback rejects the promise with the actual thrown value and
+  still releases the lock.
+- `Atomics.Mutex.lock(mutex, token?)` acquires `mutex` and returns an
+  `Atomics.Mutex.UnlockToken`. Passing an unlocked token reuses it.
+- `Atomics.Mutex.lockIfAvailable(mutex, timeout, token?)` returns an unlock
+  token when it acquires before the timeout, or `null` when it cannot.
+- `Atomics.Mutex.UnlockToken.prototype.locked` reports whether the token still
+  owns a mutex. `unlock()` releases once and returns `true`; later calls return
+  `false`. `[Symbol.dispose]()` also unlocks.
 
 ## `Condition`
 
@@ -112,7 +130,9 @@ Supported behavior:
 reacquires the lock before returning. Spurious wakeups are allowed, so callers
 must loop on their predicate.
 
-`Atomics.Condition` is an alias for `Condition` in threaded contexts.
+`Atomics.Condition` is the same constructor as `Condition` in threaded
+contexts, with static token-based helpers that operate on
+`Atomics.Mutex.UnlockToken` objects.
 
 ```js
 const lock = new Lock();
@@ -144,6 +164,13 @@ Supported behavior:
 - `notify()` wakes one waiter and returns the number woken.
 - `notifyAll()` wakes all current waiters and returns the number woken.
 - `asyncWait(lock)` participates in the same FIFO wait domain as sync waiters.
+- `Atomics.Condition.wait(condition, token)` waits using a locked
+  `Atomics.Mutex.UnlockToken`, then returns with the token locked again.
+- `Atomics.Condition.waitFor(condition, token, timeout, predicate?)` returns
+  `true` when notified before the timeout, or when `predicate` becomes truthy.
+  It returns `false` on timeout.
+- `Atomics.Condition.notify(condition, count?)` wakes up to `count` waiters, or
+  all waiters when `count` is omitted.
 
 ## `ThreadLocal`
 
@@ -190,5 +217,7 @@ Important rules:
 - Values are not coerced for load, store, exchange, wait, or compareExchange.
 - `compareExchange` uses SameValueZero, so `NaN` compare-exchange loops work.
 - Numeric RMW operations require the stored value to be a number.
+- Finite `waitAsync` tickets keep the shell/event-loop drain alive until they
+  settle, including timeout settlement when no notifier arrives.
 - Waiters are keyed by object identity plus property key and live on the owning
   context's `Gil`, so independent threaded contexts cannot cross-notify.

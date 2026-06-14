@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` when a host already targets the JSC C API.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **42,771 / 47,930 (89.2%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **43,294 / 47,930 (90.3%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
 
 ```zig
 const js = @import("js");
@@ -46,18 +46,18 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **42,771 / 47,930 (89.2%)** |
-| negative | do we reject invalid input? (early errors — partial) | 3,213 / 4,668 (68.8%) |
+| **valid** | can we run the program? (scored corpus) | **43,294 / 47,930 (90.3%)** |
+| negative | do we reject invalid input? (early errors — partial) | 3,282 / 4,668 (70.3%) |
 
-Of the valid corpus: **119 parse failures**, **5,040 runtime failures**, **0 host failures**. The runner currently skips 579 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `language`, `staging`, `RegExp`, `String`, and Annex B.
+Of the valid corpus: **65 parse failures**, **4,571 runtime failures**, **0 host failures**. The runner currently skips 579 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `language`, `staging`, and Annex B.
 
 ### Per area (valid)
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 17,600 / 19,070 (92.3%) | `Object` | 3,368 / 3,411 (98.7%) |
-| `Array` | 2,977 / 3,081 (96.6%) | `RegExp` | 1,567 / 1,687 (92.9%) |
-| `String` | 1,122 / 1,223 (91.7%) | `TypedArray` | 1,446 / 1,446 (100%) |
+| `language` | 17,644 / 19,070 (92.5%) | `Object` | 3,411 / 3,411 (100%) |
+| `Array` | 3,001 / 3,081 (97.4%) | `RegExp` | 1,687 / 1,687 (100%) |
+| `String` | 1,223 / 1,223 (100%) | `TypedArray` | 1,446 / 1,446 (100%) |
 | `TypedArrayConstructors` | 738 / 738 (100%) | `Uint8Array` | 70 / 70 (100%) |
 | `Map` | 204 / 204 (100%) | `Set` | 383 / 383 (100%) |
 | `BigInt` | 77 / 77 (100%) | `Symbol` | 98 / 98 (100%) |
@@ -65,8 +65,8 @@ Of the valid corpus: **119 parse failures**, **5,040 runtime failures**, **0 hos
 | `DataView` | 561 / 561 (100%) | `Number` | 340 / 340 (100%) |
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 29 / 29 (100%) | `FinalizationRegistry` | 47 / 47 (100%) |
-| `Temporal` | 3,464 / 4,603 (75.3%) | `intl402` | 1,651 / 3,341 (49.4%) |
-| `annexB` | 962 / 1,071 (89.8%) | `staging` | 705 / 1,028 (68.6%) |
+| `Temporal` | 3,622 / 4,603 (78.7%) | `intl402` | 1,645 / 3,341 (49.2%) |
+| `annexB` | 965 / 1,071 (90.1%) | `staging` | 741 / 1,028 (72.1%) |
 | `SharedArrayBuffer` | 104 / 104 (100%) | `ArrayBuffer` | 221 / 221 (100%) |
 | `Atomics` | 390 / 390 (100%) | — | — |
 | `SuppressedError` | 22 / 22 (100%) | `ThrowTypeError` | 14 / 14 (100%) |
@@ -187,7 +187,7 @@ Requires Zig **0.17.0-dev**.
 zig build                       # builds libzig-js.a (the JSC drop-in)
 zig build test                  # runs the unit + C-API test suite
 zig build conformance           # runs the always-green smoke suite (33/33)
-zig build threads-test          # runs the green WebKit PR-249 threads corpus (30/30)
+zig build threads-test          # runs the green WebKit PR-249 threads corpus (168/168)
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -197,7 +197,7 @@ The test262 corpus is vendored as the `test262/` git submodule (`git submodule u
 
 ## Multithreading roadmap
 
-`Context.createWith(.{ .enable_threads = true })` now exposes an experimental shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and property-`Atomics.wait` surface. That path is serialized by a VM lock and is tracked against the vendored WebKit PR-249 threads corpus; the current green allowlist is **30/30**.
+`Context.createWith(.{ .enable_threads = true })` now exposes an experimental shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and property-`Atomics.wait` surface. That path is serialized by a VM lock and is tracked against the vendored WebKit PR-249 threads corpus; the current green allowlist is **168/168**.
 
 That is a useful host-threading layer, but full JavaScript multithreading needs a broader agent model:
 
