@@ -885,6 +885,7 @@ pub fn isPropertyMode(self: *Interpreter, v: Value) bool {
         v == .object and
         !v.object.is_symbol and
         !v.object.is_bigint and
+        v.object.proxy_target == null and
         v.object.typed_array == null and
         v.object.data_view == null;
 }
@@ -966,10 +967,10 @@ pub const PropRmwOp = enum { add, sub, and_, or_, xor };
 pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.HostError!Value {
     const o = args[0].object;
     const key = try self.keyOf(argAt(args, 1));
+    const operand = try self.toNumberV(argAt(args, 2));
     const old = try ownDataOrThrow(self, o, key, "Atomics RMW: object has no own data property");
     try writableOrThrow(self, o, key, "Atomics RMW: property is not writable");
     if (old != .number) return self.throwError("TypeError", "Atomics RMW: stored value is not a number");
-    const operand = try self.toNumberV(argAt(args, 2));
     const result: f64 = switch (op) {
         .add => old.number + operand,
         .sub => old.number - operand,

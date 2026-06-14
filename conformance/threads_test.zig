@@ -15,6 +15,7 @@ const js = @import("js");
 const corpus_root = "reference/webkit-249/threads-tests";
 
 const allowlist = [_][]const u8{
+    "smoke.js",
     "api/condition-basic.js",
     "api/condition-async-wait.js",
     "api/condition-wait-termination.js",
@@ -44,6 +45,42 @@ const allowlist = [_][]const u8{
     "arrays/push-resize-multithread.js",
     "arrays/shared-element-read-write.js",
     "arrays/typed-arrays-sab.js",
+    "bench/array-element-read.js",
+    "bench/array-element-write.js",
+    "bench/flat-butterfly-read.js",
+    "bench/flat-butterfly-write.js",
+    "bench/inline-property-read.js",
+    "bench/inline-property-write.js",
+    "bench/megamorphic-access.js",
+    "bench/transition-heavy-constructor.js",
+    "cve/mc-code-deferred-fire-stale-window.js",
+    "cve/mc-code-sleep-through-jettison-isb.js",
+    "cve/mc-df-delete-reuse.js",
+    "cve/mc-df-segmented-length.js",
+    "cve/mc-df-ta-detach-resize.js",
+    "cve/mc-hand-dead-registrant-settle.js",
+    "cve/mc-hand-restrict-claim.js",
+    "cve/mc-init-lazy-global-first-touch.js",
+    "cve/mc-init-rope-resolve-race.js",
+    "cve/mc-life-sab-refchurn.js",
+    "cve/mc-lock-cow-materialize-race.js",
+    "cve/mc-lock-n3-install-vs-owner-add.js",
+    "cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
+    "cve/mc-prim-async-generator-resume-claim.js",
+    "cve/mc-prim-generator-claim-leak-stack-overflow.js",
+    "cve/mc-prim-generator-resume-claim.js",
+    "cve/mc-prim-indexed-missing-define-race.js",
+    "cve/mc-reent-coercion-order.js",
+    "cve/mc-reent-store-missing-indexed-define-race.js",
+    "cve/mc-tdwn-exit-vs-settle.js",
+    "cve/mc-tdwn-vm-teardown-unjoined.js",
+    "cve/mc-tear-date-cache.js",
+    "cve/mc-tear-generator-resume.js",
+    "cve/mc-tear-rope-resolve-race.js",
+    "cve/mc-val-atom-identity.js",
+    "cve/mc-val-llint-cache-storm.js",
+    "cve/mc-val-multislot-clone.js",
+    "cve/mc-wait-property-wait-lost-wakeup.js",
     "atomics/property-cas-delete-undefined-sentinel-u5.js",
     "atomics/property-cas-dictionary-delete-u5.js",
     "atomics/property-cas-samevaluezero.js",
@@ -84,6 +121,7 @@ const allowlist = [_][]const u8{
     "races/transition-vs-read.js",
     "races/transition-vs-write.js",
     "races/wait-notify-storm.js",
+    "heap-option-off.js",
     "invariants/delete-quarantine-dictionary.js",
     "invariants/delete-quarantine.js",
     "invariants/no-lost-elements.js",
@@ -193,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
         names.deinit(gpa);
     }
     if (sweep) {
-        for ([_][]const u8{ "api", "arrays", "atomics", "lifecycle", "races", "scaling", "shared-objects", "sync" }) |sub| {
+        for ([_][]const u8{ "api", "arrays", "atomics", "bench", "lifecycle", "races", "scaling", "shared-objects", "sync" }) |sub| {
             var d = dir.openDir(io, sub, .{ .iterate = true }) catch continue;
             defer d.close(io);
             var it = d.iterate();
@@ -284,7 +322,8 @@ pub fn main(init: std.process.Init) !void {
                 .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),
                 .max_js_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null,
             };
-            const expect_termination = std.mem.endsWith(u8, name, "-termination.js");
+            const expect_termination = std.mem.endsWith(u8, name, "-termination.js") or
+                std.mem.indexOf(u8, test_src, "--watchdog-exception-ok") != null;
             const ctx = js.Context.createWith(gpa, options) catch {
                 std.debug.print("  FAIL  {s} (context)\n", .{name});
                 failed += 1;
