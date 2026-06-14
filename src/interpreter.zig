@@ -8581,23 +8581,8 @@ pub const Interpreter = struct {
             return if (want_index) Value{ .number = -1 } else .undefined;
         }
         if (eq(name, "values")) return try self.iteratorOf(.{ .object = o });
-        if (eq(name, "keys")) {
-            // The Array Iterator yields every index 0..length, holes included.
-            const arr = try self.newArray();
-            for (0..ilen) |i| try arr.object.elements.append(self.arena, .{ .number = @floatFromInt(i) });
-            return try self.iteratorOf(arr);
-        }
-        if (eq(name, "entries")) {
-            const arr = try self.newArray();
-            var i: usize = 0;
-            while (i < ilen) : (i += 1) {
-                const pair = try self.newArray();
-                try pair.object.elements.append(self.arena, .{ .number = @floatFromInt(i) });
-                try pair.object.elements.append(self.arena, try self.arrIndexGet(o, i)); // hole -> undefined
-                try arr.object.elements.append(self.arena, pair);
-            }
-            return try self.iteratorOf(arr);
-        }
+        if (eq(name, "keys")) return try self.makeCursorIteratorWithKind(.{ .object = o }, 1);
+        if (eq(name, "entries")) return try self.makeCursorIteratorWithKind(.{ .object = o }, 2);
         if (eq(name, "toString")) {
             // Array.prototype.toString does a dynamic Get(O, "join") and calls
             // it when callable. Typed arrays share this function object, so this
@@ -21489,6 +21474,19 @@ fn stringIteratorSeqLen(s: []const u8, i: usize) usize {
     return utf8SeqLen(s, i);
 }
 
+fn arrayIteratorValue(self: *Interpreter, kind: usize, index: usize, elem: Value) EvalError!Value {
+    return switch (kind) {
+        1 => .{ .number = @floatFromInt(index) },
+        2 => blk: {
+            const pair = (try self.newArray()).object;
+            try pair.elements.append(self.arena, .{ .number = @floatFromInt(index) });
+            try pair.elements.append(self.arena, elem);
+            break :blk .{ .object = pair };
+        },
+        else => elem,
+    };
+}
+
 fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -21512,20 +21510,20 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         .object => |so| if (so.is_arguments) {
             const len = toLen(try self.toNumberV(try self.getProperty(src, "length")));
             if (i < len) {
-                val = try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+                val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
                 done = false;
             }
         } else if (so.is_array) {
             // Arrays iterate the *logical* length, reading via [[Get]] so a hole
             // (or the sparse tail) yields `undefined` and accessor indices run.
             if (i < @max(so.elements.items.len, so.array_len)) {
-                val = try self.arrIndexGet(so, i);
+                val = try arrayIteratorValue(self, kind, i, try self.arrIndexGet(so, i));
                 done = false;
             }
         } else if (so.proxy_handler != null or so.proxy_revoked) {
             const len = toLen((try self.toPrimitive(try self.getProperty(src, "length"), .number)).toNumber());
             if (i < len) {
-                val = try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+                val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
                 done = false;
             }
         } else if (so.typed_array) |ta| {
@@ -21572,6 +21570,12 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 done = false;
                 advance = j + 1 - i;
                 break;
+            }
+        } else {
+            const len = toLen((try self.toPrimitive(try self.getProperty(src, "length"), .number)).toNumber());
+            if (i < len) {
+                val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
+                done = false;
             }
         },
         .string => |s| if (i < s.len) {
