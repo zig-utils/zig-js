@@ -7797,10 +7797,11 @@ pub const Interpreter = struct {
     fn concatProcessOne(self: *Interpreter, dst: Value, v: Value, ck: ?[]const u8, n: *usize) EvalError!void {
         var spread: bool = false;
         if (v == .object) {
-            spread = v.object.is_array;
             if (ck) |k| {
                 const flag = try self.getProperty(v, k);
-                if (flag != .undefined) spread = flag.toBoolean();
+                spread = if (flag != .undefined) flag.toBoolean() else try objectToStringIsArray(self, v.object);
+            } else {
+                spread = try objectToStringIsArray(self, v.object);
             }
         }
         if (spread) {
