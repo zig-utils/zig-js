@@ -128,13 +128,13 @@ green; promote files only when their behavior is implemented and stable.
 
 ```sh
 bun run docs:build
-rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|16[8]/16[8]|17[6]/17[6]|18[2]/18[2]|threads-test -[-]' README.md docs bunpress.config.ts
+rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|16[8]/16[8]|17[6]/17[6]|18[2]/18[2]|18[4]/18[4]|18[6]/18[6]|18[7]/18[7]|threads-test -[-]' README.md docs bunpress.config.ts
 ```
 
 The search should find no stale 27-of-27, 30-of-30, 54-of-54, 69-of-69,
-130-of-130, 140-of-140, 168-of-168, 176-of-176, or 182-of-182 counts and no
-removed thread-test pass-through command syntax. Use the `-Dthreads-case` and
-`-Dthreads-sweep` options instead.
+130-of-130, 140-of-140, 168-of-168, 176-of-176, 182-of-182, 184-of-184,
+186-of-186, or 187-of-187 counts and no removed thread-test pass-through
+command syntax. Use the `-Dthreads-case` and `-Dthreads-sweep` options instead.
 
 ## When Adding Thread Work
 
