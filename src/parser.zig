@@ -1603,11 +1603,20 @@ pub const Parser = struct {
             if (m.kind != .identifier or !std.mem.eql(u8, m.text, "target")) return ParseError.UnexpectedToken;
             return self.alloc(.new_target_expr);
         }
-        var callee = try self.parsePrimary();
+        const parenthesized_callee = self.check(.lparen);
+        var callee = if (parenthesized_callee) blk: {
+            _ = self.advance();
+            const expr = try self.parseExpression();
+            try self.expect(.rparen);
+            break :blk expr;
+        } else try self.parsePrimary();
         // `new import(...)` is a SyntaxError: an ImportCall is a CallExpression,
-        // not a valid MemberExpression operand for `new`. (`import.meta` parses to
-        // `.import_meta`, so `new import.meta.x()` is unaffected.)
-        if (callee.* == .import_call) return ParseError.UnexpectedToken;
+        // not a valid MemberExpression operand for `new`. A parenthesized
+        // ImportCall is a CoverParenthesizedExpression PrimaryExpression and is
+        // therefore valid syntax (`new (import(x))`), failing later at runtime.
+        // (`import.meta` parses to `.import_meta`, so `new import.meta.x()` is
+        // unaffected.)
+        if (!parenthesized_callee and callee.* == .import_call) return ParseError.UnexpectedToken;
         while (true) {
             if (self.match(.dot)) {
                 const name = self.advance();
