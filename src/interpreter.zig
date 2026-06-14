@@ -382,6 +382,12 @@ pub const Interpreter = struct {
     /// arena engine. Cell allocation funnels through `gc_mod.allocObject` etc.,
     /// which use this when set. See docs/threads/P7-gc-design.md.
     gc: ?*anyopaque = null,
+    /// Backing allocator for GC-owned object side data. Null keeps the legacy
+    /// arena ownership path; non-null means ArrayBuffer metadata/bytes must be
+    /// released by the GC finalizer.
+    gc_backing: ?std.mem.Allocator = null,
+    /// Internal byte accounting for GC-owned non-shared ArrayBuffer slabs.
+    gc_array_buffer_bytes_live: ?*usize = null,
     /// Context-owned pending collection request set by the JS shell `gc()`
     /// helper. M1 collection is precise and quiescent-only, so the request is
     /// serviced by `Context` at the next safe entry point.
@@ -6958,15 +6964,49 @@ pub const Interpreter = struct {
     /// atomic element paths in value.zig rely on this).
     pub fn makeArrayBuffer(self: *Interpreter, len: usize) EvalError!*value.Object {
         const o = (try self.newObject()).object;
-        const data = try self.arena.alignedAlloc(u8, .@"8", len);
-        @memset(data, 0);
-        const ab = try self.arena.create(value.ArrayBufferData);
-        ab.* = .{ .local_data = data };
+        const data = try self.allocArrayBufferBytes(len);
+        errdefer self.freeArrayBufferBytes(data, self.gc_backing != null);
+        const ab = try self.allocArrayBufferData();
+        errdefer self.destroyArrayBufferData(ab);
+        ab.* = .{ .local_data = data, .gc_owned = self.gc_backing != null };
         o.array_buffer = ab;
+        errdefer o.array_buffer = null;
         if (self.env.get("ArrayBuffer")) |c| {
             if (c == .object) o.proto = try self.protoObject(c.object);
         }
         return o;
+    }
+
+    fn allocArrayBufferBytes(self: *Interpreter, len: usize) EvalError![]u8 {
+        if (len == 0) return &.{};
+        const data = if (self.gc_backing) |a| blk: {
+            const p = a.rawAlloc(len, .@"8", @returnAddress()) orelse return error.OutOfMemory;
+            if (self.gc_array_buffer_bytes_live) |live| live.* += len;
+            break :blk p[0..len];
+        } else try self.arena.alignedAlloc(u8, .@"8", len);
+        @memset(data, 0);
+        return data;
+    }
+
+    fn freeArrayBufferBytes(self: *Interpreter, bytes: []u8, gc_owned: bool) void {
+        if (!gc_owned or bytes.len == 0) return;
+        const a = self.gc_backing orelse return;
+        a.rawFree(bytes, .@"8", @returnAddress());
+        if (self.gc_array_buffer_bytes_live) |live| {
+            std.debug.assert(live.* >= bytes.len);
+            live.* -= bytes.len;
+        }
+    }
+
+    fn allocArrayBufferData(self: *Interpreter) EvalError!*value.ArrayBufferData {
+        if (self.gc_backing) |a| return a.create(value.ArrayBufferData);
+        return self.arena.create(value.ArrayBufferData);
+    }
+
+    fn destroyArrayBufferData(self: *Interpreter, ab: *value.ArrayBufferData) void {
+        if (!ab.gc_owned) return;
+        const a = self.gc_backing orelse return;
+        a.destroy(ab);
     }
 
     fn typedArrayLengthLimit(size: usize) usize {
@@ -15070,9 +15110,10 @@ fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     if (new_len > ab.max_byte_length.?) return self.throwError("RangeError", "resize exceeds maxByteLength");
     const nl: usize = @intCast(new_len);
-    const fresh = try self.arena.alignedAlloc(u8, .@"8", nl);
-    @memset(fresh, 0);
+    const fresh = try self.allocArrayBufferBytes(nl);
+    errdefer self.freeArrayBufferBytes(fresh, ab.gc_owned);
     @memcpy(fresh[0..@min(nl, ab.bytes().len)], ab.bytes()[0..@min(nl, ab.bytes().len)]);
+    self.freeArrayBufferBytes(ab.local_data, ab.gc_owned);
     ab.local_data = fresh;
     return .undefined;
 }
@@ -20020,19 +20061,32 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 /// taking ownership of one reference (the caller's ref transfers in; it is
 /// tracked in the realm's RetainList and released at realm teardown).
 pub fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.SharedBufferStorage) EvalError!*value.Object {
-    if (self.sab_retains) |rl| try rl.track(storage); // on OOM, track released the ref
+    var tracked = false;
+    if (self.sab_retains) |rl| {
+        try rl.track(storage); // on OOM, track released the ref
+        tracked = true;
+    }
+    errdefer {
+        if (tracked) if (self.sab_retains) |rl| {
+            _ = rl.releaseTracked(storage);
+        };
+    }
     const o = (try self.newObject()).object;
-    const ab = try self.arena.create(value.ArrayBufferData);
+    const ab = try self.allocArrayBufferData();
+    errdefer self.destroyArrayBufferData(ab);
     ab.* = .{
         .local_data = &.{},
         .shared = storage,
+        .gc_owned = self.gc_backing != null,
         .is_shared = true,
         .max_byte_length = if (storage.growable) storage.capacity else null,
     };
     o.array_buffer = ab;
+    errdefer o.array_buffer = null;
     if (self.env.get("SharedArrayBuffer")) |c| if (c == .object) {
         o.proto = try self.protoObject(c.object);
     };
+    tracked = false;
     return o;
 }
 

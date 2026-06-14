@@ -301,9 +301,10 @@ pub const Binding = struct {
         }
     }
 
-    /// A cell is being reclaimed. A non-shared `ArrayBufferData`'s bytes are
-    /// arena-owned (freed with the arena), but a SharedArrayBuffer wrapper owns
-    /// one realm retain that must be released when the wrapper cell dies.
+    /// A cell is being reclaimed. Arena-mode `ArrayBufferData` is released with
+    /// the arena, but GC-mode buffers own their metadata and non-shared byte
+    /// slabs individually. A SharedArrayBuffer wrapper owns one realm retain
+    /// that must be released when the wrapper cell dies.
     pub fn finalize(self: *Binding, cell: *anyopaque, kind: Kind) void {
         switch (kind) {
             .object => {
@@ -313,6 +314,15 @@ pub const Binding = struct {
                         const released = self.context.sab_retains.releaseTracked(storage);
                         std.debug.assert(released);
                         if (released) ab.shared = null;
+                    } else if (ab.gc_owned and ab.local_data.len > 0) {
+                        self.context.gpa.rawFree(ab.local_data, .@"8", @returnAddress());
+                        std.debug.assert(self.context.gc_array_buffer_bytes_live >= ab.local_data.len);
+                        self.context.gc_array_buffer_bytes_live -= ab.local_data.len;
+                        ab.local_data = &.{};
+                    }
+                    if (ab.gc_owned) {
+                        self.context.gpa.destroy(ab);
+                        o.array_buffer = null;
                     }
                 }
             },

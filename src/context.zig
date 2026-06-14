@@ -74,6 +74,10 @@ pub const Context = struct {
     /// default). When set, heap cells allocate through it and are reclaimed by
     /// collection / freed at `destroy`. See docs/threads/P7-gc-design.md.
     gc: ?*GcHeap = null,
+    /// Internal verification/accounting for GC-owned non-shared ArrayBuffer
+    /// byte slabs. This is not an embedder API; it lets tests prove collection
+    /// frees backing storage before context teardown.
+    gc_array_buffer_bytes_live: usize = 0,
     /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
     gc_binding: ?*GcBinding = null,
     /// C-API `Boxed` handles (`JSValueRef`s) that must survive collection — the
@@ -251,6 +255,8 @@ pub const Context = struct {
             .main_can_block = self.main_can_block,
             .gil = self.gil,
             .gc = self.gc,
+            .gc_backing = if (self.gc != null) self.gpa else null,
+            .gc_array_buffer_bytes_live = if (self.gc != null) &self.gc_array_buffer_bytes_live else null,
             .gc_requested = &self.gc_requested,
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
@@ -4668,6 +4674,52 @@ test "enable_gc: SharedArrayBuffer retain releases when wrapper is collected" {
     try std.testing.expectEqual(@as(usize, 0), ctx.sab_retains.items.items.len);
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
     try std.testing.expectEqual(true, cleared.boolean);
+}
+
+test "enable_gc: ArrayBuffer bytes release when wrapper is collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const baseline = ctx.gc_array_buffer_bytes_live;
+    _ = try ctx.evaluate(
+        \\globalThis.keep = new ArrayBuffer(64);
+        \\globalThis.ref = new WeakRef(globalThis.keep);
+        \\0
+    );
+    try std.testing.expectEqual(baseline + 64, ctx.gc_array_buffer_bytes_live);
+
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline + 64, ctx.gc_array_buffer_bytes_live);
+    const alive = try ctx.evaluate("globalThis.ref.deref().byteLength");
+    try std.testing.expectEqual(@as(f64, 64), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_array_buffer_bytes_live);
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+}
+
+test "enable_gc: ArrayBuffer resize releases old backing bytes" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const baseline = ctx.gc_array_buffer_bytes_live;
+    _ = try ctx.evaluate(
+        \\globalThis.keep = new ArrayBuffer(16, { maxByteLength: 64 });
+        \\0
+    );
+    try std.testing.expectEqual(baseline + 16, ctx.gc_array_buffer_bytes_live);
+
+    _ = try ctx.evaluate("globalThis.keep.resize(32); globalThis.keep.byteLength");
+    try std.testing.expectEqual(baseline + 32, ctx.gc_array_buffer_bytes_live);
+
+    _ = try ctx.evaluate("globalThis.keep.resize(8); globalThis.keep.byteLength");
+    try std.testing.expectEqual(baseline + 8, ctx.gc_array_buffer_bytes_live);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_array_buffer_bytes_live);
 }
 
 test "enable_gc: WeakMap value is live only while weak key is live" {

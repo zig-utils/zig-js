@@ -89,15 +89,21 @@ pub const TAKind = enum {
 /// An `ArrayBuffer`'s backing bytes. `detached` is set by `$262.detachArrayBuffer`
 /// / transfer; a detached buffer's views read undefined / throw on length checks.
 pub const ArrayBufferData = struct {
-    /// Backing bytes of a NON-shared buffer (arena-owned; reallocated by
-    /// resize/transfer). Empty and unused when `shared` is set — a
-    /// SharedArrayBuffer's bytes live in process-wide refcounted storage so
-    /// they can outlive this realm and be seen by other agents. Always read
-    /// the live bytes through `bytes()`, never this field directly.
+    /// Backing bytes of a NON-shared buffer. Arena contexts keep these in the
+    /// realm arena; GC contexts allocate them from the context backing
+    /// allocator so object finalization can release them on collection. Empty
+    /// and unused when `shared` is set — a SharedArrayBuffer's bytes live in
+    /// process-wide refcounted storage so they can outlive this realm and be
+    /// seen by other agents. Always read the live bytes through `bytes()`,
+    /// never this field directly.
     local_data: []u8,
     /// Non-null iff `is_shared`: the cross-agent backing storage. The wrapper
     /// holds one reference, tracked in the owning realm's `RetainList`.
     shared: ?*SharedBufferStorage = null,
+    /// Metadata and `local_data` are owned by the GC finalizer rather than the
+    /// arena. Shared buffers set this for the metadata only; their bytes are
+    /// owned by `SharedBufferStorage`.
+    gc_owned: bool = false,
     detached: bool = false,
     /// For a resizable ArrayBuffer (or growable SharedArrayBuffer), the maximum
     /// byte length; null means fixed-length (not resizable/growable).
