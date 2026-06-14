@@ -78,6 +78,10 @@ pub const Context = struct {
     /// byte slabs. This is not an embedder API; it lets tests prove collection
     /// frees backing storage before context teardown.
     gc_array_buffer_bytes_live: usize = 0,
+    /// Internal verification/accounting for GC-owned Promise reaction entries.
+    /// Not an embedder API; tests use it to prove settlement/finalization frees
+    /// reaction-list backing before teardown.
+    gc_promise_reactions_live: usize = 0,
     /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
     gc_binding: ?*GcBinding = null,
     /// C-API `Boxed` handles (`JSValueRef`s) that must survive collection — the
@@ -257,6 +261,7 @@ pub const Context = struct {
             .gc = self.gc,
             .gc_backing = if (self.gc != null) self.gpa else null,
             .gc_array_buffer_bytes_live = if (self.gc != null) &self.gc_array_buffer_bytes_live else null,
+            .gc_promise_reactions_live = if (self.gc != null) &self.gc_promise_reactions_live else null,
             .gc_requested = &self.gc_requested,
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
@@ -4720,6 +4725,46 @@ test "enable_gc: ArrayBuffer resize releases old backing bytes" {
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     try std.testing.expectEqual(baseline, ctx.gc_array_buffer_bytes_live);
+}
+
+test "enable_gc: pending Promise reaction lists release when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const baseline = ctx.gc_promise_reactions_live;
+    _ = try ctx.evaluate(
+        \\globalThis.keep = new Promise(() => {});
+        \\globalThis.ref = new WeakRef(globalThis.keep);
+        \\for (let i = 0; i < 20; i++) globalThis.keep.then(() => i, () => i);
+        \\0
+    );
+    try std.testing.expect(ctx.gc_promise_reactions_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_promise_reactions_live > baseline);
+    const alive = try ctx.evaluate("globalThis.ref.deref() !== undefined");
+    try std.testing.expectEqual(true, alive.boolean);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_promise_reactions_live);
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+}
+
+test "enable_gc: settling Promise releases reaction lists" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const baseline = ctx.gc_promise_reactions_live;
+    _ = try ctx.evaluate(
+        \\let resolve;
+        \\const p = new Promise((r) => { resolve = r; });
+        \\for (let i = 0; i < 20; i++) p.then(() => i, () => i);
+        \\resolve(1);
+        \\0
+    );
+    try std.testing.expectEqual(baseline, ctx.gc_promise_reactions_live);
 }
 
 test "enable_gc: WeakMap value is live only while weak key is live" {

@@ -38,6 +38,9 @@ pub const Reaction = struct {
 pub const Promise = struct {
     state: State = .pending,
     value: Value = .undefined,
+    /// Reaction list buffers are owned by the GC backing allocator when this
+    /// promise cell is GC-owned; arena contexts keep the legacy arena path.
+    gc_owned: bool = false,
     on_fulfill: std.ArrayListUnmanaged(Reaction) = .empty,
     on_reject: std.ArrayListUnmanaged(Reaction) = .empty,
 };
@@ -135,13 +138,55 @@ pub fn traceNativePrivateData(o: *Object, v: anytype) void {
 /// Allocate a fresh pending Promise object (proto = `Promise.prototype`).
 pub fn newPromise(self: *Interpreter) EvalError!*Object {
     const p = try gc_mod.allocPromise(self.arena);
-    p.* = .{};
+    p.* = .{ .gc_owned = self.gc_backing != null };
     const obj = try gc_mod.allocObj(self.arena);
     obj.* = .{ .promise = @ptrCast(p) };
     if (self.env.get("Promise")) |ctor| {
         if (ctor == .object) obj.proto = try self.protoObject(ctor.object);
     }
     return obj;
+}
+
+inline fn reactionAllocator(self: *Interpreter) std.mem.Allocator {
+    return self.gc_backing orelse self.arena;
+}
+
+fn noteReactionAdded(self: *Interpreter, p: *Promise) void {
+    if (!p.gc_owned) return;
+    if (self.gc_promise_reactions_live) |live| live.* += 1;
+}
+
+fn noteReactionsRemoved(self: *Interpreter, p: *Promise, count: usize) void {
+    if (!p.gc_owned or count == 0) return;
+    if (self.gc_promise_reactions_live) |live| {
+        std.debug.assert(live.* >= count);
+        live.* -= count;
+    }
+}
+
+fn appendReaction(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction), r: Reaction) EvalError!void {
+    try list.append(reactionAllocator(self), r);
+    noteReactionAdded(self, p);
+}
+
+fn popReaction(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction)) void {
+    _ = list.pop();
+    noteReactionsRemoved(self, p, 1);
+}
+
+fn clearReactions(self: *Interpreter, p: *Promise) void {
+    const count = p.on_fulfill.items.len + p.on_reject.items.len;
+    if (p.gc_owned) {
+        const a = reactionAllocator(self);
+        p.on_fulfill.deinit(a);
+        p.on_reject.deinit(a);
+        p.on_fulfill = .empty;
+        p.on_reject = .empty;
+        noteReactionsRemoved(self, p, count);
+    } else {
+        p.on_fulfill.clearRetainingCapacity();
+        p.on_reject.clearRetainingCapacity();
+    }
 }
 
 /// Fulfill `p` with `v` (no-op if already settled). If `v` is itself a thenable,
@@ -161,8 +206,9 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
         const reaction_r = Reaction{ .handler = null, .resolve = nr.resolve, .reject = nr.reject };
         switch (inner.state) {
             .pending => {
-                try inner.on_fulfill.append(self.arena, reaction_f);
-                try inner.on_reject.append(self.arena, reaction_r);
+                try appendReaction(self, inner, &inner.on_fulfill, reaction_f);
+                errdefer popReaction(self, inner, &inner.on_fulfill);
+                try appendReaction(self, inner, &inner.on_reject, reaction_r);
             },
             .fulfilled => try enqueue(self, .{ .reaction = reaction_f, .argument = inner.value, .fulfilled = true }),
             .rejected => try enqueue(self, .{ .reaction = reaction_r, .argument = inner.value, .fulfilled = false }),
@@ -198,8 +244,7 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
     p.state = .fulfilled;
     p.value = v;
     for (p.on_fulfill.items) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = true });
-    p.on_fulfill.clearRetainingCapacity();
-    p.on_reject.clearRetainingCapacity();
+    clearReactions(self, p);
 }
 
 /// Reject `p` with `reason` (no-op if already settled).
@@ -208,8 +253,7 @@ pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
     p.state = .rejected;
     p.value = reason;
     for (p.on_reject.items) |r| try enqueue(self, .{ .reaction = r, .argument = reason, .fulfilled = false });
-    p.on_fulfill.clearRetainingCapacity();
-    p.on_reject.clearRetainingCapacity();
+    clearReactions(self, p);
 }
 
 /// `p.then(onFulfilled, onRejected)` → a new promise settled by running the
@@ -245,8 +289,9 @@ pub fn performThen(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, re
     const react_r = Reaction{ .handler = rh, .resolve = resolve_fn, .reject = reject_fn };
     switch (p.state) {
         .pending => {
-            try p.on_fulfill.append(self.arena, react_f);
-            try p.on_reject.append(self.arena, react_r);
+            try appendReaction(self, p, &p.on_fulfill, react_f);
+            errdefer popReaction(self, p, &p.on_fulfill);
+            try appendReaction(self, p, &p.on_reject, react_r);
         },
         .fulfilled => try enqueue(self, .{ .reaction = react_f, .argument = p.value, .fulfilled = true }),
         .rejected => try enqueue(self, .{ .reaction = react_r, .argument = p.value, .fulfilled = false }),

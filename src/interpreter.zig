@@ -388,6 +388,8 @@ pub const Interpreter = struct {
     gc_backing: ?std.mem.Allocator = null,
     /// Internal byte accounting for GC-owned non-shared ArrayBuffer slabs.
     gc_array_buffer_bytes_live: ?*usize = null,
+    /// Internal entry accounting for GC-owned Promise reaction lists.
+    gc_promise_reactions_live: ?*usize = null,
     /// Context-owned pending collection request set by the JS shell `gc()`
     /// helper. M1 collection is precise and quiescent-only, so the request is
     /// serviced by `Context` at the next safe entry point.

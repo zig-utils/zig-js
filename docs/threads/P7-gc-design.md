@@ -273,6 +273,12 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   the old slab when publishing a new one. Validated by GC-enabled tests that
   watch live byte accounting stay stable across resize and return to baseline
   immediately after a weak-only ArrayBuffer wrapper is collected.
+  *Promise reaction-list finalization landed:* pending promise reaction buffers
+  in GC-enabled contexts now allocate from the context backing allocator. They
+  are released immediately when the promise settles and by the promise-cell
+  finalizer when an unreachable pending promise is collected. Validated by
+  GC-enabled tests that track reaction-entry accounting across settlement and
+  weak-only pending-promise collection.
   *Shell `gc()` requests landed:* the test-shell `gc()` hook no longer calls
   `Heap.collect()` while JS is live on the Zig stack. It sets a per-Context
   pending bit, and `evaluate` / `evaluateModule` service that request at the
@@ -316,9 +322,9 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   locals/registers a precise GC can't see) — the quiescent points avoid this; a
   Boehm-style stack scan with register spill would generalize it. (b) migrate
   remaining arena-backed cell sub-allocations (`slots`/`elements`/`vars`/
-  reaction lists) to gpa so `finalize` frees them on collect — turning
-  "reclaims cells plus ArrayBuffer/SAB storage" into "reclaims everything"
-  (today those backing buffers persist until `destroy`).
+  maps/iterator queues) to gpa so `finalize` frees them on collect — turning
+  "reclaims cells plus ArrayBuffer/SAB/Promise reaction storage" into "reclaims
+  everything" (today those backing buffers persist until `destroy`).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
