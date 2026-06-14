@@ -8324,7 +8324,11 @@ pub const Interpreter = struct {
             return acc;
         }
         if (eq(name, "at")) {
-            const fl = @trunc(arg0(args).toNumber());
+            const n = try self.toNumberV(arg0(args));
+            const fl = if (std.math.isNan(n)) 0 else @trunc(n);
+            if (std.math.isInf(fl)) return Value.undefined;
+            const ilen_f: f64 = @floatFromInt(ilen);
+            if (fl < -ilen_f or fl >= ilen_f) return Value.undefined;
             const idx: i64 = if (fl < 0) @as(i64, @intCast(ilen)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
             if (idx < 0 or idx >= ilen) return Value.undefined;
             return try self.arrIndexGet(o, @intCast(idx)); // a hole reads as undefined
