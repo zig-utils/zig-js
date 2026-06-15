@@ -1036,14 +1036,12 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 
 /// `Array.fromAsync(asyncItems, mapfn, thisArg)` — ES2024. Returns a promise of
 /// an array built by async-iterating (Symbol.asyncIterator, else a sync iterable
-/// wrapped so each value is awaited, else an array-like). The synchronous-settling
-/// runtime settles every `Await` inline, so the whole thing runs to completion
-/// and the returned promise is already settled.
+/// wrapped so each value is awaited, else an array-like).
 pub fn arrayFromAsync(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     const self = interp(ctx);
     const pobj = try promise.newPromise(self);
     const p = promise.promiseOf(.{ .object = pobj }).?;
-    const result = arrayFromAsyncImpl(self, this, arg(args, 0), arg(args, 1), arg(args, 2)) catch |e| {
+    const result = arrayFromAsyncImpl(self, .{ .object = pobj }, this, arg(args, 0), arg(args, 1), arg(args, 2)) catch |e| {
         if (e == error.Throw) {
             const reason = self.exception;
             self.exception = .undefined;
@@ -1052,11 +1050,19 @@ pub fn arrayFromAsync(ctx: *anyopaque, this: Value, args: []const Value) HostErr
         }
         return e;
     };
-    try promise.resolve(self, p, result);
+    switch (result) {
+        .immediate => |v| try promise.resolve(self, p, v),
+        .scheduled => {},
+    }
     return .{ .object = pobj };
 }
 
-fn arrayFromAsyncImpl(self: *Interpreter, C: Value, items: Value, mapfn: Value, this_arg: Value) HostError!Value {
+const FromAsyncOutcome = union(enum) {
+    immediate: Value,
+    scheduled,
+};
+
+fn arrayFromAsyncImpl(self: *Interpreter, out_promise: Value, C: Value, items: Value, mapfn: Value, this_arg: Value) HostError!FromAsyncOutcome {
     var mapping = false;
     if (mapfn != .undefined) {
         if (!mapfn.isCallable()) return self.throwError("TypeError", "Array.fromAsync: mapping function is not callable");
@@ -1091,6 +1097,20 @@ fn arrayFromAsyncImpl(self: *Interpreter, C: Value, items: Value, mapfn: Value, 
         const method = if (is_async) async_method else sync_method;
         const result: Value = if (use_ctor) try self.construct(C, &.{}) else try self.newArray();
         const it = try self.callValueWithThis(method, &.{}, items);
+        if (!is_async) {
+            var k: usize = 0;
+            if (try arrayFromAsyncSyncStep(self, it, mapfn, this_arg, mapping, k)) |mapped| {
+                createDataIndexOrThrow(self, result, k, mapped) catch |e| {
+                    self.iteratorCloseKeepingThrow(it);
+                    return e;
+                };
+                k += 1;
+                try scheduleArrayFromAsyncSyncRest(self, out_promise, result, it, mapfn, this_arg, mapping, k);
+                return .scheduled;
+            }
+            try setLengthOrThrow(self, result, k);
+            return .{ .immediate = result };
+        }
         var k: usize = 0;
         while (true) {
             var res = try self.callMethod(it, "next", &.{});
@@ -1123,7 +1143,7 @@ fn arrayFromAsyncImpl(self: *Interpreter, C: Value, items: Value, mapfn: Value, 
             k += 1;
         }
         try setLengthOrThrow(self, result, k);
-        return result;
+        return .{ .immediate = result };
     }
 
     // Not iterable: ToObject(items), await each index 0..length-1.
@@ -1145,7 +1165,94 @@ fn arrayFromAsyncImpl(self: *Interpreter, C: Value, items: Value, mapfn: Value, 
         try createDataIndexOrThrow(self, result, i, mapped);
     }
     try setLengthOrThrow(self, result, len);
-    return result;
+    return .{ .immediate = result };
+}
+
+fn arrayFromAsyncSyncStep(self: *Interpreter, it: Value, mapfn: Value, this_arg: Value, mapping: bool, k: usize) HostError!?Value {
+    const res = try self.callMethod(it, "next", &.{});
+    if (res != .object) return self.throwError("TypeError", "Array.fromAsync: iterator result is not an object");
+    if ((try self.getProperty(res, "done")).toBoolean()) return null;
+    var v = try self.getProperty(res, "value");
+    v = self.awaitValue(v) catch |e| {
+        self.iteratorCloseKeepingThrow(it);
+        return e;
+    };
+    if (!mapping) return v;
+    const mv = self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(k) } }, this_arg) catch |e| {
+        self.iteratorCloseKeepingThrow(it);
+        return e;
+    };
+    return self.awaitValue(mv) catch |e| {
+        self.iteratorCloseKeepingThrow(it);
+        return e;
+    };
+}
+
+fn scheduleArrayFromAsyncSyncRest(self: *Interpreter, out_promise: Value, result: Value, it: Value, mapfn: Value, this_arg: Value, mapping: bool, k: usize) HostError!void {
+    const cb = try gc_mod.allocObj(self.arena);
+    cb.* = .{ .native = arrayFromAsyncSyncRestFn };
+    try cb.elements.append(cb.elementsAllocator(self.arena), out_promise);
+    try cb.elements.append(cb.elementsAllocator(self.arena), result);
+    try cb.elements.append(cb.elementsAllocator(self.arena), it);
+    try cb.elements.append(cb.elementsAllocator(self.arena), mapfn);
+    try cb.elements.append(cb.elementsAllocator(self.arena), this_arg);
+    try cb.elements.append(cb.elementsAllocator(self.arena), .{ .number = @floatFromInt(k) });
+    try cb.elements.append(cb.elementsAllocator(self.arena), .{ .boolean = mapping });
+
+    const tick_obj = try promise.newPromise(self);
+    const tick = promise.promiseOf(.{ .object = tick_obj }).?;
+    try promise.resolve(self, tick, .undefined);
+    _ = try promise.then(self, tick, .{ .object = cb }, .undefined);
+}
+
+fn arrayFromAsyncSyncRestFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    _ = this;
+    _ = args;
+    const self = interp(ctx);
+    const cb = self.active_native orelse return .undefined;
+    if (cb.elements.items.len < 7) return .undefined;
+    const out_p = promise.promiseOf(cb.elements.items[0]) orelse return .undefined;
+    const result = cb.elements.items[1];
+    const it = cb.elements.items[2];
+    const mapfn = cb.elements.items[3];
+    const this_arg = cb.elements.items[4];
+    var k = interpreter.toLen(cb.elements.items[5].toNumber());
+    const mapping = cb.elements.items[6].toBoolean();
+
+    while (true) {
+        const mapped = arrayFromAsyncSyncStep(self, it, mapfn, this_arg, mapping, k) catch |e| {
+            if (e == error.Throw) {
+                const reason = self.exception;
+                self.exception = .undefined;
+                try promise.reject(self, out_p, reason);
+                return .undefined;
+            }
+            return e;
+        } orelse break;
+        createDataIndexOrThrow(self, result, k, mapped) catch |e| {
+            self.iteratorCloseKeepingThrow(it);
+            if (e == error.Throw) {
+                const reason = self.exception;
+                self.exception = .undefined;
+                try promise.reject(self, out_p, reason);
+                return .undefined;
+            }
+            return e;
+        };
+        k += 1;
+        cb.elements.items[5] = .{ .number = @floatFromInt(k) };
+    }
+    setLengthOrThrow(self, result, k) catch |e| {
+        if (e == error.Throw) {
+            const reason = self.exception;
+            self.exception = .undefined;
+            try promise.reject(self, out_p, reason);
+            return .undefined;
+        }
+        return e;
+    };
+    try promise.resolve(self, out_p, result);
+    return .undefined;
 }
 
 pub fn identity1(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
