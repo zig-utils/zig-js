@@ -171,6 +171,8 @@ pub const FnTemplate = struct {
     /// Exact source text of the function definition, for `Function.prototype.
     /// toString` (empty when the parser didn't capture it).
     source: []const u8 = "",
+    is_generator: bool = false,
+    is_async: bool = false,
     chunk: *Chunk,
     /// Number of frame slots (params + function-scoped declarations) the VM
     /// allocates per call.

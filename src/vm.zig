@@ -1366,12 +1366,28 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .closure = closure_env,
         .name = tmpl.name,
         .source = tmpl.source,
-        .chunk = tmpl.chunk,
+        .is_generator = tmpl.is_generator,
+        .is_async = tmpl.is_async,
+        .chunk = if (tmpl.is_generator or tmpl.is_async) null else tmpl.chunk,
+        .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
         .local_count = tmpl.local_count,
     };
     const obj = try gc_mod.allocObj(vm.arena);
-    obj.* = .{ .js_func = @ptrCast(func), .proto = vm.functionProto() };
+    const fproto: ?*value.Object = blk: {
+        const tag: ?[]const u8 = if (tmpl.is_generator and tmpl.is_async)
+            "\x00AsyncGenFuncProto"
+        else if (tmpl.is_generator)
+            "\x00GenFuncProto"
+        else if (tmpl.is_async)
+            "\x00AsyncFuncProto"
+        else
+            null;
+        if (tag) |t| if (vm.env.get(t)) |v| if (v == .object) break :blk v.object;
+        break :blk vm.functionProto();
+    };
+    obj.* = .{ .js_func = @ptrCast(func), .proto = fproto };
+    func.obj = obj;
     try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
     if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, .{ .object = obj });
     return .{ .object = obj };
@@ -1384,7 +1400,9 @@ fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Val
     if (callee == .object) {
         if (callee.object.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
-            if (func.chunk) |fchunk| return runFunction(vm, func, fchunk, args, this_val);
+            if (!func.is_generator and !func.is_async) {
+                if (func.chunk) |fchunk| return runFunction(vm, func, fchunk, args, this_val);
+            }
         }
     }
     return vm.callValueWithThis(callee, args, this_val);
@@ -1515,6 +1533,16 @@ test "vm: functions, recursion, closures" {
         \\function mk(x) { return function (y) { return x + y; }; }
         \\mk(10)(5)
     )).number);
+}
+
+test "vm: generator calls from bytecode are lazy" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("object", (try vmRun(a,
+        \\function *g() { throw new Error("body ran"); }
+        \\typeof g()
+    )).string);
 }
 
 test "vm: if/else and short-circuit value" {

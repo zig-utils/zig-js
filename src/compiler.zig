@@ -978,10 +978,18 @@ pub const Compiler = struct {
                 // the tree-walker, which resolves the reference once.)
                 .identifier => |name| {
                     const op: bc.Op = switch (oa.op) {
-                        .add => .add,        .sub => .sub,       .mul => .mul,
-                        .div => .div,        .mod => .mod,       .pow => .pow,
-                        .bit_and => .bit_and, .bit_or => .bit_or, .bit_xor => .bit_xor,
-                        .shl => .shl,        .shr => .shr,       .ushr => .ushr,
+                        .add => .add,
+                        .sub => .sub,
+                        .mul => .mul,
+                        .div => .div,
+                        .mod => .mod,
+                        .pow => .pow,
+                        .bit_and => .bit_and,
+                        .bit_or => .bit_or,
+                        .bit_xor => .bit_xor,
+                        .shl => .shl,
+                        .shr => .shr,
+                        .ushr => .ushr,
                         else => return error.Unsupported,
                     };
                     try self.emitLoad(name);
@@ -1366,31 +1374,40 @@ pub const Compiler = struct {
         // Async functions tree-walk (the Promise runtime isn't lowered yet), so
         // bail here to force the fallback for any program that defines one.
         if (fnode.is_async) return error.Unsupported;
-        const sub = try self.arena.create(Chunk);
-        sub.* = Chunk.init(self.arena);
 
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
         const scope = try self.arena.create(FnScope);
         scope.* = .{ .parent = self.scope };
-        for (fnode.params) |p| {
-            // Default values and rest params need a runtime prologue the VM
-            // doesn't emit yet — fall back to the tree-walker for those.
-            if (p.default != null or p.is_rest or p.pattern != null) return error.Unsupported;
-            _ = try scope.addLocal(self.arena, p.name);
-        }
-        if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
 
-        var sub_c = Compiler{ .arena = self.arena, .chunk = sub, .mode = .function, .scope = scope };
-        if (fnode.is_expr_body) {
-            try sub_c.compileExpr(fnode.body);
-            _ = try sub.emit(.ret, 0);
-        } else {
-            try sub_c.compileStmt(fnode.body); // body is a block
-            _ = try sub.emit(.ret_undef, 0);
+        const sub = if (fnode.is_generator) blk: {
+            break :blk try Compiler.compileGenerator(self.arena, fnode);
+        } else blk: {
+            const compiled = try self.arena.create(Chunk);
+            compiled.* = Chunk.init(self.arena);
+            for (fnode.params) |p| {
+                // Default values and rest params need a runtime prologue the VM
+                // doesn't emit yet — fall back to the tree-walker for those.
+                if (p.default != null or p.is_rest or p.pattern != null) return error.Unsupported;
+                _ = try scope.addLocal(self.arena, p.name);
+            }
+            if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
+
+            var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope };
+            if (fnode.is_expr_body) {
+                try sub_c.compileExpr(fnode.body);
+                _ = try compiled.emit(.ret, 0);
+            } else {
+                try sub_c.compileStmt(fnode.body); // body is a block
+                _ = try compiled.emit(.ret_undef, 0);
+            }
+            try compiled.finalize();
+            break :blk compiled;
+        };
+        if (fnode.is_generator) {
+            for (fnode.params) |p| _ = try scope.addLocal(self.arena, p.name);
         }
-        try sub.finalize();
         const tmpl = try self.arena.create(bc.FnTemplate);
         tmpl.* = .{
             .name = fnode.name,
@@ -1402,6 +1419,8 @@ pub const Compiler = struct {
             .is_expr_body = fnode.is_expr_body,
             .body = fnode.body,
             .source = fnode.source,
+            .is_generator = fnode.is_generator,
+            .is_async = fnode.is_async,
             .chunk = sub,
             .local_count = scope.count,
         };
