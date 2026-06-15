@@ -6883,26 +6883,30 @@ pub const Interpreter = struct {
         }
     }
 
-    /// The internal key of the well-known `Symbol.iterator` (from the `Symbol`
-    /// global), for resolving `obj[Symbol.iterator]`.
+    /// The internal key of the well-known `Symbol.iterator`, for resolving
+    /// `obj[Symbol.iterator]`.
     fn symbolIteratorKey(self: *Interpreter) ?[]const u8 {
-        const sym = self.env.get("Symbol") orelse return null;
-        if (sym != .object) return null;
-        const it = sym.object.getOwn("iterator") orelse return null;
-        if (it != .object or !it.object.is_symbol) return null;
-        return it.object.sym_key;
+        return self.wellKnownSymbolKey("iterator");
     }
 
     fn symbolAsyncIteratorKey(self: *Interpreter) ?[]const u8 {
-        const sym = self.env.get("Symbol") orelse return null;
-        if (sym != .object) return null;
-        const it = sym.object.getOwn("asyncIterator") orelse return null;
-        if (it != .object or !it.object.is_symbol) return null;
-        return it.object.sym_key;
+        return self.wellKnownSymbolKey("asyncIterator");
+    }
+
+    fn wellKnownSymbolHiddenName(name: []const u8) ?[]const u8 {
+        inline for (.{ "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables", "dispose", "asyncDispose" }) |known| {
+            if (std.mem.eql(u8, name, known)) return "\x00Symbol." ++ known;
+        }
+        return null;
     }
 
     /// The internal property key of a well-known `Symbol.<name>` (e.g. `species`).
     pub fn wellKnownSymbolKey(self: *Interpreter, name: []const u8) ?[]const u8 {
+        if (wellKnownSymbolHiddenName(name)) |hidden| {
+            if (self.env.get(hidden)) |intrinsic| {
+                if (intrinsic == .object and intrinsic.object.is_symbol) return intrinsic.object.sym_key;
+            }
+        }
         const sym = self.env.get("Symbol") orelse return null;
         if (sym != .object) return null;
         const it = sym.object.getOwn(name) orelse return null;
@@ -11338,6 +11342,7 @@ pub fn mirrorGlobalsOnto(env: *Environment, gobj: *value.Object, rs: *Shape) Eva
     var it = env.vars.iterator();
     while (it.next()) |e| {
         const name = e.key_ptr.*;
+        if (name.len > 0 and name[0] == 0) continue;
         if (gobj.getOwn(name) != null) continue;
         try gobj.setOwn(env.arena, rs, name, e.value_ptr.*);
         const frozen = eq(name, "undefined") or eq(name, "NaN") or eq(name, "Infinity");
@@ -21209,6 +21214,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             parent_symbol.?.getOwn(name).?
         else
             try makeSymbolObj(a, root_shape, "Symbol." ++ name, symbol_proto);
+        try env.put("\x00Symbol." ++ name, sym);
         try symbol_ns.setOwn(a, root_shape, name, sym);
         try symbol_ns.setAttr(a, name, .{ .writable = false, .enumerable = false, .configurable = false });
     }
