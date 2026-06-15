@@ -5965,11 +5965,11 @@ pub const Interpreter = struct {
                 }
                 if (o.typed_array) |ta| {
                     const cur = ta.currentLength(); // null when detached / out of bounds
-                    if (std.mem.eql(u8, key, "length")) return .{ .number = @floatFromInt(cur orelse 0) };
-                    if (std.mem.eql(u8, key, "byteLength")) return .{ .number = @floatFromInt((cur orelse 0) * ta.kind.byteSize()) };
-                    if (std.mem.eql(u8, key, "byteOffset")) return .{ .number = @floatFromInt(if (cur == null) 0 else ta.byte_offset) };
-                    if (std.mem.eql(u8, key, "buffer")) return .{ .object = ta.buffer };
-                    if (std.mem.eql(u8, key, "BYTES_PER_ELEMENT")) return .{ .number = @floatFromInt(ta.kind.byteSize()) };
+                    if (std.mem.eql(u8, key, "length") and o.getOwn(key) == null and o.getAccessor(key) == null) return .{ .number = @floatFromInt(cur orelse 0) };
+                    if (std.mem.eql(u8, key, "byteLength") and o.getOwn(key) == null and o.getAccessor(key) == null) return .{ .number = @floatFromInt((cur orelse 0) * ta.kind.byteSize()) };
+                    if (std.mem.eql(u8, key, "byteOffset") and o.getOwn(key) == null and o.getAccessor(key) == null) return .{ .number = @floatFromInt(if (cur == null) 0 else ta.byte_offset) };
+                    if (std.mem.eql(u8, key, "buffer") and o.getOwn(key) == null and o.getAccessor(key) == null) return .{ .object = ta.buffer };
+                    if (std.mem.eql(u8, key, "BYTES_PER_ELEMENT") and o.getOwn(key) == null and o.getAccessor(key) == null) return .{ .number = @floatFromInt(ta.kind.byteSize()) };
                     if (arrayIndex(key)) |i| {
                         if (i >= (cur orelse 0)) return .undefined;
                         if (ta.kind.isBigInt()) return self.makeBigInt(value.taReadBig(ta, i));
@@ -7769,10 +7769,10 @@ pub const Interpreter = struct {
     /// A pathological 2**53-style length throws (instead of OOM-crashing).
     fn concatSpreadInto(self: *Interpreter, dst: Value, src: *value.Object, n: *usize) EvalError!void {
         const slen: usize = if (src.is_array) @max(src.elements.items.len, src.array_len) else blk: {
-            const ln = toLen((try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number)).toNumber());
-            if (ln > (1 << 22)) return self.throwError("TypeError", "Invalid array length");
-            break :blk ln;
+            break :blk toArrayLikeLen((try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number)).toNumber());
         };
+        const max_safe_len: usize = 9007199254740991;
+        if (slen > max_safe_len - n.*) return self.throwError("TypeError", "Invalid array length");
         // A plain dense Array result preserves holes (append + markHole); a
         // species/exotic result leaves a hole as an absent index (CreateDataProperty
         // only for present elements).
@@ -7780,6 +7780,7 @@ pub const Interpreter = struct {
             dst.object.attrs == null and dst.object.proxy_handler == null and !dst.object.proxy_revoked;
         var j: usize = 0;
         while (j < slen) : (j += 1) {
+            if (j > (1 << 22)) return self.throwError("TypeError", "Invalid array length");
             if (self.arrIndexPresent(src, j)) {
                 try self.arrayResultPush(dst, n.*, try self.arrIndexGet(src, j));
             } else if (dense) {
