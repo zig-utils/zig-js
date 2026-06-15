@@ -26,6 +26,18 @@ const Environment = interp.Environment;
 const Function = interp.Function;
 const EvalError = interp.EvalError;
 
+fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
+    if (func.is_arrow) return func.arrow_this;
+    if (func.is_strict) return this_val;
+    if (this_val == .null or this_val == .undefined) {
+        if (vm.env.get("globalThis")) |gt| if (gt == .object) return gt;
+        return if (vm.global_object) |g| Value{ .object = g } else this_val;
+    }
+    if (this_val != .object or this_val.object.is_symbol or this_val.object.is_bigint)
+        return .{ .object = try vm.toObject(this_val) };
+    return this_val;
+}
+
 /// A function activation's flat local store. `slots` holds parameters then
 /// function-scoped declarations (indexes assigned by the compiler); `parent` is
 /// the *defining* function's frame, walked to resolve upvalues. Heap-allocated
@@ -651,12 +663,13 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     vm.env = genv;
     defer vm.env = saved_env;
     try vm.bindParams(func.params, args);
+    const bound_this = try bindThisForCall(vm, func, this_val);
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
         .env = genv,
-        .this_value = this_val,
+        .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
     };
@@ -878,12 +891,13 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     vm.env = genv;
     defer vm.env = saved_env;
     try vm.bindParams(func.params, args);
+    const bound_this = try bindThisForCall(vm, func, this_val);
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
         .env = genv,
-        .this_value = this_val,
+        .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
         .is_async = true,
@@ -1001,12 +1015,13 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     vm.env = genv;
     defer vm.env = saved_env;
     try vm.bindParams(func.params, args);
+    const bound_this = try bindThisForCall(vm, func, this_val);
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
         .env = genv,
-        .this_value = this_val,
+        .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
         .is_async_gen = true,
@@ -1431,12 +1446,7 @@ fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const 
     // named function expression's own immutable binding is visible in its body.
     // For ordinary functions `func.closure` is the global env (unchanged).
     vm.env = func.closure;
-    // Sloppy-mode this-substitution (matches the tree-walker): a non-strict,
-    // non-arrow function called with null/undefined `this` sees the global object.
-    vm.this_value = if (!func.is_strict and !func.is_arrow and (this_val == .null or this_val == .undefined))
-        (if (vm.global_object) |g| Value{ .object = g } else this_val)
-    else
-        this_val;
+    vm.this_value = try bindThisForCall(vm, func, this_val);
     defer {
         vm.this_value = saved_this;
         vm.strict = saved_strict;
