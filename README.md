@@ -47,7 +47,7 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 | axis | meaning | passing |
 | ---- | ------- | ------: |
 | **valid** | can we run the program? (scored corpus) | **43,354 / 47,930 (90.5%)** |
-| negative | do we reject invalid input? (early errors — partial) | 3,279 / 4,668 (70.2%) |
+| negative | do we reject invalid input? (early errors — partial) | 3,305 / 4,668 (70.8%) |
 
 Of the valid corpus: **45 parse failures**, **4,531 runtime failures**, **0 host failures**. The runner currently skips 579 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `language`, `staging`, and Annex B.
 
