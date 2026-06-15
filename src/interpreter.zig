@@ -7894,8 +7894,10 @@ pub const Interpreter = struct {
     /// An array-like routes through [[Set]].
     fn arraySetLengthThrowing(self: *Interpreter, o: *value.Object, new_len: usize) EvalError!void {
         if (o.is_array) {
+            if (new_len > 4294967295) return self.throwError("RangeError", "Invalid array length");
             if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
-            if (new_len > o.elements.items.len and new_len > o.array_len) o.array_len = @intCast(new_len);
+            if (!try self.setArrayLength(o, new_len))
+                return self.throwError("TypeError", "Cannot delete a non-configurable array element");
             return;
         }
         // Set(O, "length", newLen, true) — force strict so a non-writable /
