@@ -203,7 +203,7 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   no change), `Interpreter.gc` plumbed, and `newObject` funnels through
   `gc_mod.allocObject` (GC when on, arena when off). Flag **off** =
   byte-identical (test262 unchanged); flag **on**, validated: full test262
-  **42,745/47,930, 0 crashes**, conformance 33/33, threads 29/29, and a
+  **42,745/47,930, 0 crashes**, conformance 33/33, threads 194/194, and a
   leak-checked `enable_gc` unit test (object-heavy run + clean teardown).
   *Uniform Object heap landed:* all ~171 `value.Object` allocation sites across
   8 files now go through `gc_mod.allocObj(arena)`, which routes via a
@@ -287,6 +287,44 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   dies. Validated by a GC-enabled closure test that keeps a captured lexical
   environment alive, then drops the closure and observes the duplicated
   binding-name byte count return to baseline after collection.
+  *Object named-property backing finalization landed:* in GC-enabled contexts,
+  ordinary object named-property slots, accessor maps, accessor/data key-order
+  lists, property-attribute maps, and array hole sets now allocate from the
+  context backing allocator when first mutated. Each object records which
+  stores are GC-owned so the object finalizer releases exactly those stores
+  when the cell dies, while arena-mode objects remain unchanged. The rare
+  delete/rebuild path now releases old GC-owned slots/key-order storage before
+  rebuilding. Validated by a GC-enabled WeakRef test that exercises data
+  properties, accessors, attributes, deletion, and holes, then observes the
+  object backing-store count return to a stabilized baseline after collection.
+  *Weak collection and FinalizationRegistry record backing finalization landed:*
+  WeakMap/WeakSet entry buffers and FinalizationRegistry record buffers now use
+  the same GC-mode object backing allocator and are released by the object
+  finalizer when their owning collection/registry dies. Validated by a
+  GC-enabled test that keeps WeakMap, WeakSet, and FinalizationRegistry records
+  strongly reachable across collection, then drops the owner and observes
+  backing-store accounting return to baseline.
+  *Dense `Object.elements` finalization landed:* array elements, Map/Set entry
+  storage, structured-clone element buffers, VM argument arrays, and built-in
+  result arrays now use the owning object's GC-mode backing allocator for
+  `append`/`appendSlice`/`insert`/capacity growth. The object finalizer releases
+  the dense element buffer when the cell dies. Validated by a GC-enabled test
+  that keeps array, Map, and Set element buffers alive across collection, then
+  drops the owner and observes backing-store accounting return to baseline.
+  *Typed-view, DataView, and Temporal metadata finalization landed:* typed array
+  view records, DataView records, structured-clone typed-view metadata, and
+  `Temporal.*` internal-slot records now allocate from the owning object's
+  GC-mode backing allocator. The object finalizer destroys those metadata
+  records when the wrapper cell dies. Validated by GC-enabled tests that keep
+  typed arrays, subarrays, DataViews, structured-cloned typed views, PlainDate,
+  and Duration objects live across collection, then drop the owners and observe
+  backing-store accounting return to baseline.
+  *Generator and mapped-arguments backing finalization landed:* suspended
+  generator stack/handler buffers, async-generator request queues, and sloppy
+  mapped-arguments parameter-map name slices now allocate from GC-owned backing
+  allocators. The generator and object finalizers free those buffers when their
+  cells die. Validated by GC-enabled tests for suspended generators,
+  async-generator queued requests, and live mapped-arguments aliasing.
   *Shell `gc()` requests landed:* the test-shell `gc()` hook no longer calls
   `Heap.collect()` while JS is live on the Zig stack. It sets a per-Context
   pending bit, and `evaluate` / `evaluateModule` service that request at the
@@ -300,7 +338,7 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   `JSGlobalContextCreate` is unchanged, so it stays a no-op there. Validated by a
   C-API test (`JSGarbageCollect` reclaims 500 garbage objects while a held
   `JSValueRef` keeps its object — `tag === 123` after collection); conformance
-  33/33, threads 29/29, full unit suite leak-checked. (No `JSValueUnprotect`
+  33/33, threads 194/194, full unit suite leak-checked. (No `JSValueUnprotect`
   yet, so a boxed object is pinned for the context's life — conservative but
   sound.)
   *WeakRef weak edges landed:* `Object` now keeps a separate WeakRef brand and
@@ -328,12 +366,9 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   *Remaining for the FULL deliverable:* (a) **arbitrary mid-script collection**
   needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
   locals/registers a precise GC can't see) — the quiescent points avoid this; a
-  Boehm-style stack scan with register spill would generalize it. (b) migrate
-  remaining arena-backed cell sub-allocations (`Object.slots`/`elements`/
-  accessors/weak records/finalization records and generator/iterator queues) to
-  gpa so `finalize` frees them on collect — turning "reclaims cells plus
-  ArrayBuffer/SAB/Promise/Environment storage" into "reclaims everything" (today
-  those backing buffers persist until `destroy`).
+  Boehm-style stack scan with register spill would generalize it. (b) keep new
+  cell-owned side buffers behind the backing-store helpers and this audit, so
+  future additions do not silently fall back to reclaim-at-destroy lifetime.
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
@@ -347,8 +382,11 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   queue — collect and assert exact reclamation (precise, so counts are exact).
 - zig-js: GC stress tests (allocate-heavy loop bounded heap, explicit
   `collectGarbage` reclamation, `WeakRef` clearing/retention, and
-  WeakMap/WeakSet ephemeron behavior, and FinalizationRegistry explicit and
-  automatic cleanup delivery), targeted
+  WeakMap/WeakSet ephemeron behavior, FinalizationRegistry explicit and
+  automatic cleanup delivery, and per-owner accounting tests for ArrayBuffer,
+  Promise, Environment, and Object backing finalization including dense
+  elements, typed-view/Temporal metadata, generator buffers, async-generator
+  request queues, and mapped-arguments parameter maps), targeted
   `WeakRef`/`FinalizationRegistry`/`WeakMap` test262 buckets as each weak
   semantic lands, `zig build test262` non-regression at each milestone, TSan on
   M3.

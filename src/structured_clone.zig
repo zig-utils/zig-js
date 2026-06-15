@@ -445,10 +445,10 @@ const Deserializer = struct {
                 while (i < n) : (i += 1) {
                     const hole = (d.r.byte() catch return d.fail()) != 0;
                     if (hole) {
-                        try arr.elements.append(a, .undefined);
+                        try arr.elements.append(arr.elementsAllocator(a), .undefined);
                         try arr.markHole(a, i);
                     } else {
-                        try arr.elements.append(a, try d.deser());
+                        try arr.elements.append(arr.elementsAllocator(a), try d.deser());
                     }
                 }
                 arr.array_len = len;
@@ -486,10 +486,10 @@ const Deserializer = struct {
                     const k = try d.deser();
                     const v = try d.deser();
                     const pair = (try d.self.newArray()).object;
-                    try pair.elements.append(a, k);
-                    try pair.elements.append(a, v);
+                    try pair.elements.append(pair.elementsAllocator(a), k);
+                    try pair.elements.append(pair.elementsAllocator(a), v);
                     pair.array_len = 2;
-                    try o.elements.append(a, .{ .object = pair });
+                    try o.elements.append(o.elementsAllocator(a), .{ .object = pair });
                 }
                 return .{ .object = o };
             },
@@ -500,7 +500,7 @@ const Deserializer = struct {
                 if (d.protoFor("Set")) |p| o.proto = p;
                 const n = d.r.int(u32) catch return d.fail();
                 var i: u32 = 0;
-                while (i < n) : (i += 1) try o.elements.append(a, try d.deser());
+                while (i < n) : (i += 1) try o.elements.append(o.elementsAllocator(a), try d.deser());
                 return .{ .object = o };
             },
             .error_obj => {
@@ -555,7 +555,7 @@ const Deserializer = struct {
                 try d.objs.append(a, o);
                 const buf = try d.deser();
                 if (buf != .object or buf.object.array_buffer == null) return d.fail();
-                const ta = try a.create(value.TypedArrayData);
+                const ta = try o.typedArrayAllocator(a).create(value.TypedArrayData);
                 ta.* = .{
                     .buffer = buf.object,
                     .byte_offset = @intCast(d.r.int(u64) catch return d.fail()),
@@ -572,7 +572,7 @@ const Deserializer = struct {
                 try d.objs.append(a, o);
                 const buf = try d.deser();
                 if (buf != .object or buf.object.array_buffer == null) return d.fail();
-                const dv = try a.create(value.DataViewData);
+                const dv = try o.dataViewAllocator(a).create(value.DataViewData);
                 dv.* = .{
                     .buffer = buf.object,
                     .byte_offset = @intCast(d.r.int(u64) catch return d.fail()),

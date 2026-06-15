@@ -66,9 +66,9 @@ thread-affine unless a future API explicitly says otherwise.
 
 ## Why the GIL Stays
 
-The engine still uses arena allocation for ordinary JS objects. Arena-backed
-object graphs do not have per-object lifetime management, cross-thread roots,
-or write barriers. The GIL protects:
+The GC is still M1: it collects only at quiescent points. Running thread
+stacks, shape transitions, and ordinary heap mutation also do not yet have the
+barriers/locks needed for parallel mutators. The GIL protects:
 
 - arena allocation and teardown,
 - shape transition maps,
@@ -78,8 +78,9 @@ or write barriers. The GIL protects:
 - promise and async waiter state,
 - non-atomic `Value` slots.
 
-Removing the GIL before those have their own synchronization and lifetime story
-would turn ordinary property access into data races.
+Removing the GIL before those have complete root, synchronization, barrier, and
+lifetime stories would turn ordinary property access into data races or
+use-after-free bugs.
 
 ## Layer-C Blockers
 

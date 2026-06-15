@@ -71,13 +71,14 @@ const Completion = enum(u8) { normal = 0, throw = 1, ret = 2, break_ = 3, contin
 /// abrupt completion `[cval, kind]` so the finally runs and `end_finally`
 /// re-propagates it. Returns the finally's PC, or null if none remains (the
 /// caller performs the terminal action: return / jump-to-target / re-throw).
-fn unwindToFinally(vm: *Interpreter, exec: *Exec, cval: Value, kind: Completion) !?u32 {
+fn unwindToFinally(vm: *Interpreter, gen: ?*Generator, exec: *Exec, cval: Value, kind: Completion) !?u32 {
+    const stack_alloc = generatorStackAllocator(vm, gen);
     while (exec.handlers.items.len > 0) {
         const h = exec.handlers.pop().?;
         if (h.finally_pc != Handler.none) {
             exec.stack.shrinkRetainingCapacity(h.stack_depth);
-            try exec.stack.append(vm.arena, cval);
-            try exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(kind)) });
+            try exec.stack.append(stack_alloc, cval);
+            try exec.stack.append(stack_alloc, .{ .number = @floatFromInt(@intFromEnum(kind)) });
             return h.finally_pc;
         }
     }
@@ -88,6 +89,15 @@ fn unwindToFinally(vm: *Interpreter, exec: *Exec, cval: Value, kind: Completion)
 /// state, and the `Environment` its body resolves names against (a child of the
 /// closure, holding the params/locals across yields). Driven by `genNext`.
 pub const Generator = struct {
+    pub const BackingFlags = packed struct {
+        stack: bool = false,
+        handlers: bool = false,
+        requests: bool = false,
+    };
+
+    backing_allocator: ?std.mem.Allocator = null,
+    backing_stores_live: ?*usize = null,
+    backing_flags: BackingFlags = .{},
     chunk: *Chunk,
     exec: Exec = .{},
     env: *Environment,
@@ -118,6 +128,27 @@ pub const Generator = struct {
     is_async_gen: bool = false,
     requests: std.ArrayListUnmanaged(AsyncGenRequest) = .empty,
     pumping: bool = false,
+
+    fn backingFor(self: *Generator, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
+        const a = self.backing_allocator orelse return fallback;
+        if (!@field(self.backing_flags, field)) {
+            @field(self.backing_flags, field) = true;
+            if (self.backing_stores_live) |live| live.* += 1;
+        }
+        return a;
+    }
+
+    pub fn stackAllocator(self: *Generator, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "stack");
+    }
+
+    pub fn handlersAllocator(self: *Generator, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "handlers");
+    }
+
+    pub fn requestsAllocator(self: *Generator, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "requests");
+    }
 };
 
 /// A queued async-generator request: how to resume the body and the promise to
@@ -134,6 +165,14 @@ pub const AsyncGenRequest = struct {
 fn propKey(vm: *Interpreter, key: Value) EvalError![]const u8 {
     if (key == .object and key.object.is_symbol) return key.object.sym_key;
     return key.toString(vm.arena);
+}
+
+fn generatorStackAllocator(vm: *Interpreter, gen: ?*Generator) std.mem.Allocator {
+    return if (gen) |g| g.stackAllocator(vm.arena) else vm.arena;
+}
+
+fn generatorHandlersAllocator(vm: *Interpreter, gen: ?*Generator) std.mem.Allocator {
+    return if (gen) |g| g.handlersAllocator(vm.arena) else vm.arena;
 }
 
 /// Run `chunk` to completion, returning the program's accumulator (for a
@@ -155,16 +194,17 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     while (true) {
         return runChunk(vm, exec, chunk, frame, gen) catch |e| {
             if (e == error.Throw and exec.handlers.items.len > 0) {
+                const stack_alloc = generatorStackAllocator(vm, gen);
                 const h = exec.handlers.pop().?;
                 exec.stack.shrinkRetainingCapacity(h.stack_depth);
                 if (h.catch_pc != Handler.none) {
-                    try exec.stack.append(vm.arena, vm.exception); // bind target for the catch
+                    try exec.stack.append(stack_alloc, vm.exception); // bind target for the catch
                     exec.ip = h.catch_pc;
                 } else {
                     // No catch: run the finally carrying a "throw" completion,
                     // which `end_finally` re-throws once the finally completes.
-                    try exec.stack.append(vm.arena, vm.exception);
-                    try exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.throw)) });
+                    try exec.stack.append(stack_alloc, vm.exception);
+                    try exec.stack.append(stack_alloc, .{ .number = @floatFromInt(@intFromEnum(Completion.throw)) });
                     exec.ip = h.finally_pc;
                 }
                 continue;
@@ -179,6 +219,8 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 /// generator's yield/resume). Returns the completion value or propagates a throw.
 fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
     const stack = &exec.stack;
+    const stack_alloc = generatorStackAllocator(vm, gen);
+    const handlers_alloc = generatorHandlersAllocator(vm, gen);
     var acc: Value = exec.acc;
     var ip: usize = exec.ip;
     const code = chunk.code.items;
@@ -194,24 +236,24 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         const inst = code[ip];
         ip += 1;
         switch (inst.op) {
-            .load_const => try stack.append(vm.arena, chunk.consts.items[inst.a]),
-            .load_bigint => try stack.append(vm.arena, try vm.makeBigIntText(chunk.names.items[inst.a])),
-            .load_undefined => try stack.append(vm.arena, .undefined),
-            .load_null => try stack.append(vm.arena, .null),
-            .load_true => try stack.append(vm.arena, .{ .boolean = true }),
-            .load_false => try stack.append(vm.arena, .{ .boolean = false }),
+            .load_const => try stack.append(stack_alloc, chunk.consts.items[inst.a]),
+            .load_bigint => try stack.append(stack_alloc, try vm.makeBigIntText(chunk.names.items[inst.a])),
+            .load_undefined => try stack.append(stack_alloc, .undefined),
+            .load_null => try stack.append(stack_alloc, .null),
+            .load_true => try stack.append(stack_alloc, .{ .boolean = true }),
+            .load_false => try stack.append(stack_alloc, .{ .boolean = false }),
             .pop => _ = stack.pop(),
-            .dup => try stack.append(vm.arena, stack.items[stack.items.len - 1]),
+            .dup => try stack.append(stack_alloc, stack.items[stack.items.len - 1]),
             .set_acc => acc = stack.pop().?,
 
             .load_var => {
                 const name = chunk.names.items[inst.a];
                 const v = vm.env.get(name) orelse vm.globalProp(name) orelse return vm.throwError("ReferenceError", name);
-                try stack.append(vm.arena, v);
+                try stack.append(stack_alloc, v);
             },
             .load_var_or_undef => {
                 const name = chunk.names.items[inst.a];
-                try stack.append(vm.arena, vm.env.get(name) orelse vm.globalProp(name) orelse .undefined);
+                try stack.append(stack_alloc, vm.env.get(name) orelse vm.globalProp(name) orelse .undefined);
             },
             .store_var => {
                 const name = chunk.names.items[inst.a];
@@ -233,13 +275,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try vm.bindPatternVM(pat, v, inst.b);
             },
 
-            .load_local => try stack.append(vm.arena, frame.?.slots[inst.a]),
+            .load_local => try stack.append(stack_alloc, frame.?.slots[inst.a]),
             .store_local => frame.?.slots[inst.a] = stack.items[stack.items.len - 1], // leaves value
             .load_upval => {
                 var f = frame.?;
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
-                try stack.append(vm.arena, f.slots[inst.b]);
+                try stack.append(stack_alloc, f.slots[inst.b]);
             },
             .store_upval => {
                 var f = frame.?;
@@ -251,44 +293,44 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .neg => {
                 const v = stack.pop().?;
                 if (v == .object and v.object.is_bigint)
-                    try stack.append(vm.arena, try interp.negateBigIntObject(vm, v.object))
+                    try stack.append(stack_alloc, try interp.negateBigIntObject(vm, v.object))
                 else
-                    try stack.append(vm.arena, .{ .number = -(try vm.toNumberV(v)) });
+                    try stack.append(stack_alloc, .{ .number = -(try vm.toNumberV(v)) });
             },
             .pos => {
                 const v = stack.pop().?;
                 if (v == .object and v.object.is_bigint)
                     return vm.throwError("TypeError", "Cannot convert a BigInt value to a number");
-                try stack.append(vm.arena, .{ .number = try vm.toNumberV(v) });
+                try stack.append(stack_alloc, .{ .number = try vm.toNumberV(v) });
             },
             .not => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, .{ .boolean = !v.toBoolean() });
+                try stack.append(stack_alloc, .{ .boolean = !v.toBoolean() });
             },
             .typeof_op => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, .{ .string = v.typeOf() });
+                try stack.append(stack_alloc, .{ .string = v.typeOf() });
             },
             .bit_not => {
                 const v = stack.pop().?;
                 if (v == .object and v.object.is_bigint)
-                    try stack.append(vm.arena, try interp.bitNotBigIntObject(vm, v.object))
+                    try stack.append(stack_alloc, try interp.bitNotBigIntObject(vm, v.object))
                 else
-                    try stack.append(vm.arena, .{ .number = @floatFromInt(~v.toInt32()) });
+                    try stack.append(stack_alloc, .{ .number = @floatFromInt(~v.toInt32()) });
             },
             .void_op => {
                 _ = stack.pop().?;
-                try stack.append(vm.arena, .undefined);
+                try stack.append(stack_alloc, .undefined);
             },
             .to_string => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, .{ .string = try vm.toStringV(v) });
+                try stack.append(stack_alloc, .{ .string = try vm.toStringV(v) });
             },
 
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
-                try stack.append(vm.arena, try vm.applyBinary(binOp(inst.op), l, r));
+                try stack.append(stack_alloc, try vm.applyBinary(binOp(inst.op), l, r));
             },
 
             .jump => ip = inst.a,
@@ -302,9 +344,9 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 ip = inst.a;
             },
 
-            .load_this => try stack.append(vm.arena, vm.this_value),
-            .new_object => try stack.append(vm.arena, try vm.newObject()),
-            .new_array => try stack.append(vm.arena, try vm.newArray()),
+            .load_this => try stack.append(stack_alloc, vm.this_value),
+            .new_object => try stack.append(stack_alloc, try vm.newObject()),
+            .new_array => try stack.append(stack_alloc, try vm.newArray()),
             .init_prop => {
                 const v = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
@@ -330,7 +372,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .array_append => {
                 const v = stack.pop().?;
                 const arr = stack.items[stack.items.len - 1];
-                try arr.object.elements.append(vm.arena, v);
+                try arr.object.elements.append(arr.object.elementsAllocator(vm.arena), v);
             },
             .get_prop => {
                 const obj = stack.pop().?;
@@ -360,12 +402,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     }
                     result = try vm.getProperty(obj, name); // arrays, strings, proto chain, null/undefined
                 }
-                try stack.append(vm.arena, result);
+                try stack.append(stack_alloc, result);
             },
             .get_index => {
                 const key = stack.pop().?;
                 const obj = stack.pop().?;
-                try stack.append(vm.arena, try vm.getProperty(obj, try propKey(vm, key)));
+                try stack.append(stack_alloc, try vm.getProperty(obj, try propKey(vm, key)));
             },
             .set_prop => {
                 const v = stack.pop().?;
@@ -394,29 +436,29 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     }
                     try vm.setMember(obj, name, v);
                 }
-                try stack.append(vm.arena, v); // assignment yields the value
+                try stack.append(stack_alloc, v); // assignment yields the value
             },
             .set_index => {
                 const v = stack.pop().?;
                 const key = stack.pop().?;
                 const obj = stack.pop().?;
                 try vm.setMember(obj, try propKey(vm, key), v);
-                try stack.append(vm.arena, v);
+                try stack.append(stack_alloc, v);
             },
             .instance_of => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
-                try stack.append(vm.arena, .{ .boolean = try vm.instanceOf(l, r) });
+                try stack.append(stack_alloc, .{ .boolean = try vm.instanceOf(l, r) });
             },
 
-            .make_closure => try stack.append(vm.arena, try makeClosure(vm, chunk.fns.items[inst.a], frame)),
+            .make_closure => try stack.append(stack_alloc, try makeClosure(vm, chunk.fns.items[inst.a], frame)),
             .call => {
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
                 const result = try callValue(vm, callee, stack.items[base..], .undefined);
                 stack.shrinkRetainingCapacity(base - 1);
-                try stack.append(vm.arena, result);
+                try stack.append(stack_alloc, result);
             },
             .call_method => {
                 const argc = inst.b;
@@ -426,7 +468,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const name = chunk.names.items[inst.a];
                 const result = try invokeMethod(vm, recv, name, args);
                 stack.shrinkRetainingCapacity(base - 1);
-                try stack.append(vm.arena, result);
+                try stack.append(stack_alloc, result);
             },
             .new_call => {
                 const argc = inst.a;
@@ -434,12 +476,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const callee = stack.items[base - 1];
                 const result = try construct(vm, callee, stack.items[base..]);
                 stack.shrinkRetainingCapacity(base - 1);
-                try stack.append(vm.arena, result);
+                try stack.append(stack_alloc, result);
             },
             .call_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(vm.arena, try callValue(vm, callee, args_arr.object.elements.items, .undefined));
+                try stack.append(stack_alloc, try callValue(vm, callee, args_arr.object.elements.items, .undefined));
             },
             .call_method_spread => {
                 const args_arr = stack.pop().?;
@@ -447,12 +489,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const name = chunk.names.items[inst.a];
                 const args = args_arr.object.elements.items;
                 const result = try invokeMethod(vm, recv, name, args);
-                try stack.append(vm.arena, result);
+                try stack.append(stack_alloc, result);
             },
             .new_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(vm.arena, try construct(vm, callee, args_arr.object.elements.items));
+                try stack.append(stack_alloc, try construct(vm, callee, args_arr.object.elements.items));
             },
 
             .ret => return stack.pop().?,
@@ -462,7 +504,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // to the nearest finally carrying a "return" completion (which
                 // `end_finally` re-propagates), or return directly if none.
                 const rv = stack.pop().?;
-                if (try unwindToFinally(vm, exec, rv, .ret)) |fpc| ip = fpc else return rv;
+                if (try unwindToFinally(vm, gen, exec, rv, .ret)) |fpc| ip = fpc else return rv;
             },
             .abrupt_break, .abrupt_continue => {
                 // A break/continue that crosses a `finally`: run the enclosing
@@ -470,7 +512,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // target PC rides through as the completion value.
                 const kind: Completion = if (inst.op == .abrupt_break) .break_ else .continue_;
                 const target: Value = .{ .number = @floatFromInt(inst.a) };
-                if (try unwindToFinally(vm, exec, target, kind)) |fpc| ip = fpc else ip = inst.a;
+                if (try unwindToFinally(vm, gen, exec, target, kind)) |fpc| ip = fpc else ip = inst.a;
             },
 
             .gen_yield, .await_op, .gen_yield_star => {
@@ -501,7 +543,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const callee = stack.items[base - 2];
                 const res = try callValue(vm, callee, args, this_val);
                 stack.shrinkRetainingCapacity(base - 2);
-                try stack.append(vm.arena, res);
+                try stack.append(stack_alloc, res);
             },
             .assert_iter_result => {
                 if (stack.items[stack.items.len - 1] != .object)
@@ -509,15 +551,15 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .iter_of => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, try vm.iteratorOf(v));
+                try stack.append(stack_alloc, try vm.iteratorOf(v));
             },
             .async_iter_of => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, try vm.asyncIteratorOf(v));
+                try stack.append(stack_alloc, try vm.asyncIteratorOf(v));
             },
             .enum_keys => {
                 const v = stack.pop().?;
-                try stack.append(vm.arena, try vm.forInKeysArray(v));
+                try stack.append(stack_alloc, try vm.forInKeysArray(v));
             },
             .iter_close => {
                 const it = stack.pop().?;
@@ -533,7 +575,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 vm.exception = stack.pop().?;
                 return error.Throw;
             },
-            .push_handler => try exec.handlers.append(vm.arena, .{
+            .push_handler => try exec.handlers.append(handlers_alloc, .{
                 .catch_pc = inst.a,
                 .finally_pc = inst.b,
                 .stack_depth = @intCast(stack.items.len),
@@ -541,8 +583,8 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .pop_handler => _ = exec.handlers.pop(),
             .push_completion => {
                 // [value, kind] — value is undefined for a normal completion.
-                try stack.append(vm.arena, .undefined);
-                try stack.append(vm.arena, .{ .number = @floatFromInt(inst.a) });
+                try stack.append(stack_alloc, .undefined);
+                try stack.append(stack_alloc, .{ .number = @floatFromInt(inst.a) });
             },
             .end_finally => {
                 const kind: Completion = @enumFromInt(@as(u8, @intFromFloat(stack.pop().?.number)));
@@ -557,10 +599,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // enclosing finally before terminating, so nested finallys all
                     // run (return value / break-or-continue target rides as cval).
                     .ret => {
-                        if (try unwindToFinally(vm, exec, cval, .ret)) |fpc| ip = fpc else return cval;
+                        if (try unwindToFinally(vm, gen, exec, cval, .ret)) |fpc| ip = fpc else return cval;
                     },
                     .break_, .continue_ => {
-                        if (try unwindToFinally(vm, exec, cval, kind)) |fpc| ip = fpc else ip = @intFromFloat(cval.number);
+                        if (try unwindToFinally(vm, gen, exec, cval, kind)) |fpc| ip = fpc else ip = @intFromFloat(cval.number);
                     },
                 }
             },
@@ -598,7 +640,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     vm.initEnvironment(genv, func.closure, true);
 
     const args_obj = try vm.newArray(); // generators are never arrow functions
-    for (args) |av| try args_obj.object.elements.append(vm.arena, av);
+    for (args) |av| try args_obj.object.elements.append(args_obj.object.elementsAllocator(vm.arena), av);
     try genv.put("arguments", args_obj);
 
     // Bind params into the generator's environment (handles default/rest/
@@ -618,6 +660,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
     };
+    gc_mod.initGeneratorBacking(g);
     const obj = try gc_mod.allocObj(vm.arena);
     obj.* = .{ .gen = @ptrCast(g) };
     // The instance's [[Prototype]] is the generator function's own `.prototype`
@@ -690,12 +733,12 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
         // inner iterator by handing the desugared loop `[value, kind]` and
         // re-entering the body, whatever the resume kind.
         g.delegating = false;
-        try g.exec.stack.append(vm.arena, val);
-        try g.exec.stack.append(vm.arena, resumeKindNum(kind));
+        try g.exec.stack.append(g.stackAllocator(vm.arena), val);
+        try g.exec.stack.append(g.stackAllocator(vm.arena), resumeKindNum(kind));
     } else {
         // Suspended at a `yield`: apply the resume action.
         switch (kind) {
-            .send => try g.exec.stack.append(vm.arena, val), // becomes the yield's value
+            .send => try g.exec.stack.append(g.stackAllocator(vm.arena), val), // becomes the yield's value
             .return_ => {
                 // If the suspend point is inside a `try` with a `finally`, run
                 // that finally (carrying a "return" completion) before the
@@ -710,8 +753,8 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
                     }
                 }
                 if (fin) |fpc| {
-                    try g.exec.stack.append(vm.arena, val); // completion value
-                    try g.exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
+                    try g.exec.stack.append(g.stackAllocator(vm.arena), val); // completion value
+                    try g.exec.stack.append(g.stackAllocator(vm.arena), .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
                     g.exec.ip = fpc;
                     // fall through to run the finally via execLoop
                 } else {
@@ -805,11 +848,11 @@ fn injectThrowAt(vm: *Interpreter, g: *Generator, e: Value) EvalError!bool {
     const h = g.exec.handlers.pop().?;
     g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
     if (h.catch_pc != Handler.none) {
-        try g.exec.stack.append(vm.arena, e); // catch binding
+        try g.exec.stack.append(g.stackAllocator(vm.arena), e); // catch binding
         g.exec.ip = h.catch_pc;
     } else {
-        try g.exec.stack.append(vm.arena, e); // finally completion value
-        try g.exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.throw)) });
+        try g.exec.stack.append(g.stackAllocator(vm.arena), e); // finally completion value
+        try g.exec.stack.append(g.stackAllocator(vm.arena), .{ .number = @floatFromInt(@intFromEnum(Completion.throw)) });
         g.exec.ip = h.finally_pc;
     }
     return true;
@@ -829,7 +872,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
     const args_obj = try vm.newArray();
-    for (args) |av| try args_obj.object.elements.append(vm.arena, av);
+    for (args) |av| try args_obj.object.elements.append(args_obj.object.elementsAllocator(vm.arena), av);
     try genv.put("arguments", args_obj);
     const saved_env = vm.env;
     vm.env = genv;
@@ -846,6 +889,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
         .is_async = true,
         .result = try promise.newPromise(vm),
     };
+    gc_mod.initGeneratorBacking(g);
     try asyncDrive(vm, g, .send, .undefined);
     return .{ .object = g.result.? };
 }
@@ -860,7 +904,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     if (g.done or g.running) return;
     if (g.started) {
         switch (kind) {
-            .send => try g.exec.stack.append(vm.arena, val), // the awaited value
+            .send => try g.exec.stack.append(g.stackAllocator(vm.arena), val), // the awaited value
             .throw_ => {
                 // An awaited rejection: route to a handler, else reject the result.
                 if (!try injectThrowAt(vm, g, val)) {
@@ -951,7 +995,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
     const args_obj = try vm.newArray();
-    for (args) |av| try args_obj.object.elements.append(vm.arena, av);
+    for (args) |av| try args_obj.object.elements.append(args_obj.object.elementsAllocator(vm.arena), av);
     try genv.put("arguments", args_obj);
     const saved_env = vm.env;
     vm.env = genv;
@@ -967,6 +1011,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
         .super_ctor = func.super_ctor,
         .is_async_gen = true,
     };
+    gc_mod.initGeneratorBacking(g);
     const obj = try gc_mod.allocObj(vm.arena);
     obj.* = .{ .gen = @ptrCast(g) };
     // The instance's [[Prototype]] is the async-generator function's own
@@ -996,7 +1041,7 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
     const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
     const rp = try promise.newPromise(vm);
     const was_idle = g.requests.items.len == 0;
-    try g.requests.append(vm.arena, .{ .kind = kind, .value = val, .result = rp });
+    try g.requests.append(g.requestsAllocator(vm.arena), .{ .kind = kind, .value = val, .result = rp });
     // A completed generator never resumes: each new request settles immediately
     // (next/return → `{done:true}`, throw → reject) rather than re-running the
     // body from its final instruction pointer.
@@ -1013,11 +1058,11 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     if (g.started and g.delegating) {
         // `yield*` delegation point: forward the resume to the inner iterator.
         g.delegating = false;
-        try g.exec.stack.append(vm.arena, val);
-        try g.exec.stack.append(vm.arena, resumeKindNum(kind));
+        try g.exec.stack.append(g.stackAllocator(vm.arena), val);
+        try g.exec.stack.append(g.stackAllocator(vm.arena), resumeKindNum(kind));
     } else if (g.started) {
         switch (kind) {
-            .send => try g.exec.stack.append(vm.arena, val),
+            .send => try g.exec.stack.append(g.stackAllocator(vm.arena), val),
             .throw_ => if (!try injectThrowAt(vm, g, val)) return .{ .threw = val },
             .return_ => {
                 // Run an enclosing finally if any; else the generator returns.
@@ -1038,8 +1083,8 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
                 if (fin) |fpc| {
                     g.exec.handlers.shrinkRetainingCapacity(keep_handlers);
                     g.exec.stack.shrinkRetainingCapacity(stack_depth);
-                    try g.exec.stack.append(vm.arena, val);
-                    try g.exec.stack.append(vm.arena, .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
+                    try g.exec.stack.append(g.stackAllocator(vm.arena), val);
+                    try g.exec.stack.append(g.stackAllocator(vm.arena), .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
                     g.exec.ip = fpc;
                 } else return .{ .returned = val };
             },
@@ -1149,23 +1194,19 @@ fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
     try agStep(vm, g, req.kind, req.value);
 }
 
-const AgDoneReturn = struct {
-    result: *value.Object,
-};
-
 fn agDoneReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
-    const data: *AgDoneReturn = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try promise.resolve(vm, @ptrCast(@alignCast(data.result.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else .undefined, true));
+    const result: *value.Object = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try promise.resolve(vm, @ptrCast(@alignCast(result.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else .undefined, true));
     return .undefined;
 }
 
 fn agDoneReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
-    const data: *AgDoneReturn = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try promise.reject(vm, @ptrCast(@alignCast(data.result.promise.?)), if (args.len > 0) args[0] else .undefined);
+    const result: *value.Object = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    try promise.reject(vm, @ptrCast(@alignCast(result.promise.?)), if (args.len > 0) args[0] else .undefined);
     return .undefined;
 }
 
@@ -1177,12 +1218,10 @@ fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value
         try promise.reject(vm, @ptrCast(@alignCast(result.promise.?)), reason);
         return;
     };
-    const data = try vm.arena.create(AgDoneReturn);
-    data.* = .{ .result = result };
     const onf = try gc_mod.allocObj(vm.arena);
-    onf.* = .{ .native = agDoneReturnFulfill, .private_data = @ptrCast(data) };
+    onf.* = .{ .native = agDoneReturnFulfill, .private_data = @ptrCast(result) };
     const onr = try gc_mod.allocObj(vm.arena);
-    onr.* = .{ .native = agDoneReturnReject, .private_data = @ptrCast(data) };
+    onr.* = .{ .native = agDoneReturnReject, .private_data = @ptrCast(result) };
     _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.object.promise.?)), .{ .object = onf }, .{ .object = onr });
 }
 
@@ -1257,8 +1296,8 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
         return;
     }
     if (nf == agDoneReturnFulfill or nf == agDoneReturnReject) {
-        const data: *AgDoneReturn = @ptrCast(@alignCast(pd));
-        v.mark(data.result);
+        const result: *value.Object = @ptrCast(@alignCast(pd));
+        v.mark(result);
     }
 }
 

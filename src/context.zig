@@ -86,6 +86,15 @@ pub const Context = struct {
     /// strings. Not an embedder API; tests use it to prove environment
     /// finalization releases duplicated binding names before teardown.
     gc_environment_name_bytes_live: usize = 0,
+    /// Internal verification/accounting for GC-owned Object backing stores
+    /// (named property slots, accessors, key order, attrs, holes). Not an
+    /// embedder API; tests use it to prove object finalization reclaims
+    /// side-storage before teardown.
+    gc_object_backing_stores_live: usize = 0,
+    /// Internal verification/accounting for GC-owned Generator execution
+    /// buffers. Not an embedder API; tests use it to prove generator
+    /// finalization reclaims stack/handler/request buffers before teardown.
+    gc_generator_backing_stores_live: usize = 0,
     /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
     gc_binding: ?*GcBinding = null,
     /// C-API `Boxed` handles (`JSValueRef`s) that must survive collection — the
@@ -4806,6 +4815,335 @@ test "enable_gc: Environment binding names release when closure environment is c
     try std.testing.expectEqual(baseline, ctx.gc_environment_name_bytes_live);
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
     try std.testing.expectEqual(true, cleared.boolean);
+}
+
+test "enable_gc: Object named-property backing stores release when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  const o = {};
+        \\  for (let i = 0; i < 40; i++) o["prop" + i] = i;
+        \\  Object.defineProperty(o, "accessor", {
+        \\    get: function () { return this.prop1 + 10; },
+        \\    configurable: true,
+        \\    enumerable: true
+        \\  });
+        \\  Object.defineProperty(o, "locked", {
+        \\    value: 123,
+        \\    writable: false,
+        \\    configurable: true,
+        \\    enumerable: false
+        \\  });
+        \\  const arr = [1, 2, 3, 4];
+        \\  delete arr[1];
+        \\  o.arr = arr;
+        \\  delete o.prop3;
+        \\  globalThis.keep = o;
+        \\  globalThis.ref = new WeakRef(o);
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+    const alive = try ctx.evaluate("globalThis.keep.accessor + globalThis.keep.locked + (1 in globalThis.keep.arr ? 1000 : 0)");
+    try std.testing.expectEqual(@as(f64, 134), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+}
+
+test "enable_gc: weak collection and finalization record backing stores release when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  const wm = new WeakMap();
+        \\  const ws = new WeakSet();
+        \\  const fr = new FinalizationRegistry(() => {});
+        \\  const targets = [];
+        \\  for (let i = 0; i < 24; i++) {
+        \\    const key = { key: i };
+        \\    const value = { value: i };
+        \\    wm.set(key, value);
+        \\    ws.add(key);
+        \\    fr.register(key, "held-" + i, key);
+        \\    targets.push(key, value);
+        \\  }
+        \\  globalThis.keep = { wm, ws, fr, targets };
+        \\  globalThis.ref = new WeakRef(globalThis.keep);
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+    const alive = try ctx.evaluate(
+        \\globalThis.keep.wm.has(globalThis.keep.targets[0]) &&
+        \\globalThis.keep.ws.has(globalThis.keep.targets[0])
+    );
+    try std.testing.expectEqual(true, alive.boolean);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+}
+
+test "enable_gc: dense Object elements release when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  const arr = [];
+        \\  for (let i = 0; i < 80; i++) arr.push({ index: i });
+        \\  const map = new Map();
+        \\  const set = new Set();
+        \\  for (let i = 0; i < 30; i++) {
+        \\    const key = { key: i };
+        \\    const value = { value: i };
+        \\    map.set(key, value);
+        \\    set.add(value);
+        \\  }
+        \\  globalThis.keep = { arr, map, set };
+        \\  globalThis.ref = new WeakRef(globalThis.keep);
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+    const alive = try ctx.evaluate("globalThis.keep.arr[79].index + globalThis.keep.map.size + globalThis.keep.set.size");
+    try std.testing.expectEqual(@as(f64, 139), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+}
+
+test "enable_gc: typed-array and DataView metadata release when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  const buffer = new ArrayBuffer(16, { maxByteLength: 32 });
+        \\  const ta = new Uint16Array(buffer, 0, 4);
+        \\  ta[0] = 513;
+        \\  const sub = ta.subarray(1, 3);
+        \\  const dv = new DataView(buffer);
+        \\  dv.setUint8(4, 77);
+        \\  const clone = structuredClone({ ta, dv });
+        \\  globalThis.keep = { ta, sub, dv, clone };
+        \\  globalThis.ref = new WeakRef(globalThis.keep);
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+    const alive = try ctx.evaluate(
+        \\globalThis.keep.ta[0] +
+        \\globalThis.keep.sub.length +
+        \\globalThis.keep.dv.getUint8(4) +
+        \\globalThis.keep.clone.ta.length +
+        \\globalThis.keep.clone.dv.getUint8(4)
+    );
+    try std.testing.expectEqual(@as(f64, 673), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+}
+
+test "enable_gc: Temporal metadata releases when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  const date = new Temporal.PlainDate(2024, 6, 15);
+        \\  const duration = new Temporal.Duration(1, 2, 0, 3, 4, 5);
+        \\  globalThis.keep = { date, duration };
+        \\  globalThis.ref = new WeakRef(globalThis.keep);
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+    const alive = try ctx.evaluate(
+        \\globalThis.keep.date.year +
+        \\globalThis.keep.date.month +
+        \\globalThis.keep.date.day +
+        \\globalThis.keep.duration.years +
+        \\globalThis.keep.duration.months +
+        \\globalThis.keep.duration.days +
+        \\globalThis.keep.duration.hours +
+        \\globalThis.keep.duration.minutes
+    );
+    try std.testing.expectEqual(@as(f64, 2060), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+}
+
+test "enable_gc: mapped arguments parameter-map names release when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\function f(a, b) {
+        \\  globalThis.keep = arguments;
+        \\  globalThis.read = function () { return a + b; };
+        \\  globalThis.ref = new WeakRef(arguments);
+        \\}
+        \\f(3, 4);
+        \\0
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+    const alive = try ctx.evaluate("globalThis.keep[0] = 10; globalThis.read()");
+    try std.testing.expectEqual(@as(f64, 14), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; globalThis.read = undefined; globalThis.f = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+}
+
+test "enable_gc: suspended generator execution buffers release when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_generator_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  function* g() {
+        \\    try {
+        \\      const left = 40;
+        \\      const sent = yield left + 2;
+        \\      yield sent + 1;
+        \\    } finally {
+        \\      globalThis.generatorFinallyRan = true;
+        \\    }
+        \\  }
+        \\  const it = g();
+        \\  const first = it.next();
+        \\  if (first.value !== 42 || first.done) throw new Error("bad first yield");
+        \\  globalThis.keep = it;
+        \\  globalThis.ref = new WeakRef(it);
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_generator_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_generator_backing_stores_live > baseline);
+    const alive = try ctx.evaluate("globalThis.keep.next(5).value");
+    try std.testing.expectEqual(@as(f64, 6), alive.number);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_generator_backing_stores_live);
+}
+
+test "enable_gc: async generator request buffers release when collected" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_generator_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  async function* ag() {
+        \\    await new Promise(() => {});
+        \\    yield 1;
+        \\  }
+        \\  const it = ag();
+        \\  const p1 = it.next();
+        \\  const p2 = it.next();
+        \\  const p3 = it.return(7);
+        \\  globalThis.keep = { it, p1, p2, p3 };
+        \\  globalThis.ref = new WeakRef(it);
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_generator_backing_stores_live > baseline);
+
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc_generator_backing_stores_live > baseline);
+    const alive = try ctx.evaluate("typeof globalThis.keep.p1.then === 'function' && typeof globalThis.keep.p2.then === 'function' && typeof globalThis.keep.p3.then === 'function'");
+    try std.testing.expectEqual(true, alive.boolean);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
+
+    _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_generator_backing_stores_live);
 }
 
 test "enable_gc: WeakMap value is live only while weak key is live" {

@@ -731,17 +731,17 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             ((interpreter.objectHasOwn(o, k) or (o.is_array and arrayIndexOf(k) != null and arrayIndexOf(k).? < o.elements.items.len and !o.isHole(arrayIndexOf(k).?))) and o.getAttr(k).enumerable);
         if (!enumerable) continue;
         if (kind == .key) {
-            try result.object.elements.append(self.arena, .{ .string = k });
+            try result.object.elements.append(result.object.elementsAllocator(self.arena), .{ .string = k });
             continue;
         }
         const v = try self.getProperty(ov, k); // [[Get]] — runs an accessor getter
         if (kind == .value) {
-            try result.object.elements.append(self.arena, v);
+            try result.object.elements.append(result.object.elementsAllocator(self.arena), v);
         } else {
             const pair = try self.newArray();
-            try pair.object.elements.append(self.arena, .{ .string = k });
-            try pair.object.elements.append(self.arena, v);
-            try result.object.elements.append(self.arena, pair);
+            try pair.object.elements.append(pair.object.elementsAllocator(self.arena), .{ .string = k });
+            try pair.object.elements.append(pair.object.elementsAllocator(self.arena), v);
+            try result.object.elements.append(result.object.elementsAllocator(self.arena), pair);
         }
     }
     return result;
@@ -901,7 +901,7 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
         // them). Only the logical length is set.
         arr.object.array_len = @intFromFloat(n);
     } else {
-        for (args) |v| try arr.object.elements.append(self.arena, v);
+        for (args) |v| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), v);
     }
     return arr;
 }
@@ -949,7 +949,7 @@ fn createDataIndexOrThrow(self: *Interpreter, target: Value, k: usize, v: Value)
         k == target.object.array_len)
     {
         // Fast path: appending the next index of a plain dense Array.
-        try target.object.elements.append(self.arena, v);
+        try target.object.elements.append(target.object.elementsAllocator(self.arena), v);
         return;
     }
     const key = try std.fmt.allocPrint(self.arena, "{d}", .{k});
@@ -1458,7 +1458,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 } else if (!within and !target.extensible) {
                     return false;
                 }
-                while (target.elements.items.len <= i) try target.elements.append(self.arena, .undefined);
+                while (target.elements.items.len <= i) try target.elements.append(target.elementsAllocator(self.arena), .undefined);
                 // Defining the index makes it a present own element (clear any hole).
                 target.clearHole(i);
                 const am_mapped = target.is_arguments and interpreter.argMapName(target, i) != null;
@@ -1857,7 +1857,7 @@ pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, this: Value, args: []const V
     // here and may throw), then keep only the symbol keys.
     for (try self.objectOwnKeysList(o)) |k| {
         if (value.isRealSymbolKey(k))
-            try result.object.elements.append(self.arena, self.keyToValue(k));
+            try result.object.elements.append(result.object.elementsAllocator(self.arena), self.keyToValue(k));
     }
     return result;
 }
@@ -2073,7 +2073,7 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Val
     // keys only (symbols go to getOwnPropertySymbols).
     for (try self.objectOwnKeysList(o)) |k| {
         if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-        try result.object.elements.append(self.arena, .{ .string = k });
+        try result.object.elements.append(result.object.elementsAllocator(self.arena), .{ .string = k });
     }
     return result;
 }
@@ -2737,7 +2737,7 @@ const JsonParser = struct {
         var index: usize = 0;
         while (true) {
             const child = try p.parseValue();
-            try result.object.elements.append(p.interp.arena, child.value);
+            try result.object.elements.append(result.object.elementsAllocator(p.interp.arena), child.value);
             if (child.source) |src| {
                 const key = try std.fmt.allocPrint(p.interp.arena, "{d}", .{index});
                 try p.sources.append(p.interp.arena, .{ .holder = result.object, .key = key, .value = child.value, .source = src });

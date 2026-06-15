@@ -1469,7 +1469,7 @@ pub const Interpreter = struct {
         if (v != .undefined and v != .null) {
             const o = try self.toObject(v);
             for (try self.forInKeyList(o)) |k| {
-                try arr.elements.append(self.arena, .{ .string = k });
+                try arr.elements.append(arr.elementsAllocator(self.arena), .{ .string = k });
             }
         }
         return .{ .object = arr };
@@ -2654,9 +2654,9 @@ pub const Interpreter = struct {
         // The "strings" template object: an array of the cooked strings with an
         // own `raw` array of the unescaped strings.
         const strings = (try self.newArray()).object;
-        for (cooked) |s| try strings.elements.append(self.arena, .{ .string = s });
+        for (cooked) |s| try strings.elements.append(strings.elementsAllocator(self.arena), .{ .string = s });
         const raw_arr = (try self.newArray()).object;
-        for (raw) |s| try raw_arr.elements.append(self.arena, .{ .string = s });
+        for (raw) |s| try raw_arr.elements.append(raw_arr.elementsAllocator(self.arena), .{ .string = s });
         try self.setProp(strings, "raw", .{ .object = raw_arr });
 
         // Build the argument list: strings, then each substitution value.
@@ -2689,7 +2689,7 @@ pub const Interpreter = struct {
             const target = obj.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'apply' on a proxy that has been revoked");
             if (try self.proxyTrap(obj, "apply")) |trap| {
                 const arr = try self.newArray();
-                for (args) |a| try arr.object.elements.append(self.arena, a);
+                for (args) |a| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), a);
                 return self.callValueWithThis(trap, &.{ .{ .object = target }, this_val, arr }, .{ .object = obj.proxy_handler.? });
             }
             return self.callValueWithThis(.{ .object = target }, args, this_val);
@@ -2842,7 +2842,7 @@ pub const Interpreter = struct {
         while (true) {
             const step = try self.iterStep(it);
             if (step.done) break;
-            try arr.object.elements.append(self.arena, step.value);
+            try arr.object.elements.append(arr.object.elementsAllocator(self.arena), step.value);
         }
         return arr;
     }
@@ -2973,7 +2973,7 @@ pub const Interpreter = struct {
             };
             try args_obj.object.setOwn(self.arena, self.root_shape, "length", .{ .number = @floatFromInt(args.len) });
             try args_obj.object.setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
-            for (args) |av| try args_obj.object.elements.append(self.arena, av);
+            for (args) |av| try args_obj.object.elements.append(args_obj.object.elementsAllocator(self.arena), av);
             // Strict mode's `arguments.callee` is a poison-pill accessor whose
             // get and set are both `%ThrowTypeError%`. Reading or writing it
             // throws, but `Object.getOwnPropertyDescriptor(arguments, "callee").
@@ -2997,7 +2997,7 @@ pub const Interpreter = struct {
             // two-way live link; reads/writes go to `call_env`).
             if (!func.is_strict and !non_simple_params and func.params.len > 0) {
                 const n = @min(args.len, func.params.len);
-                const names = try self.arena.alloc([]const u8, n);
+                const names = try args_obj.object.argMapNamesAllocator(self.arena).alloc([]const u8, n);
                 for (names, 0..) |*nm, i| nm.* = func.params[i].name;
                 // A duplicated parameter name maps only its last index.
                 for (names, 0..) |nm, i| {
@@ -3065,7 +3065,7 @@ pub const Interpreter = struct {
             if (p.is_rest) {
                 const rest = try self.newArray();
                 var j = i;
-                while (j < args.len) : (j += 1) try rest.object.elements.append(self.arena, args[j]);
+                while (j < args.len) : (j += 1) try rest.object.elements.append(rest.object.elementsAllocator(self.arena), args[j]);
                 if (p.pattern) |pat| try self.bindPattern(pat, rest, true) else try self.env.put(p.name, rest);
                 break;
             }
@@ -3119,7 +3119,7 @@ pub const Interpreter = struct {
             const target = obj.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'construct' on a proxy that has been revoked");
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
-                for (args) |a| try arr.object.elements.append(self.arena, a);
+                for (args) |a| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), a);
                 const res = try self.callValueWithThis(trap, &.{ .{ .object = target }, arr, new_target }, .{ .object = obj.proxy_handler.? });
                 // The [[Construct]] trap must return an Object (9.5.14 step 9).
                 if (res != .object or res.object.is_symbol or res.object.is_bigint)
@@ -4064,8 +4064,8 @@ pub const Interpreter = struct {
                 if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, mend)));
                 recordRegexpLegacy(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
-                try arr.object.elements.append(self.arena, .{ .string = try self.stringSliceFromSearchSpan(input, search_input, mstart, mend) });
-                for (0..m.captures.len) |i| try arr.object.elements.append(self.arena, try self.captureVal(m, i));
+                try arr.object.elements.append(arr.object.elementsAllocator(self.arena), .{ .string = try self.stringSliceFromSearchSpan(input, search_input, mstart, mend) });
+                for (0..m.captures.len) |i| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), try self.captureVal(m, i));
                 try self.setProp(arr.object, "index", .{ .number = @floatFromInt(utf16IndexForByteOffset(search_input, mstart)) });
                 try self.setProp(arr.object, "input", .{ .string = input });
                 const groups = try self.regexGroups(re, m);
@@ -4443,7 +4443,7 @@ pub const Interpreter = struct {
 
             const match_v = try self.getProperty(result, "0");
             const match_s = try self.toStringV(match_v);
-            try arr.object.elements.append(self.arena, .{ .string = try self.arena.dupe(u8, match_s) });
+            try arr.object.elements.append(arr.object.elementsAllocator(self.arena), .{ .string = try self.arena.dupe(u8, match_s) });
 
             if (match_s.len == 0) {
                 const li = toLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
@@ -5054,7 +5054,7 @@ pub const Interpreter = struct {
                         return self_v;
                     }
                 }
-                try o.weak_entries.append(self.arena, .{ .key = key_obj, .value = arg(args, 1) });
+                try o.weak_entries.append(o.weakEntriesAllocator(self.arena), .{ .key = key_obj, .value = arg(args, 1) });
                 return self_v;
             }
             if (eq(name, "get")) {
@@ -5098,7 +5098,7 @@ pub const Interpreter = struct {
                         }
                     }
                 }
-                try o.weak_entries.append(self.arena, .{ .key = key_obj, .value = v });
+                try o.weak_entries.append(o.weakEntriesAllocator(self.arena), .{ .key = key_obj, .value = v });
                 return v;
             }
             return null;
@@ -5111,9 +5111,9 @@ pub const Interpreter = struct {
                 };
             }
             const pair = (try self.newArray()).object;
-            try pair.elements.append(self.arena, key);
-            try pair.elements.append(self.arena, arg(args, 1));
-            try o.elements.append(self.arena, .{ .object = pair });
+            try pair.elements.append(pair.elementsAllocator(self.arena), key);
+            try pair.elements.append(pair.elementsAllocator(self.arena), arg(args, 1));
+            try o.elements.append(o.elementsAllocator(self.arena), .{ .object = pair });
             return self_v;
         }
         if (eq(name, "get")) {
@@ -5187,7 +5187,7 @@ pub const Interpreter = struct {
                 for (o.weak_entries.items) |entry| {
                     if (entry.key == key_obj) return self_v;
                 }
-                try o.weak_entries.append(self.arena, .{ .key = key_obj });
+                try o.weak_entries.append(o.weakEntriesAllocator(self.arena), .{ .key = key_obj });
                 return self_v;
             }
             if (eq(name, "has")) {
@@ -5211,7 +5211,7 @@ pub const Interpreter = struct {
             for (o.elements.items) |e| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
             }
-            try o.elements.append(self.arena, key);
+            try o.elements.append(o.elementsAllocator(self.arena), key);
             return self_v;
         }
         if (eq(name, "has")) {
@@ -5453,9 +5453,9 @@ pub const Interpreter = struct {
             } else if (en.* == .elision) {
                 // A hole: a slot that reads as absent (skipped by iteration).
                 try v.object.markHole(self.arena, v.object.elements.items.len);
-                try v.object.elements.append(self.arena, .undefined);
+                try v.object.elements.append(v.object.elementsAllocator(self.arena), .undefined);
             } else {
-                try v.object.elements.append(self.arena, try self.eval(en));
+                try v.object.elements.append(v.object.elementsAllocator(self.arena), try self.eval(en));
             }
         }
         return v;
@@ -6229,7 +6229,7 @@ pub const Interpreter = struct {
                 const rest_arr = try self.newArray();
                 const len = iterableLen(val);
                 while (idx < len) : (idx += 1) {
-                    try rest_arr.object.elements.append(self.arena, try self.elementAt(val, idx));
+                    try rest_arr.object.elements.append(rest_arr.object.elementsAllocator(self.arena), try self.elementAt(val, idx));
                 }
                 try self.bindPattern(rest_target, rest_arr, declare);
             }
@@ -6261,7 +6261,7 @@ pub const Interpreter = struct {
             while (!done) {
                 const res = try self.callMethod(iter_obj, "next", &.{});
                 if ((try self.getProperty(res, "done")).toBoolean()) break;
-                try rest_arr.object.elements.append(self.arena, try self.getProperty(res, "value"));
+                try rest_arr.object.elements.append(rest_arr.object.elementsAllocator(self.arena), try self.getProperty(res, "value"));
             }
             try self.bindPattern(rest_target, rest_arr, declare);
             return; // a rest element always exhausts the iterator (no close)
@@ -6602,7 +6602,7 @@ pub const Interpreter = struct {
                 const dense_cap: usize = 1 << 24;
                 if (i < dense_cap and i <= o.elements.items.len + 1024) {
                     const gap_start = o.elements.items.len;
-                    while (o.elements.items.len <= i) try o.elements.append(self.arena, .undefined);
+                    while (o.elements.items.len <= i) try o.elements.append(o.elementsAllocator(self.arena), .undefined);
                     o.elements.items[i] = v;
                     o.clearHole(i);
                     // Indices skipped over by a sparse assignment are holes.
@@ -6779,19 +6779,20 @@ pub const Interpreter = struct {
             const v = o.getOwn(k) orelse continue;
             try saved.append(self.arena, .{ .k = k, .v = v, .a = o.getAttr(k) });
         }
+        const old_key_order = o.key_order;
         o.shape = self.root_shape;
-        o.slots = .empty;
+        o.resetSlotsForRebuild();
         o.key_order = null; // disable append-on-setOwn during the rebuild
         for (saved.items) |e| {
             try o.setOwn(self.arena, self.root_shape, e.k, e.v);
             try o.setAttr(self.arena, e.k, e.a);
         }
         // Restore the (deduped) creation order when the object carries accessors.
+        o.key_order = old_key_order;
         if (o.accessors != null) {
-            const ko = try self.arena.create(std.ArrayListUnmanaged([]const u8));
-            ko.* = .empty;
-            try ko.appendSlice(self.arena, survived.items);
-            o.key_order = ko;
+            try o.replaceKeyOrder(self.arena, survived.items);
+        } else {
+            o.deinitKeyOrder();
         }
         return true;
     }
@@ -7086,7 +7087,7 @@ pub const Interpreter = struct {
         const size = kind.byteSize();
         const a0 = if (args.len > 0) args[0] else Value.undefined;
         const o = (try self.newObject()).object;
-        const ta = try self.arena.create(value.TypedArrayData);
+        const ta = try o.typedArrayAllocator(self.arena).create(value.TypedArrayData);
         o.typed_array = ta;
 
         if (a0 == .object and a0.object.array_buffer != null) {
@@ -7269,7 +7270,7 @@ pub const Interpreter = struct {
             result.object.attrs == null and !result.object.proxy_revoked and result.object.proxy_handler == null and
             idx == result.object.elements.items.len and idx >= result.object.array_len)
         {
-            try result.object.elements.append(self.arena, v);
+            try result.object.elements.append(result.object.elementsAllocator(self.arena), v);
         } else {
             // CreateDataPropertyOrThrow(result, ToString(idx), v) — a non-Array
             // species result (or one carrying accessors) takes the generic define
@@ -7783,7 +7784,7 @@ pub const Interpreter = struct {
                 try self.arrayResultPush(dst, n.*, try self.arrIndexGet(src, j));
             } else if (dense) {
                 const base = dst.object.elements.items.len;
-                try dst.object.elements.append(self.arena, .undefined);
+                try dst.object.elements.append(dst.object.elementsAllocator(self.arena), .undefined);
                 try dst.object.markHole(self.arena, base);
             }
             n.* += 1;
@@ -8145,7 +8146,7 @@ pub const Interpreter = struct {
                 if (self.arrIndexPresent(o, i)) {
                     try self.arrayResultPush(result, k, try self.arrIndexGet(o, i)); // CreateDataPropertyOrThrow
                 } else if (dense) { // slice preserves holes on a plain dense result
-                    try result.object.elements.append(self.arena, .undefined);
+                    try result.object.elements.append(result.object.elementsAllocator(self.arena), .undefined);
                     try result.object.markHole(self.arena, k);
                 }
                 k += 1;
@@ -8210,7 +8211,7 @@ pub const Interpreter = struct {
             if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
             var k: usize = 0;
-            while (k < ilen) : (k += 1) try result.object.elements.append(self.arena, try self.arrIndexGet(o, ilen - 1 - k));
+            while (k < ilen) : (k += 1) try result.object.elements.append(result.object.elementsAllocator(self.arena), try self.arrIndexGet(o, ilen - 1 - k));
             return result;
         }
         if (eq(name, "toSorted")) {
@@ -8220,7 +8221,7 @@ pub const Interpreter = struct {
             if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
             var k: usize = 0;
-            while (k < ilen) : (k += 1) try result.object.elements.append(self.arena, try self.arrIndexGet(o, k));
+            while (k < ilen) : (k += 1) try result.object.elements.append(result.object.elementsAllocator(self.arena), try self.arrIndexGet(o, k));
             const ri = result.object.elements.items;
             var i: usize = 1;
             while (i < ri.len) : (i += 1) {
@@ -8243,7 +8244,7 @@ pub const Interpreter = struct {
             var k: usize = 0;
             while (k < len) : (k += 1) {
                 const v = if (k == actual) arg(args, 1) else try self.arrIndexGet(o, k);
-                try result.object.elements.append(self.arena, v);
+                try result.object.elements.append(result.object.elementsAllocator(self.arena), v);
             }
             return result;
         }
@@ -8261,10 +8262,10 @@ pub const Interpreter = struct {
             const result = try self.newArray();
             const ra = result.object;
             var i: usize = 0;
-            while (i < start) : (i += 1) try ra.elements.append(self.arena, try self.arrIndexGet(o, i));
-            if (args.len > 2) for (args[2..]) |v| try ra.elements.append(self.arena, v);
+            while (i < start) : (i += 1) try ra.elements.append(ra.elementsAllocator(self.arena), try self.arrIndexGet(o, i));
+            if (args.len > 2) for (args[2..]) |v| try ra.elements.append(ra.elementsAllocator(self.arena), v);
             i = start + del;
-            while (i < len) : (i += 1) try ra.elements.append(self.arena, try self.arrIndexGet(o, i));
+            while (i < len) : (i += 1) try ra.elements.append(ra.elementsAllocator(self.arena), try self.arrIndexGet(o, i));
             return result;
         }
         if (eq(name, "map")) {
@@ -8277,7 +8278,7 @@ pub const Interpreter = struct {
             while (i < ilen) : (i += 1) {
                 if (!self.arrIndexPresent(o, i)) {
                     if (dense) {
-                        try result.object.elements.append(self.arena, .undefined);
+                        try result.object.elements.append(result.object.elementsAllocator(self.arena), .undefined);
                         try result.object.markHole(self.arena, i); // map preserves holes
                     }
                     continue;
@@ -8497,7 +8498,7 @@ pub const Interpreter = struct {
                     _ = try self.deleteOwn(o, k);
                 };
                 o.elements.clearRetainingCapacity();
-                try o.elements.appendSlice(self.arena, ps);
+                try o.elements.appendSlice(o.elementsAllocator(self.arena), ps);
                 if (o.holes) |h| h.clearRetainingCapacity();
                 o.array_len = ilen; // indices past the sorted run read as holes
             } else {
@@ -8529,7 +8530,7 @@ pub const Interpreter = struct {
                 if (self.arrIndexPresent(o, start + i)) {
                     try self.arrayResultPush(removed, i, try self.arrIndexGet(o, start + i)); // CreateDataPropertyOrThrow
                 } else if (rdense) { // preserve a hole in the removed array
-                    try removed.object.elements.append(self.arena, .undefined);
+                    try removed.object.elements.append(removed.object.elementsAllocator(self.arena), .undefined);
                     try removed.object.markHole(self.arena, i);
                 }
             }
@@ -8543,7 +8544,7 @@ pub const Interpreter = struct {
                     _ = o.elements.orderedRemove(start);
                 };
                 var j: usize = item_count;
-                while (j > 0) : (j -= 1) try o.elements.insert(self.arena, start, inserts[j - 1]);
+                while (j > 0) : (j -= 1) try o.elements.insert(o.elementsAllocator(self.arena), start, inserts[j - 1]);
                 return removed;
             }
             // Generic Array.prototype.splice: shift the tail through [[Get]]/[[Set]]/
@@ -9354,8 +9355,8 @@ pub const Interpreter = struct {
     /// A two-element `[start, end]` array, as used by the match-indices array.
     fn indexPair(self: *Interpreter, lo: usize, hi: usize) EvalError!Value {
         const p = (try self.newArray()).object;
-        try p.elements.append(self.arena, .{ .number = @floatFromInt(lo) });
-        try p.elements.append(self.arena, .{ .number = @floatFromInt(hi) });
+        try p.elements.append(p.elementsAllocator(self.arena), .{ .number = @floatFromInt(lo) });
+        try p.elements.append(p.elementsAllocator(self.arena), .{ .number = @floatFromInt(hi) });
         return .{ .object = p };
     }
 
@@ -9366,19 +9367,19 @@ pub const Interpreter = struct {
     /// `base` is the byte offset of the search window within the original input.
     fn makeIndicesArray(self: *Interpreter, re: *regex.Regex, m: regex.Match, input: []const u8, base: usize) EvalError!*value.Object {
         const idx = (try self.newArray()).object;
-        try idx.elements.append(self.arena, try self.indexPair(
+        try idx.elements.append(idx.elementsAllocator(self.arena), try self.indexPair(
             utf16IndexForByteOffset(input, base + m.start),
             utf16IndexForByteOffset(input, base + m.end),
         ));
         for (0..m.captures.len) |i| {
             const present = i < m.captures_present.len and m.captures_present[i];
             if (present and i < m.capture_spans.len) {
-                try idx.elements.append(self.arena, try self.indexPair(
+                try idx.elements.append(idx.elementsAllocator(self.arena), try self.indexPair(
                     utf16IndexForByteOffset(input, base + m.capture_spans[i][0]),
                     utf16IndexForByteOffset(input, base + m.capture_spans[i][1]),
                 ));
             } else {
-                try idx.elements.append(self.arena, .undefined);
+                try idx.elements.append(idx.elementsAllocator(self.arena), .undefined);
             }
         }
         if (re.named_capture_list.len > 0) {
@@ -10374,10 +10375,10 @@ fn objectGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         const kv = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) } });
         const key = try self.keyOf(kv);
         if (obj.getOwn(key)) |bucket| {
-            try bucket.object.elements.append(self.arena, el);
+            try bucket.object.elements.append(bucket.object.elementsAllocator(self.arena), el);
         } else {
             const arr = try self.newArray();
-            try arr.object.elements.append(self.arena, el);
+            try arr.object.elements.append(arr.object.elementsAllocator(self.arena), el);
             try self.setProp(obj, key, arr);
         }
     }
@@ -10397,10 +10398,10 @@ fn mapGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
         const key = try self.callValue(cb, &.{ el, .{ .number = @floatFromInt(i) } });
         if ((try self.mapMethod(map, "has", &.{key})).?.boolean) {
             const bucket = (try self.mapMethod(map, "get", &.{key})).?;
-            try bucket.object.elements.append(self.arena, el);
+            try bucket.object.elements.append(bucket.object.elementsAllocator(self.arena), el);
         } else {
             const arr = try self.newArray();
-            try arr.object.elements.append(self.arena, el);
+            try arr.object.elements.append(arr.object.elementsAllocator(self.arena), el);
             _ = try self.mapMethod(map, "set", &.{ key, arr });
         }
     }
@@ -10597,7 +10598,7 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         // without closing it.
         const maybe = iterStep(self, iter) catch |err| return rejectAbrupt(self, cap, err);
         const el = maybe orelse break;
-        try values.elements.append(self.arena, .undefined);
+        try values.elements.append(values.elementsAllocator(self.arena), .undefined);
         combine.remaining += 1;
         // `nextPromise = Call(promiseResolve, C, «el»)` — an abrupt completion
         // here closes the (still-open) iterator before rejecting.
@@ -11182,7 +11183,7 @@ fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     // objectOwnKeysList is proxy- and module-namespace-aware (sorted exotic keys).
     const keys = try self.objectOwnKeysList(target.object);
     const arr = try self.newArray();
-    for (keys) |k| try arr.object.elements.append(self.arena, self.keyToValue(k));
+    for (keys) |k| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), self.keyToValue(k));
     return arr;
 }
 
@@ -11945,7 +11946,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (offset > live_len) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
     if (!track and offset + @as(u64, @intCast(view_len)) > @as(u64, @intCast(live_len)))
         return self.throwError("RangeError", "Invalid DataView length");
-    const dv = try self.arena.create(value.DataViewData);
+    const dv = try o.dataViewAllocator(self.arena).create(value.DataViewData);
     dv.* = .{ .buffer = buf_v.object, .byte_offset = @intCast(offset), .byte_length = view_len, .track_length = track };
     o.data_view = dv;
     return .{ .object = o };
@@ -12276,13 +12277,13 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             }
             const mode: u8 = @intFromFloat(h.limit);
             const results = (try self.newArray()).object;
-            try results.elements.ensureTotalCapacity(self.arena, n);
+            try results.elements.ensureTotalCapacity(results.elementsAllocator(self.arena), n);
             var i: usize = 0;
             while (i < n) : (i += 1) {
                 if (flags.elements.items[i].toBoolean()) {
                     // openIters[i] is null — longest padding.
                     const pad = if (h.padding == .object and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
-                    try results.elements.append(self.arena, pad);
+                    try results.elements.append(results.elementsAllocator(self.arena), pad);
                     continue;
                 }
                 // IteratorStepValue(openIters[i]); an abrupt completion closes the
@@ -12294,7 +12295,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                     return error.Throw;
                 };
                 if (!s.done) {
-                    try results.elements.append(self.arena, s.value);
+                    try results.elements.append(results.elementsAllocator(self.arena), s.value);
                     continue;
                 }
                 // The source is done — remove it from openIters.
@@ -12332,7 +12333,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                     },
                     else => { // longest: pad this slot and continue.
                         const pad = if (h.padding == .object and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
-                        try results.elements.append(self.arena, pad);
+                        try results.elements.append(results.elementsAllocator(self.arena), pad);
                     },
                 }
             }
@@ -12524,7 +12525,7 @@ fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     while (true) {
         const s = try self.iterStepM(this, next_method);
         if (s.done) break;
-        try arr.elements.append(self.arena, s.value);
+        try arr.elements.append(arr.elementsAllocator(self.arena), s.value);
     }
     return .{ .object = arr };
 }
@@ -12724,8 +12725,8 @@ fn iteratorConcatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         const method = try self.getProperty(arg_v, ikey);
         if (method == .undefined or method == .null or !method.isCallable())
             return self.throwError("TypeError", "Iterator.concat: each argument must have a callable @@iterator");
-        try srcs.elements.append(self.arena, arg_v);
-        try methods.elements.append(self.arena, method);
+        try srcs.elements.append(srcs.elementsAllocator(self.arena), arg_v);
+        try methods.elements.append(methods.elementsAllocator(self.arena), method);
     }
     // The captured @@iterator methods ride in `func` for the .concat consumer.
     return makeIterHelper(self, .{ .object = srcs }, .concat, .{ .object = methods }, 0);
@@ -12811,7 +12812,7 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
             self.iteratorCloseKeepingThrow(input_iter);
             return error.Throw;
         };
-        try iters.elements.append(self.arena, sub);
+        try iters.elements.append(iters.elementsAllocator(self.arena), sub);
     }
     // Per-source padding aligned to iterator order (longest mode only): pull
     // exactly `iterCount` values from the padding iterable, padding short. Any
@@ -12860,8 +12861,8 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
             self.closeListKeepingThrow(iters.elements.items);
             return error.Throw;
         };
-        try keys.elements.append(self.arena, .{ .string = key });
-        try iters.elements.append(self.arena, sub);
+        try keys.elements.append(keys.elementsAllocator(self.arena), .{ .string = key });
+        try iters.elements.append(iters.elementsAllocator(self.arena), sub);
     }
     // Per-key padding (longest mode): Get(padding, key) for each key, or all
     // undefined when padding is absent.
@@ -12874,8 +12875,8 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
                     self.closeListKeepingThrow(iters.elements.items);
                     return error.Throw;
                 };
-                try pads.elements.append(self.arena, pv);
-            } else try pads.elements.append(self.arena, .undefined);
+                try pads.elements.append(pads.elementsAllocator(self.arena), pv);
+            } else try pads.elements.append(pads.elementsAllocator(self.arena), .undefined);
         }
         pad_arr = .{ .object = pads };
     }
@@ -12891,7 +12892,7 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
     const pads = (try self.newArray()).object;
     if (padding == .undefined) {
         var i: usize = 0;
-        while (i < n) : (i += 1) try pads.elements.append(self.arena, .undefined);
+        while (i < n) : (i += 1) try pads.elements.append(pads.elementsAllocator(self.arena), .undefined);
         return .{ .object = pads };
     }
     if (padding != .object or padding.object.is_bigint or padding.object.is_symbol)
@@ -12909,14 +12910,14 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
     var i: usize = 0;
     while (i < n) : (i += 1) {
         if (exhausted) {
-            try pads.elements.append(self.arena, .undefined);
+            try pads.elements.append(pads.elementsAllocator(self.arena), .undefined);
             continue;
         }
         const s = try self.iterStepM(pit, pnext);
         if (s.done) {
             exhausted = true;
-            try pads.elements.append(self.arena, .undefined);
-        } else try pads.elements.append(self.arena, s.value);
+            try pads.elements.append(pads.elementsAllocator(self.arena), .undefined);
+        } else try pads.elements.append(pads.elementsAllocator(self.arena), s.value);
     }
     // Close the padding iterator (normal completion) if it still has values.
     if (!exhausted) try self.iteratorClose(pit);
@@ -12926,7 +12927,7 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
 /// Build a zip/zipKeyed iterator-helper object with its per-source done flags.
 fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.Object, keys: Value, mode: u8, padding: Value) EvalError!Value {
     const flags = (try self.newArray()).object;
-    for (iters.elements.items) |_| try flags.elements.append(self.arena, .{ .boolean = false });
+    for (iters.elements.items) |_| try flags.elements.append(flags.elementsAllocator(self.arena), .{ .boolean = false });
     const o = (try self.newObject()).object;
     const h = try gc_mod.allocIterHelper(self.arena);
     h.* = .{ .src = .{ .object = iters }, .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = .{ .object = flags }, .padding = padding };
@@ -13369,7 +13370,7 @@ fn asyncIterConsumeImpl(self: *Interpreter, this: Value, comptime which: AsyncCo
             while (true) {
                 const s = try asyncIterStep(self, this);
                 if (s.done) break;
-                try arr.elements.append(self.arena, s.value);
+                try arr.elements.append(arr.elementsAllocator(self.arena), s.value);
             }
             return .{ .object = arr };
         },
@@ -13765,7 +13766,7 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (value.strictEquals(target, held)) return self.throwError("TypeError", "FinalizationRegistry.register: target and held value must not be the same");
     const token = if (args.len > 2) args[2] else Value.undefined;
     if (token != .undefined and !canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.register: unregister token must be an object or a symbol");
-    try this.object.finalization_records.append(self.arena, .{
+    try this.object.finalization_records.append(this.object.finalizationRecordsAllocator(self.arena), .{
         .target = weakKeyPtr(target),
         .held = held,
         .token = if (token == .undefined) null else weakKeyPtr(token),
@@ -13859,11 +13860,11 @@ fn disposableStackConstructorFn(comptime is_async: bool) value.NativeFn {
 /// Push a resource entry [value, onDispose, kind] (kind 0=use,1=adopt,2=defer).
 fn dispPush(self: *Interpreter, o: *value.Object, v: Value, f: Value, kind: f64) EvalError!void {
     const entry = (try self.newArray()).object;
-    try entry.elements.append(self.arena, v);
-    try entry.elements.append(self.arena, f);
-    try entry.elements.append(self.arena, .{ .number = kind });
+    try entry.elements.append(entry.elementsAllocator(self.arena), v);
+    try entry.elements.append(entry.elementsAllocator(self.arena), f);
+    try entry.elements.append(entry.elementsAllocator(self.arena), .{ .number = kind });
     const res = o.getOwn("\x00ds_res").?.object;
-    try res.elements.append(self.arena, .{ .object = entry });
+    try res.elements.append(res.elementsAllocator(self.arena), .{ .object = entry });
 }
 
 fn dispGetMethod(self: *Interpreter, v: Value, sym_key: []const u8) EvalError!Value {
@@ -14242,7 +14243,7 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
 /// Build a fresh typed array of `kind` with `len` zero-initialized elements.
 fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*value.Object {
     const o = (try self.newObject()).object;
-    const ta = try self.arena.create(value.TypedArrayData);
+    const ta = try o.typedArrayAllocator(self.arena).create(value.TypedArrayData);
     ta.* = .{ .buffer = try self.makeArrayBuffer(len * kind.byteSize()), .byte_offset = 0, .length = len, .kind = kind };
     o.typed_array = ta;
     if (self.env.get(kind.ctorName())) |c| {
@@ -15848,7 +15849,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     if (v == .string or (v == .object and v.object.getOwn("\x00locale") != null)) {
         const s = if (v == .string) v.string else v.object.getOwn("\x00locale").?.string;
         const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
-        try arr.elements.append(self.arena, .{ .string = c });
+        try arr.elements.append(arr.elementsAllocator(self.arena), .{ .string = c });
         return arr;
     }
     // Anything else (incl. a primitive) is ToObject'd (null/undefined excluded
@@ -15874,7 +15875,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         for (arr.elements.items) |e| if (std.mem.eql(u8, e.string, c)) {
             dup = true;
         };
-        if (!dup) try arr.elements.append(self.arena, .{ .string = c });
+        if (!dup) try arr.elements.append(arr.elementsAllocator(self.arena), .{ .string = c });
     }
     return arr;
 }
@@ -15907,7 +15908,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
         &sanctioned_units
     else
         return self.throwError("RangeError", "Intl.supportedValuesOf: invalid key");
-    for (items) |s| try arr.elements.append(self.arena, .{ .string = s });
+    for (items) |s| try arr.elements.append(arr.elementsAllocator(self.arena), .{ .string = s });
     return .{ .object = arr };
 }
 
@@ -16294,7 +16295,7 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
                 .numbering_systems => localeUValue(tag, "nu") orelse "latn",
                 .time_zones => null, // requires region data
             };
-            if (def) |d| try arr.elements.append(self.arena, .{ .string = d });
+            if (def) |d| try arr.elements.append(arr.elementsAllocator(self.arena), .{ .string = d });
             return .{ .object = arr };
         }
     }.call;
@@ -16326,8 +16327,8 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
     }
     try self.setProp(o, "firstDay", .{ .number = first_day });
     const we = (try self.newArray()).object;
-    try we.elements.append(self.arena, .{ .number = 6 });
-    try we.elements.append(self.arena, .{ .number = 7 });
+    try we.elements.append(we.elementsAllocator(self.arena), .{ .number = 6 });
+    try we.elements.append(we.elementsAllocator(self.arena), .{ .number = 7 });
     try self.setProp(o, "weekend", .{ .object = we });
     return .{ .object = o };
 }
@@ -16356,7 +16357,7 @@ fn intlLocaleTimeZonesFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (!has_region) return .undefined;
     // We lack per-region zone data; report UTC so the result is a non-empty array.
     const arr = (try self.newArray()).object;
-    try arr.elements.append(self.arena, .{ .string = "UTC" });
+    try arr.elements.append(arr.elementsAllocator(self.arena), .{ .string = "UTC" });
     return .{ .object = arr };
 }
 
@@ -17489,7 +17490,7 @@ fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
         const o = (try self.newObject()).object;
         try self.setProp(o, "type", .{ .string = p.typ });
         try self.setProp(o, "value", .{ .string = p.value });
-        try arr.elements.append(self.arena, .{ .object = o });
+        try arr.elements.append(arr.elementsAllocator(self.arena), .{ .object = o });
     }
     return .{ .object = arr };
 }
@@ -17551,7 +17552,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
                 try s.setProp(o, "type", .{ .string = p.typ });
                 try s.setProp(o, "value", .{ .string = p.value });
                 try s.setProp(o, "source", .{ .string = src });
-                try a.elements.append(s.arena, .{ .object = o });
+                try a.elements.append(a.elementsAllocator(s.arena), .{ .object = o });
             }
         }
     }.one;
@@ -17572,7 +17573,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     try self.setProp(lo, "type", .{ .string = "literal" });
     try self.setProp(lo, "value", .{ .string = dtf_range_sep });
     try self.setProp(lo, "source", .{ .string = "shared" });
-    try arr.elements.append(self.arena, .{ .object = lo });
+    try arr.elements.append(arr.elementsAllocator(self.arena), .{ .object = lo });
     try emit(self, arr, yp.items, "endRange");
     return .{ .object = arr };
 }
@@ -18243,7 +18244,7 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
                 try s.setProp(po, "type", .{ .string = p.typ });
                 try s.setProp(po, "value", .{ .string = p.value });
                 try s.setProp(po, "source", .{ .string = src });
-                try a.elements.append(s.arena, .{ .object = po });
+                try a.elements.append(a.elementsAllocator(s.arena), .{ .object = po });
             }
         }
     }.one;
@@ -18253,7 +18254,7 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     try self.setProp(lo, "type", .{ .string = "literal" });
     try self.setProp(lo, "value", .{ .string = "\u{2013}" });
     try self.setProp(lo, "source", .{ .string = "shared" });
-    try arr.elements.append(self.arena, .{ .object = lo });
+    try arr.elements.append(arr.elementsAllocator(self.arena), .{ .object = lo });
     const yp = try nfBuildParts(self, this, &.{yv});
     try emit(self, arr, yp.items, "endRange");
     return .{ .object = arr };
@@ -18268,7 +18269,7 @@ fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) 
         const o = (try self.newObject()).object;
         try self.setProp(o, "type", .{ .string = p.typ });
         try self.setProp(o, "value", .{ .string = p.value });
-        try arr.elements.append(self.arena, .{ .object = o });
+        try arr.elements.append(arr.elementsAllocator(self.arena), .{ .object = o });
     }
     return .{ .object = arr };
 }
@@ -18719,14 +18720,14 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             const lo = (try self.newObject()).object;
             try self.setProp(lo, "type", .{ .string = "literal" });
             try self.setProp(lo, "value", .{ .string = sep });
-            try arr.elements.append(self.arena, .{ .object = lo });
+            try arr.elements.append(arr.elementsAllocator(self.arena), .{ .object = lo });
         }
         for (grp.items) |p| {
             const o = (try self.newObject()).object;
             try self.setProp(o, "type", .{ .string = p.typ });
             try self.setProp(o, "value", .{ .string = p.value });
             if (p.unit) |un| try self.setProp(o, "unit", .{ .string = un });
-            try arr.elements.append(self.arena, .{ .object = o });
+            try arr.elements.append(arr.elementsAllocator(self.arena), .{ .object = o });
         }
     }
     return .{ .object = arr };
@@ -19288,7 +19289,7 @@ fn intlListFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) va
         const o = (try self.newObject()).object;
         try self.setProp(o, "type", .{ .string = p.typ });
         try self.setProp(o, "value", .{ .string = p.value });
-        try arr.elements.append(self.arena, .{ .object = o });
+        try arr.elements.append(arr.elementsAllocator(self.arena), .{ .object = o });
     }
     return .{ .object = arr };
 }
@@ -19435,7 +19436,7 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
             try s.setProp(o, "type", .{ .string = typ });
             try s.setProp(o, "value", .{ .string = v });
             if (unit) |u| try s.setProp(o, "unit", .{ .string = try std.fmt.allocPrint(s.arena, "{s}", .{u}) });
-            try a.elements.append(s.arena, .{ .object = o });
+            try a.elements.append(a.elementsAllocator(s.arena), .{ .object = o });
         }
     }.p;
     if (r.term) |t| {
@@ -19672,7 +19673,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 const prules = pluralRulesFor(this);
                 for (order) |cat| {
                     for (prules) |r| if (std.mem.eql(u8, r.cat, cat)) {
-                        try cats.elements.append(self.arena, .{ .string = cat });
+                        try cats.elements.append(cats.elementsAllocator(self.arena), .{ .string = cat });
                         break;
                     };
                 }
@@ -19809,7 +19810,7 @@ fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) v
         const end = std.mem.indexOfScalar(u8, tag, '-') orelse tag.len;
         const lang = tag[0..end];
         if (std.mem.eql(u8, lang, "zxx") or std.mem.eql(u8, lang, "mul") or std.mem.eql(u8, lang, "mis")) continue;
-        try out.elements.append(self.arena, lv);
+        try out.elements.append(out.elementsAllocator(self.arena), lv);
     }
     return .{ .object = out };
 }
@@ -21546,8 +21547,8 @@ fn arrayIteratorValue(self: *Interpreter, kind: usize, index: usize, elem: Value
         1 => .{ .number = @floatFromInt(index) },
         2 => blk: {
             const pair = (try self.newArray()).object;
-            try pair.elements.append(self.arena, .{ .number = @floatFromInt(index) });
-            try pair.elements.append(self.arena, elem);
+            try pair.elements.append(pair.elementsAllocator(self.arena), .{ .number = @floatFromInt(index) });
+            try pair.elements.append(pair.elementsAllocator(self.arena), elem);
             break :blk .{ .object = pair };
         },
         else => elem,
@@ -21601,8 +21602,8 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                     1 => .{ .number = @floatFromInt(i) }, // keys
                     2 => blk: {
                         const pair = (try self.newArray()).object;
-                        try pair.elements.append(self.arena, .{ .number = @floatFromInt(i) });
-                        try pair.elements.append(self.arena, try self.taLoad(ta, i));
+                        try pair.elements.append(pair.elementsAllocator(self.arena), .{ .number = @floatFromInt(i) });
+                        try pair.elements.append(pair.elementsAllocator(self.arena), try self.taLoad(ta, i));
                         break :blk .{ .object = pair };
                     },
                     else => try self.taLoad(ta, i), // values
@@ -21628,8 +21629,8 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 const e = liveSetEntry(so.elements.items[j]) orelse continue;
                 if (kind == 2) {
                     const pair = (try self.newArray()).object;
-                    try pair.elements.append(self.arena, e);
-                    try pair.elements.append(self.arena, e);
+                    try pair.elements.append(pair.elementsAllocator(self.arena), e);
+                    try pair.elements.append(pair.elementsAllocator(self.arena), e);
                     val = .{ .object = pair };
                 } else {
                     val = e;
@@ -22945,7 +22946,7 @@ fn isoWeekOfYear(y: i64, m: u8, d: u8) struct { week: u8, year: i64 } {
 /// A Temporal object of `kind`, with its prototype from the env hidden binding.
 fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []const u8) EvalError!*value.Object {
     const o = (try self.newObject()).object;
-    const t = try self.arena.create(value.TemporalData);
+    const t = try o.temporalAllocator(self.arena).create(value.TemporalData);
     t.* = .{ .kind = kind };
     o.temporal = t;
     if (self.env.get(proto_key)) |p| if (p == .object) {

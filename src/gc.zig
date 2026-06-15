@@ -6,7 +6,7 @@
 //! **Status: M1 — opt-in quiescent collection.** `Context.Options.enable_gc`
 //! routes heap cells through `zig-gc`, and `Context.collectGarbage()` runs a
 //! precise mark-sweep at quiescent points. Arbitrary mid-script collection and
-//! full sub-allocation reclamation are still future work.
+//! some remaining side-storage migrations are still future work.
 //!
 //! Tracing surface and root set are derived from a full audit of the heap; see
 //! the cell-kind table in P7-gc-design.md. Cells whose references all live in
@@ -22,6 +22,7 @@ const promise = @import("promise.zig");
 const vm = @import("vm.zig");
 const ContextMod = @import("context.zig");
 const jsthread = @import("jsthread.zig");
+const gc_runtime = @import("gc_runtime.zig");
 
 const Value = value.Value;
 const Object = value.Object;
@@ -181,6 +182,99 @@ fn finalizeEnv(e: *Environment) void {
     e.disposables = .empty;
 }
 
+fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
+    var released: usize = 0;
+    const flags = o.backing_flags;
+
+    if (flags.slots) {
+        o.slots.deinit(a);
+        o.slots = .empty;
+        released += 1;
+    }
+    if (flags.elements) {
+        o.elements.deinit(a);
+        o.elements = .empty;
+        released += 1;
+    }
+    if (flags.accessors) {
+        if (o.accessors) |acc| {
+            var it = acc.keyIterator();
+            while (it.next()) |key| a.free(key.*);
+            acc.deinit(a);
+            a.destroy(acc);
+            o.accessors = null;
+        }
+        released += 1;
+    }
+    if (flags.key_order) {
+        if (o.key_order) |ord| {
+            for (ord.items) |key| a.free(key);
+            ord.deinit(a);
+            a.destroy(ord);
+            o.key_order = null;
+        }
+        released += 1;
+    }
+    if (flags.attrs) {
+        if (o.attrs) |attrs| {
+            var it = attrs.keyIterator();
+            while (it.next()) |key| a.free(key.*);
+            attrs.deinit(a);
+            a.destroy(attrs);
+            o.attrs = null;
+        }
+        released += 1;
+    }
+    if (flags.holes) {
+        if (o.holes) |holes| {
+            holes.deinit(a);
+            a.destroy(holes);
+            o.holes = null;
+        }
+        released += 1;
+    }
+    if (flags.weak_entries) {
+        o.weak_entries.deinit(a);
+        o.weak_entries = .empty;
+        released += 1;
+    }
+    if (flags.finalization_records) {
+        o.finalization_records.deinit(a);
+        o.finalization_records = .empty;
+        released += 1;
+    }
+    if (flags.typed_array) {
+        if (o.typed_array) |ta| {
+            a.destroy(ta);
+            o.typed_array = null;
+        }
+        released += 1;
+    }
+    if (flags.data_view) {
+        if (o.data_view) |dv| {
+            a.destroy(dv);
+            o.data_view = null;
+        }
+        released += 1;
+    }
+    if (flags.temporal) {
+        if (o.temporal) |t| {
+            a.destroy(t);
+            o.temporal = null;
+        }
+        released += 1;
+    }
+    if (flags.arg_map_names) {
+        a.free(o.arg_map_names);
+        o.arg_map_names = &.{};
+        released += 1;
+    }
+
+    o.backing_flags = .{};
+    o.backing_allocator = null;
+    return released;
+}
+
 pub fn traceFunction(f: *interp.Function, v: anytype) void {
     markManaged(v, f.closure);
     v.mark(f.home_object);
@@ -220,6 +314,33 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
         markValue(v, req.value);
         v.mark(req.result);
     }
+}
+
+fn finalizeGenerator(g: *vm.Generator, a: std.mem.Allocator, live: *usize) void {
+    const flags = g.backing_flags;
+    var released: usize = 0;
+    if (flags.stack) {
+        g.exec.stack.deinit(a);
+        g.exec.stack = .empty;
+        released += 1;
+    }
+    if (flags.handlers) {
+        g.exec.handlers.deinit(a);
+        g.exec.handlers = .empty;
+        released += 1;
+    }
+    if (flags.requests) {
+        g.requests.deinit(a);
+        g.requests = .empty;
+        released += 1;
+    }
+    if (released > 0) {
+        std.debug.assert(live.* >= released);
+        live.* -= released;
+    }
+    g.backing_flags = .{};
+    g.backing_allocator = null;
+    g.backing_stores_live = null;
 }
 
 pub fn traceIterHelper(h: *value.IterHelper, v: anytype) void {
@@ -338,11 +459,16 @@ pub const Binding = struct {
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
+                const released = finalizeObjectBacking(o, self.context.gpa);
+                if (released > 0) {
+                    std.debug.assert(self.context.gc_object_backing_stores_live >= released);
+                    self.context.gc_object_backing_stores_live -= released;
+                }
                 if (o.array_buffer) |ab| {
                     if (ab.shared) |storage| {
-                        const released = self.context.sab_retains.releaseTracked(storage);
-                        std.debug.assert(released);
-                        if (released) ab.shared = null;
+                        const sab_released = self.context.sab_retains.releaseTracked(storage);
+                        std.debug.assert(sab_released);
+                        if (sab_released) ab.shared = null;
                     } else if (ab.gc_owned and ab.local_data.len > 0) {
                         self.context.gpa.rawFree(ab.local_data, .@"8", @returnAddress());
                         std.debug.assert(self.context.gc_array_buffer_bytes_live >= ab.local_data.len);
@@ -356,6 +482,11 @@ pub const Binding = struct {
                 }
             },
             .environment => finalizeEnv(@ptrCast(@alignCast(cell))),
+            .generator => finalizeGenerator(
+                @ptrCast(@alignCast(cell)),
+                self.context.gpa,
+                &self.context.gc_generator_backing_stores_live,
+            ),
             .promise => {
                 const p: *promise.Promise = @ptrCast(@alignCast(cell));
                 if (p.gc_owned) {
@@ -409,6 +540,15 @@ threadlocal var active_heap: ?*anyopaque = null;
 pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
     const prev = active_heap;
     active_heap = h;
+    if (h) |raw| {
+        const heap: *Heap = @ptrCast(@alignCast(raw));
+        _ = gc_runtime.setActive(.{ .object_backing = .{
+            .allocator = heap.backing,
+            .stores_live = &heap.ctx.context.gc_object_backing_stores_live,
+        } });
+    } else {
+        _ = gc_runtime.setActive(.{});
+    }
     return prev;
 }
 
@@ -431,11 +571,9 @@ pub fn allocObj(arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
 /// Per-side-cell allocation funnels — same thread-local-active-heap rule as
 /// `allocObj`, each tagged with its own `CellKind` so `trace`/`finalize`
 /// dispatch correctly. These make the *cell* heap uniform (every heap object a
-/// GC cell), the prerequisite for sound mid-run collection. (Cell
-/// sub-allocations still being migrated — `Object.slots`, generator queues,
-/// iterator buffers, … — are never passed to `mark`, so they pose no tracing
-/// hazard, only a reclaim-at-teardown vs reclaim-on-collect difference handled
-/// in later P7 slices.)
+/// GC cell), the prerequisite for sound quiescent-point collection. Known
+/// runtime side buffers owned by these cells are now either traced as ordinary
+/// fields or recorded as GC-owned backing stores and released by finalizers.
 fn allocCell(comptime T: type, kind: CellKind, arena: std.mem.Allocator) std.mem.Allocator.Error!*T {
     if (active_heap) |h| {
         const heap: *Heap = @ptrCast(@alignCast(h));
@@ -454,7 +592,17 @@ pub fn allocPromise(arena: std.mem.Allocator) std.mem.Allocator.Error!*promise.P
     return allocCell(promise.Promise, .promise, arena);
 }
 pub fn allocGenerator(arena: std.mem.Allocator) std.mem.Allocator.Error!*vm.Generator {
-    return allocCell(vm.Generator, .generator, arena);
+    const g = try allocCell(vm.Generator, .generator, arena);
+    initGeneratorBacking(g);
+    return g;
+}
+
+pub fn initGeneratorBacking(g: *vm.Generator) void {
+    if (active_heap) |h| {
+        const heap: *Heap = @ptrCast(@alignCast(h));
+        g.backing_allocator = heap.ctx.context.gpa;
+        g.backing_stores_live = &heap.ctx.context.gc_generator_backing_stores_live;
+    }
 }
 pub fn allocBoundFn(arena: std.mem.Allocator) std.mem.Allocator.Error!*interp.Interpreter.BoundFn {
     return allocCell(interp.Interpreter.BoundFn, .bound_fn, arena);

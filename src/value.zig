@@ -1,6 +1,7 @@
 const std = @import("std");
 const Shape = @import("shape.zig").Shape;
 const SharedBufferStorage = @import("shared_buffer.zig").SharedBufferStorage;
+const gc_runtime = @import("gc_runtime.zig");
 
 /// The C-ABI shape of a host (Zig/C) function exposed to JS via
 /// `JSObjectMakeFunctionWithCallback`. Kept here so both the interpreter and
@@ -439,13 +440,35 @@ pub const FinalizationRecord = struct {
     ready: bool = false,
 };
 
+pub const ObjectBackingFlags = packed struct {
+    slots: bool = false,
+    elements: bool = false,
+    accessors: bool = false,
+    key_order: bool = false,
+    attrs: bool = false,
+    holes: bool = false,
+    weak_entries: bool = false,
+    finalization_records: bool = false,
+    typed_array: bool = false,
+    data_view: bool = false,
+    temporal: bool = false,
+    arg_map_names: bool = false,
+};
+
 /// A JavaScript object. v1 keeps this deliberately small: a string-keyed
 /// property map, an optional dense array part, and three flavors of callable:
 /// a JS-defined function (`js_func`, type-erased `*Function` to avoid an
 /// import cycle with the interpreter), a Zig-native builtin (`native`), and a
-/// C-ABI host callback (`callback`). Everything is allocated in the owning
-/// Context's arena, so there is no per-object teardown yet.
+/// C-ABI host callback (`callback`). In arena mode, backing stores still share
+/// the owning Context's arena; in GC mode, migrated backing stores record their
+/// allocator so object finalization can reclaim them before Context teardown.
 pub const Object = struct {
+    /// Non-null when this object's lazily-allocated backing stores have moved
+    /// out of the arena for GC-mode reclamation. Individual flags below record
+    /// which stores actually use this allocator, so mixed legacy/GC state is
+    /// finalized accurately while migration is incremental.
+    backing_allocator: ?std.mem.Allocator = null,
+    backing_flags: ObjectBackingFlags = .{},
     /// Named properties live behind a shared `Shape` (null = no own properties)
     /// plus a flat per-object `slots` array indexed by the shape. See shape.zig.
     shape: ?*Shape = null,
@@ -638,6 +661,115 @@ pub const Object = struct {
     /// non-null on a Temporal object.
     temporal: ?*TemporalData = null,
 
+    fn activateBacking(self: *Object, comptime field: []const u8) ?std.mem.Allocator {
+        const state = gc_runtime.activeObjectBacking() orelse return null;
+        if (self.backing_allocator == null) self.backing_allocator = state.allocator;
+        if (!@field(self.backing_flags, field)) {
+            @field(self.backing_flags, field) = true;
+            if (state.stores_live) |live| live.* += 1;
+        }
+        return self.backing_allocator.?;
+    }
+
+    fn deactivateBacking(self: *Object, comptime field: []const u8) void {
+        if (!@field(self.backing_flags, field)) return;
+        @field(self.backing_flags, field) = false;
+        if (gc_runtime.activeObjectBacking()) |state| {
+            if (state.stores_live) |live| {
+                std.debug.assert(live.* > 0);
+                live.* -= 1;
+            }
+        }
+    }
+
+    fn backingFor(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
+        if (self.backing_allocator) |a| {
+            if (!@field(self.backing_flags, field)) {
+                if (self.activateBacking(field)) |active| return active;
+            }
+            return a;
+        }
+        return self.activateBacking(field) orelse fallback;
+    }
+
+    pub fn slotsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "slots");
+    }
+
+    pub fn elementsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "elements");
+    }
+
+    pub fn accessorsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "accessors");
+    }
+
+    pub fn keyOrderAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "key_order");
+    }
+
+    pub fn attrsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "attrs");
+    }
+
+    pub fn holesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "holes");
+    }
+
+    pub fn weakEntriesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "weak_entries");
+    }
+
+    pub fn finalizationRecordsAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "finalization_records");
+    }
+
+    pub fn typedArrayAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "typed_array");
+    }
+
+    pub fn dataViewAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "data_view");
+    }
+
+    pub fn temporalAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "temporal");
+    }
+
+    pub fn argMapNamesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backingFor(fallback, "arg_map_names");
+    }
+
+    pub fn resetSlotsForRebuild(self: *Object) void {
+        if (self.backing_flags.slots) {
+            self.slots.deinit(self.backing_allocator.?);
+            self.deactivateBacking("slots");
+        }
+        self.slots = .empty;
+    }
+
+    pub fn deinitKeyOrder(self: *Object) void {
+        if (self.key_order) |ord| {
+            if (self.backing_flags.key_order) {
+                const a = self.backing_allocator.?;
+                for (ord.items) |key| a.free(key);
+                ord.deinit(a);
+                a.destroy(ord);
+                self.deactivateBacking("key_order");
+            }
+        }
+        self.key_order = null;
+    }
+
+    pub fn replaceKeyOrder(self: *Object, arena: std.mem.Allocator, names: []const []const u8) std.mem.Allocator.Error!void {
+        self.deinitKeyOrder();
+        const alloc = self.keyOrderAllocator(arena);
+        const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
+        ko.* = .empty;
+        for (names) |name| try ko.append(alloc, try alloc.dupe(u8, name));
+        self.key_order = ko;
+    }
+
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {
         const h = self.holes orelse return false;
@@ -646,11 +778,12 @@ pub const Object = struct {
 
     /// Mark dense index `i` as a hole.
     pub fn markHole(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
+        const a = self.holesAllocator(arena);
         if (self.holes == null) {
-            self.holes = try arena.create(std.AutoHashMapUnmanaged(usize, void));
+            self.holes = try a.create(std.AutoHashMapUnmanaged(usize, void));
             self.holes.?.* = .{};
         }
-        try self.holes.?.put(arena, i, {});
+        try self.holes.?.put(a, i, {});
     }
 
     /// Clear the hole at index `i` (an assignment fills it).
@@ -763,12 +896,13 @@ pub const Object = struct {
 
     /// Record an attribute override for `name`.
     pub fn setAttr(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
+        const alloc = self.attrsAllocator(arena);
         if (self.attrs == null) {
-            self.attrs = try arena.create(std.StringHashMapUnmanaged(PropAttr));
+            self.attrs = try alloc.create(std.StringHashMapUnmanaged(PropAttr));
             self.attrs.?.* = .{};
         }
-        const gop = try self.attrs.?.getOrPut(arena, name);
-        if (!gop.found_existing) gop.key_ptr.* = try arena.dupe(u8, name);
+        const gop = try self.attrs.?.getOrPut(alloc, name);
+        if (!gop.found_existing) gop.key_ptr.* = try alloc.dupe(u8, name);
         gop.value_ptr.* = a;
     }
 
@@ -792,13 +926,14 @@ pub const Object = struct {
     /// Define/merge an own accessor (get and/or set). Promotes the name to an
     /// accessor property.
     pub fn setAccessor(self: *Object, arena: std.mem.Allocator, name: []const u8, get: ?Value, set: ?Value) std.mem.Allocator.Error!void {
+        const alloc = self.accessorsAllocator(arena);
         if (self.accessors == null) {
-            self.accessors = try arena.create(std.StringHashMapUnmanaged(Accessor));
+            self.accessors = try alloc.create(std.StringHashMapUnmanaged(Accessor));
             self.accessors.?.* = .{};
         }
-        const gop = try self.accessors.?.getOrPut(arena, name);
+        const gop = try self.accessors.?.getOrPut(alloc, name);
         if (!gop.found_existing) {
-            gop.key_ptr.* = try arena.dupe(u8, name);
+            gop.key_ptr.* = try alloc.dupe(u8, name);
             gop.value_ptr.* = .{};
             // First accessor on this object: start key_order by snapshotting the
             // existing data keys (shape-chain insertion order), so the new
@@ -816,23 +951,26 @@ pub const Object = struct {
     fn recordKeyOrder(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
         const ko = self.key_order orelse return;
         for (ko.items) |e| if (std.mem.eql(u8, e, name)) return;
-        try ko.append(arena, try arena.dupe(u8, name));
+        const alloc = self.keyOrderAllocator(arena);
+        try ko.append(alloc, try alloc.dupe(u8, name));
     }
 
     /// Lazily build `key_order`, seeding it with the current data keys in
     /// insertion order (the order the shape chain already encodes).
     fn ensureKeyOrder(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
         if (self.key_order != null) return;
-        const ko = try arena.create(std.ArrayListUnmanaged([]const u8));
+        const alloc = self.keyOrderAllocator(arena);
+        const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
         ko.* = .empty;
         var seed: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer seed.deinit(arena);
         var s = self.shape;
         while (s) |sh| {
             if (sh.name) |n| try seed.append(arena, n);
             s = sh.parent;
         }
         std.mem.reverse([]const u8, seed.items); // newest-first → insertion order
-        try ko.appendSlice(arena, seed.items);
+        for (seed.items) |n| try ko.append(alloc, try alloc.dupe(u8, n));
         self.key_order = ko;
     }
 
@@ -856,7 +994,7 @@ pub const Object = struct {
         }
         const base = self.shape orelse root;
         const child = try base.transition(name);
-        try self.slots.append(arena, v); // new slot index == base.count == child.slot
+        try self.slots.append(self.slotsAllocator(arena), v); // new slot index == base.count == child.slot
         self.shape = child;
         // A new data key on an accessor-bearing object records its creation order
         // (a data↔accessor conversion keeps its position; deleteOwn drops stale

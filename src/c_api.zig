@@ -322,7 +322,7 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
     obj.* = .{ .is_array = true };
     var i: usize = 0;
     while (i < argc) : (i += 1) {
-        obj.elements.append(c.arena(), unbox(argv[i])) catch return null;
+        obj.elements.append(obj.elementsAllocator(c.arena()), unbox(argv[i])) catch return null;
     }
     return box(c, .{ .object = obj });
 }
