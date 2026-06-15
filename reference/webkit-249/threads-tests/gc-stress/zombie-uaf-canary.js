@@ -38,8 +38,11 @@
 //     shape — covering the stub-outlives-structure / recycled-StructureID
 //     family the survivor-pinned generation loop cannot reach.
 //
-// Runtime: bounded — 24 generations x 300-object waves, 8 structure-death
-// generations x 64-object waves, 2 churn threads stopped via Atomics gate.
+// Runtime: bounded. The zig-js default corpus keeps this as a correctness
+// smoke, not the opt-in gc-stress-matrix pressure run: quiescent `$vm.gc()`
+// requests are deferred until the script leaves the tree-walker stack, so the
+// high-pressure WebKit sizing would mostly measure interpreter allocation
+// throughput instead of stale-pointer coverage.
 
 load("../harness.js", "caller relative");
 
@@ -48,8 +51,8 @@ const CANARY = 0xc0de;
 const VALUE_A = 31;
 const VALUE_B = 47;
 const EXPECTED = new Set([VALUE_A, VALUE_B]);
-const GENERATIONS = 24;
-const WAVE = 300;
+const GENERATIONS = 4;
+const WAVE = 48;
 const CHURN_THREADS = 2;
 
 // Shape A: f out-of-line at a late offset; all neighbors poisoned.
@@ -203,9 +206,9 @@ for (let gen = 0; gen < GENERATIONS; ++gen) {
 //     stale stub, passing vacuously).
 // Churners are intentionally still running: cross-thread allocator reuse
 // overlaps the structure deaths.
-const DEAD_GENS = 8;
-const DEAD_WAVE = 64;
-const DEAD_WARM = 2000;
+const DEAD_GENS = 3;
+const DEAD_WAVE = 24;
+const DEAD_WARM = 300;
 
 function makeGenObject(gen) {
     const o = {};

@@ -25,10 +25,10 @@
 //   3. The process exits cleanly with all asyncTestPassed() fired (a lost
 //      settle = unfulfilled asyncTestStart = non-zero exit).
 //
-// EXECUTED POST-UNGIL ONLY (do not run against the mid-bring-up tree).
-// Amplifier-ready: the interesting windows are the 5.10-lambda vs settle
-// vs conducted-sweep interleavings; RaceAmplifier stall points already sit
-// on the detach/exit paths (ThreadManager.cpp EXIT1.8).
+// Promoted in this engine under the current GIL model. Amplifier-ready for
+// Layer C: the interesting windows are the 5.10-lambda vs settle vs
+// conducted-sweep interleavings; RaceAmplifier stall points already sit on
+// the detach/exit paths (ThreadManager.cpp EXIT1.8).
 load("../harness.js", "caller relative");
 
 const WAVES = 8;

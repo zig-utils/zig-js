@@ -19,10 +19,10 @@
 // property value, a type confusion at the read, or a crash. Any of those =
 // I12/§10A violation (collector reclaimed under a live native frame).
 //
-// EXECUTED POST-UNGIL ONLY (do not run against the mid-bring-up tree).
-// Deterministic: the rendezvous guarantees the GC storm runs strictly
-// inside the park window. Also meaningful (weaker) under the phase-1 GIL,
-// where the property-path wait drops the GIL instead.
+// Promoted in this engine under the current GIL model. Deterministic: the
+// rendezvous guarantees the GC storm runs strictly inside the park window.
+// Also meaningful (weaker) before Layer C, where the property-path wait drops
+// the GIL instead.
 load("../harness.js", "caller relative");
 
 const CELLS = 3000;

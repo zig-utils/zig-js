@@ -25,8 +25,9 @@
 // JSThreadsSafepoint::stopTheWorldAndRun (SPEC-jit §5.3 choke point), which
 // GIL-off takes the real §A.3 thread-granular conductor.
 //
-// EXECUTED POST-UNGIL ONLY. Deterministic pass criterion: all ROUNDS stops
-// complete well under the 30s watchdog while SPINNERS siblings burn JS.
+// Promoted in this engine under the current GIL model. Deterministic pass
+// criterion: all ROUNDS stops complete well under the 30s watchdog while
+// SPINNERS siblings burn JS.
 load("../harness.js", "caller relative");
 
 const SPINNERS = 3;

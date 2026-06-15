@@ -23,7 +23,8 @@
 // element, or crash is a hit. (w2) may also surface later as a GC crash under
 // the allocation churn below.
 //
-// EXECUTED POST-UNGIL ONLY (phase-1 GIL fully masks the window).
+// Promoted in this engine under the current GIL model; the same file remains
+// a Layer-C witness where true parallel mutation can expose the window.
 // Amplifier-ready: the high-value hook points are the N3 nuke-CAS and the E4
 // owner setStructure publication.
 load("../harness.js", "caller relative");

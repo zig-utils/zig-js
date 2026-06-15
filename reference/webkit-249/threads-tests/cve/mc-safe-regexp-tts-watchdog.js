@@ -25,9 +25,9 @@
 //
 // PASS criterion (post-fix): the jettison's stop completes in < 25s.
 //
-// EXECUTED POST-UNGIL ONLY. Run this test LAST / isolated: in the
-// susceptible state it takes ~32s to crash; in the fixed state ~tens of
-// seconds bounded by the calibrated regexp + watchdog termination.
+// Promoted in this engine under the current GIL model. In the susceptible
+// state it takes ~32s to crash; in the fixed state it is bounded by the
+// calibrated regexp + watchdog termination.
 load("../harness.js", "caller relative");
 
 const gate = { started: 0, calibratedN: 0 };

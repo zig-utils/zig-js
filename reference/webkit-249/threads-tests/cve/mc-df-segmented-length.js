@@ -14,9 +14,9 @@
 // writer ever stored at that index (i, after any round: still i) or a hole
 // (undefined). Garbage, a torn JSValue, or a crash = I33/C4 violation.
 //
-// EXECUTED POST-UNGIL ONLY. forceButterflySWBit pushes every write through
-// the foreign-write path so growth takes the T2 spine-replacement route
-// (maximizes spine churn). Amplifier-ready.
+// Promoted in this engine under the current GIL model. forceButterflySWBit
+// pushes every write through the foreign-write path so growth takes the T2
+// spine-replacement route (maximizes spine churn). Amplifier-ready for Layer C.
 load("../harness.js", "caller relative");
 
 const CAP = 4096;

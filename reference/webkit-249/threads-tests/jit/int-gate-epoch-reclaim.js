@@ -58,7 +58,7 @@ const dispatchers = (typeof Thread === "function" && THREADS > 0) ? spawnN(THREA
             throw new Error("dispatcher " + slot + " read through a freed/torn handler: " + v);
         ++n;
         if (!(n % 128))
-            sleepMs(0); // safepoint/park opportunity (the epoch-crossing event)
+            sleepMs(1); // safepoint/park opportunity (the epoch-crossing event)
     }
     return n;
 }) : [];

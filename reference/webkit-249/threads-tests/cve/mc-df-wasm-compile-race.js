@@ -18,8 +18,9 @@
 // yields a module whose exported f() returns 1 or 2. Any other result, or a
 // crash in the parser/compiler, is the CVE-2017-5116 analog firing.
 //
-// EXECUTED POST-UNGIL ONLY. Amplifier-ready (nondeterministic interleaving;
-// deterministic oracle).
+// Promoted in this engine under the current no-WebAssembly/refusal behavior.
+// Amplifier-ready for Layer C (nondeterministic interleaving; deterministic
+// oracle).
 load("../harness.js", "caller relative");
 
 // FIXME(U-T13/MC-LIFE-S6): this premise-skip self-retires when the GIL-off

@@ -21,8 +21,9 @@
 //  - no crash / RELEASE_ASSERT (I35 word-stability traps are part of the
 //    protocol, not legal-program outcomes).
 //
-// EXECUTED POST-UNGIL ONLY. Amplifier-ready: tighten with the race amplifier
-// at the cell-lock acquire and casButterfly hooks.
+// Promoted in this engine under the current GIL model. Amplifier-ready for
+// Layer C: tighten with the race amplifier at the cell-lock acquire and
+// casButterfly hooks.
 load("../harness.js", "caller relative");
 
 const ROUNDS = 2000;

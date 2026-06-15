@@ -38,9 +38,8 @@
 // not the 20-50x a first draft assumed — and the 2026-06-07 Validate smoke
 // (Debug+ASAN, GIL-on) measured allocation-heavy workloads closer to
 // 500-1000x, so the margin is now sized from MEASUREMENT, not arithmetic:
-// at 1/128 the slowest corpus workload (string-heavy) timed ~24s on that
-// build (map-heavy ~18s, splay-like ~14s; raytrace-like additionally had
-// its fixed per-frame pixel cost quartered — see its header).
+// at 1/512 the slowest corpus workloads stay bounded inside the zig-js full
+// debug corpus while still exercising the same checksum and rendezvous paths.
 //
 // Self-checking: the workload runs twice on the calling thread first (warm-up
 // for the JIT tiers AND a determinism check — run 2 must reproduce run 1's
@@ -64,9 +63,10 @@ function scalingThreadCount() {
 // 2026-06-07 smoke recalibration: the original 1/32 was sized for ~200x
 // slowdown, but the Debug+ASAN GIL-on build measured closer to 500-1000x on
 // allocation-heavy workloads (map-heavy 40s, string-heavy 56s at 1/64;
-// 18s / 24s at 1/128). 1/128 keeps every workload under ~25s there while
-// release builds still get non-trivial work.
-const CORPUS_DEFAULT_SCALE = 0.0078125;
+// 18s / 24s at 1/128). Zig 0.17-dev debug full-corpus runs need 1/512 to keep
+// the aggregate `zig build threads-test` command practical; release/gate runs
+// still get non-trivial work by passing SCALING_WORK_SCALE explicitly.
+const CORPUS_DEFAULT_SCALE = 0.001953125;
 
 function scalingWorkScale() {
     const s = globalThis.SCALING_WORK_SCALE;

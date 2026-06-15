@@ -1,11 +1,6 @@
 //@ requireOptions("--useJSThreads=1")
-// FIXME: skipped under the phase-1 GIL stub. Thread.restrict records the
-// owner in ThreadManager's affinity table, but the property-access choke
-// point (threadRestrictCheck in runtime/ThreadManager.h, SPEC-api 5.7) is
-// declared and never called from any proxyable-operation site yet, so
-// foreign reads/writes/deletes on a restricted object succeed instead of
-// throwing ConcurrentAccessError. Re-enable (rename away the .skip suffix)
-// once the 5.7 choke point is wired into property access.
+// SPEC-api 5.7: Thread.restrict wires the foreign-thread access choke point
+// through ordinary property access, mutation, deletion, and enumeration.
 load("../resources/assert.js", "caller relative");
 
 const restricted = Thread.restrict({ secret: 1, toDelete: 2 });

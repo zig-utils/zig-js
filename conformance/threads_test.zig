@@ -6,8 +6,8 @@
 //! copied — see reference/webkit-249/README.md licensing notes).
 //!
 //! The allowlist below is the green set; it grows as API surface lands.
-//! Files needing machinery a GIL'd tree-walker structurally lacks (JIT/GC
-//! stress, $vm hooks) stay reference-only.
+//! Files needing machinery a GIL'd tree-walker structurally lacks (some JIT/GC
+//! stress, WebAssembly, and $vm hooks) stay reference-only.
 
 const std = @import("std");
 const js = @import("js");
@@ -38,6 +38,7 @@ const allowlist = [_][]const u8{
     "lifecycle/join-semantics.js",
     "lifecycle/nested-threads.js",
     "lifecycle/restrict.js",
+    "lifecycle/restrict-foreign-access.js",
     "lifecycle/return-values.js",
     "lifecycle/async-join.js",
     "arrays/copy-on-write.js",
@@ -59,9 +60,12 @@ const allowlist = [_][]const u8{
     "cve/mc-df-delete-reuse.js",
     "cve/mc-df-segmented-length.js",
     "cve/mc-df-ta-detach-resize.js",
+    "cve/mc-df-wasm-compile-race.js",
     "cve/mc-dos-waiter-table-storm.js",
     "cve/mc-gc-blocked-native-roots.js",
+    "cve/mc-gc-finreg-cross-thread-gc.js",
     "cve/mc-gc-thread-shell-finalizer-storm.js",
+    "cve/mc-grow-wasm-relocating-grow.js",
     "cve/mc-hand-dead-registrant-settle.js",
     "cve/mc-hand-restrict-claim.js",
     "cve/mc-init-lazy-global-first-touch.js",
@@ -69,6 +73,7 @@ const allowlist = [_][]const u8{
     "cve/mc-int-resizable-tail-quarantine.js",
     "cve/mc-life-detach-quarantine-storm.js",
     "cve/mc-life-sab-refchurn.js",
+    "cve/mc-life-wasm-grow-relocate.js",
     "cve/mc-lock-cow-materialize-race.js",
     "cve/mc-lock-n3-install-vs-owner-add.js",
     "cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
@@ -99,10 +104,12 @@ const allowlist = [_][]const u8{
     "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
     "jit/ftl-osr-entry-catch-loop-amplifier.js",
     "jit/golden-disasm-corpus.js",
+    "jit/int-gate-epoch-reclaim.js",
     "jit/int-gate-fire-vs-execute.js",
     "jit/int-gate-direct-call-relink.js",
     "jit/int-gate-jettison-vs-execute.js",
     "jit/int-gate-stop-budget.js",
+    "jit/shared-arraystorage-stress.js",
     "jit/spawned-thread-butterfly-stress.js",
     "jit/tag-discipline.js",
     "jit/tid-tag-3-threads.js",
@@ -146,8 +153,16 @@ const allowlist = [_][]const u8{
     "races/transition-vs-read.js",
     "races/transition-vs-write.js",
     "races/wait-notify-storm.js",
+    "heap-access-blocking.js",
+    "heap-allocation-storm.js",
     "heap-bench-allocation.js",
+    "heap-client-churn.js",
+    "heap-deferral-storm.js",
+    "heap-epoch-reclaim.js",
+    "heap-iss-revert.js",
     "heap-option-off.js",
+    "heap-precise-storm.js",
+    "heap-stop-interleavings.js",
     "invariants/delete-quarantine-dictionary.js",
     "invariants/delete-quarantine.js",
     "invariants/no-lost-elements.js",
@@ -386,8 +401,16 @@ pub fn main(init: std.process.Init) !void {
                     std.debug.print("  FAIL  {s}: returned normally under termination\n", .{name});
                     continue;
                 }
-                const balanced = ctx.evaluate("__asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undefined;
-                if (balanced == .boolean and balanced.boolean) {
+                var balanced = false;
+                for (0..3000) |_| {
+                    const status = ctx.evaluate("drainMicrotasks(); __asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undefined;
+                    if (status == .boolean and status.boolean) {
+                        balanced = true;
+                        break;
+                    }
+                    std.Io.sleep(js.agent.engineIo(), .fromMilliseconds(10), .awake) catch {};
+                }
+                if (balanced) {
                     std.debug.print("  PASS  {s}\n", .{name});
                 } else {
                     failed += 1;
@@ -404,6 +427,12 @@ pub fn main(init: std.process.Init) !void {
                         std.debug.print("  FAIL  {s}: D9 violated\n", .{name});
                     }
                     continue;
+                }
+                if (ctx.exception) |e| {
+                    if (e == .string and std.mem.eql(u8, e.string, "__zigjs_threads_quit__")) {
+                        std.debug.print("  PASS  {s}\n", .{name});
+                        continue;
+                    }
                 }
                 failed += 1;
                 // Stringifying the exception can run JS (Error.prototype.toString):

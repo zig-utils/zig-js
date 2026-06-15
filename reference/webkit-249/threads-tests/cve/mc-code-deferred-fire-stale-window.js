@@ -25,8 +25,8 @@
 // The window is publication-to-stop — narrow and scheduler-dependent — so
 // this is an AMPLIFIER-READY race test, not deterministic: bounded loops
 // here, the amplifier widens the window (and arm64 weak ordering helps the
-// attacker). EXECUTED POST-UNGIL ONLY (single-mutator GIL closes the window
-// by construction — that is precisely why the precondition is open).
+// attacker). In this engine the deterministic oracle is part of the default
+// GIL corpus; the same file remains an amplifier-ready Layer-C witness.
 load("../harness.js", "caller relative");
 
 const READERS = 3;

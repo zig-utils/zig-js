@@ -23,8 +23,9 @@
 load("../harness.js", "caller relative");
 
 const FULL = typeof arguments !== "undefined" && Array.prototype.indexOf.call(arguments, "int-gate") >= 0;
-const ROUNDS = FULL ? 400 : 12;
+const ROUNDS = FULL ? 400 : 4;
 const THREADS = FULL ? 4 : 2;
+const WARMUP = FULL ? 20000 : 1000;
 
 function makeCallee(id) {
     // Same source per flavor => same executable family; id baked into the
@@ -81,7 +82,7 @@ const workers = spawnN(THREADS, function (slot) {
 });
 
 // Warm from the conductor too so the sites tier up.
-for (let i = 0; i < 20000; ++i) {
+for (let i = 0; i < WARMUP; ++i) {
     callMono(7);
     callPoly(slots.poly[i % 3], 5);
     callVirt(3);

@@ -14,9 +14,9 @@
 // detached). ANY other value is a torn {length, base} pair = N6 violation.
 // A crash (unmapped base under a passing length) is the CVE-grade outcome.
 //
-// EXECUTED POST-UNGIL ONLY (written during bring-up; do not run against the
-// phase-1 GIL tree expecting signal — under the GIL it is trivially green).
-// Amplifier-ready: Tools/threads/amplify.sh + the TSAN no-JIT target.
+// Promoted in this engine under the current GIL model; under the GIL it is a
+// deterministic lifetime/refusal guard. Amplifier-ready for Layer C:
+// Tools/threads/amplify.sh + the TSAN no-JIT target.
 load("../harness.js", "caller relative");
 
 const SENTINEL = 0xab;

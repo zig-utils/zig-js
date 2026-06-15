@@ -1,11 +1,8 @@
 //@ requireOptions("--useJSThreads=1")
 // API-I14: Thread.restrict + ConcurrentAccessError (SPEC-api 4.1, 5.7, Dev 8/11).
 //
-// SKIPPED until the 9.2-6 choke-point hook is INTEGRATOR-applied (I14: "INT
-// gate via 9.2-6; //@ skipped until then"). The exclusion/idempotency/owner
-// halves would pass without the hook, but the foreign-thread CAE half cannot,
-// so the whole file stays skipped to keep CI green until integration; the
-// integrator deletes the `//@ skip` line when applying the 9.2-6 diff.
+// The 9.2-6 choke-point hook is wired in this engine: foreign-thread access
+// through the enforced operations below throws ConcurrentAccessError.
 //
 // Covered (I14):
 // - every Dev-8 enforced op from a thread != T throws ConcurrentAccessError:

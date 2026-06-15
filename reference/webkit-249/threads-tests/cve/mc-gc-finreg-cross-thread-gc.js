@@ -27,7 +27,9 @@
 // test therefore never requires all N cleanups, only exactly-once semantics
 // for those delivered, plus at-least-one delivery.
 //
-// EXECUTED POST-UNGIL ONLY (do not run against the mid-bring-up tree).
+// This engine's P7 cleanup queue now delivers the spawned-conductor cleanup
+// job under the current GIL model, so the witness is part of the default
+// corpus even before Layer-C GIL removal.
 load("../harness.js", "caller relative");
 
 asyncTestStart(1);

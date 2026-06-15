@@ -26,7 +26,8 @@
 // PHYSICALLY observable on arm64 multi-core (stale i-cache lines), so this
 // test is both a correctness check everywhere and the amplifier arm's
 // skeleton for arm64 hardware (run many rounds, pin threads to distinct
-// cores). EXECUTED POST-UNGIL ONLY.
+// cores). In this engine the deterministic oracle is part of the default
+// GIL corpus; the same file remains an amplifier-ready Layer-C witness.
 load("../harness.js", "caller relative");
 
 const ROUNDS = 200;

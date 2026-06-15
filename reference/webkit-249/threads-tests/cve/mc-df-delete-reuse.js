@@ -17,8 +17,9 @@
 // A reader observing o.f === SENT_G (or vice versa) is offset-reuse type
 // confusion = I18 violation. NaN-boxed garbage / crash = worse.
 //
-// EXECUTED POST-UNGIL ONLY. Amplifier-ready; GC pressure (the epoch source)
-// comes from the churn allocation in the writer loop.
+// Promoted in this engine under the current GIL model. It remains
+// amplifier-ready for Layer C; GC pressure (the epoch source) comes from the
+// churn allocation in the writer loop.
 load("../harness.js", "caller relative");
 
 const SENT_F = 0x0f0f0f;
