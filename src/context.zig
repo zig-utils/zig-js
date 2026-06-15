@@ -904,6 +904,14 @@ test "Array.prototype generics on array-likes" {
         \\var o = { length: 2, 0: 10, 1: 20 };
         \\Array.prototype.every.call(o, function (x) { return x >= 10; })
     )).boolean);
+    try std.testing.expect((try evalIn(
+        \\var hit = false;
+        \\var p = new Proxy({ length: 1, 0: 42 }, {
+        \\  has: function () { hit = true; throw new Error("has"); }
+        \\});
+        \\try { Array.prototype.copyWithin.call(p, 0, 0); false; }
+        \\catch (e) { hit && e.message === "has"; }
+    )).boolean);
 }
 
 test "array instances inherit from Array.prototype (incl. holes)" {

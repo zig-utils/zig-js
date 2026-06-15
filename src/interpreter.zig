@@ -7725,7 +7725,7 @@ pub const Interpreter = struct {
     /// Whether array/array-like index `i` is present (own dense non-hole, own
     /// sparse named, or inherited) — the HasProperty the iteration methods use to
     /// skip holes.
-    fn arrIndexPresent(self: *Interpreter, o: *value.Object, i: usize) bool {
+    fn arrIndexPresent(self: *Interpreter, o: *value.Object, i: usize) EvalError!bool {
         // Dense fast path: a real (non-hole) in-range element of a plain array
         // is definitely present — no per-index string allocation. A *hole*
         // falls through, because an index property inherited from the prototype
@@ -7735,8 +7735,8 @@ pub const Interpreter = struct {
         if (o.typed_array) |ta| {
             if (i < (ta.currentLength() orelse 0)) return true;
         }
-        const ks = std.fmt.allocPrint(self.arena, "{d}", .{i}) catch return false;
-        return objectHasOwn(o, ks) or hasProperty(o, ks);
+        const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        return try self.hasPropertyResult(o, ks);
     }
 
     /// `o[i]` via [[Get]] (so an accessor index runs its getter, and inherited
@@ -7781,7 +7781,7 @@ pub const Interpreter = struct {
         var j: usize = 0;
         while (j < slen) : (j += 1) {
             if (j > (1 << 22)) return self.throwError("TypeError", "Invalid array length");
-            if (self.arrIndexPresent(src, j)) {
+            if (try self.arrIndexPresent(src, j)) {
                 try self.arrayResultPush(dst, n.*, try self.arrIndexGet(src, j));
             } else if (dense) {
                 const base = dst.object.elements.items.len;
@@ -8016,7 +8016,7 @@ pub const Interpreter = struct {
             while (k < ilen) : (k += 1) {
                 const from = try std.fmt.allocPrint(self.arena, "{d}", .{k});
                 const to = try std.fmt.allocPrint(self.arena, "{d}", .{k - 1});
-                if (self.arrIndexPresent(o, k)) try self.setMember(.{ .object = o }, to, try self.getProperty(.{ .object = o }, from)) else _ = try self.deleteOwn(o, to);
+                if (try self.arrIndexPresent(o, k)) try self.setMember(.{ .object = o }, to, try self.getProperty(.{ .object = o }, from)) else _ = try self.deleteOwn(o, to);
             }
             _ = try self.deleteOwn(o, try std.fmt.allocPrint(self.arena, "{d}", .{ilen - 1}));
             try self.setMember(.{ .object = o }, "length", .{ .number = @floatFromInt(ilen - 1) });
@@ -8031,7 +8031,7 @@ pub const Interpreter = struct {
                 var k: usize = len;
                 while (k > 0) : (k -= 1) {
                     const to = k - 1 + args.len;
-                    if (self.arrIndexPresent(o, k - 1))
+                    if (try self.arrIndexPresent(o, k - 1))
                         try self.arraySetIndexThrowing(o, to, try self.arrIndexGet(o, k - 1))
                     else
                         _ = try self.deleteOwn(o, try std.fmt.allocPrint(self.arena, "{d}", .{to}));
@@ -8053,7 +8053,7 @@ pub const Interpreter = struct {
             if (!o.is_array and ilen <= (1 << 22)) {
                 var i = k;
                 while (i < ilen) : (i += 1) {
-                    if (self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                    if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
                         return Value{ .number = @floatFromInt(i) };
                 }
                 return Value{ .number = -1 };
@@ -8062,7 +8062,7 @@ pub const Interpreter = struct {
             const dense_hi = @min(o.elements.items.len, ilen);
             var i = k;
             while (i < dense_hi) : (i += 1) {
-                if (self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
                     return Value{ .number = @floatFromInt(i) };
             }
             // Sparse scan: named integer-index properties in ascending order, so
@@ -8144,7 +8144,7 @@ pub const Interpreter = struct {
             var i = start;
             var k: usize = 0; // result index, for hole preservation
             while (i < end) : (i += 1) {
-                if (self.arrIndexPresent(o, i)) {
+                if (try self.arrIndexPresent(o, i)) {
                     try self.arrayResultPush(result, k, try self.arrIndexGet(o, i)); // CreateDataPropertyOrThrow
                 } else if (dense) { // slice preserves holes on a plain dense result
                     try result.object.elements.append(result.object.elementsAllocator(self.arena), .undefined);
@@ -8182,9 +8182,9 @@ pub const Interpreter = struct {
             var lower: usize = 0;
             while (lower != middle) : (lower += 1) {
                 const upper = ilen - lower - 1;
-                const lower_exists = self.arrIndexPresent(o, lower);
+                const lower_exists = try self.arrIndexPresent(o, lower);
                 const lower_val: Value = if (lower_exists) try self.arrIndexGet(o, lower) else .undefined;
-                const upper_exists = self.arrIndexPresent(o, upper);
+                const upper_exists = try self.arrIndexPresent(o, upper);
                 const upper_val: Value = if (upper_exists) try self.arrIndexGet(o, upper) else .undefined;
                 if (lower_exists and upper_exists) {
                     try self.arrIndexSetOrThrow(o, lower, upper_val);
@@ -8277,7 +8277,7 @@ pub const Interpreter = struct {
             const dense = result.object.is_array and result.object.accessors == null and result.object.attrs == null and result.object.proxy_handler == null;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!self.arrIndexPresent(o, i)) {
+                if (!(try self.arrIndexPresent(o, i))) {
                     if (dense) {
                         try result.object.elements.append(result.object.elementsAllocator(self.arena), .undefined);
                         try result.object.markHole(self.arena, i); // map preserves holes
@@ -8296,7 +8296,7 @@ pub const Interpreter = struct {
             var i: usize = 0;
             var ridx: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!self.arrIndexPresent(o, i)) continue; // skip holes (filter packs)
+                if (!(try self.arrIndexPresent(o, i))) continue; // skip holes (filter packs)
                 const el = try self.arrIndexGet(o, i);
                 if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean()) {
                     try self.arrayResultPush(result, ridx, el); // CreateDataPropertyOrThrow
@@ -8309,7 +8309,7 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!self.arrIndexPresent(o, i)) continue; // skip holes
+                if (!(try self.arrIndexPresent(o, i))) continue; // skip holes
                 const el = try self.arrIndexGet(o, i);
                 _ = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
             }
@@ -8319,7 +8319,7 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!self.arrIndexPresent(o, i)) continue;
+                if (!(try self.arrIndexPresent(o, i))) continue;
                 const el = try self.arrIndexGet(o, i);
                 if ((try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return Value{ .boolean = true };
@@ -8330,7 +8330,7 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!self.arrIndexPresent(o, i)) continue;
+                if (!(try self.arrIndexPresent(o, i))) continue;
                 const el = try self.arrIndexGet(o, i);
                 if (!(try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this)).toBoolean())
                     return Value{ .boolean = false };
@@ -8355,13 +8355,13 @@ pub const Interpreter = struct {
                 acc = args[1];
             } else {
                 // Seed with the first *present* element; empty (all-hole) → throw.
-                while (i < ilen and !self.arrIndexPresent(o, i)) i += 1;
+                while (i < ilen and !(try self.arrIndexPresent(o, i))) i += 1;
                 if (i >= ilen) return self.throwError("TypeError", "Reduce of empty array with no initial value");
                 acc = try self.arrIndexGet(o, i);
                 i += 1;
             }
             while (i < ilen) : (i += 1) {
-                if (!self.arrIndexPresent(o, i)) continue; // skip holes
+                if (!(try self.arrIndexPresent(o, i))) continue; // skip holes
                 const el = try self.arrIndexGet(o, i);
                 acc = try self.callValue(cb, &.{ acc, el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
             }
@@ -8374,14 +8374,14 @@ pub const Interpreter = struct {
             if (args.len >= 2) {
                 acc = args[1];
             } else {
-                while (i > 0 and !self.arrIndexPresent(o, i - 1)) i -= 1;
+                while (i > 0 and !(try self.arrIndexPresent(o, i - 1))) i -= 1;
                 if (i == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
                 i -= 1;
                 acc = try self.arrIndexGet(o, i);
             }
             while (i > 0) {
                 i -= 1;
-                if (!self.arrIndexPresent(o, i)) continue;
+                if (!(try self.arrIndexPresent(o, i))) continue;
                 const el = try self.arrIndexGet(o, i);
                 acc = try self.callValue(cb, &.{ acc, el, .{ .number = @floatFromInt(i) }, .{ .object = o } });
             }
@@ -8419,7 +8419,7 @@ pub const Interpreter = struct {
                 var i = start + 1;
                 while (i > 0) {
                     i -= 1;
-                    if (self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                    if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
                         return Value{ .number = @floatFromInt(i) };
                 }
                 return Value{ .number = -1 };
@@ -8438,7 +8438,7 @@ pub const Interpreter = struct {
             var i = @min(start + 1, dense_hi);
             while (i > 0) {
                 i -= 1;
-                if (self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
                     return Value{ .number = @floatFromInt(i) };
             }
             return Value{ .number = -1 };
@@ -8484,7 +8484,7 @@ pub const Interpreter = struct {
             var present: std.ArrayListUnmanaged(Value) = .empty;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (self.arrIndexPresent(o, i)) try present.append(self.arena, try self.arrIndexGet(o, i));
+                if (try self.arrIndexPresent(o, i)) try present.append(self.arena, try self.arrIndexGet(o, i));
             }
             const ps = present.items;
             var a_i: usize = 1;
@@ -8529,7 +8529,7 @@ pub const Interpreter = struct {
             const rdense = removed.object.is_array and removed.object.accessors == null and removed.object.attrs == null and removed.object.proxy_handler == null;
             var i: usize = 0;
             while (i < del) : (i += 1) {
-                if (self.arrIndexPresent(o, start + i)) {
+                if (try self.arrIndexPresent(o, start + i)) {
                     try self.arrayResultPush(removed, i, try self.arrIndexGet(o, start + i)); // CreateDataPropertyOrThrow
                 } else if (rdense) { // preserve a hole in the removed array
                     try removed.object.elements.append(removed.object.elementsAllocator(self.arena), .undefined);
@@ -8555,7 +8555,7 @@ pub const Interpreter = struct {
             if (item_count < del) {
                 var k = start;
                 while (k < len - del) : (k += 1) {
-                    if (self.arrIndexPresent(o, k + del))
+                    if (try self.arrIndexPresent(o, k + del))
                         try self.arrIndexSetOrThrow(o, k + item_count, try self.arrIndexGet(o, k + del))
                     else
                         try self.arrIndexDeleteOrThrow(o, k + item_count);
@@ -8565,7 +8565,7 @@ pub const Interpreter = struct {
             } else if (item_count > del) {
                 var k = len - del;
                 while (k > start) : (k -= 1) {
-                    if (self.arrIndexPresent(o, k + del - 1))
+                    if (try self.arrIndexPresent(o, k + del - 1))
                         try self.arrIndexSetOrThrow(o, k + item_count - 1, try self.arrIndexGet(o, k + del - 1))
                     else
                         try self.arrIndexDeleteOrThrow(o, k + item_count - 1);
@@ -8596,7 +8596,7 @@ pub const Interpreter = struct {
                 to += count - 1;
             }
             while (count > 0) {
-                if (self.arrIndexPresent(o, from))
+                if (try self.arrIndexPresent(o, from))
                     try self.arrIndexSetOrThrow(o, to, try self.arrIndexGet(o, from))
                 else
                     try self.arrIndexDeleteOrThrow(o, to);
@@ -8618,7 +8618,7 @@ pub const Interpreter = struct {
             var target_index: usize = 0;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!self.arrIndexPresent(o, i)) continue; // skip holes
+                if (!(try self.arrIndexPresent(o, i))) continue; // skip holes
                 const el = try self.arrIndexGet(o, i);
                 const m = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
                 // FlattenIntoArray with depth 1: a mapped array is spread one level.
@@ -8626,7 +8626,7 @@ pub const Interpreter = struct {
                     const mlen: usize = @max(m.object.elements.items.len, m.object.array_len);
                     var j: usize = 0;
                     while (j < mlen) : (j += 1) {
-                        if (!self.arrIndexPresent(m.object, j)) continue;
+                        if (!(try self.arrIndexPresent(m.object, j))) continue;
                         try self.arrayResultPush(result, target_index, try self.arrIndexGet(m.object, j));
                         target_index += 1;
                     }
@@ -8675,7 +8675,7 @@ pub const Interpreter = struct {
         var target_index = start;
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            if (!self.arrIndexPresent(src, i)) continue; // flat skips holes
+            if (!(try self.arrIndexPresent(src, i))) continue; // flat skips holes
             const el = try self.arrIndexGet(src, i);
             if (depth > 0 and el == .object and el.object.is_array) {
                 target_index = try self.flattenInto(dst, el.object, depth - 1, target_index);
