@@ -936,6 +936,12 @@ test "Array.prototype generics on array-likes" {
         \\Array.prototype.unshift.call(o);
         \\o.length
     )).number);
+    try expectEvalStr("hi,there",
+        \\var o = { length: 2 ** 53 + 2 };
+        \\o["9007199254740989"] = "hi";
+        \\o["9007199254740990"] = "there";
+        \\Array.prototype.slice.call(o, -2).join(",")
+    );
 }
 
 test "array instances inherit from Array.prototype (incl. holes)" {

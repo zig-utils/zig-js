@@ -7683,9 +7683,9 @@ pub const Interpreter = struct {
     /// RangeError. Read-only / in-place methods don't create such a result.
     fn arrayCreatesResult(name: []const u8) bool {
         const names = [_][]const u8{
-            "map",       "filter",  "slice", "concat",     "splice",
-            "flat",      "flatMap", "with",  "toReversed", "toSorted",
-            "toSpliced",
+            "map",      "filter",    "concat", "splice",
+            "flat",     "flatMap",   "with",   "toReversed",
+            "toSorted", "toSpliced",
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
@@ -7935,7 +7935,7 @@ pub const Interpreter = struct {
             array_like_len = toArrayLikeLen(lenf);
             // A full-length-iterating method on a pathological array-like length
             // would spin a native loop forever — bail (matches the prior guard).
-            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift")) return null;
+            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift") and !eq(name, "slice")) return null;
         }
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
@@ -8145,6 +8145,8 @@ pub const Interpreter = struct {
             const start = try relIndex(self, arg0(args), ilen, 0);
             const end = try relIndex(self, arg(args, 1), ilen, @floatFromInt(ilen));
             const count = if (end > start) end - start else 0;
+            if (count > 4294967295) return self.throwError("RangeError", "Invalid array length");
+            if (count > (1 << 22)) return null;
             const result = try self.arraySpeciesCreate(.{ .object = o }, count);
             const dense = result.object.is_array and result.object.accessors == null and result.object.attrs == null and result.object.proxy_handler == null;
             var i = start;
