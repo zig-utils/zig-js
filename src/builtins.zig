@@ -963,6 +963,13 @@ fn createDataIndexOrThrow(self: *Interpreter, target: Value, k: usize, v: Value)
         return self.throwError("TypeError", "Cannot create property");
 }
 
+fn setLengthOrThrow(self: *Interpreter, target: Value, len: usize) HostError!void {
+    const saved = self.strict;
+    self.strict = true;
+    defer self.strict = saved;
+    try self.setMember(target, "length", .{ .number = @floatFromInt(len) });
+}
+
 pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     const self = interp(ctx);
     const C = this; // the receiver: a constructor when called as Array.from / subclass.use_ctor below
@@ -1007,7 +1014,7 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
             };
             k += 1;
         }
-        try self.setMember(result, "length", .{ .number = @floatFromInt(k) });
+        try setLengthOrThrow(self, result, k);
         return result;
     }
 
@@ -1023,7 +1030,7 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         const mapped: Value = if (mapping) try self.callValueWithThis(map_fn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg) else v;
         try createDataIndexOrThrow(self, result, i, mapped);
     }
-    try self.setMember(result, "length", .{ .number = @floatFromInt(len) });
+    try setLengthOrThrow(self, result, len);
     return result;
 }
 
@@ -1110,7 +1117,7 @@ fn arrayFromAsyncImpl(self: *Interpreter, C: Value, items: Value, mapfn: Value, 
             };
             k += 1;
         }
-        try self.setMember(result, "length", .{ .number = @floatFromInt(k) });
+        try setLengthOrThrow(self, result, k);
         return result;
     }
 
@@ -1132,7 +1139,7 @@ fn arrayFromAsyncImpl(self: *Interpreter, C: Value, items: Value, mapfn: Value, 
         const mapped: Value = if (mapping) try self.awaitValue(try self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(i) } }, this_arg)) else v;
         try createDataIndexOrThrow(self, result, i, mapped);
     }
-    try self.setMember(result, "length", .{ .number = @floatFromInt(len) });
+    try setLengthOrThrow(self, result, len);
     return result;
 }
 
