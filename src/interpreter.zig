@@ -7935,7 +7935,7 @@ pub const Interpreter = struct {
             array_like_len = toArrayLikeLen(lenf);
             // A full-length-iterating method on a pathological array-like length
             // would spin a native loop forever — bail (matches the prior guard).
-            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin")) return null;
+            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse")) return null;
         }
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
@@ -8181,6 +8181,7 @@ pub const Interpreter = struct {
             const middle = ilen / 2;
             var lower: usize = 0;
             while (lower != middle) : (lower += 1) {
+                if (lower > (1 << 22)) return null;
                 const upper = ilen - lower - 1;
                 const lower_exists = try self.arrIndexPresent(o, lower);
                 const lower_val: Value = if (lower_exists) try self.arrIndexGet(o, lower) else .undefined;

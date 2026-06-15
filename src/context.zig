@@ -912,6 +912,15 @@ test "Array.prototype generics on array-likes" {
         \\try { Array.prototype.copyWithin.call(p, 0, 0); false; }
         \\catch (e) { hit && e.message === "has"; }
     )).boolean);
+    try std.testing.expect((try evalIn(
+        \\function StopReverse() {}
+        \\var o = { length: 2 ** 53 + 2 };
+        \\Object.defineProperty(o, "9007199254740990", {
+        \\  get: function () { throw new StopReverse(); }
+        \\});
+        \\try { Array.prototype.reverse.call(o); false; }
+        \\catch (e) { e instanceof StopReverse; }
+    )).boolean);
 }
 
 test "array instances inherit from Array.prototype (incl. holes)" {
