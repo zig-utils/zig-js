@@ -165,6 +165,11 @@ green; promote files only when their behavior is implemented and stable.
 The default corpus is intentionally not a "run every file" mode. Remaining
 PR-249 files are held back for specific, observed reasons:
 
+- As of 2026-06-15, the allowlist is 209 promoted files and 19 standalone
+  reference-only files. Helper/preload files such as `harness.js`,
+  `bench/harness.js`, `scaling/harness.js`, `resources/assert.js`, and
+  `vmstate/resources/workload.js` are not counted as standalone remaining
+  tests.
 - WebAssembly CVE files that can prove the current no-WebAssembly/refusal
   premise are promoted; files that require real WebAssembly construction,
   compilation, and relocating grow behavior remain reference-only until those
@@ -173,6 +178,27 @@ PR-249 files are held back for specific, observed reasons:
   artifact hooks, stop-the-world counters, or JSC-specific shell controls. They
   are not valid witnesses while the shared realm is serialized by the context
   GIL.
+- The remaining post-UNGIL CVE/JIT set is:
+  `cve/mc-aint-poll-resume-stale-elided.js`,
+  `cve/mc-code-calllink-writer-writer.js`,
+  `cve/mc-dos-retired-artifact-churn.js`,
+  `cve/mc-grow-buffer-storm.js`,
+  `cve/mc-init-butterfly-grow-slack.js`,
+  `cve/mc-init-cloned-arguments-specials.js`,
+  `cve/mc-init-direct-arguments-override.js`,
+  `cve/mc-jit-delete-reuse-stale-offset.js`,
+  `cve/mc-jit-double-relabel-stale-shape.js`,
+  `cve/mc-jit-stale-base-grow-oob.js`,
+  `cve/mc-jit-ta-resize-hoisted-base.js`,
+  `cve/mc-lock-stop-vs-park.js`,
+  `cve/mc-safe-gcwait-vs-classa-stop.js`,
+  `cve/mc-tear-typedarray-detach-grow-shrink.js`,
+  `cve/mc-val-fire-vs-link.js`, and `jit/ic-publish-reset-loops.js`.
+  Focused probes of the two arguments-publication files
+  (`mc-init-cloned-arguments-specials.js` and
+  `mc-init-direct-arguments-override.js`) timed out under the serialized
+  Debug runner rather than producing a semantic failure; they remain
+  reference-only because their publication-order race is a post-GIL witness.
 - `jit/ic-publish-reset-loops.js` currently stalls under the tree-walker and
   scheduler envelope; keep it reference-only until it completes reliably.
 - Additional ArrayStorage-forcing coverage still needs real
