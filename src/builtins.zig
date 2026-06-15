@@ -1100,7 +1100,12 @@ fn arrayFromAsyncImpl(self: *Interpreter, C: Value, items: Value, mapfn: Value, 
             var v = try self.getProperty(res, "value");
             // A sync iterable is wrapped as an async-from-sync iterator, which
             // awaits each produced value once.
-            if (!is_async) v = try self.awaitValue(v);
+            if (!is_async) {
+                v = self.awaitValue(v) catch |e| {
+                    self.iteratorCloseKeepingThrow(it);
+                    return e;
+                };
+            }
             const mapped: Value = if (mapping) blk: {
                 const mv = self.callValueWithThis(mapfn, &.{ v, .{ .number = @floatFromInt(k) } }, this_arg) catch |e| {
                     self.iteratorCloseKeepingThrow(it);
