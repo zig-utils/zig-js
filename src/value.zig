@@ -524,6 +524,12 @@ pub const Object = struct {
     is_date: bool = false,
     date_ms: f64 = 0,
     is_array: bool = false,
+    /// Test-shell `$vm.ensureArrayStorage(array)` marker. zig-js uses one
+    /// generic array element backing rather than JSC's multiple butterfly
+    /// regimes; this bit records the requested ArrayStorage witness mode so
+    /// `$vm.indexingMode` can report the effective stress precondition without
+    /// changing ordinary ECMAScript array semantics.
+    forced_array_storage: bool = false,
     /// For arrays, a *logical* length floor used when it exceeds the physically
     /// stored `elements` — so `new Array(4294967295)` / `arr.length = big` track a
     /// length without materializing (and OOM-ing on) that many holes. The array's

@@ -57,9 +57,11 @@ covers:
   golden-disasm workload execution, tag-discipline workload execution,
   jettison-vs-execute smoke coverage, OSR/catch-loop amplification,
   spawned-thread butterfly stress, TID-tag three-thread behavior, and the
-  ArrayStorage-forcing precondition witness. Real `$vm` JIT artifact counters,
-  stop counters, disassembly hooks, and ArrayStorage forcing remain outside the
-  default corpus until backed by real engine behavior.
+  shared-ArrayStorage stress witness. `$vm.ensureArrayStorage` is implemented
+  for this corpus as an explicit request to keep an array on zig-js's generic
+  element backing and report that mode through `$vm.indexingMode`; real `$vm`
+  JIT artifact counters, stop counters, and disassembly controls remain outside
+  the default corpus until backed by real engine behavior.
 - `atomics/`: property load/store, RMW, SameValueZero compare-exchange, errors,
   CAS delete/race/storm cases, missing-property store races, wait/notify,
   wait termination, waitAsync timeout behavior, waiter-table isolation, and
@@ -113,10 +115,12 @@ environment cell and engine-owned Promise/VM native closure side records.
 Shared-realm contexts still skip collection while any spawned JS thread is
 actively running or parked inside native code. `$vm.gc` and `$vm.edenGC` are
 aliases for that same shell request, `$vm.useThreadGIL()` reports whether the
-current context is using the shared-realm GIL, and `$vm.indexingMode()` is a
-narrow PR-249 compatibility hook for array-mode feature checks. Other JSC `$vm`
-hooks, such as `sharedHeapTest`, dictionary conversion, and code/disassembly
-controls, are left absent until backed by real engine behavior.
+current context is using the shared-realm GIL, `$vm.indexingMode()` reports the
+engine's array/typed-array mode witness, and `$vm.ensureArrayStorage(array)`
+forces the array-mode witness used by the PR-249 shared-ArrayStorage stress
+file. Other JSC `$vm` hooks, such as `sharedHeapTest`, dictionary conversion,
+and code/disassembly controls, are left absent until backed by real engine
+behavior.
 The shell-compatible `quit()` helper throws a runner-recognized early-exit
 sentinel, used by premise-skip tests after printing their skip marker.
 
@@ -201,9 +205,6 @@ PR-249 files are held back for specific, observed reasons:
   reference-only because their publication-order race is a post-GIL witness.
 - `jit/ic-publish-reset-loops.js` currently stalls under the tree-walker and
   scheduler envelope; keep it reference-only until it completes reliably.
-- Additional ArrayStorage-forcing coverage still needs real
-  `$vm.ensureArrayStorage` behavior; today's default corpus only includes the
-  precondition/refusal witness.
 - `semantics/stack-overflow-per-thread.js` expects 2000-deep recursion before
   overflow storming. The tree-walker's native recursion cannot safely meet that
   by raising `max_call_depth` alone; Zig `0.17-dev` probes at 2048 and 4096

@@ -46,7 +46,9 @@ but it is not true parallel JavaScript heap mutation.
 - Treating test-shell helpers or `$vm` as an embedder event-loop/API surface.
 - Assuming unsupported JSC `$vm` hooks exist: `sharedHeapTest`, dictionary
   conversion, code deletion, disassembly, and related JIT artifact controls are
-  intentionally absent until backed by real engine behavior.
+  intentionally absent until backed by real engine behavior. Supported
+  compatibility hooks are deliberately narrow: `gc`, `edenGC`, `noInline`,
+  `useThreadGIL`, `indexingMode`, and `ensureArrayStorage`.
 - Depending on shell GC while a spawned shared-realm JS thread is actively
   running or parked inside a native call. Active interpreter fields are traced
   at quiescent checkpoints, including the current environment cell and

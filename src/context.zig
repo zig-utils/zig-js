@@ -4759,11 +4759,17 @@ test "$vm exposes only supported shell hooks" {
         \\if (typeof $vm !== "object") throw new Error("missing $vm");
         \\if (typeof $vm.gc !== "function") throw new Error("missing $vm.gc");
         \\if (typeof $vm.edenGC !== "function") throw new Error("missing $vm.edenGC");
+        \\if (typeof $vm.ensureArrayStorage !== "function") throw new Error("missing $vm.ensureArrayStorage");
         \\if (typeof $vm.indexingMode !== "function") throw new Error("missing $vm.indexingMode");
         \\if (typeof $vm.noInline !== "function") throw new Error("missing $vm.noInline");
         \\if (typeof $vm.useThreadGIL !== "function") throw new Error("missing $vm.useThreadGIL");
         \\if ($vm.useThreadGIL() !== true) throw new Error("thread GIL state");
-        \\if (!$vm.indexingMode([1, 2, 3]).includes("CopyOnWrite")) throw new Error("array indexing mode");
+        \\let storageProbe = [1, 2, 3];
+        \\if (!$vm.indexingMode(storageProbe).includes("CopyOnWrite")) throw new Error("array indexing mode");
+        \\if ($vm.ensureArrayStorage(storageProbe) !== storageProbe) throw new Error("ensureArrayStorage identity");
+        \\if (!$vm.indexingMode(storageProbe).includes("ArrayStorage")) throw new Error("array storage mode");
+        \\try { $vm.ensureArrayStorage({}); throw new Error("expected ensureArrayStorage TypeError"); }
+        \\catch (e) { if (!(e instanceof TypeError)) throw e; }
         \\if ($vm.noInline(42) !== 42) throw new Error("noInline identity");
         \\if ("sharedHeapTest" in $vm) throw new Error("sharedHeapTest is not supported");
         \\if ("toCacheableDictionary" in $vm) throw new Error("dictionary hook is not supported");

@@ -10802,11 +10802,24 @@ fn vmIndexingModeFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = ctx;
     _ = this;
     const v = if (args.len > 0) args[0] else Value.undefined;
-    if (v == .object and v.object.is_array) return .{ .string = "Array CopyOnWrite" };
+    if (v == .object and v.object.is_array) {
+        if (v.object.forced_array_storage) return .{ .string = "Array ArrayStorage" };
+        return .{ .string = "Array CopyOnWrite" };
+    }
     if (v == .object) {
         if (v.object.typed_array) |ta| return .{ .string = ta.kind.ctorName() };
     }
     return .{ .string = "Object" };
+}
+
+fn vmEnsureArrayStorageFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const v = if (args.len > 0) args[0] else Value.undefined;
+    if (v != .object or !v.object.is_array)
+        return self.throwError("TypeError", "$vm.ensureArrayStorage expects an Array");
+    v.object.forced_array_storage = true;
+    return v;
 }
 
 fn installDollarVM(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
@@ -10815,6 +10828,7 @@ fn installDollarVM(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     vm_obj.* = .{ .proto = object_proto };
     try setNative(a, rs, vm_obj, "gc", 0, gcFn);
     try setNative(a, rs, vm_obj, "edenGC", 0, gcFn);
+    try setNative(a, rs, vm_obj, "ensureArrayStorage", 1, vmEnsureArrayStorageFn);
     try setNative(a, rs, vm_obj, "indexingMode", 1, vmIndexingModeFn);
     try setNative(a, rs, vm_obj, "noInline", 1, noInlineFn);
     try setNative(a, rs, vm_obj, "useThreadGIL", 0, vmUseThreadGILFn);
