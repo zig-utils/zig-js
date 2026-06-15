@@ -8494,7 +8494,7 @@ pub const Interpreter = struct {
             const depth_raw: f64 = if (args.len > 0 and args[0] != .undefined) try self.toNumberV(arg0(args)) else 1;
             const depth: f64 = if (std.math.isNan(depth_raw)) 0 else @trunc(depth_raw);
             const result = try self.arraySpeciesCreate(.{ .object = o }, 0);
-            _ = try self.flattenInto(result, o, depth, 0);
+            _ = try self.flattenIntoLen(result, o, ilen, depth, 0);
             return result;
         }
         if (eq(name, "sort")) {
@@ -8695,12 +8695,16 @@ pub const Interpreter = struct {
             const lv = try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number);
             break :blk toLen(lv.toNumber());
         };
+        return self.flattenIntoLen(dst, src, len, depth, start);
+    }
+
+    fn flattenIntoLen(self: *Interpreter, dst: Value, src: *value.Object, len: usize, depth: f64, start: usize) EvalError!usize {
         var target_index = start;
         var i: usize = 0;
         while (i < len) : (i += 1) {
             if (!(try self.arrIndexPresent(src, i))) continue; // flat skips holes
             const el = try self.arrIndexGet(src, i);
-            if (depth > 0 and el == .object and el.object.is_array) {
+            if (depth > 0 and el == .object and try objectToStringIsArray(self, el.object)) {
                 target_index = try self.flattenInto(dst, el.object, depth - 1, target_index);
             } else {
                 try self.arrayResultPush(dst, target_index, el); // CreateDataPropertyOrThrow
