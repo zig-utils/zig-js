@@ -7694,9 +7694,9 @@ pub const Interpreter = struct {
     /// RangeError. Read-only / in-place methods don't create such a result.
     fn arrayCreatesResult(name: []const u8) bool {
         const names = [_][]const u8{
-            "map",      "filter",    "concat", "splice",
-            "flat",     "flatMap",   "with",   "toReversed",
-            "toSorted", "toSpliced",
+            "map",      "filter",  "concat", "splice",
+            "flat",     "flatMap", "with",   "toReversed",
+            "toSorted",
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
@@ -7946,7 +7946,7 @@ pub const Interpreter = struct {
             array_like_len = toArrayLikeLen(lenf);
             // A full-length-iterating method on a pathological array-like length
             // would spin a native loop forever — bail (matches the prior guard).
-            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift") and !eq(name, "slice")) return null;
+            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift") and !eq(name, "slice") and !eq(name, "toSpliced")) return null;
         }
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
@@ -8275,13 +8275,17 @@ pub const Interpreter = struct {
         if (eq(name, "toSpliced")) {
             const len = ilen;
             const start = try relIndex(self, arg0(args), len, 0);
-            const del: usize = if (args.len <= 1) len - start else blk: {
-                const d = arg(args, 1).toNumber();
+            const del: usize = if (args.len == 0) 0 else if (args.len == 1) len - start else blk: {
+                const d = try self.toNumberV(arg(args, 1));
                 if (std.math.isNan(d) or d <= 0) break :blk 0;
                 const du: usize = if (d > @as(f64, @floatFromInt(len))) len else @intFromFloat(@trunc(d));
                 break :blk if (start + du > len) len - start else du;
             };
-            const new_len = len - del + (if (args.len > 2) args.len - 2 else 0);
+            const insert_count = if (args.len > 2) args.len - 2 else 0;
+            if (insert_count > del and len > 9007199254740991 - (insert_count - del))
+                return self.throwError("TypeError", "Invalid array length");
+            const new_len = len - del + insert_count;
+            if (new_len > 4294967295) return self.throwError("RangeError", "Invalid array length");
             if (new_len > (1 << 22)) return null;
             const result = try self.newArray();
             const ra = result.object;
