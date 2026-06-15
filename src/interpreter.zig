@@ -8517,7 +8517,13 @@ pub const Interpreter = struct {
                 while (j > 0 and (try self.sortCompareSpec(ps[j - 1], key, cmp)) > 0) : (j -= 1) ps[j] = ps[j - 1];
                 ps[j] = key;
             }
-            if (o.is_array and o.accessors == null) {
+            const dense_plain_array = o.is_array and
+                o.holes == null and
+                o.accessors == null and
+                o.attrs == null and
+                o.proxy_handler == null and
+                o.array_len <= o.elements.items.len;
+            if (dense_plain_array) {
                 // Drop any sparse named-index props (their values are in `ps`).
                 for (try o.ownKeys(self.arena)) |k| if (value.canonicalIndex(k) != null) {
                     _ = try self.deleteOwn(o, k);
