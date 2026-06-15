@@ -8007,19 +8007,22 @@ pub const Interpreter = struct {
             if (o.is_array) {
                 if (arrayElemNonConfigurable(o, 0)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
                 if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
-                if (o.elements.items.len > 0) _ = o.elements.orderedRemove(0);
-                o.array_len = if (ilen > 0) @intCast(ilen - 1) else 0;
-                return first;
             }
-            // Array-like: move each element down, delete the tail, set length.
+            // Move each element down, delete the tail, set length.
             var k: usize = 1;
             while (k < ilen) : (k += 1) {
-                const from = try std.fmt.allocPrint(self.arena, "{d}", .{k});
-                const to = try std.fmt.allocPrint(self.arena, "{d}", .{k - 1});
-                if (try self.arrIndexPresent(o, k)) try self.setMember(.{ .object = o }, to, try self.getProperty(.{ .object = o }, from)) else _ = try self.deleteOwn(o, to);
+                if (try self.arrIndexPresent(o, k))
+                    try self.arrIndexSetOrThrow(o, k - 1, try self.arrIndexGet(o, k))
+                else
+                    try self.arrIndexDeleteOrThrow(o, k - 1);
             }
-            _ = try self.deleteOwn(o, try std.fmt.allocPrint(self.arena, "{d}", .{ilen - 1}));
-            try self.setMember(.{ .object = o }, "length", .{ .number = @floatFromInt(ilen - 1) });
+            try self.arrIndexDeleteOrThrow(o, ilen - 1);
+            if (o.is_array) {
+                if (!try self.setArrayLength(o, ilen - 1))
+                    return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+            } else {
+                try self.arraySetLengthThrowing(o, ilen - 1);
+            }
             return first;
         }
         if (eq(name, "unshift")) {

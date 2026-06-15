@@ -942,6 +942,18 @@ test "Array.prototype generics on array-likes" {
         \\o["9007199254740990"] = "there";
         \\Array.prototype.slice.call(o, -2).join(",")
     );
+    try std.testing.expect((try evalIn(
+        \\Array.prototype[1] = 17;
+        \\var a = [3];
+        \\a.length = 2;
+        \\var first = a.shift();
+        \\delete Array.prototype[1];
+        \\first === 3 && a[0] === 17 && a[1] === undefined
+    )).boolean);
+    try std.testing.expect((try evalIn(
+        \\try { Array.prototype.shift.call(Object.defineProperty({}, "length", { writable: false })); false; }
+        \\catch (e) { e instanceof TypeError; }
+    )).boolean);
 }
 
 test "array instances inherit from Array.prototype (incl. holes)" {
