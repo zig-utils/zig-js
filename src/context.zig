@@ -60,6 +60,11 @@ pub const Context = struct {
     /// Cooperative termination for worker contexts: the owning Worker's stop
     /// word, polled at the engines' step checkpoints (src/worker.zig).
     stop_flag: ?*const std.atomic.Value(bool) = null,
+    /// Internal teardown stop word for shared-realm `Thread`s. `destroy()`
+    /// sets this before waiting so unjoined parked/running threads unwind
+    /// instead of keeping context teardown blocked forever after an abrupt
+    /// main-thread completion.
+    teardown_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Host policy for whether this shared VM may block in synchronous waits.
     /// Used by PR-249 and test262 `[[CanBlock]]` coverage.
     main_can_block: bool = true,
@@ -105,6 +110,11 @@ pub const Context = struct {
     /// `Thread` records spawned in this realm (the records live in the
     /// arena; the list is gpa-backed). `destroy` waits for all of them.
     js_threads: std.ArrayListUnmanaged(*jsthread.ThreadRecord) = .empty,
+    /// Interpreters currently executing or draining host checkpoints in this
+    /// realm. GC-mode collections trace these explicit execution roots at
+    /// quiescent checkpoints; arbitrary native/Zig stack scanning is still a
+    /// separate Layer-C requirement.
+    active_interpreters: std.ArrayListUnmanaged(*interp.Interpreter) = .empty,
     /// TDZ sentinel for uninitialized let/const bindings.
     tdz_marker: *value.Object,
     /// Active module graph state during `evaluateModule`, so runtime `import()`
@@ -268,7 +278,7 @@ pub const Context = struct {
             .sab_retains = &self.sab_retains,
             .async_waiters = &self.async_waiters,
             .finalization_cleanup_jobs = &self.finalization_cleanup_jobs,
-            .stop_flag = self.stop_flag,
+            .stop_flag = self.stop_flag orelse &self.teardown_stop,
             .main_can_block = self.main_can_block,
             .gil = self.gil,
             .gc = self.gc,
@@ -285,6 +295,7 @@ pub const Context = struct {
 
     pub fn destroy(self: *Context) void {
         if (self.gil) |g| {
+            self.teardown_stop.store(true, .release);
             // Spawned threads need the lock to finish: park until each is
             // done, then OS-join the handles.
             g.acquire();
@@ -302,6 +313,7 @@ pub const Context = struct {
             self.assertOwnerThread();
         }
         self.js_threads.deinit(self.gpa);
+        self.active_interpreters.deinit(self.gpa);
         self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
         // Reclaim every GC cell (running finalizers) before the arena and the
@@ -364,12 +376,26 @@ pub const Context = struct {
         return false;
     }
 
-    /// Run a precise mark-sweep over the GC heap (Phase 7). **Only sound at a
-    /// quiescent point** — no JS executing on this thread, so every live object
-    /// is reachable from the `Context` roots `gc.zig`'s binding traces (the
-    /// interpreter recursion that would hold live `Value`s as Zig locals has
-    /// unwound). Conservatively skipped while a spawned shared-realm thread is
-    /// still running. No-op when the GC is off.
+    pub fn pushActiveInterpreter(self: *Context, machine: *interp.Interpreter) !void {
+        try self.active_interpreters.append(self.gpa, machine);
+    }
+
+    pub fn popActiveInterpreter(self: *Context, machine: *interp.Interpreter) void {
+        var i: usize = self.active_interpreters.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.active_interpreters.items[i] == machine) {
+                _ = self.active_interpreters.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// Run a precise mark-sweep over the GC heap (Phase 7). Sound at explicit
+    /// quiescent checkpoints: persistent Context roots plus registered active
+    /// Interpreter state are traced. Conservatively skipped while a spawned
+    /// shared-realm thread is still running, because arbitrary parked native
+    /// stacks are not yet scanned. No-op when the GC is off.
     pub fn collectGarbage(self: *Context) void {
         const h = self.gc orelse return;
         if (self.hasRunningJsThreads()) return; // live thread interpreter stacks not yet rooted
@@ -412,6 +438,8 @@ pub const Context = struct {
         var parser = try Parser.init(a, owned_source);
         const prog = try parser.parseProgram();
         var machine = self.interpreter();
+        try self.pushActiveInterpreter(&machine);
+        defer self.popActiveInterpreter(&machine);
         // Top-level strictness from the program's directive prologue (the parser
         // leaves `strict` set if it saw a leading `"use strict"`).
         machine.strict = parser.strict;
@@ -430,6 +458,7 @@ pub const Context = struct {
             error.Unsupported => machine.eval(prog), // construct the VM can't lower
             error.OutOfMemory => return error.OutOfMemory,
         };
+        const top_level_failed = if (outcome) |_| false else |_| true;
 
         // Microtask checkpoint: run queued Promise reactions before returning, so
         // settled `.then`/`await` continuations and the async harness's `$DONE`
@@ -446,6 +475,7 @@ pub const Context = struct {
         // thread finishes (each drains its own queue and settles its
         // asyncJoins), then drains whatever those settlements queued here.
         if (self.gil) |g| {
+            if (top_level_failed) self.teardown_stop.store(true, .release);
             var i: usize = 0;
             while (i < self.js_threads.items.len) : (i += 1) {
                 const rec = self.js_threads.items[i];
@@ -465,6 +495,7 @@ pub const Context = struct {
             machine.drainFinalizationCleanupJobs() catch {};
             machine.drainMicrotasks() catch {};
             machine.settleAsyncWaiters();
+            if (top_level_failed) self.teardown_stop.store(false, .release);
         }
 
         return outcome catch |err| {
@@ -522,6 +553,8 @@ pub const Context = struct {
         const root = try self.loadModule(entry_path, entry_source, host, &cache);
         try self.linkModule(root);
         var machine = self.interpreter();
+        try self.pushActiveInterpreter(&machine);
+        defer self.popActiveInterpreter(&machine);
         machine.strict = true;
         // Expose the graph to runtime dynamic `import()`.
         self.mod_host = host;
@@ -4255,6 +4288,20 @@ test "Thread API (enable_threads): shared realm, identity, exceptions, ids" {
     );
 }
 
+test "Thread API (enable_threads): abrupt top-level failure terminates parked unjoined threads" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    try std.testing.expectError(error.Throw, ctx.evaluate(
+        \\const gate = { go: 0 };
+        \\globalThis.__parked = new Thread(() => {
+        \\  while (Atomics.load(gate, "go") === 0)
+        \\    Atomics.wait(gate, "go", 0, 10000);
+        \\  return 1;
+        \\});
+        \\throw new Error("main failed before releasing parked thread");
+    ));
+    ctx.destroy();
+}
+
 test "Lock/Condition/ThreadLocal: mailbox handshake, mutual exclusion, TLS" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
     defer ctx.destroy();
@@ -4371,11 +4418,25 @@ test "Atomics.Mutex and Atomics.Condition proposal-style static APIs" {
         \\if (!threw) throw new Error("recursive Mutex.lock must throw");
         \\if (token.unlock() !== true || token.locked || mutex.locked) throw new Error("unlock");
         \\if (token.unlock() !== false) throw new Error("double unlock is false");
+        \\threw = false;
+        \\try { Atomics.Mutex.lock(mutex, {}); } catch (e) { threw = e instanceof TypeError; }
+        \\if (!threw) throw new Error("bad lock token must throw");
+        \\let probe = Atomics.Mutex.lockIfAvailable(mutex, 0);
+        \\if (probe === null) throw new Error("bad lock token leaked the mutex");
+        \\probe.unlock();
         \\const reused = new Atomics.Mutex.UnlockToken();
         \\const reusedResult = Atomics.Mutex.lockIfAvailable(mutex, 0, reused);
         \\if (reusedResult !== reused || !reused.locked) throw new Error("reused token");
+        \\if (Atomics.Mutex.lockIfAvailable(mutex, 0, reused) !== null) throw new Error("contended lockIfAvailable");
+        \\if (!reused.locked || !mutex.locked) throw new Error("contended lockIfAvailable changed owner");
         \\reused[Symbol.dispose]();
         \\if (reused.locked || mutex.locked) throw new Error("dispose unlock");
+        \\threw = false;
+        \\try { Atomics.Mutex.lockIfAvailable(mutex, 0, {}); } catch (e) { threw = e instanceof TypeError; }
+        \\if (!threw) throw new Error("bad lockIfAvailable token must throw");
+        \\probe = Atomics.Mutex.lockIfAvailable(mutex, 0);
+        \\if (probe === null) throw new Error("bad lockIfAvailable token leaked the mutex");
+        \\probe.unlock();
         \\threw = false;
         \\try { Atomics.Mutex.lock(new Atomics.Condition()); } catch (e) { threw = e instanceof TypeError; }
         \\if (!threw) throw new Error("wrong Mutex receiver");
@@ -4618,6 +4679,37 @@ test "enable_gc: evaluateModule clears transient module cache so later GC can ru
     const before = ctx.gc.?.collections;
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc.?.collections > before);
+}
+
+test "enable_gc: active module interpreter roots import.meta during requested microtask GC" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const Host = struct {
+        fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    var dummy: u8 = 0;
+    const mh = Context.ModuleHost{ .ctx = &dummy, .load = Host.load };
+
+    _ = try ctx.evaluateModule("entry.js",
+        \\globalThis.ref = new WeakRef(import.meta);
+        \\Promise.resolve().then(function () {
+        \\  gc();
+        \\  Promise.resolve().then(function () {
+        \\    globalThis.aliveAfterGc = globalThis.ref.deref() !== undefined;
+        \\  });
+        \\});
+        \\export const value = 1;
+    , mh);
+
+    const alive = try ctx.evaluate("globalThis.aliveAfterGc === true");
+    try std.testing.expectEqual(true, alive.boolean);
+
+    ctx.collectGarbage();
+    const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
+    try std.testing.expectEqual(true, cleared.boolean);
 }
 
 test "enable_gc: WeakRef target clears when only weakly reachable" {

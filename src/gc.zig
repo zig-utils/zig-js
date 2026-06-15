@@ -104,6 +104,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (o.module_ns) |p| v.mark(p); // *ModuleNs (kind .module_ns)
     if (o.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
     promise.traceNativePrivateData(o, v);
+    interp.traceNativePrivateData(o, v);
     vm.traceNativePrivateData(o, v);
     // The viewed ArrayBuffer object keeps a TypedArray/DataView's storage alive.
     if (o.typed_array) |ta| v.mark(ta.buffer);
@@ -365,6 +366,39 @@ pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.M
     }
 }
 
+pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
+    markManaged(v, machine.env);
+    traceEnv(machine.env, v);
+    if (machine.microtasks) |q| {
+        for (q.items) |mt| {
+            traceReaction(mt.reaction, v);
+            markValue(v, mt.argument);
+            markValue(v, mt.thenable);
+            markValue(v, mt.then_fn);
+            if (mt.promise) |p| v.mark(p);
+        }
+    }
+    if (machine.async_waiters) |waiters| {
+        for (waiters.items) |aw| markValue(v, aw.promise);
+    }
+    if (machine.finalization_cleanup_jobs) |jobs| {
+        for (jobs.items) |registry| v.mark(registry);
+    }
+    if (machine.tdz_marker) |o| v.mark(o);
+    if (machine.global_object) |o| v.mark(o);
+    var sym_it = machine.symbols.valueIterator();
+    while (sym_it.next()) |sym| v.mark(sym.*);
+    if (machine.import_meta_obj) |o| v.mark(o);
+    markValue(v, machine.ret_value);
+    markValue(v, machine.this_value);
+    markValue(v, machine.exception);
+    markValue(v, machine.new_target);
+    if (machine.active_native) |o| v.mark(o);
+    if (machine.home_object) |o| v.mark(o);
+    if (machine.super_ctor) |o| v.mark(o);
+    for (machine.with_stack.items) |o| v.mark(o);
+}
+
 // ---- The binding the collector instantiates over -------------------------
 
 /// A tiny stateful binding the collector instantiates over: it just wraps the
@@ -377,13 +411,8 @@ pub const Binding = struct {
 
     pub const Kind = CellKind;
 
-    /// Persistent roots reachable from the realm. NOTE: M1 must additionally
-    /// trace the *live* `Interpreter` execution state (value stack, `this`,
-    /// `ret_value`, `exception`, `new_target`, `home_object`, `super_ctor`,
-    /// `with_stack`, `active_native`, `symbols`, `import_meta_obj`) at the
-    /// safepoint where collection runs — see P7-gc-design.md and
-    /// `traceInterpreterRoots`. With collection only at teardown, the
-    /// persistent set suffices.
+    /// Persistent roots reachable from the realm plus registered active
+    /// Interpreter execution roots at quiescent checkpoints.
     pub fn traceRoots(self: *Binding, v: anytype) void {
         const ctx = self.context;
         v.mark(ctx.global_object);
@@ -403,6 +432,7 @@ pub const Binding = struct {
             if (rec.js_obj) |o| v.mark(o);
             for (rec.pending_joins.items) |p| v.mark(p);
         }
+        for (ctx.active_interpreters.items) |machine| traceInterpreterRoots(machine, v);
         if (ctx.gil) |g| {
             for (g.prop_async.items) |raw| {
                 const t: *jsthread.PropAsyncTicket = @ptrCast(@alignCast(raw));

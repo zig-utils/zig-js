@@ -200,6 +200,14 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     var microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty;
     var async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty;
     var machine = rec.ctx.interpreter();
+    rec.ctx.pushActiveInterpreter(&machine) catch {
+        rec.threw = true;
+        rec.result = .undefined;
+        rec.done = true;
+        rec.done_cond.broadcast(agent.engineIo());
+        return;
+    };
+    defer rec.ctx.popActiveInterpreter(&machine);
     machine.microtasks = &microtasks;
     machine.async_waiters = &async_waiters;
     if (machine.callValueWithThis(fn_v, args, .undefined)) |out| {
@@ -212,7 +220,6 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         rec.threw = true;
         rec.result = machine.exception;
     }
-    rec.done = true;
     // Settle asyncJoin promises on this (the settling) thread, then drain
     // the reactions it just queued.
     for (rec.pending_joins.items) |p_obj| {
@@ -225,6 +232,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     }
     rec.pending_joins.clearRetainingCapacity();
     machine.drainMicrotasks() catch {};
+    rec.done = true;
     rec.done_cond.broadcast(agent.engineIo());
 }
 
@@ -624,7 +632,10 @@ fn mutexStaticLockFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
     const rec = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
         return self.throwError("TypeError", "Atomics.Mutex.lock requires a Mutex argument");
     _ = try acquireLock(self, rec, null, "Atomics.Mutex.lock cannot acquire the mutex");
-    return unlockTokenCreate(self, if (args.len > 1) args[1] else .undefined, rec);
+    return unlockTokenCreate(self, if (args.len > 1) args[1] else .undefined, rec) catch |err| {
+        if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
+        return err;
+    };
 }
 
 fn mutexStaticLockIfAvailableFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -637,7 +648,10 @@ fn mutexStaticLockIfAvailableFn(ctx_ptr: *anyopaque, this: Value, args: []const 
         return self.throwError("TypeError", "Atomics.Mutex.lockIfAvailable requires a timeout");
     const timeout_ns = try timeoutMillisToNs(try self.toNumberV(timeout_v));
     switch (try acquireLock(self, rec, timeout_ns, "Atomics.Mutex.lockIfAvailable cannot acquire the mutex")) {
-        .acquired => return unlockTokenCreate(self, if (args.len > 2) args[2] else .undefined, rec),
+        .acquired => return unlockTokenCreate(self, if (args.len > 2) args[2] else .undefined, rec) catch |err| {
+            if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
+            return err;
+        },
         .timed_out => return .null,
     }
 }

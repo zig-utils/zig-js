@@ -10504,6 +10504,46 @@ fn combineSettle(self: *Interpreter, c: *promise.Combine) value.HostError!void {
     } else _ = try self.callValue(c.resolve, &.{.{ .object = c.values }});
 }
 
+inline fn tracePrivateValue(v: anytype, val: Value) void {
+    if (val == .object) v.mark(val.object);
+}
+
+/// Trace engine-owned `private_data` carried by native closures allocated in
+/// this file. The Object tracer already marks the closure object itself; this
+/// hook keeps type-erased side records from hiding GC-managed Values/Objects.
+pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
+    const nf = o.native orelse return;
+    const pd = o.private_data orelse return;
+
+    if (nf == promiseResolveClosure or nf == promiseRejectClosure) {
+        const data: *promise.Resolving = @ptrCast(@alignCast(pd));
+        v.mark(data.promise);
+        return;
+    }
+
+    if (nf == finallyReactionFn or nf == finallyThunkFn) {
+        const data: *FinallyData = @ptrCast(@alignCast(pd));
+        tracePrivateValue(v, data.on_finally);
+        tracePrivateValue(v, data.captured);
+        return;
+    }
+
+    if (nf == combineElemFn) {
+        const elem: *promise.Elem = @ptrCast(@alignCast(pd));
+        const c = elem.combine;
+        tracePrivateValue(v, c.resolve);
+        tracePrivateValue(v, c.reject);
+        v.mark(c.values);
+        return;
+    }
+
+    if (nf == capabilityExecutorFn) {
+        const cap: *CapCapture = @ptrCast(@alignCast(pd));
+        tracePrivateValue(v, cap.resolve);
+        tracePrivateValue(v, cap.reject);
+    }
+}
+
 /// IteratorStep + IteratorValue: advance `iter`, returning the next value or
 /// null when exhausted. A protocol violation (non-object result) throws.
 fn iterStep(self: *Interpreter, iter: Value) EvalError!?Value {
@@ -10741,6 +10781,14 @@ fn gcFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value
         if (self.gc_requested) |requested| requested.* = true;
     }
     return .undefined;
+}
+
+fn quitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    self.exception = .{ .string = "__zigjs_threads_quit__" };
+    return error.Throw;
 }
 
 fn vmUseThreadGILFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -20746,6 +20794,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "drainMicrotasks", 0, drainMicrotasksFn);
     try defineGlobalFn(env, root_shape, "noInline", 1, noInlineFn);
     try defineGlobalFn(env, root_shape, "gc", 0, gcFn);
+    try defineGlobalFn(env, root_shape, "quit", 0, quitFn);
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
     try installRegExpProto(env, root_shape);
     if (env.get("RegExp")) |re| {
