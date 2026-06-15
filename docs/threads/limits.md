@@ -13,6 +13,10 @@ but it is not true parallel JavaScript heap mutation.
   threads, and serialized JS execution under the GIL.
 - Blocking points release the GIL so other JS threads can run while one thread
   is parked.
+- Successful shell evaluations keep the realm alive until spawned
+  shared-realm `Thread`s finish. Abrupt top-level failures request thread
+  termination before teardown so parked child threads cannot strand the
+  context.
 - Typed-array `Atomics.wait` / `notify` / `waitAsync` use the process-wide
   agent waiter table.
 - Property-mode `Atomics.wait` / `notify` / `waitAsync` use per-context waiter
@@ -44,14 +48,18 @@ but it is not true parallel JavaScript heap mutation.
   conversion, code deletion, disassembly, and related JIT artifact controls are
   intentionally absent until backed by real engine behavior.
 - Depending on shell GC while a spawned shared-realm JS thread is actively
-  running. Completed `Thread` records are traced, but live thread interpreter
-  stacks are still a Layer-C root-completeness blocker.
+  running or parked inside a native call. Active interpreter fields are traced
+  at quiescent checkpoints, including the current environment cell and
+  engine-owned Promise/VM native closure side records, but arbitrary native/Zig
+  stacks are still a Layer-C root-completeness blocker. The `zig-gc`
+  dependency has an optional conservative-word marking helper for stack ranges;
+  zig-js still needs per-thread stack-bound registration before it can rely on
+  that helper for arbitrary parked/running native frames.
 - Treating deep recursive call tests as an implemented VM-stack feature. The
   tree-walker still uses native recursion for calls, so PR-249 stack-overflow
   tests that require thousands of pre-overflow calls remain future work.
-- Treating remaining PR-249 unpromoted JIT, GC-stress, WebAssembly, heap,
-  unpromoted CVE, and unpromoted semantic files as part of the default green
-  suite.
+- Treating remaining PR-249 unpromoted high-pressure JIT, WebAssembly-required
+  CVE, and semantic files as part of the default green suite.
 
 ## C-API and Context Affinity
 
@@ -86,7 +94,7 @@ use-after-free bugs.
 
 GIL removal is blocked on:
 
-- a tracing GC with safepoints and complete roots for running threads,
+- conservative or precise stack roots for arbitrary running/parked threads,
 - object and shape synchronization,
 - safe slot and element storage under concurrent readers and writers,
 - an atomic representation story for `Value`,

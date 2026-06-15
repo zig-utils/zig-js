@@ -81,16 +81,18 @@ The engine heap is one monolithic `Object` (`value.zig:430`) plus side cells.
 
 | Kind | Type | References to visit |
 |---|---|---|
-| `object` | `value.zig` `Object` | `shape`, `proto`, `ctor_ref`, `proxy_target`, `proxy_handler` (`*Object`); every `Value` in `slots` and strong `elements`; `accessors` map get/set Values; `prim` (`?Value`); `js_func`/`gen`/`bound`/`promise`/`iter_helper`/`module_ns`/`arg_map_env` (type-erased cells); `array_buffer`/`typed_array`/`data_view`/`temporal`; **weak**: `weak_ref_target` and WeakMap/WeakSet `weak_entries`; **ephemeron**: WeakMap values when their keys are live |
+| `object` | `value.zig` `Object` | `shape`, `proto`, `ctor_ref`, `proxy_target`, `proxy_handler` (`*Object`); every `Value` in `slots` and strong `elements`; `accessors` map get/set Values; `prim` (`?Value`); `js_func`/`gen`/`bound`/`promise`/`iter_helper`/`module_ns`/`arg_map_env` (type-erased cells); engine-owned native `private_data` records for Promise/VM async callbacks; `array_buffer`/`typed_array`/`data_view`/`temporal`; **weak**: `weak_ref_target` and WeakMap/WeakSet `weak_entries`; **ephemeron**: WeakMap values when their keys are live |
 | `shape` | `shape.zig` `Shape` | `parent`; the `*Shape` values in `transitions` (the keys are property-name strings) |
 | `env` | `interpreter.zig:126` `Environment` | every `Value` in `vars`; `parent`; `aliases` (live cross-env bindings); `disposables` |
 | `function` | `interpreter.zig:266` `Function` | closure `env`; bound `this`/home-object Values (AST nodes are immutable — see below) |
 | `generator` / `boundfn` / `promise` / `iterhelper` / `modulens` / `temporal` | side structs | their captured Values / envs / reaction callbacks |
 | `arraybuffer` / `typedarray` / `dataview` | buffer structs | the viewed `*Object` buffer; **finalize** non-shared `ArrayBufferData` byte storage; SAB storage is refcounted (`shared_buffer.zig`) — `finalize` releases the retain |
 
-`private_data: ?*anyopaque` (`value.zig:512`) is **host-owned and opaque** — the
-GC never traces it; embedders that stash a cell there must root it themselves
-(documented C-API rule).
+`private_data: ?*anyopaque` (`value.zig`) is host-owned and opaque for embedder
+callbacks, so embedders that stash cells there must root them themselves. Engine
+native closures are the exception: the object tracer recognizes the VM/Promise
+closure functions that carry generator, resolving-function, `finally`, and
+combinator side records, then marks their captured cells explicitly.
 
 ### Roots
 
@@ -102,9 +104,10 @@ GC never traces it; embedders that stash a cell there must root it themselves
 - active module caches (`Context.mod_cache`) while `evaluateModule` or host
   script dynamic import is holding a module graph; each cached module roots its
   module environment and namespace object
-- **the live interpreter's VM value stack + call frames** during execution —
-  the transient roots; an executing thread parks at a safepoint with its stack
-  in a scannable state.
+- registered active `Interpreter` roots at quiescent checkpoints: the current
+  environment cell plus its bindings, local microtask/waiter/finalization
+  queues, `this`, return/exception/`new.target`, active native function, `with`
+  objects, symbols, and `import.meta`
 - `sab_retains` are *not* GC roots — SAB storage is refcounted process-wide;
   the GC only `finalize`s the wrapper's retain.
 
@@ -203,7 +206,7 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   no change), `Interpreter.gc` plumbed, and `newObject` funnels through
   `gc_mod.allocObject` (GC when on, arena when off). Flag **off** =
   byte-identical (test262 unchanged); flag **on**, validated: full test262
-  **42,745/47,930, 0 crashes**, conformance 33/33, threads 194/194, and a
+  **42,745/47,930, 0 crashes**, conformance 33/33, threads 209/209, and a
   leak-checked `enable_gc` unit test (object-heavy run + clean teardown).
   *Uniform Object heap landed:* all ~171 `value.Object` allocation sites across
   8 files now go through `gc_mod.allocObj(arena)`, which routes via a
@@ -232,8 +235,10 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   runs a precise mark-sweep, called automatically at the top of `evaluate`
   (before the interpreter starts, so the Zig stack holds no live `Value`s and
   the `Context` roots `gc.zig`'s binding traces are complete) and callable
-  directly by embedders at any quiescent point. Guarded to skip while spawned
-  shared-realm threads still hold untraced live interpreter stacks. Validated:
+  directly by embedders at any quiescent point. Registered active interpreter
+  roots cover host checkpoints such as microtask/module drains; collection is
+  still guarded to skip while spawned shared-realm threads may hold arbitrary
+  parked native/Zig stacks. Validated:
   flag off byte-identical; flag on full test262 **42,771/47,930, 0 crashes,
   host-fail 0** (collection runs on every one of ~24k contexts — proof the root
   set is complete, since a missed root would free a live intrinsic and crash);
@@ -248,9 +253,15 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   remaining queue is rooted, including in threaded contexts once every spawned
   `Thread` record is done. The tracer now covers completed thread records,
   property-mode `waitAsync` tickets, promise resolving-function private data,
-  and VM async resume callback private data. This promotes
+  VM async resume callback private data, and active interpreter checkpoint
+  fields such as `import.meta`. This promotes
   `cve/mc-dos-waiter-table-storm.js`, whose reclamation arm depends on
   WeakRefs clearing across async microtask turns.
+  *Dependency root helper landed:* `zig-gc` now exposes optional conservative
+  word marking for native stack or register-spill ranges, with dependency-local
+  tests covering exact and interior payload pointers. zig-js still needs
+  per-thread stack-bound registration before this removes the arbitrary native
+  stack root blocker.
   *Module-graph roots landed:* `gc.zig` now traces active `Context.mod_cache`
   module graphs, marking each module environment and namespace object while
   module evaluation or host script dynamic import owns the cache. `evaluateModule`
@@ -330,6 +341,11 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   pending bit, and `evaluate` / `evaluateModule` service that request at the
   next quiescent entry point. This keeps PR-249 object-model flag identity tests
   from crashing while preserving the M1 root-completeness rule.
+  *Active interpreter and native closure roots landed:* registered interpreters
+  now mark the active environment cell, not only its values, and object tracing
+  follows engine-owned Promise/VM native `private_data` records. This keeps
+  async microtask GC from reclaiming live function environments or Promise
+  combinator result arrays while waiter-table and WeakRef reclamation tests run.
   *C-API handle table landed:* `box()` registers each `Boxed` (`JSValueRef`) on
   `Context.c_api_handles` when the GC is on (`*Boxed` aliases `*Value`), and
   `traceRoots` marks them — so an embedder-held `JSValueRef` survives collection.
@@ -338,7 +354,7 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   `JSGlobalContextCreate` is unchanged, so it stays a no-op there. Validated by a
   C-API test (`JSGarbageCollect` reclaims 500 garbage objects while a held
   `JSValueRef` keeps its object — `tag === 123` after collection); conformance
-  33/33, threads 194/194, full unit suite leak-checked. (No `JSValueUnprotect`
+  33/33, threads 209/209, full unit suite leak-checked. (No `JSValueUnprotect`
   yet, so a boxed object is pinned for the context's life — conservative but
   sound.)
   *WeakRef weak edges landed:* `Object` now keeps a separate WeakRef brand and
@@ -365,10 +381,12 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   callbacks.
   *Remaining for the FULL deliverable:* (a) **arbitrary mid-script collection**
   needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
-  locals/registers a precise GC can't see) — the quiescent points avoid this; a
-  Boehm-style stack scan with register spill would generalize it. (b) keep new
-  cell-owned side buffers behind the backing-store helpers and this audit, so
-  future additions do not silently fall back to reclaim-at-destroy lifetime.
+  locals/registers a precise GC can't see) and a fuller safepoint protocol for
+  spawned threads parked in native calls — the quiescent checkpoints avoid
+  this; a Boehm-style stack scan with register spill would generalize it. (b)
+  keep new cell-owned side buffers behind the backing-store helpers and this
+  audit, so future additions do not silently fall back to reclaim-at-destroy
+  lifetime.
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per

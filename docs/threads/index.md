@@ -24,7 +24,7 @@ objects, and promise state safe in today's engine.
 | `$262.agent` and typed-array `Atomics.wait` / `notify` / `waitAsync` | Implemented in `src/agent.zig` with hooks in `src/interpreter.zig`. | Unit tests and real test262 agent cases. |
 | Structured clone | Implemented in `src/structured_clone.zig`. | Unit tests, workers, and agents. |
 | Embedder `Worker` API | Implemented in `src/worker.zig` with C-API hooks in `src/c_api.zig`. | Worker unit tests and C-API round trip. |
-| Shared-realm `Thread` API | Implemented in `src/gil.zig`, `src/jsthread.zig`, and `src/context.zig`. | `zig build threads-test` green allowlist: 194/194. |
+| Shared-realm `Thread` API | Implemented in `src/gil.zig`, `src/jsthread.zig`, and `src/context.zig`. | `zig build threads-test` green allowlist: 209/209. |
 
 ## Core Rules
 
@@ -50,6 +50,9 @@ objects, and promise state safe in today's engine.
 - [Limits & Roadmap](./limits.md) - GIL semantics, host knobs, and Layer-C
   blockers.
 - [bindings.md](./bindings.md) - mutable-state audit and contribution rule.
+- [GitHub issue #1](https://github.com/zig-utils/zig-js/issues/1) - the single
+  canonical tracker for thread work; do not split status across duplicate
+  roadmap issues.
 - [P2-agents.md](./P2-agents.md), [P5-workers.md](./P5-workers.md), and
   [P6-thread-api.md](./P6-thread-api.md) - implementation design records.
 - [P7-gc-design.md](./P7-gc-design.md), [P7-gil-removal.md](./P7-gil-removal.md),
