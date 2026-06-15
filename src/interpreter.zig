@@ -7935,7 +7935,7 @@ pub const Interpreter = struct {
             array_like_len = toArrayLikeLen(lenf);
             // A full-length-iterating method on a pathological array-like length
             // would spin a native loop forever — bail (matches the prior guard).
-            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse")) return null;
+            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift")) return null;
         }
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
@@ -8023,18 +8023,24 @@ pub const Interpreter = struct {
             return first;
         }
         if (eq(name, "unshift")) {
+            const max_safe_len: usize = 9007199254740991;
             const len = ilen;
+            if (args.len > 0 and len > max_safe_len - args.len)
+                return self.throwError("TypeError", "unshift would exceed the maximum array length 2**53-1");
             if (args.len > 0) {
                 // Shift each existing element up by argCount (high to low, via
                 // [[Get]]/[[Set]]/[[Delete]] so holes move and inherited accessors
                 // fire), then place the new arguments at the front.
                 var k: usize = len;
+                var moved: usize = 0;
                 while (k > 0) : (k -= 1) {
+                    if (moved > (1 << 22)) return null;
                     const to = k - 1 + args.len;
                     if (try self.arrIndexPresent(o, k - 1))
                         try self.arraySetIndexThrowing(o, to, try self.arrIndexGet(o, k - 1))
                     else
-                        _ = try self.deleteOwn(o, try std.fmt.allocPrint(self.arena, "{d}", .{to}));
+                        try self.arrIndexDeleteOrThrow(o, to);
+                    moved += 1;
                 }
                 for (args, 0..) |a, j| try self.arraySetIndexThrowing(o, j, a);
             }

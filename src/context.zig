@@ -921,6 +921,21 @@ test "Array.prototype generics on array-likes" {
         \\try { Array.prototype.reverse.call(o); false; }
         \\catch (e) { e instanceof StopReverse; }
     )).boolean);
+    try std.testing.expect((try evalIn(
+        \\function StopUnshift() {}
+        \\var o = { length: 2 ** 53 - 2 };
+        \\Object.defineProperty(o, "9007199254740986", {
+        \\  get: function () { throw new StopUnshift(); }
+        \\});
+        \\o["9007199254740987"] = "hi";
+        \\try { Array.prototype.unshift.call(o, null); false; }
+        \\catch (e) { e instanceof StopUnshift && o["9007199254740988"] === "hi"; }
+    )).boolean);
+    try std.testing.expectEqual(@as(f64, 9007199254740991), (try evalIn(
+        \\var o = { length: Infinity };
+        \\Array.prototype.unshift.call(o);
+        \\o.length
+    )).number);
 }
 
 test "array instances inherit from Array.prototype (incl. holes)" {
