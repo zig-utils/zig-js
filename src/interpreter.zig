@@ -3631,9 +3631,16 @@ pub const Interpreter = struct {
 
     /// `await v` on an already-evaluated value (synchronous-settling): if `v` is
     /// a promise, drive the microtask queue until it settles, then return its
-    /// value (or throw its rejection). A non-promise is returned as-is.
+    /// value (or throw its rejection). A thenable is first assimilated through an
+    /// intrinsic promise so `Await` observes its `then` hook exactly once.
     pub fn awaitValue(self: *Interpreter, v: Value) EvalError!Value {
-        const p = promise.promiseOf(v) orelse return v;
+        const p = promise.promiseOf(v) orelse blk: {
+            if (v != .object or v.object.is_array) return v;
+            const pobj = try promise.newPromise(self);
+            const pp = promise.promiseOf(.{ .object = pobj }).?;
+            try promise.resolve(self, pp, v);
+            break :blk pp;
+        };
         const q = self.microtasks;
         while (p.state == .pending) {
             const queue = q orelse break;

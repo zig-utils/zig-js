@@ -1645,6 +1645,25 @@ test "Promise thenable job ignores throw after resolve" {
     try std.testing.expectEqualStrings("ok", v.string);
 }
 
+test "Array.fromAsync awaits thenable elements" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var count = 0;
+        \\var value = "";
+        \\var rejected = false;
+        \\Array.fromAsync({ length: 1, 0: { then: function (resolve) {
+        \\  count += 1;
+        \\  resolve("ok");
+        \\} } }).then(function (a) { value = count + ":" + a[0]; });
+        \\var err = new Error("boom");
+        \\Array.fromAsync({ length: 1, 0: { then: function () { throw err; } } })
+        \\  .then(undefined, function (reason) { rejected = reason === err; });
+    );
+    const v = try ctx.evaluate("value + ':' + rejected");
+    try std.testing.expectEqualStrings("1:ok:true", v.string);
+}
+
 /// Evaluate `src` in a fresh context and return its completion value. Only safe
 /// for by-value results (numbers/booleans); a returned `.string` points into the
 /// context arena, so use `expectEvalStr` for those (it compares before teardown).

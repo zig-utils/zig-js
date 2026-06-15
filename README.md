@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` when a host already targets the JSC C API.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **43,370 / 47,930 (90.5%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **43,381 / 47,930 (90.5%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
 
 ```zig
 const js = @import("js");
@@ -46,17 +46,17 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **43,370 / 47,930 (90.5%)** |
+| **valid** | can we run the program? (scored corpus) | **43,381 / 47,930 (90.5%)** |
 | negative | do we reject invalid input? (early errors — partial) | 3,305 / 4,668 (70.8%) |
 
-Of the valid corpus: **45 parse failures**, **4,515 runtime failures**, **0 host failures**. The runner currently skips 579 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `language`, `staging`, and Annex B.
+Of the valid corpus: **45 parse failures**, **4,504 runtime failures**, **0 host failures**. The runner currently skips 579 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `language`, `staging`, and Annex B.
 
 ### Per area (valid)
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 17,681 / 19,070 (92.7%) | `Object` | 3,411 / 3,411 (100%) |
-| `Array` | 3,041 / 3,081 (98.7%) | `RegExp` | 1,687 / 1,687 (100%) |
+| `language` | 17,682 / 19,070 (92.7%) | `Object` | 3,411 / 3,411 (100%) |
+| `Array` | 3,051 / 3,081 (99.0%) | `RegExp` | 1,687 / 1,687 (100%) |
 | `String` | 1,223 / 1,223 (100%) | `TypedArray` | 1,446 / 1,446 (100%) |
 | `TypedArrayConstructors` | 738 / 738 (100%) | `Uint8Array` | 70 / 70 (100%) |
 | `Map` | 204 / 204 (100%) | `Set` | 383 / 383 (100%) |
