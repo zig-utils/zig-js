@@ -7935,7 +7935,7 @@ pub const Interpreter = struct {
             array_like_len = toArrayLikeLen(lenf);
             // A full-length-iterating method on a pathological array-like length
             // would spin a native loop forever — bail (matches the prior guard).
-            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22)) return null;
+            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin")) return null;
         }
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
@@ -8457,11 +8457,12 @@ pub const Interpreter = struct {
             const v = arg0(args);
             const start = try relIndex(self, arg(args, 1), ilen, 0);
             const end = try relIndex(self, arg(args, 2), ilen, @floatFromInt(ilen));
+            if (end > start and end - start > (1 << 22)) return null;
             // fill writes through [[Set]] over the full length, so it also fills
             // holes (and creates indexed properties on an array-like `this`).
             var i = start;
             while (i < end) : (i += 1) {
-                try self.setMember(.{ .object = o }, try std.fmt.allocPrint(self.arena, "{d}", .{i}), v);
+                try self.arrIndexSetOrThrow(o, i, v);
             }
             return Value{ .object = o };
         }
@@ -8582,6 +8583,7 @@ pub const Interpreter = struct {
             const start = try relIndex(self, arg(args, 1), len, 0);
             const end = try relIndex(self, arg(args, 2), len, @floatFromInt(len));
             var count = @min(if (end > start) end - start else 0, len - target);
+            if (count > (1 << 22)) return null;
             // Copy through [[Get]]/[[Set]] over the full length; a hole at the
             // source deletes the target (so holes move correctly). Walk backward
             // when the ranges overlap with target after source.
@@ -8594,11 +8596,10 @@ pub const Interpreter = struct {
                 to += count - 1;
             }
             while (count > 0) {
-                const tk = try std.fmt.allocPrint(self.arena, "{d}", .{to});
                 if (self.arrIndexPresent(o, from))
-                    try self.setMember(.{ .object = o }, tk, try self.arrIndexGet(o, from))
+                    try self.arrIndexSetOrThrow(o, to, try self.arrIndexGet(o, from))
                 else
-                    _ = try self.deleteOwn(o, tk);
+                    try self.arrIndexDeleteOrThrow(o, to);
                 count -= 1;
                 if (count == 0) break;
                 if (backward) {
