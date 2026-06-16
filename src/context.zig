@@ -529,6 +529,14 @@ pub const Context = struct {
         indirect: struct { module: *Module, name: []const u8 }, // re-export
     };
 
+    fn isSourceImport(entry: ast.ImportEntry) bool {
+        return std.mem.eql(u8, entry.imported, "source");
+    }
+
+    fn isHostModuleSourceSpecifier(specifier: []const u8) bool {
+        return std.mem.eql(u8, specifier, "<module source>");
+    }
+
     pub const Module = struct {
         path: []const u8,
         items: []*ast.Node,
@@ -613,7 +621,9 @@ pub const Context = struct {
         // Load every dependency and record this module's export map.
         for (items) |item| switch (item.*) {
             .import_decl => |imp| {
-                _ = try self.loadDep(m, imp.specifier, host, cache);
+                const source_only = imp.entries.len == 1 and isSourceImport(imp.entries[0]);
+                if (!source_only or !isHostModuleSourceSpecifier(imp.specifier))
+                    _ = try self.loadDep(m, imp.specifier, host, cache);
             },
             .export_decl => |e| {
                 if (e.from.len > 0) _ = try self.loadDep(m, e.from, host, cache);
@@ -633,6 +643,20 @@ pub const Context = struct {
         const dep = try self.loadModule(dep_path, dep_src, host, cache);
         try m.deps.put(self.arena(), specifier, dep);
         return dep;
+    }
+
+    fn newModuleSourceObject(self: *Context) RunError!*value.Object {
+        const a = self.arena();
+        const obj = try gc_mod.allocObj(a);
+        obj.* = .{};
+        if (self.env.get("$262")) |host| if (host == .object) {
+            if (host.object.getOwn("AbstractModuleSource")) |ctor| if (ctor == .object) {
+                if (ctor.object.getOwn("prototype")) |proto| if (proto == .object) {
+                    obj.proto = proto.object;
+                };
+            };
+        };
+        return obj;
     }
 
     /// Record the export names introduced by one `export` declaration.
@@ -682,6 +706,13 @@ pub const Context = struct {
         return error.Throw;
     }
 
+    fn moduleTypeError(self: *Context, msg: []const u8) RunError {
+        var machine = self.interpreter();
+        machine.throwError("TypeError", msg) catch {};
+        self.exception = machine.exception;
+        return error.Throw;
+    }
+
     /// Resolve an export `name` of `module` to a concrete `(env, local)` binding,
     /// chasing re-exports and `export *` sources. Returns null if not found.
     fn resolveExport(module: *Module, name: []const u8, depth: u32) ?interp.Environment.Alias {
@@ -712,11 +743,14 @@ pub const Context = struct {
 
         for (m.items) |item| switch (item.*) {
             .import_decl => |imp| {
-                const dep = m.deps.get(imp.specifier).?;
+                const dep = if (m.deps.get(imp.specifier)) |d| d else null;
                 for (imp.entries) |entry| {
-                    if (std.mem.eql(u8, entry.imported, "*")) {
-                        try m.env.put(entry.local, .{ .object = try self.namespaceObject(dep) });
-                    } else if (resolveExport(dep, entry.imported, 0)) |res| {
+                    if (isSourceImport(entry)) {
+                        if (!isHostModuleSourceSpecifier(imp.specifier)) return self.moduleTypeError("source phase import is not available");
+                        try m.env.put(entry.local, .{ .object = try self.newModuleSourceObject() });
+                    } else if (std.mem.eql(u8, entry.imported, "*")) {
+                        try m.env.put(entry.local, .{ .object = try self.namespaceObject(dep.?) });
+                    } else if (resolveExport(dep.?, entry.imported, 0)) |res| {
                         try m.env.putAlias(entry.local, res.env, res.name);
                     } else {
                         return self.moduleError("does not provide an export");
@@ -767,7 +801,11 @@ pub const Context = struct {
         if (m.evaluated) return;
         m.evaluated = true;
         for (m.items) |item| switch (item.*) {
-            .import_decl => |imp| try self.evalModule(machine, m.deps.get(imp.specifier).?),
+            .import_decl => |imp| {
+                const source_only = imp.entries.len == 1 and isSourceImport(imp.entries[0]);
+                if (!source_only or !isHostModuleSourceSpecifier(imp.specifier))
+                    try self.evalModule(machine, m.deps.get(imp.specifier).?);
+            },
             .export_decl => |e| if (e.from.len > 0) try self.evalModule(machine, m.deps.get(e.from).?),
             else => {},
         };
@@ -1002,6 +1040,19 @@ test "modules expose namespace re-exports and evaluate dependencies in source or
         \\if (val !== 2) throw new Error("default binding did not update");
     , &.{
         .{ .path = "dep.js", .source = "export default function fn() { fn = 2; return 1; }" },
+    });
+}
+
+test "modules bind source-phase imports as module source objects" {
+    try evaluateModuleWithFixtures(
+        \\import source direct from "<module source>";
+        \\import { x } from "./reexport.js";
+        \\import * as ns from "./reexport.js";
+        \\if (!(direct instanceof $262.AbstractModuleSource)) throw new Error("bad direct source import");
+        \\if (!(x instanceof $262.AbstractModuleSource)) throw new Error("bad named source re-export");
+        \\if (!(ns.x instanceof $262.AbstractModuleSource)) throw new Error("bad namespace source re-export");
+    , &.{
+        .{ .path = "reexport.js", .source = "import source x from '<module source>'; export { x };" },
     });
 }
 

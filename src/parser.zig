@@ -609,6 +609,20 @@ pub const Parser = struct {
             try self.consumeStatementTerminator();
             return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = &.{} } });
         }
+        // Source-phase import: `import source x from "mod"`. The contextual
+        // keyword is only recognized when a binding and following `from` are
+        // present, so `import source from "mod"` remains a default import.
+        if (self.checkContextual("source") and self.peekKind(1) == .identifier and self.peekIsKeyword(2, "from")) {
+            _ = self.advance(); // source
+            const name = self.advance().text;
+            if (self.isForbiddenBindingName(name)) return ParseError.UnexpectedToken;
+            try entries.append(self.arena, .{ .imported = "source", .local = name });
+            try self.expectContextual("from");
+            const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
+            try self.parseImportAttributesOpt();
+            try self.consumeStatementTerminator();
+            return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items } });
+        }
         // Default binding: `import name ...`
         if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "from")) {
             const name = self.advance().text;
@@ -2887,6 +2901,29 @@ test "parser validates static import attributes" {
 
     var non_string = try Parser.init(arena.allocator(), "import './m.js' with { type: 1 };");
     try std.testing.expectError(ParseError.UnexpectedToken, non_string.parseModule());
+}
+
+test "parser accepts source-phase import bindings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var source_import = try Parser.init(arena.allocator(), "import source mod from '<module source>';");
+    const source_prog = try source_import.parseModule();
+    try std.testing.expectEqualStrings("source", source_prog.program[0].import_decl.entries[0].imported);
+    try std.testing.expectEqualStrings("mod", source_prog.program[0].import_decl.entries[0].local);
+
+    var source_named_source = try Parser.init(arena.allocator(), "import source source from '<module source>';");
+    const named_source_prog = try source_named_source.parseModule();
+    try std.testing.expectEqualStrings("source", named_source_prog.program[0].import_decl.entries[0].local);
+
+    var source_named_from = try Parser.init(arena.allocator(), "import source from from '<module source>';");
+    const named_from_prog = try source_named_from.parseModule();
+    try std.testing.expectEqualStrings("from", named_from_prog.program[0].import_decl.entries[0].local);
+
+    var default_source = try Parser.init(arena.allocator(), "import source from './m.js';");
+    const default_prog = try default_source.parseModule();
+    try std.testing.expectEqualStrings("default", default_prog.program[0].import_decl.entries[0].imported);
+    try std.testing.expectEqualStrings("source", default_prog.program[0].import_decl.entries[0].local);
 }
 
 test "parser validates module label early errors" {
