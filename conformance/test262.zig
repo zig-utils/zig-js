@@ -28,7 +28,7 @@
 //!   - `flags: [raw]`        → run the body with no harness prepended
 //!   - `flags: [module|async|CanBlockIsFalse]` → skip (unsupported runtime)
 //!   - `includes: [...]`     → prepend the named harness files
-//!   - `negative: { type, phase }` → expect a parse error or a thrown exception
+//!   - `negative: { type, phase }` → expect a parse/resolution error or throw
 //!
 //! Usage: `zig build test262` (root from the `-Dtest262=<path>` build option). A
 //! missing corpus is reported and skipped cleanly (exit 0).
@@ -186,6 +186,7 @@ const Meta = struct {
     unsupported_flag: bool = false,
     negative: bool = false,
     negative_parse: bool = false,
+    negative_resolution: bool = false,
     /// `flags: [onlyStrict]` — the test must run as strict-mode code, so a
     /// `"use strict"` directive is prepended to the assembled source.
     only_strict: bool = false,
@@ -246,8 +247,25 @@ fn parseMeta(src: []const u8) Meta {
         if (std.mem.indexOf(u8, region, "phase: parse") != null or
             std.mem.indexOf(u8, region, "phase:parse") != null)
             meta.negative_parse = true;
+        if (std.mem.indexOf(u8, region, "phase: resolution") != null or
+            std.mem.indexOf(u8, region, "phase:resolution") != null)
+            meta.negative_resolution = true;
     }
     return meta;
+}
+
+fn negativeMatched(meta: Meta, err: anyerror) bool {
+    if (meta.negative_parse) return err != error.Throw;
+    if (meta.negative_resolution) return true;
+    return err == error.Throw;
+}
+
+fn moduleRootParses(gpa: std.mem.Allocator, src: []const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var parser = js.Parser.init(arena.allocator(), src) catch return false;
+    _ = parser.parseModule() catch return false;
+    return true;
 }
 
 /// Parse the include file names following `includes:` — either the inline
@@ -380,8 +398,7 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []con
         return .pass;
     } else |err| {
         if (meta.negative) {
-            const ok = if (meta.negative_parse) err != error.Throw else err == error.Throw;
-            return if (ok) .pass_negative else .fail_negative;
+            return if (negativeMatched(meta, err)) .pass_negative else .fail_negative;
         }
         return switch (err) {
             error.Throw => .fail_runtime,
@@ -433,6 +450,7 @@ fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_pat
 /// Run a `flags: [module]` test: install the harness in the global scope, then
 /// link + evaluate the test body as a Module against its sibling fixtures.
 fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, meta: Meta) Outcome {
+    if (meta.negative_resolution and !moduleRootParses(gpa, src)) return .fail_negative;
     const ctx = js.Context.createWithTestingOptions(gpa, .{
         .main_can_block = !meta.can_block_false,
     }) catch return .skip;
@@ -463,8 +481,7 @@ fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []
         return if (meta.negative) .fail_negative else .pass;
     } else |err| {
         if (meta.negative) {
-            const ok = if (meta.negative_parse) err != error.Throw else err == error.Throw;
-            return if (ok) .pass_negative else .fail_negative;
+            return if (negativeMatched(meta, err)) .pass_negative else .fail_negative;
         }
         return switch (err) {
             error.Throw => .fail_runtime,
