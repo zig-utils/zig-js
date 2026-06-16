@@ -1734,6 +1734,7 @@ pub const Interpreter = struct {
             .var_decl => |d| if (d.kind == .@"var") try self.hoistOneVar(d.name),
             .destructure_decl => |d| if (d.kind == .@"var") try self.hoistPatternVars(d.pattern),
             .decl_group => |g| for (g) |gs| try self.hoistVarsIn(gs),
+            .export_decl => |e| if (e.declaration) |d| try self.hoistVarsIn(d),
             .block => |b| for (b) |bs| try self.hoistVarsIn(bs),
             .if_stmt => |i| {
                 try self.hoistVarsIn(i.consequent);
@@ -1966,10 +1967,14 @@ pub const Interpreter = struct {
                 if (e.declaration) |d| {
                     if (d.* == .func_decl) try self.globalDefine(d.func_decl.name, try self.makeFunction(d.func_decl, self.env));
                 } else if (e.default_expr) |dx| {
-                    if (dx.* == .func_decl) {
-                        const fv = try self.makeFunction(dx.func_decl, self.env);
-                        if (e.default_name.len > 0) try self.globalDefine(e.default_name, fv);
-                        try self.env.put("*default*", fv);
+                    const fv: ?Value = switch (dx.*) {
+                        .func_decl => |f| try self.makeFunction(f, self.env),
+                        .function => |f| try self.makeFunction(f, self.env),
+                        else => null,
+                    };
+                    if (fv) |v| {
+                        if (e.default_name.len > 0) try self.globalDefine(e.default_name, v) else try self.maybeNameAnon(v, dx, "default");
+                        try self.env.put("*default*", v);
                     }
                 }
             },
@@ -2017,7 +2022,7 @@ pub const Interpreter = struct {
                 if (e.declaration) |d| {
                     if (d.* == .func_decl) continue;
                 } else if (e.default_expr) |dx| {
-                    if (dx.* == .func_decl) continue;
+                    if (dx.* == .func_decl or dx.* == .function) continue;
                 }
             }
             const r = try self.eval(s);

@@ -746,7 +746,16 @@ pub const Context = struct {
         switch (item.*) {
             .var_decl => |v| if (v.kind != .@"var") m.env.put(v.name, tdz) catch {},
             .decl_group => |g| for (g) |s| self.instantiateLexical(m, s),
-            .export_decl => |e| if (e.declaration) |d| self.instantiateLexical(m, d),
+            .export_decl => |e| {
+                if (e.declaration) |d| self.instantiateLexical(m, d);
+                if (e.default_expr) |dx| switch (dx.*) {
+                    .class_expr => {
+                        m.env.put("*default*", tdz) catch {};
+                        if (e.default_name.len > 0) m.env.put(e.default_name, tdz) catch {};
+                    },
+                    else => {},
+                };
+            },
             else => {},
         }
     }
@@ -895,6 +904,54 @@ pub const Context = struct {
         ns.extensible = false;
     }
 };
+
+fn evaluateSelfModule(source: []const u8) !void {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    const Host = struct {
+        source: []const u8,
+
+        fn load(ctx_ptr: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            if (!std.mem.eql(u8, specifier, "./entry.js")) return null;
+            out_path.* = "entry.js";
+            return self.source;
+        }
+    };
+
+    var host_state = Host{ .source = source };
+    const mh = Context.ModuleHost{ .ctx = &host_state, .load = Host.load };
+    _ = try ctx.evaluateModule("entry.js", source, mh);
+}
+
+test "modules initialize default and var exports for self imports" {
+    try evaluateSelfModule(
+        \\try {
+        \\  typeof C;
+        \\  throw new Error("missing default class TDZ");
+        \\} catch (e) {
+        \\  if (!(e instanceof ReferenceError)) throw e;
+        \\}
+        \\import C from "./entry.js";
+        \\export default class {};
+    );
+
+    try evaluateSelfModule(
+        \\import f from "./entry.js";
+        \\if (f() !== 23) throw new Error("bad default function value");
+        \\if (f.name !== "default") throw new Error("bad default function name");
+        \\export default function() { return 23; }
+    );
+
+    try evaluateSelfModule(
+        \\import { test262 as imp } from "./entry.js";
+        \\if (test262 !== undefined) throw new Error("exported var was not hoisted");
+        \\if (imp !== undefined) throw new Error("imported var was not hoisted");
+        \\export var test262 = 23;
+        \\if (test262 !== 23 || imp !== 23) throw new Error("exported var did not update");
+    );
+}
 
 test "Date basics" {
     // Components constructor (month is 0-based) + UTC getters.
