@@ -6940,6 +6940,8 @@ pub const Interpreter = struct {
     pub fn arraySpeciesCreate(self: *Interpreter, original: Value, len: usize) EvalError!Value {
         if (original != .object or !try objectToStringIsArray(self, original.object)) return self.newArray();
         const c = try self.getProperty(original, "constructor");
+        if (c == .object and (c.object.is_symbol or c.object.is_bigint))
+            return self.throwError("TypeError", "Array species is not a constructor");
         // GetFunctionRealm cross-realm check: a `constructor` that is another
         // realm's %Array% is treated as the default — ArrayCreate, WITHOUT
         // consulting its @@species (so a cross-realm species getter is untouched).
@@ -8656,15 +8658,10 @@ pub const Interpreter = struct {
                 if (!(try self.arrIndexPresent(o, i))) continue; // skip holes
                 const el = try self.arrIndexGet(o, i);
                 const m = try self.callValueWithThis(cb, &.{ el, .{ .number = @floatFromInt(i) }, .{ .object = o } }, cb_this);
-                // FlattenIntoArray with depth 1: a mapped array is spread one level.
-                if (m == .object and m.object.is_array) {
-                    const mlen: usize = @max(m.object.elements.items.len, m.object.array_len);
-                    var j: usize = 0;
-                    while (j < mlen) : (j += 1) {
-                        if (!(try self.arrIndexPresent(m.object, j))) continue;
-                        try self.arrayResultPush(result, target_index, try self.arrIndexGet(m.object, j));
-                        target_index += 1;
-                    }
+                // FlattenIntoArray with depth 1: a mapped array (including a
+                // Proxy for an array) is spread one level.
+                if (m == .object and try objectToStringIsArray(self, m.object)) {
+                    target_index = try self.flattenInto(result, m.object, 0, target_index);
                 } else {
                     try self.arrayResultPush(result, target_index, m);
                     target_index += 1;
