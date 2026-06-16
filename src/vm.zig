@@ -394,19 +394,23 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // Inline cache: plain (non-array) objects with a shape and
                     // no accessor/attribute overrides (those need the full
                     // [[Get]] path: getters + the prototype walk).
-                    if (obj == .object and !obj.object.is_array and obj.object.accessors == null and obj.object.attrs == null) {
+                    if (obj == .object) {
                         const o = obj.object;
-                        const ic = &chunk.ics[ip - 1];
-                        if (o.shape != null and o.shape == ic.shape) {
-                            result = o.slots.items[ic.slot];
-                            break :fast;
-                        }
-                        if (o.shape) |sh| {
-                            if (sh.lookup(name)) |slot| {
-                                ic.shape = sh;
-                                ic.slot = slot;
-                                result = o.slots.items[slot];
+                        o.lockProperties();
+                        defer o.unlockProperties();
+                        if (!o.is_array and o.accessors == null and o.attrs == null) {
+                            const ic = &chunk.ics[ip - 1];
+                            if (o.shape != null and o.shape == ic.shape) {
+                                result = o.slots.items[ic.slot];
                                 break :fast;
+                            }
+                            if (o.shape) |sh| {
+                                if (sh.lookup(name)) |slot| {
+                                    ic.shape = sh;
+                                    ic.slot = slot;
+                                    result = o.slots.items[slot];
+                                    break :fast;
+                                }
                             }
                         }
                         // own miss → fall through to full [[Get]] (prototype walk
@@ -430,19 +434,23 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // property transitions the shape, so it goes the slow path.
                     // Objects with accessor/attribute overrides also take the
                     // slow path ([[Set]] honors setters + non-writable).
-                    if (obj == .object and !obj.object.is_array and obj.object.accessors == null and obj.object.attrs == null) {
+                    if (obj == .object) {
                         const o = obj.object;
-                        const ic = &chunk.ics[ip - 1];
-                        if (o.shape != null and o.shape == ic.shape) {
-                            o.slots.items[ic.slot] = v;
-                            break :fast;
-                        }
-                        if (o.shape) |sh| {
-                            if (sh.lookup(name)) |slot| {
-                                ic.shape = sh;
-                                ic.slot = slot;
-                                o.slots.items[slot] = v;
+                        o.lockProperties();
+                        defer o.unlockProperties();
+                        if (!o.is_array and o.accessors == null and o.attrs == null) {
+                            const ic = &chunk.ics[ip - 1];
+                            if (o.shape != null and o.shape == ic.shape) {
+                                o.slots.items[ic.slot] = v;
                                 break :fast;
+                            }
+                            if (o.shape) |sh| {
+                                if (sh.lookup(name)) |slot| {
+                                    ic.shape = sh;
+                                    ic.slot = slot;
+                                    o.slots.items[slot] = v;
+                                    break :fast;
+                                }
                             }
                         }
                     }

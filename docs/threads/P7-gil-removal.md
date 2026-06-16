@@ -14,16 +14,17 @@ gating prerequisite below.
 ## Where Layer B leaves us
 
 Phases 1–6 ship a **GIL'd** shared heap (`src/gil.zig`): exactly one thread
-runs JS at a time, so arena allocation, object shape publication, slot/element
-storage, and every existing invariant are safe even before their final
-per-structure synchronization exists. Threads interleave only at the step
+runs JS at a time, so arena allocation, direct object rebuild paths,
+slot/element storage, and every existing invariant are safe even before their
+final per-structure synchronization exists. Threads interleave only at the step
 checkpoints (`(steps & 1023) == 0` in `src/interpreter.zig` `eval` and
 `src/vm.zig` `execLoop`, both calling `Gil.yieldIfContended`) and release the
 lock at every blocking point. Removing the GIL means every one of the
 structures the GIL currently protects needs its own correctness story. The
-shape transition **map** now has that first story: `Shape.transition` locks the
-per-shape transition table, so identical property-add histories converge even
-without relying on the context GIL.
+shape transition **map** and ordinary named-property helper paths now have that
+first story: `Shape.transition` locks the per-shape transition table, and
+`Object.property_lock` serializes helper-routed shape, slot, accessor,
+attribute, and key-order state.
 
 ## The gating prerequisite: a tracing GC
 
@@ -45,10 +46,10 @@ polled in both engines.
 |---|---|---|---|---|
 | 1 | Per-context arena | `context.zig:22`, alloc via `arena()` | `ArenaAllocator` + backing GPA are not thread-safe; concurrent alloc corrupts free lists | GC-managed heap, or per-thread nurseries with a shared old space |
 | 2 | **Shape transition map** | `shape.zig` `transitions: StringHashMapUnmanaged(*Shape)` plus per-shape `transition_lock`, mutated only in `Shape.transition()` | **Closed for the map itself:** `Shape.transition` locks the table around lookup/allocation/publish, so two mutators adding the same property to one parent shape converge on one child instead of corrupting/diverging. Arena allocation remains covered by #1 until the shared heap/nursery story is complete. | Keep all transition writes behind `Shape.transition`; later Layer-C work may swap the lock for a lock-free table only with equivalent convergence tests. |
-| 3 | Object shape pointer | `value.zig:832` `self.shape = child` in `setOwn` | Non-atomic pointer store; a concurrent reader can see a torn/stale shape on weakly-ordered ISAs | Atomic shape slot + publish-after-populate ordering |
-| 4 | Object slot storage | `value.zig:434` `slots: ArrayListUnmanaged(Value)`, appended in `setOwn` (`value.zig:831`) | `append` reallocates; a concurrent reader dereferences a freed buffer | Per-object lock, or stable-segmented slot vectors that never move |
+| 3 | Object shape pointer | `value.zig` `Object.property_lock`, `shape`, `setOwnUnlocked`; VM property ICs in `vm.zig` | **Closed for named-property helper paths:** `Object.setOwn` / `getOwn` and VM plain-property IC reads/writes hold `property_lock` while reading/publishing the shape pointer. Direct semantic rebuild paths still run under the GIL until they are funneled through locked helpers. | Keep all ordinary named-property shape publication behind `property_lock`; later Layer-C work may replace direct delete/rebuild mutations with locked helper APIs or an atomic shape slot with equivalent publish ordering. |
+| 4 | Object slot storage | `value.zig` `Object.property_lock`, `slots: ArrayListUnmanaged(Value)`, `setOwnUnlocked`; VM property ICs in `vm.zig` | **Closed for named-property helper paths:** slot append and same-slot updates through `Object.setOwn` / `getOwn` and VM plain-property ICs are serialized by `property_lock`. Dense element storage and direct array/collection element mutations remain separate blockers. | Keep slot-vector mutation behind `property_lock`, then replace/funnel remaining direct slot rebuild paths before removing the GIL. |
 | 5 | Object element storage | `elements: ArrayListUnmanaged(Value)` (Array push) | Same realloc-move hazard as slots | Same as #4 |
-| 6 | Accessor / attribute maps | `setAccessor`/`setAttr` `StringHashMapUnmanaged` puts | HashMap not thread-safe | Fold under the per-object lock |
+| 6 | Accessor / attribute maps | `value.zig` `Object.property_lock`, `setAccessor`/`setAttr` `StringHashMapUnmanaged` puts | **Closed for Object helper paths:** accessor and attribute map lookup/mutation through `Object.getAccessor` / `setAccessor` / `getAttr` / `setAttr` is serialized by `property_lock`. Direct map edits in delete/descriptor code remain GIL-protected until funneled through helpers. | Keep accessor/attribute state behind `property_lock`; remove direct side doors before ungil. |
 | 7 | **Value width** | `value.zig:888` `Value = union(enum)` — ~24 bytes (slice payload + tag), **not pointer-width** | A 24-byte slot cannot be read/written atomically; readers tear against writers | NaN-box `Value` to 8 bytes so a slot is a single atomic word — a design input *before* any ungil bring-up |
 | 8 | Strings | `value.zig` `string: []const u8` (uninterned arena slices); `jsstring.zig` atomic `retain`/`release` refcount | No shared intern table exists to race on (good). FFI `JSStringRef` retain/release is now atomic; arena slices still have context lifetime. | Keep uninterned until Layer C chooses a sharded intern table; continue avoiding pointer-identity assumptions for equal strings. |
 
@@ -67,6 +68,12 @@ polled in both engines.
   `Shape.transition` (`shape.zig`), whose per-shape lock is now the
   synchronization point for the transition table (#2). Do not add side doors
   that mutate `transitions` directly.
+- **Keep object named properties funnel-shaped.** Ordinary named property
+  helper paths now synchronize on `Object.property_lock` (`value.zig`), and the
+  VM's plain-property inline caches take that lock before touching `shape` or
+  `slots`. Do not add new direct mutations of `shape`, `slots`, `accessors`,
+  `attrs`, or `key_order`; existing direct delete/rebuild paths are Layer-C
+  cleanup before the GIL can go away.
 - **Keep the safepoint checkpoints as the only interleave points.** Both
   engines already poll at `(steps & 1023) == 0`; a GC needs exactly these as
   safepoints. Do not add heap mutation paths that can run for an unbounded

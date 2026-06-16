@@ -469,6 +469,11 @@ pub const Object = struct {
     /// finalized accurately while migration is incremental.
     backing_allocator: ?std.mem.Allocator = null,
     backing_flags: ObjectBackingFlags = .{},
+    /// Coarse synchronization for ordinary named-property metadata: shape
+    /// publication, slots, accessors, attributes, and key order. The Layer-B GIL
+    /// still serializes JS execution today; this lock is the Layer-C object-side
+    /// convergence point for paths that already flow through Object helpers.
+    property_lock: std.atomic.Mutex = .unlocked,
     /// Named properties live behind a shared `Shape` (null = no own properties)
     /// plus a flat per-object `slots` array indexed by the shape. See shape.zig.
     shape: ?*Shape = null,
@@ -746,7 +751,29 @@ pub const Object = struct {
         return self.backingFor(fallback, "arg_map_names");
     }
 
+    pub fn lockProperties(self: *const Object) void {
+        var spins: usize = 0;
+        const mutex = &@constCast(self).property_lock;
+        while (!mutex.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+
+    pub fn unlockProperties(self: *const Object) void {
+        @constCast(self).property_lock.unlock();
+    }
+
     pub fn resetSlotsForRebuild(self: *Object) void {
+        self.lockProperties();
+        defer self.unlockProperties();
+        self.resetSlotsForRebuildUnlocked();
+    }
+
+    fn resetSlotsForRebuildUnlocked(self: *Object) void {
         if (self.backing_flags.slots) {
             self.slots.deinit(self.backing_allocator.?);
             self.deactivateBacking("slots");
@@ -755,6 +782,12 @@ pub const Object = struct {
     }
 
     pub fn deinitKeyOrder(self: *Object) void {
+        self.lockProperties();
+        defer self.unlockProperties();
+        self.deinitKeyOrderUnlocked();
+    }
+
+    fn deinitKeyOrderUnlocked(self: *Object) void {
         if (self.key_order) |ord| {
             if (self.backing_flags.key_order) {
                 const a = self.backing_allocator.?;
@@ -768,7 +801,9 @@ pub const Object = struct {
     }
 
     pub fn replaceKeyOrder(self: *Object, arena: std.mem.Allocator, names: []const []const u8) std.mem.Allocator.Error!void {
-        self.deinitKeyOrder();
+        self.lockProperties();
+        defer self.unlockProperties();
+        self.deinitKeyOrderUnlocked();
         const alloc = self.keyOrderAllocator(arena);
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
         ko.* = .empty;
@@ -814,10 +849,16 @@ pub const Object = struct {
 
     /// Own named property keys in insertion order (for `for-in` / enumeration).
     pub fn ownKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
+        self.lockProperties();
+        defer self.unlockProperties();
+        return self.ownKeysUnlocked(arena);
+    }
+
+    fn ownKeysUnlocked(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         var insertion: std.ArrayListUnmanaged([]const u8) = .empty;
         const has_own = struct {
             fn f(o: *const Object, k: []const u8) bool {
-                return o.getOwn(k) != null or (o.accessors != null and o.accessors.?.get(k) != null);
+                return o.getOwnUnlocked(k) != null or (o.accessors != null and o.accessors.?.get(k) != null);
             }
         }.f;
         const contains = struct {
@@ -894,6 +935,12 @@ pub const Object = struct {
 
     /// The attributes of own property `name` (all-true default if no override).
     pub fn getAttr(self: *const Object, name: []const u8) PropAttr {
+        self.lockProperties();
+        defer self.unlockProperties();
+        return self.getAttrUnlocked(name);
+    }
+
+    fn getAttrUnlocked(self: *const Object, name: []const u8) PropAttr {
         if (self.attrs) |m| {
             if (m.get(name)) |a| return a;
         }
@@ -902,6 +949,8 @@ pub const Object = struct {
 
     /// Record an attribute override for `name`.
     pub fn setAttr(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
+        self.lockProperties();
+        defer self.unlockProperties();
         const alloc = self.attrsAllocator(arena);
         if (self.attrs == null) {
             self.attrs = try alloc.create(std.StringHashMapUnmanaged(PropAttr));
@@ -925,6 +974,12 @@ pub const Object = struct {
 
     /// An own accessor (get/set) property, if present.
     pub fn getAccessor(self: *const Object, name: []const u8) ?Accessor {
+        self.lockProperties();
+        defer self.unlockProperties();
+        return self.getAccessorUnlocked(name);
+    }
+
+    fn getAccessorUnlocked(self: *const Object, name: []const u8) ?Accessor {
         const m = self.accessors orelse return null;
         return m.get(name);
     }
@@ -932,6 +987,8 @@ pub const Object = struct {
     /// Define/merge an own accessor (get and/or set). Promotes the name to an
     /// accessor property.
     pub fn setAccessor(self: *Object, arena: std.mem.Allocator, name: []const u8, get: ?Value, set: ?Value) std.mem.Allocator.Error!void {
+        self.lockProperties();
+        defer self.unlockProperties();
         const alloc = self.accessorsAllocator(arena);
         if (self.accessors == null) {
             self.accessors = try alloc.create(std.StringHashMapUnmanaged(Accessor));
@@ -944,8 +1001,8 @@ pub const Object = struct {
             // First accessor on this object: start key_order by snapshotting the
             // existing data keys (shape-chain insertion order), so the new
             // accessor interleaves correctly with them.
-            try self.ensureKeyOrder(arena);
-            try self.recordKeyOrder(arena, gop.key_ptr.*);
+            try self.ensureKeyOrderUnlocked(arena);
+            try self.recordKeyOrderUnlocked(arena, gop.key_ptr.*);
         }
         if (get) |g| gop.value_ptr.get = g;
         if (set) |s| gop.value_ptr.set = s;
@@ -955,6 +1012,12 @@ pub const Object = struct {
     /// a property between data and accessor keeps its original creation position
     /// (only a brand-new key extends the order).
     fn recordKeyOrder(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
+        self.lockProperties();
+        defer self.unlockProperties();
+        try self.recordKeyOrderUnlocked(arena, name);
+    }
+
+    fn recordKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
         const ko = self.key_order orelse return;
         for (ko.items) |e| if (std.mem.eql(u8, e, name)) return;
         const alloc = self.keyOrderAllocator(arena);
@@ -964,6 +1027,12 @@ pub const Object = struct {
     /// Lazily build `key_order`, seeding it with the current data keys in
     /// insertion order (the order the shape chain already encodes).
     fn ensureKeyOrder(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
+        self.lockProperties();
+        defer self.unlockProperties();
+        try self.ensureKeyOrderUnlocked(arena);
+    }
+
+    fn ensureKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
         if (self.key_order != null) return;
         const alloc = self.keyOrderAllocator(arena);
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
@@ -982,6 +1051,12 @@ pub const Object = struct {
 
     /// Read an own named property, or null if absent. No allocation.
     pub fn getOwn(self: *const Object, name: []const u8) ?Value {
+        self.lockProperties();
+        defer self.unlockProperties();
+        return self.getOwnUnlocked(name);
+    }
+
+    pub fn getOwnUnlocked(self: *const Object, name: []const u8) ?Value {
         const sh = self.shape orelse return null;
         // `lookup` doesn't mutate; the const-cast keeps Object read-only here.
         const slot = (@constCast(sh)).lookup(name) orelse return null;
@@ -992,6 +1067,12 @@ pub const Object = struct {
     /// when the name is new. `root` is the Context's empty shape; `arena` backs
     /// the slot storage and shape tree.
     pub fn setOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
+        self.lockProperties();
+        defer self.unlockProperties();
+        try self.setOwnUnlocked(arena, root, name, v);
+    }
+
+    pub fn setOwnUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
         if (self.shape) |sh| {
             if (sh.lookup(name)) |slot| {
                 self.slots.items[slot] = v;
@@ -1005,7 +1086,7 @@ pub const Object = struct {
         // A new data key on an accessor-bearing object records its creation order
         // (a data↔accessor conversion keeps its position; deleteOwn drops stale
         // entries so a genuinely re-added key lands at the end).
-        if (self.key_order != null) try self.recordKeyOrder(arena, name);
+        if (self.key_order != null) try self.recordKeyOrderUnlocked(arena, name);
     }
 };
 
@@ -1411,4 +1492,27 @@ pub fn looseEquals(a: Value, b: Value) bool {
         else => {},
     }
     return false;
+}
+
+test "object named properties serialize concurrent same-name writes" {
+    const root = try Shape.createRoot(std.heap.page_allocator);
+    var object = Object{};
+
+    const Worker = struct {
+        fn run(o: *Object, root_shape: *Shape, n: usize) void {
+            o.setOwn(std.heap.page_allocator, root_shape, "shared", .{ .number = @floatFromInt(n) }) catch @panic("setOwn failed");
+            _ = o.getOwn("shared") orelse @panic("missing shared property");
+        }
+    };
+
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*thread, i| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ &object, root, i });
+    }
+    for (threads) |thread| thread.join();
+
+    const value = object.getOwn("shared") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), object.slots.items.len);
+    try std.testing.expectEqual(@as(?u32, 0), object.shape.?.lookup("shared"));
+    try std.testing.expect(value == .number);
 }

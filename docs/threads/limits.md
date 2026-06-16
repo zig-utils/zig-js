@@ -79,13 +79,15 @@ thread-affine unless a future API explicitly says otherwise.
 The GC is still M1: it collects only at quiescent points. Running thread
 stacks and ordinary heap mutation also do not yet have the barriers/locks
 needed for parallel mutators. Shape transition maps have a per-shape lock now,
-but object publication, slot storage, and arena allocation around those
-transitions still rely on the GIL. The GIL protects:
+and ordinary named-property helper paths plus VM plain-property inline caches
+hold `Object.property_lock` around shape/slot/accessor/attribute state. Arena
+allocation, dense element storage, direct object rebuild paths, and non-atomic
+`Value` slots still rely on the GIL. The GIL protects:
 
 - arena allocation and teardown,
-- object shape pointers,
-- slot and element vectors,
-- accessor and attribute maps,
+- direct object shape/slot/accessor/attribute mutations not yet funneled
+  through `Object.property_lock`,
+- dense element vectors,
 - promise and async waiter state,
 - non-atomic `Value` slots.
 
