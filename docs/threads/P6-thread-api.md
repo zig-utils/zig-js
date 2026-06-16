@@ -104,5 +104,6 @@ mode is independently shippable and testable; for this engine it is the
 - `evaluate()`'s drain tail and the delivery loops assume one queue; the
   per-thread lift (4) is the fiddly part. Main-thread behavior must not
   change with the option off — gate everything.
-- Shape transitions stay safe ONLY under the GIL: any future "drop the GIL
-  for this hot loop" idea is Layer C work, not a Phase 6 shortcut.
+- Shape transition maps have a per-shape lock, but object shape publication,
+  slot/element storage, and arena allocation still stay under the GIL. Dropping
+  the GIL remains Layer C work, not a Phase 6 shortcut.

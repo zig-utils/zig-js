@@ -14,12 +14,16 @@ gating prerequisite below.
 ## Where Layer B leaves us
 
 Phases 1–6 ship a **GIL'd** shared heap (`src/gil.zig`): exactly one thread
-runs JS at a time, so arena allocation, shape transitions, and every existing
-invariant are safe with zero per-structure synchronization. Threads interleave
-only at the step checkpoints (`(steps & 1023) == 0` in `src/interpreter.zig`
-`eval` and `src/vm.zig` `execLoop`, both calling `Gil.yieldIfContended`) and
-release the lock at every blocking point. Removing the GIL means every one of
-the structures the GIL currently protects needs its own correctness story.
+runs JS at a time, so arena allocation, object shape publication, slot/element
+storage, and every existing invariant are safe even before their final
+per-structure synchronization exists. Threads interleave only at the step
+checkpoints (`(steps & 1023) == 0` in `src/interpreter.zig` `eval` and
+`src/vm.zig` `execLoop`, both calling `Gil.yieldIfContended`) and release the
+lock at every blocking point. Removing the GIL means every one of the
+structures the GIL currently protects needs its own correctness story. The
+shape transition **map** now has that first story: `Shape.transition` locks the
+per-shape transition table, so identical property-add histories converge even
+without relying on the context GIL.
 
 ## The gating prerequisite: a tracing GC
 
@@ -40,7 +44,7 @@ polled in both engines.
 | # | Structure | Site | Tear without the GIL | Fix direction |
 |---|---|---|---|---|
 | 1 | Per-context arena | `context.zig:22`, alloc via `arena()` | `ArenaAllocator` + backing GPA are not thread-safe; concurrent alloc corrupts free lists | GC-managed heap, or per-thread nurseries with a shared old space |
-| 2 | **Shape transition map** | `shape.zig:29` `transitions: StringHashMapUnmanaged(*Shape)`, mutated in `transition()` `shape.zig:56` (`transitions.put`) | Two mutators adding the same property to one parent shape both miss the `get`, both `put` → divergent child shapes, broken monomorphism, corrupt map | Per-shape lock on the transition map, or a lock-free transition table; this is the *first* thing two mutators tear |
+| 2 | **Shape transition map** | `shape.zig` `transitions: StringHashMapUnmanaged(*Shape)` plus per-shape `transition_lock`, mutated only in `Shape.transition()` | **Closed for the map itself:** `Shape.transition` locks the table around lookup/allocation/publish, so two mutators adding the same property to one parent shape converge on one child instead of corrupting/diverging. Arena allocation remains covered by #1 until the shared heap/nursery story is complete. | Keep all transition writes behind `Shape.transition`; later Layer-C work may swap the lock for a lock-free table only with equivalent convergence tests. |
 | 3 | Object shape pointer | `value.zig:832` `self.shape = child` in `setOwn` | Non-atomic pointer store; a concurrent reader can see a torn/stale shape on weakly-ordered ISAs | Atomic shape slot + publish-after-populate ordering |
 | 4 | Object slot storage | `value.zig:434` `slots: ArrayListUnmanaged(Value)`, appended in `setOwn` (`value.zig:831`) | `append` reallocates; a concurrent reader dereferences a freed buffer | Per-object lock, or stable-segmented slot vectors that never move |
 | 5 | Object element storage | `elements: ArrayListUnmanaged(Value)` (Array push) | Same realloc-move hazard as slots | Same as #4 |
@@ -60,9 +64,9 @@ polled in both engines.
   thread-safe: `src/jsstring.zig` uses an atomic refcount, so C-API strings can
   be retained and released from any thread while remaining immutable.
 - **Keep shape transitions funnel-shaped.** All transitions go through
-  `Shape.transition` (`shape.zig:56`) — a single chokepoint to wrap in a lock
-  or swap for a lock-free table (#2). Do not add side doors that mutate
-  `transitions` directly.
+  `Shape.transition` (`shape.zig`), whose per-shape lock is now the
+  synchronization point for the transition table (#2). Do not add side doors
+  that mutate `transitions` directly.
 - **Keep the safepoint checkpoints as the only interleave points.** Both
   engines already poll at `(steps & 1023) == 0`; a GC needs exactly these as
   safepoints. Do not add heap mutation paths that can run for an unbounded

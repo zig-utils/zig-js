@@ -77,11 +77,12 @@ thread-affine unless a future API explicitly says otherwise.
 ## Why the GIL Stays
 
 The GC is still M1: it collects only at quiescent points. Running thread
-stacks, shape transitions, and ordinary heap mutation also do not yet have the
-barriers/locks needed for parallel mutators. The GIL protects:
+stacks and ordinary heap mutation also do not yet have the barriers/locks
+needed for parallel mutators. Shape transition maps have a per-shape lock now,
+but object publication, slot storage, and arena allocation around those
+transitions still rely on the GIL. The GIL protects:
 
 - arena allocation and teardown,
-- shape transition maps,
 - object shape pointers,
 - slot and element vectors,
 - accessor and attribute maps,

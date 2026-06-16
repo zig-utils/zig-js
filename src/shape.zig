@@ -11,7 +11,9 @@
 //!
 //! Shapes live in the owning Context's arena (their property-name strings are
 //! context-scoped), so a Context owns one root (empty) shape and every object
-//! transitions out from there.
+//! transitions out from there. The transition map is locked per shape: the
+//! current shared-realm GIL still serializes ordinary JS mutation, but the map
+//! itself no longer depends on the GIL for convergence or hash-table integrity.
 
 const std = @import("std");
 
@@ -27,6 +29,7 @@ pub const Shape = struct {
     /// Edges to child shapes that add one more property, keyed by that name.
     /// Shared and cached so identical construction sequences converge.
     transitions: std.StringHashMapUnmanaged(*Shape) = .{},
+    transition_lock: std.atomic.Mutex = .unlocked,
     arena: std.mem.Allocator,
 
     /// Create the empty root shape for a Context.
@@ -54,6 +57,9 @@ pub const Shape = struct {
     /// `name` added to the same shape always returns the same child, so objects
     /// share structure.
     pub fn transition(self: *Shape, name: []const u8) std.mem.Allocator.Error!*Shape {
+        self.lockTransitions();
+        defer self.transition_lock.unlock();
+
         if (self.transitions.get(name)) |child| return child;
         const owned = try self.arena.dupe(u8, name);
         const child = try self.arena.create(Shape);
@@ -66,6 +72,17 @@ pub const Shape = struct {
         };
         try self.transitions.put(self.arena, owned, child);
         return child;
+    }
+
+    fn lockTransitions(self: *Shape) void {
+        var spins: usize = 0;
+        while (!self.transition_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
     }
 };
 
@@ -85,4 +102,25 @@ test "shape transitions share structure and assign sequential slots" {
     const sa2 = try root.transition("a");
     const sab2 = try sa2.transition("b");
     try std.testing.expectEqual(sab, sab2);
+}
+
+test "shape transitions converge under concurrent same-name insertion" {
+    const root = try Shape.createRoot(std.heap.page_allocator);
+
+    const Worker = struct {
+        fn run(shape: *Shape, out: **Shape) void {
+            out.* = shape.transition("shared") catch @panic("shape transition failed");
+        }
+    };
+
+    var children: [8]*Shape = undefined;
+    var threads: [children.len]std.Thread = undefined;
+    for (&threads, &children) |*t, *child| {
+        t.* = try std.Thread.spawn(.{}, Worker.run, .{ root, child });
+    }
+    for (threads) |t| t.join();
+
+    for (children[1..]) |child| try std.testing.expectEqual(children[0], child);
+    try std.testing.expectEqual(@as(usize, 1), root.transitions.count());
+    try std.testing.expectEqual(@as(?u32, 0), children[0].lookup("shared"));
 }
