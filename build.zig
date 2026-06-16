@@ -45,7 +45,9 @@ pub fn build(b: *std.Build) void {
     // `-Dtsan` builds them under ThreadSanitizer — the concurrency gate for
     // the agent/worker/waiter machinery (issue #1).
     const tsan = b.option(bool, "tsan", "Build unit tests with ThreadSanitizer") orelse false;
+    const test_filter = b.option([]const u8, "test-filter", "Only run unit tests whose name contains this substring");
     const tests = b.addTest(.{
+        .filters = if (test_filter) |f| &.{f} else &.{},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = target,
