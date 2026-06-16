@@ -6570,7 +6570,7 @@ pub const Interpreter = struct {
             }
         }
         if (o.is_array and !o.is_arguments) {
-            if (std.mem.eql(u8, key, "length")) {
+            if (std.mem.eql(u8, key, "length") and receiver == .object and receiver.object == o) {
                 const u = try self.arrayLengthFromValue(v);
                 // ArraySetLength: a non-writable `length` rejects the assignment
                 // (the RangeError above still precedes this) — sloppy silently,
@@ -7696,9 +7696,8 @@ pub const Interpreter = struct {
     /// RangeError. Read-only / in-place methods don't create such a result.
     fn arrayCreatesResult(name: []const u8) bool {
         const names = [_][]const u8{
-            "map",      "filter",  "concat", "splice",
-            "flat",     "flatMap", "with",   "toReversed",
-            "toSorted",
+            "map",     "filter", "concat",     "flat",
+            "flatMap", "with",   "toReversed", "toSorted",
         };
         for (names) |n| if (eq(name, n)) return true;
         return false;
@@ -7951,7 +7950,7 @@ pub const Interpreter = struct {
             array_like_len = toArrayLikeLen(lenf);
             // A full-length-iterating method on a pathological array-like length
             // would spin a native loop forever — bail (matches the prior guard).
-            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift") and !eq(name, "slice") and !eq(name, "toSpliced")) return null;
+            if (!arraySearchReadsLive(name) and array_like_len > (1 << 22) and !eq(name, "fill") and !eq(name, "copyWithin") and !eq(name, "reverse") and !eq(name, "unshift") and !eq(name, "slice") and !eq(name, "splice") and !eq(name, "toSpliced")) return null;
         }
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
@@ -8575,12 +8574,15 @@ pub const Interpreter = struct {
         if (eq(name, "splice")) {
             const len = ilen;
             const start = try relIndex(self, arg0(args), len, 0);
-            const del: usize = if (args.len <= 1) len - start else blk: {
-                const d = arg(args, 1).toNumber();
+            const del: usize = if (args.len == 0) 0 else if (args.len == 1) len - start else blk: {
+                const d = try self.toNumberV(arg(args, 1));
                 if (std.math.isNan(d) or d <= 0) break :blk 0;
                 const du: usize = if (d > @as(f64, @floatFromInt(len))) len else @intFromFloat(@trunc(d));
                 break :blk if (start + du > len) len - start else du;
             };
+            const item_count = if (args.len > 2) args.len - 2 else 0;
+            if (item_count > del and len > 9007199254740991 - (item_count - del))
+                return self.throwError("TypeError", "Invalid array length");
             const removed = try self.arraySpeciesCreate(.{ .object = o }, del);
             // A plain dense Array `removed` preserves holes; a custom-species
             // result is CreateDataProperty'd per present index.
@@ -8594,11 +8596,11 @@ pub const Interpreter = struct {
                     try removed.object.markHole(self.arena, i);
                 }
             }
+            try self.arraySetLengthThrowing(removed.object, del);
             const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
-            const item_count = inserts.len;
             // Dense fast path: an ordinary array with no holes/accessors/sparse
             // tail can splice its contiguous value store directly.
-            if (o.is_array and o.holes == null and o.accessors == null and o.array_len <= o.elements.items.len) {
+            if (o.is_array and arrayLenWritable(o) and o.holes == null and o.accessors == null and o.array_len <= o.elements.items.len) {
                 i = 0;
                 while (i < del) : (i += 1) if (start < o.elements.items.len) {
                     _ = o.elements.orderedRemove(start);
