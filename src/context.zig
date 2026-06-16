@@ -117,6 +117,8 @@ pub const Context = struct {
     active_interpreters: std.ArrayListUnmanaged(*interp.Interpreter) = .empty,
     /// TDZ sentinel for uninitialized let/const bindings.
     tdz_marker: *value.Object,
+    /// Test262 host module source for `import source x from "<module source>"`.
+    module_source_object: ?*value.Object = null,
     /// Active module graph state during `evaluateModule`, so runtime `import()`
     /// (dynamic import) can resolve+load+evaluate further modules on demand.
     mod_host: ?ModuleHost = null,
@@ -646,6 +648,7 @@ pub const Context = struct {
     }
 
     fn newModuleSourceObject(self: *Context) RunError!*value.Object {
+        if (self.module_source_object) |cached| return cached;
         const a = self.arena();
         const obj = try gc_mod.allocObj(a);
         obj.* = .{};
@@ -656,6 +659,7 @@ pub const Context = struct {
                 };
             };
         };
+        self.module_source_object = obj;
         return obj;
     }
 
@@ -747,9 +751,9 @@ pub const Context = struct {
                 for (imp.entries) |entry| {
                     if (isSourceImport(entry)) {
                         if (!isHostModuleSourceSpecifier(imp.specifier)) return self.moduleTypeError("source phase import is not available");
-                        try m.env.put(entry.local, .{ .object = try self.newModuleSourceObject() });
+                        try m.env.putConst(entry.local, .{ .object = try self.newModuleSourceObject() });
                     } else if (std.mem.eql(u8, entry.imported, "*")) {
-                        try m.env.put(entry.local, .{ .object = try self.namespaceObject(dep.?) });
+                        try m.env.putConst(entry.local, .{ .object = try self.namespaceObject(dep.?) });
                     } else if (resolveExport(dep.?, entry.imported, 0)) |res| {
                         try m.env.putAlias(entry.local, res.env, res.name);
                     } else {
@@ -897,9 +901,37 @@ pub const Context = struct {
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
         var envs: std.ArrayListUnmanaged(*interp.Environment) = .empty;
         var locals: std.ArrayListUnmanaged([]const u8) = .empty;
+        var ambiguous: std.ArrayListUnmanaged([]const u8) = .empty;
         const add = struct {
-            fn f(aa: std.mem.Allocator, nm: *std.ArrayListUnmanaged([]const u8), ev: *std.ArrayListUnmanaged(*interp.Environment), lo: *std.ArrayListUnmanaged([]const u8), name: []const u8, res: interp.Environment.Alias) !void {
-                for (nm.items) |existing| if (std.mem.eql(u8, existing, name)) return; // de-dup
+            fn contains(list: []const []const u8, name: []const u8) bool {
+                for (list) |existing| if (std.mem.eql(u8, existing, name)) return true;
+                return false;
+            }
+
+            fn sameObjectBinding(env: *interp.Environment, local: []const u8, res: interp.Environment.Alias) bool {
+                const left = env.get(local) orelse return false;
+                const right = res.env.get(res.name) orelse return false;
+                return left == .object and right == .object and left.object == right.object;
+            }
+
+            fn f(
+                aa: std.mem.Allocator,
+                nm: *std.ArrayListUnmanaged([]const u8),
+                ev: *std.ArrayListUnmanaged(*interp.Environment),
+                lo: *std.ArrayListUnmanaged([]const u8),
+                amb: *std.ArrayListUnmanaged([]const u8),
+                name: []const u8,
+                res: interp.Environment.Alias,
+            ) !void {
+                if (contains(amb.items, name)) return;
+                for (nm.items, 0..) |existing, i| {
+                    if (!std.mem.eql(u8, existing, name)) continue;
+                    if ((ev.items[i] == res.env and std.mem.eql(u8, lo.items[i], res.name)) or
+                        sameObjectBinding(ev.items[i], lo.items[i], res))
+                        return;
+                    try amb.append(aa, name);
+                    return;
+                }
                 try nm.append(aa, name);
                 try ev.append(aa, res.env);
                 try lo.append(aa, res.name);
@@ -907,16 +939,35 @@ pub const Context = struct {
         }.f;
         var it = module.exports.iterator();
         while (it.next()) |e| {
-            if (resolveExport(module, e.key_ptr.*, 0)) |res| try add(a, &names, &envs, &locals, e.key_ptr.*, res);
+            if (resolveExport(module, e.key_ptr.*, 0)) |res| try add(a, &names, &envs, &locals, &ambiguous, e.key_ptr.*, res);
         }
         for (module.star_sources.items) |src| {
             var sit = src.exports.iterator();
             while (sit.next()) |e| {
                 const name = e.key_ptr.*;
                 if (std.mem.eql(u8, name, "default")) continue;
-                if (resolveExport(src, name, 0)) |res| try add(a, &names, &envs, &locals, name, res);
+                if (module.exports.contains(name)) continue;
+                if (resolveExport(src, name, 0)) |res| try add(a, &names, &envs, &locals, &ambiguous, name, res);
             }
         }
+        var write_i: usize = 0;
+        for (names.items, 0..) |name, read_i| {
+            var is_ambiguous = false;
+            for (ambiguous.items) |ambiguous_name| {
+                if (std.mem.eql(u8, ambiguous_name, name)) {
+                    is_ambiguous = true;
+                    break;
+                }
+            }
+            if (is_ambiguous) continue;
+            names.items[write_i] = name;
+            envs.items[write_i] = envs.items[read_i];
+            locals.items[write_i] = locals.items[read_i];
+            write_i += 1;
+        }
+        names.items.len = write_i;
+        envs.items.len = write_i;
+        locals.items.len = write_i;
         // [[OwnPropertyKeys]] returns the string names sorted by code unit.
         const N = names.items.len;
         var order = try a.alloc(usize, N);
@@ -1053,6 +1104,34 @@ test "modules bind source-phase imports as module source objects" {
         \\if (!(ns.x instanceof $262.AbstractModuleSource)) throw new Error("bad namespace source re-export");
     , &.{
         .{ .path = "reexport.js", .source = "import source x from '<module source>'; export { x };" },
+    });
+}
+
+test "modules create immutable namespace import bindings" {
+    try evaluateSelfModule(
+        \\import * as ns from "./entry.js";
+        \\var original = ns;
+        \\try {
+        \\  ns = null;
+        \\  throw new Error("namespace import assignment did not throw");
+        \\} catch (e) {
+        \\  if (!(e instanceof TypeError)) throw e;
+        \\}
+        \\if (ns !== original) throw new Error("namespace import binding changed");
+        \\export var value = 1;
+    );
+}
+
+test "modules omit ambiguous star exports from namespace objects" {
+    try evaluateModuleWithFixtures(
+        \\import * as ns from "./barrel.js";
+        \\if (!("first" in ns)) throw new Error("missing first");
+        \\if (!("second" in ns)) throw new Error("missing second");
+        \\if ("both" in ns) throw new Error("ambiguous export was exposed");
+    , &.{
+        .{ .path = "barrel.js", .source = "export * from './one.js'; export * from './two.js';" },
+        .{ .path = "one.js", .source = "export var first = 1; export var both = 1;" },
+        .{ .path = "two.js", .source = "export var second = 2; export var both = 2;" },
     });
 }
 
