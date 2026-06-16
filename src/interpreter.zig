@@ -5136,51 +5136,70 @@ pub const Interpreter = struct {
             return null;
         }
         if (eq(name, "set")) {
+            const val = arg(args, 1);
+            const pair = (try self.newArray()).object;
+            try pair.appendElement(self.arena, key);
+            try pair.appendElement(self.arena, val);
+            o.lockElements();
+            defer o.unlockElements();
             for (o.elements.items) |e| {
-                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) {
-                    entry.elements.items[1] = arg(args, 1);
+                if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) {
+                    _ = entry.setElementAt(1, val);
                     return self_v;
                 };
             }
-            const pair = (try self.newArray()).object;
-            try pair.elements.append(pair.elementsAllocator(self.arena), key);
-            try pair.elements.append(pair.elementsAllocator(self.arena), arg(args, 1));
             try o.elements.append(o.elementsAllocator(self.arena), .{ .object = pair });
             return self_v;
         }
         if (eq(name, "get")) {
+            o.lockElements();
+            defer o.unlockElements();
             for (o.elements.items) |e| {
-                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) return entry.elements.items[1];
+                if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return mapEntryValue(entry);
             }
             return Value.undefined;
         }
         if (eq(name, "has")) {
+            o.lockElements();
+            defer o.unlockElements();
             for (o.elements.items) |e| {
-                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) return Value{ .boolean = true };
+                if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return Value{ .boolean = true };
             }
             return Value{ .boolean = false };
         }
         if (eq(name, "delete")) {
+            o.lockElements();
+            defer o.unlockElements();
             for (o.elements.items) |e| {
-                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) {
-                    entry.elements.clearRetainingCapacity();
+                if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) {
+                    entry.clearElementsRetainingCapacity();
                     return Value{ .boolean = true };
                 };
             }
             return Value{ .boolean = false };
         }
         if (eq(name, "clear")) {
-            o.elements.clearRetainingCapacity();
+            o.clearElementsRetainingCapacity();
             return Value.undefined;
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
             if (!cb.isCallable()) return self.throwError("TypeError", "Map.prototype.forEach callback is not callable");
             var i: usize = 0;
-            while (i < o.elements.items.len) : (i += 1) {
-                const e = o.elements.items[i];
-                if (e != .object or e.object.elements.items.len < 2) continue;
-                _ = try self.callValueWithThis(cb, &.{ e.object.elements.items[1], e.object.elements.items[0], self_v }, arg(args, 1));
+            while (true) : (i += 1) {
+                var end = false;
+                const entry = blk: {
+                    o.lockElements();
+                    defer o.unlockElements();
+                    if (i >= o.elements.items.len) {
+                        end = true;
+                        break :blk null;
+                    }
+                    break :blk liveMapEntry(o.elements.items[i]);
+                };
+                if (end) break;
+                const live_entry = entry orelse continue;
+                _ = try self.callValueWithThis(cb, &.{ mapEntryValue(live_entry), live_entry.elementAt(0) orelse .undefined, self_v }, arg(args, 1));
             }
             return Value.undefined;
         }
@@ -5192,8 +5211,12 @@ pub const Interpreter = struct {
                 if (!candidate.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed: callback is not a function");
                 break :cb candidate;
             } else Value.undefined;
-            for (o.elements.items) |e| {
-                if (liveMapEntry(e)) |entry| if (value.sameValueZero(entry.elements.items[0], key)) return entry.elements.items[1];
+            {
+                o.lockElements();
+                defer o.unlockElements();
+                for (o.elements.items) |e| {
+                    if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return mapEntryValue(entry);
+                }
             }
             const v = if (eq(name, "getOrInsertComputed")) blk: {
                 break :blk try self.callValue(cb, &.{key});
@@ -5240,6 +5263,8 @@ pub const Interpreter = struct {
             return null;
         }
         if (eq(name, "add")) {
+            o.lockElements();
+            defer o.unlockElements();
             for (o.elements.items) |e| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
             }
@@ -5247,16 +5272,20 @@ pub const Interpreter = struct {
             return self_v;
         }
         if (eq(name, "has")) {
+            o.lockElements();
+            defer o.unlockElements();
             for (o.elements.items) |e| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return Value{ .boolean = true };
             }
             return Value{ .boolean = false };
         }
         if (eq(name, "delete")) {
+            const tomb = try gc_mod.allocObj(self.arena);
+            tomb.* = .{ .is_set_deleted = true };
+            o.lockElements();
+            defer o.unlockElements();
             for (o.elements.items, 0..) |e, i| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) {
-                    const tomb = try gc_mod.allocObj(self.arena);
-                    tomb.* = .{ .is_set_deleted = true };
                     o.elements.items[i] = .{ .object = tomb };
                     return Value{ .boolean = true };
                 };
@@ -5264,16 +5293,27 @@ pub const Interpreter = struct {
             return Value{ .boolean = false };
         }
         if (eq(name, "clear")) {
-            o.elements.clearRetainingCapacity();
+            o.clearElementsRetainingCapacity();
             return Value.undefined;
         }
         if (eq(name, "forEach")) {
             const cb = arg0(args);
             if (!cb.isCallable()) return self.throwError("TypeError", "Set.prototype.forEach callback is not callable");
             var i: usize = 0;
-            while (i < o.elements.items.len) : (i += 1) {
-                const e = liveSetEntry(o.elements.items[i]) orelse continue;
-                _ = try self.callValueWithThis(cb, &.{ e, e, self_v }, arg(args, 1));
+            while (true) : (i += 1) {
+                var end = false;
+                const e = blk: {
+                    o.lockElements();
+                    defer o.unlockElements();
+                    if (i >= o.elements.items.len) {
+                        end = true;
+                        break :blk null;
+                    }
+                    break :blk liveSetEntry(o.elements.items[i]);
+                };
+                if (end) break;
+                const live_entry = e orelse continue;
+                _ = try self.callValueWithThis(cb, &.{ live_entry, live_entry, self_v }, arg(args, 1));
             }
             return Value.undefined;
         }
@@ -5410,10 +5450,7 @@ pub const Interpreter = struct {
     /// are exhausted without a match, `false` (no close — the iterator finished).
     fn setKeysAny(self: *Interpreter, rec: SetRecord, o: *value.Object, want: bool) EvalError!bool {
         if (rec.is_set) {
-            for (rec.obj.elements.items) |k| {
-                const entry = liveSetEntry(k) orelse continue;
-                if (setContains(o, entry) == want) return true;
-            }
+            for (try self.collectSetKeys(rec)) |entry| if (setContains(o, entry) == want) return true;
             return false;
         }
         const iter = try self.callValueWithThis(rec.keys, &.{}, .{ .object = rec.obj });
@@ -5433,6 +5470,8 @@ pub const Interpreter = struct {
     /// SetDataHas: whether the native Set `o` contains `elem` (SameValueZero) —
     /// used by the set operations when they iterate the *other* operand.
     fn setContains(o: *value.Object, elem: Value) bool {
+        o.lockElements();
+        defer o.unlockElements();
         for (o.elements.items) |e| {
             const entry = liveSetEntry(e) orelse continue;
             if (value.sameValueZero(entry, elem)) return true;
@@ -5444,6 +5483,8 @@ pub const Interpreter = struct {
     /// set-like calls its `has`).
     fn recordHas(self: *Interpreter, rec: SetRecord, elem: Value) EvalError!bool {
         if (rec.is_set) {
+            rec.obj.lockElements();
+            defer rec.obj.unlockElements();
             for (rec.obj.elements.items) |e| {
                 const entry = liveSetEntry(e) orelse continue;
                 if (value.sameValueZero(entry, elem)) return true;
@@ -5457,6 +5498,8 @@ pub const Interpreter = struct {
     fn collectSetKeys(self: *Interpreter, rec: SetRecord) EvalError![]Value {
         if (rec.is_set) {
             var list: std.ArrayListUnmanaged(Value) = .empty;
+            rec.obj.lockElements();
+            defer rec.obj.unlockElements();
             for (rec.obj.elements.items) |e| {
                 const entry = liveSetEntry(e) orelse continue;
                 try list.append(self.arena, entry);
@@ -21603,12 +21646,23 @@ fn canonicalCollectionKey(v: Value) Value {
 }
 
 fn liveMapEntry(v: Value) ?*value.Object {
-    if (v != .object or v.object.elements.items.len < 2) return null;
+    if (v != .object or v.object.elementsLen() < 2) return null;
     return v.object;
+}
+
+fn mapEntryMatches(entry: *value.Object, key: Value) bool {
+    const entry_key = entry.elementAt(0) orelse return false;
+    return value.sameValueZero(entry_key, key);
+}
+
+fn mapEntryValue(entry: *value.Object) Value {
+    return entry.elementAt(1) orelse .undefined;
 }
 
 fn liveMapEntryCount(o: *value.Object) usize {
     var n: usize = 0;
+    o.lockElements();
+    defer o.unlockElements();
     for (o.elements.items) |entry| {
         if (liveMapEntry(entry) != null) n += 1;
     }
@@ -21622,6 +21676,8 @@ fn liveSetEntry(v: Value) ?Value {
 
 fn liveSetEntryCount(o: *value.Object) usize {
     var n: usize = 0;
+    o.lockElements();
+    defer o.unlockElements();
     for (o.elements.items) |entry| {
         if (liveSetEntry(entry) != null) n += 1;
     }
@@ -21730,33 +21786,39 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
             }
         } else if (so.is_map) {
             var j = i;
+            so.lockElements();
             while (j < so.elements.items.len) : (j += 1) {
                 const entry = liveMapEntry(so.elements.items[j]) orelse continue;
                 val = switch (kind) {
-                    1 => entry.elements.items[0], // keys
+                    1 => entry.elementAt(0) orelse .undefined, // keys
                     2 => .{ .object = entry }, // entries: the stored [key, value] pair
-                    else => entry.elements.items[1], // values
+                    else => mapEntryValue(entry), // values
                 };
                 done = false;
                 advance = j + 1 - i;
                 break;
             }
+            so.unlockElements();
         } else if (so.is_set) {
             var j = i;
+            var entry_value: ?Value = null;
+            so.lockElements();
             while (j < so.elements.items.len) : (j += 1) {
                 const e = liveSetEntry(so.elements.items[j]) orelse continue;
-                if (kind == 2) {
-                    const pair = (try self.newArray()).object;
-                    try pair.elements.append(pair.elementsAllocator(self.arena), e);
-                    try pair.elements.append(pair.elementsAllocator(self.arena), e);
-                    val = .{ .object = pair };
-                } else {
-                    val = e;
-                }
+                entry_value = e;
                 done = false;
                 advance = j + 1 - i;
                 break;
             }
+            so.unlockElements();
+            if (entry_value) |e| if (kind == 2) {
+                const pair = (try self.newArray()).object;
+                try pair.appendElement(self.arena, e);
+                try pair.appendElement(self.arena, e);
+                val = .{ .object = pair };
+            } else {
+                val = e;
+            };
         } else {
             const len = toLen((try self.toPrimitive(try self.getProperty(src, "length"), .number)).toNumber());
             if (i < len) {

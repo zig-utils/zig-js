@@ -474,6 +474,11 @@ pub const Object = struct {
     /// still serializes JS execution today; this lock is the Layer-C object-side
     /// convergence point for paths that already flow through Object helpers.
     property_lock: std.atomic.Mutex = .unlocked,
+    /// Coarse synchronization for the dense/indexed element store. Arrays,
+    /// Map/Set data, iterator cursor cells, and many small engine tuples use
+    /// `elements`; Layer-C work must move each direct access behind this lock or
+    /// a narrower equivalent before the GIL can go away.
+    elements_lock: std.atomic.Mutex = .unlocked,
     /// Named properties live behind a shared `Shape` (null = no own properties)
     /// plus a flat per-object `slots` array indexed by the shape. See shape.zig.
     shape: ?*Shape = null,
@@ -765,6 +770,55 @@ pub const Object = struct {
 
     pub fn unlockProperties(self: *const Object) void {
         @constCast(self).property_lock.unlock();
+    }
+
+    pub fn lockElements(self: *const Object) void {
+        var spins: usize = 0;
+        const mutex = &@constCast(self).elements_lock;
+        while (!mutex.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+
+    pub fn unlockElements(self: *const Object) void {
+        @constCast(self).elements_lock.unlock();
+    }
+
+    pub fn elementsLen(self: *const Object) usize {
+        self.lockElements();
+        defer self.unlockElements();
+        return self.elements.items.len;
+    }
+
+    pub fn elementAt(self: *const Object, i: usize) ?Value {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len) return null;
+        return self.elements.items[i];
+    }
+
+    pub fn setElementAt(self: *Object, i: usize, v: Value) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len) return false;
+        self.elements.items[i] = v;
+        return true;
+    }
+
+    pub fn appendElement(self: *Object, arena: std.mem.Allocator, v: Value) std.mem.Allocator.Error!void {
+        self.lockElements();
+        defer self.unlockElements();
+        try self.elements.append(self.elementsAllocator(arena), v);
+    }
+
+    pub fn clearElementsRetainingCapacity(self: *Object) void {
+        self.lockElements();
+        defer self.unlockElements();
+        self.elements.clearRetainingCapacity();
     }
 
     pub fn resetSlotsForRebuild(self: *Object) void {
