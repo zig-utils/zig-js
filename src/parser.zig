@@ -1808,6 +1808,7 @@ pub const Parser = struct {
     /// `.prop` / call chain is handled by the enclosing `parseMemberTail`.
     fn parseNew(self: *Parser) ParseError!*Node {
         _ = self.advance(); // new
+        if (self.in_async and isKeyword(self.cur(), "await")) return ParseError.UnexpectedToken;
         // `new.target` meta-property.
         if (self.match(.dot)) {
             const m = self.advance();
@@ -2763,4 +2764,16 @@ test "parser validates class private name uses" {
     var declared = try Parser.init(arena.allocator(), "class C { #x; f() { this.#x; } }");
     const prog = try declared.parseModule();
     try std.testing.expectEqual(@as(usize, 1), prog.program.len);
+}
+
+test "parser rejects new await only when await is active" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var module_new_await = try Parser.init(arena.allocator(), "new await;");
+    try std.testing.expectError(ParseError.UnexpectedToken, module_new_await.parseModule());
+
+    var script_new_await = try Parser.init(arena.allocator(), "function await() {} new await;");
+    const prog = try script_new_await.parseProgram();
+    try std.testing.expectEqual(@as(usize, 2), prog.program.len);
 }
