@@ -353,6 +353,179 @@ pub const Parser = struct {
         if (fnode.body.* == .block) try self.checkLexicalDupes(fnode.body.block, false);
     }
 
+    fn addModuleLexicalName(
+        self: *Parser,
+        lexical: *std.StringHashMapUnmanaged(void),
+        vars: *std.StringHashMapUnmanaged(void),
+        name: []const u8,
+    ) ParseError!void {
+        if (name.len == 0) return;
+        if (lexical.contains(name) or vars.contains(name)) return ParseError.UnexpectedToken;
+        try lexical.put(self.arena, name, {});
+    }
+
+    fn addModuleVarName(
+        self: *Parser,
+        lexical: *std.StringHashMapUnmanaged(void),
+        vars: *std.StringHashMapUnmanaged(void),
+        name: []const u8,
+    ) ParseError!void {
+        if (name.len == 0) return;
+        if (lexical.contains(name)) return ParseError.UnexpectedToken;
+        try vars.put(self.arena, name, {});
+    }
+
+    fn addPatternNames(
+        self: *Parser,
+        out: *std.ArrayListUnmanaged([]const u8),
+        pattern: *Node,
+    ) ParseError!void {
+        switch (pattern.*) {
+            .identifier => |name| try out.append(self.arena, name),
+            .obj_pattern => |p| {
+                for (p.props) |prop| try self.addPatternNames(out, prop.target);
+                if (p.rest) |name| try out.append(self.arena, name);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| if (elem.target) |target|
+                    try self.addPatternNames(out, target);
+                if (p.rest) |rest| try self.addPatternNames(out, rest);
+            },
+            else => {},
+        }
+    }
+
+    fn collectModuleDeclNames(
+        self: *Parser,
+        node: *Node,
+        lexical: *std.StringHashMapUnmanaged(void),
+        vars: *std.StringHashMapUnmanaged(void),
+    ) ParseError!void {
+        switch (node.*) {
+            .import_decl => |i| for (i.entries) |entry|
+                try self.addModuleLexicalName(lexical, vars, entry.local),
+            .export_decl => |e| {
+                if (e.declaration) |decl| try self.collectModuleDeclNames(decl, lexical, vars);
+                if (e.default_name.len > 0) try self.addModuleLexicalName(lexical, vars, e.default_name);
+            },
+            .var_decl => |d| {
+                if (d.kind == .@"var")
+                    try self.addModuleVarName(lexical, vars, d.name)
+                else
+                    try self.addModuleLexicalName(lexical, vars, d.name);
+            },
+            .decl_group => |group| for (group) |decl|
+                try self.collectModuleDeclNames(decl, lexical, vars),
+            .destructure_decl => |d| {
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                try self.addPatternNames(&names, d.pattern);
+                for (names.items) |name| {
+                    if (d.kind == .@"var")
+                        try self.addModuleVarName(lexical, vars, name)
+                    else
+                        try self.addModuleLexicalName(lexical, vars, name);
+                }
+            },
+            .func_decl => |f| try self.addModuleLexicalName(lexical, vars, f.name),
+            else => {},
+        }
+    }
+
+    fn addExportedName(
+        self: *Parser,
+        exported: *std.StringHashMapUnmanaged(void),
+        name: []const u8,
+    ) ParseError!void {
+        if (name.len == 0) return;
+        if (exported.contains(name)) return ParseError.UnexpectedToken;
+        try exported.put(self.arena, name, {});
+    }
+
+    fn collectDeclExportedNames(
+        self: *Parser,
+        exported: *std.StringHashMapUnmanaged(void),
+        decl: *Node,
+    ) ParseError!void {
+        switch (decl.*) {
+            .var_decl => |d| try self.addExportedName(exported, d.name),
+            .decl_group => |group| for (group) |item| try self.collectDeclExportedNames(exported, item),
+            .destructure_decl => |d| {
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                try self.addPatternNames(&names, d.pattern);
+                for (names.items) |name| try self.addExportedName(exported, name);
+            },
+            .func_decl => |f| try self.addExportedName(exported, f.name),
+            else => {},
+        }
+    }
+
+    fn collectExportedNames(
+        self: *Parser,
+        exported: *std.StringHashMapUnmanaged(void),
+        node: *Node,
+    ) ParseError!void {
+        if (node.* != .export_decl) return;
+        const e = node.export_decl;
+        if (e.default_expr != null) try self.addExportedName(exported, "default");
+        if (e.star_as.len > 0) try self.addExportedName(exported, e.star_as);
+        for (e.entries) |entry| try self.addExportedName(exported, entry.exported);
+        if (e.declaration) |decl| try self.collectDeclExportedNames(exported, decl);
+    }
+
+    fn checkModuleEarlyErrors(self: *Parser, stmts: []const *Node) ParseError!void {
+        var lexical: std.StringHashMapUnmanaged(void) = .empty;
+        var vars: std.StringHashMapUnmanaged(void) = .empty;
+        var exported: std.StringHashMapUnmanaged(void) = .empty;
+        for (stmts) |stmt| {
+            try self.collectModuleDeclNames(stmt, &lexical, &vars);
+            try self.collectExportedNames(&exported, stmt);
+        }
+        for (stmts) |stmt| try self.recurseScope(stmt);
+    }
+
+    fn wtf8SurrogateAt(s: []const u8, i: usize) ?u16 {
+        if (i + 2 >= s.len) return null;
+        if (s[i] != 0xed) return null;
+        if (s[i + 1] < 0xa0 or s[i + 1] > 0xbf) return null;
+        if ((s[i + 2] & 0xc0) != 0x80) return null;
+        const cp = (@as(u16, s[i] & 0x0f) << 12) |
+            (@as(u16, s[i + 1] & 0x3f) << 6) |
+            @as(u16, s[i + 2] & 0x3f);
+        if (cp < 0xd800 or cp > 0xdfff) return null;
+        return cp;
+    }
+
+    fn isHighSurrogate(unit: u16) bool {
+        return unit >= 0xd800 and unit <= 0xdbff;
+    }
+
+    fn isLowSurrogate(unit: u16) bool {
+        return unit >= 0xdc00 and unit <= 0xdfff;
+    }
+
+    fn utf8SeqLen(bytes: []const u8, i: usize) usize {
+        const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch return 1;
+        if (i + n > bytes.len) return 1;
+        return if (std.unicode.utf8ValidateSlice(bytes[i .. i + n])) n else 1;
+    }
+
+    fn isWellFormedStringValue(s: []const u8) bool {
+        var i: usize = 0;
+        while (i < s.len) {
+            if (wtf8SurrogateAt(s, i)) |first| {
+                if (isHighSurrogate(first)) {
+                    if (wtf8SurrogateAt(s, i + 3)) |second| if (isLowSurrogate(second)) {
+                        i += 6;
+                        continue;
+                    };
+                }
+                return false;
+            }
+            i += utf8SeqLen(s, i);
+        }
+        return true;
+    }
+
     /// Parse the token stream as a Module: a Module is always strict, and its
     /// top level additionally permits `import`/`export` declarations.
     pub fn parseModule(self: *Parser) ParseError!*Node {
@@ -365,6 +538,7 @@ pub const Parser = struct {
         while (!self.check(.eof)) {
             try stmts.append(self.arena, try self.parseModuleItem());
         }
+        try self.checkModuleEarlyErrors(stmts.items);
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -394,6 +568,7 @@ pub const Parser = struct {
         // Default binding: `import name ...`
         if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "from")) {
             const name = self.advance().text;
+            if (self.isForbiddenBindingName(name)) return ParseError.UnexpectedToken;
             try entries.append(self.arena, .{ .imported = "default", .local = name });
             _ = self.match(.comma);
         }
@@ -402,6 +577,7 @@ pub const Parser = struct {
             _ = self.advance();
             try self.expectContextual("as");
             const ns = self.advance().text;
+            if (self.isForbiddenBindingName(ns)) return ParseError.UnexpectedToken;
             try entries.append(self.arena, .{ .imported = "*", .local = ns });
         } else if (self.check(.lbrace)) {
             try self.parseNamedImports(&entries);
@@ -416,12 +592,17 @@ pub const Parser = struct {
     fn parseNamedImports(self: *Parser, entries: *std.ArrayListUnmanaged(ast.ImportEntry)) ParseError!void {
         try self.expect(.lbrace);
         while (!self.check(.rbrace)) {
-            const imported = self.moduleExportName();
+            const imported_is_string = self.cur().kind == .string;
+            const imported = try self.moduleExportName();
             var local = imported;
             if (self.checkContextual("as")) {
                 _ = self.advance();
+                if (!self.check(.identifier)) return ParseError.UnexpectedToken;
                 local = self.advance().text;
+            } else if (imported_is_string) {
+                return ParseError.UnexpectedToken;
             }
+            if (self.isForbiddenBindingName(local)) return ParseError.UnexpectedToken;
             try entries.append(self.arena, .{ .imported = imported, .local = local });
             if (!self.match(.comma)) break;
         }
@@ -440,7 +621,7 @@ pub const Parser = struct {
             node.star = true;
             if (self.checkContextual("as")) {
                 _ = self.advance();
-                node.star_as = self.moduleExportName();
+                node.star_as = try self.moduleExportName();
             }
             try self.expectContextual("from");
             node.from = self.advance().text;
@@ -450,13 +631,15 @@ pub const Parser = struct {
         if (self.check(.lbrace)) {
             // `export { a, b as c }` [from "m"]
             var entries: std.ArrayListUnmanaged(ast.ExportEntry) = .empty;
+            var referenced_module_export_name = false;
             _ = self.advance(); // `{`
             while (!self.check(.rbrace)) {
-                const first = self.moduleExportName();
+                if (self.cur().kind == .string) referenced_module_export_name = true;
+                const first = try self.moduleExportName();
                 var exported = first;
                 if (self.checkContextual("as")) {
                     _ = self.advance();
-                    exported = self.moduleExportName();
+                    exported = try self.moduleExportName();
                 }
                 try entries.append(self.arena, .{ .local = first, .exported = exported });
                 if (!self.match(.comma)) break;
@@ -470,6 +653,8 @@ pub const Parser = struct {
                     e.imported = e.local;
                     e.local = "";
                 }
+            } else if (referenced_module_export_name) {
+                return ParseError.UnexpectedToken;
             }
             node.entries = entries.items;
             try self.consumeStatementTerminator();
@@ -506,7 +691,10 @@ pub const Parser = struct {
     }
 
     /// A ModuleExportName: an identifier or a string literal (ES2022).
-    fn moduleExportName(self: *Parser) []const u8 {
+    fn moduleExportName(self: *Parser) ParseError![]const u8 {
+        const t = self.cur();
+        if (t.kind != .identifier and t.kind != .string) return ParseError.UnexpectedToken;
+        if (t.kind == .string and !isWellFormedStringValue(t.text)) return ParseError.UnexpectedToken;
         return self.advance().text;
     }
 
@@ -2317,4 +2505,50 @@ test "parser accepts module import export ASI line terminators" {
     var bare_import = try Parser.init(arena.allocator(), "import './m.js'\nexport {}");
     const import_prog = try bare_import.parseModule();
     try std.testing.expectEqual(@as(usize, 2), import_prog.program.len);
+}
+
+test "parser rejects module duplicate lexical and exported names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var lexical = try Parser.init(arena.allocator(), "let x; const x = 0;");
+    try std.testing.expectError(ParseError.UnexpectedToken, lexical.parseModule());
+
+    var var_lex = try Parser.init(arena.allocator(), "var f; function f() {}");
+    try std.testing.expectError(ParseError.UnexpectedToken, var_lex.parseModule());
+
+    var default_dup = try Parser.init(arena.allocator(), "var x, y; export default x; export { y as default };");
+    try std.testing.expectError(ParseError.UnexpectedToken, default_dup.parseModule());
+
+    var star_dup = try Parser.init(arena.allocator(), "var x; export { x as z }; export * as z from './m.js';");
+    try std.testing.expectError(ParseError.UnexpectedToken, star_dup.parseModule());
+}
+
+test "parser rejects forbidden strict import bindings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var args = try Parser.init(arena.allocator(), "import { x as arguments } from './m.js';");
+    try std.testing.expectError(ParseError.UnexpectedToken, args.parseModule());
+
+    var eval_name = try Parser.init(arena.allocator(), "import eval from './m.js';");
+    try std.testing.expectError(ParseError.UnexpectedToken, eval_name.parseModule());
+}
+
+test "parser validates module string export names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var local_string = try Parser.init(arena.allocator(), "export { \"foo\" as \"bar\" }; function foo() {}");
+    try std.testing.expectError(ParseError.UnexpectedToken, local_string.parseModule());
+
+    var bad_export = try Parser.init(arena.allocator(), "export { Foo as \"\\uD83D\" }; function Foo() {}");
+    try std.testing.expectError(ParseError.UnexpectedToken, bad_export.parseModule());
+
+    var bad_import = try Parser.init(arena.allocator(), "import { \"\\uD83D\" as foo } from './m.js';");
+    try std.testing.expectError(ParseError.UnexpectedToken, bad_import.parseModule());
+
+    var good_reexport = try Parser.init(arena.allocator(), "export { \"foo\" as \"bar\" } from './m.js';");
+    const prog = try good_reexport.parseModule();
+    try std.testing.expectEqual(@as(usize, 1), prog.program.len);
 }
