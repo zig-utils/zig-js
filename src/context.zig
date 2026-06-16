@@ -624,7 +624,7 @@ pub const Context = struct {
         for (items) |item| switch (item.*) {
             .import_decl => |imp| {
                 const source_only = imp.entries.len == 1 and isSourceImport(imp.entries[0]);
-                if (!source_only or !isHostModuleSourceSpecifier(imp.specifier))
+                if (!source_only)
                     _ = try self.loadDep(m, imp.specifier, host, cache);
             },
             .export_decl => |e| {
@@ -741,6 +741,17 @@ pub const Context = struct {
     fn linkModule(self: *Context, m: *Module) RunError!void {
         if (m.linked) return;
         m.linked = true;
+        // Source-phase imports do not instantiate the target as an ordinary
+        // module. Reject unsupported host source records before dependency
+        // linking so their host-defined failure is not masked by unrelated
+        // linking errors in sibling imports.
+        for (m.items) |item| switch (item.*) {
+            .import_decl => |imp| for (imp.entries) |entry| {
+                if (isSourceImport(entry) and !isHostModuleSourceSpecifier(imp.specifier))
+                    return self.moduleTypeError("source phase import is not available");
+            },
+            else => {},
+        };
         // Link dependencies first.
         var dit = m.deps.valueIterator();
         while (dit.next()) |dep| try self.linkModule(dep.*);
@@ -750,7 +761,6 @@ pub const Context = struct {
                 const dep = if (m.deps.get(imp.specifier)) |d| d else null;
                 for (imp.entries) |entry| {
                     if (isSourceImport(entry)) {
-                        if (!isHostModuleSourceSpecifier(imp.specifier)) return self.moduleTypeError("source phase import is not available");
                         try m.env.putConst(entry.local, .{ .object = try self.newModuleSourceObject() });
                     } else if (std.mem.eql(u8, entry.imported, "*")) {
                         try m.env.putConst(entry.local, .{ .object = try self.namespaceObject(dep.?) });
