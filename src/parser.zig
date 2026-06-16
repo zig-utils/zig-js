@@ -562,6 +562,7 @@ pub const Parser = struct {
         // Bare side-effect import: `import "spec";`
         if (self.check(.string)) {
             const spec = self.advance().text;
+            try self.parseImportAttributesOpt();
             try self.consumeStatementTerminator();
             return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = &.{} } });
         }
@@ -584,8 +585,29 @@ pub const Parser = struct {
         }
         try self.expectContextual("from");
         const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
+        try self.parseImportAttributesOpt();
         try self.consumeStatementTerminator();
         return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items } });
+    }
+
+    /// Static import attributes: `with { key: "value", ... }`. The host does
+    /// not interpret them yet, but the parser must validate the clause shape and
+    /// duplicate keys so module linking observes the right phase.
+    fn parseImportAttributesOpt(self: *Parser) ParseError!void {
+        if (!self.checkContextual("with")) return;
+        _ = self.advance();
+        try self.expect(.lbrace);
+        var keys: std.StringHashMapUnmanaged(void) = .empty;
+        while (!self.check(.rbrace)) {
+            const key = try self.moduleExportName();
+            if (keys.contains(key)) return ParseError.UnexpectedToken;
+            try keys.put(self.arena, key, {});
+            try self.expect(.colon);
+            if (!self.check(.string)) return ParseError.UnexpectedToken;
+            _ = self.advance();
+            if (!self.match(.comma)) break;
+        }
+        try self.expect(.rbrace);
     }
 
     /// `{ a, b as c, "str" as d }` import bindings.
@@ -625,6 +647,7 @@ pub const Parser = struct {
             }
             try self.expectContextual("from");
             node.from = self.advance().text;
+            try self.parseImportAttributesOpt();
             try self.consumeStatementTerminator();
             return self.alloc(.{ .export_decl = node });
         }
@@ -648,6 +671,7 @@ pub const Parser = struct {
             if (self.checkContextual("from")) {
                 _ = self.advance();
                 node.from = self.advance().text;
+                try self.parseImportAttributesOpt();
                 // Re-export: the names are imported from the source module, not local.
                 for (entries.items) |*e| {
                     e.imported = e.local;
@@ -2738,6 +2762,29 @@ test "parser rejects forbidden strict import bindings" {
 
     var eval_name = try Parser.init(arena.allocator(), "import eval from './m.js';");
     try std.testing.expectError(ParseError.UnexpectedToken, eval_name.parseModule());
+}
+
+test "parser validates static import attributes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var attrs = try Parser.init(arena.allocator(),
+        \\import x from './a.js' with {};
+        \\import './b.js'
+        \\  with { type: "json", "test262": "", };
+        \\export * from './c.js' with { if: "" };
+    );
+    const prog = try attrs.parseModule();
+    try std.testing.expectEqual(@as(usize, 3), prog.program.len);
+
+    var dup_import = try Parser.init(arena.allocator(), "import './m.js' with { type: 'json', 'typ\\u0065': '' };");
+    try std.testing.expectError(ParseError.UnexpectedToken, dup_import.parseModule());
+
+    var dup_export = try Parser.init(arena.allocator(), "export * from './m.js' with { type: 'json', 'type': '' };");
+    try std.testing.expectError(ParseError.UnexpectedToken, dup_export.parseModule());
+
+    var non_string = try Parser.init(arena.allocator(), "import './m.js' with { type: 1 };");
+    try std.testing.expectError(ParseError.UnexpectedToken, non_string.parseModule());
 }
 
 test "parser validates module string export names" {
