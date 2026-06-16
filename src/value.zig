@@ -540,6 +540,10 @@ pub const Object = struct {
     /// `$vm.indexingMode` can report the effective stress precondition without
     /// changing ordinary ECMAScript array semantics.
     forced_array_storage: bool = false,
+    /// Conservative guard for fast indexed writes: once an object has ever had an
+    /// array-index data/accessor property, prototype-chain writes must use the
+    /// ordinary path so inherited setters/non-writable data stay observable.
+    has_indexed_property: bool = false,
     /// For arrays, a *logical* length floor used when it exceeds the physically
     /// stored `elements` — so `new Array(4294967295)` / `arr.length = big` track a
     /// length without materializing (and OOM-ing on) that many holes. The array's
@@ -794,6 +798,12 @@ pub const Object = struct {
         return self.elements.items.len;
     }
 
+    pub fn arrayLength(self: *const Object) usize {
+        self.lockElements();
+        defer self.unlockElements();
+        return @max(self.elements.items.len, self.array_len);
+    }
+
     pub fn elementAt(self: *const Object, i: usize) ?Value {
         self.lockElements();
         defer self.unlockElements();
@@ -819,6 +829,168 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         self.elements.clearRetainingCapacity();
+    }
+
+    pub fn packedDenseElementsCoverLength(self: *const Object) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        return self.holes == null and self.array_len <= self.elements.items.len;
+    }
+
+    pub fn denseElementLimit(self: *const Object, logical_len: usize) usize {
+        self.lockElements();
+        defer self.unlockElements();
+        return @min(self.elements.items.len, logical_len);
+    }
+
+    fn isHoleUnlocked(self: *const Object, i: usize) bool {
+        const h = self.holes orelse return false;
+        return h.contains(i);
+    }
+
+    fn markHoleUnlocked(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
+        const a = self.holesAllocator(arena);
+        if (self.holes == null) {
+            self.holes = try a.create(std.AutoHashMapUnmanaged(usize, void));
+            self.holes.?.* = .{};
+        }
+        try self.holes.?.put(a, i, {});
+    }
+
+    fn clearHoleUnlocked(self: *Object, i: usize) void {
+        if (self.holes) |h| _ = h.remove(i);
+    }
+
+    pub fn denseElementInBounds(self: *const Object, i: usize) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        return i < self.elements.items.len;
+    }
+
+    pub fn denseElementPresent(self: *const Object, i: usize) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        return i < self.elements.items.len and !self.isHoleUnlocked(i);
+    }
+
+    pub fn denseElement(self: *const Object, i: usize) ?Value {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
+        return self.elements.items[i];
+    }
+
+    pub fn setDenseElement(self: *Object, i: usize, v: Value) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len) return false;
+        self.elements.items[i] = v;
+        self.clearHoleUnlocked(i);
+        return true;
+    }
+
+    pub fn growDenseElement(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!usize {
+        self.lockElements();
+        defer self.unlockElements();
+        const gap_start = self.elements.items.len;
+        while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), .undefined);
+        self.elements.items[i] = v;
+        self.clearHoleUnlocked(i);
+        var g = gap_start;
+        while (g < i) : (g += 1) try self.markHoleUnlocked(arena, g);
+        return gap_start;
+    }
+
+    pub fn setOrGrowDenseElement(
+        self: *Object,
+        arena: std.mem.Allocator,
+        i: usize,
+        v: Value,
+        dense_cap: usize,
+    ) std.mem.Allocator.Error!bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i < self.elements.items.len) {
+            self.elements.items[i] = v;
+            self.clearHoleUnlocked(i);
+            return true;
+        }
+        if (i >= dense_cap or i > self.elements.items.len + 1024) return false;
+        const gap_start = self.elements.items.len;
+        while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), .undefined);
+        self.elements.items[i] = v;
+        self.clearHoleUnlocked(i);
+        var g = gap_start;
+        while (g < i) : (g += 1) try self.markHoleUnlocked(arena, g);
+        return true;
+    }
+
+    pub fn deleteDenseElement(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len) return false;
+        self.elements.items[i] = .undefined;
+        try self.markHoleUnlocked(arena, i);
+        return true;
+    }
+
+    pub fn truncateDenseElementsAndSetLength(self: *Object, new_len: usize) void {
+        self.lockElements();
+        defer self.unlockElements();
+        if (new_len < self.elements.items.len) self.elements.shrinkRetainingCapacity(new_len);
+        self.array_len = new_len;
+    }
+
+    pub fn extendArrayLengthFloor(self: *Object, new_len: usize) void {
+        self.lockElements();
+        defer self.unlockElements();
+        self.array_len = @max(self.array_len, new_len);
+    }
+
+    pub fn reversePackedDenseElements(self: *Object) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (self.holes != null or self.array_len > self.elements.items.len) return false;
+        std.mem.reverse(Value, self.elements.items);
+        return true;
+    }
+
+    pub fn replaceDenseElementsAndSetLength(
+        self: *Object,
+        arena: std.mem.Allocator,
+        values: []const Value,
+        new_len: usize,
+    ) std.mem.Allocator.Error!void {
+        self.lockElements();
+        defer self.unlockElements();
+        self.elements.clearRetainingCapacity();
+        try self.elements.appendSlice(self.elementsAllocator(arena), values);
+        if (self.holes) |h| h.clearRetainingCapacity();
+        self.array_len = new_len;
+    }
+
+    pub fn splicePackedDenseElements(
+        self: *Object,
+        arena: std.mem.Allocator,
+        start: usize,
+        delete_count: usize,
+        inserts: []const Value,
+    ) std.mem.Allocator.Error!bool {
+        self.lockElements();
+        defer self.unlockElements();
+        if (self.holes != null or self.array_len > self.elements.items.len) return false;
+        var i: usize = 0;
+        while (i < delete_count) : (i += 1) {
+            if (start < self.elements.items.len) {
+                _ = self.elements.orderedRemove(start);
+            }
+        }
+        var j: usize = inserts.len;
+        while (j > 0) : (j -= 1) {
+            try self.elements.insert(self.elementsAllocator(arena), start, inserts[j - 1]);
+        }
+        self.array_len = self.elements.items.len;
+        return true;
     }
 
     pub fn resetSlotsForRebuild(self: *Object) void {
@@ -871,35 +1043,23 @@ pub const Object = struct {
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {
-        const h = self.holes orelse return false;
-        return h.contains(i);
+        self.lockElements();
+        defer self.unlockElements();
+        return self.isHoleUnlocked(i);
     }
 
     /// Mark dense index `i` as a hole.
     pub fn markHole(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
-        self.lockProperties();
-        defer self.unlockProperties();
+        self.lockElements();
+        defer self.unlockElements();
         try self.markHoleUnlocked(arena, i);
-    }
-
-    fn markHoleUnlocked(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
-        const a = self.holesAllocator(arena);
-        if (self.holes == null) {
-            self.holes = try a.create(std.AutoHashMapUnmanaged(usize, void));
-            self.holes.?.* = .{};
-        }
-        try self.holes.?.put(a, i, {});
     }
 
     /// Clear the hole at index `i` (an assignment fills it).
     pub fn clearHole(self: *Object, i: usize) void {
-        self.lockProperties();
-        defer self.unlockProperties();
+        self.lockElements();
+        defer self.unlockElements();
         self.clearHoleUnlocked(i);
-    }
-
-    fn clearHoleUnlocked(self: *Object, i: usize) void {
-        if (self.holes) |h| _ = h.remove(i);
     }
 
     pub fn isCallableObject(self: *const Object) bool {
@@ -1072,6 +1232,7 @@ pub const Object = struct {
         if (!gop.found_existing) {
             gop.key_ptr.* = try alloc.dupe(u8, name);
             gop.value_ptr.* = .{};
+            if (canonicalIndex(name) != null) self.has_indexed_property = true;
             // First accessor on this object: start key_order by snapshotting the
             // existing data keys (shape-chain insertion order), so the new
             // accessor interleaves correctly with them.
@@ -1157,6 +1318,7 @@ pub const Object = struct {
         const child = try base.transition(name);
         try self.slots.append(self.slotsAllocator(arena), v); // new slot index == base.count == child.slot
         self.shape = child;
+        if (canonicalIndex(name) != null) self.has_indexed_property = true;
         // A new data key on an accessor-bearing object records its creation order
         // (a data↔accessor conversion keeps its position; deleteOwn drops stale
         // entries so a genuinely re-added key lands at the end).
@@ -1179,6 +1341,8 @@ pub const Object = struct {
         _ = m.remove(key);
         if (self.is_array) {
             if (canonicalIndex(key)) |i| {
+                self.lockElements();
+                defer self.unlockElements();
                 if (i < self.elements.items.len) try self.markHoleUnlocked(arena, i);
             }
         }

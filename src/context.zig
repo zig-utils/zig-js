@@ -1329,6 +1329,27 @@ test "array instances inherit from Array.prototype (incl. holes)" {
     // Ordinary arrays are unaffected: a real hole with no inherited index is undefined.
     try std.testing.expect((try evalIn("[1, , 3][1] === undefined")).boolean);
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("[1, 2, 3][1]")).number);
+    try std.testing.expect((try evalIn(
+        \\var hit = 0;
+        \\try {
+        \\  Object.defineProperty(Array.prototype, "0", { set: function (v) { hit = v; }, configurable: true });
+        \\  var a = [];
+        \\  a[0] = 7;
+        \\  hit === 7 && a.length === 0 && !Object.prototype.hasOwnProperty.call(a, "0");
+        \\} finally {
+        \\  delete Array.prototype[0];
+        \\}
+    )).boolean);
+    try expectEvalStr("0|false|1",
+        \\try {
+        \\  Object.defineProperty(Array.prototype, "0", { value: 1, writable: false, configurable: true });
+        \\  var a = [];
+        \\  a[0] = 7;
+        \\  a.length + "|" + Object.prototype.hasOwnProperty.call(a, "0") + "|" + a[0];
+        \\} finally {
+        \\  delete Array.prototype[0];
+        \\}
+    );
 }
 
 test "Array / Object constructors" {

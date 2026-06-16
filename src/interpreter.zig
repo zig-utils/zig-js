@@ -1017,11 +1017,14 @@ pub const Interpreter = struct {
                         // ToPropertyKey (so `null[obj.toString]` throws without
                         // calling toString), then the property key is formed.
                         const obj = try self.eval(m.object);
+                        var fast_key_buf: [24]u8 = undefined;
                         const key: []const u8 = if (m.computed) |ce| blk2: {
                             const kv = try self.eval(ce);
                             if (m.optional and (obj == .null or obj == .undefined)) break :blk .undefined;
                             if (obj == .null or obj == .undefined)
                                 return self.throwError("TypeError", "cannot read property of null or undefined");
+                            if (fastNumericIndex(kv)) |idx|
+                                break :blk2 std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
                             break :blk2 try self.keyOf(kv);
                         } else m.property;
                         const old = try self.getProperty(obj, key);
@@ -1112,7 +1115,12 @@ pub const Interpreter = struct {
                     const kv = try self.eval(ce);
                     if (obj == .null or obj == .undefined)
                         return self.throwError("TypeError", "cannot read property of null or undefined");
-                    break :blk try self.getProperty(obj, try self.keyOf(kv));
+                    var fast_key_buf: [24]u8 = undefined;
+                    const key = if (fastNumericIndex(kv)) |idx|
+                        std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable
+                    else
+                        try self.keyOf(kv);
+                    break :blk try self.getProperty(obj, key);
                 }
                 break :blk try self.getProperty(obj, m.property);
             },
@@ -1430,8 +1438,8 @@ pub const Interpreter = struct {
             };
             if (o.is_array) {
                 var i: usize = 0;
-                while (i < o.elements.items.len) : (i += 1) {
-                    if (o.isHole(i)) continue;
+                while (i < o.elementsLen()) : (i += 1) {
+                    if (!o.denseElementPresent(i)) continue;
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
                     // Accessor at this index comes from ownKeys below.
                     if (o.getAccessor(key) != null) continue;
@@ -3196,6 +3204,38 @@ pub const Interpreter = struct {
         return static;
     }
 
+    fn fastNumericIndex(v: Value) ?usize {
+        if (v != .number) return null;
+        const n = v.number;
+        if (std.math.isNan(n) or std.math.isInf(n) or @trunc(n) != n or n < 0 or n >= 4294967295)
+            return null;
+        return @intFromFloat(n);
+    }
+
+    fn arrayProtoChainCleanForIndexedSet(self: *Interpreter, o: *value.Object, key: []const u8) bool {
+        var cur = self.effectiveProto(o);
+        while (cur) |c| {
+            if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property)
+                return false;
+            if (objectHasOwn(c, key)) return false;
+            cur = self.effectiveProto(c);
+        }
+        return true;
+    }
+
+    fn setFastArrayNumericIndex(self: *Interpreter, recv: Value, index: usize, v: Value) EvalError!bool {
+        if (recv != .object) return false;
+        const o = recv.object;
+        try self.checkRestricted(o);
+        var key_buf: [24]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{d}", .{index}) catch unreachable;
+        if (!o.is_array or o.is_arguments or o.accessors != null or o.attrs != null or
+            o.has_indexed_property or !o.extensible or !self.arrayProtoChainCleanForIndexedSet(o, key))
+            return false;
+        const dense_cap: usize = 1 << 24;
+        return try o.setOrGrowDenseElement(self.arena, index, v, dense_cap);
+    }
+
     /// ToPropertyKey: a Symbol key uses its unique internal encoding (so
     /// symbol-keyed properties don't collide with string keys and stay out of
     /// string enumeration); other keys coerce to string.
@@ -3247,7 +3287,7 @@ pub const Interpreter = struct {
     /// Apply the deletion half of ArraySetLength after writability/coercion
     /// checks. Returns false when a non-configurable element blocks the shrink.
     pub fn setArrayLength(self: *Interpreter, o: *value.Object, requested_len: usize) EvalError!bool {
-        const old_len = @max(o.elements.items.len, o.array_len);
+        const old_len = o.arrayLength();
         var new_len = requested_len;
         var blocked = false;
 
@@ -3280,9 +3320,7 @@ pub const Interpreter = struct {
             }
         }
 
-        if (new_len < o.elements.items.len)
-            o.elements.shrinkRetainingCapacity(new_len);
-        o.array_len = new_len;
+        o.truncateDenseElementsAndSetLength(new_len);
         return !blocked;
     }
 
@@ -6058,9 +6096,9 @@ pub const Interpreter = struct {
                 }
                 if (o.is_array) {
                     if (std.mem.eql(u8, key, "length"))
-                        if (o.is_arguments) return o.getOwn("length") orelse .{ .number = @floatFromInt(o.elements.items.len) };
+                        if (o.is_arguments) return o.getOwn("length") orelse .{ .number = @floatFromInt(o.elementsLen()) };
                     if (std.mem.eql(u8, key, "length"))
-                        return .{ .number = @floatFromInt(@max(o.elements.items.len, o.array_len)) };
+                        return .{ .number = @floatFromInt(o.arrayLength()) };
                     // An accessor defined on an index (via defineProperty) wins
                     // over the dense element store, so the getter is invoked.
                     if (arrayElementIndex(key)) |i| {
@@ -6073,7 +6111,9 @@ pub const Interpreter = struct {
                         // is returned directly; a hole falls through to the proto
                         // chain so an inherited index (e.g. `Array.prototype[0]`) is
                         // seen, and an accessor likewise wins over the store.
-                        if (o.getAccessor(key) == null and i < o.elements.items.len and !o.isHole(i)) return o.elements.items[i];
+                        if (o.getAccessor(key) == null) {
+                            if (o.denseElement(i)) |v| return v;
+                        }
                         // else fall through: hole, accessor, or a sparse named property.
                     }
                 }
@@ -6394,7 +6434,7 @@ pub const Interpreter = struct {
         switch (val) {
             .object => |o| {
                 if (!o.is_array) return self.throwError("TypeError", "value is not iterable");
-                return if (i < o.elements.items.len) o.elements.items[i] else .undefined;
+                return o.elementAt(i) orelse .undefined;
             },
             .string => |s| {
                 if (i >= s.len) return .undefined;
@@ -6406,7 +6446,7 @@ pub const Interpreter = struct {
 
     fn iterableLen(val: Value) usize {
         return switch (val) {
-            .object => |o| if (o.is_array) o.elements.items.len else 0,
+            .object => |o| if (o.is_array) o.elementsLen() else 0,
             .string => |s| s.len,
             else => 0,
         };
@@ -6492,7 +6532,12 @@ pub const Interpreter = struct {
                     const kv = try self.eval(ce);
                     if (recv == .null or recv == .undefined)
                         return self.throwError("TypeError", "cannot set property of null or undefined");
-                    return self.setMember(recv, try self.keyOf(kv), v);
+                    var fast_key_buf: [24]u8 = undefined;
+                    const key = if (fastNumericIndex(kv)) |idx| blk: {
+                        if (try self.setFastArrayNumericIndex(recv, idx, v)) return;
+                        break :blk std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
+                    } else try self.keyOf(kv);
+                    return self.setMember(recv, key, v);
                 }
                 try self.setMember(recv, m.property, v);
             },
@@ -6624,18 +6669,17 @@ pub const Interpreter = struct {
                 if (argMapName(o, i)) |nm| {
                     const aenv: *Environment = @ptrCast(@alignCast(o.arg_map_env.?));
                     try aenv.assign(nm, v);
-                    if (i < o.elements.items.len) o.elements.items[i] = v;
+                    _ = o.setElementAt(i, v);
                     return true;
                 }
                 // An accessor installed on this index (via defineProperty) routes
                 // the write to its setter through the ordinary [[Set]] path below,
                 // rather than overwriting the mapped element directly.
-                if (o.getAccessor(key) == null and i < o.elements.items.len) {
+                if (o.getAccessor(key) == null and o.denseElementInBounds(i)) {
                     // A per-index descriptor may mark the element non-writable:
                     // sloppy ignores the write, strict throws (handled by caller).
                     if (o.attrs != null and !o.getAttr(key).writable) return false;
-                    o.elements.items[i] = v;
-                    o.clearHole(i);
+                    _ = o.setDenseElement(i, v);
                     return true;
                 }
             }
@@ -6654,7 +6698,7 @@ pub const Interpreter = struct {
             if (arrayElementIndex(key) != null and o.getAccessor(key) != null) {
                 // fall through to the setter walk
             } else if (arrayElementIndex(key) != null and self.arrayProtoMayInterceptSet(o, key) and
-                !(arrayElementIndex(key).? < o.elements.items.len and !o.isHole(arrayElementIndex(key).?)))
+                !o.denseElementPresent(arrayElementIndex(key).?))
             {
                 // The index isn't an own present element and an inherited
                 // accessor or Proxy can intercept the write — OrdinarySet routes
@@ -6663,35 +6707,13 @@ pub const Interpreter = struct {
                 // A per-index descriptor (recorded in `attrs`) may mark the
                 // element non-writable: sloppy ignores the write, strict throws.
                 if (o.attrs != null and !o.getAttr(key).writable) return false;
-                if (i < o.elements.items.len) {
-                    if (o.isHole(i)) {
-                        if (self.effectiveProto(o)) |p| {
-                            if (p.proxy_handler != null or p.proxy_revoked)
-                                return self.proxySet(p, key, v, receiver);
-                        }
-                    }
-                    o.elements.items[i] = v;
-                    o.clearHole(i); // an assignment fills a hole
+                if (o.denseElementPresent(i)) {
+                    _ = o.setDenseElement(i, v); // an assignment fills a hole
                     return true;
                 }
-                // Grow densely only for near-contiguous, bounded indices; large
-                // or gappy indices become sparse named properties (no giant alloc).
-                if (!o.extensible) return false;
-                const dense_cap: usize = 1 << 24;
-                if (i < dense_cap and i <= o.elements.items.len + 1024) {
-                    const gap_start = o.elements.items.len;
-                    while (o.elements.items.len <= i) try o.elements.append(o.elementsAllocator(self.arena), .undefined);
-                    o.elements.items[i] = v;
-                    o.clearHole(i);
-                    // Indices skipped over by a sparse assignment are holes.
-                    var g = gap_start;
-                    while (g < i) : (g += 1) try o.markHole(self.arena, g);
-                    return true;
-                }
-                // A large/gappy index becomes a sparse named property; the array's
-                // logical length still extends past it (`a[1e9]=x` → length 1e9+1).
-                o.array_len = @max(o.array_len, i + 1);
-                // fall through: store as a named (sparse) property
+                // Holes and out-of-bounds writes must first run OrdinarySet's
+                // prototype walk: inherited setters and non-writable data
+                // descriptors block creating a local dense element.
             }
         }
         // A setter anywhere on the prototype chain intercepts the assignment.
@@ -6719,7 +6741,7 @@ pub const Interpreter = struct {
             // own data property here shadows any inherited accessor above it. A
             // non-writable one fails the set; a writable one falls through to the
             // ordinary data-write on the receiver.
-            if (c.getOwn(key) != null) {
+            if (objectHasOwn(c, key)) {
                 if (!c.getAttr(key).writable) return false;
                 break;
             }
@@ -6756,6 +6778,20 @@ pub const Interpreter = struct {
         if (had_receiver_own) {
             if (!ro.getAttr(key).writable) return false;
         } else if (!ro.extensible) return false;
+        if (ro.is_array and !ro.is_arguments) {
+            if (arrayElementIndex(key)) |i| {
+                const old_len = ro.arrayLength();
+                if (i >= old_len and ro.attrs != null and !ro.getAttr("length").writable) return false;
+                if (ro.attrs != null and !ro.getAttr(key).writable) return false;
+                const dense_cap: usize = 1 << 24;
+                const dense_len = ro.elementsLen();
+                if (i < dense_cap and i <= dense_len + 1024) {
+                    _ = try ro.growDenseElement(self.arena, i, v);
+                    return true;
+                }
+                ro.extendArrayLengthFloor(i + 1);
+            }
+        }
         try self.setProp(ro, key, v);
         if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {
             const root = rootEnv(self.env);
@@ -6824,12 +6860,11 @@ pub const Interpreter = struct {
         if (o.is_array) {
             if (std.mem.eql(u8, key, "length")) return false;
             if (arrayElementIndex(key)) |i| {
-                if (i < o.elements.items.len) {
+                if (o.denseElementInBounds(i)) {
                     if (o.attrs != null and !o.getAttr(key).configurable) return false;
                     // Deleting a mapped arguments index severs its parameter link.
                     if (o.is_arguments and i < o.arg_map_names.len) o.arg_map_names[i] = "";
-                    o.elements.items[i] = .undefined;
-                    try o.markHole(self.arena, i);
+                    _ = try o.deleteDenseElement(self.arena, i);
                     return true;
                 }
             }
@@ -7778,7 +7813,7 @@ pub const Interpreter = struct {
         // is definitely present — no per-index string allocation. A *hole*
         // falls through, because an index property inherited from the prototype
         // chain can still make it present (HasProperty walks the chain).
-        if (o.is_array and o.accessors == null and i < o.elements.items.len and !o.isHole(i))
+        if (o.is_array and o.accessors == null and o.denseElementPresent(i))
             return true;
         if (o.typed_array) |ta| {
             if (i < (ta.currentLength() orelse 0)) return true;
@@ -7792,8 +7827,9 @@ pub const Interpreter = struct {
     fn arrIndexGet(self: *Interpreter, o: *value.Object, i: usize) EvalError!Value {
         // Dense fast path mirrors `arrIndexPresent`; a hole goes through [[Get]]
         // so an inherited index (accessor or value) on the prototype resolves.
-        if (o.is_array and o.accessors == null and i < o.elements.items.len and !o.isHole(i))
-            return o.elements.items[i];
+        if (o.is_array and o.accessors == null) {
+            if (o.denseElement(i)) |v| return v;
+        }
         const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
         return self.getProperty(.{ .object = o }, ks);
     }
@@ -7816,7 +7852,7 @@ pub const Interpreter = struct {
     /// Array uses its sparse `length`, an array-like reads ToLength(.length).
     /// A pathological 2**53-style length throws (instead of OOM-crashing).
     fn concatSpreadInto(self: *Interpreter, dst: Value, src: *value.Object, n: *usize) EvalError!void {
-        const slen: usize = if (src.is_array) @max(src.elements.items.len, src.array_len) else blk: {
+        const slen: usize = if (src.is_array) src.arrayLength() else blk: {
             break :blk toArrayLikeLen((try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number)).toNumber());
         };
         const max_safe_len: usize = 9007199254740991;
@@ -7832,8 +7868,8 @@ pub const Interpreter = struct {
             if (try self.arrIndexPresent(src, j)) {
                 try self.arrayResultPush(dst, n.*, try self.arrIndexGet(src, j));
             } else if (dense) {
-                const base = dst.object.elements.items.len;
-                try dst.object.elements.append(dst.object.elementsAllocator(self.arena), .undefined);
+                const base = dst.object.elementsLen();
+                try dst.object.appendElement(self.arena, .undefined);
                 try dst.object.markHole(self.arena, base);
             }
             n.* += 1;
@@ -7909,6 +7945,7 @@ pub const Interpreter = struct {
             if (c.proxy_handler != null or c.proxy_revoked) return true;
             if (c.typed_array != null and canonicalNumericIndexString(key) != null) return true;
             if (c.getAccessor(key) != null) return true;
+            if (objectHasOwn(c, key)) return true;
             cur = self.effectiveProto(c);
         }
         return false;
@@ -8007,7 +8044,7 @@ pub const Interpreter = struct {
         const ilen: usize = if (o.is_arguments)
             toArrayLikeLen(try self.toNumberV(try self.getProperty(.{ .object = o }, "length")))
         else if (o.is_array)
-            @max(o.elements.items.len, o.array_len)
+            o.arrayLength()
         else
             array_like_len;
         if (eq(name, "push")) {
@@ -8040,8 +8077,7 @@ pub const Interpreter = struct {
             if (o.is_array) {
                 if (arrayElemNonConfigurable(o, last)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
                 if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
-                if (last < o.elements.items.len) o.elements.shrinkRetainingCapacity(last);
-                o.array_len = @intCast(last);
+                o.truncateDenseElementsAndSetLength(last);
                 return element;
             }
             if (!try self.deleteOwn(o, idx)) return self.throwError("TypeError", "Cannot delete property");
@@ -8118,7 +8154,7 @@ pub const Interpreter = struct {
                 return Value{ .number = -1 };
             }
             // Dense scan: indexOf skips holes (HasProperty check).
-            const dense_hi = @min(o.elements.items.len, ilen);
+            const dense_hi = o.denseElementLimit(ilen);
             var i = k;
             while (i < dense_hi) : (i += 1) {
                 if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
@@ -8146,7 +8182,7 @@ pub const Interpreter = struct {
             }
             // includes treats holes as `undefined` and uses SameValueZero (so
             // NaN matches NaN). Dense scan visits every in-range index.
-            const dense_hi = @min(o.elements.items.len, ilen);
+            const dense_hi = o.denseElementLimit(ilen);
             var i = k;
             while (i < dense_hi) : (i += 1) {
                 if (value.sameValueZero(try self.arrIndexGet(o, i), target)) return Value{ .boolean = true };
@@ -8208,7 +8244,7 @@ pub const Interpreter = struct {
                 if (try self.arrIndexPresent(o, i)) {
                     try self.arrayResultPush(result, k, try self.arrIndexGet(o, i)); // CreateDataPropertyOrThrow
                 } else if (dense) { // slice preserves holes on a plain dense result
-                    try result.object.elements.append(result.object.elementsAllocator(self.arena), .undefined);
+                    try result.object.appendElement(self.arena, .undefined);
                     try result.object.markHole(self.arena, k);
                 }
                 k += 1;
@@ -8230,10 +8266,7 @@ pub const Interpreter = struct {
         if (eq(name, "reverse")) {
             // Dense fast path: a plain array with no holes, no accessors, and no
             // sparse tail is a contiguous value slice — swap in place.
-            if (o.is_array and o.holes == null and o.accessors == null and
-                o.array_len <= o.elements.items.len)
-            {
-                std.mem.reverse(Value, o.elements.items);
+            if (o.is_array and o.accessors == null and o.reversePackedDenseElements()) {
                 return Value{ .object = o };
             }
             // Generic Array.prototype.reverse: Get/Set/HasProperty/Delete keyed by
@@ -8274,7 +8307,7 @@ pub const Interpreter = struct {
             if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
             var k: usize = 0;
-            while (k < ilen) : (k += 1) try result.object.elements.append(result.object.elementsAllocator(self.arena), try self.arrIndexGet(o, ilen - 1 - k));
+            while (k < ilen) : (k += 1) try result.object.appendElement(self.arena, try self.arrIndexGet(o, ilen - 1 - k));
             return result;
         }
         if (eq(name, "toSorted")) {
@@ -8284,8 +8317,9 @@ pub const Interpreter = struct {
             if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
             var k: usize = 0;
-            while (k < ilen) : (k += 1) try result.object.elements.append(result.object.elementsAllocator(self.arena), try self.arrIndexGet(o, k));
-            const ri = result.object.elements.items;
+            var items: std.ArrayListUnmanaged(Value) = .empty;
+            while (k < ilen) : (k += 1) try items.append(self.arena, try self.arrIndexGet(o, k));
+            const ri = items.items;
             var i: usize = 1;
             while (i < ri.len) : (i += 1) {
                 const key = ri[i];
@@ -8293,6 +8327,7 @@ pub const Interpreter = struct {
                 while (j > 0 and (try self.sortCompare(ri[j - 1], key, cmp)) > 0) : (j -= 1) ri[j] = ri[j - 1];
                 ri[j] = key;
             }
+            try result.object.replaceDenseElementsAndSetLength(self.arena, ri, ri.len);
             return result;
         }
         if (eq(name, "with")) {
@@ -8307,7 +8342,7 @@ pub const Interpreter = struct {
             var k: usize = 0;
             while (k < len) : (k += 1) {
                 const v = if (k == actual) arg(args, 1) else try self.arrIndexGet(o, k);
-                try result.object.elements.append(result.object.elementsAllocator(self.arena), v);
+                try result.object.appendElement(self.arena, v);
             }
             return result;
         }
@@ -8329,10 +8364,10 @@ pub const Interpreter = struct {
             const result = try self.newArray();
             const ra = result.object;
             var i: usize = 0;
-            while (i < start) : (i += 1) try ra.elements.append(ra.elementsAllocator(self.arena), try self.arrIndexGet(o, i));
-            if (args.len > 2) for (args[2..]) |v| try ra.elements.append(ra.elementsAllocator(self.arena), v);
+            while (i < start) : (i += 1) try ra.appendElement(self.arena, try self.arrIndexGet(o, i));
+            if (args.len > 2) for (args[2..]) |v| try ra.appendElement(self.arena, v);
             i = start + del;
-            while (i < len) : (i += 1) try ra.elements.append(ra.elementsAllocator(self.arena), try self.arrIndexGet(o, i));
+            while (i < len) : (i += 1) try ra.appendElement(self.arena, try self.arrIndexGet(o, i));
             return result;
         }
         if (eq(name, "map")) {
@@ -8345,7 +8380,7 @@ pub const Interpreter = struct {
             while (i < ilen) : (i += 1) {
                 if (!(try self.arrIndexPresent(o, i))) {
                     if (dense) {
-                        try result.object.elements.append(result.object.elementsAllocator(self.arena), .undefined);
+                        try result.object.appendElement(self.arena, .undefined);
                         try result.object.markHole(self.arena, i); // map preserves holes
                     }
                     continue;
@@ -8510,7 +8545,7 @@ pub const Interpreter = struct {
                 }
                 return Value{ .number = -1 };
             }
-            const dense_hi = @min(o.elements.items.len, ilen);
+            const dense_hi = o.denseElementLimit(ilen);
             // Sparse indices (above the dense store) are the highest, so search
             // them first, descending — the first match is the answer.
             const sparse = try self.arrSparseIndices(o, dense_hi, start + 1);
@@ -8581,20 +8616,16 @@ pub const Interpreter = struct {
                 ps[j] = key;
             }
             const dense_plain_array = o.is_array and
-                o.holes == null and
                 o.accessors == null and
                 o.attrs == null and
                 o.proxy_handler == null and
-                o.array_len <= o.elements.items.len;
+                o.packedDenseElementsCoverLength();
             if (dense_plain_array) {
                 // Drop any sparse named-index props (their values are in `ps`).
                 for (try o.ownKeys(self.arena)) |k| if (value.canonicalIndex(k) != null) {
                     _ = try self.deleteOwn(o, k);
                 };
-                o.elements.clearRetainingCapacity();
-                try o.elements.appendSlice(o.elementsAllocator(self.arena), ps);
-                if (o.holes) |h| h.clearRetainingCapacity();
-                o.array_len = ilen; // indices past the sorted run read as holes
+                try o.replaceDenseElementsAndSetLength(self.arena, ps, ilen); // indices past the sorted run read as holes
             } else {
                 // Per SortIndexedProperties: write the sorted run back with [[Set]]
                 // (running accessor setters) and DeleteProperty the trailing slots.
@@ -8627,7 +8658,7 @@ pub const Interpreter = struct {
                 if (try self.arrIndexPresent(o, start + i)) {
                     try self.arrayResultPush(removed, i, try self.arrIndexGet(o, start + i)); // CreateDataPropertyOrThrow
                 } else if (rdense) { // preserve a hole in the removed array
-                    try removed.object.elements.append(removed.object.elementsAllocator(self.arena), .undefined);
+                    try removed.object.appendElement(self.arena, .undefined);
                     try removed.object.markHole(self.arena, i);
                 }
             }
@@ -8635,13 +8666,9 @@ pub const Interpreter = struct {
             const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
             // Dense fast path: an ordinary array with no holes/accessors/sparse
             // tail can splice its contiguous value store directly.
-            if (o.is_array and arrayLenWritable(o) and o.holes == null and o.accessors == null and o.array_len <= o.elements.items.len) {
-                i = 0;
-                while (i < del) : (i += 1) if (start < o.elements.items.len) {
-                    _ = o.elements.orderedRemove(start);
-                };
-                var j: usize = item_count;
-                while (j > 0) : (j -= 1) try o.elements.insert(o.elementsAllocator(self.arena), start, inserts[j - 1]);
+            if (o.is_array and arrayLenWritable(o) and o.accessors == null and
+                try o.splicePackedDenseElements(self.arena, start, del, inserts))
+            {
                 return removed;
             }
             // Generic Array.prototype.splice: shift the tail through [[Get]]/[[Set]]/
@@ -8758,7 +8785,7 @@ pub const Interpreter = struct {
     /// (HasProperty) and recursing into nested arrays up to `depth`. The result
     /// is packed — flat does not preserve holes.
     fn flattenInto(self: *Interpreter, dst: Value, src: *value.Object, depth: f64, start: usize) EvalError!usize {
-        const len: usize = if (src.is_array) @max(src.elements.items.len, src.array_len) else blk: {
+        const len: usize = if (src.is_array) src.arrayLength() else blk: {
             const lv = try self.toPrimitive(try self.getProperty(.{ .object = src }, "length"), .number);
             break :blk toLen(lv.toNumber());
         };
@@ -27807,7 +27834,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     }
     if (o.is_array) {
         if (std.mem.eql(u8, name, "length")) return true;
-        if (Interpreter.arrayElementIndex(name)) |i| return i < o.elements.items.len and !o.isHole(i);
+        if (Interpreter.arrayElementIndex(name)) |i| return o.denseElementPresent(i);
     }
     return false;
 }

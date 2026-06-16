@@ -106,6 +106,7 @@ mode is independently shippable and testable; for this engine it is the
   change with the option off — gate everything.
 - Shape transition maps have a per-shape lock, and ordinary named-property
   helper paths, including named-property delete/rebuild, have
-  `Object.property_lock`, but dense element storage, non-atomic `Value` slots,
-  and arena allocation still stay under the GIL. Dropping the GIL remains Layer
-  C work, not a Phase 6 shortcut.
+  `Object.property_lock`. Dense-array and Map/Set helper paths now route through
+  `Object.elements_lock`, but remaining direct element side doors, non-atomic
+  `Value` slots, and arena allocation still stay under the GIL. Dropping the GIL
+  remains Layer C work, not a Phase 6 shortcut.

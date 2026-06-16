@@ -82,14 +82,13 @@ needed for parallel mutators. Shape transition maps have a per-shape lock now,
 ordinary named-property helper paths plus VM plain-property inline caches hold
 `Object.property_lock` around shape/slot/accessor/attribute state, including
 named-property delete/rebuild, and Promise settlement/reaction lists have a
-per-promise lock. Map/Set helper and cursor paths now use an `Object.elements`
-lock, but dense array storage and remaining direct `elements` side doors still
-rely on the GIL. Arena allocation, dense element storage, remaining direct
-collection/tuple element stores, microtask queues, async waiter arrays, and
-non-atomic `Value` slots still rely on the GIL. The GIL protects:
+per-promise lock. Dense-array helper paths and Map/Set helper/cursor paths now
+use `Object.elements_lock`, but remaining direct `elements` side doors still
+rely on the GIL. Arena allocation, remaining direct collection/tuple element
+stores, microtask queues, async waiter arrays, and non-atomic `Value` slots
+still rely on the GIL. The GIL protects:
 
 - arena allocation and teardown,
-- dense array element vectors,
 - remaining direct `Object.elements` side doors,
 - microtask queues and async waiter arrays,
 - non-atomic `Value` slots.

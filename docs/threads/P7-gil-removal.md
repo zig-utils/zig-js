@@ -14,9 +14,9 @@ gating prerequisite below.
 ## Where Layer B leaves us
 
 Phases 1–6 ship a **GIL'd** shared heap (`src/gil.zig`): exactly one thread
-runs JS at a time, so arena allocation, dense element storage, collection
-element stores, and every existing invariant are safe even before their
-final per-structure synchronization exists. Threads interleave only at the step
+runs JS at a time, so arena allocation, remaining direct element side doors,
+and every existing invariant are safe even before their final per-structure
+synchronization exists. Threads interleave only at the step
 checkpoints (`(steps & 1023) == 0` in `src/interpreter.zig` `eval` and
 `src/vm.zig` `execLoop`, both calling `Gil.yieldIfContended`) and release the
 lock at every blocking point. Removing the GIL means every one of the
@@ -48,7 +48,7 @@ polled in both engines.
 | 2 | **Shape transition map** | `shape.zig` `transitions: StringHashMapUnmanaged(*Shape)` plus per-shape `transition_lock`, mutated only in `Shape.transition()` | **Closed for the map itself:** `Shape.transition` locks the table around lookup/allocation/publish, so two mutators adding the same property to one parent shape converge on one child instead of corrupting/diverging. Arena allocation remains covered by #1 until the shared heap/nursery story is complete. | Keep all transition writes behind `Shape.transition`; later Layer-C work may swap the lock for a lock-free table only with equivalent convergence tests. |
 | 3 | Object shape pointer | `value.zig` `Object.property_lock`, `shape`, `setOwnUnlocked`, `deleteNamedDataOwn`; VM property ICs in `vm.zig` | **Closed for ordinary named properties:** `Object.setOwn` / `getOwn` / `deleteNamedDataOwn` and VM plain-property IC reads/writes hold `property_lock` while reading, publishing, or rebuilding the shape pointer. | Keep all ordinary named-property shape publication behind `property_lock`; later Layer-C work may replace this with an atomic shape slot only if it preserves publish ordering and delete/rebuild convergence. |
 | 4 | Object slot storage | `value.zig` `Object.property_lock`, `slots: ArrayListUnmanaged(Value)`, `setOwnUnlocked`, `deleteNamedDataOwn`; VM property ICs in `vm.zig` | **Closed for ordinary named properties:** slot append, same-slot updates, and delete/rebuild compaction through `Object` helpers and VM plain-property ICs are serialized by `property_lock`. Dense element storage and direct array/collection element mutations remain separate blockers. | Keep slot-vector mutation behind `property_lock`; move any future direct slot side door into `Object` before removing the GIL. |
-| 5 | Object element storage | `value.zig` `Object.elements_lock`, `elements: ArrayListUnmanaged(Value)`; Map/Set helper and cursor paths in `interpreter.zig` | **Partially closed:** `Object` now has an element-store lock, and non-callback Map/Set helpers, Map/Set `forEach` per-slot snapshots, native Set helper scans, and Map/Set cursors use it before reading or mutating collection-backed `elements`. Dense arrays and remaining direct tuple/internal `elements` side doors are still GIL-protected. | Continue moving every direct `elements.items` read/write/append/clear behind `Object.elements_lock` or a narrower equivalent, and do not hold it across JS callbacks. |
+| 5 | Object element storage | `value.zig` `Object.elements_lock`, `elements: ArrayListUnmanaged(Value)`; dense-array, Map/Set helper, and cursor paths in `interpreter.zig` | **Partially closed:** `Object` now has an element-store lock. Central dense-array get/set/delete/length, packed reverse/sort/splice fast paths, non-callback Map/Set helpers, Map/Set `forEach` per-slot snapshots, native Set helper scans, and Map/Set cursors use it before reading or mutating element-backed storage. Remaining direct tuple/internal `elements` side doors are still GIL-protected. | Continue moving every direct `elements.items` read/write/append/clear behind `Object.elements_lock` or a narrower equivalent, and do not hold it across JS callbacks. |
 | 6 | Accessor / attribute maps | `value.zig` `Object.property_lock`, `setAccessor`/`setAttr` `StringHashMapUnmanaged` puts, `deleteAccessorOwn` removes | **Closed for ordinary named properties:** accessor and attribute map lookup/mutation/removal through `Object` helpers is serialized by `property_lock`. | Keep accessor/attribute state behind `property_lock`; add tests for any future descriptor side door before ungil. |
 | 7 | **Value width** | `value.zig:888` `Value = union(enum)` — ~24 bytes (slice payload + tag), **not pointer-width** | A 24-byte slot cannot be read/written atomically; readers tear against writers | NaN-box `Value` to 8 bytes so a slot is a single atomic word — a design input *before* any ungil bring-up |
 | 8 | Strings | `value.zig` `string: []const u8` (uninterned arena slices); `jsstring.zig` atomic `retain`/`release` refcount | No shared intern table exists to race on (good). FFI `JSStringRef` retain/release is now atomic; arena slices still have context lifetime. | Keep uninterned until Layer C chooses a sharded intern table; continue avoiding pointer-identity assumptions for equal strings. |
@@ -81,10 +81,11 @@ polled in both engines.
   of `Promise.state` or `Promise.value` outside `promise.zig`/locked GC
   tracing.
 - **Keep element storage funnel-shaped.** `Object.elements_lock` is the
-  synchronization point for indexed storage. Map/Set helper and cursor paths
-  already use it, and callback paths must snapshot one slot or one key list
-  before invoking JS. Do not add new direct `elements.items` access on shared
-  data paths; finish moving dense arrays and engine tuples behind helpers.
+  synchronization point for indexed storage. Dense-array helper paths, Map/Set
+  helper paths, and cursor paths already use it, and callback paths must
+  snapshot one slot or one key list before invoking JS. Do not add new direct
+  `elements.items` access on shared data paths; finish moving internal engine
+  tuples behind helpers.
 - **Keep the safepoint checkpoints as the only interleave points.** Both
   engines already poll at `(steps & 1023) == 0`; a GC needs exactly these as
   safepoints. Do not add heap mutation paths that can run for an unbounded
