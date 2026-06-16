@@ -435,6 +435,20 @@ pub const Interpreter = struct {
     /// no untraced module graph, and no-op when GC is disabled.
     gc_checkpoint_ctx: ?*anyopaque = null,
     gc_checkpoint_fn: ?*const fn (ctx: *anyopaque) void = null,
+    /// Optional Context callback invoked at the engine step checkpoints
+    /// (`(steps & 1023) == 0`) to run a guarded mid-script collection. Set only
+    /// when the GC is on; null = zero cost. The callback owns the safety policy
+    /// (no other running JS threads; conservative native-stack scan available).
+    /// See `stack_scan.zig` and docs/threads/P7-gc-design.md.
+    gc_safepoint_ctx: ?*anyopaque = null,
+    gc_safepoint_fn: ?*const fn (ctx: *anyopaque) void = null,
+    /// Active VM `Exec` frames on this interpreter, innermost last. The VM
+    /// operand stack is arena-backed (not a GC cell), so its live `Value`s are
+    /// invisible to both the precise tracer and a conservative native-stack
+    /// scan; registering each running `Exec` lets `gc.zig` trace them precisely
+    /// during a mid-script collection. Populated only when the GC is on; the
+    /// list itself is gpa-backed and freed on interpreter teardown.
+    gc_execs: std.ArrayListUnmanaged(*vm.Exec) = .empty,
     /// Context-owned serial used to mint per-class private-name storage keys.
     /// Null only in isolated interpreter unit helpers.
     private_name_serial: ?*u64 = null,
@@ -902,6 +916,10 @@ pub const Interpreter = struct {
             if (self.stop_flag) |sf| if (sf.load(.monotonic))
                 return self.throwError("Error", "worker terminated");
             if (self.gil) |g| g.yieldIfContended();
+            // Mid-script GC: the tree-walker holds live `Value`s only as native
+            // Zig locals/registers, which the conservative native-stack scan
+            // covers; run a guarded collection. No-op when the GC is off.
+            if (self.gc_safepoint_fn != null) self.serviceGcSafepoint();
         }
         return switch (node.*) {
             .number => |n| .{ .number = n },
@@ -3517,6 +3535,36 @@ pub const Interpreter = struct {
         if (!requested.*) return;
         const f = self.gc_checkpoint_fn orelse return;
         const ctx = self.gc_checkpoint_ctx orelse return;
+        f(ctx);
+    }
+
+    /// Register a running VM `Exec` as a precise GC root for the duration of its
+    /// instruction loop. No-op when the GC is off (the common path), so the VM
+    /// pays only a null check. The list is arena-backed; symmetric `popExecRoot`
+    /// keeps it bounded by the live call-nesting depth.
+    pub fn pushExecRoot(self: *Interpreter, exec: *vm.Exec) void {
+        if (self.gc == null) return;
+        self.gc_execs.append(self.arena, exec) catch {};
+    }
+
+    pub fn popExecRoot(self: *Interpreter, exec: *vm.Exec) void {
+        if (self.gc == null) return;
+        var i = self.gc_execs.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.gc_execs.items[i] == exec) {
+                _ = self.gc_execs.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// Run a guarded mid-script collection at a step checkpoint. The Context
+    /// callback owns the safety policy (GC on, no other running JS threads,
+    /// conservative native-stack scan available); a no-op otherwise.
+    pub fn serviceGcSafepoint(self: *Interpreter) void {
+        const f = self.gc_safepoint_fn orelse return;
+        const ctx = self.gc_safepoint_ctx orelse return;
         f(ctx);
     }
 

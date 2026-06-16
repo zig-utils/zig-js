@@ -11,6 +11,7 @@ const Parser = @import("parser.zig").Parser;
 const shared_buffer = @import("shared_buffer.zig");
 const gil_mod = @import("gil.zig");
 const jsthread = @import("jsthread.zig");
+const stack_scan = @import("stack_scan.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -53,6 +54,12 @@ pub const Context = struct {
     /// the next evaluate/evaluateModule entry rather than inside live Zig
     /// interpreter recursion.
     gc_requested: bool = false,
+    /// Set only for the duration of a guarded mid-script collection so the GC
+    /// binding (`gc.zig` `traceRoots`) conservatively scans the collecting
+    /// thread's live native stack + spilled registers. Quiescent collection
+    /// leaves it false and stays precise (so exact-reclamation tests are
+    /// unaffected). See `collectMidScript` and `stack_scan.zig`.
+    gc_scan_native_stack: bool = false,
     /// Realm-wide serial for class private-name storage keys. Private names are
     /// per-class brands, so two unrelated classes declaring `#x` must not alias
     /// even if both outlive separate evaluate calls.
@@ -295,6 +302,10 @@ pub const Context = struct {
             .gc_requested = &self.gc_requested,
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
+            // Mid-script collection hook: wired only when the GC is on, so the
+            // arena engine pays nothing (the VM/tree-walker skip on a null fn).
+            .gc_safepoint_ctx = if (self.gc != null) self else null,
+            .gc_safepoint_fn = if (self.gc != null) collectMidScript else null,
             .private_name_serial = &self.private_name_serial,
         };
     }
@@ -414,6 +425,25 @@ pub const Context = struct {
         self.collectGarbage();
     }
 
+    /// Heap-growth-triggered collection at an engine step checkpoint, while the
+    /// native stack holds live `Value`s. Sound because the GC binding adds two
+    /// extra root sources for this case: registered active VM `Exec` operand
+    /// stacks (precise) and a conservative scan of the collecting thread's
+    /// native stack + spilled registers (`stack_scan.zig`, the tree-walker's
+    /// locals). No-op unless the GC is on, the conservative scan is available on
+    /// this target, and no *other* shared-realm thread is running — a parked
+    /// thread's native stack is not scanned yet (the M3 safepoint protocol), so
+    /// mid-script collection stays single-threaded.
+    fn collectMidScript(raw_ctx: *anyopaque) void {
+        const self: *Context = @ptrCast(@alignCast(raw_ctx));
+        const h = self.gc orelse return;
+        if (!stack_scan.supported) return;
+        if (self.hasRunningJsThreads()) return;
+        self.gc_scan_native_stack = true;
+        defer self.gc_scan_native_stack = false;
+        h.maybeCollect();
+    }
+
     pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
         for (self.finalization_cleanup_jobs.items) |queued| {
             if (queued == registry) return;
@@ -434,6 +464,12 @@ pub const Context = struct {
         self.assertOwnerThread();
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
+        // Register this frame as the high boundary of the live native stack so a
+        // mid-script collection can conservatively root the interpreter's
+        // `Value` locals below it (`stack_scan.zig`). Cheap; matters only when
+        // the GC is on.
+        const ss_saved = stack_scan.enter(@frameAddress());
+        defer stack_scan.leave(ss_saved);
         // Quiescent point: reclaim garbage from prior evaluations on this
         // context before running (nothing is executing yet, so the Context
         // roots are complete).
@@ -560,6 +596,10 @@ pub const Context = struct {
         self.assertOwnerThread();
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
+        // See `evaluate`: register the native-stack scan boundary for mid-script
+        // collection during module execution.
+        const ss_saved = stack_scan.enter(@frameAddress());
+        defer stack_scan.leave(ss_saved);
         // Quiescent point before module execution; a prior shell `gc()` request
         // can be serviced before the live module graph is installed.
         self.collectRequestedGarbage();
@@ -4967,6 +5007,75 @@ test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
     // The retained object is intact and usable after collection.
     const r = try ctx.evaluate("globalThis.keep.kept + globalThis.keep.nested.deep[2]");
     try std.testing.expectEqual(@as(f64, 4), r.number); // 1 + 3
+}
+
+test "enable_gc: mid-script collection reclaims garbage during a running loop (bounded heap)" {
+    // Phase 7 / M1 item (a): the GC collects *while JS runs* (at the engine step
+    // checkpoints), not just at quiescent points. A long loop allocating
+    // throwaway objects would grow the heap without bound if collection only ran
+    // at entry; the safepoint collector keeps it bounded. Crucially, this also
+    // proves the new roots are sound: the live operand-stack `Value`s (registered
+    // active VM `Exec`) and the loop's bindings are never wrongly freed, so the
+    // arithmetic result is exact.
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\let acc = 0;
+        \\for (let i = 0; i < 50000; i++) {
+        \\  const o = { a: i, b: { c: i }, arr: [i, i, i] };
+        \\  acc += o.b.c + o.arr[1];
+        \\}
+        \\acc;
+    );
+    // sum_{i=0..49999}(i + i) = 2 * (49999*50000/2) = 2499950000.
+    try std.testing.expectEqual(@as(f64, 2499950000), result.number);
+    // Collection ran repeatedly mid-loop — far more than the single quiescent
+    // collect at the top of `evaluate`.
+    try std.testing.expect(ctx.gc.?.collections > 2);
+    // The heap stayed bounded: nothing like the ~150k object graphs a leak would
+    // accumulate over 50k iterations survived.
+    try std.testing.expect(ctx.gc.?.live_cells < 20000);
+}
+
+test "enable_gc: conservative native-stack scan keeps a stack-only value alive" {
+    // The safety-critical direction of mid-script collection: a `Value` held
+    // only as a native Zig local (the tree-walker's case) must survive a
+    // collection that runs while the stack is live. The collecting thread arms
+    // `gc_scan_native_stack`, so `gc.zig`'s `traceRoots` conservatively scans the
+    // stack + spilled registers and marks the cell this local points at.
+    if (!stack_scan.supported) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const ss = stack_scan.enter(@frameAddress());
+    defer stack_scan.leave(ss);
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+
+    // Reachable ONLY through this local — no JS root, no Context root.
+    const orphan = try gc_mod.allocObj(ctx.arena());
+    try orphan.setOwn(ctx.gpa, ctx.root_shape, "marker", .{ .number = 12345 });
+
+    // Collect with the native-stack scan armed, exactly as `collectMidScript`
+    // does. A precise-only collection would sweep `orphan`; the conservative
+    // scan must keep it.
+    ctx.gc_scan_native_stack = true;
+    ctx.gc.?.collect();
+    ctx.gc_scan_native_stack = false;
+    std.mem.doNotOptimizeAway(&orphan);
+
+    // Survived and intact.
+    const got = orphan.getOwn("marker") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 12345), got.number);
+
+    // Control: with the scan off (the quiescent path), the now-unreferenced
+    // orphan is unreachable and reclaimed — confirming it only survived above
+    // because of the stack scan, not some other root.
+    const live_before = ctx.gc.?.live_cells;
+    std.mem.doNotOptimizeAway(&orphan); // last legitimate use; dead hereafter
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc.?.live_cells < live_before);
 }
 
 test "enable_gc: active module cache roots module environments during collection" {

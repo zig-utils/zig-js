@@ -23,6 +23,7 @@ const vm = @import("vm.zig");
 const ContextMod = @import("context.zig");
 const jsthread = @import("jsthread.zig");
 const gc_runtime = @import("gc_runtime.zig");
+const stack_scan = @import("stack_scan.zig");
 
 const Value = value.Value;
 const Object = value.Object;
@@ -371,6 +372,14 @@ pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.M
 pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markManaged(v, machine.env);
     traceEnv(machine.env, v);
+    // Active VM operand stacks: arena-backed, so their live `Value`s are
+    // invisible to both the precise object graph and the conservative native
+    // stack scan. The VM flushes `acc`/`ip` into each `Exec` at the safepoint
+    // before collecting, so these reads are current.
+    for (machine.gc_execs.items) |exec| {
+        for (exec.stack.items) |s| markValue(v, s);
+        markValue(v, exec.acc);
+    }
     if (machine.microtasks) |q| {
         for (q.items) |mt| {
             traceReaction(mt.reaction, v);
@@ -417,6 +426,13 @@ pub const Binding = struct {
     /// Interpreter execution roots at quiescent checkpoints.
     pub fn traceRoots(self: *Binding, v: anytype) void {
         const ctx = self.context;
+        // Mid-script collection: conservatively root the collecting thread's
+        // live native stack + spilled callee-saved registers, which hold the
+        // tree-walker's `Value` locals and the VM's transient accumulator. Only
+        // enabled (`gc_scan_native_stack`) for a guarded single-threaded
+        // mid-script collect; quiescent collection keeps it off and stays
+        // precise. See `stack_scan.zig` and docs/threads/P7-gc-design.md.
+        if (ctx.gc_scan_native_stack) _ = stack_scan.scan(v);
         v.mark(ctx.global_object);
         v.mark(ctx.tdz_marker);
         traceEnv(&ctx.env, v); // the global environment is embedded by value

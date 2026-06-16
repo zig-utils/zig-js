@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const gc_mod = @import("gc.zig");
+const stack_scan = @import("stack_scan.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
 const ContextMod = @import("context.zig");
@@ -192,6 +193,12 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer g.release();
     const gc_saved = gc_mod.setActiveHeap(rec.ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
+    // Register this spawned thread's native-stack scan boundary. Mid-script
+    // collection is gated off while any JS thread is running (a parked thread's
+    // stack is not scanned yet — the M3 safepoint protocol), so this is hygiene
+    // for the future, not yet load-bearing.
+    const ss_saved = stack_scan.enter(@frameAddress());
+    defer stack_scan.leave(ss_saved);
     t_current = rec;
     // A per-thread interpreter over the SHARED realm: same arena, environment,
     // global object, and shapes (safe under the GIL), with its own job queues.

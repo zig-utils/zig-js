@@ -200,6 +200,12 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    // Register this operand stack as a precise GC root while it runs, so a
+    // mid-script collection at a step checkpoint traces its live `Value`s (the
+    // operand stack is arena-backed, invisible to the conservative native-stack
+    // scan). No-op when the GC is off.
+    vm.pushExecRoot(exec);
+    defer vm.popExecRoot(exec);
     // Run the instruction stream; if a throw escapes and an active handler can
     // catch it, unwind to that handler's catch block and resume. Otherwise the
     // throw propagates to the caller (uncaught — the generator/function ends).
@@ -244,6 +250,15 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             if (vm.stop_flag) |sf| if (sf.load(.monotonic))
                 return vm.throwError("Error", "worker terminated");
             if (vm.gil) |g| g.yieldIfContended();
+            // Mid-script GC: flush the live accumulator/ip into `exec` so the
+            // precise tracer (which roots `exec.stack`/`exec.acc`) sees the
+            // current operand state, then run a guarded collection. No-op when
+            // the GC is off (`gc_safepoint_fn == null`).
+            if (vm.gc_safepoint_fn != null) {
+                exec.acc = acc;
+                exec.ip = ip;
+                vm.serviceGcSafepoint();
+            }
         }
         const inst = code[ip];
         ip += 1;

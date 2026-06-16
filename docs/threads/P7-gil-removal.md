@@ -40,6 +40,15 @@ should begin before a tracing GC with safepoints replaces the arena.** The step
 checkpoints above are the natural safepoint sites — they already exist and are
 polled in both engines.
 
+**Progress:** the GC (M1, opt-in) now collects *mid-script* at those checkpoints
+for single-threaded execution — conservative native-stack + register scanning
+(`src/stack_scan.zig`) roots the tree-walker's live `Value` locals and active VM
+`Exec` operand stacks are registered as precise roots (see
+[`P7-gc-design.md`](P7-gc-design.md)). The remaining safepoint work for Layer C
+is scanning a *parked* thread's native stack while another thread collects (the
+multi-thread safepoint protocol), after which the GIL guard on mid-script
+collection can be lifted.
+
 ## Blocker map (each is GIL-protected today)
 
 | # | Structure | Site | Tear without the GIL | Fix direction |

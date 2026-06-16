@@ -382,14 +382,40 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   The GC binding also skips the embedded global environment when tracing
   function closures, fixing a root-completeness bug exposed by live cleanup
   callbacks.
-  *Remaining for the FULL deliverable:* (a) **arbitrary mid-script collection**
-  needs conservative stack scanning (a tree-walker holds live `Value`s as Zig
-  locals/registers a precise GC can't see) and a fuller safepoint protocol for
-  spawned threads parked in native calls — the quiescent checkpoints avoid
-  this; a Boehm-style stack scan with register spill would generalize it. (b)
-  keep new cell-owned side buffers behind the backing-store helpers and this
-  audit, so future additions do not silently fall back to reclaim-at-destroy
-  lifetime.
+  *Mid-script collection landed (single-threaded):* the GC now collects *while
+  JS runs*, not only at quiescent points. Two new root sources make this sound.
+  (1) **Conservative native-stack scanning** (`src/stack_scan.zig`): the
+  collecting thread spills its callee-saved registers (aarch64/x86_64 inline
+  asm), captures the live stack pointer, and conservatively marks every machine
+  word in `[sp, frame_high]` that points into a managed cell — covering the
+  tree-walker's `Value` locals/registers, which a precise tracer cannot see.
+  `frame_high` is registered by `enter(@frameAddress())` at `evaluate` /
+  `evaluateModule` / spawned-thread entry. The `zig-gc` `Visitor` already
+  exposed `markConservativeWord`; the interior-pointer lookup was made O(log n)
+  (a per-collection address-sorted index, built lazily only when a conservative
+  mark actually occurs) so a stack scan no longer costs O(words × cells).
+  (2) **Active VM `Exec` roots**: the VM operand stack is arena-backed (not a GC
+  cell), so its live `Value`s are invisible to both the precise object graph and
+  the conservative scan; each running `Exec` is registered on the interpreter
+  (`gc_execs`) and the VM flushes `acc`/`ip` into it at the safepoint, so the
+  tracer marks `exec.stack`/`exec.acc` precisely. Collection is driven at the
+  existing `(steps & 1023)` checkpoints via `Context.collectMidScript`
+  (heap-growth-triggered `maybeCollect`), guarded so it only runs when the GC is
+  on, the target supports the stack scan, and **no other shared-realm thread is
+  running** — a parked thread's native stack is not scanned yet, so mid-script
+  collection stays single-threaded. Everything is gated behind `enable_gc`, so
+  the arena engine is byte-identical (every new hook is a null-`fn`/`gc == null`
+  no-op). Validated: GC-on unit tests (a 50 000-iteration allocating loop keeps
+  the heap bounded with the arithmetic result exact — proving live operand-stack
+  values are never wrongly freed; and a value reachable only through a native
+  Zig local survives a collection that would otherwise sweep it), `threads-test`
+  209/209 (incl. `gc-stress/conservative-scan-register.js`), test262 unchanged.
+  *Remaining for the FULL deliverable:* (a) **mid-script collection across
+  parked threads**: scan a spawned thread's native stack + registers while it is
+  parked in a native call (the M3 safepoint protocol), lifting the
+  single-threaded guard above. (b) keep new cell-owned side buffers behind the
+  backing-store helpers and this audit, so future additions do not silently fall
+  back to reclaim-at-destroy lifetime.
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
