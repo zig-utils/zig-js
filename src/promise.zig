@@ -36,6 +36,7 @@ pub const Reaction = struct {
 };
 
 pub const Promise = struct {
+    lock: std.atomic.Mutex = .unlocked,
     state: State = .pending,
     value: Value = .undefined,
     /// Reaction list buffers are owned by the GC backing allocator when this
@@ -43,6 +44,21 @@ pub const Promise = struct {
     gc_owned: bool = false,
     on_fulfill: std.ArrayListUnmanaged(Reaction) = .empty,
     on_reject: std.ArrayListUnmanaged(Reaction) = .empty,
+
+    pub fn lockState(self: *Promise) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+
+    pub fn unlockState(self: *Promise) void {
+        self.lock.unlock();
+    }
 };
 
 /// Shared state for one promise resolving-function pair. ECMAScript's
@@ -164,35 +180,68 @@ fn noteReactionsRemoved(self: *Interpreter, p: *Promise, count: usize) void {
     }
 }
 
-fn appendReaction(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction), r: Reaction) EvalError!void {
+fn appendReactionUnlocked(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction), r: Reaction) EvalError!void {
     try list.append(reactionAllocator(self), r);
     noteReactionAdded(self, p);
 }
 
-fn popReaction(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction)) void {
+fn popReactionUnlocked(self: *Interpreter, p: *Promise, list: *std.ArrayListUnmanaged(Reaction)) void {
     _ = list.pop();
     noteReactionsRemoved(self, p, 1);
 }
 
-fn clearReactions(self: *Interpreter, p: *Promise) void {
-    const count = p.on_fulfill.items.len + p.on_reject.items.len;
+pub fn snapshot(p: *Promise) struct { state: State, value: Value } {
+    p.lockState();
+    defer p.unlockState();
+    return .{ .state = p.state, .value = p.value };
+}
+
+pub fn isPending(p: *Promise) bool {
+    p.lockState();
+    defer p.unlockState();
+    return p.state == .pending;
+}
+
+fn disposeMovedReactions(self: *Interpreter, p: *Promise, fulfill: *std.ArrayListUnmanaged(Reaction), reject_list: *std.ArrayListUnmanaged(Reaction), count: usize) void {
     if (p.gc_owned) {
         const a = reactionAllocator(self);
-        p.on_fulfill.deinit(a);
-        p.on_reject.deinit(a);
-        p.on_fulfill = .empty;
-        p.on_reject = .empty;
-        noteReactionsRemoved(self, p, count);
-    } else {
-        p.on_fulfill.clearRetainingCapacity();
-        p.on_reject.clearRetainingCapacity();
+        fulfill.deinit(a);
+        reject_list.deinit(a);
     }
+    noteReactionsRemoved(self, p, count);
+}
+
+fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!void {
+    std.debug.assert(state != .pending);
+
+    var fulfill: std.ArrayListUnmanaged(Reaction) = .empty;
+    var reject_list: std.ArrayListUnmanaged(Reaction) = .empty;
+    var removed_count: usize = 0;
+
+    p.lockState();
+    if (p.state != .pending) {
+        p.unlockState();
+        return;
+    }
+    p.state = state;
+    p.value = v;
+    fulfill = p.on_fulfill;
+    reject_list = p.on_reject;
+    removed_count = fulfill.items.len + reject_list.items.len;
+    p.on_fulfill = .empty;
+    p.on_reject = .empty;
+    p.unlockState();
+
+    errdefer disposeMovedReactions(self, p, &fulfill, &reject_list, removed_count);
+    const selected = if (state == .fulfilled) fulfill.items else reject_list.items;
+    for (selected) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
+    disposeMovedReactions(self, p, &fulfill, &reject_list, removed_count);
 }
 
 /// Fulfill `p` with `v` (no-op if already settled). If `v` is itself a thenable,
 /// adopt its state instead (resolution).
 pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
-    if (p.state != .pending) return;
+    if (!isPending(p)) return;
     // Thenable assimilation: resolving with a promise/thenable chains to it.
     if (promiseOf(v)) |inner| {
         if (inner == p) {
@@ -202,17 +251,7 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
         }
         // `await`/`then` on the inner: when it settles, settle `p`.
         const nr = try nativeResolveReject(self, p);
-        const reaction_f = Reaction{ .handler = null, .resolve = nr.resolve, .reject = nr.reject };
-        const reaction_r = Reaction{ .handler = null, .resolve = nr.resolve, .reject = nr.reject };
-        switch (inner.state) {
-            .pending => {
-                try appendReaction(self, inner, &inner.on_fulfill, reaction_f);
-                errdefer popReaction(self, inner, &inner.on_fulfill);
-                try appendReaction(self, inner, &inner.on_reject, reaction_r);
-            },
-            .fulfilled => try enqueue(self, .{ .reaction = reaction_f, .argument = inner.value, .fulfilled = true }),
-            .rejected => try enqueue(self, .{ .reaction = reaction_r, .argument = inner.value, .fulfilled = false }),
-        }
+        try performThen(self, inner, .undefined, .undefined, nr.resolve, nr.reject);
         return;
     }
     // Arbitrary thenable: adopt its state by calling `v.then(resolve, reject)`
@@ -241,19 +280,12 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
             return;
         }
     }
-    p.state = .fulfilled;
-    p.value = v;
-    for (p.on_fulfill.items) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = true });
-    clearReactions(self, p);
+    try settle(self, p, .fulfilled, v);
 }
 
 /// Reject `p` with `reason` (no-op if already settled).
 pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
-    if (p.state != .pending) return;
-    p.state = .rejected;
-    p.value = reason;
-    for (p.on_reject.items) |r| try enqueue(self, .{ .reaction = r, .argument = reason, .fulfilled = false });
-    clearReactions(self, p);
+    try settle(self, p, .rejected, reason);
 }
 
 /// `p.then(onFulfilled, onRejected)` → a new promise settled by running the
@@ -287,14 +319,25 @@ pub fn performThen(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, re
     const rh: ?Value = if (on_r.isCallable()) on_r else null;
     const react_f = Reaction{ .handler = fh, .resolve = resolve_fn, .reject = reject_fn };
     const react_r = Reaction{ .handler = rh, .resolve = resolve_fn, .reject = reject_fn };
-    switch (p.state) {
+    p.lockState();
+    errdefer p.unlockState();
+    const snap = .{ .state = p.state, .value = p.value };
+    switch (snap.state) {
         .pending => {
-            try appendReaction(self, p, &p.on_fulfill, react_f);
-            errdefer popReaction(self, p, &p.on_fulfill);
-            try appendReaction(self, p, &p.on_reject, react_r);
+            try appendReactionUnlocked(self, p, &p.on_fulfill, react_f);
+            errdefer popReactionUnlocked(self, p, &p.on_fulfill);
+            try appendReactionUnlocked(self, p, &p.on_reject, react_r);
+            p.unlockState();
+            return;
         },
-        .fulfilled => try enqueue(self, .{ .reaction = react_f, .argument = p.value, .fulfilled = true }),
-        .rejected => try enqueue(self, .{ .reaction = react_r, .argument = p.value, .fulfilled = false }),
+        .fulfilled, .rejected => {},
+    }
+    p.unlockState();
+
+    switch (snap.state) {
+        .pending => unreachable,
+        .fulfilled => try enqueue(self, .{ .reaction = react_f, .argument = snap.value, .fulfilled = true }),
+        .rejected => try enqueue(self, .{ .reaction = react_r, .argument = snap.value, .fulfilled = false }),
     }
 }
 
@@ -308,7 +351,7 @@ fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
 pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
     if (task.kind == .thenable) {
         const p = task.promise orelse return;
-        if (p.state != .pending) return;
+        if (!isPending(p)) return;
         const nr = try nativeResolveReject(self, p);
         if (self.callValueWithThis(task.then_fn, &.{ nr.resolve, nr.reject }, task.thenable)) |_| {} else |err| {
             if (err == error.Throw) {

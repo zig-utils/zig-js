@@ -37,8 +37,8 @@ but it is not true parallel JavaScript heap mutation.
 ## Not Supported Today
 
 - True parallel mutation of ordinary JS objects.
-- Dropping the GIL around arbitrary heap, shape, object, array, or promise
-  mutation.
+- Dropping the GIL around arbitrary heap, array, collection, microtask, async
+  waiter, or non-atomic `Value` mutation.
 - Sharing ordinary JS values between isolated agents or workers without
   structured clone.
 - Treating `Context.TestingOptions` as a general embedder API with a long-term
@@ -79,16 +79,17 @@ thread-affine unless a future API explicitly says otherwise.
 The GC is still M1: it collects only at quiescent points. Running thread
 stacks and ordinary heap mutation also do not yet have the barriers/locks
 needed for parallel mutators. Shape transition maps have a per-shape lock now,
-and ordinary named-property helper paths plus VM plain-property inline caches
-hold `Object.property_lock` around shape/slot/accessor/attribute state,
-including named-property delete/rebuild. Arena allocation, dense element
-storage, collection element stores, and non-atomic `Value` slots still rely on
-the GIL. The GIL protects:
+ordinary named-property helper paths plus VM plain-property inline caches hold
+`Object.property_lock` around shape/slot/accessor/attribute state, including
+named-property delete/rebuild, and Promise settlement/reaction lists have a
+per-promise lock. Arena allocation, dense element storage, collection element
+stores, microtask queues, async waiter arrays, and non-atomic `Value` slots
+still rely on the GIL. The GIL protects:
 
 - arena allocation and teardown,
 - dense element vectors,
 - collection element stores backed by object `elements`,
-- promise and async waiter state,
+- microtask queues and async waiter arrays,
 - non-atomic `Value` slots.
 
 Removing the GIL before those have complete root, synchronization, barrier, and

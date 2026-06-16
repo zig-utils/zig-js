@@ -52,6 +52,7 @@ polled in both engines.
 | 6 | Accessor / attribute maps | `value.zig` `Object.property_lock`, `setAccessor`/`setAttr` `StringHashMapUnmanaged` puts, `deleteAccessorOwn` removes | **Closed for ordinary named properties:** accessor and attribute map lookup/mutation/removal through `Object` helpers is serialized by `property_lock`. | Keep accessor/attribute state behind `property_lock`; add tests for any future descriptor side door before ungil. |
 | 7 | **Value width** | `value.zig:888` `Value = union(enum)` — ~24 bytes (slice payload + tag), **not pointer-width** | A 24-byte slot cannot be read/written atomically; readers tear against writers | NaN-box `Value` to 8 bytes so a slot is a single atomic word — a design input *before* any ungil bring-up |
 | 8 | Strings | `value.zig` `string: []const u8` (uninterned arena slices); `jsstring.zig` atomic `retain`/`release` refcount | No shared intern table exists to race on (good). FFI `JSStringRef` retain/release is now atomic; arena slices still have context lifetime. | Keep uninterned until Layer C chooses a sharded intern table; continue avoiding pointer-identity assumptions for equal strings. |
+| 9 | Promise settlement and reactions | `promise.zig` `Promise.lock`, `state`, `value`, `on_fulfill`, `on_reject`; `gc.zig` `tracePromise`; `interpreter.zig` `awaitValue` | **Closed for per-promise state:** resolve/reject/then registration, snapshot reads, async thenable job guards, and GC tracing lock the Promise before reading or moving settlement/reaction state. Microtask queues and async waiter arrays remain separate GIL-protected host state. | Keep all Promise state reads through `promise.snapshot`/`isPending` or under `Promise.lock`; do not treat microtask queue mutation as ungil-ready until the per-thread event-loop story is explicit. |
 
 ## Design inputs to lock in now (so earlier phases don't foreclose them)
 
@@ -74,6 +75,11 @@ polled in both engines.
   `slots`. Named data/accessor delete and shape+slot rebuild also live behind
   the same lock. Do not add new direct mutations of `shape`, `slots`,
   `accessors`, `attrs`, or `key_order`.
+- **Keep Promise state funnel-shaped.** Promise settlement and reaction-list
+  mutation now synchronize on `Promise.lock` (`promise.zig`), and `awaitValue`
+  observes settled promises through `promise.snapshot`. Do not add direct reads
+  of `Promise.state` or `Promise.value` outside `promise.zig`/locked GC
+  tracing.
 - **Keep the safepoint checkpoints as the only interleave points.** Both
   engines already poll at `(steps & 1023) == 0`; a GC needs exactly these as
   safepoints. Do not add heap mutation paths that can run for an unbounded

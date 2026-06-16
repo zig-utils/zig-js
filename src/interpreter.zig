@@ -3665,7 +3665,7 @@ pub const Interpreter = struct {
             break :blk pp;
         };
         const q = self.microtasks;
-        while (p.state == .pending) {
+        while (promise.snapshot(p).state == .pending) {
             const queue = q orelse break;
             if (queue.items.len == 0) {
                 // Threads mode: another thread can settle this shared promise
@@ -3692,10 +3692,11 @@ pub const Interpreter = struct {
             const job = queue.orderedRemove(0);
             try promise.runJob(self, job);
         }
-        return switch (p.state) {
-            .fulfilled => p.value,
+        const done = promise.snapshot(p);
+        return switch (done.state) {
+            .fulfilled => done.value,
             .rejected => blk: {
-                self.exception = p.value;
+                self.exception = done.value;
                 break :blk error.Throw;
             },
             .pending => .undefined, // never settled synchronously

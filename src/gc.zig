@@ -292,6 +292,8 @@ pub fn traceBoundFn(b: *interp.Interpreter.BoundFn, v: anytype) void {
 }
 
 pub fn tracePromise(p: *promise.Promise, v: anytype) void {
+    p.lockState();
+    defer p.unlockState();
     markValue(v, p.value);
     for (p.on_fulfill.items) |r| traceReaction(r, v);
     for (p.on_reject.items) |r| traceReaction(r, v);

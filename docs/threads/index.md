@@ -14,11 +14,12 @@ behind a VM lock.
 The shared-realm model is concurrent, not parallel. `Thread` runs on real OS
 threads, but only one thread executes JS or mutates the shared heap at a time.
 The context GIL is what makes arena allocation, dense element storage,
-collection element stores, and promise state safe in today's engine. Shape
-transition maps carry their own per-shape lock, and ordinary named-property
-helper paths carry an object-level property lock so concurrent same-name
-transitions, helper-routed property writes, and named-property deletes converge
-on one shape/slot path.
+collection element stores, microtask queues, and async waiter arrays safe in
+today's engine. Shape transition maps carry their own per-shape lock, ordinary
+named-property helper paths carry an object-level property lock, and Promise
+settlement/reaction lists carry a per-promise lock so concurrent same-name
+transitions, helper-routed property writes, named-property deletes, and shared
+promise settlement converge on one state path.
 
 ## Shipping Surface
 
@@ -41,9 +42,10 @@ on one shape/slot path.
 - Blocking points release the GIL: `Thread.join`, contended `Lock.hold`,
   `Condition.wait`, property-mode `Atomics.wait`, and typed-array
   `Atomics.wait`.
-- Promise and microtask queues are per running interpreter / thread. Shared
-  promises can settle from another thread, and `await` yields at the GIL
-  boundary until the settlement is observable.
+- Promise settlement and reaction-list state is locked per promise. Microtask
+  queues are still per running interpreter / thread; shared promises can settle
+  from another thread, and `await` yields at the GIL boundary until the
+  settlement is observable.
 - Process-global mutable state must be listed in [bindings.md](./bindings.md)
   with a `per-thread`, `locked`, or `refused` ruling.
 
