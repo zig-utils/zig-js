@@ -46,7 +46,7 @@ polled in both engines.
 | 5 | Object element storage | `elements: ArrayListUnmanaged(Value)` (Array push) | Same realloc-move hazard as slots | Same as #4 |
 | 6 | Accessor / attribute maps | `setAccessor`/`setAttr` `StringHashMapUnmanaged` puts | HashMap not thread-safe | Fold under the per-object lock |
 | 7 | **Value width** | `value.zig:888` `Value = union(enum)` — ~24 bytes (slice payload + tag), **not pointer-width** | A 24-byte slot cannot be read/written atomically; readers tear against writers | NaN-box `Value` to 8 bytes so a slot is a single atomic word — a design input *before* any ungil bring-up |
-| 8 | Strings | `value.zig` `string: []const u8` (uninterned arena slices); `jsstring.zig` `retain`/`release` non-atomic refcount | No shared intern table exists to race on (good) — but the FFI refcount is non-atomic, and arena slices have arena lifetime | Keep uninterned until Layer C chooses a sharded intern table; make the `JsString` refcount atomic |
+| 8 | Strings | `value.zig` `string: []const u8` (uninterned arena slices); `jsstring.zig` atomic `retain`/`release` refcount | No shared intern table exists to race on (good). FFI `JSStringRef` retain/release is now atomic; arena slices still have context lifetime. | Keep uninterned until Layer C chooses a sharded intern table; continue avoiding pointer-identity assumptions for equal strings. |
 
 ## Design inputs to lock in now (so earlier phases don't foreclose them)
 
@@ -56,7 +56,9 @@ polled in both engines.
   ABI is insulated.
 - **Keep strings uninterned.** No code should assume pointer-identity of equal
   strings; equality is by bytes (#8). This preserves the freedom to add a
-  sharded intern table only in Layer C.
+  sharded intern table only in Layer C. `JSStringRef` lifecycle is already
+  thread-safe: `src/jsstring.zig` uses an atomic refcount, so C-API strings can
+  be retained and released from any thread while remaining immutable.
 - **Keep shape transitions funnel-shaped.** All transitions go through
   `Shape.transition` (`shape.zig:56`) — a single chokepoint to wrap in a lock
   or swap for a lock-free table (#2). Do not add side doors that mutate

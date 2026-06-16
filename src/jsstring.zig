@@ -6,25 +6,27 @@ const std = @import("std");
 /// the C API hands ownership across the boundary.
 pub const JsString = struct {
     bytes: []u8,
-    refcount: usize,
+    refcount: std.atomic.Value(usize),
     gpa: std.mem.Allocator,
 
     pub fn create(gpa: std.mem.Allocator, utf8: []const u8) !*JsString {
         const self = try gpa.create(JsString);
         errdefer gpa.destroy(self);
         const buf = try gpa.dupe(u8, utf8);
-        self.* = .{ .bytes = buf, .refcount = 1, .gpa = gpa };
+        self.* = .{ .bytes = buf, .refcount = .init(1), .gpa = gpa };
         return self;
     }
 
-    pub fn retain(self: *JsString) void {
-        self.refcount += 1;
+    pub fn retain(self: *JsString) *JsString {
+        _ = self.refcount.fetchAdd(1, .monotonic);
+        return self;
     }
 
     pub fn release(self: *JsString) void {
-        std.debug.assert(self.refcount > 0);
-        self.refcount -= 1;
-        if (self.refcount == 0) {
+        const prev = self.refcount.fetchSub(1, .release);
+        std.debug.assert(prev > 0);
+        if (prev == 1) {
+            _ = self.refcount.load(.acquire);
             self.gpa.free(self.bytes);
             self.gpa.destroy(self);
         }
@@ -42,3 +44,26 @@ pub const JsString = struct {
         return count;
     }
 };
+
+test "JSString retain/release is atomic across threads" {
+    const s = try JsString.create(std.testing.allocator, "thread-safe string");
+    defer s.release();
+
+    const iterations = 10_000;
+    const Worker = struct {
+        fn run(str: *JsString) void {
+            for (0..iterations) |_| {
+                const held = str.retain();
+                if (held.bytes.len == 0) @panic("lost JSString bytes");
+                held.release();
+            }
+        }
+    };
+
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{s});
+    for (threads) |t| t.join();
+
+    try std.testing.expectEqual(@as(usize, 1), s.refcount.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 18), s.utf16Len());
+}

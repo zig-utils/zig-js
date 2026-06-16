@@ -23,9 +23,8 @@
 //! https://github.com/zig-utils/zig-js/issues/1 for the worker/agent roadmap.
 //! The `JSWorker*` surface (below) spawns such per-thread contexts and moves
 //! values between them as structured-clone bytes.
-//! `JSStringRef`s are immutable and may be created and released on any thread,
-//! but a given string must not be used from two threads concurrently (its
-//! refcount is not atomic).
+//! `JSStringRef`s are immutable and retain/release is atomic, so references may
+//! be created, retained, and released on any thread.
 
 const std = @import("std");
 const gc_mod = @import("gc.zig");
@@ -440,7 +439,7 @@ export fn JSStringCreateWithUTF8CString(utf8: [*:0]const u8) callconv(.c) JSStri
 
 export fn JSStringRetain(str: JSStringRef) callconv(.c) JSStringRef {
     const s = strFrom(str) orelse return null;
-    s.retain();
+    _ = s.retain();
     return str;
 }
 
