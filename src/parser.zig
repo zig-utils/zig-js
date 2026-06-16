@@ -2190,6 +2190,7 @@ pub const Parser = struct {
         }
         try self.expect(.rbrace);
         try self.checkPrivateNames(members.items);
+        try self.checkPrivateNameUses(members.items);
         return self.alloc(.{ .class_expr = .{ .name = name, .superclass = superclass, .members = members.items, .source = self.sourceFrom(start) } });
     }
 
@@ -2212,6 +2213,202 @@ pub const Parser = struct {
             }
         }
         _ = self;
+    }
+
+    fn isPrivateNameText(name: []const u8) bool {
+        return name.len > 0 and name[0] == '#';
+    }
+
+    fn requirePrivateName(
+        self: *Parser,
+        declared: *std.StringHashMapUnmanaged(void),
+        name: []const u8,
+    ) ParseError!void {
+        _ = self;
+        if (isPrivateNameText(name) and !declared.contains(name)) return ParseError.UnexpectedToken;
+    }
+
+    fn checkPrivateUsesInPattern(
+        self: *Parser,
+        declared: *std.StringHashMapUnmanaged(void),
+        pattern: *Node,
+    ) ParseError!void {
+        switch (pattern.*) {
+            .obj_pattern => |p| for (p.props) |prop| {
+                if (prop.key_expr) |key_expr| try self.checkPrivateUsesInNode(declared, key_expr);
+                if (prop.default) |default| try self.checkPrivateUsesInNode(declared, default);
+                try self.checkPrivateUsesInPattern(declared, prop.target);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| {
+                    if (elem.target) |target| try self.checkPrivateUsesInPattern(declared, target);
+                    if (elem.default) |default| try self.checkPrivateUsesInNode(declared, default);
+                }
+                if (p.rest) |rest| try self.checkPrivateUsesInPattern(declared, rest);
+            },
+            else => {},
+        }
+    }
+
+    fn checkPrivateUsesInParams(
+        self: *Parser,
+        declared: *std.StringHashMapUnmanaged(void),
+        params: []const ast.Param,
+    ) ParseError!void {
+        for (params) |param| {
+            if (param.pattern) |pattern| try self.checkPrivateUsesInPattern(declared, pattern);
+            if (param.default) |default| try self.checkPrivateUsesInNode(declared, default);
+        }
+    }
+
+    fn checkPrivateUsesInNode(
+        self: *Parser,
+        declared: *std.StringHashMapUnmanaged(void),
+        node: *Node,
+    ) ParseError!void {
+        switch (node.*) {
+            .identifier => |name| try self.requirePrivateName(declared, name),
+            .unary => |u| try self.checkPrivateUsesInNode(declared, u.operand),
+            .delete_expr => |target| try self.checkPrivateUsesInNode(declared, target),
+            .update => |u| try self.checkPrivateUsesInNode(declared, u.target),
+            .binary => |b| {
+                try self.checkPrivateUsesInNode(declared, b.left);
+                try self.checkPrivateUsesInNode(declared, b.right);
+            },
+            .logical => |l| {
+                try self.checkPrivateUsesInNode(declared, l.left);
+                try self.checkPrivateUsesInNode(declared, l.right);
+            },
+            .sequence => |s| {
+                try self.checkPrivateUsesInNode(declared, s.first);
+                try self.checkPrivateUsesInNode(declared, s.second);
+            },
+            .assign => |a| {
+                try self.checkPrivateUsesInNode(declared, a.target);
+                try self.checkPrivateUsesInNode(declared, a.value);
+            },
+            .op_assign => |a| {
+                try self.checkPrivateUsesInNode(declared, a.target);
+                try self.checkPrivateUsesInNode(declared, a.value);
+            },
+            .conditional => |c| {
+                try self.checkPrivateUsesInNode(declared, c.cond);
+                try self.checkPrivateUsesInNode(declared, c.consequent);
+                try self.checkPrivateUsesInNode(declared, c.alternate);
+            },
+            .function => |f| {
+                try self.checkPrivateUsesInParams(declared, f.params);
+                try self.checkPrivateUsesInNode(declared, f.body);
+            },
+            .yield_expr => |y| if (y.argument) |arg| try self.checkPrivateUsesInNode(declared, arg),
+            .await_expr => |a| try self.checkPrivateUsesInNode(declared, a.argument),
+            .super_call => |args| for (args) |arg| try self.checkPrivateUsesInNode(declared, arg),
+            .super_member => |m| if (m.computed) |computed| try self.checkPrivateUsesInNode(declared, computed),
+            .call => |c| {
+                try self.checkPrivateUsesInNode(declared, c.callee);
+                for (c.args) |arg| try self.checkPrivateUsesInNode(declared, arg);
+            },
+            .new_expr => |n| {
+                try self.checkPrivateUsesInNode(declared, n.callee);
+                for (n.args) |arg| try self.checkPrivateUsesInNode(declared, arg);
+            },
+            .tagged_template => |t| {
+                try self.checkPrivateUsesInNode(declared, t.tag);
+                for (t.exprs) |expr| try self.checkPrivateUsesInNode(declared, expr);
+            },
+            .member => |m| {
+                try self.checkPrivateUsesInNode(declared, m.object);
+                try self.requirePrivateName(declared, m.property);
+                if (m.computed) |computed| try self.checkPrivateUsesInNode(declared, computed);
+            },
+            .optional_chain => |chain| try self.checkPrivateUsesInNode(declared, chain),
+            .object_lit => |props| for (props) |prop| {
+                if (prop.key_expr) |key_expr| try self.checkPrivateUsesInNode(declared, key_expr);
+                try self.checkPrivateUsesInNode(declared, prop.value);
+            },
+            .array_lit => |items| for (items) |item| try self.checkPrivateUsesInNode(declared, item),
+            .spread => |value| try self.checkPrivateUsesInNode(declared, value),
+            .obj_pattern, .arr_pattern => try self.checkPrivateUsesInPattern(declared, node),
+            .var_decl => |d| if (d.init) |init_expr| try self.checkPrivateUsesInNode(declared, init_expr),
+            .destructure_decl => |d| {
+                try self.checkPrivateUsesInPattern(declared, d.pattern);
+                try self.checkPrivateUsesInNode(declared, d.init);
+            },
+            .func_decl => |f| {
+                try self.checkPrivateUsesInParams(declared, f.params);
+                try self.checkPrivateUsesInNode(declared, f.body);
+            },
+            .return_stmt => |ret| if (ret) |value| try self.checkPrivateUsesInNode(declared, value),
+            .throw_stmt => |value| try self.checkPrivateUsesInNode(declared, value),
+            .try_stmt => |t| {
+                try self.checkPrivateUsesInNode(declared, t.block);
+                if (t.catch_param) |param| try self.checkPrivateUsesInPattern(declared, param);
+                if (t.catch_block) |catch_block| try self.checkPrivateUsesInNode(declared, catch_block);
+                if (t.finally_block) |finally_block| try self.checkPrivateUsesInNode(declared, finally_block);
+            },
+            .expr_stmt => |expr| try self.checkPrivateUsesInNode(declared, expr),
+            .block => |stmts| for (stmts) |stmt| try self.checkPrivateUsesInNode(declared, stmt),
+            .decl_group => |decls| for (decls) |decl| try self.checkPrivateUsesInNode(declared, decl),
+            .if_stmt => |stmt| {
+                try self.checkPrivateUsesInNode(declared, stmt.cond);
+                try self.checkPrivateUsesInNode(declared, stmt.consequent);
+                if (stmt.alternate) |alt| try self.checkPrivateUsesInNode(declared, alt);
+            },
+            .while_stmt => |stmt| {
+                try self.checkPrivateUsesInNode(declared, stmt.cond);
+                try self.checkPrivateUsesInNode(declared, stmt.body);
+            },
+            .do_while_stmt => |stmt| {
+                try self.checkPrivateUsesInNode(declared, stmt.body);
+                try self.checkPrivateUsesInNode(declared, stmt.cond);
+            },
+            .for_stmt => |stmt| {
+                if (stmt.init) |init_node| try self.checkPrivateUsesInNode(declared, init_node);
+                if (stmt.cond) |cond| try self.checkPrivateUsesInNode(declared, cond);
+                if (stmt.update) |update| try self.checkPrivateUsesInNode(declared, update);
+                try self.checkPrivateUsesInNode(declared, stmt.body);
+            },
+            .for_in => |stmt| {
+                try self.checkPrivateUsesInNode(declared, stmt.target);
+                try self.checkPrivateUsesInNode(declared, stmt.iterable);
+                try self.checkPrivateUsesInNode(declared, stmt.body);
+            },
+            .switch_stmt => |stmt| {
+                try self.checkPrivateUsesInNode(declared, stmt.disc);
+                for (stmt.cases) |case| {
+                    if (case.@"test") |case_test| try self.checkPrivateUsesInNode(declared, case_test);
+                    for (case.body) |body| try self.checkPrivateUsesInNode(declared, body);
+                }
+            },
+            .with_stmt => |stmt| {
+                try self.checkPrivateUsesInNode(declared, stmt.obj);
+                try self.checkPrivateUsesInNode(declared, stmt.body);
+            },
+            .export_decl => |e| {
+                if (e.declaration) |decl| try self.checkPrivateUsesInNode(declared, decl);
+                if (e.default_expr) |expr| try self.checkPrivateUsesInNode(declared, expr);
+            },
+            .import_call => |i| {
+                try self.checkPrivateUsesInNode(declared, i.specifier);
+                if (i.options) |options| try self.checkPrivateUsesInNode(declared, options);
+            },
+            .class_expr => {},
+            else => {},
+        }
+    }
+
+    fn checkPrivateNameUses(self: *Parser, members: []const ast.ClassMember) ParseError!void {
+        var declared: std.StringHashMapUnmanaged(void) = .empty;
+        for (members) |member| {
+            if (member.key_expr == null and isPrivateNameText(member.key))
+                try declared.put(self.arena, member.key, {});
+        }
+        for (members) |member| {
+            if (member.key_expr) |key_expr| try self.checkPrivateUsesInNode(&declared, key_expr);
+            if (member.func) |func| try self.checkPrivateUsesInNode(&declared, func);
+            if (member.field_init) |field_init| try self.checkPrivateUsesInNode(&declared, field_init);
+            if (member.static_block) |static_block| try self.checkPrivateUsesInNode(&declared, static_block);
+        }
     }
 
     /// Parse `(params) { body }` after a method name, returning a function node.
@@ -2550,5 +2747,20 @@ test "parser validates module string export names" {
 
     var good_reexport = try Parser.init(arena.allocator(), "export { \"foo\" as \"bar\" } from './m.js';");
     const prog = try good_reexport.parseModule();
+    try std.testing.expectEqual(@as(usize, 1), prog.program.len);
+}
+
+test "parser validates class private name uses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var method_use = try Parser.init(arena.allocator(), "class C { f() { this.#x; } }");
+    try std.testing.expectError(ParseError.UnexpectedToken, method_use.parseModule());
+
+    var field_use = try Parser.init(arena.allocator(), "class C { y = this.#x; }");
+    try std.testing.expectError(ParseError.UnexpectedToken, field_use.parseModule());
+
+    var declared = try Parser.init(arena.allocator(), "class C { #x; f() { this.#x; } }");
+    const prog = try declared.parseModule();
     try std.testing.expectEqual(@as(usize, 1), prog.program.len);
 }
