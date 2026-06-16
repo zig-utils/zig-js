@@ -44,6 +44,15 @@ pub const Parser = struct {
     /// True when parsing a Module (via `parseModule`): top-level `import` and
     /// `export` declarations are recognized, and the body is implicitly strict.
     module: bool = false,
+    /// Active labels in the current function body. A function boundary resets
+    /// these because `break`/`continue` cannot target labels outside the
+    /// function it appears in.
+    active_labels: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Labels immediately wrapping the next statement. If that statement is an
+    /// iteration statement, those labels become valid labeled-continue targets.
+    pending_labels: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Labels of currently enclosing iteration statements.
+    continue_labels: std.ArrayListUnmanaged([]const u8) = .empty,
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
         var lx = lex.Lexer.init(arena, source);
@@ -155,6 +164,23 @@ pub const Parser = struct {
             return self.advance().text;
         }
         return null;
+    }
+
+    fn labelListContains(labels: []const []const u8, label: []const u8) bool {
+        for (labels) |candidate| {
+            if (std.mem.eql(u8, candidate, label)) return true;
+        }
+        return false;
+    }
+
+    fn statementCanInheritPendingLabels(self: *Parser) bool {
+        const t = self.cur();
+        if (t.kind != .identifier) return false;
+        if (std.mem.eql(u8, t.text, "while") or
+            std.mem.eql(u8, t.text, "do") or
+            std.mem.eql(u8, t.text, "for"))
+            return true;
+        return self.peekKind(1) == .colon and !self.isForbiddenLabelName(t.text);
     }
 
     /// Keywords that can NEVER be a binding identifier, in any mode (the
@@ -799,6 +825,9 @@ pub const Parser = struct {
                 _ = self.match(.semicolon);
                 // Unlabeled `break` requires an enclosing loop or switch.
                 if (label == null and self.iter_depth == 0 and self.switch_depth == 0) return ParseError.UnexpectedToken;
+                if (label) |name| {
+                    if (!labelListContains(self.active_labels.items, name)) return ParseError.UnexpectedToken;
+                }
                 return self.alloc(.{ .break_stmt = label });
             }
             if (std.mem.eql(u8, t.text, "continue")) {
@@ -807,12 +836,24 @@ pub const Parser = struct {
                 _ = self.match(.semicolon);
                 // `continue` requires an enclosing loop (labeled or not).
                 if (self.iter_depth == 0) return ParseError.UnexpectedToken;
+                if (label) |name| {
+                    if (!labelListContains(self.continue_labels.items, name)) return ParseError.UnexpectedToken;
+                }
                 return self.alloc(.{ .continue_stmt = label });
             }
             // Labeled statement: `label: stmt` (identifier directly followed by `:`).
             if (self.peekKind(1) == .colon and !self.isForbiddenLabelName(t.text)) {
                 _ = self.advance(); // label
                 _ = self.advance(); // ':'
+                if (labelListContains(self.active_labels.items, t.text)) return ParseError.UnexpectedToken;
+                try self.active_labels.append(self.arena, t.text);
+                defer self.active_labels.items.len -= 1;
+                const saved_pending = self.pending_labels.items.len;
+                try self.pending_labels.append(self.arena, t.text);
+                if (!self.statementCanInheritPendingLabels()) {
+                    self.pending_labels.items.len = saved_pending;
+                }
+                defer self.pending_labels.items.len = saved_pending;
                 const body = try self.parseStatement();
                 return self.alloc(.{ .labeled_stmt = .{ .label = t.text, .body = body } });
             }
@@ -1028,8 +1069,17 @@ pub const Parser = struct {
 
     /// Parse a loop body, tracking that `break`/`continue` are now legal.
     fn parseLoopBody(self: *Parser) ParseError!*Node {
+        const saved_pending = self.pending_labels.items.len;
+        const saved_continue = self.continue_labels.items.len;
+        for (self.pending_labels.items) |label|
+            try self.continue_labels.append(self.arena, label);
+        self.pending_labels.items.len = 0;
         self.iter_depth += 1;
-        defer self.iter_depth -= 1;
+        defer {
+            self.iter_depth -= 1;
+            self.pending_labels.items.len = saved_pending;
+            self.continue_labels.items.len = saved_continue;
+        }
         return self.parseStatement();
     }
 
@@ -1386,6 +1436,9 @@ pub const Parser = struct {
         const saved_strict = self.strict;
         const saved_iter = self.iter_depth;
         const saved_switch = self.switch_depth;
+        const saved_active_labels = self.active_labels.items.len;
+        const saved_pending_labels = self.pending_labels.items.len;
+        const saved_continue_labels = self.continue_labels.items.len;
         self.in_generator = is_gen;
         self.in_async = is_async;
         // A function body opens a fresh control-flow context: `return` is now
@@ -1393,6 +1446,9 @@ pub const Parser = struct {
         self.fn_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
+        self.active_labels.items.len = 0;
+        self.pending_labels.items.len = 0;
+        self.continue_labels.items.len = 0;
         // A function is strict if it lexically inherits strictness or its own
         // body opens with a `"use strict"` directive prologue. Detect it up
         // front so nested functions parsed within inherit correctly.
@@ -1405,6 +1461,9 @@ pub const Parser = struct {
             self.fn_depth -= 1;
             self.iter_depth = saved_iter;
             self.switch_depth = saved_switch;
+            self.active_labels.items.len = saved_active_labels;
+            self.pending_labels.items.len = saved_pending_labels;
+            self.continue_labels.items.len = saved_continue_labels;
         }
         return self.parseBlock();
     }
@@ -1844,6 +1903,7 @@ pub const Parser = struct {
         if (self.match(.dot)) {
             const m = self.advance();
             if (m.kind != .identifier or !std.mem.eql(u8, m.text, "target")) return ParseError.UnexpectedToken;
+            if (self.module and self.fn_depth == 0) return ParseError.UnexpectedToken;
             return self.alloc(.new_target_expr);
         }
         const parenthesized_callee = self.check(.lparen);
@@ -2785,6 +2845,36 @@ test "parser validates static import attributes" {
 
     var non_string = try Parser.init(arena.allocator(), "import './m.js' with { type: 1 };");
     try std.testing.expectError(ParseError.UnexpectedToken, non_string.parseModule());
+}
+
+test "parser validates module label early errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var undef_continue = try Parser.init(arena.allocator(), "while (false) { continue undef; }");
+    try std.testing.expectError(ParseError.UnexpectedToken, undef_continue.parseModule());
+
+    var duplicate = try Parser.init(arena.allocator(), "label: { label: 0; }");
+    try std.testing.expectError(ParseError.UnexpectedToken, duplicate.parseModule());
+
+    var labeled_loop = try Parser.init(arena.allocator(), "label: while (false) { continue label; }");
+    const labeled_prog = try labeled_loop.parseModule();
+    try std.testing.expectEqual(@as(usize, 1), labeled_prog.program.len);
+
+    var labeled_block_continue = try Parser.init(arena.allocator(), "label: { while (false) { continue label; } }");
+    try std.testing.expectError(ParseError.UnexpectedToken, labeled_block_continue.parseModule());
+}
+
+test "parser rejects module top-level new target" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var top_level = try Parser.init(arena.allocator(), "new.target;");
+    try std.testing.expectError(ParseError.UnexpectedToken, top_level.parseModule());
+
+    var nested = try Parser.init(arena.allocator(), "function f() { new.target; }");
+    const prog = try nested.parseModule();
+    try std.testing.expectEqual(@as(usize, 1), prog.program.len);
 }
 
 test "parser validates module string export names" {
