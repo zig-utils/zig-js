@@ -1440,7 +1440,7 @@ pub const Interpreter = struct {
                     if (o.getAttr(key).enumerable) try out.append(self.arena, key);
                 }
             }
-            const own_keys = if (o.proxy_handler != null or o.proxy_revoked)
+            const own_keys = if (o.proxy_handler != null or o.proxy_revoked or o.module_ns != null)
                 try self.objectOwnKeysList(o)
             else
                 try o.ownKeys(self.arena);
@@ -1448,7 +1448,10 @@ pub const Interpreter = struct {
                 if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
                 if (visited.contains(k)) continue;
                 try visited.put(self.arena, k, {});
-                const enumerable = if (o.proxy_handler != null or o.proxy_revoked) blk: {
+                const enumerable = if (moduleNsOf(o) != null) blk: {
+                    const desc = try moduleNsDesc(self, o, k);
+                    break :blk desc == .object and if (desc.object.getOwn("enumerable")) |e| e.toBoolean() else false;
+                } else if (o.proxy_handler != null or o.proxy_revoked) blk: {
                     const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ .{ .object = o }, self.keyToValue(k) });
                     break :blk desc == .object and if (desc.object.getOwn("enumerable")) |e| e.toBoolean() else false;
                 } else o.getAttr(k).enumerable;
@@ -6437,9 +6440,12 @@ pub const Interpreter = struct {
             // the property with `this` as the receiver, so the write lands on (or
             // through an inherited setter of) the current instance.
             .super_member => |m| {
-                if (self.home_object == null) return self.throwError("SyntaxError", "'super' outside a method");
+                const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
                 const key = try self.memberKey(m.property, m.computed);
-                try self.setMember(self.this_value, key, v);
+                const parent = home.proto orelse return self.throwError("TypeError", "Cannot set property of null (super)");
+                if (!try self.setMemberResult(.{ .object = parent }, key, v, self.this_value)) {
+                    if (self.strict) return self.throwError("TypeError", "Cannot set property");
+                }
             },
             // Assignment destructuring: `[a, b] = x` / `({a} = o)`.
             .obj_pattern, .arr_pattern => try self.bindPattern(target, v, false),
@@ -6680,6 +6686,10 @@ pub const Interpreter = struct {
                 try desc.setOwn(self.arena, self.root_shape, "configurable", .{ .boolean = true });
             }
             return try builtins.defineOneResult(self, ro, key, desc);
+        }
+        if (moduleNsOf(ro) != null) {
+            _ = try moduleNsDesc(self, ro, key);
+            return false;
         }
         if (ro.getAccessor(key) != null) return false;
         const had_receiver_own = ro.getOwn(key) != null;

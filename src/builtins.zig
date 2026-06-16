@@ -656,7 +656,11 @@ pub fn ownEnumerableKeys(self: *Interpreter, o: *value.Object) HostError![]const
     // A module namespace's enumerable own keys are exactly its (sorted) string
     // export names; the @@toStringTag is non-enumerable.
     if (interpreter.isModuleNs(o)) {
-        try list.appendSlice(self.arena, interpreter.moduleNsNames(o));
+        for (interpreter.moduleNsNames(o)) |k| {
+            const desc = try interpreter.moduleNsDesc(self, o, k);
+            if (desc == .object and descBool(desc.object, "enumerable", false))
+                try list.append(self.arena, k);
+        }
         return list.items;
     }
     // A Proxy's enumerable own string keys: [[OwnPropertyKeys]] (ownKeys trap)
@@ -715,10 +719,14 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
     const ov: Value = .{ .object = o };
     const result = try self.newArray();
     const is_proxy = o.proxy_handler != null or o.proxy_revoked;
+    const is_module_ns = interpreter.isModuleNs(o);
     for (try ownStringKeysOrdered(self, o)) |k| {
         // [[GetOwnProperty]] enumerable check, read live so an earlier getter's
         // mutation is observed; a key deleted in the meantime drops out.
-        const enumerable = if (is_proxy) blk: {
+        const enumerable = if (is_module_ns) blk: {
+            const desc = try interpreter.moduleNsDesc(self, o, k);
+            break :blk desc == .object and descBool(desc.object, "enumerable", false);
+        } else if (is_proxy) blk: {
             const desc = try objectGetOwnPropertyDescriptor(self, .undefined, &.{ ov, self.keyToValue(k) });
             break :blk desc == .object and (try self.getProperty(desc, "enumerable")).toBoolean();
         } else if (o.prim != null and o.prim.? == .string)
@@ -1450,6 +1458,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         if (s != .undefined and !(s == .object and s.object.isCallableObject()))
             return self.throwError("TypeError", "Setter must be a function");
     }
+    if (interpreter.isModuleNs(target)) return moduleNamespaceDefine(self, target, key, d);
     // [[DefineOwnProperty]] on a Proxy: invoke the `defineProperty` trap with the
     // normalized descriptor object; a falsy result is a TypeError. An absent trap
     // forwards to the target.
@@ -1685,6 +1694,27 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     return true;
 }
 
+fn moduleNamespaceDefine(self: *Interpreter, target: *value.Object, key: []const u8, d: *value.Object) HostError!bool {
+    const current = try interpreter.moduleNsDesc(self, target, key);
+    if (current != .object) return false;
+    if (d.getOwn("get") != null or d.getOwn("set") != null) return false;
+    const cur = current.object;
+    if (d.getOwn("configurable")) |v|
+        if (v.toBoolean() != descBool(cur, "configurable", false)) return false;
+    if (d.getOwn("enumerable")) |v|
+        if (v.toBoolean() != descBool(cur, "enumerable", false)) return false;
+    if (d.getOwn("writable")) |v|
+        if (v.toBoolean() != descBool(cur, "writable", false)) return false;
+    if (d.getOwn("value")) |v|
+        if (!sameValue(v, cur.getOwn("value") orelse .undefined)) return false;
+    return true;
+}
+
+fn descBool(o: *value.Object, name: []const u8, default: bool) bool {
+    if (o.getOwn(name)) |v| return v.toBoolean();
+    return default;
+}
+
 /// The rejection half of ValidateAndApplyPropertyDescriptor for an existing
 /// *non-configurable* property. Returns false if descriptor `d` tries to flip
 /// configurable on, change enumerable, switch between data/accessor, or — for a
@@ -1808,9 +1838,13 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
         if (ab.max_byte_length != null)
             return self.throwError("TypeError", "Cannot freeze a TypedArray backed by a resizable ArrayBuffer");
     };
-    if (o.proxy_handler != null or o.proxy_revoked) {
-        if (!try self.proxyPreventExt(o))
-            return self.throwError("TypeError", "Object.seal/freeze: [[PreventExtensions]] returned false");
+    if (o.proxy_handler != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
+        if (o.proxy_handler != null or o.proxy_revoked) {
+            if (!try self.proxyPreventExt(o))
+                return self.throwError("TypeError", "Object.seal/freeze: [[PreventExtensions]] returned false");
+        } else {
+            o.extensible = false;
+        }
         for (try self.objectOwnKeysList(o)) |k| {
             const cur = try objectGetOwnPropertyDescriptor(ctx, .undefined, &.{ .{ .object = o }, self.keyToValue(k) });
             if (cur != .object) continue; // [[GetOwnProperty]] returned undefined
@@ -1883,8 +1917,10 @@ pub fn objectIsFrozen(ctx: *anyopaque, this: Value, args: []const Value) HostErr
 fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     if (ov != .object) return true;
     const o = ov.object;
-    if (o.proxy_handler != null or o.proxy_revoked) {
-        if (try self.proxyIsExtensible(o)) return false;
+    if (o.proxy_handler != null or o.proxy_revoked or interpreter.isModuleNs(o)) {
+        if (o.proxy_handler != null or o.proxy_revoked) {
+            if (try self.proxyIsExtensible(o)) return false;
+        } else if (o.extensible) return false;
         const ov_obj: Value = .{ .object = o };
         for (try self.objectOwnKeysList(o)) |k| {
             const desc = try objectGetOwnPropertyDescriptor(self, .undefined, &.{ ov_obj, self.keyToValue(k) });

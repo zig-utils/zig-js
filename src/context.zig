@@ -754,7 +754,7 @@ pub const Context = struct {
                         m.env.put("*default*", tdz) catch {};
                         if (e.default_name.len > 0) m.env.put(e.default_name, tdz) catch {};
                     },
-                    else => {},
+                    else => m.env.put("*default*", tdz) catch {},
                 };
             },
             else => {},
@@ -1003,6 +1003,64 @@ test "modules expose namespace re-exports and evaluate dependencies in source or
     , &.{
         .{ .path = "dep.js", .source = "export default function fn() { fn = 2; return 1; }" },
     });
+}
+
+test "modules namespace exotica observe TDZ and integrity semantics" {
+    try evaluateSelfModule(
+        \\import * as ns from "./entry.js";
+        \\try {
+        \\  Object.keys(ns);
+        \\  throw new Error("missing namespace TDZ");
+        \\} catch (e) {
+        \\  if (!(e instanceof ReferenceError)) throw e;
+        \\}
+        \\export default 0;
+    );
+
+    try evaluateSelfModule(
+        \\import * as ns from "./entry.js";
+        \\export var local1;
+        \\var local2;
+        \\export { local2 as renamed };
+        \\export { local1 as indirect } from "./entry.js";
+        \\if (!Reflect.defineProperty(ns, "indirect",
+        \\    { writable: true, enumerable: true, configurable: false })) {
+        \\  throw new Error("namespace no-op define failed");
+        \\}
+        \\try {
+        \\  Object.freeze(ns);
+        \\  throw new Error("namespace freeze should fail");
+        \\} catch (e) {
+        \\  if (!(e instanceof TypeError)) throw e;
+        \\}
+        \\if (Object.isFrozen(ns)) throw new Error("namespace reported frozen");
+    );
+
+    try evaluateSelfModule(
+        \\import * as ns from "./entry.js";
+        \\class A { constructor() { return ns; } }
+        \\class B extends A { constructor() { super(); super.foo = 14; } }
+        \\try {
+        \\  new B();
+        \\  throw new Error("missing namespace receiver TDZ");
+        \\} catch (e) {
+        \\  if (!(e instanceof ReferenceError)) throw e;
+        \\}
+        \\export let foo = 42;
+    );
+
+    try evaluateSelfModule(
+        \\import * as ns from "./entry.js";
+        \\var setterValue;
+        \\class A {
+        \\  constructor() { return ns; }
+        \\  set foo(v) { setterValue = v; }
+        \\}
+        \\class B extends A { constructor() { super(); super.foo = 14; } }
+        \\new B();
+        \\if (setterValue !== 14) throw new Error("super setter not called");
+        \\export let foo = 42;
+    );
 }
 
 test "Date basics" {
