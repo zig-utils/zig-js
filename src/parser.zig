@@ -70,14 +70,37 @@ pub const Parser = struct {
     fn cur(self: *Parser) Token {
         return self.tokens[self.pos];
     }
+    fn containsLineTerminator(bytes: []const u8) bool {
+        if (std.mem.indexOfScalar(u8, bytes, '\n') != null) return true;
+        if (std.mem.indexOfScalar(u8, bytes, '\r') != null) return true;
+        var i: usize = 0;
+        while (i + 2 < bytes.len) : (i += 1) {
+            if (bytes[i] == 0xe2 and bytes[i + 1] == 0x80 and
+                (bytes[i + 2] == 0xa8 or bytes[i + 2] == 0xa9))
+                return true;
+        }
+        return false;
+    }
+
+    fn hasLineTerminatorBefore(self: *Parser, ahead: usize) bool {
+        const idx = self.pos + ahead;
+        if (idx == 0 or idx >= self.tokens.len) return false;
+        const gap = self.source[self.tokens[idx - 1].end..self.tokens[idx].pos];
+        return containsLineTerminator(gap);
+    }
+
     /// Whether no line terminator separates the token `ahead` positions away from
     /// the one just before it (the restricted-production check, e.g. `using` may
     /// not be followed by a newline before its binding identifier).
     fn noNewlineBefore(self: *Parser, ahead: usize) bool {
-        const idx = self.pos + ahead;
-        if (idx == 0 or idx >= self.tokens.len) return true;
-        const gap = self.source[self.tokens[idx - 1].end..self.tokens[idx].pos];
-        return std.mem.indexOfScalar(u8, gap, '\n') == null;
+        return !self.hasLineTerminatorBefore(ahead);
+    }
+
+    fn consumeStatementTerminator(self: *Parser) ParseError!void {
+        if (self.match(.semicolon)) return;
+        if (self.check(.eof) or self.check(.rbrace)) return;
+        if (self.hasLineTerminatorBefore(0)) return;
+        return ParseError.UnexpectedToken;
     }
 
     fn advance(self: *Parser) Token {
@@ -546,7 +569,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, t.text, "try")) return self.parseTry();
             if (std.mem.eql(u8, t.text, "debugger")) {
                 _ = self.advance();
-                _ = self.match(.semicolon);
+                try self.consumeStatementTerminator();
                 return self.alloc(.{ .block = &[_]*Node{} });
             }
             if (std.mem.eql(u8, t.text, "class")) {
@@ -585,7 +608,7 @@ pub const Parser = struct {
         if (t.kind == .lbrace) return self.parseBlock();
 
         const expr = try self.parseExpression();
-        _ = self.match(.semicolon);
+        try self.consumeStatementTerminator();
         return self.alloc(.{ .expr_stmt = expr });
     }
 
@@ -738,7 +761,7 @@ pub const Parser = struct {
             const pattern = try self.parseBindingTarget();
             try self.expect(.assign);
             const init_expr = try self.parseAssignment();
-            _ = self.match(.semicolon);
+            try self.consumeStatementTerminator();
             return self.alloc(.{ .destructure_decl = .{ .kind = kind, .pattern = pattern, .init = init_expr } });
         }
         // One or more comma-separated declarators: `let a, b = 1, c`.
@@ -760,7 +783,7 @@ pub const Parser = struct {
             try decls.append(self.arena, try self.alloc(.{ .var_decl = .{ .kind = kind, .name = name_tok.text, .init = init_expr, .dispose = dispose } }));
             if (!self.match(.comma)) break;
         }
-        _ = self.match(.semicolon);
+        try self.consumeStatementTerminator();
         // A single declarator stays a bare var_decl; multiples become a
         // transparent declaration group (NOT a block — no new scope).
         if (decls.items.len == 1) return decls.items[0];
@@ -2230,4 +2253,35 @@ test "parser handles var decl and if" {
     try std.testing.expectEqual(@as(usize, 2), prog.program.len);
     try std.testing.expect(prog.program[0].* == .var_decl);
     try std.testing.expect(prog.program[1].* == .if_stmt);
+}
+
+test "parser requires statement boundary between same-line tokens" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var single = try Parser.init(arena.allocator(), "var str = '''';");
+    try std.testing.expectError(ParseError.UnexpectedToken, single.parseProgram());
+
+    var double = try Parser.init(arena.allocator(), "var str = \"\"\"\";");
+    try std.testing.expectError(ParseError.UnexpectedToken, double.parseProgram());
+
+    var adjacent_expr = try Parser.init(arena.allocator(), "a b");
+    try std.testing.expectError(ParseError.UnexpectedToken, adjacent_expr.parseProgram());
+}
+
+test "parser accepts ASI line terminators between statements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var lf = try Parser.init(arena.allocator(), "var a = 1\nvar b = 2");
+    const lf_prog = try lf.parseProgram();
+    try std.testing.expectEqual(@as(usize, 2), lf_prog.program.len);
+
+    var cr = try Parser.init(arena.allocator(), "var a = 1\rvar b = 2");
+    const cr_prog = try cr.parseProgram();
+    try std.testing.expectEqual(@as(usize, 2), cr_prog.program.len);
+
+    var ls = try Parser.init(arena.allocator(), "var a = 1\u{2028}var b = 2");
+    const ls_prog = try ls.parseProgram();
+    try std.testing.expectEqual(@as(usize, 2), ls_prog.program.len);
 }
