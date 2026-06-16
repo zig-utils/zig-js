@@ -1122,6 +1122,19 @@ test "modules create immutable namespace import bindings" {
     );
 }
 
+test "modules keep self-imported default expressions in TDZ" {
+    try evaluateModuleWithFixtures(
+        \\try {
+        \\  typeof dflt;
+        \\  throw new Error("missing default TDZ");
+        \\} catch (e) {
+        \\  if (!(e instanceof ReferenceError)) throw e;
+        \\}
+        \\import dflt from "./entry.js";
+        \\export default (function() {});
+    , &.{});
+}
+
 test "modules omit ambiguous star exports from namespace objects" {
     try evaluateModuleWithFixtures(
         \\import * as ns from "./barrel.js";

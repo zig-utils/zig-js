@@ -76,6 +76,10 @@ pub const FunctionNode = struct {
     /// Explicit named function expressions have an internal immutable self-name
     /// binding. Method definitions and NamedEvaluation only set Function.name.
     has_name_binding: bool = false,
+    /// Parsed from direct `export default function ...` syntax. Although it is
+    /// stored as a function node that may be anonymous, modules instantiate it
+    /// like a hoistable FunctionDeclaration, unlike `export default (function(){})`.
+    is_default_export_decl: bool = false,
     /// `function*` / `*method()` — calling it returns a generator object whose
     /// body runs lazily on the suspendable VM.
     is_generator: bool = false,

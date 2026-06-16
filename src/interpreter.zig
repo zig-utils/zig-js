@@ -1964,15 +1964,16 @@ pub const Interpreter = struct {
                     }
                 }
             },
-            // `export function f(){}` / `export default function f(){}` hoist `f`
-            // just like a bare function declaration so forward references resolve.
+            // `export function f(){}` / direct `export default function f(){}`
+            // hoist just like bare function declarations. Parenthesized
+            // `export default (function(){})` is an expression and must wait for
+            // source-order evaluation.
             .export_decl => |e| {
                 if (e.declaration) |d| {
                     if (d.* == .func_decl) try self.globalDefine(d.func_decl.name, try self.makeFunction(d.func_decl, self.env));
                 } else if (e.default_expr) |dx| {
                     const fv: ?Value = switch (dx.*) {
-                        .func_decl => |f| try self.makeFunction(f, self.env),
-                        .function => |f| try self.makeFunction(f, self.env),
+                        .function => |f| if (f.is_default_export_decl) try self.makeFunction(f, self.env) else null,
                         else => null,
                     };
                     if (fv) |v| {
@@ -2025,7 +2026,7 @@ pub const Interpreter = struct {
                 if (e.declaration) |d| {
                     if (d.* == .func_decl) continue;
                 } else if (e.default_expr) |dx| {
-                    if (dx.* == .func_decl or dx.* == .function) continue;
+                    if (dx.* == .function and dx.function.is_default_export_decl) continue;
                 }
             }
             const r = try self.eval(s);

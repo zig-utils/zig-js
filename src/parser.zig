@@ -749,6 +749,7 @@ pub const Parser = struct {
                 // function *expression* (which permits no name).
                 const is_async = self.isContextual("async");
                 const decl = try self.parseFunctionExpr(is_async);
+                decl.function.is_default_export_decl = true;
                 node.default_expr = decl;
                 node.default_name = decl.function.name;
                 return self.alloc(.{ .export_decl = node });
