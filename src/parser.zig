@@ -1276,6 +1276,13 @@ pub const Parser = struct {
         return params.items;
     }
 
+    fn parseFunctionParamList(self: *Parser) ParseError![]const ast.Param {
+        const saved_async = self.in_async;
+        self.in_async = false;
+        defer self.in_async = saved_async;
+        return self.parseParamList();
+    }
+
     fn isEvalOrArguments(name: []const u8) bool {
         return std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
     }
@@ -1313,7 +1320,7 @@ pub const Parser = struct {
         const name_tok = self.advance();
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
         if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
-        const params = try self.parseParamList();
+        const params = try self.parseFunctionParamList();
         const body = try self.parseFnBody(is_gen, is_async);
         if (self.last_fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
@@ -1336,7 +1343,7 @@ pub const Parser = struct {
                 name = self.advance().text;
             }
         }
-        const params = try self.parseParamList();
+        const params = try self.parseFunctionParamList();
         const body = try self.parseFnBody(is_gen, is_async);
         if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
@@ -2776,4 +2783,15 @@ test "parser rejects new await only when await is active" {
     var script_new_await = try Parser.init(arena.allocator(), "function await() {} new await;");
     const prog = try script_new_await.parseProgram();
     try std.testing.expectEqual(@as(usize, 2), prog.program.len);
+}
+
+test "parser does not propagate module await into function parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var decl_param = try Parser.init(arena.allocator(), "function fn(x = await 1) {}");
+    try std.testing.expectError(ParseError.ExpectedToken, decl_param.parseModule());
+
+    var expr_param = try Parser.init(arena.allocator(), "0, function (x = await 1) {};");
+    try std.testing.expectError(ParseError.ExpectedToken, expr_param.parseModule());
 }
