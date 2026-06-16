@@ -296,6 +296,7 @@ pub const Parser = struct {
         }
         // Early error: no duplicate lexically-declared names in a scope.
         try self.checkLexicalDupes(stmts.items, false);
+        try self.checkPrivateUsesInProgram(stmts.items);
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -522,6 +523,7 @@ pub const Parser = struct {
         }
         for (stmts) |stmt| try checkLocalExportedBindings(stmt, &lexical, &vars);
         for (stmts) |stmt| try self.recurseScope(stmt);
+        try self.checkPrivateUsesInProgram(stmts);
     }
 
     fn wtf8SurrogateAt(s: []const u8, i: usize) ?u16 {
@@ -2297,7 +2299,6 @@ pub const Parser = struct {
         }
         try self.expect(.rbrace);
         try self.checkPrivateNames(members.items);
-        try self.checkPrivateNameUses(members.items);
         return self.alloc(.{ .class_expr = .{ .name = name, .superclass = superclass, .members = members.items, .source = self.sourceFrom(start) } });
     }
 
@@ -2499,13 +2500,24 @@ pub const Parser = struct {
                 try self.checkPrivateUsesInNode(declared, i.specifier);
                 if (i.options) |options| try self.checkPrivateUsesInNode(declared, options);
             },
-            .class_expr => {},
+            .class_expr => |c| try self.checkPrivateNameUses(declared, c.members),
             else => {},
         }
     }
 
-    fn checkPrivateNameUses(self: *Parser, members: []const ast.ClassMember) ParseError!void {
+    fn checkPrivateUsesInProgram(self: *Parser, stmts: []const *Node) ParseError!void {
         var declared: std.StringHashMapUnmanaged(void) = .empty;
+        for (stmts) |stmt| try self.checkPrivateUsesInNode(&declared, stmt);
+    }
+
+    fn checkPrivateNameUses(
+        self: *Parser,
+        inherited: *std.StringHashMapUnmanaged(void),
+        members: []const ast.ClassMember,
+    ) ParseError!void {
+        var declared: std.StringHashMapUnmanaged(void) = .empty;
+        var it = inherited.iterator();
+        while (it.next()) |entry| try declared.put(self.arena, entry.key_ptr.*, {});
         for (members) |member| {
             if (member.key_expr == null and isPrivateNameText(member.key))
                 try declared.put(self.arena, member.key, {});
@@ -2938,6 +2950,15 @@ test "parser validates class private name uses" {
     var declared = try Parser.init(arena.allocator(), "class C { #x; f() { this.#x; } }");
     const prog = try declared.parseModule();
     try std.testing.expectEqual(@as(usize, 1), prog.program.len);
+
+    var nested = try Parser.init(arena.allocator(),
+        \\class Outer {
+        \\  #x;
+        \\  f() { return class Inner { g() { return this.#x; } } }
+        \\}
+    );
+    const nested_prog = try nested.parseModule();
+    try std.testing.expectEqual(@as(usize, 1), nested_prog.program.len);
 }
 
 test "parser rejects new await only when await is active" {

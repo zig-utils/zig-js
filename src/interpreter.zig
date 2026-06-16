@@ -2285,7 +2285,22 @@ pub const Interpreter = struct {
             .function => |f| try self.rewritePrivateNamesInFunction(f, map),
             .yield_expr => |y| if (y.argument) |a| try self.rewritePrivateNamesInNode(a, map),
             .await_expr => |a| try self.rewritePrivateNamesInNode(a.argument, map),
-            .class_expr => {},
+            .class_expr => |c| {
+                if (c.superclass) |sc| try self.rewritePrivateNamesInNode(sc, map);
+                var nested_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+                defer nested_map.deinit(self.arena);
+                var it = map.iterator();
+                while (it.next()) |entry| try nested_map.put(self.arena, entry.key_ptr.*, entry.value_ptr.*);
+                for (c.members) |m| {
+                    if (m.key_expr == null and value.isPrivateKey(m.key)) _ = nested_map.remove(m.key);
+                }
+                for (c.members) |m| {
+                    if (m.key_expr) |key_expr| try self.rewritePrivateNamesInNode(key_expr, map);
+                    if (m.field_init) |init| try self.rewritePrivateNamesInNode(init, &nested_map);
+                    if (m.func) |func| try self.rewritePrivateNamesInNode(func, &nested_map);
+                    if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, &nested_map);
+                }
+            },
             .super_call => |args| for (args) |arg_node| try self.rewritePrivateNamesInNode(arg_node, map),
             .super_member => |sm| {
                 if (sm.computed) |c| {
@@ -28858,6 +28873,18 @@ test "interpreter class private fields/methods and static blocks" {
     try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
         \\class C { static x; static { this.x = 42; } }
         \\C.x
+    )).number);
+    // A nested class body can use private names from the enclosing class body.
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
+        \\class Outer {
+        \\  #x = 42;
+        \\  f() {
+        \\    var self = this;
+        \\    return class Inner { g() { return self.#x; } };
+        \\  }
+        \\}
+        \\var Inner = new Outer().f();
+        \\new Inner().g()
     )).number);
 }
 
