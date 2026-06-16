@@ -13,11 +13,12 @@ behind a VM lock.
 
 The shared-realm model is concurrent, not parallel. `Thread` runs on real OS
 threads, but only one thread executes JS or mutates the shared heap at a time.
-The context GIL is what makes arena allocation, dense element storage, direct
-object rebuild paths, and promise state safe in today's engine. Shape
+The context GIL is what makes arena allocation, dense element storage,
+collection element stores, and promise state safe in today's engine. Shape
 transition maps carry their own per-shape lock, and ordinary named-property
 helper paths carry an object-level property lock so concurrent same-name
-transitions and helper-routed property writes converge on one shape/slot path.
+transitions, helper-routed property writes, and named-property deletes converge
+on one shape/slot path.
 
 ## Shipping Surface
 

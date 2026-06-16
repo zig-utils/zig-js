@@ -6768,16 +6768,11 @@ pub const Interpreter = struct {
             }
         }
         // Accessor property.
-        if (o.accessors) |m| {
-            if (m.getPtr(key) != null) {
-                if (!o.getAttr(key).configurable) return false;
-                _ = m.remove(key);
-                // An accessor on an array index leaves a hole behind.
-                if (o.is_array) {
-                    if (arrayElementIndex(key)) |i| if (i < o.elements.items.len) try o.markHole(self.arena, i);
-                }
-                if (o.getOwn(key) == null) return true;
-            }
+        switch (try o.deleteAccessorOwn(self.arena, key)) {
+            .absent => {},
+            .blocked => return false,
+            .deleted => return true,
+            .removed_continue => {},
         }
         // Dense array element → leave a hole (reads as absent), length unchanged.
         // A per-index descriptor may mark it non-configurable (delete fails).
@@ -6796,42 +6791,7 @@ pub const Interpreter = struct {
         }
         if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
             _ = try self.getProperty(.{ .object = o }, key);
-        // Named data property: nothing to do if absent; reject if non-configurable.
-        if (o.getOwn(key) == null) return true;
-        if (!o.getAttr(key).configurable) return false;
-        // Rebuild shape+slots without `key` (delete is rare; correctness over speed).
-        const keys = try o.ownKeys(self.arena); // creation order (data + accessor)
-        const Entry = struct { k: []const u8, v: Value, a: value.PropAttr };
-        var saved: std.ArrayListUnmanaged(Entry) = .empty;
-        // Capture the surviving creation order (incl. accessor keys) to restore as
-        // `key_order` afterward — the rebuild's setOwn would otherwise append the
-        // data keys to the end of the existing key_order, corrupting the order.
-        var survived: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (keys) |k| {
-            if (std.mem.eql(u8, k, key)) continue;
-            try survived.append(self.arena, k);
-            // Accessor-only keys have no data slot (they live in `o.accessors`,
-            // which this shape/slots rebuild leaves untouched) — skip them rather
-            // than unwrapping a null slot.
-            const v = o.getOwn(k) orelse continue;
-            try saved.append(self.arena, .{ .k = k, .v = v, .a = o.getAttr(k) });
-        }
-        const old_key_order = o.key_order;
-        o.shape = self.root_shape;
-        o.resetSlotsForRebuild();
-        o.key_order = null; // disable append-on-setOwn during the rebuild
-        for (saved.items) |e| {
-            try o.setOwn(self.arena, self.root_shape, e.k, e.v);
-            try o.setAttr(self.arena, e.k, e.a);
-        }
-        // Restore the (deduped) creation order when the object carries accessors.
-        o.key_order = old_key_order;
-        if (o.accessors != null) {
-            try o.replaceKeyOrder(self.arena, survived.items);
-        } else {
-            o.deinitKeyOrder();
-        }
-        return true;
+        return try o.deleteNamedDataOwn(self.arena, self.root_shape, key);
     }
 
     /// Define an accessor (get/set) on an object via its `setAccessor`.

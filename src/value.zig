@@ -803,6 +803,10 @@ pub const Object = struct {
     pub fn replaceKeyOrder(self: *Object, arena: std.mem.Allocator, names: []const []const u8) std.mem.Allocator.Error!void {
         self.lockProperties();
         defer self.unlockProperties();
+        try self.replaceKeyOrderUnlocked(arena, names);
+    }
+
+    fn replaceKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator, names: []const []const u8) std.mem.Allocator.Error!void {
         self.deinitKeyOrderUnlocked();
         const alloc = self.keyOrderAllocator(arena);
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
@@ -819,6 +823,12 @@ pub const Object = struct {
 
     /// Mark dense index `i` as a hole.
     pub fn markHole(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
+        self.lockProperties();
+        defer self.unlockProperties();
+        try self.markHoleUnlocked(arena, i);
+    }
+
+    fn markHoleUnlocked(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
         const a = self.holesAllocator(arena);
         if (self.holes == null) {
             self.holes = try a.create(std.AutoHashMapUnmanaged(usize, void));
@@ -829,6 +839,12 @@ pub const Object = struct {
 
     /// Clear the hole at index `i` (an assignment fills it).
     pub fn clearHole(self: *Object, i: usize) void {
+        self.lockProperties();
+        defer self.unlockProperties();
+        self.clearHoleUnlocked(i);
+    }
+
+    fn clearHoleUnlocked(self: *Object, i: usize) void {
         if (self.holes) |h| _ = h.remove(i);
     }
 
@@ -951,6 +967,10 @@ pub const Object = struct {
     pub fn setAttr(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
         self.lockProperties();
         defer self.unlockProperties();
+        try self.setAttrUnlocked(arena, name, a);
+    }
+
+    fn setAttrUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
         const alloc = self.attrsAllocator(arena);
         if (self.attrs == null) {
             self.attrs = try alloc.create(std.StringHashMapUnmanaged(PropAttr));
@@ -1087,6 +1107,62 @@ pub const Object = struct {
         // (a data↔accessor conversion keeps its position; deleteOwn drops stale
         // entries so a genuinely re-added key lands at the end).
         if (self.key_order != null) try self.recordKeyOrderUnlocked(arena, name);
+    }
+
+    pub const AccessorDeleteResult = enum {
+        absent,
+        blocked,
+        removed_continue,
+        deleted,
+    };
+
+    pub fn deleteAccessorOwn(self: *Object, arena: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!AccessorDeleteResult {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const m = self.accessors orelse return .absent;
+        if (m.getPtr(key) == null) return .absent;
+        if (!self.getAttrUnlocked(key).configurable) return .blocked;
+        _ = m.remove(key);
+        if (self.is_array) {
+            if (canonicalIndex(key)) |i| {
+                if (i < self.elements.items.len) try self.markHoleUnlocked(arena, i);
+            }
+        }
+        return if (self.getOwnUnlocked(key) == null) .deleted else .removed_continue;
+    }
+
+    pub fn deleteNamedDataOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8) std.mem.Allocator.Error!bool {
+        self.lockProperties();
+        defer self.unlockProperties();
+        if (self.getOwnUnlocked(key) == null) return true;
+        if (!self.getAttrUnlocked(key).configurable) return false;
+
+        const keys = try self.ownKeysUnlocked(arena);
+        const Entry = struct { k: []const u8, v: Value, a: PropAttr };
+        var saved: std.ArrayListUnmanaged(Entry) = .empty;
+        var survived: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (keys) |k| {
+            if (std.mem.eql(u8, k, key)) continue;
+            try survived.append(arena, k);
+            const v = self.getOwnUnlocked(k) orelse continue;
+            try saved.append(arena, .{ .k = k, .v = v, .a = self.getAttrUnlocked(k) });
+        }
+
+        const old_key_order = self.key_order;
+        self.shape = root;
+        self.resetSlotsForRebuildUnlocked();
+        self.key_order = null;
+        for (saved.items) |entry| {
+            try self.setOwnUnlocked(arena, root, entry.k, entry.v);
+            try self.setAttrUnlocked(arena, entry.k, entry.a);
+        }
+        self.key_order = old_key_order;
+        if (self.accessors != null) {
+            try self.replaceKeyOrderUnlocked(arena, survived.items);
+        } else {
+            self.deinitKeyOrderUnlocked();
+        }
+        return true;
     }
 };
 
@@ -1515,4 +1591,35 @@ test "object named properties serialize concurrent same-name writes" {
     try std.testing.expectEqual(@as(usize, 1), object.slots.items.len);
     try std.testing.expectEqual(@as(?u32, 0), object.shape.?.lookup("shared"));
     try std.testing.expect(value == .number);
+}
+
+test "object named property delete rebuild serializes with writers" {
+    const root = try Shape.createRoot(std.heap.page_allocator);
+    var object = Object{};
+    try object.setOwn(std.heap.page_allocator, root, "anchor", .{ .number = 1 });
+
+    const Worker = struct {
+        fn run(o: *Object, root_shape: *Shape, n: usize) void {
+            if ((n & 1) == 0) {
+                o.setOwn(std.heap.page_allocator, root_shape, "shared", .{ .number = @floatFromInt(n) }) catch @panic("setOwn failed");
+            } else {
+                _ = o.deleteNamedDataOwn(std.heap.page_allocator, root_shape, "shared") catch @panic("deleteNamedDataOwn failed");
+            }
+        }
+    };
+
+    var threads: [16]std.Thread = undefined;
+    for (&threads, 0..) |*thread, i| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ &object, root, i });
+    }
+    for (threads) |thread| thread.join();
+
+    try std.testing.expect(object.getOwn("anchor") != null);
+    var count: usize = 0;
+    var shape = object.shape;
+    while (shape) |s| {
+        if (s.name != null) count += 1;
+        shape = s.parent;
+    }
+    try std.testing.expectEqual(count, object.slots.items.len);
 }
