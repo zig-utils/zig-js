@@ -94,7 +94,7 @@ pub const Token = struct {
     escaped_identifier: bool = false,
 };
 
-pub const LexError = error{ UnexpectedCharacter, UnterminatedString, InvalidNumber, OutOfMemory };
+pub const LexError = error{ UnexpectedCharacter, UnterminatedString, UnterminatedComment, InvalidNumber, OutOfMemory };
 
 /// A single-pass JavaScript tokenizer for the v1 expression/statement subset.
 /// String escapes are decoded into freshly allocated buffers in `arena`.
@@ -127,18 +127,32 @@ pub const Lexer = struct {
         return if (self.i + 1 < self.src.len) self.src[self.i + 1] else 0;
     }
 
-    fn skipTrivia(self: *Lexer) void {
+    fn skipTrivia(self: *Lexer) LexError!void {
         while (self.i < self.src.len) {
             const c = self.src[self.i];
             // ASCII whitespace incl. vertical tab (0x0B) and form feed (0x0C).
             if (c == ' ' or c == '\t' or c == '\r' or c == '\n' or c == 0x0B or c == 0x0C) {
                 self.i += 1;
             } else if (c == '/' and self.peek2() == '/') {
-                while (self.i < self.src.len and self.src[self.i] != '\n') self.i += 1;
+                self.i += 2;
+                while (self.i < self.src.len) {
+                    const ch = self.src[self.i];
+                    if (ch == '\n' or ch == '\r') break;
+                    if (ch >= 0x80) {
+                        const len = std.unicode.utf8ByteSequenceLength(ch) catch break;
+                        if (self.i + len > self.src.len) break;
+                        const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
+                        if (isLineTermCp(cp)) break;
+                        self.i += len;
+                    } else {
+                        self.i += 1;
+                    }
+                }
             } else if (c == '/' and self.peek2() == '*') {
                 self.i += 2;
                 while (self.i + 1 < self.src.len and !(self.src[self.i] == '*' and self.src[self.i + 1] == '/')) self.i += 1;
-                self.i = @min(self.i + 2, self.src.len);
+                if (self.i + 1 >= self.src.len) return LexError.UnterminatedComment;
+                self.i += 2;
             } else if (c >= 0x80) {
                 // Unicode whitespace (NBSP, U+2000–200A, …) or line terminators
                 // (U+2028/U+2029) and the BOM are all trivia between tokens.
@@ -223,7 +237,8 @@ pub const Lexer = struct {
                 self.i += 1;
                 if (self.peek() != 'u') return LexError.UnexpectedCharacter;
                 self.i += 1; // 'u'
-                try self.skipUnicodeEscape();
+                const cp = try self.scanUnicodeEscapeCp();
+                if (!(if (first) isIdStartCp(cp) else isIdContinueCp(cp))) return LexError.UnexpectedCharacter;
                 first = false;
                 continue;
             }
@@ -247,18 +262,29 @@ pub const Lexer = struct {
     /// Advance past a `\u` escape's digits (`\u{XXXX}` or exactly four hex
     /// digits). `self.i` points just past the `u`.
     fn skipUnicodeEscape(self: *Lexer) LexError!void {
+        _ = try self.scanUnicodeEscapeCp();
+    }
+
+    /// Decode and advance past a `\u` escape's digits. `self.i` points just
+    /// past the `u`.
+    fn scanUnicodeEscapeCp(self: *Lexer) LexError!u21 {
         if (self.peek() == '{') {
             self.i += 1;
             const ds = self.i;
             while (self.i < self.src.len and self.src[self.i] != '}') self.i += 1;
             if (self.i >= self.src.len or self.i == ds) return LexError.UnexpectedCharacter;
+            const cp = std.fmt.parseInt(u21, self.src[ds..self.i], 16) catch return LexError.UnexpectedCharacter;
+            if (cp > 0x10FFFF) return LexError.UnexpectedCharacter;
             self.i += 1; // '}'
+            return cp;
         } else {
+            const ds = self.i;
             var k: usize = 0;
             while (k < 4) : (k += 1) {
                 if (self.i >= self.src.len or !std.ascii.isHex(self.src[self.i])) return LexError.UnexpectedCharacter;
                 self.i += 1;
             }
+            return std.fmt.parseInt(u21, self.src[ds..self.i], 16) catch return LexError.UnexpectedCharacter;
         }
     }
 
@@ -333,7 +359,7 @@ pub const Lexer = struct {
     }
 
     fn nextRaw(self: *Lexer) LexError!Token {
-        self.skipTrivia();
+        try self.skipTrivia();
         const start = self.i;
         if (self.i >= self.src.len) return .{ .kind = .eof, .text = "", .pos = start };
 
