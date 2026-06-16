@@ -100,9 +100,13 @@ GIL removal is blocked on:
 - object and shape synchronization,
 - safe slot and element storage under concurrent readers and writers,
 - an atomic representation story for `Value`,
-- C-API string / handle lifetime rules that work across threads,
 - stress coverage that can run under real parallel mutation with
   ThreadSanitizer clean.
+
+C-API string and handle lifetime is no longer a Layer-C blocker in this list:
+`JSStringRef` retain/release is atomic, and GC-enabled `JSValueRef` wrappers use
+counted `JSValueProtect` / `JSValueUnprotect` roots. C-API access remains
+context-affine unless a future public API explicitly says otherwise.
 
 The detailed prerequisite record lives in [P7-gil-removal.md](./P7-gil-removal.md),
 and the GC foundation is tracked in [P7-gc-design.md](./P7-gc-design.md).

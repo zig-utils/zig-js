@@ -71,7 +71,8 @@ before acting on one.
 
 | Symbol | Location | What it is | Ruling | Notes / phase |
 |---|---|---|---|---|
-| `gpa` | `src/c_api.zig:40` | `const gpa = std.heap.page_allocator` — backs every C-API-created `Context` and `JsString`. | **locked** | Immutable binding; `page_allocator` is internally synchronized, so concurrent `JSGlobalContextCreate` / `JSStringCreateWithUTF8CString` from different threads are safe. `JSStringRef` retain/release uses an atomic refcount and is thread-safe. No handle registry exists for `JSValueRef`/`JSObjectRef` (refs are raw pointers; lifetime is the caller's problem), so there is no other C-API global to rule on. The Phase 0 thread rule still applies: each created `JS*Ref` is affine to its context's thread. |
+| `gpa` | `src/c_api.zig:40` | `const gpa = std.heap.page_allocator` — backs every C-API-created `Context` and `JsString`. | **locked** | Immutable binding; `page_allocator` is internally synchronized, so concurrent `JSGlobalContextCreate` / `JSStringCreateWithUTF8CString` from different threads are safe. `JSStringRef` retain/release uses an atomic refcount and is thread-safe. |
+| `Context.c_api_handles` | `src/context.zig:109` | Per-context counted `JSValueProtect` roots for GC-enabled C-API handles. | **per-thread** | Owned by the `Context` and mutated only through context-affine C-API calls. `JSValueRef`/`JSObjectRef` remain raw context-affine wrappers; `JSValueProtect` only controls GC reachability, not cross-thread access. |
 
 No other mutable globals: the `var buf` / `var exception` hits at :452/:465/:497
 are locals inside `test` blocks.

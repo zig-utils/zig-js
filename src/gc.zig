@@ -442,10 +442,10 @@ pub const Binding = struct {
         }
         if (ctx.mod_cache) |cache| traceModuleGraph(cache, v);
         markValue(v, ctx.exception orelse .undefined);
-        // C-API handles: each entry is a `*Boxed` ({ value: Value }), so the
-        // pointer aliases `*Value`. The embedder may hold these `JSValueRef`s.
+        // C-API protected handles: each ref is a `*Boxed` ({ value: Value }),
+        // so the pointer aliases `*Value`.
         for (ctx.c_api_handles.items) |h| {
-            const vp: *const Value = @ptrCast(@alignCast(h));
+            const vp: *const Value = @ptrCast(@alignCast(h.ref));
             markValue(v, vp.*);
         }
     }

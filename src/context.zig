@@ -102,11 +102,11 @@ pub const Context = struct {
     gc_generator_backing_stores_live: usize = 0,
     /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
     gc_binding: ?*GcBinding = null,
-    /// C-API `Boxed` handles (`JSValueRef`s) that must survive collection — the
-    /// embedder may hold them across calls. Each `box()` registers its `Boxed`
-    /// here when the GC is on (`*Boxed` aliases `*Value`, its first field);
-    /// `gc.zig`'s `traceRoots` marks them. Off-GC contexts never touch it.
-    c_api_handles: std.ArrayListUnmanaged(*anyopaque) = .empty,
+    /// C-API `Boxed` handles (`JSValueRef`s) protected by the embedder.
+    /// `JSValueProtect` registers a wrapper here when the GC is on (`*Boxed`
+    /// aliases `*Value`, its first field); `gc.zig`'s `traceRoots` marks them
+    /// until matching `JSValueUnprotect` calls remove the entry.
+    c_api_handles: std.ArrayListUnmanaged(CApiHandle) = .empty,
     /// `Thread` records spawned in this realm (the records live in the
     /// arena; the list is gpa-backed). `destroy` waits for all of them.
     js_threads: std.ArrayListUnmanaged(*jsthread.ThreadRecord) = .empty,
@@ -160,6 +160,10 @@ pub const Context = struct {
     /// when the GC is off.
     pub const GcHeap = @import("gc.zig").Heap;
     pub const GcBinding = @import("gc.zig").Binding;
+    pub const CApiHandle = struct {
+        ref: *anyopaque,
+        count: usize,
+    };
 
     pub fn create(gpa: std.mem.Allocator) !*Context {
         return createWith(gpa, .{});

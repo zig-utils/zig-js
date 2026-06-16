@@ -84,12 +84,6 @@ fn ctxFrom(ref: JSContextRef) ?*Context {
 fn box(ctx: *Context, v: Value) JSValueRef {
     const b = ctx.arena().create(Boxed) catch return null;
     b.* = .{ .value = v };
-    // When the GC is on, an embedder-held `JSValueRef` must keep its object
-    // alive across collections: register the `Boxed` as a root (`*Boxed` aliases
-    // `*Value` — `value` is its only/first field). Off-GC contexts skip this, so
-    // the default C-API path pays nothing. (No `JSValueUnprotect` yet, so a
-    // boxed object is pinned for the context's life — conservative but sound.)
-    if (ctx.gc != null) ctx.c_api_handles.append(ctx.gpa, @ptrCast(b)) catch {};
     return @ptrCast(b);
 }
 
@@ -111,8 +105,8 @@ fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
 export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
     // Real precise mark-sweep when the context has the GC enabled; a no-op on
     // the default arena engine. Sound here because the C-API entry point is a
-    // quiescent point (no JS executing) and every live `JSValueRef` is rooted
-    // via the handle table (see `box`).
+    // quiescent point (no JS executing); embedder-held `JSValueRef`s that must
+    // survive this call are rooted by JSValueProtect's counted handle table.
     const c = ctxFrom(ctx) orelse return;
     c.collectGarbage();
 }
@@ -295,13 +289,31 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
 }
 
 export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
-    _ = ctx;
-    _ = v; // No-op: arena keeps values alive for the context lifetime.
+    const c = ctxFrom(ctx) orelse return;
+    if (c.gc == null) return; // arena contexts keep values for the context lifetime.
+    const raw = v orelse return;
+    for (c.c_api_handles.items) |*h| {
+        if (h.ref == raw) {
+            h.count += 1;
+            return;
+        }
+    }
+    c.c_api_handles.append(c.gpa, .{ .ref = raw, .count = 1 }) catch {};
 }
 
 export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
-    _ = ctx;
-    _ = v;
+    const c = ctxFrom(ctx) orelse return;
+    if (c.gc == null) return;
+    const raw = v orelse return;
+    for (c.c_api_handles.items, 0..) |*h, i| {
+        if (h.ref != raw) continue;
+        if (h.count > 1) {
+            h.count -= 1;
+        } else {
+            _ = c.c_api_handles.orderedRemove(i);
+        }
+        return;
+    }
 }
 
 // ---- JSObject construction & properties --------------------------------
@@ -622,17 +634,20 @@ test "C-API: worker create, post a number, receive the doubled reply" {
     try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, reply, null));
 }
 
-test "C-API: JSGarbageCollect reclaims garbage and keeps held JSValueRefs (GC on)" {
+test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     // A GC-enabled context driven through the C-API (the default
     // JSGlobalContextCreate stays arena-backed; here we opt in directly).
     const ctx_obj = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx_obj.destroy();
     const ctx: JSContextRef = @ptrCast(ctx_obj);
 
-    // Hold a JSValueRef to an object — it is registered as a GC handle.
+    // Protect a JSValueRef to an object — protected handles are traced as GC
+    // roots until matching JSValueUnprotect calls remove them.
     const mk = JSStringCreateWithUTF8CString("({ tag: 123 })") orelse return error.StringInitFailed;
     defer JSStringRelease(mk);
     const held = JSEvaluateScript(ctx, mk, null, null, 0, null) orelse return error.EvalFailed;
+    JSValueProtect(ctx, held);
+    JSValueProtect(ctx, held);
 
     // Produce a pile of unreferenced garbage.
     const junk = JSStringCreateWithUTF8CString("for (let i = 0; i < 500; i++) { ({ a: i, b: [i] }); } 0") orelse return error.StringInitFailed;
@@ -644,10 +659,17 @@ test "C-API: JSGarbageCollect reclaims garbage and keeps held JSValueRefs (GC on
     const after = ctx_obj.gc.?.live_cells;
     try std.testing.expect(after < before); // garbage reclaimed
 
-    // The held reference survived collection (rooted via the handle table) and
-    // is still usable.
+    // The held reference survived collection while protected and is still usable.
     const key = JSStringCreateWithUTF8CString("tag") orelse return error.StringInitFailed;
     defer JSStringRelease(key);
     const tag = JSObjectGetProperty(ctx, held, key, null) orelse return error.PropFailed;
     try std.testing.expectEqual(@as(f64, 123), JSValueToNumber(ctx, tag, null));
+
+    const with_protection = ctx_obj.gc.?.live_cells;
+    JSValueUnprotect(ctx, held);
+    JSGarbageCollect(ctx);
+    try std.testing.expectEqual(with_protection, ctx_obj.gc.?.live_cells);
+    JSValueUnprotect(ctx, held);
+    JSGarbageCollect(ctx);
+    try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
 }

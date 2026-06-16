@@ -116,9 +116,10 @@ combinator side records, then marks their captured cells explicitly.
 Embedders hold `JSValueRef`s — pointers to `Boxed` cells (`c_api.zig`) — that
 must keep objects alive across calls, but the GC can't see the embedder's
 variables. Solution: a **handle table** (JSC "protected values" / V8
-`HandleScope` model). `box()` registers the `Boxed` in a per-context handle set
-that `traceRoots` walks; `JS*Release`/scope-exit unregisters. This is the one
-piece of new C-API bookkeeping M1 adds.
+`HandleScope` model). `JSValueProtect` registers the `Boxed` in a per-context
+counted handle table that `traceRoots` walks; matching `JSValueUnprotect` calls
+decrement and remove the root. This is the one piece of new C-API bookkeeping
+M1 adds.
 
 ### Write barrier
 
@@ -346,17 +347,19 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   follows engine-owned Promise/VM native `private_data` records. This keeps
   async microtask GC from reclaiming live function environments or Promise
   combinator result arrays while waiter-table and WeakRef reclamation tests run.
-  *C-API handle table landed:* `box()` registers each `Boxed` (`JSValueRef`) on
-  `Context.c_api_handles` when the GC is on (`*Boxed` aliases `*Value`), and
-  `traceRoots` marks them — so an embedder-held `JSValueRef` survives collection.
+  *C-API protected handle table landed:* `JSValueProtect` registers each
+  protected `Boxed` (`JSValueRef`) on `Context.c_api_handles` when the GC is on
+  (`*Boxed` aliases `*Value`), and `traceRoots` marks them until matching
+  `JSValueUnprotect` calls remove the counted root — so an embedder-held
+  protected `JSValueRef` survives collection without pinning every transient
+  result for the context lifetime.
   `JSGarbageCollect` is now a **real** precise mark-sweep (was a documented
   no-op) when the context opts into the GC; the default arena-backed
   `JSGlobalContextCreate` is unchanged, so it stays a no-op there. Validated by a
-  C-API test (`JSGarbageCollect` reclaims 500 garbage objects while a held
-  `JSValueRef` keeps its object — `tag === 123` after collection); conformance
-  33/33, threads 209/209, full unit suite leak-checked. (No `JSValueUnprotect`
-  yet, so a boxed object is pinned for the context's life — conservative but
-  sound.)
+  C-API test (`JSGarbageCollect` reclaims 500 garbage objects while a protected
+  `JSValueRef` keeps its object — `tag === 123` after collection — and later
+  releases the object after the final `JSValueUnprotect`); conformance 33/33,
+  threads 209/209, full unit suite leak-checked.
   *WeakRef weak edges landed:* `Object` now keeps a separate WeakRef brand and
   nullable target object slot; `gc.zig` registers that slot with
   `Visitor.markWeak`, so a collection clears the slot before sweeping an
