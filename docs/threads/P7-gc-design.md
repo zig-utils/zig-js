@@ -410,12 +410,31 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   values are never wrongly freed; and a value reachable only through a native
   Zig local survives a collection that would otherwise sweep it), `threads-test`
   209/209 (incl. `gc-stress/conservative-scan-register.js`), test262 unchanged.
-  *Remaining for the FULL deliverable:* (a) **mid-script collection across
-  parked threads**: scan a spawned thread's native stack + registers while it is
-  parked in a native call (the M3 safepoint protocol), lifting the
-  single-threaded guard above. (b) keep new cell-owned side buffers behind the
-  backing-store helpers and this audit, so future additions do not silently fall
-  back to reclaim-at-destroy lifetime.
+  *Parked-thread collection landed (multi-thread safepoint protocol):* the
+  single-threaded guard is lifted — a thread holding the GIL can now collect
+  mid-script while its peers are parked. A thread that releases the GIL to block
+  publishes a conservative scan range (spilled callee-saved registers + stack
+  pointer) into a per-thread `stack_scan.ParkScan` registered with the `Gil`,
+  at every GIL park funnel (`Gil.wait`/`waitTimeout`/`yieldIfContended`, covering
+  `Condition.wait`/`join`/`Lock`/property-mode `Atomics.wait`, plus the TA-mode
+  `Atomics.wait` release). The collector scans its own stack plus every parked
+  peer's published range. Soundness: the collector holds the GIL throughout so
+  parked peers cannot run (their stacks are frozen); the publish (before GIL
+  release) happens-before the scan (after GIL acquire) via the GIL mutex (no
+  race, TSan-clean); and a safety net (`Gil.allOthersParked`) makes the collector
+  abort unless every peer is parked-and-published, so a missed park site only
+  costs a skipped collection, never a freed-live object. Parked peers' JS-level
+  state stays precisely rooted via `active_interpreters` (their `Environment` and
+  VM `Exec` operand stacks); the conservative parked-stack scan adds coverage for
+  `Value`s in a parked thread's native frames. Validated: a GC+threads unit test
+  (a peer's object reachable only from its own state survives collection while
+  parked) and `threads-test` 209/209 with the GC+threads cases now exercising
+  real collection-while-parked (`gc-stress/conservative-scan-register.js`,
+  `cve/mc-gc-*`, `gc-stress/zombie-uaf-canary.js`), TSan-clean.
+  *Remaining for the FULL deliverable:* keep new cell-owned side buffers behind
+  the backing-store helpers and this audit, so future additions do not silently
+  fall back to reclaim-at-destroy lifetime. Beyond M1: NaN-box `Value` (#7), the
+  M2 write barrier + incremental marking, then M3 (drop the GIL, concurrent mark).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per

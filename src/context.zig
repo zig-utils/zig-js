@@ -267,9 +267,14 @@ pub const Context = struct {
         if (options.enable_threads) {
             const g = try gpa.create(gil_mod.Gil);
             g.* = .{};
+            g.park_alloc = gpa;
             self.gil = g;
             g.acquire();
             defer g.release();
+            // Register the main thread's park record (this thread). A spawned
+            // thread that becomes the collector roots the main thread's parked
+            // stack through it (e.g. while main waits in the keepalive loop).
+            g.registerPark(stack_scan.parkRecord());
             try jsthread.installThreadAPI(self);
         }
         return self;
@@ -324,6 +329,8 @@ pub const Context = struct {
                 if (rec.thread) |t| t.join();
             }
             jsthread.abandonPropAsync(g);
+            g.unregisterPark(stack_scan.parkRecord());
+            g.park_records.deinit(self.gpa);
             self.gpa.destroy(g);
             self.gil = null;
         } else {
@@ -408,14 +415,25 @@ pub const Context = struct {
         }
     }
 
-    /// Run a precise mark-sweep over the GC heap (Phase 7). Sound at explicit
-    /// quiescent checkpoints: persistent Context roots plus registered active
-    /// Interpreter state are traced. Conservatively skipped while a spawned
-    /// shared-realm thread is still running, because arbitrary parked native
-    /// stacks are not yet scanned. No-op when the GC is off.
+    /// Run a precise mark-sweep over the GC heap (Phase 7). Single-threaded, this
+    /// is precise: persistent Context roots plus registered active Interpreter
+    /// state. With spawned threads it is sound only when this thread holds the
+    /// GIL and every peer is parked-and-published, in which case it additionally
+    /// conservatively roots this thread's and every parked peer's native stack
+    /// (the multi-thread safepoint protocol, `stack_scan.zig`); otherwise it
+    /// skips, because a peer may hold an unscanned native-stack root. No-op when
+    /// the GC is off.
     pub fn collectGarbage(self: *Context) void {
         const h = self.gc orelse return;
-        if (self.hasRunningJsThreads()) return; // live thread interpreter stacks not yet rooted
+        if (self.hasRunningJsThreads()) {
+            const g = self.gil orelse return;
+            if (!g.holds() or !stack_scan.supported or !g.allOthersParked()) return;
+            self.gc_scan_native_stack = true;
+            defer self.gc_scan_native_stack = false;
+            h.collect();
+            self.gc_requested = false;
+            return;
+        }
         h.collect();
         self.gc_requested = false;
     }
@@ -427,18 +445,25 @@ pub const Context = struct {
 
     /// Heap-growth-triggered collection at an engine step checkpoint, while the
     /// native stack holds live `Value`s. Sound because the GC binding adds two
-    /// extra root sources for this case: registered active VM `Exec` operand
-    /// stacks (precise) and a conservative scan of the collecting thread's
-    /// native stack + spilled registers (`stack_scan.zig`, the tree-walker's
-    /// locals). No-op unless the GC is on, the conservative scan is available on
-    /// this target, and no *other* shared-realm thread is running — a parked
-    /// thread's native stack is not scanned yet (the M3 safepoint protocol), so
-    /// mid-script collection stays single-threaded.
+    /// extra root sources: registered active VM `Exec` operand stacks (precise,
+    /// for every active interpreter including parked threads') and a conservative
+    /// scan of native stacks + spilled registers (`stack_scan.zig`) — the
+    /// collecting thread's own, plus every *parked* peer thread's published
+    /// range. No-op unless the GC is on and the conservative scan is available.
+    ///
+    /// With threads, collection only proceeds when every other registered thread
+    /// is parked-and-published (`allOthersParked`); otherwise some peer released
+    /// the GIL without publishing a scan range (or is mid startup), so we abort
+    /// rather than risk missing a live native-stack root. The collector holds
+    /// the GIL throughout, so parked peers cannot run and their stacks stay
+    /// frozen during the scan.
     fn collectMidScript(raw_ctx: *anyopaque) void {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const h = self.gc orelse return;
         if (!stack_scan.supported) return;
-        if (self.hasRunningJsThreads()) return;
+        if (self.gil) |g| {
+            if (!g.allOthersParked()) return;
+        }
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
         h.maybeCollect();
@@ -4725,6 +4750,48 @@ test "Lock/Condition/ThreadLocal: mailbox handshake, mutual exclusion, TLS" {
         \\const seen = new Thread(() => { const before = tls.value; tls.value = "worker"; return [before, tls.value]; }).join();
         \\if (seen[0] !== undefined || seen[1] !== "worker") throw new Error("tls worker view");
         \\if (tls.value !== "main") throw new Error("tls main view");
+    );
+}
+
+test "enable_gc + threads: collection roots a parked peer thread's reachable state" {
+    // Phase 7 multi-thread safepoint protocol: a spawned thread builds an object
+    // reachable only from its own JS state, then parks (TA-mode `Atomics.wait`,
+    // which drops the GIL and publishes a conservative scan range). The main
+    // thread forces collections while the peer is parked, then wakes it; the
+    // peer re-derives a checksum over the same object. If the parked peer's
+    // reachable state weren't rooted across collection, the object would be
+    // swept and the checksum would mismatch. Also a crash/leak gate (testing
+    // allocator) for the parked-scan machinery under a real spawned thread.
+    if (!stack_scan.supported) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .enable_gc = true });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\// Property-mode Atomics on a plain shared-realm object (the corpus park
+        \\// primitive: it drops the GIL while parked, unlike TA-mode wait which
+        \\// is gated to the main agent).
+        \\const gate = { wake: 0, parked: 0 };
+        \\const t = new Thread(() => {
+        \\  try {
+        \\    let sum = 0;
+        \\    const secret = { tag: "alive", payload: [] };
+        \\    for (let i = 0; i < 64; i++) { const v = (i * 2654435761) % 1000003; secret.payload.push(v); sum += v; }
+        \\    Atomics.store(gate, "parked", 1);     // announce we are about to park
+        \\    Atomics.notify(gate, "parked");
+        \\    Atomics.wait(gate, "wake", 0);        // park: drops the GIL, publishes scan range
+        \\    let after = 0;
+        \\    for (let i = 0; i < 64; i++) after += secret.payload[i];
+        \\    if (after !== sum || secret.tag !== "alive") return "CORRUPT:" + after + "/" + sum;
+        \\    return "ok";
+        \\  } catch (e) { return "THREW:" + e.name + ":" + e.message; }
+        \\});
+        \\// Busy-wait yields the GIL at the step checkpoints, letting the peer run
+        \\// and park; then force collections while it is parked.
+        \\while (Atomics.load(gate, "parked") === 0) {}
+        \\for (let k = 0; k < 8; k++) gc();
+        \\Atomics.store(gate, "wake", 1);
+        \\Atomics.notify(gate, "wake");
+        \\const r = t.join();
+        \\if (r !== "ok") throw new Error("parked peer: " + r);
     );
 }
 

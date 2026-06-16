@@ -11,6 +11,7 @@ const shared_buffer = @import("shared_buffer.zig");
 const agent = @import("agent.zig");
 const structured_clone = @import("structured_clone.zig");
 const gil_mod = @import("gil.zig");
+const stack_scan = @import("stack_scan.zig");
 const gc_mod = @import("gc.zig");
 const jsthread = @import("jsthread.zig");
 const Compiler = @import("compiler.zig").Compiler;
@@ -20699,7 +20700,11 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const storage = ab.shared orelse return self.throwError("TypeError", "Atomics.wait requires a shared buffer");
     const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
     // A GIL'd thread must not park holding the VM lock — its notifier needs
-    // it to run.
+    // it to run. Publish a conservative scan range first so a mid-script
+    // collection on another thread can root this parked stack (defers run LIFO:
+    // reacquire the GIL, then mark unparked).
+    if (self.gil != null) stack_scan.beginPark();
+    defer if (self.gil != null) stack_scan.endPark();
     if (self.gil) |g| g.release();
     defer if (self.gil) |g| g.acquire();
     const outcome = if (vd.ta.kind == .i64)

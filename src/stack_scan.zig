@@ -66,6 +66,63 @@ pub fn active() bool {
     return stack_high != null;
 }
 
+/// A parked thread's published conservative-scan range, so a *different* thread
+/// holding the GIL can root the parked thread's native stack + callee-saved
+/// registers during a mid-script collection (issue #1 Phase 7, the multi-thread
+/// safepoint protocol). Each thread owns one of these as a threadlocal and
+/// registers its address with the `Gil` (see `gil.zig`); the collector walks the
+/// registry. `parked` gates whether the range is meaningful. All fields are
+/// written before the parking thread releases the GIL and read after the
+/// collector acquires it, so the GIL mutex supplies the happens-before edge.
+pub const ParkScan = struct {
+    parked: bool = false,
+    lo: usize = 0,
+    high: usize = 0,
+    regs: [spill_count]usize = @splat(0),
+};
+
+threadlocal var tl_park: ParkScan = .{};
+
+/// This thread's park record (stable address for the thread's lifetime).
+pub fn parkRecord() *ParkScan {
+    return &tl_park;
+}
+
+/// Publish this thread's live stack range + spilled callee-saved registers and
+/// mark it parked, immediately before releasing the GIL to block. The collector
+/// scans `[lo, high]` plus `regs`. A no-op-ish publish (empty range) is fine when
+/// no boundary is registered — the collector just finds nothing.
+pub fn beginPark() void {
+    spillRegisters(&tl_park.regs);
+    const sp = currentSp();
+    tl_park.lo = sp;
+    tl_park.high = stack_high orelse sp;
+    @atomicStore(bool, &tl_park.parked, true, .release);
+}
+
+/// Mark this thread no longer parked, immediately after reacquiring the GIL.
+pub fn endPark() void {
+    @atomicStore(bool, &tl_park.parked, false, .release);
+}
+
+/// Whether the given (other thread's) record is currently parked.
+pub fn isParked(rec: *const ParkScan) bool {
+    return @atomicLoad(bool, &rec.parked, .acquire);
+}
+
+/// Conservatively mark a parked thread's published stack range + registers.
+/// Mirrors `scan()` but operates on a foreign, frozen stack (the parked thread
+/// cannot run until the collecting thread releases the GIL).
+pub fn scanRecord(rec: *const ParkScan, v: anytype) void {
+    for (rec.regs) |word| v.markConservativeWord(word);
+    if (rec.high <= rec.lo) return;
+    const wsz = @sizeOf(usize);
+    const lo = std.mem.alignForward(usize, rec.lo, wsz);
+    if (lo >= rec.high) return;
+    const words = (rec.high - lo) / wsz;
+    v.markConservativeWords(@ptrFromInt(lo), words);
+}
+
 /// Callee-saved general-purpose registers per target. A live `Value`'s `*Object`
 /// word can sit in one of these across the collection call, where the ordinary
 /// stack scan would miss it; we spill them into a stack buffer (inside the

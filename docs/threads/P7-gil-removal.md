@@ -40,14 +40,16 @@ should begin before a tracing GC with safepoints replaces the arena.** The step
 checkpoints above are the natural safepoint sites — they already exist and are
 polled in both engines.
 
-**Progress:** the GC (M1, opt-in) now collects *mid-script* at those checkpoints
-for single-threaded execution — conservative native-stack + register scanning
-(`src/stack_scan.zig`) roots the tree-walker's live `Value` locals and active VM
-`Exec` operand stacks are registered as precise roots (see
-[`P7-gc-design.md`](P7-gc-design.md)). The remaining safepoint work for Layer C
-is scanning a *parked* thread's native stack while another thread collects (the
-multi-thread safepoint protocol), after which the GIL guard on mid-script
-collection can be lifted.
+**Progress:** the GC (M1, opt-in) now collects *mid-script* at those checkpoints,
+including **while peer threads are parked** — conservative native-stack +
+register scanning (`src/stack_scan.zig`) roots the tree-walker's live `Value`
+locals, active VM `Exec` operand stacks are registered as precise roots, and a
+parking thread publishes a conservative scan range that a GIL-holding collector
+walks for every parked peer (the multi-thread safepoint protocol; a
+safety net aborts collection unless every peer is parked-and-published). See
+[`P7-gc-design.md`](P7-gc-design.md). The GC can now reclaim at safepoints under
+the full threading model with the GIL still held; lifting the GIL itself is M3
+(NaN-boxed `Value`, write barrier, concurrent mark).
 
 ## Blocker map (each is GIL-protected today)
 

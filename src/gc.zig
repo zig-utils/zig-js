@@ -429,10 +429,23 @@ pub const Binding = struct {
         // Mid-script collection: conservatively root the collecting thread's
         // live native stack + spilled callee-saved registers, which hold the
         // tree-walker's `Value` locals and the VM's transient accumulator. Only
-        // enabled (`gc_scan_native_stack`) for a guarded single-threaded
-        // mid-script collect; quiescent collection keeps it off and stays
-        // precise. See `stack_scan.zig` and docs/threads/P7-gc-design.md.
-        if (ctx.gc_scan_native_stack) _ = stack_scan.scan(v);
+        // enabled (`gc_scan_native_stack`) for a guarded mid-script collect;
+        // quiescent collection keeps it off and stays precise. See
+        // `stack_scan.zig` and docs/threads/P7-gc-design.md.
+        if (ctx.gc_scan_native_stack) {
+            _ = stack_scan.scan(v);
+            // Plus every parked peer thread's published range (the multi-thread
+            // safepoint protocol): they cannot run while we hold the GIL, so
+            // their stacks are frozen. `collectMidScript` only set the flag
+            // after confirming all peers are parked-and-published.
+            if (ctx.gil) |g| {
+                const me = stack_scan.parkRecord();
+                for (g.park_records.items) |rec| {
+                    if (rec == me) continue;
+                    if (stack_scan.isParked(rec)) stack_scan.scanRecord(rec, v);
+                }
+            }
+        }
         v.mark(ctx.global_object);
         v.mark(ctx.tdz_marker);
         traceEnv(&ctx.env, v); // the global environment is embedded by value

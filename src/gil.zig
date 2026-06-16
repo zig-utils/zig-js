@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const agent = @import("agent.zig");
+const stack_scan = @import("stack_scan.zig");
 
 pub const Gil = struct {
     mutex: std.Io.Mutex = .init,
@@ -35,9 +36,54 @@ pub const Gil = struct {
     /// Per-realm Thread-id allocator: ids in [1, 0x7ffe], monotonically
     /// fresh (no reuse before a rebias lands), main = 0.
     next_thread_id: u32 = 1,
+    /// Conservative-scan park records for every thread that runs JS in this
+    /// realm (the main thread plus each spawned `Thread`). A thread registers
+    /// its threadlocal record on entry and unregisters on exit, both under the
+    /// GIL. During a mid-script collection the GIL-holding collector walks this
+    /// list to root every *parked* thread's native stack + registers — the
+    /// multi-thread safepoint protocol (issue #1 Phase 7). Mutated and read only
+    /// under the GIL, so no extra lock is needed.
+    park_records: std.ArrayListUnmanaged(*stack_scan.ParkScan) = .empty,
+    /// Backing allocator for `park_records` (the Context's gpa).
+    park_alloc: ?std.mem.Allocator = null,
 
     fn currentId() u64 {
         return @intCast(std.Thread.getCurrentId());
+    }
+
+    /// Register this thread's park record. Call under the GIL once per thread
+    /// that will run JS in the realm.
+    pub fn registerPark(g: *Gil, rec: *stack_scan.ParkScan) void {
+        const a = g.park_alloc orelse return;
+        for (g.park_records.items) |existing| if (existing == rec) return;
+        g.park_records.append(a, rec) catch {};
+    }
+
+    /// Unregister this thread's park record. Call under the GIL before the
+    /// thread's final GIL release / before its stack is torn down.
+    pub fn unregisterPark(g: *Gil, rec: *stack_scan.ParkScan) void {
+        var i: usize = g.park_records.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (g.park_records.items[i] == rec) {
+                _ = g.park_records.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// Whether every registered thread other than the caller is currently
+    /// parked-and-published. When true, the GIL holder can safely run a
+    /// mid-script collection that scans those parked stacks; when false, some
+    /// thread released the GIL without publishing a scan range (or is mid
+    /// startup), so the collector must not collect (it would miss live roots).
+    pub fn allOthersParked(g: *const Gil) bool {
+        const me = stack_scan.parkRecord();
+        for (g.park_records.items) |rec| {
+            if (rec == me) continue;
+            if (!stack_scan.isParked(rec)) return false;
+        }
+        return true;
     }
 
     pub fn acquire(g: *Gil) void {
@@ -63,6 +109,10 @@ pub const Gil = struct {
     /// actually waiting (uncontended cost: one relaxed load).
     pub fn yieldIfContended(g: *Gil) void {
         if (g.contenders.load(.monotonic) == 0) return;
+        // Publish a scan range before handing off: while we spin/reacquire, a
+        // thread that takes the lock may collect and must see this stack.
+        stack_scan.beginPark();
+        defer stack_scan.endPark();
         g.release();
         while (g.contenders.load(.acquire) != 0) {
             std.Thread.yield() catch {};
@@ -75,6 +125,10 @@ pub const Gil = struct {
     /// the primitive under `join`, `Condition.wait`, and friends.
     pub fn wait(g: *Gil, cond: *std.Io.Condition) void {
         const io = agent.engineIo();
+        // Publish before the GIL drops inside the condition wait; clear after
+        // it is reacquired (so a collector on another thread can root us).
+        stack_scan.beginPark();
+        defer stack_scan.endPark();
         g.holder.store(0, .monotonic);
         cond.waitUncancelable(io, &g.mutex);
         g.holder.store(currentId(), .monotonic);
@@ -84,6 +138,8 @@ pub const Gil = struct {
     /// lock before returning either way.
     pub fn waitTimeout(g: *Gil, cond: *std.Io.Condition, timeout: std.Io.Timeout) error{Timeout}!void {
         const io = agent.engineIo();
+        stack_scan.beginPark();
+        defer stack_scan.endPark();
         g.holder.store(0, .monotonic);
         defer g.holder.store(currentId(), .monotonic);
         cond.waitTimeout(io, &g.mutex, timeout) catch |err| switch (err) {

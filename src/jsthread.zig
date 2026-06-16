@@ -199,6 +199,13 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // for the future, not yet load-bearing.
     const ss_saved = stack_scan.enter(@frameAddress());
     defer stack_scan.leave(ss_saved);
+    // Publish this thread's park record so a mid-script collection on another
+    // thread can root our native stack while we are parked. Registered/
+    // unregistered under the GIL (held here); the defer runs before the final
+    // `g.release()` above (LIFO), i.e. while we still hold the lock and before
+    // our stack is torn down.
+    g.registerPark(stack_scan.parkRecord());
+    defer g.unregisterPark(stack_scan.parkRecord());
     t_current = rec;
     // A per-thread interpreter over the SHARED realm: same arena, environment,
     // global object, and shapes (safe under the GIL), with its own job queues.
