@@ -498,6 +498,20 @@ pub const Parser = struct {
         if (e.declaration) |decl| try self.collectDeclExportedNames(exported, decl);
     }
 
+    fn checkLocalExportedBindings(
+        node: *Node,
+        lexical: *const std.StringHashMapUnmanaged(void),
+        vars: *const std.StringHashMapUnmanaged(void),
+    ) ParseError!void {
+        if (node.* != .export_decl) return;
+        const e = node.export_decl;
+        if (e.from.len != 0) return;
+        for (e.entries) |entry| {
+            if (!lexical.contains(entry.local) and !vars.contains(entry.local))
+                return ParseError.UnexpectedToken;
+        }
+    }
+
     fn checkModuleEarlyErrors(self: *Parser, stmts: []const *Node) ParseError!void {
         var lexical: std.StringHashMapUnmanaged(void) = .empty;
         var vars: std.StringHashMapUnmanaged(void) = .empty;
@@ -506,6 +520,7 @@ pub const Parser = struct {
             try self.collectModuleDeclNames(stmt, &lexical, &vars);
             try self.collectExportedNames(&exported, stmt);
         }
+        for (stmts) |stmt| try checkLocalExportedBindings(stmt, &lexical, &vars);
         for (stmts) |stmt| try self.recurseScope(stmt);
     }
 
@@ -2811,6 +2826,21 @@ test "parser rejects module duplicate lexical and exported names" {
 
     var star_dup = try Parser.init(arena.allocator(), "var x; export { x as z }; export * as z from './m.js';");
     try std.testing.expectError(ParseError.UnexpectedToken, star_dup.parseModule());
+}
+
+test "parser rejects unresolved local exports" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var missing = try Parser.init(arena.allocator(), "export { unresolvable };");
+    try std.testing.expectError(ParseError.UnexpectedToken, missing.parseModule());
+
+    var global = try Parser.init(arena.allocator(), "export { Number };");
+    try std.testing.expectError(ParseError.UnexpectedToken, global.parseModule());
+
+    var declared_later = try Parser.init(arena.allocator(), "export { value as renamed }; const value = 1;");
+    const prog = try declared_later.parseModule();
+    try std.testing.expectEqual(@as(usize, 2), prog.program.len);
 }
 
 test "parser rejects forbidden strict import bindings" {
