@@ -388,7 +388,7 @@ pub const Parser = struct {
         // Bare side-effect import: `import "spec";`
         if (self.check(.string)) {
             const spec = self.advance().text;
-            _ = self.match(.semicolon);
+            try self.consumeStatementTerminator();
             return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = &.{} } });
         }
         // Default binding: `import name ...`
@@ -408,7 +408,7 @@ pub const Parser = struct {
         }
         try self.expectContextual("from");
         const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
-        _ = self.match(.semicolon);
+        try self.consumeStatementTerminator();
         return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items } });
     }
 
@@ -444,7 +444,7 @@ pub const Parser = struct {
             }
             try self.expectContextual("from");
             node.from = self.advance().text;
-            _ = self.match(.semicolon);
+            try self.consumeStatementTerminator();
             return self.alloc(.{ .export_decl = node });
         }
         if (self.check(.lbrace)) {
@@ -472,7 +472,7 @@ pub const Parser = struct {
                 }
             }
             node.entries = entries.items;
-            _ = self.match(.semicolon);
+            try self.consumeStatementTerminator();
             return self.alloc(.{ .export_decl = node });
         }
         if (self.isContextual("default")) {
@@ -495,7 +495,7 @@ pub const Parser = struct {
             }
             // `export default AssignmentExpression;`
             node.default_expr = try self.parseAssignment();
-            _ = self.match(.semicolon);
+            try self.consumeStatementTerminator();
             return self.alloc(.{ .export_decl = node });
         }
         // `export <declaration>` — var/let/const/function/class. The declaration
@@ -2284,4 +2284,37 @@ test "parser accepts ASI line terminators between statements" {
     var ls = try Parser.init(arena.allocator(), "var a = 1\u{2028}var b = 2");
     const ls_prog = try ls.parseProgram();
     try std.testing.expectEqual(@as(usize, 2), ls_prog.program.len);
+}
+
+test "parser requires module import export statement boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var named = try Parser.init(arena.allocator(), "export {} null;");
+    try std.testing.expectError(ParseError.UnexpectedToken, named.parseModule());
+
+    var named_from = try Parser.init(arena.allocator(), "export {} from './m.js' null;");
+    try std.testing.expectError(ParseError.UnexpectedToken, named_from.parseModule());
+
+    var namespace_from = try Parser.init(arena.allocator(), "export * as ns from './m.js' null;");
+    try std.testing.expectError(ParseError.UnexpectedToken, namespace_from.parseModule());
+
+    var bare_import = try Parser.init(arena.allocator(), "import './m.js' null;");
+    try std.testing.expectError(ParseError.UnexpectedToken, bare_import.parseModule());
+
+    var default_expr = try Parser.init(arena.allocator(), "export default 1 null;");
+    try std.testing.expectError(ParseError.UnexpectedToken, default_expr.parseModule());
+}
+
+test "parser accepts module import export ASI line terminators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var named = try Parser.init(arena.allocator(), "export {}\nexport {}");
+    const named_prog = try named.parseModule();
+    try std.testing.expectEqual(@as(usize, 2), named_prog.program.len);
+
+    var bare_import = try Parser.init(arena.allocator(), "import './m.js'\nexport {}");
+    const import_prog = try bare_import.parseModule();
+    try std.testing.expectEqual(@as(usize, 2), import_prog.program.len);
 }
