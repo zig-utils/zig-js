@@ -7712,6 +7712,7 @@ pub const Interpreter = struct {
     fn arraySearchReadsLive(name: []const u8) bool {
         return eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes") or
             eq(name, "push") or eq(name, "pop") or
+            eq(name, "reduceRight") or
             eq(name, "some") or eq(name, "every") or eq(name, "find") or
             eq(name, "findIndex") or eq(name, "findLast") or eq(name, "findLastIndex");
     }
@@ -8401,6 +8402,26 @@ pub const Interpreter = struct {
         if (eq(name, "reduceRight")) {
             const cb = arg0(args);
             var acc: Value = undefined;
+            if (!o.is_array and ilen > (1 << 22)) {
+                const sparse = try self.arrSparseIndices(o, 0, ilen);
+                var seeded = args.len >= 2;
+                if (seeded) acc = args[1];
+                var si = sparse.len;
+                while (si > 0) {
+                    si -= 1;
+                    const idx = sparse[si];
+                    if (!(try self.arrIndexPresent(o, idx))) continue;
+                    const el = try self.arrIndexGet(o, idx);
+                    if (!seeded) {
+                        acc = el;
+                        seeded = true;
+                        continue;
+                    }
+                    acc = try self.callValue(cb, &.{ acc, el, .{ .number = @floatFromInt(idx) }, .{ .object = o } });
+                }
+                if (!seeded) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                return acc;
+            }
             var i: usize = ilen;
             if (args.len >= 2) {
                 acc = args[1];
