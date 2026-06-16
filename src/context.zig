@@ -642,7 +642,8 @@ pub const Context = struct {
             try declaredExportNames(self, m, d);
         }
         if (e.default_expr != null) {
-            try m.exports.put(a, "default", .{ .local = "*default*" });
+            const local = if (e.default_name.len > 0) e.default_name else "*default*";
+            try m.exports.put(a, "default", .{ .local = local });
         }
         for (e.entries) |entry| {
             if (e.from.len == 0) {
@@ -656,7 +657,7 @@ pub const Context = struct {
             const dep = m.deps.get(e.from).?;
             if (e.star_as.len > 0) {
                 // `export * as ns from "m"` — a namespace re-export.
-                try m.exports.put(a, e.star_as, .{ .indirect = .{ .module = dep, .name = "*namespace*" } });
+                try m.exports.put(a, e.star_as, .{ .local = e.star_as });
             } else {
                 try m.star_sources.append(a, dep); // `export * from "m"`
             }
@@ -726,7 +727,7 @@ pub const Context = struct {
                 // `export * as ns from "m"` needs a namespace object for `m`.
                 if (e.star and e.star_as.len > 0) {
                     const dep = m.deps.get(e.from).?;
-                    _ = try self.namespaceObject(dep);
+                    try m.env.put(e.star_as, .{ .object = try self.namespaceObject(dep) });
                 }
             },
             else => {},
@@ -765,8 +766,11 @@ pub const Context = struct {
     fn evalModule(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
         if (m.evaluated) return;
         m.evaluated = true;
-        var dit = m.deps.valueIterator();
-        while (dit.next()) |dep| try self.evalModule(machine, dep.*);
+        for (m.items) |item| switch (item.*) {
+            .import_decl => |imp| try self.evalModule(machine, m.deps.get(imp.specifier).?),
+            .export_decl => |e| if (e.from.len > 0) try self.evalModule(machine, m.deps.get(e.from).?),
+            else => {},
+        };
 
         const saved_env = machine.env;
         const saved_this = machine.this_value;
@@ -905,24 +909,43 @@ pub const Context = struct {
     }
 };
 
-fn evaluateSelfModule(source: []const u8) !void {
+const ModuleFixture = struct {
+    path: []const u8,
+    source: []const u8,
+};
+
+fn evaluateModuleWithFixtures(source: []const u8, fixtures: []const ModuleFixture) !void {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
 
     const Host = struct {
         source: []const u8,
+        fixtures: []const ModuleFixture,
 
         fn load(ctx_ptr: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
             const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
-            if (!std.mem.eql(u8, specifier, "./entry.js")) return null;
-            out_path.* = "entry.js";
-            return self.source;
+            const path = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+            if (std.mem.eql(u8, path, "entry.js")) {
+                out_path.* = "entry.js";
+                return self.source;
+            }
+            for (self.fixtures) |fixture| {
+                if (std.mem.eql(u8, path, fixture.path)) {
+                    out_path.* = fixture.path;
+                    return fixture.source;
+                }
+            }
+            return null;
         }
     };
 
-    var host_state = Host{ .source = source };
+    var host_state = Host{ .source = source, .fixtures = fixtures };
     const mh = Context.ModuleHost{ .ctx = &host_state, .load = Host.load };
     _ = try ctx.evaluateModule("entry.js", source, mh);
+}
+
+fn evaluateSelfModule(source: []const u8) !void {
+    try evaluateModuleWithFixtures(source, &.{});
 }
 
 test "modules initialize default and var exports for self imports" {
@@ -951,6 +974,35 @@ test "modules initialize default and var exports for self imports" {
         \\export var test262 = 23;
         \\if (test262 !== 23 || imp !== 23) throw new Error("exported var did not update");
     );
+}
+
+test "modules expose namespace re-exports and evaluate dependencies in source order" {
+    try evaluateModuleWithFixtures(
+        \\import * as ns from "./entry.js";
+        \\export * as "All" from "./dep.js";
+        \\if (ns.All["not-id"] !== globalThis.mark) throw new Error("missing namespace re-export");
+    , &.{
+        .{ .path = "dep.js", .source = "export { mark as \"not-id\" }; function mark() {} globalThis.mark = mark;" },
+    });
+
+    try evaluateModuleWithFixtures(
+        \\if (globalThis.order !== "123") throw new Error(globalThis.order);
+        \\import "./one.js";
+        \\export {} from "./two.js";
+        \\import "./three.js";
+    , &.{
+        .{ .path = "one.js", .source = "globalThis.order = '1';" },
+        .{ .path = "two.js", .source = "globalThis.order += '2';" },
+        .{ .path = "three.js", .source = "globalThis.order += '3';" },
+    });
+
+    try evaluateModuleWithFixtures(
+        \\import val from "./dep.js";
+        \\if (val() !== 1) throw new Error("bad call");
+        \\if (val !== 2) throw new Error("default binding did not update");
+    , &.{
+        .{ .path = "dep.js", .source = "export default function fn() { fn = 2; return 1; }" },
+    });
 }
 
 test "Date basics" {
