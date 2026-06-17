@@ -21,6 +21,7 @@ const bc = @import("bytecode.zig");
 
 const Node = ast.Node;
 const Chunk = bc.Chunk;
+const Value = @import("value.zig").Value;
 
 pub const CompileError = error{ Unsupported, OutOfMemory };
 
@@ -858,7 +859,7 @@ pub const Compiler = struct {
     fn compileExpr(self: *Compiler, node: *Node) CompileError!void {
         switch (node.*) {
             .number => |n| {
-                const ci = try self.chunk.addConst(.{ .number = n });
+                const ci = try self.chunk.addConst(Value.num(n));
                 _ = try self.chunk.emit(.load_const, ci);
             },
             .bigint_lit => |b| {
@@ -866,7 +867,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.load_bigint, try self.chunk.addName(text));
             },
             .string => |s| {
-                const ci = try self.chunk.addConst(.{ .string = s });
+                const ci = try self.chunk.addConst(Value.str(s));
                 _ = try self.chunk.emit(.load_const, ci);
             },
             .boolean => |b| _ = try self.chunk.emit(if (b) .load_true else .load_false, 0),
@@ -1081,7 +1082,7 @@ pub const Compiler = struct {
                         if (p.key_expr) |ke| {
                             try self.compileExpr(ke);
                         } else {
-                            const ci = try self.chunk.addConst(.{ .string = p.key });
+                            const ci = try self.chunk.addConst(Value.str(p.key));
                             _ = try self.chunk.emit(.load_const, ci);
                         }
                         const gi = try self.compileFunction(p.value.function, false);
@@ -1142,7 +1143,7 @@ pub const Compiler = struct {
     fn compileUpdate(self: *Compiler, inc: bool, prefix: bool, target: *Node) CompileError!void {
         if (target.* != .identifier) return error.Unsupported;
         const name = target.identifier;
-        const one = try self.chunk.addConst(.{ .number = 1 });
+        const one = try self.chunk.addConst(Value.num(1));
         const delta: bc.Op = if (inc) .add else .sub;
         if (prefix) {
             try self.emitLoad(name);
@@ -1203,13 +1204,13 @@ pub const Compiler = struct {
         try self.emitDefine(it);
         _ = try ch.emit(.load_undefined, 0);
         try self.emitDefine(recv_v);
-        _ = try ch.emit(.load_const, try ch.addConst(.{ .number = 0 }));
+        _ = try ch.emit(.load_const, try ch.addConst(Value.num(0)));
         try self.emitDefine(recv_k);
 
         const top = ch.here();
         // if (recv_k == 0) fall through to the `next` branch, else jump to throw/return.
         try self.emitLoad(recv_k);
-        _ = try ch.emit(.load_const, try ch.addConst(.{ .number = 0 }));
+        _ = try ch.emit(.load_const, try ch.addConst(Value.num(0)));
         _ = try ch.emit(.eq_strict, 0);
         const to_nonnext = try ch.emit(.jump_if_false, 0);
 
@@ -1224,7 +1225,7 @@ pub const Compiler = struct {
         // --- recv_k == 1 ? throw branch : return branch ---
         ch.patchToHere(to_nonnext);
         try self.emitLoad(recv_k);
-        _ = try ch.emit(.load_const, try ch.addConst(.{ .number = 1 }));
+        _ = try ch.emit(.load_const, try ch.addConst(Value.num(1)));
         _ = try ch.emit(.eq_strict, 0);
         const to_return = try ch.emit(.jump_if_false, 0);
 
@@ -1257,7 +1258,7 @@ pub const Compiler = struct {
         ch.patchToHere(to_after_close);
         // throw new TypeError(...)
         _ = try ch.emit(.load_var, try ch.addName("TypeError"));
-        _ = try ch.emit(.load_const, try ch.addConst(.{ .string = "The iterator does not provide a 'throw' method" }));
+        _ = try ch.emit(.load_const, try ch.addConst(Value.str("The iterator does not provide a 'throw' method")));
         _ = try ch.emit(.new_call, 1);
         _ = try ch.emit(.throw_op, 0);
         // has a `throw` method: r = m.call(it, recv_v)

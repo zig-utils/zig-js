@@ -88,7 +88,7 @@ fn box(ctx: *Context, v: Value) JSValueRef {
 }
 
 fn unbox(ref: JSValueRef) Value {
-    const b: *Boxed = @ptrCast(@alignCast(ref orelse return .undefined));
+    const b: *Boxed = @ptrCast(@alignCast(ref orelse return Value.undef()));
     return b.value;
 }
 
@@ -97,7 +97,7 @@ fn strFrom(ref: JSStringRef) ?*JsString {
 }
 
 fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
-    if (exc != null) exc[0] = box(ctx, .{ .string = message });
+    if (exc != null) exc[0] = box(ctx, Value.str(message));
 }
 
 // ---- VM lifecycle ------------------------------------------------------
@@ -128,7 +128,7 @@ export fn JSGlobalContextRetain(ctx: JSContextRef) callconv(.c) JSContextRef {
 
 export fn JSContextGetGlobalObject(ctx: JSContextRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
-    return box(c, .{ .object = c.global_object });
+    return box(c, Value.obj(c.global_object));
 }
 
 export fn JSEvaluateScript(
@@ -148,7 +148,7 @@ export fn JSEvaluateScript(
         // A JS `throw` surfaces the actual thrown value; host failures (parse
         // errors, OOM) surface their error name as a string.
         if (err == error.Throw) {
-            if (exception != null) exception[0] = box(c, c.exception orelse .{ .string = "uncaught exception" });
+            if (exception != null) exception[0] = box(c, c.exception orelse Value.str("uncaught exception"));
         } else {
             setException(c, exception, @errorName(err));
         }
@@ -161,7 +161,7 @@ export fn JSEvaluateScript(
 
 export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
     _ = ctx;
-    return switch (unbox(v)) {
+    return switch (unbox(v).kind()) {
         .undefined => .undefined,
         .null => .null,
         .boolean => .boolean,
@@ -173,40 +173,38 @@ export fn JSValueGetType(ctx: JSContextRef, v: JSValueRef) callconv(.c) JSType {
 
 export fn JSValueIsUndefined(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v) == .undefined;
+    return unbox(v).isUndefined();
 }
 
 export fn JSValueIsNull(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v) == .null;
+    return unbox(v).isNull();
 }
 
 export fn JSValueIsBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v) == .boolean;
+    return unbox(v).isBoolean();
 }
 
 export fn JSValueIsNumber(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v) == .number;
+    return unbox(v).isNumber();
 }
 
 export fn JSValueIsString(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v) == .string;
+    return unbox(v).isString();
 }
 
 export fn JSValueIsObject(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return unbox(v) == .object;
+    return unbox(v).isObject();
 }
 
 export fn JSValueIsArray(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
     _ = ctx;
-    return switch (unbox(v)) {
-        .object => |o| o.is_array,
-        else => false,
-    };
+    const uv = unbox(v);
+    return uv.isObject() and uv.asObj().is_array;
 }
 
 export fn JSValueIsDate(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
@@ -230,29 +228,29 @@ export fn JSValueIsStrictEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef) 
 
 export fn JSValueMakeUndefined(ctx: JSContextRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
-    return box(c, .undefined);
+    return box(c, Value.undef());
 }
 
 export fn JSValueMakeNull(ctx: JSContextRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
-    return box(c, .null);
+    return box(c, Value.nul());
 }
 
 export fn JSValueMakeBoolean(ctx: JSContextRef, b: bool) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
-    return box(c, .{ .boolean = b });
+    return box(c, Value.boolVal(b));
 }
 
 export fn JSValueMakeNumber(ctx: JSContextRef, n: f64) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
-    return box(c, .{ .number = n });
+    return box(c, Value.num(n));
 }
 
 export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
-    const s = strFrom(str) orelse return box(c, .undefined);
+    const s = strFrom(str) orelse return box(c, Value.undef());
     const copy = c.arena().dupe(u8, s.bytes) catch return null;
-    return box(c, .{ .string = copy });
+    return box(c, Value.str(copy));
 }
 
 // ---- JSValue coercion -------------------------------------------------
@@ -282,10 +280,10 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
     _ = exception;
     const c = ctxFrom(ctx) orelse return null;
     const val = unbox(v);
-    if (val == .object) return v;
+    if (val.isObject()) return v;
     const obj = gc_mod.allocObj(c.arena()) catch return null;
     obj.* = .{};
-    return box(c, .{ .object = obj });
+    return box(c, Value.obj(obj));
 }
 
 export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
@@ -323,7 +321,7 @@ export fn JSObjectMake(ctx: JSContextRef, class: ?*anyopaque, data: ?*anyopaque)
     const c = ctxFrom(ctx) orelse return null;
     const obj = gc_mod.allocObj(c.arena()) catch return null;
     obj.* = .{ .private_data = data };
-    return box(c, .{ .object = obj });
+    return box(c, Value.obj(obj));
 }
 
 export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
@@ -335,7 +333,7 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
     while (i < argc) : (i += 1) {
         obj.elements.append(obj.elementsAllocator(c.arena()), unbox(argv[i])) catch return null;
     }
-    return box(c, .{ .object = obj });
+    return box(c, Value.obj(obj));
 }
 
 export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRef, reject: [*c]JSObjectRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
@@ -347,18 +345,16 @@ export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRe
 }
 
 fn objectFrom(ref: JSObjectRef) ?*Object {
-    return switch (unbox(ref)) {
-        .object => |o| o,
-        else => null,
-    };
+    const u = unbox(ref);
+    return if (u.isObject()) u.asObj() else null;
 }
 
 export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, exception: ExceptionRef) callconv(.c) JSValueRef {
     _ = exception;
     const c = ctxFrom(ctx) orelse return null;
-    const obj = objectFrom(object) orelse return box(c, .undefined);
-    const key = strFrom(name) orelse return box(c, .undefined);
-    return box(c, obj.getOwn(key.bytes) orelse .undefined);
+    const obj = objectFrom(object) orelse return box(c, Value.undef());
+    const key = strFrom(name) orelse return box(c, Value.undef());
+    return box(c, obj.getOwn(key.bytes) orelse Value.undef());
 }
 
 export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSStringRef, val: JSValueRef, attrs: c_uint, exception: ExceptionRef) callconv(.c) void {
@@ -373,9 +369,9 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
 export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, index: c_uint, exception: ExceptionRef) callconv(.c) JSValueRef {
     _ = exception;
     const c = ctxFrom(ctx) orelse return null;
-    const obj = objectFrom(object) orelse return box(c, .undefined);
+    const obj = objectFrom(object) orelse return box(c, Value.undef());
     if (index < obj.elements.items.len) return box(c, obj.elements.items[index]);
-    return box(c, .undefined);
+    return box(c, Value.undef());
 }
 
 fn collectArgs(c: *Context, argc: usize, argv: [*c]const JSValueRef) ?[]Value {
@@ -396,7 +392,7 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
     // JS functions / native builtins / error constructors run on the interpreter.
     const args = collectArgs(c, argc, argv) orelse return null;
     var interpreter = c.interpreter();
-    const res = interpreter.callValueWithThis(.{ .object = obj }, args, unbox(this_object)) catch |err| {
+    const res = interpreter.callValueWithThis(Value.obj(obj), args, unbox(this_object)) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, interpreter.exception);
         } else setException(c, exception, @errorName(err));
@@ -410,7 +406,7 @@ export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef,
     const c = ctxFrom(ctx) orelse return null;
     const obj = gc_mod.allocObj(c.arena()) catch return null;
     obj.* = .{ .callback = callback };
-    return box(c, .{ .object = obj });
+    return box(c, Value.obj(obj));
 }
 
 export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef, argc: usize, argv: [*c]const JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
@@ -421,7 +417,7 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
     };
     const args = collectArgs(c, argc, argv) orelse return null;
     var interpreter = c.interpreter();
-    const res = interpreter.construct(.{ .object = obj }, args) catch |err| {
+    const res = interpreter.construct(Value.obj(obj), args) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, interpreter.exception);
         } else setException(c, exception, @errorName(err));
@@ -508,7 +504,7 @@ export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref:
     var machine = c.interpreter();
     w.postMessage(&machine, unbox(value_ref)) catch |err| {
         if (err == error.Throw) {
-            if (exception != null) exception[0] = box(c, c.exception orelse .{ .string = "DataCloneError" });
+            if (exception != null) exception[0] = box(c, c.exception orelse Value.str("DataCloneError"));
         } else setException(c, exception, @errorName(err));
         return false;
     };
