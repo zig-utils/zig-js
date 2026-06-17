@@ -29,12 +29,12 @@ const EvalError = interp.EvalError;
 fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
     if (func.is_arrow) return func.arrow_this;
     if (func.is_strict) return this_val;
-    if (this_val == .null or this_val == .undefined) {
-        if (vm.env.get("globalThis")) |gt| if (gt == .object) return gt;
-        return if (vm.global_object) |g| Value{ .object = g } else this_val;
+    if (this_val.isNull() or this_val.isUndefined()) {
+        if (vm.env.get("globalThis")) |gt| if (gt.isObject()) return gt;
+        return if (vm.global_object) |g| Value.obj(g) else this_val;
     }
-    if (this_val != .object or this_val.object.is_symbol or this_val.object.is_bigint)
-        return .{ .object = try vm.toObject(this_val) };
+    if (!this_val.isObject() or this_val.asObj().is_symbol or this_val.asObj().is_bigint)
+        return Value.obj(try vm.toObject(this_val));
     return this_val;
 }
 
@@ -55,7 +55,7 @@ pub const Frame = struct {
 /// (the whole operand stack is saved, so a `yield` can sit mid-expression).
 pub const Exec = struct {
     stack: std.ArrayListUnmanaged(Value) = .empty,
-    acc: Value = .undefined,
+    acc: Value = Value.undef(),
     ip: usize = 0,
     /// Active try/catch handlers, innermost last. Lives in `Exec` so it persists
     /// across a generator's `yield`/resume (a `yield` can sit inside a `try`).
@@ -90,7 +90,7 @@ fn unwindToFinally(vm: *Interpreter, gen: ?*Generator, exec: *Exec, cval: Value,
         if (h.finally_pc != Handler.none) {
             exec.stack.shrinkRetainingCapacity(h.stack_depth);
             try exec.stack.append(stack_alloc, cval);
-            try exec.stack.append(stack_alloc, .{ .number = @floatFromInt(@intFromEnum(kind)) });
+            try exec.stack.append(stack_alloc, Value.num(@floatFromInt(@intFromEnum(kind))));
             return h.finally_pc;
         }
     }
@@ -113,7 +113,7 @@ pub const Generator = struct {
     chunk: *Chunk,
     exec: Exec = .{},
     env: *Environment,
-    this_value: Value = .undefined,
+    this_value: Value = Value.undef(),
     home_object: ?*value.Object = null,
     super_ctor: ?*value.Object = null,
     started: bool = false,
@@ -175,7 +175,7 @@ pub const AsyncGenRequest = struct {
 /// encoding (matching the tree-walker's `memberKey`); everything else coerces
 /// to string.
 fn propKey(vm: *Interpreter, key: Value) EvalError![]const u8 {
-    if (key == .object and key.object.is_symbol) return key.object.sym_key;
+    if (key.isObject() and key.asObj().is_symbol) return key.asObj().sym_key;
     return key.toString(vm.arena);
 }
 
@@ -222,7 +222,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // No catch: run the finally carrying a "throw" completion,
                     // which `end_finally` re-throws once the finally completes.
                     try exec.stack.append(stack_alloc, vm.exception);
-                    try exec.stack.append(stack_alloc, .{ .number = @floatFromInt(@intFromEnum(Completion.throw)) });
+                    try exec.stack.append(stack_alloc, Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
                     exec.ip = h.finally_pc;
                 }
                 continue;
@@ -265,10 +265,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         switch (inst.op) {
             .load_const => try stack.append(stack_alloc, chunk.consts.items[inst.a]),
             .load_bigint => try stack.append(stack_alloc, try vm.makeBigIntText(chunk.names.items[inst.a])),
-            .load_undefined => try stack.append(stack_alloc, .undefined),
-            .load_null => try stack.append(stack_alloc, .null),
-            .load_true => try stack.append(stack_alloc, .{ .boolean = true }),
-            .load_false => try stack.append(stack_alloc, .{ .boolean = false }),
+            .load_undefined => try stack.append(stack_alloc, Value.undef()),
+            .load_null => try stack.append(stack_alloc, Value.nul()),
+            .load_true => try stack.append(stack_alloc, Value.boolVal(true)),
+            .load_false => try stack.append(stack_alloc, Value.boolVal(false)),
             .pop => _ = stack.pop(),
             .dup => try stack.append(stack_alloc, stack.items[stack.items.len - 1]),
             .set_acc => acc = stack.pop().?,
@@ -280,7 +280,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .load_var_or_undef => {
                 const name = chunk.names.items[inst.a];
-                try stack.append(stack_alloc, vm.env.get(name) orelse vm.globalProp(name) orelse .undefined);
+                try stack.append(stack_alloc, vm.env.get(name) orelse vm.globalProp(name) orelse Value.undef());
             },
             .store_var => {
                 const name = chunk.names.items[inst.a];
@@ -319,39 +319,39 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 
             .neg => {
                 const v = stack.pop().?;
-                if (v == .object and v.object.is_bigint)
-                    try stack.append(stack_alloc, try interp.negateBigIntObject(vm, v.object))
+                if (v.isObject() and v.asObj().is_bigint)
+                    try stack.append(stack_alloc, try interp.negateBigIntObject(vm, v.asObj()))
                 else
-                    try stack.append(stack_alloc, .{ .number = -(try vm.toNumberV(v)) });
+                    try stack.append(stack_alloc, Value.num(-(try vm.toNumberV(v))));
             },
             .pos => {
                 const v = stack.pop().?;
-                if (v == .object and v.object.is_bigint)
+                if (v.isObject() and v.asObj().is_bigint)
                     return vm.throwError("TypeError", "Cannot convert a BigInt value to a number");
-                try stack.append(stack_alloc, .{ .number = try vm.toNumberV(v) });
+                try stack.append(stack_alloc, Value.num(try vm.toNumberV(v)));
             },
             .not => {
                 const v = stack.pop().?;
-                try stack.append(stack_alloc, .{ .boolean = !v.toBoolean() });
+                try stack.append(stack_alloc, Value.boolVal(!v.toBoolean()));
             },
             .typeof_op => {
                 const v = stack.pop().?;
-                try stack.append(stack_alloc, .{ .string = v.typeOf() });
+                try stack.append(stack_alloc, Value.str(v.typeOf()));
             },
             .bit_not => {
                 const v = stack.pop().?;
-                if (v == .object and v.object.is_bigint)
-                    try stack.append(stack_alloc, try interp.bitNotBigIntObject(vm, v.object))
+                if (v.isObject() and v.asObj().is_bigint)
+                    try stack.append(stack_alloc, try interp.bitNotBigIntObject(vm, v.asObj()))
                 else
-                    try stack.append(stack_alloc, .{ .number = @floatFromInt(~v.toInt32()) });
+                    try stack.append(stack_alloc, Value.num(@floatFromInt(~v.toInt32())));
             },
             .void_op => {
                 _ = stack.pop().?;
-                try stack.append(stack_alloc, .undefined);
+                try stack.append(stack_alloc, Value.undef());
             },
             .to_string => {
                 const v = stack.pop().?;
-                try stack.append(stack_alloc, .{ .string = try vm.toStringV(v) });
+                try stack.append(stack_alloc, Value.str(try vm.toStringV(v)));
             },
 
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
@@ -399,7 +399,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .array_append => {
                 const v = stack.pop().?;
                 const arr = stack.items[stack.items.len - 1];
-                try arr.object.elements.append(arr.object.elementsAllocator(vm.arena), v);
+                try arr.asObj().elements.append(arr.asObj().elementsAllocator(vm.arena), v);
             },
             .get_prop => {
                 const obj = stack.pop().?;
@@ -409,8 +409,8 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // Inline cache: plain (non-array) objects with a shape and
                     // no accessor/attribute overrides (those need the full
                     // [[Get]] path: getters + the prototype walk).
-                    if (obj == .object) {
-                        const o = obj.object;
+                    if (obj.isObject()) {
+                        const o = obj.asObj();
                         o.lockProperties();
                         defer o.unlockProperties();
                         if (!o.is_array and o.accessors == null and o.attrs == null) {
@@ -449,8 +449,8 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // property transitions the shape, so it goes the slow path.
                     // Objects with accessor/attribute overrides also take the
                     // slow path ([[Set]] honors setters + non-writable).
-                    if (obj == .object) {
-                        const o = obj.object;
+                    if (obj.isObject()) {
+                        const o = obj.asObj();
                         o.lockProperties();
                         defer o.unlockProperties();
                         if (!o.is_array and o.accessors == null and o.attrs == null) {
@@ -485,7 +485,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .instance_of => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
-                try stack.append(stack_alloc, .{ .boolean = try vm.instanceOf(l, r) });
+                try stack.append(stack_alloc, Value.boolVal(try vm.instanceOf(l, r)));
             },
 
             .make_closure => try stack.append(stack_alloc, try makeClosure(vm, chunk.fns.items[inst.a], frame)),
@@ -493,7 +493,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
-                const result = try callValue(vm, callee, stack.items[base..], .undefined);
+                const result = try callValue(vm, callee, stack.items[base..], Value.undef());
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
@@ -518,24 +518,24 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .call_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try callValue(vm, callee, args_arr.object.elements.items, .undefined));
+                try stack.append(stack_alloc, try callValue(vm, callee, args_arr.asObj().elements.items, Value.undef()));
             },
             .call_method_spread => {
                 const args_arr = stack.pop().?;
                 const recv = stack.pop().?;
                 const name = chunk.names.items[inst.a];
-                const args = args_arr.object.elements.items;
+                const args = args_arr.asObj().elements.items;
                 const result = try invokeMethod(vm, recv, name, args);
                 try stack.append(stack_alloc, result);
             },
             .new_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try construct(vm, callee, args_arr.object.elements.items));
+                try stack.append(stack_alloc, try construct(vm, callee, args_arr.asObj().elements.items));
             },
 
             .ret => return stack.pop().?,
-            .ret_undef => return .undefined,
+            .ret_undef => return Value.undef(),
             .abrupt_return => {
                 // A return that must run enclosing `finally` blocks first: unwind
                 // to the nearest finally carrying a "return" completion (which
@@ -548,7 +548,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // finally(s) first, then jump to the (patched) loop target. The
                 // target PC rides through as the completion value.
                 const kind: Completion = if (inst.op == .abrupt_break) .break_ else .continue_;
-                const target: Value = .{ .number = @floatFromInt(inst.a) };
+                const target: Value = Value.num(@floatFromInt(inst.a));
                 if (try unwindToFinally(vm, gen, exec, target, kind)) |fpc| ip = fpc else ip = inst.a;
             },
 
@@ -583,7 +583,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try stack.append(stack_alloc, res);
             },
             .assert_iter_result => {
-                if (stack.items[stack.items.len - 1] != .object)
+                if (!stack.items[stack.items.len - 1].isObject())
                     return vm.throwError("TypeError", "iterator result is not an object");
             },
             .iter_of => {
@@ -620,8 +620,8 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .pop_handler => _ = exec.handlers.pop(),
             .push_completion => {
                 // [value, kind] — value is undefined for a normal completion.
-                try stack.append(stack_alloc, .undefined);
-                try stack.append(stack_alloc, .{ .number = @floatFromInt(inst.a) });
+                try stack.append(stack_alloc, Value.undef());
+                try stack.append(stack_alloc, Value.num(@floatFromInt(inst.a)));
             },
             .end_finally => {
                 const kind: Completion = @enumFromInt(@as(u8, @intFromFloat(stack.pop().?.number)));
@@ -639,7 +639,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         if (try unwindToFinally(vm, gen, exec, cval, .ret)) |fpc| ip = fpc else return cval;
                     },
                     .break_, .continue_ => {
-                        if (try unwindToFinally(vm, gen, exec, cval, kind)) |fpc| ip = fpc else ip = @intFromFloat(cval.number);
+                        if (try unwindToFinally(vm, gen, exec, cval, kind)) |fpc| ip = fpc else ip = @intFromFloat(cval.asNum());
                     },
                 }
             },
@@ -661,7 +661,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
 fn makeIterResult(vm: *Interpreter, v: Value, done: bool) EvalError!Value {
     const o = try vm.newObject();
     try vm.setMember(o, "value", v);
-    try vm.setMember(o, "done", .{ .boolean = done });
+    try vm.setMember(o, "done", Value.boolVal(done));
     return o;
 }
 
@@ -677,7 +677,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     vm.initEnvironment(genv, func.closure, true);
 
     const args_obj = try vm.newArray(); // generators are never arrow functions
-    for (args) |av| try args_obj.object.elements.append(args_obj.object.elementsAllocator(vm.arena), av);
+    for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
     try genv.put("arguments", args_obj);
 
     // Bind params into the generator's environment (handles default/rest/
@@ -708,17 +708,17 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     // using the callMethod fast path.
     set_proto: {
         if (func.obj) |fobj| {
-            const fp = try vm.getProperty(.{ .object = fobj }, "prototype");
-            if (fp == .object) {
-                obj.proto = fp.object;
+            const fp = try vm.getProperty(Value.obj(fobj), "prototype");
+            if (fp.isObject()) {
+                obj.proto = fp.asObj();
                 break :set_proto;
             }
         }
-        if (vm.env.get("\x00GenProto")) |p| if (p == .object) {
-            obj.proto = p.object;
+        if (vm.env.get("\x00GenProto")) |p| if (p.isObject()) {
+            obj.proto = p.asObj();
         };
     }
-    return .{ .object = obj };
+    return Value.obj(obj);
 }
 
 /// How a generator is being resumed: a normal `.next(v)`, a `.throw(e)` that
@@ -729,11 +729,11 @@ const ResumeKind = enum { send, throw_, return_ };
 /// resume value, so the desugared `yield*` loop can branch on how it was resumed:
 /// 0 = `.next(v)`, 1 = `.throw(e)`, 2 = `.return(v)`.
 fn resumeKindNum(kind: ResumeKind) Value {
-    return .{ .number = switch (kind) {
+    return Value.num(switch (kind) {
         .send => 0,
         .throw_ => 1,
         .return_ => 2,
-    } };
+    });
 }
 
 /// Shared driver for `.next`/`.throw`/`.return`. Restores the generator's
@@ -746,7 +746,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     // A completed (or not-yet-started) generator handles each kind without
     // re-entering the body.
     if (g.done) return switch (kind) {
-        .send => makeIterResult(vm, .undefined, true),
+        .send => makeIterResult(vm, Value.undef(), true),
         .return_ => makeIterResult(vm, val, true),
         .throw_ => blk: {
             vm.exception = val;
@@ -792,7 +792,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
                 }
                 if (fin) |fpc| {
                     try g.exec.stack.append(g.stackAllocator(vm.arena), val); // completion value
-                    try g.exec.stack.append(g.stackAllocator(vm.arena), .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
+                    try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@intFromEnum(Completion.ret))));
                     g.exec.ip = fpc;
                     // fall through to run the finally via execLoop
                 } else {
@@ -890,7 +890,7 @@ fn injectThrowAt(vm: *Interpreter, g: *Generator, e: Value) EvalError!bool {
         g.exec.ip = h.catch_pc;
     } else {
         try g.exec.stack.append(g.stackAllocator(vm.arena), e); // finally completion value
-        try g.exec.stack.append(g.stackAllocator(vm.arena), .{ .number = @floatFromInt(@intFromEnum(Completion.throw)) });
+        try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
         g.exec.ip = h.finally_pc;
     }
     return true;
@@ -910,7 +910,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
     const args_obj = try vm.newArray();
-    for (args) |av| try args_obj.object.elements.append(args_obj.object.elementsAllocator(vm.arena), av);
+    for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
     try genv.put("arguments", args_obj);
     const saved_env = vm.env;
     vm.env = genv;
@@ -929,8 +929,8 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
         .result = try promise.newPromise(vm),
     };
     gc_mod.initGeneratorBacking(g);
-    try asyncDrive(vm, g, .send, .undefined);
-    return .{ .object = g.result.? };
+    try asyncDrive(vm, g, .send, Value.undef());
+    return Value.obj(g.result.?);
 }
 
 fn resultPromise(g: *Generator) *promise.Promise {
@@ -982,7 +982,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         if (e != error.Throw) return e;
         g.done = true;
         const reason = vm.exception;
-        vm.exception = .undefined;
+        vm.exception = Value.undef();
         try promise.reject(vm, resultPromise(g), reason);
         return;
     };
@@ -995,7 +995,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         onf.* = .{ .native = asyncOnFulfill, .private_data = @ptrCast(g) };
         const onr = try gc_mod.allocObj(vm.arena);
         onr.* = .{ .native = asyncOnReject, .private_data = @ptrCast(g) };
-        _ = try promise.then(vm, @ptrCast(@alignCast(awaited.promise.?)), .{ .object = onf }, .{ .object = onr });
+        _ = try promise.then(vm, @ptrCast(@alignCast(awaited.promise.?)), Value.obj(onf), Value.obj(onr));
         return;
     }
     g.done = true;
@@ -1006,16 +1006,16 @@ fn asyncOnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try asyncDrive(vm, g, .send, if (args.len > 0) args[0] else .undefined);
-    return .undefined;
+    try asyncDrive(vm, g, .send, if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
 }
 
 fn asyncOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try asyncDrive(vm, g, .throw_, if (args.len > 0) args[0] else .undefined);
-    return .undefined;
+    try asyncDrive(vm, g, .throw_, if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1034,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
     const args_obj = try vm.newArray();
-    for (args) |av| try args_obj.object.elements.append(args_obj.object.elementsAllocator(vm.arena), av);
+    for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
     try genv.put("arguments", args_obj);
     const saved_env = vm.env;
     vm.env = genv;
@@ -1062,17 +1062,17 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     // still served by the gen special-case in `builtinMethod`.
     set_proto: {
         if (func.obj) |fobj| {
-            const fp = try vm.getProperty(.{ .object = fobj }, "prototype");
-            if (fp == .object) {
-                obj.proto = fp.object;
+            const fp = try vm.getProperty(Value.obj(fobj), "prototype");
+            if (fp.isObject()) {
+                obj.proto = fp.asObj();
                 break :set_proto;
             }
         }
-        if (vm.env.get("\x00AsyncGenProto")) |p| if (p == .object) {
-            obj.proto = p.object;
+        if (vm.env.get("\x00AsyncGenProto")) |p| if (p.isObject()) {
+            obj.proto = p.asObj();
         };
     }
-    return .{ .object = obj };
+    return Value.obj(obj);
 }
 
 /// `asyncGen.next/return/throw(v)` — enqueue a request and return a promise for
@@ -1092,7 +1092,7 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
     if (g.done) {
         if (was_idle) try agDrainDone(vm, g);
     } else if (was_idle) try agStep(vm, g, kind, val);
-    return .{ .object = rp };
+    return Value.obj(rp);
 }
 
 const AgStep = union(enum) { awaited: Value, yielded: Value, returned: Value, threw: Value };
@@ -1128,7 +1128,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
                     g.exec.handlers.shrinkRetainingCapacity(keep_handlers);
                     g.exec.stack.shrinkRetainingCapacity(stack_depth);
                     try g.exec.stack.append(g.stackAllocator(vm.arena), val);
-                    try g.exec.stack.append(g.stackAllocator(vm.arena), .{ .number = @floatFromInt(@intFromEnum(Completion.ret)) });
+                    try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@intFromEnum(Completion.ret))));
                     g.exec.ip = fpc;
                 } else return .{ .returned = val };
             },
@@ -1169,7 +1169,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
         if (e != error.Throw) return e;
         const reason = vm.exception;
-        vm.exception = .undefined;
+        vm.exception = Value.undef();
         return .{ .threw = reason };
     };
     if (g.suspended) {
@@ -1192,7 +1192,7 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
             onf.* = .{ .native = agOnFulfill, .private_data = @ptrCast(g) };
             const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agOnReject, .private_data = @ptrCast(g) };
-            _ = try promise.then(vm, @ptrCast(@alignCast(ap.promise.?)), .{ .object = onf }, .{ .object = onr });
+            _ = try promise.then(vm, @ptrCast(@alignCast(ap.promise.?)), Value.obj(onf), Value.obj(onr));
         },
         .yielded => |v| {
             try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, false));
@@ -1207,7 +1207,7 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
             const wrapped = interp.promiseResolveValue(vm, v) catch |err| {
                 if (err != error.Throw) return err;
                 const reason = vm.exception;
-                vm.exception = .undefined;
+                vm.exception = Value.undef();
                 if (can_resume_abrupt) return agStep(vm, g, .throw_, reason);
                 g.done = true;
                 try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), reason);
@@ -1220,7 +1220,7 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
             onf.* = .{ .native = agReturnFulfill, .private_data = @ptrCast(g) };
             const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agReturnReject, .private_data = @ptrCast(g) };
-            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.object.promise.?)), .{ .object = onf }, .{ .object = onr });
+            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
         },
         .threw => |e| {
             g.done = true;
@@ -1242,23 +1242,23 @@ fn agDoneReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const result: *value.Object = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try promise.resolve(vm, @ptrCast(@alignCast(result.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else .undefined, true));
-    return .undefined;
+    try promise.resolve(vm, @ptrCast(@alignCast(result.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
+    return Value.undef();
 }
 
 fn agDoneReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const result: *value.Object = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try promise.reject(vm, @ptrCast(@alignCast(result.promise.?)), if (args.len > 0) args[0] else .undefined);
-    return .undefined;
+    try promise.reject(vm, @ptrCast(@alignCast(result.promise.?)), if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
 }
 
 fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value_v: Value) EvalError!void {
     const wrapped = interp.promiseResolveValue(vm, value_v) catch |err| {
         if (err != error.Throw) return err;
         const reason = vm.exception;
-        vm.exception = .undefined;
+        vm.exception = Value.undef();
         try promise.reject(vm, @ptrCast(@alignCast(result.promise.?)), reason);
         return;
     };
@@ -1266,7 +1266,7 @@ fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value
     onf.* = .{ .native = agDoneReturnFulfill, .private_data = @ptrCast(result) };
     const onr = try gc_mod.allocObj(vm.arena);
     onr.* = .{ .native = agDoneReturnReject, .private_data = @ptrCast(result) };
-    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.object.promise.?)), .{ .object = onf }, .{ .object = onr });
+    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
 }
 
 /// Once the generator is done, settle every still-queued request: a `next`
@@ -1277,7 +1277,7 @@ fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
         switch (req.kind) {
             .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promise.?)), req.value),
             .return_ => try settleAsyncGeneratorDoneReturn(vm, req.result, req.value),
-            .send => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promise.?)), try makeIterResult(vm, .undefined, true)),
+            .send => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promise.?)), try makeIterResult(vm, Value.undef(), true)),
         }
     }
 }
@@ -1288,12 +1288,12 @@ fn agReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    if (g.requests.items.len == 0) return .undefined;
+    if (g.requests.items.len == 0) return Value.undef();
     const front = g.requests.items[0].result;
-    try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else .undefined, true));
+    try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
     _ = g.requests.orderedRemove(0);
     try agDrainDone(vm, g);
-    return .undefined;
+    return Value.undef();
 }
 
 /// AsyncGeneratorAwaitReturn rejected: the await threw → reject the front request.
@@ -1301,28 +1301,28 @@ fn agReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    if (g.requests.items.len == 0) return .undefined;
+    if (g.requests.items.len == 0) return Value.undef();
     const front = g.requests.items[0].result;
-    try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), if (args.len > 0) args[0] else .undefined);
+    try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), if (args.len > 0) args[0] else Value.undef());
     _ = g.requests.orderedRemove(0);
     try agDrainDone(vm, g);
-    return .undefined;
+    return Value.undef();
 }
 
 fn agOnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try agStep(vm, g, .send, if (args.len > 0) args[0] else .undefined);
-    return .undefined;
+    try agStep(vm, g, .send, if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
 }
 
 fn agOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try agStep(vm, g, .throw_, if (args.len > 0) args[0] else .undefined);
-    return .undefined;
+    try agStep(vm, g, .throw_, if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
 }
 
 /// Trace engine-owned `private_data` carried by VM async resume callbacks.
@@ -1412,22 +1412,22 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
             "\x00AsyncFuncProto"
         else
             null;
-        if (tag) |t| if (vm.env.get(t)) |v| if (v == .object) break :blk v.object;
+        if (tag) |t| if (vm.env.get(t)) |v| if (v.isObject()) break :blk v.asObj();
         break :blk vm.functionProto();
     };
     obj.* = .{ .js_func = @ptrCast(func), .proto = fproto };
     func.obj = obj;
     try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
-    if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, .{ .object = obj });
-    return .{ .object = obj };
+    if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, Value.obj(obj));
+    return Value.obj(obj);
 }
 
 /// Invoke `callee` with `args` and an explicit `this`. A VM-compiled function
 /// runs in a nested VM frame; everything else (natives, error constructors,
 /// tree-walk closures) is handed to the interpreter.
 fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
-    if (callee == .object) {
-        if (callee.object.js_func) |erased| {
+    if (callee.isObject()) {
+        if (callee.asObj().js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             if (!func.is_generator and !func.is_async) {
                 if (func.chunk) |fchunk| return runFunction(vm, func, fchunk, args, this_val);
@@ -1443,7 +1443,7 @@ fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Val
 /// intrinsics and the fallback for synthesized-only method names.
 fn invokeMethod(vm: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!Value {
     const method = try vm.getProperty(recv, name);
-    if (method == .object and method.object.isCallableObject())
+    if (method.isObject() and method.asObj().isCallableObject())
         return callValue(vm, method, args, recv);
     if (try vm.builtinMethod(recv, name, args)) |r| return r;
     return callValue(vm, method, args, recv);
@@ -1453,13 +1453,13 @@ fn invokeMethod(vm: *Interpreter, recv: Value, name: []const u8, args: []const V
 /// `this` (tagged for `instanceof`); error constructors and tree-walk functions
 /// are delegated to the interpreter.
 fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
-    if (callee == .object) {
-        if (callee.object.js_func) |erased| {
+    if (callee.isObject()) {
+        if (callee.asObj().js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
             if (func.chunk) |fchunk| {
-                const this_val = try vm.newInstance(callee.object);
+                const this_val = try vm.newInstance(callee.asObj());
                 const ret = try runFunction(vm, func, fchunk, args, this_val);
-                return if (ret == .object) ret else this_val;
+                return if (ret.isObject()) ret else this_val;
             }
         }
     }
@@ -1474,7 +1474,7 @@ fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const 
     // Allocate the activation frame: slots default to undefined, the first
     // `params.len` are filled from the arguments. Globals stay in `vm.env`.
     const slots = try vm.arena.alloc(Value, func.local_count);
-    @memset(slots, .undefined);
+    @memset(slots, Value.undef());
     for (func.params, 0..) |_, i| {
         if (i < args.len) slots[i] = args[i];
     }
