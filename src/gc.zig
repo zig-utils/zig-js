@@ -99,31 +99,27 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (concurrent) o.unlockProperties();
 
     if (o.is_weak and (o.is_map or o.is_set)) {
-        // `weak_entries`/`finalization_records` register *interior* pointers
-        // (`&entry.key`) as weak slots. Those addresses point into a growable
-        // ArrayList, so a concurrent mutator append can reallocate the buffer
-        // and dangle a slot registered earlier this cycle — which the lock
-        // around the read does NOT prevent. So weak collections are still marked
-        // only under stop-the-world (M1) / GIL-held (M2) marking, where
-        // `weak_entries` cannot grow during the cycle. Making them concurrent
-        // needs isMarked-based weak clearing (no registered interior pointers);
-        // until then the mutator funnels (`weakEntry*`/`finRecord*`) keep the
-        // storage behind `elements_lock` so that rework is a localized change.
-        for (o.weak_entries.items) |*entry| v.markWeak(&entry.key);
+        // Weak collections register no interior weak slots here — keys are weak
+        // (their liveness is read by `isLive` in the world-stopped finish pass,
+        // `pruneDeadWeakEntries`) and values are ephemeron edges marked in
+        // `traceObjectEphemeron` (also at finish). So `weak_entries` is never
+        // read during the (possibly concurrent) mark — nothing tears against a
+        // mutator append, and no `&entry.key` can dangle when the buffer grows.
     } else {
         if (concurrent) o.lockElements();
         for (o.elements.items) |el| markValue(v, el);
         if (concurrent) o.unlockElements();
     }
     markValueOpt(v, o.prim);
-    markWeakObject(v, &o.weak_ref_target);
+    markWeakObject(v, &o.weak_ref_target); // a stable field address — safe to register
     if (o.is_finalization_registry) {
         markValue(v, o.finalization_callback);
-        for (o.finalization_records.items) |*record| {
-            v.markWeak(&record.target);
-            if (record.token != null) v.markWeak(&record.token);
-            markValue(v, record.held);
-        }
+        // Only `held` is a strong edge (mark it by value under the entry-storage
+        // lock so a concurrent append can't tear the read). target/token are
+        // weak — their liveness is decided by `isLive` at finish, not registered.
+        if (concurrent) o.lockElements();
+        for (o.finalization_records.items) |*record| markValue(v, record.held);
+        if (concurrent) o.unlockElements();
     }
 
     // Type-erased side-cells.
@@ -149,12 +145,19 @@ pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
     }
 }
 
-pub fn pruneDeadWeakEntries(o: *Object) bool {
+/// World-stopped finish pass (afterWeak): drop weak entries whose key died and
+/// mark finalization records whose target died as ready. Liveness is read
+/// directly from `heap.isLive` (the mark bit) rather than from a pre-registered
+/// interior weak slot — so this is correct even when the mark ran concurrently
+/// with a mutator that grew `weak_entries`/`finalization_records`. Behaviorally
+/// identical to the old markWeak-then-null-then-prune for the stop-the-world and
+/// GIL-held paths (a dead key/target is exactly an unmarked managed cell).
+pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
     var cleanup_ready = false;
     if (o.is_weak and (o.is_map or o.is_set)) {
         var i: usize = 0;
         while (i < o.weak_entries.items.len) {
-            if (o.weak_entries.items[i].key == null) {
+            if (!heap.isLive(o.weak_entries.items[i].key)) {
                 _ = o.weak_entries.orderedRemove(i);
             } else {
                 i += 1;
@@ -163,10 +166,12 @@ pub fn pruneDeadWeakEntries(o: *Object) bool {
     }
     if (o.is_finalization_registry) {
         for (o.finalization_records.items) |*record| {
-            if (record.target == null and !record.ready) {
+            if (!heap.isLive(record.target) and !record.ready) {
                 record.ready = true;
                 cleanup_ready = true;
             }
+            // A dead unregister token can never match a future unregister; drop it.
+            if (record.token != null and !heap.isLive(record.token)) record.token = null;
         }
     }
     return cleanup_ready;
@@ -536,7 +541,10 @@ pub const Binding = struct {
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
-                if (pruneDeadWeakEntries(o)) self.context.queueFinalizationRegistryCleanup(o);
+                // The heap running this collection is the Context's own (afterWeak
+                // only fires mid-collect), and marks are still valid (pre-sweep).
+                const heap = self.context.gc orelse return;
+                if (pruneDeadWeakEntries(o, heap)) self.context.queueFinalizationRegistryCleanup(o);
             },
             else => {},
         }

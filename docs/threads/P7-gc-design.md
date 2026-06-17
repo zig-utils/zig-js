@@ -523,22 +523,30 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   FinalizationRegistry `finalization_records` mutation now goes through
   `Object.weakEntry*`/`finRecord*` helpers — each self-contained and guarded by
   `elements_lock`, with the lock never held across the `getOrInsertComputed` /
-  cleanup callbacks (which may re-enter the collection). That is the funnel
-  prerequisite. *Concurrent marking of weak collections still needs one more
-  thing:* the marker registers *interior* weak slots (`markWeak(&entry.key)`)
-  that point into the growable `weak_entries`/`finalization_records` buffer, so a
-  concurrent append can reallocate the buffer and dangle a slot registered
-  earlier in the cycle — a hazard the read lock does not address (caught by the
-  TSan-slowed marker as an alignment fault on a freed entry). The fix is
-  isMarked-based weak clearing (decide key/target liveness by `isMarked` in the
-  world-stopped finish pass instead of pre-registering interior pointers); until
-  then weak collections are marked only under stop-the-world (M1) / GIL-held
-  (M2) marking, where the buffer cannot grow mid-cycle.
-  *Remaining for M3:* land isMarked-based weak clearing (above); then drive the
-  production `collectMidScript` driver to run the marker concurrently (instead of
-  only while peers are parked), drop the GIL for true multi-mutator parallelism
-  (needs thread-safe cell allocation + the full per-structure-lock audit), and
-  run the TSan campaign + serial-perf gate + stress amplifiers.
+  cleanup callbacks (which may re-enter the collection).
+  *Concurrent weak-collection marking landed (isMarked-based clearing).* The
+  marker no longer registers *interior* weak slots (`markWeak(&entry.key)`) that
+  point into the growable `weak_entries`/`finalization_records` buffer — a
+  concurrent append could reallocate it and dangle a slot registered earlier in
+  the cycle (a hazard the read lock did not address; the TSan-slowed marker
+  caught it as an alignment fault on a freed entry). Instead the marker doesn't
+  read `weak_entries` during the cycle at all (keys are weak; values are
+  ephemeron edges marked at the world-stopped finish), and `finalization_records`
+  is read only to mark the strong `held` value (by value, under `elements_lock`).
+  Weak-key / finalizer-target liveness is then decided at the finish pass by the
+  cell's mark bit via `zig-gc` `Heap.isLive(ptr)` (O(1)) in
+  `pruneDeadWeakEntries` — behavior-identical to the old markWeak-then-null-then-
+  prune for M1/M2 (a dead key/target is exactly an unmarked managed cell), but
+  with no registered interior pointer to dangle. Validated: a marker thread races
+  a mutator inserting 1,000 WeakMap entries (`enable_gc concurrent (M3)`),
+  TSan-clean; WeakRef still uses `markWeak(&o.weak_ref_target)` (a stable field
+  address, safe). `WeakRef`/`WeakMap`/`WeakSet`/`FinalizationRegistry` test262
+  buckets stay 100%; threads-test 209/209.
+  *Remaining for M3:* drive the production `collectMidScript` driver to run the
+  marker concurrently (instead of only while peers are parked), drop the GIL for
+  true multi-mutator parallelism (needs thread-safe cell allocation + the full
+  per-structure-lock audit), and run the TSan campaign + serial-perf gate +
+  stress amplifiers.
 
 ## Verification
 

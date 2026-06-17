@@ -5308,6 +5308,75 @@ test "enable_gc concurrent (M3): a marker thread races a mutator appending into 
     std.mem.doNotOptimizeAway(&garbage);
 }
 
+test "enable_gc concurrent (M3): a WeakMap survives a marker racing a mutator that inserts entries" {
+    // Weak-collection counterpart of the array test, validating isMarked-based
+    // weak clearing: a marker thread runs while the mutator inserts 1,000
+    // WeakMap entries through `weakEntrySet` (which grows `weak_entries`). The
+    // marker never reads `weak_entries` during the cycle (keys are resolved by
+    // `isLive` at finish, values by the ephemeron pass), so the growing buffer
+    // races nothing and no interior `&entry.key` can dangle. Keys are kept
+    // strongly reachable via a rooted array, so every entry (and its ephemeron
+    // value) survives. This crashed before isMarked-based clearing (a realloc'd
+    // weak slot dangled); it must be TSan-clean now.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const heap = ctx.gc.?;
+    const a = ctx.arena();
+
+    const wm = try gc_mod.allocObj(a);
+    wm.* = .{ .is_weak = true, .is_map = true };
+    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "wm", Value.obj(wm));
+    const keep = try gc_mod.allocObj(a); // strongly holds the (otherwise weak) keys
+    keep.* = .{ .is_array = true };
+    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "keep", Value.obj(keep));
+
+    const n = 1000;
+    var keys: [n]*value.Object = undefined;
+    var vals: [n]*value.Object = undefined;
+    for (0..n) |i| {
+        const k = try gc_mod.allocObj(a);
+        k.* = .{};
+        const vv = try gc_mod.allocObj(a);
+        vv.* = .{};
+        try vv.setOwn(ctx.gpa, ctx.root_shape, "id", Value.num(@floatFromInt(i)));
+        try keep.appendElement(a, Value.obj(k));
+        keys[i] = k;
+        vals[i] = vv;
+    }
+
+    heap.beginConcurrentMark();
+    const Shared = struct {
+        heap: *Context.GcHeap,
+        done: std.atomic.Value(bool) = .init(false),
+        fn loop(s: *@This()) void {
+            while (true) {
+                const q = s.heap.concurrentMarkRound();
+                if (s.done.load(.acquire) and q) break;
+                std.atomic.spinLoopHint();
+            }
+        }
+    };
+    var shared = Shared{ .heap = heap };
+    const marker = try std.Thread.spawn(.{}, Shared.loop, .{&shared});
+    for (0..n) |i| try wm.weakEntrySet(a, @ptrCast(keys[i]), Value.obj(vals[i]));
+    shared.done.store(true, .release);
+    marker.join();
+    heap.finishConcurrentMark();
+
+    // Every entry present; each ephemeron value (live key) survived intact.
+    try std.testing.expectEqual(@as(usize, n), wm.weak_entries.items.len);
+    for (0..n) |i| {
+        const got = wm.weakEntryGet(@ptrCast(keys[i])) orelse return error.TestUnexpectedResult;
+        const id = got.asObj().getOwn("id") orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(f64, @floatFromInt(i)), id.asNum());
+    }
+}
+
 test "enable_gc: conservative native-stack scan keeps a stack-only value alive" {
     // The safety-critical direction of mid-script collection: a `Value` held
     // only as a native Zig local (the tree-walker's case) must survive a
