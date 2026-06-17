@@ -1464,6 +1464,49 @@ pub const Value = union(enum) {
     string: []const u8,
     object: *Object,
 
+    /// The value-kind discriminant, independent of the payload representation.
+    /// Phase 7 / blocker #7 introduces a representation-agnostic `Value` API
+    /// (this `Kind` + the `num`/`str`/`obj`/… constructors and `asNum`/`asStr`/…
+    /// accessors below). They are byte-identical over today's tagged union, so
+    /// migrating call sites onto them is a no-op — but once every site uses the
+    /// API instead of `switch (v)` / `.{ .string = … }` / `v.string`, swapping
+    /// the underlying representation to the 8-byte NaN-box (`nanbox.zig`, with
+    /// strings as `*StringCell` per `strcell.zig`) touches only this type, not
+    /// the ~2,600 call sites. See docs/threads/P7-gil-removal.md (#7).
+    pub const Kind = std.meta.Tag(Value);
+
+    pub inline fn kind(self: Value) Kind {
+        return std.meta.activeTag(self);
+    }
+
+    // Representation-agnostic constructors.
+    pub inline fn num(n: f64) Value {
+        return .{ .number = n };
+    }
+    pub inline fn str(s: []const u8) Value {
+        return .{ .string = s };
+    }
+    pub inline fn obj(o: *Object) Value {
+        return .{ .object = o };
+    }
+    pub inline fn boolVal(b: bool) Value {
+        return .{ .boolean = b };
+    }
+
+    // Representation-agnostic accessors (caller has checked `kind()` first).
+    pub inline fn asNum(self: Value) f64 {
+        return self.number;
+    }
+    pub inline fn asStr(self: Value) []const u8 {
+        return self.string;
+    }
+    pub inline fn asObj(self: Value) *Object {
+        return self.object;
+    }
+    pub inline fn asBool(self: Value) bool {
+        return self.boolean;
+    }
+
     pub fn isCallable(self: Value) bool {
         return switch (self) {
             .object => |o| o.isCallableObject(),
