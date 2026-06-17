@@ -542,34 +542,30 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   TSan-clean; WeakRef still uses `markWeak(&o.weak_ref_target)` (a stable field
   address, safe). `WeakRef`/`WeakMap`/`WeakSet`/`FinalizationRegistry` test262
   buckets stay 100%; threads-test 209/209.
+  *Production concurrent driver landed (M3, opt-in `concurrent_gc`).* With the
+  flag on (requires `enable_gc`, single-mutator — no `enable_threads`),
+  `collectMidScript` marks on a dedicated thread *concurrently with the running
+  mutator*: it begins a cycle at one safepoint (snapshotting roots incl. the
+  native stack while stable), spawns a marker thread that drains grey work + the
+  barrier hand-off, and closes the cycle at the next safepoint (stop+join, then
+  world-stopped finish — fold born cells, re-scan roots, sweep).
+  `finishConcurrentGCIfActive` runs at every quiescent boundary (evaluate /
+  evaluateModule exit, collectGarbage, destroy) so a marker never outlives its
+  cycle. Default off → the M2 incremental driver and the arena engine are
+  byte-identical. The pieces it composes: born-cell deferral
+  (`born_concurrent`); O(1) `isManaged`; per-object (`Object`) and
+  per-environment (`Environment.binding_lock`) concurrent-trace synchronization;
+  the insertion barrier; the thread-safe `aux` scratch allocator. Validated by
+  `enable_gc concurrent (M3): the production driver marks on a thread while JS
+  runs` — a 4,000-iteration loop allocates objects + per-iter `let` environments
+  and reassigns a global while the marker traces (~dozens of begin→marker→finish
+  cycles); exact arithmetic, bounded heap, no marker outlives the run,
+  **TSan-clean** (`-Dtsan`). (`Function`/`Promise`/`Generator` side-cells aren't
+  exercised concurrently by this workload; extend the same per-cell-type sync to
+  them before relying on concurrent marking for workloads dominated by those.)
   *Remaining for M3:*
-  1. **Production concurrent driver** — drive `collectMidScript` to mark on a
-     dedicated thread between safepoints (begin at one safepoint, finish at the
-     next), instead of stepping incrementally on the mutator. A flag-gated
-     (`concurrent_gc`) single-mutator prototype was built and run; it surfaced —
-     and two of its blockers are now **fixed** — the requirements for marking
-     while the mutator *allocates*:
-     - *Born-cell hazard (FIXED, zig-gc `born_concurrent`).* `Heap.create` used to
-       hand a new cell to the marker (born grey) before the caller initialized
-       the payload, so the marker could trace a half-built cell (and the init
-       overwrote a per-object lock mid-critical-section). Now cells born during a
-       concurrent mark are born marked but deferred to a mutator-private list and
-       traced at the world-stopped finish, where payloads are complete.
-     - *`isManaged` list-walk race (FIXED, zig-gc).* `Visitor.isManaged` walked
-       the all-cells list, racing `create`'s prepend; it is now an O(1) magic
-       check.
-     - *Remaining: per-cell-type concurrent-trace synchronization.* The marker
-       reads each traced cell's mutable storage while the mutator may write it.
-       `Object` is covered (slots/accessors/elements under their locks, `proto`
-       atomic), but **`Environment` is not** — `traceEnv` reads the `vars`/
-       `aliases` hashmaps and `disposables` while the mutator does
-       `Environment.put`/`assign` (TSan-flagged on a `let`-loop's binding
-       writes), and `Function`/`Promise`/`Generator` side-cells likely need the
-       same. Extending the Object-style locking (or single-word atomic slot
-       reads, since `Value` is now 8 bytes) to these traced cell types is the
-       remaining work before the production driver is TSan-clean. The prototype
-       was reverted pending it; the validated concurrent-marking capability
-       (objects/arrays + weak collections, via explicit-marker tests) stands.
+  1. Extend concurrent-trace synchronization to the remaining mutable traced
+     side-cells (`Function`/`Promise`/`Generator`) for full workload coverage.
   2. Drop the GIL for true multi-mutator parallelism (needs thread-safe cell
      allocation + the full per-structure-lock audit).
   3. TSan campaign to zero unsuppressed races; serial-perf gate; stress amplifiers.
