@@ -642,7 +642,7 @@ pub const Interpreter = struct {
 
     /// Whether `v` is the TDZ sentinel (an uninitialized let/const binding).
     fn isTdz(self: *Interpreter, v: Value) bool {
-        return v.isObject() and self.tdz_marker != null and v.object == self.tdz_marker.?;
+        return v.isObject() and self.tdz_marker != null and v.asObj() == self.tdz_marker.?;
     }
 
     /// Pre-bind every identifier in a destructuring pattern to the TDZ sentinel.
@@ -690,7 +690,7 @@ pub const Interpreter = struct {
         var env: ?*Environment = self.env;
         while (env) |e| {
             if (e.get("globalThis")) |gt| {
-                if (gt.isObject()) return gt.object;
+                if (gt.isObject()) return gt.asObj();
             }
             if (e.parent == null) break;
             env = e.parent;
@@ -720,7 +720,7 @@ pub const Interpreter = struct {
     /// represented as object-tagged primitives internally, so they still need
     /// fresh wrappers here.
     pub fn toObject(self: *Interpreter, v: Value) EvalError!*value.Object {
-        if (v.isObject() and !v.object.is_symbol and !v.object.is_bigint) return v.object;
+        if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint) return v.asObj();
         if (v.isNull() or v.isUndefined())
             return self.throwError("TypeError", "Cannot convert undefined or null to object");
         const ctor_name: []const u8 = switch (v) {
@@ -733,7 +733,7 @@ pub const Interpreter = struct {
         const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .prim = v };
         if (self.env.get(ctor_name)) |ctor| {
-            if (ctor.isObject()) o.proto = try self.protoObject(ctor.object);
+            if (ctor.isObject()) o.proto = try self.protoObject(ctor.asObj());
         }
         return o;
     }
@@ -887,8 +887,8 @@ pub const Interpreter = struct {
             obj.proto = p;
         } else if (self.env.get(name)) |ctor_v| {
             if (ctor_v.isObject()) {
-                if (ctor_v.object.getOwn("prototype")) |proto_v| {
-                    if (proto_v.isObject()) obj.proto = proto_v.object;
+                if (ctor_v.asObj().getOwn("prototype")) |proto_v| {
+                    if (proto_v.isObject()) obj.proto = proto_v.asObj();
                 }
             }
         }
@@ -959,7 +959,7 @@ pub const Interpreter = struct {
                     const obj = try self.eval(m.object);
                     if (!obj.isObject()) break :blk Value.boolVal(true);
                     const key = try self.memberKey(m.property, m.computed);
-                    const ok = try self.deleteOwn(obj.object, key);
+                    const ok = try self.deleteOwn(obj.asObj(), key);
                     // Strict mode: a failed delete (a non-configurable property)
                     // is a TypeError rather than a `false` result.
                     if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
@@ -1106,8 +1106,8 @@ pub const Interpreter = struct {
                 // mid-chain), copy the super result's internal state onto the
                 // existing `this` in place. A JS super returns undefined (it
                 // initialized `this` directly), so nothing to adopt.
-                if (self.this_value.isObject() and sup_ret.isObject() and sup_ret.object != self.this_value.object)
-                    adoptInternalSlots(self.this_value.object, sup_ret.object);
+                if (self.this_value.isObject() and sup_ret.isObject() and sup_ret.asObj() != self.this_value.asObj())
+                    adoptInternalSlots(self.this_value.asObj(), sup_ret.asObj());
                 self.this_initialized = true;
                 break :blk .undefined;
             },
@@ -1450,7 +1450,7 @@ pub const Interpreter = struct {
             // A String wrapper's own enumerable character indices "0".."len-1".
             if (o.prim) |p| if (p.isString()) {
                 var i: usize = 0;
-                while (i < utf16LenOfString(p.string)) : (i += 1) {
+                while (i < utf16LenOfString(p.asStr())) : (i += 1) {
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
                     if (visited.contains(key)) continue;
                     try visited.put(self.arena, key, {});
@@ -1479,10 +1479,10 @@ pub const Interpreter = struct {
                 try visited.put(self.arena, k, {});
                 const enumerable = if (moduleNsOf(o) != null) blk: {
                     const desc = try moduleNsDesc(self, o, k);
-                    break :blk desc.isObject() and if (desc.object.getOwn("enumerable")) |e| e.toBoolean() else false;
+                    break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |e| e.toBoolean() else false;
                 } else if (o.proxy_handler != null or o.proxy_revoked) blk: {
                     const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ Value.obj(o), self.keyToValue(k) });
-                    break :blk desc.isObject() and if (desc.object.getOwn("enumerable")) |e| e.toBoolean() else false;
+                    break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |e| e.toBoolean() else false;
                 } else o.getAttr(k).enumerable;
                 if (enumerable) try out.append(self.arena, k);
             }
@@ -1738,10 +1738,10 @@ pub const Interpreter = struct {
         // ToNumeric: an object operand coerces via ToPrimitive(number); a BigInt
         // is incremented/decremented by 1n (not the Number 1), and the result
         // stays a BigInt.
-        if (old_val.isObject() and !old_val.object.is_bigint and !old_val.object.is_symbol)
+        if (old_val.isObject() and !old_val.asObj().is_bigint and !old_val.asObj().is_symbol)
             old_val = try self.toPrimitive(old_val, .number);
-        if (old_val.isObject() and old_val.object.is_bigint) {
-            const b = old_val.object.bigint;
+        if (old_val.isObject() and old_val.asObj().is_bigint) {
+            const b = old_val.asObj().bigint;
             const updated = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
             try self.assignTo(target, updated);
             return if (prefix) updated else old_val;
@@ -2159,7 +2159,7 @@ pub const Interpreter = struct {
                 "\x00AsyncFuncProto"
             else
                 null;
-            if (tag) |t| if (self.env.get(t)) |v| if (v.isObject()) break :blk v.object;
+            if (tag) |t| if (self.env.get(t)) |v| if (v.isObject()) break :blk v.asObj();
             break :blk self.functionProto();
         };
         const obj = try gc_mod.allocObj(self.arena);
@@ -2171,7 +2171,7 @@ pub const Interpreter = struct {
 
     fn funcOf(v: Value) ?*Function {
         if (v.isObject()) {
-            if (v.object.js_func) |e| return @ptrCast(@alignCast(e));
+            if (v.asObj().js_func) |e| return @ptrCast(@alignCast(e));
         }
         return null;
     }
@@ -2193,7 +2193,7 @@ pub const Interpreter = struct {
         if (funcOf(Value.obj(o))) |func| {
             if (func.source.len > 0) return Value.str(func.source);
         }
-        const raw_name: []const u8 = if (o.getOwn("name")) |n| (if (n.isString()) n.string else "") else "";
+        const raw_name: []const u8 = if (o.getOwn("name")) |n| (if (n.isString()) n.asStr() else "") else "";
         const nm: []const u8 = if (raw_name.len > 0 and raw_name[0] == 0) "" else raw_name;
         return .{ .string = try std.mem.concat(self.arena, u8, &.{ "function ", nm, "() { [native code] }" }) };
     }
@@ -2221,10 +2221,10 @@ pub const Interpreter = struct {
     /// non-enumerable, configurable own `name` property), overriding the
     /// parser-assigned bare name.
     fn nameAccessor(self: *Interpreter, fnv: Value, prefix: []const u8, name_str: []const u8) EvalError!void {
-        if (!fnv.isObject() or !fnv.object.isCallableObject()) return;
+        if (!fnv.isObject() or !fnv.asObj().isCallableObject()) return;
         const nm = try std.fmt.allocPrint(self.arena, "{s} {s}", .{ prefix, name_str });
-        try fnv.object.setOwn(self.arena, self.root_shape, "name", Value.str(nm));
-        try fnv.object.setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+        try fnv.asObj().setOwn(self.arena, self.root_shape, "name", Value.str(nm));
+        try fnv.asObj().setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
         if (funcOf(fnv)) |f| f.name = nm;
     }
 
@@ -2232,23 +2232,23 @@ pub const Interpreter = struct {
     /// a string key as-is, a symbol as `[description]` (or `""` when undescribed),
     /// else ToString. Used to name concise methods/accessors from their key.
     fn keyDisplayName(self: *Interpreter, kv: Value) EvalError![]const u8 {
-        if (kv.isObject() and kv.object.is_symbol)
-            return if (kv.object.sym_desc) |d| try std.fmt.allocPrint(self.arena, "[{s}]", .{d}) else "";
-        if (kv.isString()) return kv.string;
+        if (kv.isObject() and kv.asObj().is_symbol)
+            return if (kv.asObj().sym_desc) |d| try std.fmt.allocPrint(self.arena, "[{s}]", .{d}) else "";
+        if (kv.isString()) return kv.asStr();
         return self.toStringV(kv);
     }
 
     fn maybeNameAnon(self: *Interpreter, val: Value, init_node: *Node, name: []const u8) EvalError!void {
         if (name.len == 0) return;
         if (!isAnonFnDef(init_node)) return;
-        if (!val.isObject() or !val.object.isCallableObject()) return;
-        const o = val.object;
+        if (!val.isObject() or !val.asObj().isCallableObject()) return;
+        const o = val.asObj();
         if (o.getOwn("name")) |c| {
             // Already has a meaningful own `name`: a non-empty string, or — for a
             // class with an explicit `static name(){}`/field — a non-string value.
             // Only an empty-string placeholder (a freshly-built anonymous class)
             // is overridable.
-            if (!c.isString() or c.string.len != 0) return;
+            if (!c.isString() or c.asStr().len != 0) return;
         }
         try o.setOwn(self.arena, self.root_shape, "name", Value.str(name));
         try o.setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
@@ -2470,8 +2470,8 @@ pub const Interpreter = struct {
         if (superclass) |sc| {
             const sv = try self.eval(sc);
             if (!sv.isObject()) return self.throwError("TypeError", "class extends value is not a constructor");
-            super_obj = sv.object;
-            super_proto = try self.protoObject(sv.object);
+            super_obj = sv.asObj();
+            super_proto = try self.protoObject(sv.asObj());
         }
         return self.buildClass(name, members, super_obj, super_proto, source);
     }
@@ -2534,7 +2534,7 @@ pub const Interpreter = struct {
             .is_expr_body = false,
         };
         const class_val = try self.makeFunction(fnode, self.env);
-        const class_obj = class_val.object;
+        const class_obj = class_val.asObj();
         const proto = try self.protoObject(class_obj);
         // A class's `prototype` is non-writable, non-enumerable, non-configurable.
         try class_obj.setAttr(self.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -2650,8 +2650,8 @@ pub const Interpreter = struct {
     /// path; everything else (strings, generators, Sets/Maps, user objects with
     /// `[Symbol.iterator]`) goes through the iterator protocol.
     pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
-        if (v.isObject() and v.object.is_array and self.arrayIterIntact()) {
-            for (v.object.elements.items) |e| try list.append(self.arena, e);
+        if (v.isObject() and v.asObj().is_array and self.arrayIterIntact()) {
+            for (v.asObj().elements.items) |e| try list.append(self.arena, e);
             return;
         }
         const iter_obj = try self.iteratorOf(v); // throws TypeError if not iterable
@@ -2737,12 +2737,12 @@ pub const Interpreter = struct {
     /// error constructors fabricate an error instance.
     pub fn callValueWithThis(self: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
         if (!callee.isObject()) return self.throwError("TypeError", "value is not a function");
-        const obj = callee.object;
+        const obj = callee.asObj();
         if (obj.proxy_handler != null or obj.proxy_revoked) {
             const target = obj.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'apply' on a proxy that has been revoked");
             if (try self.proxyTrap(obj, "apply")) |trap| {
                 const arr = try self.newArray();
-                for (args) |a| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), a);
+                for (args) |a| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), a);
                 return self.callValueWithThis(trap, &.{ Value.obj(target), this_val, arr }, Value.obj(obj.proxy_handler.?));
             }
             return self.callValueWithThis(Value.obj(target), args, this_val);
@@ -2781,7 +2781,7 @@ pub const Interpreter = struct {
     fn argListFromArrayLike(self: *Interpreter, v: Value) EvalError![]const Value {
         if (v.isUndefined() or v.isNull()) return &.{};
         if (!builtins.isRealObject(v)) return self.throwError("TypeError", "CreateListFromArrayLike called on non-object");
-        const o = v.object;
+        const o = v.asObj();
         const len = toLen((try self.toPrimitive(try self.getProperty(v, "length"), .number)).toNumber());
         if (len > (1 << 24)) return self.throwError("RangeError", "argument list too large");
         // Dense fast path for a plain array with no accessors.
@@ -2797,7 +2797,7 @@ pub const Interpreter = struct {
         const obj = try gc_mod.allocObj(self.arena);
         const target_proto = if (target.proxy_handler != null or target.proxy_revoked) blk: {
             const p = try self.proxyGetProto(target);
-            break :blk if (p.isObject()) p.object else null;
+            break :blk if (p.isObject()) p.asObj() else null;
         } else self.effectiveProto(target);
         obj.* = .{ .bound = @ptrCast(bf), .proto = target_proto };
         // Per spec: a bound function's `length` is max(0, target.length - args)
@@ -2807,14 +2807,14 @@ pub const Interpreter = struct {
         const bound_len: f64 = if (objectHasOwn(target, "length")) blk: {
             const tgt_len_v = try self.getProperty(Value.obj(target), "length");
             if (!tgt_len_v.isNumber()) break :blk 0;
-            const len_int = if (std.math.isNan(tgt_len_v.number)) @as(f64, 0) else @trunc(tgt_len_v.number);
+            const len_int = if (std.math.isNan(tgt_len_v.asNum())) @as(f64, 0) else @trunc(tgt_len_v.asNum());
             const bound_count: f64 = @floatFromInt(bound_args.len);
             break :blk if (len_int <= bound_count) 0 else len_int - bound_count;
         } else 0;
         try obj.setOwn(self.arena, self.root_shape, "length", Value.num(bound_len));
         try obj.setAttr(self.arena, "length", ro_attr);
         const tgt_name = try self.getProperty(Value.obj(target), "name");
-        const base_name = if (tgt_name.isString()) tgt_name.string else "";
+        const base_name = if (tgt_name.isString()) tgt_name.asStr() else "";
         const bound_name = try std.fmt.allocPrint(self.arena, "bound {s}", .{base_name});
         try obj.setOwn(self.arena, self.root_shape, "name", Value.str(bound_name));
         try obj.setAttr(self.arena, "name", ro_attr);
@@ -2852,27 +2852,27 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
             break :blk try prim.toString(self.arena);
         } else "";
-        const proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.object, name) else null;
+        const proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), name) else null;
         const err = try self.makeErrorWithProto(name, msg, proto);
         if (has_msg and msg.len == 0) {
-            try self.setProp(err.object, "message", Value.str(""));
-            try err.object.setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
+            try self.setProp(err.asObj(), "message", Value.str(""));
+            try err.asObj().setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
         }
 
         if (aggregate) {
             // `errors` is a fresh Array built from the (iterable) first argument.
             const errs = try self.iterableToArray(if (args.len > 0) args[0] else .undefined);
-            try self.setProp(err.object, "errors", errs);
-            try err.object.setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
+            try self.setProp(err.asObj(), "errors", errs);
+            try err.asObj().setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
         }
 
         if (suppressed) {
             // SuppressedError(error, suppressed, message): the first two arguments
             // become non-enumerable own `error` / `suppressed` properties.
-            try self.setProp(err.object, "error", if (args.len > 0) args[0] else .undefined);
-            try err.object.setAttr(self.arena, "error", .{ .enumerable = false, .configurable = true, .writable = true });
-            try self.setProp(err.object, "suppressed", if (args.len > 1) args[1] else .undefined);
-            try err.object.setAttr(self.arena, "suppressed", .{ .enumerable = false, .configurable = true, .writable = true });
+            try self.setProp(err.asObj(), "error", if (args.len > 0) args[0] else .undefined);
+            try err.asObj().setAttr(self.arena, "error", .{ .enumerable = false, .configurable = true, .writable = true });
+            try self.setProp(err.asObj(), "suppressed", if (args.len > 1) args[1] else .undefined);
+            try err.asObj().setAttr(self.arena, "suppressed", .{ .enumerable = false, .configurable = true, .writable = true });
         }
 
         // ES2022 `cause` option: `new Error(msg, { cause })` installs a
@@ -2882,8 +2882,8 @@ pub const Interpreter = struct {
         if (args.len > opt_i and args[opt_i] == .object) {
             if (try self.inOperator(Value.str("cause"), args[opt_i])) {
                 const cause = try self.getProperty(args[opt_i], "cause");
-                try self.setProp(err.object, "cause", cause);
-                try err.object.setAttr(self.arena, "cause", .{ .enumerable = false, .configurable = true, .writable = true });
+                try self.setProp(err.asObj(), "cause", cause);
+                try err.asObj().setAttr(self.arena, "cause", .{ .enumerable = false, .configurable = true, .writable = true });
             }
         }
         return err;
@@ -2895,7 +2895,7 @@ pub const Interpreter = struct {
         while (true) {
             const step = try self.iterStep(it);
             if (step.done) break;
-            try arr.object.elements.append(arr.object.elementsAllocator(self.arena), step.value);
+            try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), step.value);
         }
         return arr;
     }
@@ -2970,7 +2970,7 @@ pub const Interpreter = struct {
         self.signal = .none;
         self.strict = func.is_strict;
         if (self.env.get("globalThis")) |gt| {
-            if (gt.isObject()) self.global_object = gt.object;
+            if (gt.isObject()) self.global_object = gt.asObj();
         }
         // Sloppy-mode this-substitution: null/undefined become the callee
         // realm's global object; primitive receivers are boxed in the callee
@@ -2984,7 +2984,7 @@ pub const Interpreter = struct {
                 if (self.env.get("globalThis")) |gt| if (gt.isObject()) break :blk gt;
                 break :blk if (self.global_object) |g| Value{ .object = g } else this_val;
             }
-            if (!this_val.isObject() or this_val.object.is_symbol or this_val.object.is_bigint)
+            if (!this_val.isObject() or this_val.asObj().is_symbol or this_val.asObj().is_bigint)
                 break :blk Value.obj(try self.toObject(this_val));
             break :blk this_val;
         } else this_val;
@@ -3010,23 +3010,23 @@ pub const Interpreter = struct {
         // Non-arrow functions get an `arguments` array-like over the call args.
         if (!func.is_arrow) {
             const args_obj = try self.newArray();
-            args_obj.object.is_arguments = true;
+            args_obj.asObj().is_arguments = true;
             // The arguments exotic object's [[Prototype]] is %Object.prototype%
             // (not Array.prototype): it has no inherited array methods, and
             // `arguments.toString()` is Object.prototype.toString → "[object
             // Arguments]". Index storage and for-of still use the `is_array` path.
-            if (self.objectProto()) |op| args_obj.object.proto = op;
+            if (self.objectProto()) |op| args_obj.asObj().proto = op;
             // It does have an own @@iterator = %Array.prototype.values% (so
             // `arguments[Symbol.iterator]()` yields an Array Iterator).
             if (self.arrayProtoObj()) |ap| if (self.symbolIteratorKey()) |ik| {
                 if (ap.getOwn(ik)) |it| {
-                    try args_obj.object.setOwn(self.arena, self.root_shape, ik, it);
-                    try args_obj.object.setAttr(self.arena, ik, .{ .writable = true, .enumerable = false, .configurable = true });
+                    try args_obj.asObj().setOwn(self.arena, self.root_shape, ik, it);
+                    try args_obj.asObj().setAttr(self.arena, ik, .{ .writable = true, .enumerable = false, .configurable = true });
                 }
             };
-            try args_obj.object.setOwn(self.arena, self.root_shape, "length", Value.num(@floatFromInt(args.len)));
-            try args_obj.object.setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
-            for (args) |av| try args_obj.object.elements.append(args_obj.object.elementsAllocator(self.arena), av);
+            try args_obj.asObj().setOwn(self.arena, self.root_shape, "length", Value.num(@floatFromInt(args.len)));
+            try args_obj.asObj().setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
+            for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(self.arena), av);
             // Strict mode's `arguments.callee` is a poison-pill accessor whose
             // get and set are both `%ThrowTypeError%`. Reading or writing it
             // throws, but `Object.getOwnPropertyDescriptor(arguments, "callee").
@@ -3041,8 +3041,8 @@ pub const Interpreter = struct {
             }
             if (func.is_strict or non_simple_params) {
                 if (self.throwTypeError()) |tte| {
-                    try args_obj.object.setAccessor(self.arena, "callee", Value.obj(tte), Value.obj(tte));
-                    try args_obj.object.setAttr(self.arena, "callee", .{ .enumerable = false, .configurable = false });
+                    try args_obj.asObj().setAccessor(self.arena, "callee", Value.obj(tte), Value.obj(tte));
+                    try args_obj.asObj().setAttr(self.arena, "callee", .{ .enumerable = false, .configurable = false });
                 }
             }
             // Mapped arguments [[ParameterMap]]: in sloppy mode with simple
@@ -3050,7 +3050,7 @@ pub const Interpreter = struct {
             // two-way live link; reads/writes go to `call_env`).
             if (!func.is_strict and !non_simple_params and func.params.len > 0) {
                 const n = @min(args.len, func.params.len);
-                const names = try args_obj.object.argMapNamesAllocator(self.arena).alloc([]const u8, n);
+                const names = try args_obj.asObj().argMapNamesAllocator(self.arena).alloc([]const u8, n);
                 for (names, 0..) |*nm, i| nm.* = func.params[i].name;
                 // A duplicated parameter name maps only its last index.
                 for (names, 0..) |nm, i| {
@@ -3060,8 +3060,8 @@ pub const Interpreter = struct {
                         break;
                     };
                 }
-                args_obj.object.arg_map_env = @ptrCast(call_env);
-                args_obj.object.arg_map_names = names;
+                args_obj.asObj().arg_map_env = @ptrCast(call_env);
+                args_obj.asObj().arg_map_names = names;
             }
             try call_env.put("arguments", args_obj);
         }
@@ -3091,7 +3091,7 @@ pub const Interpreter = struct {
         self.mark_fn_body = false;
         if (func.is_class_constructor and func.is_derived_constructor) {
             if (self.signal == .ret) {
-                if (self.ret_value.isObject() and !self.ret_value.object.is_symbol and !self.ret_value.object.is_bigint) return self.ret_value;
+                if (self.ret_value.isObject() and !self.ret_value.asObj().is_symbol and !self.ret_value.asObj().is_bigint) return self.ret_value;
                 if (!self.ret_value.isUndefined()) {
                     self.env = saved_env;
                     self.global_object = saved_global;
@@ -3118,7 +3118,7 @@ pub const Interpreter = struct {
             if (p.is_rest) {
                 const rest = try self.newArray();
                 var j = i;
-                while (j < args.len) : (j += 1) try rest.object.elements.append(rest.object.elementsAllocator(self.arena), args[j]);
+                while (j < args.len) : (j += 1) try rest.asObj().elements.append(rest.asObj().elementsAllocator(self.arena), args[j]);
                 if (p.pattern) |pat| try self.bindPattern(pat, rest, true) else try self.env.put(p.name, rest);
                 break;
             }
@@ -3167,15 +3167,15 @@ pub const Interpreter = struct {
     /// by the constructor; `callee` is the function actually invoked.
     pub fn constructNT(self: *Interpreter, callee: Value, args: []const Value, new_target: Value) EvalError!Value {
         if (!callee.isObject()) return self.throwError("TypeError", "value is not a constructor");
-        const obj = callee.object;
+        const obj = callee.asObj();
         if (obj.proxy_handler != null or obj.proxy_revoked) {
             const target = obj.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'construct' on a proxy that has been revoked");
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
-                for (args) |a| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), a);
+                for (args) |a| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), a);
                 const res = try self.callValueWithThis(trap, &.{ Value.obj(target), arr, new_target }, Value.obj(obj.proxy_handler.?));
                 // The [[Construct]] trap must return an Object (9.5.14 step 9).
-                if (!res.isObject() or res.object.is_symbol or res.object.is_bigint)
+                if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint)
                     return self.throwError("TypeError", "proxy 'construct' trap must return an object");
                 return res;
             }
@@ -3210,7 +3210,7 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "value is not a constructor");
             // OrdinaryCreateFromConstructor: the instance proto comes from NewTarget.
             const inst = try gc_mod.allocObj(self.arena);
-            inst.* = .{ .ctor_ref = obj, .proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.object, "Object") else try self.protoObject(obj) };
+            inst.* = .{ .ctor_ref = obj, .proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), "Object") else try self.protoObject(obj) };
             const this_val = Value{ .object = inst };
             const ret = try self.callFunctionNT(func, args, this_val, new_target);
             return if (ret.isObject()) ret else this_val;
@@ -3227,7 +3227,7 @@ pub const Interpreter = struct {
 
     fn fastNumericIndex(v: Value) ?usize {
         if (!v.isNumber()) return null;
-        const n = v.number;
+        const n = v.asNum();
         if (std.math.isNan(n) or std.math.isInf(n) or @trunc(n) != n or n < 0 or n >= 4294967295)
             return null;
         return @intFromFloat(n);
@@ -3246,7 +3246,7 @@ pub const Interpreter = struct {
 
     fn setFastArrayNumericIndex(self: *Interpreter, recv: Value, index: usize, v: Value) EvalError!bool {
         if (!recv.isObject()) return false;
-        const o = recv.object;
+        const o = recv.asObj();
         try self.checkRestricted(o);
         var key_buf: [24]u8 = undefined;
         const key = std.fmt.bufPrint(&key_buf, "{d}", .{index}) catch unreachable;
@@ -3265,7 +3265,7 @@ pub const Interpreter = struct {
     /// throw), and a TypeError for a Symbol. Unlike `Value.toString` (a Zig-level
     /// rendering), this observes user methods and rejects Symbols.
     pub fn toStringV(self: *Interpreter, v: Value) EvalError![]const u8 {
-        if (v.isObject() and v.object.is_symbol)
+        if (v.isObject() and v.asObj().is_symbol)
             return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
         if (v.isObject()) {
             const prim = try self.toPrimitive(v, .string);
@@ -3279,9 +3279,9 @@ pub const Interpreter = struct {
     /// ToNumber(v): runs `[Symbol.toPrimitive]`/`valueOf`/`toString` for an
     /// object (propagating throws), and a TypeError for a Symbol.
     pub fn toNumberV(self: *Interpreter, v: Value) EvalError!f64 {
-        if (v.isObject() and v.object.is_symbol)
+        if (v.isObject() and v.asObj().is_symbol)
             return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
-        if (v.isObject() and v.object.is_bigint)
+        if (v.isObject() and v.asObj().is_bigint)
             return self.throwError("TypeError", "Cannot convert a BigInt value to a number");
         if (v.isObject()) {
             const prim = try self.toPrimitive(v, .number);
@@ -3346,7 +3346,7 @@ pub const Interpreter = struct {
     }
 
     pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
-        if (k.isObject() and k.object.is_symbol) return self.registerSymbol(k.object);
+        if (k.isObject() and k.asObj().is_symbol) return self.registerSymbol(k.asObj());
         // ToPropertyKey: an object key is first ToPrimitive(key, string) — running
         // its `[Symbol.toPrimitive]`/`toString`/`valueOf` (a TypeError if none
         // yields a primitive) — and a resulting Symbol keeps its key.
@@ -3385,17 +3385,17 @@ pub const Interpreter = struct {
     /// proto from the NewTarget's realm. Falls back to the current realm.
     pub fn ctorRealmProto(self: *Interpreter, ctor: *value.Object, service: []const u8) EvalError!*value.Object {
         const p = try self.getProperty(Value.obj(ctor), "prototype");
-        if (p.isObject() and !p.object.is_symbol) return p.object;
+        if (p.isObject() and !p.asObj().is_symbol) return p.asObj();
         if (ctor.js_func) |jf| {
             const fnp: *Function = @ptrCast(@alignCast(jf));
             var env: ?*Environment = fnp.closure;
             while (env) |e| {
                 // The realm's intrinsics live on its global object (globalThis).
-                const g: ?*value.Object = if (e.get("globalThis")) |gt| (if (gt.isObject()) gt.object else null) else null;
+                const g: ?*value.Object = if (e.get("globalThis")) |gt| (if (gt.isObject()) gt.asObj() else null) else null;
                 if (g) |gobj| {
                     if (gobj.getOwn("Intl")) |intl| if (intl.isObject())
-                        if (intl.object.getOwn(service)) |sv| if (sv.isObject())
-                            if (sv.object.getOwn("prototype")) |pp| if (pp.isObject()) return pp.object;
+                        if (intl.asObj().getOwn(service)) |sv| if (sv.isObject())
+                            if (sv.asObj().getOwn("prototype")) |pp| if (pp.isObject()) return pp.asObj();
                     break;
                 }
                 if (e.parent == null) break;
@@ -3408,10 +3408,10 @@ pub const Interpreter = struct {
     fn envIntrinsicProto(env: *Environment, intrinsic: []const u8) ?*value.Object {
         if (env.get("globalThis")) |gt| {
             if (gt.isObject()) {
-                if (gt.object.getOwn(intrinsic)) |ctor_v| {
+                if (gt.asObj().getOwn(intrinsic)) |ctor_v| {
                     if (ctor_v.isObject()) {
-                        if (ctor_v.object.getOwn("prototype")) |proto_v| {
-                            if (proto_v.isObject()) return proto_v.object;
+                        if (ctor_v.asObj().getOwn("prototype")) |proto_v| {
+                            if (proto_v.isObject()) return proto_v.asObj();
                         }
                     }
                 }
@@ -3419,8 +3419,8 @@ pub const Interpreter = struct {
         }
         if (env.get(intrinsic)) |ctor_v| {
             if (ctor_v.isObject()) {
-                if (ctor_v.object.getOwn("prototype")) |proto_v| {
-                    if (proto_v.isObject()) return proto_v.object;
+                if (ctor_v.asObj().getOwn("prototype")) |proto_v| {
+                    if (proto_v.isObject()) return proto_v.asObj();
                 }
             }
         }
@@ -3429,7 +3429,7 @@ pub const Interpreter = struct {
 
     fn envIntrinsicObject(env: *Environment, intrinsic: []const u8) ?*value.Object {
         if (env.get(intrinsic)) |v| {
-            if (v.isObject()) return v.object;
+            if (v.isObject()) return v.asObj();
         }
         return null;
     }
@@ -3454,7 +3454,7 @@ pub const Interpreter = struct {
         }
         if (ctor.bound) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            if (bf.target.isObject()) return try self.functionRealmIntrinsicProto(bf.target.object, intrinsic);
+            if (bf.target.isObject()) return try self.functionRealmIntrinsicProto(bf.target.asObj(), intrinsic);
         }
         return null;
     }
@@ -3479,7 +3479,7 @@ pub const Interpreter = struct {
         }
         if (ctor.bound) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            if (bf.target.isObject()) return try self.functionRealmIntrinsicObject(bf.target.object, intrinsic);
+            if (bf.target.isObject()) return try self.functionRealmIntrinsicObject(bf.target.asObj(), intrinsic);
         }
         return null;
     }
@@ -3489,7 +3489,7 @@ pub const Interpreter = struct {
     /// use the NewTarget realm's intrinsic prototype when that realm is known.
     pub fn ctorRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!*value.Object {
         const p = try self.getProperty(Value.obj(ctor), "prototype");
-        if (p.isObject() and !p.object.is_symbol) return p.object;
+        if (p.isObject() and !p.asObj().is_symbol) return p.asObj();
         if (try self.functionRealmIntrinsicProto(ctor, intrinsic)) |proto| return proto;
         if (envIntrinsicProto(self.env, intrinsic)) |proto| return proto;
         return try self.protoObject(ctor);
@@ -3503,12 +3503,12 @@ pub const Interpreter = struct {
         if (!self.new_target.isObject()) return null;
         // GetPrototypeFromConstructor: new.target.prototype, or — when that is not
         // an Object — the *new.target's realm's* named intrinsic prototype.
-        return try self.ctorRealmIntrinsicProto(self.new_target.object, ctor_name);
+        return try self.ctorRealmIntrinsicProto(self.new_target.asObj(), ctor_name);
     }
 
     pub fn protoObject(self: *Interpreter, ctor: *value.Object) EvalError!*value.Object {
         if (ctor.getOwn("prototype")) |p| {
-            if (p.isObject()) return p.object;
+            if (p.isObject()) return p.asObj();
         }
         const proto = (try self.newObject()).object;
         try self.setProp(ctor, "prototype", Value.obj(proto));
@@ -3729,13 +3729,13 @@ pub const Interpreter = struct {
     /// value is a String. Throws a TypeError otherwise.
     fn validateImportOptions(self: *Interpreter, options: Value) EvalError!void {
         if (options.isUndefined()) return;
-        if (!options.isObject() or options.object.is_symbol or options.object.is_bigint)
+        if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)
             return self.throwError("TypeError", "import() options must be an object");
         const attrs = try self.getProperty(options, "with");
         if (attrs.isUndefined()) return;
-        if (!attrs.isObject() or attrs.object.is_symbol or attrs.object.is_bigint)
+        if (!attrs.isObject() or attrs.asObj().is_symbol or attrs.asObj().is_bigint)
             return self.throwError("TypeError", "import() 'with' attributes must be an object");
-        const keys = try attrs.object.enumerableKeys(self.arena);
+        const keys = try attrs.asObj().enumerableKeys(self.arena);
         for (keys) |k| {
             const v = try self.getProperty(attrs, k);
             if (!v.isString()) return self.throwError("TypeError", "import attribute values must be strings");
@@ -3748,7 +3748,7 @@ pub const Interpreter = struct {
     /// intrinsic promise so `Await` observes its `then` hook exactly once.
     pub fn awaitValue(self: *Interpreter, v: Value) EvalError!Value {
         const p = promise.promiseOf(v) orelse blk: {
-            if (!v.isObject() or v.object.is_array) return v;
+            if (!v.isObject() or v.asObj().is_array) return v;
             const pobj = try promise.newPromise(self);
             const pp = promise.promiseOf(Value.obj(pobj)).?;
             try promise.resolve(self, pp, v);
@@ -3811,7 +3811,7 @@ pub const Interpreter = struct {
 
     fn finishBigInt(self: *Interpreter, o: *value.Object) EvalError!void {
         if (self.env.get("BigInt")) |c| {
-            if (c.isObject()) o.proto = try self.protoObject(c.object);
+            if (c.isObject()) o.proto = try self.protoObject(c.asObj());
         }
     }
 
@@ -3831,7 +3831,7 @@ pub const Interpreter = struct {
                 if (o.is_bigint) return v;
                 if (o.is_symbol) return self.throwError("TypeError", "Cannot convert a Symbol value to a BigInt");
                 const p = try self.toPrimitive(v, .number);
-                if (p.isObject() and !p.object.is_bigint and !p.object.is_symbol) return self.throwError("TypeError", "Cannot convert object to a BigInt");
+                if (p.isObject() and !p.asObj().is_bigint and !p.asObj().is_symbol) return self.throwError("TypeError", "Cannot convert object to a BigInt");
                 return self.toBigIntValueImpl(p, number_ok);
             },
             .boolean => |b| return self.makeBigInt(if (b) 1 else 0),
@@ -3878,7 +3878,7 @@ pub const Interpreter = struct {
                 .boolean => "Boolean",
                 else => "Object",
             };
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, intrinsic);
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic);
         }
         return Value.obj(o);
     }
@@ -3904,8 +3904,8 @@ pub const Interpreter = struct {
     fn arrayProto(self: *Interpreter) ?*value.Object {
         const av = self.env.get("Array") orelse return null;
         if (!av.isObject()) return null;
-        const p = av.object.getOwn("prototype") orelse return null;
-        return if (p.isObject()) p.object else null;
+        const p = av.asObj().getOwn("prototype") orelse return null;
+        return if (p.isObject()) p.asObj() else null;
     }
 
     /// `%Object.prototype%`, the [[Prototype]] of an ordinary plain object —
@@ -3917,8 +3917,8 @@ pub const Interpreter = struct {
     fn objectProto(self: *Interpreter) ?*value.Object {
         const ov = self.env.get("Object") orelse return null;
         if (!ov.isObject()) return null;
-        const p = ov.object.getOwn("prototype") orelse return null;
-        return if (p.isObject()) p.object else null;
+        const p = ov.asObj().getOwn("prototype") orelse return null;
+        return if (p.isObject()) p.asObj() else null;
     }
 
     /// The shared `%ThrowTypeError%` intrinsic, stashed as the get/set of
@@ -3926,11 +3926,11 @@ pub const Interpreter = struct {
     /// `arguments.callee` and `arguments.caller` poison-pill accessors.
     pub fn throwTypeError(self: *Interpreter) ?*value.Object {
         if (self.env.get("\x00ThrowTypeError")) |v| {
-            if (v.isObject()) return v.object;
+            if (v.isObject()) return v.asObj();
         }
         const fp = self.functionProto() orelse return null;
         const acc = fp.getAccessor("caller") orelse return null;
-        if (acc.get) |g| if (g.isObject()) return g.object;
+        if (acc.get) |g| if (g.isObject()) return g.asObj();
         return null;
     }
 
@@ -3940,8 +3940,8 @@ pub const Interpreter = struct {
     pub fn functionProto(self: *Interpreter) ?*value.Object {
         const fv = self.env.get("Function") orelse return null;
         if (!fv.isObject()) return null;
-        const p = fv.object.getOwn("prototype") orelse return null;
-        return if (p.isObject()) p.object else null;
+        const p = fv.asObj().getOwn("prototype") orelse return null;
+        return if (p.isObject()) p.asObj() else null;
     }
 
     /// `{ ...src }` CopyDataProperties: copy `src`'s own enumerable properties /
@@ -3971,12 +3971,12 @@ pub const Interpreter = struct {
     pub fn vmInitAccessor(self: *Interpreter, obj: Value, key: Value, fn_val: Value, is_get: bool) EvalError!void {
         const k = try self.keyOf(key);
         const name = try self.keyDisplayName(key);
-        if (funcOf(fn_val)) |f| f.home_object = obj.object;
+        if (funcOf(fn_val)) |f| f.home_object = obj.asObj();
         try self.nameAccessor(fn_val, if (is_get) "get" else "set", name);
         if (is_get)
-            try self.defineAccessor(obj.object, k, fn_val, null)
+            try self.defineAccessor(obj.asObj(), k, fn_val, null)
         else
-            try self.defineAccessor(obj.object, k, null, fn_val);
+            try self.defineAccessor(obj.asObj(), k, null, fn_val);
     }
 
     fn evalObjectLit(self: *Interpreter, props: []ast.Property) EvalError!Value {
@@ -3996,30 +3996,30 @@ pub const Interpreter = struct {
                 .none => {
                     const pv = try self.eval(p.value);
                     if (p.key_expr == null and std.mem.eql(u8, key, "__proto__")) {
-                        if (pv.isObject()) v.object.proto = pv.object;
-                        if (pv.isNull()) v.object.proto = null;
+                        if (pv.isObject()) v.asObj().proto = pv.asObj();
+                        if (pv.isNull()) v.asObj().proto = null;
                         continue;
                     }
                     // A concise method's [[HomeObject]] is the object being built,
                     // so `super` inside it resolves on the object's prototype.
                     if (p.value.* == .function and p.value.function.is_method)
                         if (funcOf(pv)) |f| {
-                            f.home_object = v.object;
+                            f.home_object = v.asObj();
                         };
                     try self.maybeNameAnon(pv, p.value, name_str); // `{ x: function(){} }` ⇒ name "x"
-                    try self.setProp(v.object, key, pv);
+                    try self.setProp(v.asObj(), key, pv);
                 },
                 .get => {
                     const gv = try self.eval(p.value);
-                    if (funcOf(gv)) |f| f.home_object = v.object;
+                    if (funcOf(gv)) |f| f.home_object = v.asObj();
                     try self.nameAccessor(gv, "get", name_str);
-                    try self.defineAccessor(v.object, key, gv, null);
+                    try self.defineAccessor(v.asObj(), key, gv, null);
                 },
                 .set => {
                     const sv = try self.eval(p.value);
-                    if (funcOf(sv)) |f| f.home_object = v.object;
+                    if (funcOf(sv)) |f| f.home_object = v.asObj();
                     try self.nameAccessor(sv, "set", name_str);
-                    try self.defineAccessor(v.object, key, null, sv);
+                    try self.defineAccessor(v.asObj(), key, null, sv);
                 },
             }
         }
@@ -4032,7 +4032,7 @@ pub const Interpreter = struct {
     pub fn regexpPrototypeFromNewTarget(self: *Interpreter) EvalError!?*value.Object {
         if (self.new_target.isObject()) {
             const p = try self.getProperty(self.new_target, "prototype");
-            if (p.isObject() and !p.object.is_symbol and !p.object.is_bigint) return p.object;
+            if (p.isObject() and !p.asObj().is_symbol and !p.asObj().is_bigint) return p.asObj();
         }
         return null;
     }
@@ -4054,9 +4054,9 @@ pub const Interpreter = struct {
         if (self.new_target.isObject()) {
             // GetPrototypeFromConstructor: new.target.prototype, or new.target's
             // realm's %RegExp.prototype% when that is not an Object.
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "RegExp");
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "RegExp");
         } else if (self.env.get("RegExp")) |c| {
-            if (c.isObject()) o.proto = try self.protoObject(c.object);
+            if (c.isObject()) o.proto = try self.protoObject(c.asObj());
         }
         // Eagerly compile to validate the pattern — RegExp construction reports a
         // SyntaxError for an invalid pattern (the compiled form is discarded;
@@ -4115,7 +4115,7 @@ pub const Interpreter = struct {
     /// throwing).
     fn isRegExpProto(self: *Interpreter, o: *value.Object) bool {
         if (self.env.get("RegExp")) |c| if (c.isObject()) {
-            if (c.object.getOwn("prototype")) |p| if (p.isObject()) return p.object == o;
+            if (c.asObj().getOwn("prototype")) |p| if (p.isObject()) return p.asObj() == o;
         };
         return false;
     }
@@ -4185,15 +4185,15 @@ pub const Interpreter = struct {
                 if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, mend)));
                 recordRegexpLegacy(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
-                try arr.object.elements.append(arr.object.elementsAllocator(self.arena), Value.str(try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
-                for (0..m.captures.len) |i| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), try self.captureVal(m, i));
-                try self.setProp(arr.object, "index", Value.num(@floatFromInt(utf16IndexForByteOffset(search_input, mstart))));
-                try self.setProp(arr.object, "input", Value.str(input));
+                try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), Value.str(try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
+                for (0..m.captures.len) |i| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), try self.captureVal(m, i));
+                try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(utf16IndexForByteOffset(search_input, mstart))));
+                try self.setProp(arr.asObj(), "input", Value.str(input));
                 const groups = try self.regexGroups(re, m);
-                try self.setProp(arr.object, "groups", if (groups) |g| Value.obj(g) else .undefined);
+                try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else .undefined);
                 // The `d` (hasIndices) flag adds a parallel match-indices array.
                 if (std.mem.indexOfScalar(u8, flags, 'd') != null)
-                    try self.setProp(arr.object, "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0)));
+                    try self.setProp(arr.asObj(), "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0)));
                 return arr;
             }
             if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -4213,10 +4213,10 @@ pub const Interpreter = struct {
         const exec = try self.getProperty(rx, "exec");
         if (exec.isCallable()) {
             const result = try self.callValueWithThis(exec, &.{Value.str(s)}, rx);
-            if (result.isNull() or (result.isObject() and !result.object.is_symbol and !result.object.is_bigint)) return result;
+            if (result.isNull() or (result.isObject() and !result.asObj().is_symbol and !result.asObj().is_bigint)) return result;
             return self.throwError("TypeError", "RegExp exec result must be an object or null");
         }
-        if (rx.object.is_regex) return (try self.regexMethod(rx.object, "exec", &.{Value.str(s)})).?;
+        if (rx.asObj().is_regex) return (try self.regexMethod(rx.asObj(), "exec", &.{Value.str(s)})).?;
         return self.throwError("TypeError", "RegExp exec property is not callable");
     }
 
@@ -4225,7 +4225,7 @@ pub const Interpreter = struct {
     }
 
     fn setRegExpLikeLastIndexValue(self: *Interpreter, rx: Value, v: Value) EvalError!void {
-        if (rx.isObject() and rx.object.is_regex) return self.setRegExpLastIndexValue(rx.object, v);
+        if (rx.isObject() and rx.asObj().is_regex) return self.setRegExpLastIndexValue(rx.asObj(), v);
         if (rx.isObject()) {
             const was_strict = self.strict;
             self.strict = true;
@@ -4237,8 +4237,8 @@ pub const Interpreter = struct {
 
     fn regexpSameValue(a: Value, b: Value) bool {
         if (a.isNumber() and b.isNumber()) {
-            const x = a.number;
-            const y = b.number;
+            const x = a.asNum();
+            const y = b.asNum();
             if (std.math.isNan(x) and std.math.isNan(y)) return true;
             if (x == 0 and y == 0) return (1.0 / x) == (1.0 / y);
             return x == y;
@@ -4517,7 +4517,7 @@ pub const Interpreter = struct {
     }
 
     fn isRegExpObjectValue(v: Value) bool {
-        return v.isObject() and !v.object.is_symbol and !v.object.is_bigint;
+        return v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint;
     }
 
     /// RegExp.prototype[@@matchAll]: build a lazy %RegExpStringIterator% over a
@@ -4539,7 +4539,7 @@ pub const Interpreter = struct {
         const it = try gc_mod.allocObj(self.arena);
         it.* = .{};
         if (self.env.get("\x00ReStrIterProto")) |p| {
-            if (p.isObject()) it.proto = p.object;
+            if (p.isObject()) it.proto = p.asObj();
         }
         try self.setProp(it, "__re", matcher);
         try self.setProp(it, "__str", Value.str(try self.arena.dupe(u8, s)));
@@ -4560,11 +4560,11 @@ pub const Interpreter = struct {
         const arr = try self.newArray();
         while (true) {
             const result = try self.regexpExecGeneric(rx, s);
-            if (result.isNull()) return if (arr.object.elements.items.len == 0) Value.null else arr;
+            if (result.isNull()) return if (arr.asObj().elements.items.len == 0) Value.null else arr;
 
             const match_v = try self.getProperty(result, "0");
             const match_s = try self.toStringV(match_v);
-            try arr.object.elements.append(arr.object.elementsAllocator(self.arena), Value.str(try self.arena.dupe(u8, match_s)));
+            try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), Value.str(try self.arena.dupe(u8, match_s)));
 
             if (match_s.len == 0) {
                 const li = toLen(try self.toNumberV(try self.getProperty(rx, "lastIndex")));
@@ -4670,7 +4670,7 @@ pub const Interpreter = struct {
         if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.split] called on a non-object");
         const lim: usize = if (limit_value.isUndefined()) std.math.maxInt(u32) else value.Value.uint32FromF64(try self.toNumberV(limit_value));
         const result = try self.newArray();
-        const out = &result.object.elements;
+        const out = &result.asObj().elements;
         if (lim == 0) return result;
 
         const default_ctor = self.env.get("RegExp") orelse .undefined;
@@ -4723,7 +4723,7 @@ pub const Interpreter = struct {
 
     fn regexpToString(self: *Interpreter, this: Value) EvalError!Value {
         if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype.toString called on a non-object");
-        if (self.isRegExpProto(this.object)) return Value.str("/(?:)/");
+        if (self.isRegExpProto(this.asObj())) return Value.str("/(?:)/");
         const src = try self.toStringV(try self.getProperty(this, "source"));
         const flags = try self.toStringV(try self.getProperty(this, "flags"));
         return .{ .string = try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }) };
@@ -4740,11 +4740,11 @@ pub const Interpreter = struct {
         // `Date.prototype.isPrototypeOf(d)` and `d.constructor` resolve. Date
         // methods still dispatch via the `is_date` branch in builtinMethod.
         if (self.new_target.isObject()) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Date");
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Date");
         } else if (self.env.get("Date")) |ctor| {
             if (ctor.isObject()) {
-                if (ctor.object.getOwn("prototype")) |p| {
-                    if (p.isObject()) o.proto = p.object;
+                if (ctor.asObj().getOwn("prototype")) |p| {
+                    if (p.isObject()) o.proto = p.asObj();
                 }
             }
         }
@@ -4871,7 +4871,7 @@ pub const Interpreter = struct {
             const dtf = (try self.newObject()).object;
             try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
-            const loc = if (locs.elements.items.len > 0) locs.elements.items[0].string else "en";
+            const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
             try self.setProp(dtf, "\x00locale", Value.str(loc));
             const r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else .undefined, required, defaults);
             try dtfStoreOptions(self, dtf, r);
@@ -5053,11 +5053,11 @@ pub const Interpreter = struct {
     fn protoReachesCtorProto(self: *Interpreter, ctor_name: []const u8, start: ?*value.Object) bool {
         const cv = self.env.get(ctor_name) orelse return false;
         if (!cv.isObject()) return false;
-        const wp = cv.object.getOwn("prototype") orelse return false;
+        const wp = cv.asObj().getOwn("prototype") orelse return false;
         if (!wp.isObject()) return false;
         var cur = start;
         while (cur) |c| : (cur = c.proto) {
-            if (c == wp.object) return true;
+            if (c == wp.asObj()) return true;
         }
         return false;
     }
@@ -5074,11 +5074,11 @@ pub const Interpreter = struct {
         const o = (try self.newObject()).object;
         o.is_map = true;
         if (self.new_target.isObject()) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, intrinsic);
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic);
         } else if (self.env.get("Map")) |ctor| {
             if (ctor.isObject()) {
-                if (ctor.object.getOwn("prototype")) |p| {
-                    if (p.isObject()) o.proto = p.object;
+                if (ctor.asObj().getOwn("prototype")) |p| {
+                    if (p.isObject()) o.proto = p.asObj();
                 }
             }
         }
@@ -5102,11 +5102,11 @@ pub const Interpreter = struct {
         // Proto from the in-flight constructor (`new Set`/`new WeakSet`), so a
         // WeakSet doesn't inherit Set.prototype; internal results default to Set.
         if (self.new_target.isObject()) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, intrinsic);
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic);
         } else if (self.env.get("Set")) |ctor| {
             if (ctor.isObject()) {
-                if (ctor.object.getOwn("prototype")) |p| {
-                    if (p.isObject()) o.proto = p.object;
+                if (ctor.asObj().getOwn("prototype")) |p| {
+                    if (p.isObject()) o.proto = p.asObj();
                 }
             }
         }
@@ -5527,12 +5527,12 @@ pub const Interpreter = struct {
         const size = try self.toNumberV(try self.getProperty(v, "size"));
         if (std.math.isNan(size)) return self.throwError("TypeError", "set-like 'size' is NaN");
         if (@trunc(size) < 0) return self.throwError("RangeError", "set-like 'size' is negative"); // intSize = ToIntegerOrInfinity
-        if (v.object.is_set) return .{ .obj = v.object, .has = .undefined, .keys = .undefined, .size = size, .is_set = true };
+        if (v.asObj().is_set) return .{ .obj = v.asObj(), .has = .undefined, .keys = .undefined, .size = size, .is_set = true };
         const has = try self.getProperty(v, "has");
         if (!has.isCallable()) return self.throwError("TypeError", "set-like 'has' is not callable");
         const keys = try self.getProperty(v, "keys");
         if (!keys.isCallable()) return self.throwError("TypeError", "set-like 'keys' is not callable");
-        return .{ .obj = v.object, .has = has, .keys = keys, .size = size, .is_set = false };
+        return .{ .obj = v.asObj(), .has = has, .keys = keys, .size = size, .is_set = false };
     }
 
     /// Lazily walk `rec`'s keys (GetIteratorDirect — `next` captured once),
@@ -5615,13 +5615,13 @@ pub const Interpreter = struct {
         const v = try self.newArray();
         for (elems) |en| {
             if (en.* == .spread) {
-                try self.spreadInto(&v.object.elements, try self.eval(en.spread));
+                try self.spreadInto(&v.asObj().elements, try self.eval(en.spread));
             } else if (en.* == .elision) {
                 // A hole: a slot that reads as absent (skipped by iteration).
-                try v.object.markHole(self.arena, v.object.elements.items.len);
-                try v.object.elements.append(v.object.elementsAllocator(self.arena), .undefined);
+                try v.asObj().markHole(self.arena, v.asObj().elements.items.len);
+                try v.asObj().elements.append(v.asObj().elementsAllocator(self.arena), .undefined);
             } else {
-                try v.object.elements.append(v.object.elementsAllocator(self.arena), try self.eval(en));
+                try v.asObj().elements.append(v.asObj().elementsAllocator(self.arena), try self.eval(en));
             }
         }
         return v;
@@ -5665,12 +5665,12 @@ pub const Interpreter = struct {
             // canonical Symbol object on the global `Symbol` so identity holds
             // (e.g. getOwnPropertySymbols/Reflect.ownKeys surfacing @@toStringTag).
             if (self.env.get("Symbol")) |symv| if (symv.isObject()) {
-                const ks = symv.object.ownKeys(self.arena) catch &.{};
+                const ks = symv.asObj().ownKeys(self.arena) catch &.{};
                 for (ks) |k| {
-                    const v = symv.object.getOwn(k) orelse continue;
-                    if (v.isObject() and v.object.is_symbol and std.mem.eql(u8, v.object.sym_key, key)) {
-                        self.symbols.put(self.arena, key, v.object) catch {};
-                        return Value.obj(v.object);
+                    const v = symv.asObj().getOwn(k) orelse continue;
+                    if (v.isObject() and v.asObj().is_symbol and std.mem.eql(u8, v.asObj().sym_key, key)) {
+                        self.symbols.put(self.arena, key, v.asObj()) catch {};
+                        return Value.obj(v.asObj());
                     }
                 }
             };
@@ -5692,7 +5692,7 @@ pub const Interpreter = struct {
     }
 
     fn sameProtoValue(proto: ?*value.Object, v: Value) bool {
-        return (proto == null and v.isNull()) or (proto != null and v.isObject() and proto.? == v.object);
+        return (proto == null and v.isNull()) or (proto != null and v.isObject() and proto.? == v.asObj());
     }
 
     fn ordinarySetPrototypeOf(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
@@ -5731,11 +5731,11 @@ pub const Interpreter = struct {
         const target = o.proxy_target orelse return self.throwError("TypeError", "Cannot perform 'getPrototypeOf' on a proxy that has been revoked");
         const trap = (try self.proxyTrap(o, "getPrototypeOf")) orelse return self.ordinaryProtoValue(target);
         const res = try self.callValueWithThis(trap, &.{Value.obj(target)}, Value.obj(o.proxy_handler.?));
-        if (!res.isNull() and (!res.isObject() or res.object.is_symbol or res.object.is_bigint))
+        if (!res.isNull() and (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint))
             return self.throwError("TypeError", "proxy 'getPrototypeOf' trap must return an object or null");
         if (!try self.ordinaryIsExtensible(target)) {
             const tp = try self.ordinaryProtoValue(target);
-            const same = (res.isNull() and tp.isNull()) or (res.isObject() and tp.isObject() and res.object == tp.object);
+            const same = (res.isNull() and tp.isNull()) or (res.isObject() and tp.isObject() and res.asObj() == tp.asObj());
             if (!same) return self.throwError("TypeError", "proxy 'getPrototypeOf' trap result must match the prototype of a non-extensible target");
         }
         return res;
@@ -5903,7 +5903,7 @@ pub const Interpreter = struct {
                 // other string keys in insertion order, then symbols.
                 var indices: std.ArrayListUnmanaged([]const u8) = .empty;
                 var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-                for (p.string, 0..) |_, i| {
+                for (p.asStr(), 0..) |_, i| {
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                     try seen.put(self.arena, i, {});
                 }
@@ -6023,7 +6023,7 @@ pub const Interpreter = struct {
             var i: usize = 0;
             while (i < len) : (i += 1) {
                 const k = try self.getProperty(res, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-                if (!k.isString() and !(k.isObject() and k.object.is_symbol))
+                if (!k.isString() and !(k.isObject() and k.asObj().is_symbol))
                     return self.throwError("TypeError", "ownKeys trap result includes a non-String, non-Symbol key");
                 try list.append(self.arena, try self.keyOf(k));
             }
@@ -6072,7 +6072,7 @@ pub const Interpreter = struct {
     }
 
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
-        if (recv.isObject()) try self.checkRestricted(recv.object);
+        if (recv.isObject()) try self.checkRestricted(recv.asObj());
         return self.getPropertyWithReceiver(recv, key, recv);
     }
 
@@ -6176,9 +6176,9 @@ pub const Interpreter = struct {
                 // `[0] === "a"`).
                 if (o.prim) |p| {
                     if (p.isString()) {
-                        if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(p.string)));
+                        if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(p.asStr())));
                         if (arrayIndex(key)) |i| {
-                            if (try self.stringIndexValue(p.string, i)) |v| return v;
+                            if (try self.stringIndexValue(p.asStr(), i)) |v| return v;
                         }
                     }
                 }
@@ -6214,9 +6214,9 @@ pub const Interpreter = struct {
                     }
                     if (c.prim) |p| {
                         if (p.isString()) {
-                            if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(p.string)));
+                            if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(p.asStr())));
                             if (arrayIndex(key)) |i| {
-                                if (try self.stringIndexValue(p.string, i)) |v| return v;
+                                if (try self.stringIndexValue(p.asStr(), i)) |v| return v;
                             }
                         }
                     }
@@ -6248,7 +6248,7 @@ pub const Interpreter = struct {
     /// primitive as the receiver passed to inherited accessors/proxy traps.
     fn getPrimitiveMember(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         if (recv.isString()) {
-            const s = recv.string;
+            const s = recv.asStr();
             if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(s)));
             if (arrayIndex(key)) |i| {
                 if (try self.stringIndexValue(s, i)) |v| return v;
@@ -6358,14 +6358,14 @@ pub const Interpreter = struct {
             const rest_obj = try self.newObject();
             if (val.isObject()) {
                 // Object rest copies only the *enumerable* own properties.
-                const keys = try val.object.enumerableKeys(self.arena);
+                const keys = try val.asObj().enumerableKeys(self.arena);
                 outer: for (keys) |k| {
                     for (consumed.items) |c| {
                         if (std.mem.eql(u8, c, k)) continue :outer;
                     }
                     // Copy via [[Get]] so an accessor's getter runs (and a data
                     // property's value is read), landing as a plain data prop.
-                    try self.setProp(rest_obj.object, k, try self.getProperty(val, k));
+                    try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
                 }
             }
             if (declare) try self.env.put(rest_name, rest_obj) else try self.env.assign(rest_name, rest_obj);
@@ -6379,7 +6379,7 @@ pub const Interpreter = struct {
         // Fast path: a real array (whose `Array.prototype[Symbol.iterator]` is
         // still the native one) or a string — index directly, no iterator object
         // churn. A deleted/overridden array iterator falls to the general path.
-        if ((val.isObject() and val.object.is_array and self.arrayIterIntact()) or val.isString()) {
+        if ((val.isObject() and val.asObj().is_array and self.arrayIterIntact()) or val.isString()) {
             var idx: usize = 0;
             for (elems) |elem| {
                 var v = try self.elementAt(val, idx);
@@ -6398,7 +6398,7 @@ pub const Interpreter = struct {
                 const rest_arr = try self.newArray();
                 const len = iterableLen(val);
                 while (idx < len) : (idx += 1) {
-                    try rest_arr.object.elements.append(rest_arr.object.elementsAllocator(self.arena), try self.elementAt(val, idx));
+                    try rest_arr.asObj().elements.append(rest_arr.asObj().elementsAllocator(self.arena), try self.elementAt(val, idx));
                 }
                 try self.bindPattern(rest_target, rest_arr, declare);
             }
@@ -6430,7 +6430,7 @@ pub const Interpreter = struct {
             while (!done) {
                 const res = try self.callMethod(iter_obj, "next", &.{});
                 if ((try self.getProperty(res, "done")).toBoolean()) break;
-                try rest_arr.object.elements.append(rest_arr.object.elementsAllocator(self.arena), try self.getProperty(res, "value"));
+                try rest_arr.asObj().elements.append(rest_arr.asObj().elementsAllocator(self.arena), try self.getProperty(res, "value"));
             }
             try self.bindPattern(rest_target, rest_arr, declare);
             return; // a rest element always exhausts the iterator (no close)
@@ -6444,7 +6444,7 @@ pub const Interpreter = struct {
     /// closed through their dispatched `return`). The result is discarded; a
     /// throw propagates (normal-completion close).
     pub fn iteratorClose(self: *Interpreter, iter: Value) EvalError!void {
-        if (iter.isObject() and iter.object.gen != null) {
+        if (iter.isObject() and iter.asObj().gen != null) {
             const r = try self.callMethod(iter, "return", &.{});
             if (!r.isObject()) return self.throwError("TypeError", "iterator 'return' did not return an object");
             return;
@@ -6625,15 +6625,15 @@ pub const Interpreter = struct {
     /// translate a false result into a strict-mode TypeError; Reflect.set returns
     /// the boolean directly.
     pub fn setMemberResult(self: *Interpreter, recv: Value, key: []const u8, v: Value, receiver: Value) EvalError!bool {
-        if (recv.isObject()) try self.checkRestricted(recv.object);
-        if (recv.isObject() and (recv.object.is_symbol or recv.object.is_bigint))
+        if (recv.isObject()) try self.checkRestricted(recv.asObj());
+        if (recv.isObject() and (recv.asObj().is_symbol or recv.asObj().is_bigint))
             return self.setPrimitiveMemberResult(recv, key, v);
         if (!recv.isObject()) {
             if (recv.isNull() or recv.isUndefined())
                 return self.throwError("TypeError", "Cannot set property of null or undefined");
             return self.setPrimitiveMemberResult(recv, key, v);
         }
-        const o = recv.object;
+        const o = recv.asObj();
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxySet(o, key, v, receiver);
         // A module namespace's [[Set]] always fails: strict throws, sloppy is a
         // silent no-op.
@@ -6642,7 +6642,7 @@ pub const Interpreter = struct {
             // Integer-Indexed Exotic [[Set]] for a canonical numeric key.
             const numkey: ?f64 = if (arrayIndex(key)) |i| @as(f64, @floatFromInt(i)) else canonicalNumericIndexString(key);
             if (numkey) |n| {
-                const same = (receiver.isObject() and receiver.object == o);
+                const same = (receiver.isObject() and receiver.asObj() == o);
                 if (same) {
                     // IntegerIndexedElementSet: ToNumber/ToBigInt always runs (an
                     // observable valueOf, can throw) even for an out-of-bounds /
@@ -6651,7 +6651,7 @@ pub const Interpreter = struct {
                     // valid; the store happens only if the index is valid after.
                     if (ta.kind.isBigInt()) {
                         const bv = try self.toBigIntValueImpl(v, false);
-                        if (isValidIntegerIndex(ta, n)) value.taWriteBig(ta, @intFromFloat(n), bv.object.bigint);
+                        if (isValidIntegerIndex(ta, n)) value.taWriteBig(ta, @intFromFloat(n), bv.asObj().bigint);
                     } else {
                         const num = try self.toNumberV(v);
                         if (isValidIntegerIndex(ta, n)) value.taWrite(ta, @intFromFloat(n), num);
@@ -6665,12 +6665,12 @@ pub const Interpreter = struct {
                 // never an inherited setter); on any other object an ordinary set.
                 if (!isValidIntegerIndex(ta, n)) return true;
                 if (!receiver.isObject()) return true;
-                const rcv = receiver.object;
+                const rcv = receiver.asObj();
                 if (rcv.typed_array) |rta| {
                     if (!isValidIntegerIndex(rta, n)) return false;
                     if (rta.kind.isBigInt()) {
                         const bv = try self.toBigIntValueImpl(v, false);
-                        value.taWriteBig(rta, @intFromFloat(n), bv.object.bigint);
+                        value.taWriteBig(rta, @intFromFloat(n), bv.asObj().bigint);
                     } else {
                         value.taWrite(rta, @intFromFloat(n), try self.toNumberV(v));
                     }
@@ -6681,8 +6681,8 @@ pub const Interpreter = struct {
                     const desc = (try self.newObject()).object;
                     try desc.setOwn(self.arena, self.root_shape, "value", v);
                     if (existing.isObject()) {
-                        if (existing.object.getOwn("get") != null or existing.object.getOwn("set") != null) return false;
-                        if (existing.object.getOwn("writable")) |w| if (!w.toBoolean()) return false;
+                        if (existing.asObj().getOwn("get") != null or existing.asObj().getOwn("set") != null) return false;
+                        if (existing.asObj().getOwn("writable")) |w| if (!w.toBoolean()) return false;
                     } else {
                         try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
                         try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
@@ -6709,7 +6709,7 @@ pub const Interpreter = struct {
         if (o.prim) |p| {
             if (p.isString()) {
                 if (std.mem.eql(u8, key, "length")) return false;
-                if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.string)) return false;
+                if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.asStr())) return false;
             }
         }
         if (o.is_arguments) {
@@ -6739,7 +6739,7 @@ pub const Interpreter = struct {
             }
         }
         if (o.is_array and !o.is_arguments) {
-            if (std.mem.eql(u8, key, "length") and receiver.isObject() and receiver.object == o) {
+            if (std.mem.eql(u8, key, "length") and receiver.isObject() and receiver.asObj() == o) {
                 const u = try self.arrayLengthFromValue(v);
                 // ArraySetLength: a non-writable `length` rejects the assignment
                 // (the RangeError above still precedes this) — sloppy silently,
@@ -6806,14 +6806,14 @@ pub const Interpreter = struct {
             if (!o.getAttr(key).writable) return false;
         }
         if (!receiver.isObject()) return false;
-        const ro = receiver.object;
+        const ro = receiver.asObj();
         if (ro.proxy_handler != null or ro.proxy_revoked) {
             const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ Value.obj(ro), self.keyToValue(key) });
             const desc = (try self.newObject()).object;
             try desc.setOwn(self.arena, self.root_shape, "value", v);
             if (existing.isObject()) {
-                if (existing.object.getOwn("get") != null or existing.object.getOwn("set") != null) return false;
-                if (existing.object.getOwn("writable")) |w| {
+                if (existing.asObj().getOwn("get") != null or existing.asObj().getOwn("set") != null) return false;
+                if (existing.asObj().getOwn("writable")) |w| {
                     if (!w.toBoolean()) return false;
                 }
             } else {
@@ -6899,7 +6899,7 @@ pub const Interpreter = struct {
         if (o.prim) |p| {
             if (p.isString()) {
                 if (std.mem.eql(u8, key, "length")) return false;
-                if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.string)) return false;
+                if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.asStr())) return false;
             }
         }
         // Accessor property.
@@ -6945,7 +6945,7 @@ pub const Interpreter = struct {
         // the unshadowed intrinsics and the fallback for method names that aren't
         // installed as real own properties (synthesized push/getDay/etc.).
         const method = try self.getProperty(recv, name);
-        if (method.isObject() and method.object.isCallableObject())
+        if (method.isObject() and method.asObj().isCallableObject())
             return self.callValueWithThis(method, args, recv);
         if (try self.builtinMethod(recv, name, args)) |result| return result;
         return self.callValueWithThis(method, args, recv);
@@ -6964,7 +6964,7 @@ pub const Interpreter = struct {
                 if (self.symbolIteratorKey()) |ik| {
                     const itfn = try self.getProperty(v, ik);
                     if (!itfn.isUndefined() and !itfn.isNull()) {
-                        if (itfn.isObject() and itfn.object.isCallableObject())
+                        if (itfn.isObject() and itfn.asObj().isCallableObject())
                             return try self.callValueWithThis(itfn, &.{}, v);
                         return self.throwError("TypeError", "value is not iterable");
                     }
@@ -7028,14 +7028,14 @@ pub const Interpreter = struct {
     pub fn wellKnownSymbolKey(self: *Interpreter, name: []const u8) ?[]const u8 {
         if (wellKnownSymbolHiddenName(name)) |hidden| {
             if (self.env.get(hidden)) |intrinsic| {
-                if (intrinsic.isObject() and intrinsic.object.is_symbol) return intrinsic.object.sym_key;
+                if (intrinsic.isObject() and intrinsic.asObj().is_symbol) return intrinsic.asObj().sym_key;
             }
         }
         const sym = self.env.get("Symbol") orelse return null;
         if (!sym.isObject()) return null;
         const it = sym.object.getOwn(name) orelse return null;
-        if (!it.isObject() or !it.object.is_symbol) return null;
-        return it.object.sym_key;
+        if (!it.isObject() or !it.asObj().is_symbol) return null;
+        return it.asObj().sym_key;
     }
 
     /// SpeciesConstructor(O, defaultConstructor): `O.constructor[Symbol.species]`,
@@ -7046,7 +7046,7 @@ pub const Interpreter = struct {
         if (ctor.isUndefined()) return default_ctor;
         // Type(C) must be Object: Symbol/BigInt primitives are wrapped as objects
         // (is_symbol/is_bigint) in this engine, so reject them explicitly too.
-        if (!ctor.isObject() or ctor.object.is_symbol or ctor.object.is_bigint)
+        if (!ctor.isObject() or ctor.asObj().is_symbol or ctor.asObj().is_bigint)
             return self.throwError("TypeError", "constructor is not an object");
         const skey = self.wellKnownSymbolKey("species") orelse return default_ctor;
         const s = try self.getProperty(ctor, skey);
@@ -7062,16 +7062,16 @@ pub const Interpreter = struct {
     /// non-constructor species throws a TypeError, and any other constructor is
     /// `new`-ed with the length (its abrupt completion propagates).
     pub fn arraySpeciesCreate(self: *Interpreter, original: Value, len: usize) EvalError!Value {
-        if (!original.isObject() or !try objectToStringIsArray(self, original.object)) return self.newArray();
+        if (!original.isObject() or !try objectToStringIsArray(self, original.asObj())) return self.newArray();
         const c = try self.getProperty(original, "constructor");
-        if (c.isObject() and (c.object.is_symbol or c.object.is_bigint))
+        if (c.isObject() and (c.asObj().is_symbol or c.asObj().is_bigint))
             return self.throwError("TypeError", "Array species is not a constructor");
         // GetFunctionRealm cross-realm check: a `constructor` that is another
         // realm's %Array% is treated as the default — ArrayCreate, WITHOUT
         // consulting its @@species (so a cross-realm species getter is untouched).
-        if (c.isObject() and c.object.native == builtins.arrayConstructor) {
+        if (c.isObject() and c.asObj().native == builtins.arrayConstructor) {
             const cur = self.env.get("Array");
-            if (cur == null or cur.? != .object or c.object != cur.?.object) return self.newArray();
+            if (cur == null or cur.? != .object or c.asObj() != cur.?.object) return self.newArray();
         }
         var ctor: Value = c;
         if (c.isObject()) {
@@ -7085,7 +7085,7 @@ pub const Interpreter = struct {
         // The intrinsic Array constructor → a plain array (fast path, matching
         // `new Array(len)` then filling in 0..len).
         if (self.env.get("Array")) |arr| {
-            if (ctor.isObject() and arr.isObject() and ctor.object == arr.object) return self.newArray();
+            if (ctor.isObject() and arr.isObject() and ctor.asObj() == arr.asObj()) return self.newArray();
         }
         if (!isConstructorValue(ctor)) return self.throwError("TypeError", "Array species is not a constructor");
         return self.construct(ctor, &.{Value.num(@floatFromInt(len))});
@@ -7101,12 +7101,12 @@ pub const Interpreter = struct {
         const default_ctor = self.env.get(kind.ctorName()) orelse return newTypedArray(self, kind, len);
         const ctor = try self.speciesConstructor(Value.obj(exemplar), default_ctor);
         // Fast path: the intrinsic constructor for this view kind.
-        if (ctor.isObject() and default_ctor.isObject() and ctor.object == default_ctor.object)
+        if (ctor.isObject() and default_ctor.isObject() and ctor.asObj() == default_ctor.asObj())
             return newTypedArray(self, kind, len);
         const res = try self.construct(ctor, &.{Value.num(@floatFromInt(len))});
-        if (!res.isObject() or res.object.typed_array == null)
+        if (!res.isObject() or res.asObj().typed_array == null)
             return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
-        const rta = res.object.typed_array.?;
+        const rta = res.asObj().typed_array.?;
         if (rta.kind.isBigInt() != kind.isBigInt())
             return self.throwError("TypeError", "TypedArray species content type does not match");
         // The callers write into the result, so ValidateTypedArray is normally
@@ -7121,7 +7121,7 @@ pub const Interpreter = struct {
         // shorter than requested, is a TypeError.
         if ((rta.currentLength() orelse 0) < len)
             return self.throwError("TypeError", "TypedArray species result is too short or out of bounds");
-        return res.object;
+        return res.asObj();
     }
 
     /// TypedArraySpeciesCreate(exemplar, «buffer, byteOffset, length?») — the
@@ -7141,11 +7141,11 @@ pub const Interpreter = struct {
             Value.obj(buffer),
             Value.num(@floatFromInt(byte_offset)),
         });
-        if (!res.isObject() or res.object.typed_array == null)
+        if (!res.isObject() or res.asObj().typed_array == null)
             return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
-        if (res.object.typed_array.?.buffer.array_buffer.?.detached)
+        if (res.asObj().typed_array.?.buffer.array_buffer.?.detached)
             return self.throwError("TypeError", "TypedArray species returned a detached TypedArray");
-        if (res.object.typed_array.?.kind.isBigInt() != kind.isBigInt())
+        if (res.asObj().typed_array.?.kind.isBigInt() != kind.isBigInt())
             return self.throwError("TypeError", "TypedArray species content type does not match");
         return res;
     }
@@ -7163,7 +7163,7 @@ pub const Interpreter = struct {
         o.array_buffer = ab;
         errdefer o.array_buffer = null;
         if (self.env.get("ArrayBuffer")) |c| {
-            if (c.isObject()) o.proto = try self.protoObject(c.object);
+            if (c.isObject()) o.proto = try self.protoObject(c.asObj());
         }
         return o;
     }
@@ -7209,10 +7209,10 @@ pub const Interpreter = struct {
         // (a getter runs and may throw), or — when that is not an Object — the
         // *newTarget's realm's* typed-array prototype for this kind.
         if (self.new_target.isObject()) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, kind.ctorName());
+            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), kind.ctorName());
         } else if (self.env.get(kind.ctorName())) |c| {
             if (c.isObject()) {
-                o.proto = try self.protoObject(c.object);
+                o.proto = try self.protoObject(c.asObj());
             }
         }
     }
@@ -7227,12 +7227,12 @@ pub const Interpreter = struct {
         const ta = try o.typedArrayAllocator(self.arena).create(value.TypedArrayData);
         o.typed_array = ta;
 
-        if (a0.isObject() and a0.object.array_buffer != null) {
+        if (a0.isObject() and a0.asObj().array_buffer != null) {
             // new TA(buffer, byteOffset?, length?). byteOffset/length are ToIndex
             // (a negative or non-integer-huge value is a RangeError), the offset
             // alignment is checked before the length coerces, and the buffer is
             // re-checked for detachment AFTER both coercions run user code.
-            const buffer = a0.object;
+            const buffer = a0.asObj();
             const byte_offset: usize = @intCast(if (args.len > 1) try toIndexArg(self, args[1]) else 0);
             if (byte_offset % size != 0) return self.throwError("RangeError", "invalid typed array offset");
             const has_len = args.len > 2 and !args[2].isUndefined();
@@ -7258,10 +7258,10 @@ pub const Interpreter = struct {
             ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind, .track_length = track };
             return Value.obj(o);
         }
-        if (a0.isObject() and a0.object.typed_array != null) {
+        if (a0.isObject() and a0.asObj().typed_array != null) {
             // new TA(typedArray): copy elements (converting numeric types). A
             // BigInt and a non-BigInt element type can't be mixed.
-            const src = a0.object.typed_array.?;
+            const src = a0.asObj().typed_array.?;
             if (src.kind.isBigInt() != kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when constructing a TypedArray");
             const length = src.currentLength() orelse return self.throwError("TypeError", "Cannot construct from an out-of-bounds TypedArray");
             try self.initTypedArrayProto(o, kind);
@@ -7272,7 +7272,7 @@ pub const Interpreter = struct {
             }
             return Value.obj(o);
         }
-        if (a0.isObject() and !a0.object.is_symbol and !a0.object.is_bigint) {
+        if (a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint) {
             // new TA(arrayLike | iterable): collect the values, then coerce + copy
             // (ToBigInt for a BigInt view, ToNumber otherwise). The iterable path
             // is taken only when GetMethod(@@iterator) yields a callable — a null
@@ -7312,7 +7312,7 @@ pub const Interpreter = struct {
             // invalid/out-of-bounds index or immutable buffer (a silent no-op,
             // not a throw).
             if (i >= (ta.currentLength() orelse 0) or (ta.buffer.array_buffer.?.immutable and !allow_immutable)) return;
-            value.taWriteBig(ta, i, bv.object.bigint);
+            value.taWriteBig(ta, i, bv.asObj().bigint);
         } else {
             const num = try self.toNumberV(v);
             if (i >= (ta.currentLength() orelse 0) or (ta.buffer.array_buffer.?.immutable and !allow_immutable)) return;
@@ -7372,13 +7372,13 @@ pub const Interpreter = struct {
     /// it. The resulting iterator must be an Object; its `next` is read eagerly
     /// (GetIteratorDirect). Returns the iterator object.
     pub fn getIteratorFlattenableObj(self: *Interpreter, obj: Value) EvalError!Value {
-        if (!obj.isObject() or obj.object.is_bigint or obj.object.is_symbol)
+        if (!obj.isObject() or obj.asObj().is_bigint or obj.asObj().is_symbol)
             return self.throwError("TypeError", "value is not an iterable object");
         var iterator: Value = obj;
         if (self.symbolIteratorKey()) |ik| {
             const method = try self.getProperty(obj, ik);
             if (!method.isUndefined() and !method.isNull()) {
-                if (!method.isObject() or !method.object.isCallableObject())
+                if (!method.isObject() or !method.asObj().isCallableObject())
                     return self.throwError("TypeError", "Symbol.iterator is not callable");
                 iterator = try self.callValueWithThis(method, &.{}, obj);
             }
@@ -7403,11 +7403,11 @@ pub const Interpreter = struct {
     /// Append `v` as the next element of a method's result (an array uses its
     /// dense store; a custom species object gets a `[[Set]]` at `idx`).
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
-        if (result.isObject() and result.object.is_array and result.object.accessors == null and
-            result.object.attrs == null and !result.object.proxy_revoked and result.object.proxy_handler == null and
-            idx == result.object.elements.items.len and idx >= result.object.array_len)
+        if (result.isObject() and result.asObj().is_array and result.asObj().accessors == null and
+            result.asObj().attrs == null and !result.asObj().proxy_revoked and result.asObj().proxy_handler == null and
+            idx == result.asObj().elements.items.len and idx >= result.asObj().array_len)
         {
-            try result.object.elements.append(result.object.elementsAllocator(self.arena), v);
+            try result.asObj().elements.append(result.asObj().elementsAllocator(self.arena), v);
         } else {
             // CreateDataPropertyOrThrow(result, ToString(idx), v) — a non-Array
             // species result (or one carrying accessors) takes the generic define
@@ -7418,7 +7418,7 @@ pub const Interpreter = struct {
             try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
             try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
             try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-            if (!result.isObject() or !try builtins.defineOneResult(self, result.object, k, desc))
+            if (!result.isObject() or !try builtins.defineOneResult(self, result.asObj(), k, desc))
                 return self.throwError("TypeError", "Cannot create array result property");
         }
     }
@@ -7436,7 +7436,7 @@ pub const Interpreter = struct {
     /// present, else an Async-from-Sync wrapper over `obj[Symbol.iterator]()`.
     pub fn asyncIteratorOf(self: *Interpreter, v: Value) EvalError!Value {
         if (self.symbolAsyncIteratorKey()) |ik| {
-            if (v.isObject() and hasProperty(v.object, ik)) {
+            if (v.isObject() and hasProperty(v.asObj(), ik)) {
                 const m = try self.getProperty(v, ik);
                 // GetMethod: undefined/null → method absent (fall back to sync);
                 // present but not callable → TypeError.
@@ -7471,7 +7471,7 @@ pub const Interpreter = struct {
             else => "\x00ArrIterProto",
         };
         if (self.env.get(proto_key)) |p| {
-            if (p.isObject()) it.proto = p.object;
+            if (p.isObject()) it.proto = p.asObj();
         } else {
             // Before %IteratorPrototype% exists (early bootstrap): a plain `next`.
             try setNative(self.arena, self.root_shape, it, "next", 0, cursorIterNext);
@@ -7506,7 +7506,7 @@ pub const Interpreter = struct {
     /// once via GetIteratorDirect), call it with `it` as the receiver rather than
     /// re-reading `it.next` each step — so a `next` accessor runs only once.
     fn iterStepM(self: *Interpreter, it: Value, next_method: Value) EvalError!IterStepResult {
-        const r = if (next_method.isObject() and next_method.object.isCallableObject())
+        const r = if (next_method.isObject() and next_method.asObj().isCallableObject())
             try self.callValueWithThis(next_method, &.{}, it)
         else
             try self.callMethod(it, "next", &.{});
@@ -7530,8 +7530,8 @@ pub const Interpreter = struct {
     fn arrayProtoObj(self: *Interpreter) ?*value.Object {
         const av = self.env.get("Array") orelse return null;
         if (!av.isObject()) return null;
-        const p = av.object.getOwn("prototype") orelse return null;
-        return if (p.isObject()) p.object else null;
+        const p = av.asObj().getOwn("prototype") orelse return null;
+        return if (p.isObject()) p.asObj() else null;
     }
 
     /// The current `Array.prototype[Symbol.iterator]` slot: `.intact` (still the
@@ -7542,7 +7542,7 @@ pub const Interpreter = struct {
         const ap = self.arrayProtoObj() orelse return .intact;
         const ik = self.symbolIteratorKey() orelse return .intact;
         const slot = ap.getOwn(ik) orelse return .deleted;
-        if (slot.isObject() and slot.object.native == arrayValuesIterFn) return .intact;
+        if (slot.isObject() and slot.asObj().native == arrayValuesIterFn) return .intact;
         return .{ .custom = slot };
     }
 
@@ -7572,7 +7572,7 @@ pub const Interpreter = struct {
         if (o.proxy_handler != null or o.proxy_revoked) {
             const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ Value.obj(o), self.keyToValue(key) });
             if (!desc.isObject()) return false;
-            if (desc.object.getOwn("enumerable")) |enumerable| return enumerable.toBoolean();
+            if (desc.asObj().getOwn("enumerable")) |enumerable| return enumerable.toBoolean();
             return false;
         }
         return objectHasOwn(o, key) and o.getAttr(key).enumerable and
@@ -7594,15 +7594,15 @@ pub const Interpreter = struct {
             return Value{ .boolean = try self.objectProtoPropertyIsEnumerable(o, k) };
         }
         if (eq(name, "isPrototypeOf")) {
-            if (!(args.len > 0 and args[0].isObject() and !args[0].object.is_symbol and !args[0].object.is_bigint)) return Value{ .boolean = false };
+            if (!(args.len > 0 and args[0].isObject() and !args[0].asObj().is_symbol and !args[0].asObj().is_bigint)) return Value{ .boolean = false };
             const o = try self.toObject(recv);
             var cur: Value = args[0];
             while (cur.isObject()) {
-                const next = if (cur.object.proxy_handler != null or cur.object.proxy_revoked)
-                    try self.proxyGetProto(cur.object)
-                else if (cur.object.proto) |p| Value{ .object = p } else Value.null;
+                const next = if (cur.asObj().proxy_handler != null or cur.asObj().proxy_revoked)
+                    try self.proxyGetProto(cur.asObj())
+                else if (cur.asObj().proto) |p| Value{ .object = p } else Value.null;
                 if (!next.isObject()) return Value{ .boolean = false };
-                if (next.object == o) return Value{ .boolean = true };
+                if (next.asObj() == o) return Value{ .boolean = true };
                 cur = next;
             }
             return Value{ .boolean = false };
@@ -7628,12 +7628,12 @@ pub const Interpreter = struct {
             while (cur.isObject()) {
                 const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ cur, key_v });
                 if (desc.isObject()) {
-                    const d = desc.object;
+                    const d = desc.asObj();
                     if (d.getOwn("get") != null or d.getOwn("set") != null)
                         return (if (want_get) d.getOwn("get") else d.getOwn("set")) orelse Value.undefined;
                     return Value.undefined;
                 }
-                const c = cur.object;
+                const c = cur.asObj();
                 cur = if (c.proxy_handler != null or c.proxy_revoked)
                     try self.proxyGetProto(c)
                 else if (c.proto) |p| Value{ .object = p } else Value.null;
@@ -7681,14 +7681,14 @@ pub const Interpreter = struct {
                         return Value{ .boolean = try self.objectProtoPropertyIsEnumerable(o, k) };
                     }
                     if (eq(name, "isPrototypeOf")) {
-                        if (!(args.len > 0 and args[0].isObject() and !args[0].object.is_symbol and !args[0].object.is_bigint)) return Value{ .boolean = false };
+                        if (!(args.len > 0 and args[0].isObject() and !args[0].asObj().is_symbol and !args[0].asObj().is_bigint)) return Value{ .boolean = false };
                         var cur: Value = args[0];
                         while (cur.isObject()) {
-                            const next = if (cur.object.proxy_handler != null or cur.object.proxy_revoked)
-                                try self.proxyGetProto(cur.object)
-                            else if (cur.object.proto) |p| Value{ .object = p } else Value.null;
+                            const next = if (cur.asObj().proxy_handler != null or cur.asObj().proxy_revoked)
+                                try self.proxyGetProto(cur.asObj())
+                            else if (cur.asObj().proto) |p| Value{ .object = p } else Value.null;
                             if (!next.isObject()) return Value{ .boolean = false };
-                            if (next.object == o) return Value{ .boolean = true };
+                            if (next.asObj() == o) return Value{ .boolean = true };
                             cur = next;
                         }
                         return Value{ .boolean = false };
@@ -7723,12 +7723,12 @@ pub const Interpreter = struct {
                         while (cur.isObject()) {
                             const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ cur, key_v });
                             if (desc.isObject()) {
-                                const d = desc.object;
+                                const d = desc.asObj();
                                 if (d.getOwn("get") != null or d.getOwn("set") != null)
                                     return (if (want_get) d.getOwn("get") else d.getOwn("set")) orelse Value.undefined;
                                 return Value.undefined; // a data property shadows
                             }
-                            const c = cur.object;
+                            const c = cur.asObj();
                             cur = if (c.proxy_handler != null or c.proxy_revoked)
                                 try self.proxyGetProto(c)
                             else if (c.proto) |p| Value{ .object = p } else Value.null;
@@ -7914,17 +7914,17 @@ pub const Interpreter = struct {
         // A plain dense Array result preserves holes (append + markHole); a
         // species/exotic result leaves a hole as an absent index (CreateDataProperty
         // only for present elements).
-        const dense = dst.isObject() and dst.object.is_array and dst.object.accessors == null and
-            dst.object.attrs == null and dst.object.proxy_handler == null and !dst.object.proxy_revoked;
+        const dense = dst.isObject() and dst.asObj().is_array and dst.asObj().accessors == null and
+            dst.asObj().attrs == null and dst.asObj().proxy_handler == null and !dst.asObj().proxy_revoked;
         var j: usize = 0;
         while (j < slen) : (j += 1) {
             if (j > (1 << 22)) return self.throwError("TypeError", "Invalid array length");
             if (try self.arrIndexPresent(src, j)) {
                 try self.arrayResultPush(dst, n.*, try self.arrIndexGet(src, j));
             } else if (dense) {
-                const base = dst.object.elementsLen();
-                try dst.object.appendElement(self.arena, .undefined);
-                try dst.object.markHole(self.arena, base);
+                const base = dst.asObj().elementsLen();
+                try dst.asObj().appendElement(self.arena, .undefined);
+                try dst.asObj().markHole(self.arena, base);
             }
             n.* += 1;
         }
@@ -7939,13 +7939,13 @@ pub const Interpreter = struct {
         if (v.isObject()) {
             if (ck) |k| {
                 const flag = try self.getProperty(v, k);
-                spread = if (!flag.isUndefined()) flag.toBoolean() else try objectToStringIsArray(self, v.object);
+                spread = if (!flag.isUndefined()) flag.toBoolean() else try objectToStringIsArray(self, v.asObj());
             } else {
-                spread = try objectToStringIsArray(self, v.object);
+                spread = try objectToStringIsArray(self, v.asObj());
             }
         }
         if (spread) {
-            try self.concatSpreadInto(dst, v.object, n);
+            try self.concatSpreadInto(dst, v.asObj(), n);
         } else {
             try self.arrayResultPush(dst, n.*, v);
             n.* += 1;
@@ -8291,15 +8291,15 @@ pub const Interpreter = struct {
             if (count > 4294967295) return self.throwError("RangeError", "Invalid array length");
             if (count > (1 << 22)) return null;
             const result = try self.arraySpeciesCreate(Value.obj(o), count);
-            const dense = result.object.is_array and result.object.accessors == null and result.object.attrs == null and result.object.proxy_handler == null;
+            const dense = result.asObj().is_array and result.asObj().accessors == null and result.asObj().attrs == null and result.asObj().proxy_handler == null;
             var i = start;
             var k: usize = 0; // result index, for hole preservation
             while (i < end) : (i += 1) {
                 if (try self.arrIndexPresent(o, i)) {
                     try self.arrayResultPush(result, k, try self.arrIndexGet(o, i)); // CreateDataPropertyOrThrow
                 } else if (dense) { // slice preserves holes on a plain dense result
-                    try result.object.appendElement(self.arena, .undefined);
-                    try result.object.markHole(self.arena, k);
+                    try result.asObj().appendElement(self.arena, .undefined);
+                    try result.asObj().markHole(self.arena, k);
                 }
                 k += 1;
             }
@@ -8313,7 +8313,7 @@ pub const Interpreter = struct {
             for (args) |a| try self.concatProcessOne(result, a, ck, &n);
             // Set the result length (so trailing holes are reflected) when the
             // species result isn't a plain dense array that already tracks it.
-            if (!(result.isObject() and result.object.is_array and result.object.accessors == null and result.object.attrs == null))
+            if (!(result.isObject() and result.asObj().is_array and result.asObj().accessors == null and result.asObj().attrs == null))
                 try self.setMember(result, "length", Value.num(@floatFromInt(n)));
             return result;
         }
@@ -8361,7 +8361,7 @@ pub const Interpreter = struct {
             if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
             var k: usize = 0;
-            while (k < ilen) : (k += 1) try result.object.appendElement(self.arena, try self.arrIndexGet(o, ilen - 1 - k));
+            while (k < ilen) : (k += 1) try result.asObj().appendElement(self.arena, try self.arrIndexGet(o, ilen - 1 - k));
             return result;
         }
         if (eq(name, "toSorted")) {
@@ -8381,7 +8381,7 @@ pub const Interpreter = struct {
                 while (j > 0 and (try self.sortCompare(ri[j - 1], key, cmp)) > 0) : (j -= 1) ri[j] = ri[j - 1];
                 ri[j] = key;
             }
-            try result.object.replaceDenseElementsAndSetLength(self.arena, ri, ri.len);
+            try result.asObj().replaceDenseElementsAndSetLength(self.arena, ri, ri.len);
             return result;
         }
         if (eq(name, "with")) {
@@ -8396,7 +8396,7 @@ pub const Interpreter = struct {
             var k: usize = 0;
             while (k < len) : (k += 1) {
                 const v = if (k == actual) arg(args, 1) else try self.arrIndexGet(o, k);
-                try result.object.appendElement(self.arena, v);
+                try result.asObj().appendElement(self.arena, v);
             }
             return result;
         }
@@ -8416,7 +8416,7 @@ pub const Interpreter = struct {
             if (new_len > 4294967295) return self.throwError("RangeError", "Invalid array length");
             if (new_len > (1 << 22)) return null;
             const result = try self.newArray();
-            const ra = result.object;
+            const ra = result.asObj();
             var i: usize = 0;
             while (i < start) : (i += 1) try ra.appendElement(self.arena, try self.arrIndexGet(o, i));
             if (args.len > 2) for (args[2..]) |v| try ra.appendElement(self.arena, v);
@@ -8429,13 +8429,13 @@ pub const Interpreter = struct {
             const result = try self.arraySpeciesCreate(Value.obj(o), ilen);
             // Only a freshly-created plain dense Array preserves holes by filling
             // them (a custom-species result leaves an absent index).
-            const dense = result.object.is_array and result.object.accessors == null and result.object.attrs == null and result.object.proxy_handler == null;
+            const dense = result.asObj().is_array and result.asObj().accessors == null and result.asObj().attrs == null and result.asObj().proxy_handler == null;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (!(try self.arrIndexPresent(o, i))) {
                     if (dense) {
-                        try result.object.appendElement(self.arena, .undefined);
-                        try result.object.markHole(self.arena, i); // map preserves holes
+                        try result.asObj().appendElement(self.arena, .undefined);
+                        try result.asObj().markHole(self.arena, i); // map preserves holes
                     }
                     continue;
                 }
@@ -8706,17 +8706,17 @@ pub const Interpreter = struct {
             const removed = try self.arraySpeciesCreate(Value.obj(o), del);
             // A plain dense Array `removed` preserves holes; a custom-species
             // result is CreateDataProperty'd per present index.
-            const rdense = removed.object.is_array and removed.object.accessors == null and removed.object.attrs == null and removed.object.proxy_handler == null;
+            const rdense = removed.asObj().is_array and removed.asObj().accessors == null and removed.asObj().attrs == null and removed.asObj().proxy_handler == null;
             var i: usize = 0;
             while (i < del) : (i += 1) {
                 if (try self.arrIndexPresent(o, start + i)) {
                     try self.arrayResultPush(removed, i, try self.arrIndexGet(o, start + i)); // CreateDataPropertyOrThrow
                 } else if (rdense) { // preserve a hole in the removed array
-                    try removed.object.appendElement(self.arena, .undefined);
-                    try removed.object.markHole(self.arena, i);
+                    try removed.asObj().appendElement(self.arena, .undefined);
+                    try removed.asObj().markHole(self.arena, i);
                 }
             }
-            try self.arraySetLengthThrowing(removed.object, del);
+            try self.arraySetLengthThrowing(removed.asObj(), del);
             const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
             // Dense fast path: an ordinary array with no holes/accessors/sparse
             // tail can splice its contiguous value store directly.
@@ -8852,8 +8852,8 @@ pub const Interpreter = struct {
         while (i < len) : (i += 1) {
             if (!(try self.arrIndexPresent(src, i))) continue; // flat skips holes
             const el = try self.arrIndexGet(src, i);
-            if (depth > 0 and el.isObject() and try objectToStringIsArray(self, el.object)) {
-                target_index = try self.flattenInto(dst, el.object, depth - 1, target_index);
+            if (depth > 0 and el.isObject() and try objectToStringIsArray(self, el.asObj())) {
+                target_index = try self.flattenInto(dst, el.asObj(), depth - 1, target_index);
             } else {
                 try self.arrayResultPush(dst, target_index, el); // CreateDataPropertyOrThrow
                 target_index += 1;
@@ -8873,7 +8873,7 @@ pub const Interpreter = struct {
 
     /// Comparator for Array.prototype.sort: >0 if `a` sorts after `b`.
     fn sortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f64 {
-        if (cmp.isObject() and cmp.object.isCallableObject()) {
+        if (cmp.isObject() and cmp.asObj().isCallableObject()) {
             const r = try self.callValue(cmp, &.{ a, b });
             const n = try self.toNumberV(r);
             return if (std.math.isNan(n)) 0 else n;
@@ -8895,7 +8895,7 @@ pub const Interpreter = struct {
             const o = (try self.newObject()).object;
             try self.setProp(o, "\x00intl", Value.str("NumberFormat"));
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
-            const loc = if (locs.elements.items.len > 0) locs.elements.items[0].string else "en";
+            const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
             try self.setProp(o, "\x00locale", Value.str(loc));
             const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else .undefined);
             try self.setProp(o, "\x00opts", Value.obj(ro));
@@ -8984,7 +8984,7 @@ pub const Interpreter = struct {
             const m = try self.getProperty(v, mkey);
             if (!m.isUndefined()) return m.toBoolean();
         }
-        return v.object.is_regex;
+        return v.asObj().is_regex;
     }
 
     fn stringProtocolDispatch(self: *Interpreter, name: []const u8, receiver: Value, args: []const Value) EvalError!?Value {
@@ -9121,7 +9121,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "split")) {
             const result = try self.newArray();
-            const out = &result.object.elements;
+            const out = &result.asObj().elements;
             // No separator → the whole string as the sole element.
             if (args.len == 0 or args[0].isUndefined()) {
                 const lim: usize = if (args.len > 1 and !args[1].isUndefined()) value.Value.uint32FromF64(try self.toNumberV(args[1])) else std.math.maxInt(u32);
@@ -9134,8 +9134,8 @@ pub const Interpreter = struct {
             const lim: usize = if (args.len > 1 and !args[1].isUndefined()) value.Value.uint32FromF64(try self.toNumberV(args[1])) else std.math.maxInt(u32);
             // Regex separator: split on each match, inserting capture groups, per
             // the String.prototype.split(@@split) algorithm.
-            if (args[0].isObject() and args[0].object.is_regex) {
-                const re = try self.compileRegex(args[0].object);
+            if (args[0].isObject() and args[0].asObj().is_regex) {
+                const re = try self.compileRegex(args[0].asObj());
                 if (lim == 0) return result;
                 if (s.len == 0) {
                     // Empty input: [""] unless the pattern matches the empty string.
@@ -9469,8 +9469,8 @@ pub const Interpreter = struct {
             }
             // RegExpCreate(regexp, "g"), then Invoke(rx, @@matchAll, « S ») so a
             // replaced/deleted RegExp.prototype[@@matchAll] is honoured.
-            const src = if (regexp.isObject() and regexp.object.is_regex)
-                regexp.object.regex_source
+            const src = if (regexp.isObject() and regexp.asObj().is_regex)
+                regexp.asObj().regex_source
             else if (regexp.isUndefined())
                 ""
             else
@@ -9488,7 +9488,7 @@ pub const Interpreter = struct {
     /// Coerce a value to a RegExp object: a regex stays as-is; anything else
     /// becomes `new RegExp(String(v))`.
     fn toRegexObject(self: *Interpreter, v: Value) EvalError!*value.Object {
-        if (v.isObject() and v.object.is_regex) return v.object;
+        if (v.isObject() and v.asObj().is_regex) return v.asObj();
         const pat = if (v.isUndefined()) "" else try self.toStringV(v);
         return (try self.makeRegex(pat, "")).object;
     }
@@ -9628,7 +9628,7 @@ pub const Interpreter = struct {
                         continue;
                     };
                     const gv = groups.?.getOwn(template[i + 2 .. close]) orelse Value.undefined;
-                    if (gv.isString()) try buf.appendSlice(a, gv.string);
+                    if (gv.isString()) try buf.appendSlice(a, gv.asStr());
                     i = close;
                 },
                 '0'...'9' => {
@@ -9766,10 +9766,10 @@ pub const Interpreter = struct {
         const v = try self.eval(operand);
         // BigInt unary: `-`/`~` stay BigInt; unary `+` is a TypeError; `typeof`/
         // `!`/`void` work as for any value.
-        if (v.isObject() and v.object.is_bigint and (op == .neg or op == .pos or op == .bit_not)) {
+        if (v.isObject() and v.asObj().is_bigint and (op == .neg or op == .pos or op == .bit_not)) {
             return switch (op) {
-                .neg => try negateBigIntObject(self, v.object),
-                .bit_not => try bitNotBigIntObject(self, v.object),
+                .neg => try negateBigIntObject(self, v.asObj()),
+                .bit_not => try bitNotBigIntObject(self, v.asObj()),
                 .pos => self.throwError("TypeError", "Cannot convert a BigInt value to a number"),
                 else => unreachable,
             };
@@ -9806,7 +9806,7 @@ pub const Interpreter = struct {
             // up directly. A field is an own data slot; a method/accessor lives on
             // the class prototype, so walk the prototype chain too.
             const key = left_node.identifier;
-            var cur: ?*value.Object = robj.object;
+            var cur: ?*value.Object = robj.asObj();
             var has = false;
             while (cur) |c| {
                 if (c.getOwn(key) != null or c.getAccessor(key) != null) {
@@ -9830,8 +9830,8 @@ pub const Interpreter = struct {
     /// `valueOf`/`toString` apply even to proto-less plain objects — and the
     /// first primitive result wins.
     pub fn toPrimitive(self: *Interpreter, v: Value, hint: enum { default, number, string }) EvalError!Value {
-        if (!v.isObject() or v.object.is_symbol or v.object.is_bigint) return v;
-        const o = v.object;
+        if (!v.isObject() or v.asObj().is_symbol or v.asObj().is_bigint) return v;
+        const o = v.asObj();
         // GetMethod(v, @@toPrimitive): if present, it alone decides — it is called
         // with the hint string and must return a non-object (an object result is
         // the "Cannot convert" TypeError); a non-callable @@toPrimitive throws.
@@ -9845,7 +9845,7 @@ pub const Interpreter = struct {
                     .default => "default",
                 };
                 const res = try self.callValueWithThis(exotic, &.{Value.str(hint_str)}, v);
-                if (!res.isObject() or res.object.is_symbol or res.object.is_bigint) return res;
+                if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) return res;
                 return self.throwError("TypeError", "Cannot convert object to primitive value");
             }
         }
@@ -9877,7 +9877,7 @@ pub const Interpreter = struct {
                     break;
                 }
                 if (c.getOwn(m)) |fv| {
-                    if (fv.isObject() and (fv.object.js_func != null or (c == o and fv.object.native != null))) method = fv
+                    if (fv.isObject() and (fv.asObj().js_func != null or (c == o and fv.asObj().native != null))) method = fv
                         // Primitive wrappers' native valueOf is a spec builtin that
                         // produces the boxed primitive at this position in the
                         // OrdinaryToPrimitive order, so do not continue to a later
@@ -9902,7 +9902,7 @@ pub const Interpreter = struct {
                     const res = try self.callValueWithThis(fnv, &.{}, v);
                     // A BigInt or Symbol result is a primitive (it is represented
                     // as an object internally), so it ends ToPrimitive too.
-                    if (!res.isObject() or res.object.is_bigint or res.object.is_symbol) return res;
+                    if (!res.isObject() or res.asObj().is_bigint or res.asObj().is_symbol) return res;
                 }
             }
         }
@@ -9921,8 +9921,8 @@ pub const Interpreter = struct {
         if (o.prim) |p| {
             if (builtin_wrapper_value_of) return p;
             if (builtin_to_string) {
-                if (p.isObject() and p.object.is_symbol) {
-                    const ds = p.object.sym_desc orelse "";
+                if (p.isObject() and p.asObj().is_symbol) {
+                    const ds = p.asObj().sym_desc orelse "";
                     return .{ .string = try std.mem.concat(self.arena, u8, &.{ "Symbol(", ds, ")" }) };
                 }
                 return Value.str(try p.toString(self.arena));
@@ -9952,7 +9952,7 @@ pub const Interpreter = struct {
         if (!builtin_to_string) return self.throwError("TypeError", "Cannot convert object to primitive value");
         if (builtin_to_string_method) |m| {
             const res = try self.callValueWithThis(m, &.{}, v);
-            if (!res.isObject() or res.object.is_symbol or res.object.is_bigint) return res;
+            if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) return res;
         }
         return self.throwError("TypeError", "Cannot convert object to primitive value");
     }
@@ -9966,7 +9966,7 @@ pub const Interpreter = struct {
         var cur: ?*value.Object = o;
         while (cur) |c| : (cur = c.proto) {
             if (c.getOwn(name)) |fv| {
-                return if (fv.isObject() and fv.object.js_func != null) fv else null;
+                return if (fv.isObject() and fv.asObj().js_func != null) fv else null;
             }
         }
         return null;
@@ -9996,8 +9996,8 @@ pub const Interpreter = struct {
                 // objects compare by identity, and an object vs null/undefined is
                 // always unequal, so neither is coerced. A BigInt/Symbol value is
                 // boxed as an object here but counts as a primitive operand.
-                const l_obj = l.isObject() and !l.object.is_bigint and !l.object.is_symbol;
-                const r_obj = r.isObject() and !r.object.is_bigint and !r.object.is_symbol;
+                const l_obj = l.isObject() and !l.asObj().is_bigint and !l.asObj().is_symbol;
+                const r_obj = r.isObject() and !r.asObj().is_bigint and !r.asObj().is_symbol;
                 if (l_obj and !r_obj and !r.isUndefined() and !r.isNull()) l = try self.toPrimitive(l, .default);
                 if (r_obj and !l_obj and !l.isUndefined() and !l.isNull()) r = try self.toPrimitive(r, .default);
             },
@@ -10006,8 +10006,8 @@ pub const Interpreter = struct {
         // BigInt operands. Arithmetic/bitwise require both to be BigInt (mixing
         // with a Number is a TypeError); relational ops compare mathematically;
         // `+` with a string still concatenates.
-        const l_big = l.isObject() and l.object.is_bigint;
-        const r_big = r.isObject() and r.object.is_bigint;
+        const l_big = l.isObject() and l.asObj().is_bigint;
+        const r_big = r.isObject() and r.asObj().is_bigint;
         if (l_big or r_big) {
             switch (op) {
                 .add => if (l.isString() or r.isString()) {} else return self.bigIntBinary(op, l, r, l_big, r_big),
@@ -10066,8 +10066,8 @@ pub const Interpreter = struct {
     /// A BigInt binary op (both operands must be BigInt — mixing is a TypeError).
     fn bigIntBinary(self: *Interpreter, op: ast.BinaryOp, l: Value, r: Value, l_big: bool, r_big: bool) EvalError!Value {
         if (!l_big or !r_big) return self.throwError("TypeError", "Cannot mix BigInt and other types, use explicit conversions");
-        const a = l.object.bigint;
-        const b = r.object.bigint;
+        const a = l.asObj().bigint;
+        const b = r.asObj().bigint;
         const res: i128 = switch (op) {
             .add => a +% b,
             .sub => a -% b,
@@ -10096,15 +10096,15 @@ pub const Interpreter = struct {
     fn bigCmp(l: Value, r: Value) f64 {
         // BigInt vs BigInt: compare the i128 values exactly (an f64 round-trip
         // loses precision past 2^53, e.g. 9007199254740992000n vs ...991999n).
-        const l_big = l.isObject() and l.object.is_bigint;
-        const r_big = r.isObject() and r.object.is_bigint;
+        const l_big = l.isObject() and l.asObj().is_bigint;
+        const r_big = r.isObject() and r.asObj().is_bigint;
         if (l_big and r_big) {
-            const a = l.object.bigint;
-            const b = r.object.bigint;
+            const a = l.asObj().bigint;
+            const b = r.asObj().bigint;
             return if (a < b) -1 else if (a > b) 1 else 0;
         }
-        const lf: f64 = if (l_big) @floatFromInt(l.object.bigint) else l.toNumber();
-        const rf: f64 = if (r_big) @floatFromInt(r.object.bigint) else r.toNumber();
+        const lf: f64 = if (l_big) @floatFromInt(l.asObj().bigint) else l.toNumber();
+        const rf: f64 = if (r_big) @floatFromInt(r.asObj().bigint) else r.toNumber();
         return lf - rf;
     }
 
@@ -10128,9 +10128,9 @@ pub const Interpreter = struct {
     }
 
     pub fn inOperator(self: *Interpreter, l: Value, r: Value) EvalError!bool {
-        if (r.isObject()) try self.checkRestricted(r.object);
+        if (r.isObject()) try self.checkRestricted(r.asObj());
         if (!r.isObject()) return self.throwError("TypeError", "cannot use 'in' on a non-object");
-        const o = r.object;
+        const o = r.asObj();
         const key = try self.keyOf(l);
         if (try self.hasPropertyResult(o, key)) return true;
         // The global object carries the installed globals as properties.
@@ -10139,9 +10139,9 @@ pub const Interpreter = struct {
     }
 
     pub fn instanceOf(self: *Interpreter, l: Value, r: Value) EvalError!bool {
-        if (!r.isObject() or !r.object.isCallableObject())
+        if (!r.isObject() or !r.asObj().isCallableObject())
             return self.throwError("TypeError", "Right-hand side of 'instanceof' is not callable");
-        return self.ordinaryHasInstance(r.object, l);
+        return self.ordinaryHasInstance(r.asObj(), l);
     }
 
     /// OrdinaryHasInstance(C=`rc`, O=`l`): is `rc.prototype` in `l`'s prototype
@@ -10167,13 +10167,13 @@ pub const Interpreter = struct {
             return self.instanceOf(l, bf.target);
         }
         if (!builtins.isRealObject(l)) return false;
-        const lo = l.object;
+        const lo = l.asObj();
         const p = try self.getProperty(Value.obj(rc), "prototype");
         if (!builtins.isRealObject(p)) return self.throwError("TypeError", "Function has non-object prototype in instanceof check");
         var cur = try self.objectGetPrototypeValue(lo);
         while (cur.isObject()) {
-            if (cur.object == p.object) return true;
-            cur = try self.objectGetPrototypeValue(cur.object);
+            if (cur.asObj() == p.asObj()) return true;
+            cur = try self.objectGetPrototypeValue(cur.asObj());
         }
         if (rc.error_ctor) |name| {
             if (lo.is_error and (std.mem.eql(u8, lo.error_name, name) or std.mem.eql(u8, name, "Error")))
@@ -10188,7 +10188,7 @@ pub const Interpreter = struct {
 fn functionHasInstanceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return Value.boolVal(false);
-    return Value.boolVal(try self.ordinaryHasInstance(this.object, if (args.len > 0) args[0] else .undefined));
+    return Value.boolVal(try self.ordinaryHasInstance(this.asObj(), if (args.len > 0) args[0] else .undefined));
 }
 
 /// The global `eval`. Direct eval runs in the caller's lexical environment;
@@ -10199,7 +10199,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len == 0) return .undefined;
     if (!args[0].isString()) return args[0]; // eval of a non-string is the identity
-    const src = args[0].string;
+    const src = args[0].asStr();
     var parser = Parser.init(self.arena, src) catch return self.throwError("SyntaxError", "eval: invalid source");
     // Direct eval inherits the caller's strictness for early errors; indirect
     // eval is global code in the eval function's realm and only becomes strict
@@ -10215,8 +10215,8 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return .undefined));
         self.env = genv;
         if (genv.get("globalThis")) |gt| if (gt.isObject()) {
-            self.this_value = Value.obj(gt.object);
-            self.global_object = gt.object;
+            self.this_value = Value.obj(gt.asObj());
+            self.global_object = gt.asObj();
         };
     }
 
@@ -10259,7 +10259,7 @@ fn promiseRejectAbrupt(self: *Interpreter, err: value.HostError) value.HostError
 
 fn asyncFromSyncUnderlying(self: *Interpreter, this: Value) value.HostError!Value {
     if (!this.isObject()) return self.throwError("TypeError", "Async-from-Sync iterator method called on a non-object");
-    return this.object.getOwn("__sync") orelse self.throwError("TypeError", "Async-from-Sync iterator missing underlying iterator");
+    return this.asObj().getOwn("__sync") orelse self.throwError("TypeError", "Async-from-Sync iterator missing underlying iterator");
 }
 
 fn asyncFromSyncContinuation(self: *Interpreter, sync_iter: Value, result: Value, close_on_rejection: bool) value.HostError!Value {
@@ -10338,7 +10338,7 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const executor = if (args.len > 0) args[0] else .undefined;
     if (!executor.isCallable()) return self.throwError("TypeError", "Promise resolver is not a function");
     const pobj = try promise.newPromise(self);
-    if (self.new_target.isObject()) pobj.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Promise");
+    if (self.new_target.isObject()) pobj.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Promise");
     const pp = pobj.promise.?;
     const resolving = try self.arena.create(promise.Resolving);
     resolving.* = .{ .promise = @ptrCast(@alignCast(pp)) };
@@ -10392,7 +10392,7 @@ fn promiseThenImpl(self: *Interpreter, this: Value, on_f: Value, on_r: Value) va
     const default_ctor = self.env.get("Promise") orelse .undefined;
     const c = try self.speciesConstructor(this, default_ctor);
     // Intrinsic Promise → cheap native capability; a subclass/custom → its own.
-    if (c.isObject() and default_ctor.isObject() and c.object == default_ctor.object)
+    if (c.isObject() and default_ctor.isObject() and c.asObj() == default_ctor.asObj())
         return promise.then(self, p, on_f, on_r);
     const cap = try newPromiseCapability(self, c);
     try promise.performThen(self, p, on_f, on_r, cap.resolve, cap.reject);
@@ -10485,7 +10485,7 @@ pub fn promiseResolveValue(self: *Interpreter, v: Value) EvalError!Value {
     if (promise.promiseOf(v) != null) {
         if (self.env.get("Promise")) |pc| if (pc.isObject()) {
             const ctor = try self.getProperty(v, "constructor");
-            if (ctor.isObject() and ctor.object == pc.object) return v;
+            if (ctor.isObject() and ctor.asObj() == pc.asObj()) return v;
         };
     }
     const pobj = try promise.newPromise(self);
@@ -10517,12 +10517,12 @@ fn promiseRejectValue(self: *Interpreter, reason: Value) EvalError!Value {
 /// subclass instance).
 fn promiseResolveStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.is_symbol or this.object.is_bigint)
+    if (!this.isObject() or this.asObj().is_symbol or this.asObj().is_bigint)
         return self.throwError("TypeError", "Promise.resolve called on a non-object");
     const v = if (args.len > 0) args[0] else .undefined;
     if (promise.promiseOf(v) != null) {
         const ctor = try self.getProperty(v, "constructor");
-        if (ctor.isObject() and ctor.object == this.object) return v;
+        if (ctor.isObject() and ctor.asObj() == this.asObj()) return v;
     }
     const cap = try newPromiseCapability(self, this);
     _ = try self.callValue(cap.resolve, &.{v});
@@ -10552,10 +10552,10 @@ fn objectGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         const kv = try self.callValue(cb, &.{ el, Value.num(@floatFromInt(i)) });
         const key = try self.keyOf(kv);
         if (obj.getOwn(key)) |bucket| {
-            try bucket.object.elements.append(bucket.object.elementsAllocator(self.arena), el);
+            try bucket.asObj().elements.append(bucket.asObj().elementsAllocator(self.arena), el);
         } else {
             const arr = try self.newArray();
-            try arr.object.elements.append(arr.object.elementsAllocator(self.arena), el);
+            try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), el);
             try self.setProp(obj, key, arr);
         }
     }
@@ -10575,10 +10575,10 @@ fn mapGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
         const key = try self.callValue(cb, &.{ el, Value.num(@floatFromInt(i)) });
         if ((try self.mapMethod(map, "has", &.{key})).?.boolean) {
             const bucket = (try self.mapMethod(map, "get", &.{key})).?;
-            try bucket.object.elements.append(bucket.object.elementsAllocator(self.arena), el);
+            try bucket.asObj().elements.append(bucket.asObj().elementsAllocator(self.arena), el);
         } else {
             const arr = try self.newArray();
-            try arr.object.elements.append(arr.object.elementsAllocator(self.arena), el);
+            try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), el);
             _ = try self.mapMethod(map, "set", &.{ key, arr });
         }
     }
@@ -10588,7 +10588,7 @@ fn mapGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 /// Collect an iterable's elements into a slice: arrays use their dense store
 /// directly; anything else is driven through the iterator protocol.
 fn collectIterable(self: *Interpreter, v: Value) EvalError![]Value {
-    if (v.isObject() and v.object.is_array) return v.object.elements.items;
+    if (v.isObject() and v.asObj().is_array) return v.asObj().elements.items;
     const iter = try self.iteratorOf(v);
     var list: std.ArrayListUnmanaged(Value) = .empty;
     while (true) {
@@ -10657,7 +10657,7 @@ fn combineSettle(self: *Interpreter, c: *promise.Combine) value.HostError!void {
 }
 
 inline fn tracePrivateValue(v: anytype, val: Value) void {
-    if (val.isObject()) v.mark(val.object);
+    if (val.isObject()) v.mark(val.asObj());
 }
 
 /// Trace engine-owned `private_data` carried by native closures allocated in
@@ -10954,12 +10954,12 @@ fn vmIndexingModeFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = ctx;
     _ = this;
     const v = if (args.len > 0) args[0] else Value.undefined;
-    if (v.isObject() and v.object.is_array) {
-        if (v.object.forced_array_storage) return Value.str("Array ArrayStorage");
+    if (v.isObject() and v.asObj().is_array) {
+        if (v.asObj().forced_array_storage) return Value.str("Array ArrayStorage");
         return Value.str("Array CopyOnWrite");
     }
     if (v.isObject()) {
-        if (v.object.typed_array) |ta| return Value.str(ta.kind.ctorName());
+        if (v.asObj().typed_array) |ta| return Value.str(ta.kind.ctorName());
     }
     return Value.str("Object");
 }
@@ -10968,9 +10968,9 @@ fn vmEnsureArrayStorageFn(ctx: *anyopaque, this: Value, args: []const Value) val
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const v = if (args.len > 0) args[0] else Value.undefined;
-    if (!v.isObject() or !v.object.is_array)
+    if (!v.isObject() or !v.asObj().is_array)
         return self.throwError("TypeError", "$vm.ensureArrayStorage expects an Array");
-    v.object.forced_array_storage = true;
+    v.asObj().forced_array_storage = true;
     return v;
 }
 
@@ -11051,8 +11051,8 @@ fn protoSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // Only an Object or null is a candidate prototype; anything else is a no-op.
     if (!v.isNull() and !builtins.isRealObject(v)) return .undefined;
     if (!this.isObject()) return .undefined; // a primitive `this` has no own [[Prototype]]
-    const o = this.object;
-    const new_proto: ?*value.Object = if (v.isObject()) v.object else null;
+    const o = this.asObj();
+    const new_proto: ?*value.Object = if (v.isObject()) v.asObj() else null;
     // OrdinarySetPrototypeOf rejects setting the prototype of a non-extensible
     // object, or any change that would form a [[Prototype]] cycle. The
     // `__proto__` setter turns that false result into a TypeError.
@@ -11087,7 +11087,7 @@ fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (tag_obj) |o| {
         if (symbolToStringTagKey(self)) |tk| {
             const tv = try self.getProperty(Value.obj(o), tk);
-            if (tv.isString()) tag = tv.string;
+            if (tv.isString()) tag = tv.asStr();
         }
     }
     return .{ .string = try std.mem.concat(self.arena, u8, &.{ "[object ", tag, "]" }) };
@@ -11106,8 +11106,8 @@ fn symbolToStringTagKey(self: *Interpreter) ?[]const u8 {
     const sym = self.env.get("Symbol") orelse return null;
     if (!sym.isObject()) return null;
     const tt = sym.object.getOwn("toStringTag") orelse return null;
-    if (!tt.isObject() or !tt.object.is_symbol) return null;
-    return tt.object.sym_key;
+    if (!tt.isObject() or !tt.asObj().is_symbol) return null;
+    return tt.asObj().sym_key;
 }
 
 /// `Error.isError(v)` — true iff `v` is an object with [[ErrorData]], looking
@@ -11117,7 +11117,7 @@ fn errorIsErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = this;
     const v = if (args.len > 0) args[0] else .undefined;
     if (!v.isObject()) return Value.boolVal(false);
-    var o = v.object;
+    var o = v.asObj();
     while (o.proxy_handler != null) {
         if (o.proxy_target) |t| o = t else break;
     }
@@ -11132,19 +11132,19 @@ fn errorIsErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 /// any other hint (or a non-string) is a TypeError.
 fn dateSymbolToPrimitiveFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.is_symbol or this.object.is_bigint)
+    if (!this.isObject() or this.asObj().is_symbol or this.asObj().is_bigint)
         return self.throwError("TypeError", "Date.prototype[Symbol.toPrimitive] called on a non-object");
     const hint = if (args.len > 0) args[0] else .undefined;
     if (!hint.isString()) return self.throwError("TypeError", "hint must be a string");
-    const string_first = std.mem.eql(u8, hint.string, "string") or std.mem.eql(u8, hint.string, "default");
-    if (!string_first and !std.mem.eql(u8, hint.string, "number"))
+    const string_first = std.mem.eql(u8, hint.asStr(), "string") or std.mem.eql(u8, hint.asStr(), "default");
+    if (!string_first and !std.mem.eql(u8, hint.asStr(), "number"))
         return self.throwError("TypeError", "invalid hint for Symbol.toPrimitive");
     const names: [2][]const u8 = if (string_first) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
     for (names) |m| {
         const method = try self.getProperty(this, m);
         if (method.isCallable()) {
             const res = try self.callValueWithThis(method, &.{}, this);
-            if (!res.isObject() or res.object.is_symbol or res.object.is_bigint) return res;
+            if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) return res;
         }
     }
     return self.throwError("TypeError", "Cannot convert object to primitive value");
@@ -11153,7 +11153,7 @@ fn dateSymbolToPrimitiveFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.is_symbol or this.object.is_bigint)
+    if (!this.isObject() or this.asObj().is_symbol or this.asObj().is_bigint)
         return self.throwError("TypeError", "Error.prototype.toString called on a non-object");
     // ToString(name)/ToString(message) run ToPrimitive (throwing for a Symbol and
     // propagating an abrupt valueOf/toString).
@@ -11172,14 +11172,14 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.is_symbol or this.object.is_bigint)
+    if (!this.isObject() or this.asObj().is_symbol or this.asObj().is_bigint)
         return self.throwError("TypeError", "Error.prototype.stack getter called on a non-object");
     // No [[ErrorData]] → undefined (e.g. Error.prototype, a plain object). For an
     // error, an implementation-defined trace string. Read the class name directly
     // off `[[ErrorData]]` rather than via [[Get]], so a hostile/recursive receiver
     // (proxy traps, getters) can't re-enter and blow the stack.
-    if (!this.object.is_error) return .undefined;
-    const name = this.object.error_name;
+    if (!this.asObj().is_error) return .undefined;
+    const name = this.asObj().error_name;
     return Value.str(if (name.len == 0) "Error" else name);
 }
 
@@ -11189,17 +11189,17 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 /// property is absent (bypassing this inherited accessor) or Set(this, p, v,
 /// true) when present (honoring an own accessor/writability).
 fn setterIgnoringProto(self: *Interpreter, this: Value, home: ?*value.Object, key: []const u8, v: Value) EvalError!Value {
-    if (!this.isObject() or this.object.is_symbol or this.object.is_bigint)
+    if (!this.isObject() or this.asObj().is_symbol or this.asObj().is_bigint)
         return self.throwError("TypeError", "setter requires an object receiver");
-    if (home) |h| if (this.object == h) {
+    if (home) |h| if (this.asObj() == h) {
         const proto: ?*value.Object = if (h.getOwn("constructor")) |ctor|
-            (if (ctor.isObject()) try self.functionRealmIntrinsicProto(ctor.object, "TypeError") else null)
+            (if (ctor.isObject()) try self.functionRealmIntrinsicProto(ctor.asObj(), "TypeError") else null)
         else
             null;
         self.exception = try self.makeErrorWithProto("TypeError", "Cannot assign to the read-only property of the home object", proto);
         return error.Throw;
     };
-    const o = this.object;
+    const o = this.asObj();
     // [[GetOwnProperty]](this, key): own data slot, own accessor, or proxy trap.
     const has_own = if (o.proxy_handler != null or o.proxy_revoked) blk: {
         const d = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), .undefined, &.{ Value.obj(o), self.keyToValue(key) });
@@ -11228,7 +11228,7 @@ fn setterIgnoringProto(self: *Interpreter, this: Value, home: ?*value.Object, ke
 fn errorStackSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     // Step 1: a non-object receiver throws (handled in setterIgnoringProto).
-    if (!this.isObject() or this.object.is_symbol or this.object.is_bigint)
+    if (!this.isObject() or this.asObj().is_symbol or this.asObj().is_bigint)
         return self.throwError("TypeError", "Error.prototype.stack setter called on a non-object");
     // Step 2: v must already be a String (no coercion of an object/wrapper).
     const v = if (args.len > 0) args[0] else .undefined;
@@ -11305,8 +11305,8 @@ fn symbolToPrimitiveFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 /// symbol of an `Object(sym)` wrapper.
 fn symbolThisValue(this: Value) Value {
     if (this.isObject()) {
-        if (this.object.is_symbol) return this;
-        if (this.object.prim) |p| return p;
+        if (this.asObj().is_symbol) return this;
+        if (this.asObj().prim) |p| return p;
     }
     return this;
 }
@@ -11315,9 +11315,9 @@ fn symbolThisValue(this: Value) Value {
 /// `Object(sym)` wrapper), else throws a TypeError naming `method`.
 fn thisSymbol(self: *Interpreter, this: Value, method: []const u8) EvalError!*value.Object {
     if (this.isObject()) {
-        if (this.object.is_symbol) return this.object;
-        if (this.object.prim) |p| {
-            if (p.isObject() and p.object.is_symbol) return p.object;
+        if (this.asObj().is_symbol) return this.asObj();
+        if (this.asObj().prim) |p| {
+            if (p.isObject() and p.asObj().is_symbol) return p.asObj();
         }
     }
     return self.throwError("TypeError", try std.fmt.allocPrint(self.arena, "{s} requires that 'this' be a Symbol", .{method}));
@@ -11335,7 +11335,7 @@ fn proxyConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
         return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
     const o = try gc_mod.allocObj(self.arena);
-    o.* = .{ .proxy_target = target.object, .proxy_handler = handler.object, .proxy_callable = target.object.isCallableObject() };
+    o.* = .{ .proxy_target = target.asObj(), .proxy_handler = handler.asObj(), .proxy_callable = target.asObj().isCallableObject() };
     return Value.obj(o);
 }
 
@@ -11351,7 +11351,7 @@ fn proxyRevocableFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
         return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
     const p = try gc_mod.allocObj(self.arena);
-    p.* = .{ .proxy_target = target.object, .proxy_handler = handler.object, .proxy_callable = target.object.isCallableObject() };
+    p.* = .{ .proxy_target = target.asObj(), .proxy_handler = handler.asObj(), .proxy_callable = target.asObj().isCallableObject() };
     const revoke = try gc_mod.allocObj(self.arena);
     revoke.* = .{ .native = proxyRevokeFn, .private_data = @ptrCast(p) };
     try installNativeProps(self.arena, self.root_shape, revoke, "", 0);
@@ -11392,7 +11392,7 @@ fn reflectSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.set called on non-object");
     // A module namespace's [[Set]] returns false (Reflect.set reports it without
     // throwing, unlike a strict assignment).
-    if (target.isObject() and isModuleNs(target.object)) return Value.boolVal(false);
+    if (target.isObject() and isModuleNs(target.asObj())) return Value.boolVal(false);
     const receiver = if (args.len > 3) args[3] else target;
     return Value.boolVal(try self.setMemberResult(target, try self.keyOf(if (args.len > 1) args[1] else .undefined), if (args.len > 2) args[2] else .undefined, receiver));
 }
@@ -11410,19 +11410,19 @@ fn reflectDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.deleteProperty called on non-object");
-    return Value.boolVal(try self.deleteOwn(target.object, try self.keyOf(if (args.len > 1) args[1] else .undefined)));
+    return Value.boolVal(try self.deleteOwn(target.asObj(), try self.keyOf(if (args.len > 1) args[1] else .undefined)));
 }
 
 fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].object);
+    if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.ownKeys called on non-object");
     // objectOwnKeysList is proxy- and module-namespace-aware (sorted exotic keys).
-    const keys = try self.objectOwnKeysList(target.object);
+    const keys = try self.objectOwnKeysList(target.asObj());
     const arr = try self.newArray();
-    for (keys) |k| try arr.object.elements.append(arr.object.elementsAllocator(self.arena), self.keyToValue(k));
+    for (keys) |k| try arr.asObj().elements.append(arr.asObj().elementsAllocator(self.arena), self.keyToValue(k));
     return arr;
 }
 
@@ -11431,8 +11431,8 @@ fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.getPrototypeOf called on non-object");
-    if (target.object.proxy_handler != null or target.object.proxy_revoked) return self.proxyGetProto(target.object);
-    return if (target.object.proto) |p| Value.obj(p) else .null;
+    if (target.asObj().proxy_handler != null or target.asObj().proxy_revoked) return self.proxyGetProto(target.asObj());
+    return if (target.asObj().proto) |p| Value.obj(p) else .null;
 }
 
 /// CreateListFromArrayLike: a non-Array argumentsList is still read via its
@@ -11440,7 +11440,7 @@ fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 /// a non-object is a TypeError. Real arrays take the dense fast path.
 fn createListFromArrayLike(self: *Interpreter, v: Value) EvalError![]const Value {
     if (!builtins.isRealObject(v)) return self.throwError("TypeError", "Reflect: arguments list is not an object");
-    if (v.object.is_array) return v.object.elements.items;
+    if (v.asObj().is_array) return v.asObj().elements.items;
     const len = toLen((try self.toPrimitive(try self.getProperty(v, "length"), .number)).toNumber());
     if (len > (1 << 22)) return self.throwError("RangeError", "arguments list is too large");
     const buf = try self.arena.alloc(Value, len);
@@ -11484,7 +11484,7 @@ fn reflectGetOwnDescFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 /// `Reflect.isExtensible(target)` — TypeError on a non-Object (Object.* returns false).
 fn reflectIsExtensibleFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].object);
+    if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
     if (!builtins.isRealObject(if (args.len > 0) args[0] else .undefined))
         return self.throwError("TypeError", "Reflect.isExtensible called on non-object");
     return builtins.objectIsExtensible(ctx, this, args);
@@ -11495,13 +11495,13 @@ fn reflectIsExtensibleFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 fn reflectPreventExtFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].object);
+    if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
     const target = if (args.len > 0) args[0] else .undefined;
     if (!builtins.isRealObject(target))
         return self.throwError("TypeError", "Reflect.preventExtensions called on non-object");
-    if (target.object.proxy_handler != null or target.object.proxy_revoked)
-        return Value.boolVal(try self.proxyPreventExt(target.object));
-    target.object.extensible = false;
+    if (target.asObj().proxy_handler != null or target.asObj().proxy_revoked)
+        return Value.boolVal(try self.proxyPreventExt(target.asObj()));
+    target.asObj().extensible = false;
     return Value.boolVal(true);
 }
 
@@ -11518,8 +11518,8 @@ fn reflectSetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const p = if (args.len > 1) args[1] else .undefined;
     if (!p.isNull() and !builtins.isRealObject(p))
         return self.throwError("TypeError", "Object prototype may only be an Object or null");
-    const new_proto: ?*value.Object = if (p.isObject()) p.object else null;
-    return Value.boolVal(try self.setPrototypeOfObject(target.object, new_proto));
+    const new_proto: ?*value.Object = if (p.isObject()) p.asObj() else null;
+    return Value.boolVal(try self.setPrototypeOfObject(target.asObj(), new_proto));
 }
 
 /// Best-effort [[Construct]]-ability test: a native flagged `native_ctor`, an
@@ -11527,7 +11527,7 @@ fn reflectSetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 /// function over a constructor, or a proxy whose target is a constructor.
 pub fn isConstructorValue(v: Value) bool {
     if (!v.isObject()) return false;
-    const o = v.object;
+    const o = v.asObj();
     if (o.proxy_handler != null) return if (o.proxy_target) |t| isConstructorValue(Value.obj(t)) else false;
     if (o.bound) |erased| {
         const bf: *Interpreter.BoundFn = @ptrCast(@alignCast(erased));
@@ -11583,7 +11583,7 @@ fn host262IsHTMLDDACallFn(ctx: *anyopaque, this: Value, args: []const Value) val
     _ = this;
     if (args.len == 0) return .null;
     if (args[0].isUndefined()) return .null;
-    if (args[0].isString() and args[0].string.len == 0) return .null;
+    if (args[0].isString() and args[0].asStr().len == 0) return .null;
     return .undefined;
 }
 
@@ -11592,7 +11592,7 @@ fn host262DetachFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     _ = ctx;
     const v = if (args.len > 0) args[0] else Value.undefined;
-    if (v.isObject()) if (v.object.array_buffer) |ab| {
+    if (v.isObject()) if (v.asObj().array_buffer) |ab| {
         ab.detached = true;
     };
     return .undefined;
@@ -11606,9 +11606,9 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const fnobj = self.active_native orelse return .undefined;
     const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return .undefined));
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else .undefined;
-    var parser = Parser.init(self.arena, args[0].string) catch return self.throwError("SyntaxError", "evalScript: invalid source");
+    var parser = Parser.init(self.arena, args[0].asStr()) catch return self.throwError("SyntaxError", "evalScript: invalid source");
     const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "evalScript: parse error");
-    const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.object else null) else null;
+    const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
     const s_env = self.env;
     const s_this = self.this_value;
     const s_glob = self.global_object;
@@ -11637,13 +11637,13 @@ fn host262CreateRealmFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
     // Share the creating realm's well-known symbols with the new realm.
-    const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv.isObject()) sv.object else null) else null;
+    const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv.isObject()) sv.asObj() else null) else null;
     try installGlobalsInner(genv, self.root_shape, parent_symbol);
     try genv.put("globalThis", Value.obj(gobj));
     try mirrorGlobalsOnto(genv, gobj, self.root_shape);
     // Point the new realm's own `$262.global` at its global object.
     if (genv.get("$262")) |d| {
-        if (d.isObject()) try self.setProp(d.object, "global", Value.obj(gobj));
+        if (d.isObject()) try self.setProp(d.asObj(), "global", Value.obj(gobj));
     }
     // The realm record handed back to the caller (in the caller's realm).
     const realm = (try self.newObject()).object;
@@ -11678,7 +11678,7 @@ fn install262AbstractModuleSource(env: *Environment, rs: *Shape, host: *value.Ob
     const ctor = try gc_mod.allocObj(a);
     const function_proto: ?*value.Object = blk: {
         if (env.get("Function")) |fv| if (fv.isObject()) {
-            if (fv.object.getOwn("prototype")) |pv| if (pv.isObject()) break :blk pv.object;
+            if (fv.asObj().getOwn("prototype")) |pv| if (pv.isObject()) break :blk pv.asObj();
         };
         break :blk null;
     };
@@ -11689,12 +11689,12 @@ fn install262AbstractModuleSource(env: *Environment, rs: *Shape, host: *value.Ob
     try setConstructor(a, rs, proto, ctor);
 
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
-        if (sym.object.getOwn("toStringTag")) |tag| if (tag.isObject() and tag.object.is_symbol) {
+        if (sym.object.getOwn("toStringTag")) |tag| if (tag.isObject() and tag.asObj().is_symbol) {
             const getter = try gc_mod.allocObj(a);
             getter.* = .{ .native = host262AbstractModuleSourceTagGetter };
             try installNativeProps(a, rs, getter, "get [Symbol.toStringTag]", 0);
-            try proto.setAccessor(a, tag.object.sym_key, Value.obj(getter), null);
-            try proto.setAttr(a, tag.object.sym_key, .{ .enumerable = false, .configurable = true });
+            try proto.setAccessor(a, tag.asObj().sym_key, Value.obj(getter), null);
+            try proto.setAttr(a, tag.asObj().sym_key, .{ .enumerable = false, .configurable = true });
         };
     };
 
@@ -11710,22 +11710,22 @@ fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
     self.initEnvironment(genv, null, true);
     const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
-    const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv.isObject()) sv.object else null) else null;
+    const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv.isObject()) sv.asObj() else null) else null;
     const parent_symbol_registry = try symbolRegistry(self);
     try installGlobalsInner(genv, self.root_shape, parent_symbol);
     if (parent_symbol_registry) |reg| {
         if (genv.get("Symbol")) |sv| if (sv.isObject())
-            try sv.object.setOwn(a, self.root_shape, "\x00registry", Value.obj(reg));
+            try sv.asObj().setOwn(a, self.root_shape, "\x00registry", Value.obj(reg));
     }
     if (genv.get("Object")) |ov| if (ov.isObject()) {
-        if (ov.object.getOwn("prototype")) |pv| {
-            if (pv.isObject()) gobj.proto = pv.object;
+        if (ov.asObj().getOwn("prototype")) |pv| {
+            if (pv.isObject()) gobj.proto = pv.asObj();
         }
     };
     try genv.put("globalThis", Value.obj(gobj));
     try mirrorGlobalsOnto(genv, gobj, self.root_shape);
     if (genv.get("$262")) |d| {
-        if (d.isObject()) try self.setProp(d.object, "global", Value.obj(gobj));
+        if (d.isObject()) try self.setProp(d.asObj(), "global", Value.obj(gobj));
     }
     return genv;
 }
@@ -11754,7 +11754,7 @@ fn symbolProtoInRealm(realm: *Environment) ?*value.Object {
     const sym = realm.get("Symbol") orelse return null;
     if (!sym.isObject()) return null;
     const p = sym.object.getOwn("prototype") orelse return null;
-    return if (p.isObject()) p.object else null;
+    return if (p.isObject()) p.asObj() else null;
 }
 
 const SrWrappedData = struct {
@@ -11768,7 +11768,7 @@ const SrWrappedData = struct {
 /// other object is a TypeError.
 fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environment, v: Value) EvalError!Value {
     if (!v.isObject()) return v;
-    const o = v.object;
+    const o = v.asObj();
     if (o.is_symbol) {
         if (symbolProtoInRealm(wrap_env)) |p| o.proto = p;
         return v;
@@ -11789,8 +11789,8 @@ fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environme
         w.private_data = @ptrCast(data);
         // The wrapper's [[Prototype]] is the realm receiving the wrapped value.
         if (wrap_env.get("Function")) |fc| if (fc.isObject()) {
-            if (fc.object.getOwn("prototype")) |fp| if (fp.isObject()) {
-                w.proto = fp.object;
+            if (fc.asObj().getOwn("prototype")) |fp| if (fp.isObject()) {
+                w.proto = fp.asObj();
             };
         };
         // CopyNameAndLength(wrapped, target): a read that throws (a poisoned
@@ -11804,15 +11804,15 @@ fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environme
             self.getProperty(Value.obj(o), "length") catch
                 return throwErrorInRealm(self, error_env, "TypeError", "ShadowRealm: wrapped function length is not accessible");
         // ToIntegerOrInfinity(targetLen): +∞ is preserved; otherwise clamp to ≥ 0.
-        const len: f64 = if (len_v.isNumber() and !std.math.isNan(len_v.number))
-            (if (std.math.isInf(len_v.number)) (if (len_v.number > 0) len_v.number else 0) else @max(0, @trunc(len_v.number)))
+        const len: f64 = if (len_v.isNumber() and !std.math.isNan(len_v.asNum()))
+            (if (std.math.isInf(len_v.asNum())) (if (len_v.asNum() > 0) len_v.asNum() else 0) else @max(0, @trunc(len_v.asNum())))
         else
             0;
         try w.setOwn(self.arena, self.root_shape, "length", Value.num(len));
         try w.setAttr(self.arena, "length", ro_attr);
         const name_v = self.getProperty(Value.obj(o), "name") catch
             return throwErrorInRealm(self, error_env, "TypeError", "ShadowRealm: wrapped function name is not accessible");
-        try w.setOwn(self.arena, self.root_shape, "name", Value.str(if (name_v.isString()) name_v.string else ""));
+        try w.setOwn(self.arena, self.root_shape, "name", Value.str(if (name_v.isString()) name_v.asStr() else ""));
         try w.setAttr(self.arena, "name", ro_attr);
         return Value.obj(w);
     }
@@ -11850,7 +11850,7 @@ fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const o = (try self.newObject()).object;
     o.is_shadow_realm = true;
     o.private_data = @ptrCast(genv);
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -11860,7 +11860,7 @@ fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
 /// wired up, so the returned promise rejects.
 fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.object.is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.importValue called on a non-ShadowRealm");
+    if (!this.isObject() or !this.asObj().is_shadow_realm) return self.throwError("TypeError", "ShadowRealm.prototype.importValue called on a non-ShadowRealm");
     _ = try self.toStringV(if (args.len > 0) args[0] else .undefined); // ToString(specifier) — may throw
     const export_name = if (args.len > 1) args[1] else .undefined;
     if (!export_name.isString()) return self.throwError("TypeError", "ShadowRealm.prototype.importValue: exportName must be a string");
@@ -11871,14 +11871,14 @@ fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) v
 fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const caller_env = shadowRealmNativeRealm(self) orelse self.env;
-    if (!this.isObject() or !this.object.is_shadow_realm) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
+    if (!this.isObject() or !this.asObj().is_shadow_realm) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
     const src = if (args.len > 0) args[0] else .undefined;
     if (!src.isString()) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate expects a string");
-    const genv: *Environment = @ptrCast(@alignCast(this.object.private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
-    var parser = Parser.init(self.arena, src.string) catch return throwErrorInRealm(self, caller_env, "SyntaxError", "evaluate: invalid source");
+    const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
+    var parser = Parser.init(self.arena, src.asStr()) catch return throwErrorInRealm(self, caller_env, "SyntaxError", "evaluate: invalid source");
     const prog = parser.parseProgram() catch return throwErrorInRealm(self, caller_env, "SyntaxError", "evaluate: parse error");
     const prog_strict = parser.strict;
-    const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.object else null) else null;
+    const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
     const s_env = self.env;
     const s_this = self.this_value;
     const s_glob = self.global_object;
@@ -12037,14 +12037,14 @@ fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const big = if (this.isObject() and this.object.is_bigint) this.object else if (this.isObject() and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) this.object.prim.?.object else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
+    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().prim != null and this.asObj().prim.? == .object and this.asObj().prim.?.object.is_bigint) this.asObj().prim.?.object else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
     return Value.str(try value.bigIntToString(big, self.arena));
 }
 
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
 fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const big = if (this.isObject() and this.object.is_bigint) this.object else if (this.isObject() and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) this.object.prim.?.object else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
+    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().prim != null and this.asObj().prim.? == .object and this.asObj().prim.?.object.is_bigint) this.asObj().prim.?.object else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
     const radix: u8 = if (args.len > 0 and !args[0].isUndefined()) @intFromFloat(@trunc(try self.toNumberV(args[0]))) else 10;
     if (radix < 2 or radix > 36) return self.throwError("RangeError", "toString() radix must be between 2 and 36");
     if (big.bigint_text != null and radix == 10) return Value.str(big.bigint_text.?);
@@ -12055,9 +12055,9 @@ fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this.isObject() and this.object.is_bigint) return this;
+    if (this.isObject() and this.asObj().is_bigint) return this;
     // A BigInt wrapper object (`Object(1n)`) unwraps to its boxed BigInt.
-    if (this.isObject() and this.object.prim != null and this.object.prim.? == .object and this.object.prim.?.object.is_bigint) return this.object.prim.?;
+    if (this.isObject() and this.asObj().prim != null and this.asObj().prim.? == .object and this.asObj().prim.?.object.is_bigint) return this.asObj().prim.?;
     return self.throwError("TypeError", "BigInt.prototype.valueOf requires that 'this' be a BigInt");
 }
 
@@ -12119,7 +12119,7 @@ fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
             if (bits_count == 0) return self.makeBigInt(if (signed) 0 else 0);
             const bit_count: usize = std.math.cast(usize, bits_count) orelse
                 return self.throwError("RangeError", "BigInt.asIntN bit count is out of range");
-            var input = try managedBigIntFromObject(self.arena, xv.object);
+            var input = try managedBigIntFromObject(self.arena, xv.asObj());
             var truncated = try std.math.big.int.Managed.init(self.arena);
             try truncated.truncate(&input, if (signed) .signed else .unsigned, bit_count);
             return makeBigIntFromManaged(self, &truncated);
@@ -12161,8 +12161,8 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor DataView requires 'new'");
     const buf_v = if (args.len > 0) args[0] else .undefined;
-    if (!buf_v.isObject() or buf_v.object.array_buffer == null) return self.throwError("TypeError", "First argument to DataView must be an ArrayBuffer");
-    const ab = buf_v.object.array_buffer.?;
+    if (!buf_v.isObject() or buf_v.asObj().array_buffer == null) return self.throwError("TypeError", "First argument to DataView must be an ArrayBuffer");
+    const ab = buf_v.asObj().array_buffer.?;
     const offset = try toIndexArg(self, if (args.len > 1) args[1] else .undefined);
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const buf_len = ab.bytes().len;
@@ -12177,7 +12177,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         view_len = @intCast(vl);
     }
     const o = (try self.newObject()).object;
-    if (self.new_target.isObject()) o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "DataView");
+    if (self.new_target.isObject()) o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "DataView");
     // The detached/out-of-bounds re-check after OrdinaryCreateFromConstructor is
     // spec'd: reading newTarget.prototype can run user code that detaches or
     // resizes the buffer.
@@ -12187,7 +12187,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (!track and offset + @as(u64, @intCast(view_len)) > @as(u64, @intCast(live_len)))
         return self.throwError("RangeError", "Invalid DataView length");
     const dv = try o.dataViewAllocator(self.arena).create(value.DataViewData);
-    dv.* = .{ .buffer = buf_v.object, .byte_offset = @intCast(offset), .byte_length = view_len, .track_length = track };
+    dv.* = .{ .buffer = buf_v.asObj(), .byte_offset = @intCast(offset), .byte_length = view_len, .track_length = track };
     o.data_view = dv;
     return Value.obj(o);
 }
@@ -12197,8 +12197,8 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
-            const dv = this.object.data_view.?;
+            if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
+            const dv = this.asObj().data_view.?;
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
             const little = if (args.len > 1) args[1].toBoolean() else false;
             const ab = dv.buffer.array_buffer.?;
@@ -12241,8 +12241,8 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
-            const dv = this.object.data_view.?;
+            if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
+            const dv = this.asObj().data_view.?;
             // SetViewValue checks IsImmutableBuffer before coercing the index/value.
             if (dv.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Cannot modify a DataView backed by an immutable ArrayBuffer");
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
@@ -12253,7 +12253,7 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             var big: i128 = 0;
             if (t.big) {
                 const bv = try self.toBigIntValueImpl(val, false);
-                big = bv.object.bigint;
+                big = bv.asObj().bigint;
             } else {
                 num = try self.toNumberV(val);
             }
@@ -12303,15 +12303,15 @@ fn numToRaw(comptime UInt: type, num: f64) UInt {
 fn dataViewBufferGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.buffer requires a DataView receiver");
-    return Value.obj(this.object.data_view.?.buffer);
+    if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.buffer requires a DataView receiver");
+    return Value.obj(this.asObj().data_view.?.buffer);
 }
 
 fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.byteLength requires a DataView receiver");
-    const dv = this.object.data_view.?;
+    if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.byteLength requires a DataView receiver");
+    const dv = this.asObj().data_view.?;
     // get byteLength throws when the view is detached or out of bounds.
     const cur = dv.currentByteLength() orelse return self.throwError("TypeError", "DataView is detached or out of bounds");
     return Value.num(@floatFromInt(cur));
@@ -12320,8 +12320,8 @@ fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) v
 fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.data_view == null) return self.throwError("TypeError", "DataView.prototype.byteOffset requires a DataView receiver");
-    const dv = this.object.data_view.?;
+    if (!this.isObject() or this.asObj().data_view == null) return self.throwError("TypeError", "DataView.prototype.byteOffset requires a DataView receiver");
+    const dv = this.asObj().data_view.?;
     // get byteOffset throws when the view is detached or out of bounds.
     if (dv.currentByteLength() == null) return self.throwError("TypeError", "DataView is detached or out of bounds");
     return Value.num(@floatFromInt(dv.byte_offset));
@@ -12346,7 +12346,7 @@ fn makeIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, f
     }
     o.iter_helper = h;
     if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
-        o.proto = p.object;
+        o.proto = p.asObj();
     };
     return Value.obj(o);
 }
@@ -12356,8 +12356,8 @@ fn makeIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, f
 fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.iter_helper == null) return self.throwError("TypeError", "Iterator Helper next called on an incompatible receiver");
-    const h = this.object.iter_helper.?;
+    if (!this.isObject() or this.asObj().iter_helper == null) return self.throwError("TypeError", "Iterator Helper next called on an incompatible receiver");
+    const h = this.asObj().iter_helper.?;
     // GeneratorValidate: re-entering an already-executing helper (e.g. its
     // mapper calls back into next()) is a TypeError, not a stack RangeError.
     if (h.running) return self.throwError("TypeError", "Iterator Helper is already running");
@@ -12480,7 +12480,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             // `h.src` is a JS array of the source iterables; `counter` is the next
             // source index and `inner` the iterator currently being drained.
             h.started = true; // the generator has run (→ "suspended-yield")
-            const srcs = h.src.object;
+            const srcs = h.src.asObj();
             while (true) {
                 if (h.inner == null) {
                     const idx: usize = @intFromFloat(h.counter);
@@ -12490,7 +12490,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                     }
                     h.counter += 1;
                     // Open the source with its pre-captured @@iterator method.
-                    const it = try self.callValueWithThis(h.func.object.elements.items[idx], &.{}, srcs.elements.items[idx]);
+                    const it = try self.callValueWithThis(h.func.asObj().elements.items[idx], &.{}, srcs.elements.items[idx]);
                     if (!it.isObject()) return self.throwError("TypeError", "Iterator.concat: @@iterator did not return an object");
                     h.inner = it;
                 }
@@ -12508,7 +12508,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             // strict); `padding` = per-source padding (longest); `func` = key
             // array (zip_keyed). Implements the IteratorZip abstract closure.
             h.started = true; // the generator has run (→ "suspended-yield")
-            const iters = h.src.object.elements.items;
+            const iters = h.src.asObj().elements.items;
             const flags = h.inner.?.object;
             const n = iters.len;
             if (n == 0) {
@@ -12522,7 +12522,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             while (i < n) : (i += 1) {
                 if (flags.elements.items[i].toBoolean()) {
                     // openIters[i] is null — longest padding.
-                    const pad = if (h.padding.isObject() and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
+                    const pad = if (h.padding.isObject() and i < h.padding.asObj().elements.items.len) h.padding.asObj().elements.items[i] else Value.undefined;
                     try results.elements.append(results.elementsAllocator(self.arena), pad);
                     continue;
                 }
@@ -12572,7 +12572,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                         return self.iterResultObj(.undefined, true);
                     },
                     else => { // longest: pad this slot and continue.
-                        const pad = if (h.padding.isObject() and i < h.padding.object.elements.items.len) h.padding.object.elements.items[i] else Value.undefined;
+                        const pad = if (h.padding.isObject() and i < h.padding.asObj().elements.items.len) h.padding.asObj().elements.items[i] else Value.undefined;
                         try results.elements.append(results.elementsAllocator(self.arena), pad);
                     },
                 }
@@ -12592,7 +12592,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             if (h.kind == .zip) return self.iterResultObj(Value.obj(results), false);
             // zip_keyed: OrdinaryObjectCreate(null) with one data property per
             // key (CreateDataPropertyOrThrow → writable/enumerable/configurable).
-            const keys = h.func.object.elements.items;
+            const keys = h.func.asObj().elements.items;
             const obj = (try self.newObject()).object;
             obj.proto = null;
             var k: usize = 0;
@@ -12635,9 +12635,9 @@ fn zipCloseAll(self: *Interpreter, iters: []Value, flags: *value.Object, pending
 fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.iter_helper == null)
+    if (!this.isObject() or this.asObj().iter_helper == null)
         return self.throwError("TypeError", "Iterator Helper return called on an incompatible receiver");
-    const h = this.object.iter_helper.?;
+    const h = this.asObj().iter_helper.?;
     // GeneratorValidate: a re-entrant return() while the helper is mid-close
     // (state "executing") is a TypeError.
     if (h.running) return self.throwError("TypeError", "Iterator Helper is already running");
@@ -12667,14 +12667,14 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
                     // so a re-entrant call just returns {undefined, done:true}.
                     h.running = h.started;
                     defer h.running = false;
-                    try zipCloseAll(self, h.src.object.elements.items, h.inner.?.object, false);
+                    try zipCloseAll(self, h.src.asObj().elements.items, h.inner.?.object, false);
                 }
                 return self.iterResultObj(.undefined, true);
             },
             // concat closes the iterator it is currently draining; the running
             // guard makes a re-entrant return() from that close a TypeError.
             .concat => {
-                if (h.inner) |inner| if (inner.isObject() and inner.object.iter_helper == null) {
+                if (h.inner) |inner| if (inner.isObject() and inner.asObj().iter_helper == null) {
                     h.running = h.started;
                     defer h.running = false;
                     try self.iteratorClose(inner);
@@ -12683,7 +12683,7 @@ fn iterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
             },
             else => if (h.src.isObject()) try self.iteratorClose(h.src),
         }
-        if (h.inner) |inner| if (inner.isObject() and inner.object.iter_helper == null) try self.iteratorClose(inner);
+        if (h.inner) |inner| if (inner.isObject() and inner.asObj().iter_helper == null) try self.iteratorClose(inner);
     }
     return self.iterResultObj(.undefined, true);
 }
@@ -12875,7 +12875,7 @@ fn iterProtoDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const ret = try self.getProperty(this, "return");
-    if (ret.isObject() and ret.object.isCallableObject()) _ = try self.callValueWithThis(ret, &.{}, this);
+    if (ret.isObject() and ret.asObj().isCallableObject()) _ = try self.callValueWithThis(ret, &.{}, this);
     return .undefined;
 }
 
@@ -12890,7 +12890,7 @@ fn asyncIterProtoDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) va
         promise.reject(self, p, self.exception) catch {};
         return Value.obj(pobj);
     };
-    if (ret.isObject() and ret.object.isCallableObject()) {
+    if (ret.isObject() and ret.asObj().isCallableObject()) {
         const r = self.callValueWithThis(ret, &.{}, this) catch {
             promise.reject(self, p, self.exception) catch {};
             return Value.obj(pobj);
@@ -12909,8 +12909,8 @@ fn asyncIterProtoDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn installSymbolMethod(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, key: []const u8, display: []const u8, len: usize, f: value.NativeFn) EvalError!void {
     try setNative(a, rs, obj, key, len, f);
     if (obj.getOwn(key)) |mv| if (mv.isObject()) {
-        try mv.object.setOwn(a, rs, "name", Value.str(display));
-        try mv.object.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+        try mv.asObj().setOwn(a, rs, "name", Value.str(display));
+        try mv.asObj().setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
     };
 }
 
@@ -12923,7 +12923,7 @@ fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     // String is accepted (Symbol/BigInt are object-boxed here, so reject them too).
     if (!o.isObject()) {
         if (!o.isString()) return self.throwError("TypeError", "Iterator.from: argument is not iterable");
-    } else if (o.object.is_symbol or o.object.is_bigint) {
+    } else if (o.asObj().is_symbol or o.asObj().is_bigint) {
         return self.throwError("TypeError", "Iterator.from: argument is not iterable");
     }
     // method = GetMethod(O, @@iterator): an undefined method means O is itself the
@@ -12937,14 +12937,14 @@ fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
             iterator = try self.callValueWithThis(method, &.{}, o);
         }
     }
-    if (!iterator.isObject() or iterator.object.is_symbol or iterator.object.is_bigint)
+    if (!iterator.isObject() or iterator.asObj().is_symbol or iterator.asObj().is_bigint)
         return self.throwError("TypeError", "Iterator.from: the iterator is not an object");
     // If the iterator already inherits from %Iterator.prototype%, return it as-is;
     // otherwise wrap it (WrapForValidIteratorPrototype).
     if (self.env.get("Iterator")) |ic| if (ic.isObject()) {
-        if (ic.object.getOwn("prototype")) |ip| if (ip.isObject()) {
-            var cur: ?*value.Object = iterator.object.proto;
-            while (cur) |c| : (cur = c.proto) if (c == ip.object) return iterator;
+        if (ic.asObj().getOwn("prototype")) |ip| if (ip.isObject()) {
+            var cur: ?*value.Object = iterator.asObj().proto;
+            while (cur) |c| : (cur = c.proto) if (c == ip.asObj()) return iterator;
         };
     };
     return makeIterHelper(self, iterator, .wrap, .undefined, 0);
@@ -12978,7 +12978,7 @@ fn iteratorConcatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 fn zipReadMode(self: *Interpreter, options: Value, padding_out: *Value) EvalError!u8 {
     padding_out.* = .undefined;
     if (options.isUndefined()) return 0;
-    if (!options.isObject() or options.object.is_bigint or options.object.is_symbol)
+    if (!options.isObject() or options.asObj().is_bigint or options.asObj().is_symbol)
         return self.throwError("TypeError", "Iterator.zip: options must be an object");
     const mv = try self.getProperty(options, "mode");
     var mode: u8 = 0;
@@ -12986,7 +12986,7 @@ fn zipReadMode(self: *Interpreter, options: Value, padding_out: *Value) EvalErro
         // The mode is compared by value (no ToString): only the primitive
         // strings "shortest"/"longest"/"strict" are accepted.
         if (!mv.isString()) return self.throwError("TypeError", "Iterator.zip: mode must be 'shortest', 'longest', or 'strict'");
-        const ms = mv.string;
+        const ms = mv.asStr();
         if (std.mem.eql(u8, ms, "shortest")) {
             mode = 0;
         } else if (std.mem.eql(u8, ms, "longest")) {
@@ -13006,7 +13006,7 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const iterables = if (args.len > 0) args[0] else .undefined;
-    if (!iterables.isObject() or iterables.object.is_bigint or iterables.object.is_symbol)
+    if (!iterables.isObject() or iterables.asObj().is_bigint or iterables.asObj().is_symbol)
         return self.throwError("TypeError", "Iterator.zip: iterables must be an object");
     var padding: Value = .undefined;
     const mode = try zipReadMode(self, if (args.len > 1) args[1] else .undefined, &padding);
@@ -13016,12 +13016,12 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const iters = (try self.newArray()).object;
     const ik = self.symbolIteratorKey();
     const method: Value = if (ik) |k| try self.getProperty(iterables, k) else .undefined;
-    if (method.isUndefined() or method.isNull() or !method.isObject() or !method.object.isCallableObject())
+    if (method.isUndefined() or method.isNull() or !method.isObject() or !method.asObj().isCallableObject())
         return self.throwError("TypeError", "Iterator.zip: iterables is not iterable");
     const input_iter = try self.callValueWithThis(method, &.{}, iterables);
     if (!input_iter.isObject()) return self.throwError("TypeError", "Iterator.zip: iterator is not an object");
     const next_method = try self.getProperty(input_iter, "next");
-    if (!next_method.isObject() or !next_method.object.isCallableObject())
+    if (!next_method.isObject() or !next_method.asObj().isCallableObject())
         return self.throwError("TypeError", "Iterator.zip: iterator.next is not callable");
     while (true) {
         // IteratorStepValue(inputIter). An abrupt completion runs
@@ -13070,13 +13070,13 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const iterables = if (args.len > 0) args[0] else .undefined;
-    if (!iterables.isObject() or iterables.object.is_bigint or iterables.object.is_symbol)
+    if (!iterables.isObject() or iterables.asObj().is_bigint or iterables.asObj().is_symbol)
         return self.throwError("TypeError", "Iterator.zipKeyed: iterables must be an object");
     var padding: Value = .undefined;
     const mode = try zipReadMode(self, if (args.len > 1) args[1] else .undefined, &padding);
     // Longest-mode padding must be undefined or an Object (validated up front,
     // independent of how many keys `iterables` has).
-    if (mode == 1 and !padding.isUndefined() and (!padding.isObject() or padding.object.is_bigint or padding.object.is_symbol))
+    if (mode == 1 and !padding.isUndefined() and (!padding.isObject() or padding.asObj().is_bigint or padding.asObj().is_symbol))
         return self.throwError("TypeError", "Iterator.zipKeyed: padding must be an object");
 
     const keys = (try self.newArray()).object;
@@ -13084,9 +13084,9 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     // [[OwnPropertyKeys]] snapshot, then per key: [[GetOwnProperty]] (enumerable
     // check), [[Get]] (value), GetIteratorFlattenable. Both string and symbol
     // keys participate. An abrupt completion closes opened inputs (reverse).
-    const all_keys = try self.objectOwnKeysList(iterables.object);
+    const all_keys = try self.objectOwnKeysList(iterables.asObj());
     for (all_keys) |key| {
-        const en = self.objectProtoPropertyIsEnumerable(iterables.object, key) catch {
+        const en = self.objectProtoPropertyIsEnumerable(iterables.asObj(), key) catch {
             self.closeListKeepingThrow(iters.elements.items);
             return error.Throw;
         };
@@ -13111,7 +13111,7 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         const pads = (try self.newArray()).object;
         for (keys.elements.items) |kv| {
             if (padding.isObject()) {
-                const pv = self.getProperty(padding, kv.string) catch {
+                const pv = self.getProperty(padding, kv.asStr()) catch {
                     self.closeListKeepingThrow(iters.elements.items);
                     return error.Throw;
                 };
@@ -13135,12 +13135,12 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
         while (i < n) : (i += 1) try pads.elements.append(pads.elementsAllocator(self.arena), .undefined);
         return Value.obj(pads);
     }
-    if (!padding.isObject() or padding.object.is_bigint or padding.object.is_symbol)
+    if (!padding.isObject() or padding.asObj().is_bigint or padding.asObj().is_symbol)
         return self.throwError("TypeError", "Iterator.zip: padding must be an object");
     // GetIterator(padding, sync): strict — a missing @@iterator is a TypeError.
     const ik = self.symbolIteratorKey();
     const method: Value = if (ik) |k| try self.getProperty(padding, k) else .undefined;
-    if (method.isUndefined() or method.isNull() or !method.isObject() or !method.object.isCallableObject())
+    if (method.isUndefined() or method.isNull() or !method.isObject() or !method.asObj().isCallableObject())
         return self.throwError("TypeError", "Iterator.zip: padding is not iterable");
     const pit = try self.callValueWithThis(method, &.{}, padding);
     if (!pit.isObject()) return self.throwError("TypeError", "Iterator.zip: padding iterator is not an object");
@@ -13173,7 +13173,7 @@ fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.
     h.* = .{ .src = Value.obj(iters), .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = Value.obj(flags), .padding = padding };
     o.iter_helper = h;
     if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
-        o.proto = p.object;
+        o.proto = p.asObj();
     };
     return Value.obj(o);
 }
@@ -13186,11 +13186,11 @@ fn iteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Iterator requires 'new'");
     // Abstract: cannot be constructed unless subclassed (new.target !== Iterator).
     if (self.new_target.isObject()) {
-        if (self.env.get("Iterator")) |ic| if (ic.isObject() and self.new_target.object == ic.object)
+        if (self.env.get("Iterator")) |ic| if (ic.isObject() and self.new_target.asObj() == ic.asObj())
             return self.throwError("TypeError", "Abstract class Iterator not directly constructable");
     }
     const o = (try self.newObject()).object;
-    o.proto = try self.ctorRealmIntrinsicProto(self.new_target.object, "Iterator");
+    o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Iterator");
     return Value.obj(o);
 }
 
@@ -13203,13 +13203,13 @@ fn genProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.gen == null)
+            if (!this.isObject() or this.asObj().gen == null)
                 return self.throwError("TypeError", "method called on an incompatible receiver");
             const v: Value = if (args.len > 0) args[0] else .undefined;
             return switch (which) {
-                .next => vm.genNext(self, this.object, v),
-                .ret => vm.genReturn(self, this.object, v),
-                .throw => vm.genThrow(self, this.object, v),
+                .next => vm.genNext(self, this.asObj(), v),
+                .ret => vm.genReturn(self, this.asObj(), v),
+                .throw => vm.genThrow(self, this.asObj(), v),
             };
         }
     }.call;
@@ -13222,7 +13222,7 @@ fn asyncGenProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.gen == null or !vm.asyncGenObj(this.object)) {
+            if (!this.isObject() or this.asObj().gen == null or !vm.asyncGenObj(this.asObj())) {
                 const pobj = try promise.newPromise(self);
                 const p = promise.promiseOf(Value.obj(pobj)).?;
                 const err = try self.makeError("TypeError", "AsyncGenerator method called on an incompatible receiver");
@@ -13231,9 +13231,9 @@ fn asyncGenProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn
             }
             const v: Value = if (args.len > 0) args[0] else .undefined;
             return switch (which) {
-                .next => vm.genNext(self, this.object, v),
-                .ret => vm.genReturn(self, this.object, v),
-                .throw => vm.genThrow(self, this.object, v),
+                .next => vm.genNext(self, this.asObj(), v),
+                .ret => vm.genReturn(self, this.asObj(), v),
+                .throw => vm.genThrow(self, this.asObj(), v),
             };
         }
     }.call;
@@ -13246,7 +13246,7 @@ fn asyncGenProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn
 /// or Set when present (both bypass this inherited accessor).
 fn iterProtoAccessorSet(self: *Interpreter, this: Value, key: []const u8, v: Value) EvalError!Value {
     const home: ?*value.Object = if (self.env.get("\x00IterProto")) |h|
-        (if (h.isObject()) h.object else null)
+        (if (h.isObject()) h.asObj() else null)
     else
         null;
     return setterIgnoringProto(self, this, home, key, v);
@@ -13289,20 +13289,20 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     const a = env.arena;
     const sym_iter: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("iterator")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("iterator")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
 
     const sym_dispose: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("dispose")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("dispose")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
@@ -13515,8 +13515,8 @@ fn asyncHelperProduce(self: *Interpreter, h: *value.IterHelper) EvalError!struct
 fn asyncIterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.iter_helper == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper next called on an incompatible receiver"));
-    const h = this.object.iter_helper.?;
+    if (!this.isObject() or this.asObj().iter_helper == null) return promiseRejectValue(self, try self.makeError("TypeError", "Async iterator helper next called on an incompatible receiver"));
+    const h = this.asObj().iter_helper.?;
     if (h.done) return promiseResolveValue(self, try self.iterResultObj(.undefined, true));
     const produced = asyncHelperProduce(self, h) catch {
         const exc = self.exception;
@@ -13529,7 +13529,7 @@ fn asyncIterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 fn asyncIterHelperReturnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (this.isObject() and this.object.iter_helper != null) this.object.iter_helper.?.done = true;
+    if (this.isObject() and this.asObj().iter_helper != null) this.asObj().iter_helper.?.done = true;
     return promiseResolveValue(self, try self.iterResultObj(.undefined, true));
 }
 
@@ -13541,7 +13541,7 @@ fn makeAsyncIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Ki
     h.* = .{ .src = src, .kind = kind, .func = func, .limit = limit, .is_async = true };
     o.iter_helper = h;
     if (self.env.get("\x00AsyncIterHelperProto")) |p| if (p.isObject()) {
-        o.proto = p.object;
+        o.proto = p.asObj();
     };
     return Value.obj(o);
 }
@@ -13702,11 +13702,11 @@ fn asyncIteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value)
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor AsyncIterator requires 'new'");
     if (self.new_target.isObject()) {
-        if (self.env.get("AsyncIterator")) |ic| if (ic.isObject() and self.new_target.object == ic.object)
+        if (self.env.get("AsyncIterator")) |ic| if (ic.isObject() and self.new_target.asObj() == ic.asObj())
             return self.throwError("TypeError", "Abstract class AsyncIterator not directly constructable");
     }
     const o = (try self.newObject()).object;
-    o.proto = try self.protoObject(self.new_target.object);
+    o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -13716,19 +13716,19 @@ fn installAsyncIterator(env: *Environment, rs: *Shape, object_proto: *value.Obje
     const a = env.arena;
     const sym_async_iter: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("asyncIterator")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("asyncIterator")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
     const sym_async_dispose: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("asyncDispose")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("asyncDispose")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
@@ -13864,14 +13864,14 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             // already installed by makeFunction).
             if (nt.isObject() and fnval.isObject()) {
                 const p = try self.getProperty(nt, "prototype");
-                if (p.isObject() and !p.object.is_symbol) {
-                    fnval.object.proto = p.object;
+                if (p.isObject() and !p.asObj().is_symbol) {
+                    fnval.asObj().proto = p.asObj();
                 } else {
                     const key = dynamicFunctionPrototypeKey(kind);
-                    if (try self.functionRealmIntrinsicObject(nt.object, key)) |proto| {
-                        fnval.object.proto = proto;
+                    if (try self.functionRealmIntrinsicObject(nt.asObj(), key)) |proto| {
+                        fnval.asObj().proto = proto;
                     } else if (Interpreter.envIntrinsicObject(self.env, key)) |proto| {
-                        fnval.object.proto = proto;
+                        fnval.asObj().proto = proto;
                     }
                 }
             }
@@ -13922,24 +13922,24 @@ fn installFunctionKinds(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
     const func_ctor: *value.Object = blk: {
-        if (env.get("Function")) |fv| if (fv.isObject()) break :blk fv.object;
+        if (env.get("Function")) |fv| if (fv.isObject()) break :blk fv.asObj();
         return;
     };
     const func_proto: *value.Object = blk: {
-        if (func_ctor.getOwn("prototype")) |pv| if (pv.isObject()) break :blk pv.object;
+        if (func_ctor.getOwn("prototype")) |pv| if (pv.isObject()) break :blk pv.asObj();
         return;
     };
     const gen_proto: ?*value.Object = blk: {
-        if (env.get("\x00GenProto")) |v| if (v.isObject()) break :blk v.object;
+        if (env.get("\x00GenProto")) |v| if (v.isObject()) break :blk v.asObj();
         break :blk null;
     };
     const agen_proto: ?*value.Object = blk: {
-        if (env.get("\x00AsyncGenProto")) |v| if (v.isObject()) break :blk v.object;
+        if (env.get("\x00AsyncGenProto")) |v| if (v.isObject()) break :blk v.asObj();
         break :blk null;
     };
 
@@ -13953,14 +13953,14 @@ fn installFunctionKinds(env: *Environment, rs: *Shape) EvalError!void {
 
 /// CanBeHeldWeakly(v): an Object or a Symbol (a BigInt or a primitive is not).
 fn canBeHeldWeakly(v: Value) bool {
-    if (!v.isObject() or v.object.is_bigint) return false;
-    if (v.object.is_symbol and v.object.getOwn("\x00forKey") != null) return false;
+    if (!v.isObject() or v.asObj().is_bigint) return false;
+    if (v.asObj().is_symbol and v.asObj().getOwn("\x00forKey") != null) return false;
     return true;
 }
 
 fn weakKeyPtr(v: Value) ?*anyopaque {
     if (!v.isObject()) return null;
-    return @ptrCast(v.object);
+    return @ptrCast(v.asObj());
 }
 
 fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -13971,7 +13971,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "WeakRef: target must be an object or a symbol");
     const o = (try self.newObject()).object;
     o.is_weak_ref = true;
-    o.weak_ref_target = target.object;
+    o.weak_ref_target = target.asObj();
     if (try self.protoFromCtor("WeakRef")) |pr| o.proto = pr;
     return Value.obj(o);
 }
@@ -13979,8 +13979,8 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn weakRefDerefFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.object.is_weak_ref) return self.throwError("TypeError", "WeakRef.prototype.deref called on a non-WeakRef");
-    const target = this.object.weak_ref_target orelse return .undefined;
+    if (!this.isObject() or !this.asObj().is_weak_ref) return self.throwError("TypeError", "WeakRef.prototype.deref called on a non-WeakRef");
+    const target = this.asObj().weak_ref_target orelse return .undefined;
     return Value.obj(target);
 }
 
@@ -13999,7 +13999,7 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
 
 fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.object.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.register called on an incompatible receiver");
+    if (!this.isObject() or !this.asObj().is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.register called on an incompatible receiver");
     const target = if (args.len > 0) args[0] else .undefined;
     if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "FinalizationRegistry.register: target must be an object or a symbol");
     const held = if (args.len > 1) args[1] else .undefined;
@@ -14007,7 +14007,7 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const token = if (args.len > 2) args[2] else Value.undefined;
     if (!token.isUndefined() and !canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.register: unregister token must be an object or a symbol");
     gc_mod.barrierValue(held); // strong held value stored into the live registry cell
-    try this.object.finalization_records.append(this.object.finalizationRecordsAllocator(self.arena), .{
+    try this.asObj().finalization_records.append(this.asObj().finalizationRecordsAllocator(self.arena), .{
         .target = weakKeyPtr(target),
         .held = held,
         .token = if (token.isUndefined()) null else weakKeyPtr(token),
@@ -14017,7 +14017,7 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 
 fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.object.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.unregister called on an incompatible receiver");
+    if (!this.isObject() or !this.asObj().is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.unregister called on an incompatible receiver");
     const token = if (args.len > 0) args[0] else .undefined;
     if (!canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.unregister: token must be an object or a symbol");
     // Remove every cell whose [[UnregisterToken]] is SameValue(token); return
@@ -14025,9 +14025,9 @@ fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const token_ptr = weakKeyPtr(token);
     var removed = false;
     var i: usize = 0;
-    while (i < this.object.finalization_records.items.len) {
-        if (this.object.finalization_records.items[i].token == token_ptr) {
-            _ = this.object.finalization_records.orderedRemove(i);
+    while (i < this.asObj().finalization_records.items.len) {
+        if (this.asObj().finalization_records.items[i].token == token_ptr) {
+            _ = this.asObj().finalization_records.orderedRemove(i);
             removed = true;
         } else i += 1;
     }
@@ -14036,17 +14036,17 @@ fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 
 fn finRegCleanupSomeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.object.is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome called on an incompatible receiver");
-    const cb = if (args.len > 0 and !args[0].isUndefined()) args[0] else this.object.finalization_callback;
+    if (!this.isObject() or !this.asObj().is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome called on an incompatible receiver");
+    const cb = if (args.len > 0 and !args[0].isUndefined()) args[0] else this.asObj().finalization_callback;
     if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome callback is not callable");
     var i: usize = 0;
-    while (i < this.object.finalization_records.items.len) {
-        const record = this.object.finalization_records.items[i];
+    while (i < this.asObj().finalization_records.items.len) {
+        const record = this.asObj().finalization_records.items[i];
         if (!record.ready) {
             i += 1;
             continue;
         }
-        _ = this.object.finalization_records.orderedRemove(i);
+        _ = this.asObj().finalization_records.orderedRemove(i);
         _ = try self.callValue(cb, &.{record.held});
     }
     return .undefined;
@@ -14065,14 +14065,14 @@ fn dsHidden(self: *Interpreter, o: *value.Object, key: []const u8, v: Value) Eva
 }
 
 fn isDispStack(this: Value) bool {
-    return this.isObject() and this.object.getOwn("\x00ds_res") != null;
+    return this.isObject() and this.asObj().getOwn("\x00ds_res") != null;
 }
 
 /// Brand-check a specific stack kind: a (sync) DisposableStack method rejects an
 /// AsyncDisposableStack and vice versa.
 fn isDispStackOf(this: Value, want_async: bool) bool {
-    if (!this.isObject() or this.object.getOwn("\x00ds_res") == null) return false;
-    const is_async = (this.object.getOwn("\x00ds_async") orelse Value{ .boolean = false }).toBoolean();
+    if (!this.isObject() or this.asObj().getOwn("\x00ds_res") == null) return false;
+    const is_async = (this.asObj().getOwn("\x00ds_async") orelse Value{ .boolean = false }).toBoolean();
     return is_async == want_async;
 }
 
@@ -14120,10 +14120,10 @@ fn dispUseFn(comptime is_async: bool) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!isDispStackOf(this, is_async)) return self.throwError("TypeError", "use called on an incompatible receiver");
-            if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+            if (dispDisposed(this.asObj())) return self.throwError("ReferenceError", "DisposableStack is disposed");
             const v = if (args.len > 0) args[0] else Value.undefined;
             if (v.isUndefined() or v.isNull()) {
-                if (is_async) try dispPush(self, this.object, v, .undefined, 3);
+                if (is_async) try dispPush(self, this.asObj(), v, .undefined, 3);
                 return v;
             }
             const key = self.wellKnownSymbolKey(if (is_async) "asyncDispose" else "dispose") orelse return self.throwError("TypeError", "Symbol.dispose unavailable");
@@ -14135,7 +14135,7 @@ fn dispUseFn(comptime is_async: bool) value.NativeFn {
             }
             if (method.isUndefined() or method.isNull()) return self.throwError("TypeError", "value is not disposable");
             if (!method.isCallable()) return self.throwError("TypeError", "dispose method is not callable");
-            try dispPush(self, this.object, v, method, 0);
+            try dispPush(self, this.asObj(), v, method, 0);
             return v;
         }
     }.call;
@@ -14144,21 +14144,21 @@ fn dispUseFn(comptime is_async: bool) value.NativeFn {
 fn dispAdoptFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStack(this)) return self.throwError("TypeError", "adopt called on a non-DisposableStack");
-    if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+    if (dispDisposed(this.asObj())) return self.throwError("ReferenceError", "DisposableStack is disposed");
     const v = if (args.len > 0) args[0] else Value.undefined;
     const f = if (args.len > 1) args[1] else Value.undefined;
     if (!f.isCallable()) return self.throwError("TypeError", "onDispose is not callable");
-    try dispPush(self, this.object, v, f, 1);
+    try dispPush(self, this.asObj(), v, f, 1);
     return v;
 }
 
 fn dispDeferFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStack(this)) return self.throwError("TypeError", "defer called on a non-DisposableStack");
-    if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+    if (dispDisposed(this.asObj())) return self.throwError("ReferenceError", "DisposableStack is disposed");
     const f = if (args.len > 0) args[0] else Value.undefined;
     if (!f.isCallable()) return self.throwError("TypeError", "onDispose is not callable");
-    try dispPush(self, this.object, .undefined, f, 2);
+    try dispPush(self, this.asObj(), .undefined, f, 2);
     return .undefined;
 }
 
@@ -14168,20 +14168,20 @@ fn dispMoveFn(comptime is_async: bool) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!isDispStackOf(this, is_async)) return self.throwError("TypeError", "move called on an incompatible receiver");
-            if (dispDisposed(this.object)) return self.throwError("ReferenceError", "DisposableStack is disposed");
+            if (dispDisposed(this.asObj())) return self.throwError("ReferenceError", "DisposableStack is disposed");
             // OrdinaryCreateFromConstructor(%DisposableStack%, …): the new stack
             // uses the INTRINSIC prototype, never the subclass's.
             const name = if (is_async) "AsyncDisposableStack" else "DisposableStack";
             const o = (try self.newObject()).object;
             if (self.env.get(name)) |c| if (c.isObject()) {
-                o.proto = try self.protoObject(c.object);
+                o.proto = try self.protoObject(c.asObj());
             };
-            try dsHidden(self, o, "\x00ds_res", this.object.getOwn("\x00ds_res").?);
+            try dsHidden(self, o, "\x00ds_res", this.asObj().getOwn("\x00ds_res").?);
             try dsHidden(self, o, "\x00ds_done", Value.boolVal(false));
             try dsHidden(self, o, "\x00ds_async", Value.boolVal(is_async));
             // The source keeps an empty list and is marked disposed.
-            try dsHidden(self, this.object, "\x00ds_res", try self.newArray());
-            try dsHidden(self, this.object, "\x00ds_done", Value.boolVal(true));
+            try dsHidden(self, this.asObj(), "\x00ds_res", try self.newArray());
+            try dsHidden(self, this.asObj(), "\x00ds_done", Value.boolVal(true));
             return Value.obj(o);
         }
     }.call;
@@ -14191,7 +14191,7 @@ fn dispMoveFn(comptime is_async: bool) value.NativeFn {
 fn dispOne(self: *Interpreter, entry: *value.Object, is_async: bool) EvalError!void {
     const v = entry.elements.items[0];
     const f = entry.elements.items[1];
-    const kind = entry.elements.items[2].number;
+    const kind = entry.elements.items[2].asNum();
     const r = switch (@as(u8, @intFromFloat(kind))) {
         1 => try self.callValueWithThis(f, &.{v}, .undefined), // adopt: onDispose(value)
         2 => try self.callValueWithThis(f, &.{}, .undefined), // defer: onDispose()
@@ -14205,8 +14205,8 @@ fn dispOnlyAsyncSentinels(o: *value.Object) bool {
     const res = o.getOwn("\x00ds_res").?.object;
     if (res.elements.items.len == 0) return false;
     for (res.elements.items) |entry_v| {
-        const entry = entry_v.object;
-        if (@as(u8, @intFromFloat(entry.elements.items[2].number)) != 3) return false;
+        const entry = entry_v.asObj();
+        if (@as(u8, @intFromFloat(entry.elements.items[2].asNum())) != 3) return false;
     }
     return true;
 }
@@ -14240,10 +14240,10 @@ fn dispRunAll(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!?V
 fn makeSuppressed(self: *Interpreter, errv: Value, suppressed: Value) EvalError!Value {
     const e = try self.makeError("SuppressedError", "An error was suppressed during disposal");
     if (e.isObject()) {
-        try self.setProp(e.object, "error", errv);
-        try e.object.setAttr(self.arena, "error", .{ .enumerable = false, .configurable = true, .writable = true });
-        try self.setProp(e.object, "suppressed", suppressed);
-        try e.object.setAttr(self.arena, "suppressed", .{ .enumerable = false, .configurable = true, .writable = true });
+        try self.setProp(e.asObj(), "error", errv);
+        try e.asObj().setAttr(self.arena, "error", .{ .enumerable = false, .configurable = true, .writable = true });
+        try self.setProp(e.asObj(), "suppressed", suppressed);
+        try e.asObj().setAttr(self.arena, "suppressed", .{ .enumerable = false, .configurable = true, .writable = true });
     }
     return e;
 }
@@ -14252,9 +14252,9 @@ fn dispDisposeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStackOf(this, false)) return self.throwError("TypeError", "dispose called on an incompatible receiver");
-    if (dispDisposed(this.object)) return .undefined;
-    try dsHidden(self, this.object, "\x00ds_done", Value.boolVal(true));
-    if (try dispRunAll(self, this.object, false)) |err| {
+    if (dispDisposed(this.asObj())) return .undefined;
+    try dsHidden(self, this.asObj(), "\x00ds_done", Value.boolVal(true));
+    if (try dispRunAll(self, this.asObj(), false)) |err| {
         self.exception = err;
         return error.Throw;
     }
@@ -14265,10 +14265,10 @@ fn dispDisposeAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStackOf(this, true)) return promiseRejectValue(self, try self.makeError("TypeError", "disposeAsync called on an incompatible receiver"));
-    if (dispDisposed(this.object)) return promiseResolveValue(self, .undefined);
-    const needs_tick = dispOnlyAsyncSentinels(this.object);
-    try dsHidden(self, this.object, "\x00ds_done", Value.boolVal(true));
-    const r = dispRunAll(self, this.object, true) catch {
+    if (dispDisposed(this.asObj())) return promiseResolveValue(self, .undefined);
+    const needs_tick = dispOnlyAsyncSentinels(this.asObj());
+    try dsHidden(self, this.asObj(), "\x00ds_done", Value.boolVal(true));
+    const r = dispRunAll(self, this.asObj(), true) catch {
         const exc = self.exception;
         self.exception = .undefined;
         return promiseRejectValue(self, exc);
@@ -14282,7 +14282,7 @@ fn dispDisposedGetter(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStack(this)) return self.throwError("TypeError", "disposed getter on a non-DisposableStack");
-    return Value.boolVal(dispDisposed(this.object));
+    return Value.boolVal(dispDisposed(this.asObj()));
 }
 
 fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
@@ -14291,7 +14291,7 @@ fn installDisposableStacks(env: *Environment, rs: *Shape, object_proto: *value.O
     const symKey = struct {
         fn get(s: ?Value, name: []const u8) ?[]const u8 {
             if (s) |sv| if (sv.isObject()) {
-                if (sv.object.getOwn(name)) |t| if (t.isObject() and t.object.is_symbol) return t.object.sym_key;
+                if (sv.asObj().getOwn(name)) |t| if (t.isObject() and t.asObj().is_symbol) return t.asObj().sym_key;
             };
             return null;
         }
@@ -14359,7 +14359,7 @@ fn installWeakRefAndFinReg(env: *Environment, rs: *Shape, object_proto: *value.O
     const a = env.arena;
     const tt: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
@@ -14414,9 +14414,9 @@ fn installDataView(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     try setNativeGetter(a, rs, proto, "byteOffset", dataViewByteOffsetGetter);
     // DataView.prototype[Symbol.toStringTag] = "DataView" {configurable}.
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
-        if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.object.is_symbol) {
-            try proto.setOwn(a, rs, tt.object.sym_key, Value.str("DataView"));
-            try proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
+            try proto.setOwn(a, rs, tt.asObj().sym_key, Value.str("DataView"));
+            try proto.setAttr(a, tt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
     const ctor = try gc_mod.allocObj(a);
@@ -14453,9 +14453,9 @@ fn arrayBufferSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 /// validate the result (right kind, not detached/same/too-small) before copying.
 fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, comptime want_shared: bool) value.HostError!Value {
     const kind_name = if (want_shared) "SharedArrayBuffer" else "ArrayBuffer";
-    if (!this.isObject() or this.object.array_buffer == null or this.object.array_buffer.?.is_shared != want_shared)
+    if (!this.isObject() or this.asObj().array_buffer == null or this.asObj().array_buffer.?.is_shared != want_shared)
         return self.throwError("TypeError", kind_name ++ ".prototype.slice called on an incompatible receiver");
-    const ab = this.object.array_buffer.?;
+    const ab = this.asObj().array_buffer.?;
     if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.bytes().len;
     const start = try relIndex(self, if (args.len > 0) args[0] else .undefined, blen, 0);
@@ -14467,14 +14467,14 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     const default_ctor = self.env.get(kind_name) orelse .undefined;
     const ctor = try self.speciesConstructor(this, default_ctor);
     const new_v = try self.construct(ctor, &.{Value.num(@floatFromInt(safe_count))});
-    if (!new_v.isObject() or new_v.object.array_buffer == null)
+    if (!new_v.isObject() or new_v.asObj().array_buffer == null)
         return self.throwError("TypeError", "ArrayBuffer species constructor did not return an ArrayBuffer");
-    const nb = new_v.object.array_buffer.?;
+    const nb = new_v.asObj().array_buffer.?;
     if (nb.is_shared != want_shared)
         return self.throwError("TypeError", "ArrayBuffer species constructor returned a buffer of the wrong shared-ness");
     if (!want_shared and nb.detached) return self.throwError("TypeError", "species constructor returned a detached ArrayBuffer");
     if (!want_shared and nb.immutable) return self.throwError("TypeError", "species constructor returned an immutable ArrayBuffer");
-    if (new_v.object == this.object) return self.throwError("TypeError", "ArrayBuffer species constructor returned the same buffer");
+    if (new_v.asObj() == this.asObj()) return self.throwError("TypeError", "ArrayBuffer species constructor returned the same buffer");
     if (nb.bytes().len < safe_count) return self.throwError("TypeError", "ArrayBuffer species constructor returned too small a buffer");
     if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     @memcpy(nb.bytes()[0..safe_count], ab.bytes()[start .. start + safe_count]);
@@ -14488,7 +14488,7 @@ fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*
     ta.* = .{ .buffer = try self.makeArrayBuffer(len * kind.byteSize()), .byte_offset = 0, .length = len, .kind = kind };
     o.typed_array = ta;
     if (self.env.get(kind.ctorName())) |c| {
-        if (c.isObject()) o.proto = try self.protoObject(c.object);
+        if (c.isObject()) o.proto = try self.protoObject(c.asObj());
     }
     return o;
 }
@@ -14812,8 +14812,8 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         // The offset's ToInteger can run user code (a valueOf) that detaches or
         // shrinks the target's buffer; re-read the live length afterwards.
         const tlen = ta.currentLength() orelse return self.throwError("TypeError", "Cannot set on a TypedArray whose buffer is detached or out of bounds");
-        if (src.isObject() and src.object.typed_array != null) {
-            const s = src.object.typed_array.?;
+        if (src.isObject() and src.asObj().typed_array != null) {
+            const s = src.asObj().typed_array.?;
             if (s.kind.isBigInt() != ta.kind.isBigInt()) return self.throwError("TypeError", "Cannot mix BigInt and other types when setting a TypedArray");
             const slen = s.currentLength() orelse return self.throwError("TypeError", "source TypedArray buffer is detached or out of bounds");
             if (offset > tlen or slen > tlen - offset) return self.throwError("RangeError", "offset is out of bounds");
@@ -14870,13 +14870,13 @@ fn taSortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f
         const n = try self.toNumberV(r);
         return if (std.math.isNan(n)) 0 else n;
     }
-    if (a.isObject() and a.object.is_bigint) {
-        const av = a.object.bigint;
-        const bv = b.object.bigint;
+    if (a.isObject() and a.asObj().is_bigint) {
+        const av = a.asObj().bigint;
+        const bv = b.asObj().bigint;
         return if (av < bv) -1 else if (av > bv) 1 else 0;
     }
-    const an = a.number;
-    const bn = b.number;
+    const an = a.asNum();
+    const bn = b.asNum();
     if (std.math.isNan(an)) return if (std.math.isNan(bn)) 0 else 1;
     if (std.math.isNan(bn)) return -1;
     if (an == 0 and bn == 0) {
@@ -14910,11 +14910,11 @@ fn typedArrayAbstractFn(ctx: *anyopaque, this: Value, args: []const Value) value
 /// requested one, else a TypeError.
 fn typedArrayCreateLen(self: *Interpreter, constructor: Value, length: usize) EvalError!Value {
     const result = try self.construct(constructor, &.{Value.num(@floatFromInt(length))});
-    if (!result.isObject() or result.object.typed_array == null)
+    if (!result.isObject() or result.asObj().typed_array == null)
         return self.throwError("TypeError", "TypedArrayCreate did not return a TypedArray");
-    const cur = result.object.typed_array.?.currentLength();
+    const cur = result.asObj().typed_array.?.currentLength();
     if (cur == null) return self.throwError("TypeError", "TypedArrayCreate returned a detached TypedArray");
-    if (result.object.typed_array.?.buffer.array_buffer.?.immutable)
+    if (result.asObj().typed_array.?.buffer.array_buffer.?.immutable)
         return self.throwError("TypeError", "TypedArrayCreate returned a TypedArray backed by an immutable buffer");
     if (cur.? < length) return self.throwError("TypeError", "TypedArrayCreate returned a TypedArray smaller than requested");
     return result;
@@ -14924,7 +14924,7 @@ fn typedArrayOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isConstructorValue(this)) return self.throwError("TypeError", "%TypedArray%.of requires a constructor `this`");
     const result = try typedArrayCreateLen(self, this, args.len);
-    const ta = result.object.typed_array.?;
+    const ta = result.asObj().typed_array.?;
     for (args, 0..) |av, i| try self.taStore(ta, i, av);
     return result;
 }
@@ -14955,7 +14955,7 @@ fn typedArrayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             try list.append(self.arena, try self.getProperty(r, "value"));
         }
         const result = try typedArrayCreateLen(self, this, list.items.len);
-        const ta = result.object.typed_array.?;
+        const ta = result.asObj().typed_array.?;
         for (list.items, 0..) |v, i| {
             const mapped = if (mapfn.isCallable()) try self.callValueWithThis(mapfn, &.{ v, Value.num(@floatFromInt(i)) }, this_arg) else v;
             try self.taStore(ta, i, mapped);
@@ -14965,7 +14965,7 @@ fn typedArrayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 
     const len = toLen(try self.toNumberV(try self.getProperty(source, "length")));
     const result = try typedArrayCreateLen(self, this, len);
-    const ta = result.object.typed_array.?;
+    const ta = result.asObj().typed_array.?;
     var i: usize = 0;
     while (i < len) : (i += 1) {
         var kb: [24]u8 = undefined;
@@ -14985,11 +14985,11 @@ fn taProtoGetter(comptime which: enum { length, byte_length, byte_offset, buffer
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.typed_array == null) {
+            if (!this.isObject() or this.asObj().typed_array == null) {
                 if (which == .tag) return .undefined;
                 return self.throwError("TypeError", "%TypedArray%.prototype accessor called on a non-TypedArray");
             }
-            const ta = this.object.typed_array.?;
+            const ta = this.asObj().typed_array.?;
             const cur = ta.currentLength(); // null when detached / out of bounds
             return switch (which) {
                 .length => Value.num(@floatFromInt(cur orelse 0)),
@@ -15174,7 +15174,7 @@ fn encodeBase64(self: *Interpreter, bytes: []const u8, url: bool, omit_padding: 
 /// anything else (including null, symbols, bigints) → TypeError.
 fn getOptionsObject(self: *Interpreter, v: Value) EvalError!?*value.Object {
     if (v.isUndefined()) return null;
-    if (v.isObject() and !v.object.is_symbol and !v.object.is_bigint) return v.object;
+    if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint) return v.asObj();
     return self.throwError("TypeError", "options must be an object");
 }
 
@@ -15185,7 +15185,7 @@ fn getStringOption(self: *Interpreter, opts: ?*value.Object, key: []const u8, al
     const v = try self.getProperty(Value.obj(o), key);
     if (v.isUndefined()) return default;
     if (!v.isString()) return self.throwError("TypeError", "option value must be a string");
-    for (allowed) |a| if (std.mem.eql(u8, v.string, a)) return v.string;
+    for (allowed) |a| if (std.mem.eql(u8, v.asStr(), a)) return v.asStr();
     return self.throwError("TypeError", "invalid option value");
 }
 
@@ -15205,7 +15205,7 @@ fn uint8ArrayBytes(o: *value.Object) ?[]u8 {
 }
 
 fn requireUint8Array(self: *Interpreter, this: Value) EvalError!*value.Object {
-    if (this.isObject()) if (this.object.typed_array) |ta| if (ta.kind == .u8) return this.object;
+    if (this.isObject()) if (this.asObj().typed_array) |ta| if (ta.kind == .u8) return this.asObj();
     return self.throwError("TypeError", "method requires a Uint8Array receiver");
 }
 
@@ -15217,7 +15217,7 @@ fn uint8FromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const opts = try getOptionsObject(self, arg(args, 1));
     const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
     const lch = lastChunkFromName(try getStringOption(self, opts, "lastChunkHandling", &.{ "loose", "strict", "stop-before-partial" }, "loose"));
-    const r = try decodeBase64(self, sv.string, url, lch, std.math.maxInt(usize));
+    const r = try decodeBase64(self, sv.asStr(), url, lch, std.math.maxInt(usize));
     if (r.err) return self.throwError("SyntaxError", "invalid base64-encoded string");
     const o = try newTypedArray(self, .u8, r.bytes.len);
     @memcpy(o.typed_array.?.buffer.array_buffer.?.bytes()[0..r.bytes.len], r.bytes);
@@ -15229,7 +15229,7 @@ fn uint8FromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = this;
     const sv = arg(args, 0);
     if (!sv.isString()) return self.throwError("TypeError", "Uint8Array.fromHex requires a string argument");
-    const r = try decodeHex(self, sv.string, std.math.maxInt(usize));
+    const r = try decodeHex(self, sv.asStr(), std.math.maxInt(usize));
     if (r.err) return self.throwError("SyntaxError", "invalid hex-encoded string");
     const o = try newTypedArray(self, .u8, r.bytes.len);
     @memcpy(o.typed_array.?.buffer.array_buffer.?.bytes()[0..r.bytes.len], r.bytes);
@@ -15270,7 +15270,7 @@ fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value
     const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
     const lch = lastChunkFromName(try getStringOption(self, opts, "lastChunkHandling", &.{ "loose", "strict", "stop-before-partial" }, "loose"));
     const target = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
-    const r = try decodeBase64(self, sv.string, url, lch, target.len);
+    const r = try decodeBase64(self, sv.asStr(), url, lch, target.len);
     @memcpy(target[0..r.bytes.len], r.bytes);
     if (r.err) return self.throwError("SyntaxError", "invalid base64-encoded string");
     return try self.readWrittenResult(r.read, r.bytes.len);
@@ -15283,7 +15283,7 @@ fn uint8SetFromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const sv = arg(args, 0);
     if (!sv.isString()) return self.throwError("TypeError", "setFromHex requires a string argument");
     const target = uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached");
-    const r = try decodeHex(self, sv.string, target.len);
+    const r = try decodeHex(self, sv.asStr(), target.len);
     @memcpy(target[0..r.bytes.len], r.bytes);
     if (r.err) return self.throwError("SyntaxError", "invalid hex-encoded string");
     return try self.readWrittenResult(r.read, r.bytes.len);
@@ -15299,9 +15299,9 @@ fn taProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.typed_array == null)
+            if (!this.isObject() or this.asObj().typed_array == null)
                 return self.throwError("TypeError", "TypedArray.prototype method called on a non-TypedArray");
-            return (try typedArrayMethod(self, this.object, name, args)) orelse .undefined;
+            return (try typedArrayMethod(self, this.asObj(), name, args)) orelse .undefined;
         }
     }.call;
 }
@@ -15338,8 +15338,8 @@ fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resiza
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a non-ArrayBuffer");
-            const ab = this.object.array_buffer.?;
+            if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a non-ArrayBuffer");
+            const ab = this.asObj().array_buffer.?;
             // These are %ArrayBuffer.prototype% accessors — a SharedArrayBuffer
             // receiver throws (it has its own byteLength/maxByteLength/growable).
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a SharedArrayBuffer");
@@ -15359,8 +15359,8 @@ fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resiza
 /// fixed-length immutable buffer and detach the source.
 fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transferToImmutable called on a non-ArrayBuffer");
-    const ab = this.object.array_buffer.?;
+    if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transferToImmutable called on a non-ArrayBuffer");
+    const ab = this.asObj().array_buffer.?;
     if (ab.is_shared) return self.throwError("TypeError", "transferToImmutable cannot be called on a SharedArrayBuffer");
     const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
@@ -15376,8 +15376,8 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
 /// the resulting buffer is immutable and the source is left intact.
 fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.sliceToImmutable called on a non-ArrayBuffer");
-    const ab = this.object.array_buffer.?;
+    if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.sliceToImmutable called on a non-ArrayBuffer");
+    const ab = this.asObj().array_buffer.?;
     if (ab.is_shared) return self.throwError("TypeError", "sliceToImmutable cannot be called on a SharedArrayBuffer");
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.bytes().len;
@@ -15396,8 +15396,8 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
 /// `ArrayBuffer.prototype.resize(newByteLength)` — grow/shrink a resizable buffer.
 fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a non-ArrayBuffer");
-    const ab = this.object.array_buffer.?;
+    if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a non-ArrayBuffer");
+    const ab = this.asObj().array_buffer.?;
     if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a SharedArrayBuffer");
     if (ab.max_byte_length == null) return self.throwError("TypeError", "ArrayBuffer is not resizable");
     const new_len = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
@@ -15418,8 +15418,8 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
-            const ab = this.object.array_buffer.?;
+            if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
+            const ab = this.asObj().array_buffer.?;
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
             const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
             if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
@@ -15438,7 +15438,7 @@ fn arrayBufferIsViewFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = ctx;
     _ = this;
     const v = if (args.len > 0) args[0] else Value.undefined;
-    return Value.boolVal(v.isObject() and (v.object.typed_array != null or v.object.data_view != null));
+    return Value.boolVal(v.isObject() and (v.asObj().typed_array != null or v.asObj().data_view != null));
 }
 
 // ===== Intl (ECMA-402) ===============================================
@@ -16087,8 +16087,8 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     if (v.isUndefined()) return arr;
     // A string or a single Intl.Locale is wrapped as a one-element list (its
     // [[Locale]] slot is used; toString is not observed).
-    if (v.isString() or (v.isObject() and v.object.getOwn("\x00locale") != null)) {
-        const s = if (v.isString()) v.string else v.object.getOwn("\x00locale").?.string;
+    if (v.isString() or (v.isObject() and v.asObj().getOwn("\x00locale") != null)) {
+        const s = if (v.isString()) v.asStr() else v.asObj().getOwn("\x00locale").?.string;
         const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
         try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(c));
         return arr;
@@ -16107,13 +16107,13 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         if (!ev.isString() and !ev.isObject()) return self.throwError("TypeError", "Intl: locale must be a string or object");
         // An Intl.Locale element contributes its [[Locale]] slot directly (its
         // toString must not be observed).
-        const s = if (ev.isObject() and ev.object.getOwn("\x00locale") != null)
-            ev.object.getOwn("\x00locale").?.string
+        const s = if (ev.isObject() and ev.asObj().getOwn("\x00locale") != null)
+            ev.asObj().getOwn("\x00locale").?.string
         else
             try self.toStringV(ev);
         const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
         var dup = false;
-        for (arr.elements.items) |e| if (std.mem.eql(u8, e.string, c)) {
+        for (arr.elements.items) |e| if (std.mem.eql(u8, e.asStr(), c)) {
             dup = true;
         };
         if (!dup) try arr.elements.append(arr.elementsAllocator(self.arena), Value.str(c));
@@ -16272,8 +16272,8 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Intl.Locale requires 'new'");
     const tagv = if (args.len > 0) args[0] else .undefined;
     if (!tagv.isString() and !tagv.isObject()) return self.throwError("TypeError", "Locale tag must be a string or Intl.Locale");
-    const tag_raw = if (tagv.isObject() and tagv.object.getOwn("\x00locale") != null)
-        tagv.object.getOwn("\x00locale").?.string
+    const tag_raw = if (tagv.isObject() and tagv.asObj().getOwn("\x00locale") != null)
+        tagv.asObj().getOwn("\x00locale").?.string
     else
         try self.toStringV(tagv);
     var canon = canonicalizeLocaleTag(self.arena, tag_raw) orelse return self.throwError("RangeError", "Incorrect locale information provided");
@@ -16385,7 +16385,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     }
 
     const o = (try self.newObject()).object;
-    if (self.new_target.isObject()) o.proto = try self.ctorRealmProto(self.new_target.object, "Locale");
+    if (self.new_target.isObject()) o.proto = try self.ctorRealmProto(self.new_target.asObj(), "Locale");
     try self.setProp(o, "\x00locale", Value.str(canon));
     try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
     return Value.obj(o);
@@ -16397,8 +16397,8 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale accessor on incompatible receiver");
-            const tag = this.object.getOwn("\x00locale").?.string;
+            if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale accessor on incompatible receiver");
+            const tag = this.asObj().getOwn("\x00locale").?.string;
             // -u- extension keyword accessors.
             switch (f) {
                 .calendar => return if (localeUValue(tag, "ca")) |v| Value.str(v) else .undefined,
@@ -16458,9 +16458,9 @@ fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+            if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
             const a = self.arena;
-            const tag = this.object.getOwn("\x00locale").?.string;
+            const tag = this.asObj().getOwn("\x00locale").?.string;
             // Split off the base language-id (up to the first singleton) and tail.
             var base_end: usize = tag.len;
             {
@@ -16511,7 +16511,7 @@ fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
             try buf.appendSlice(a, tail);
             const canon = canonicalizeLocaleTag(a, buf.items) orelse return self.throwError("RangeError", "Incorrect locale information provided");
             const o = (try self.newObject()).object;
-            o.proto = this.object.proto;
+            o.proto = this.asObj().proto;
             try self.setProp(o, "\x00locale", Value.str(canon));
             try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
             return Value.obj(o);
@@ -16526,8 +16526,8 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
-            const tag = this.object.getOwn("\x00locale").?.string;
+            if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+            const tag = this.asObj().getOwn("\x00locale").?.string;
             const arr = (try self.newArray()).object;
             const def: ?[]const u8 = switch (which) {
                 .calendars => localeUValue(tag, "ca") orelse "iso8601",
@@ -16545,7 +16545,7 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
 fn intlLocaleTextInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTextInfo on incompatible receiver");
+    if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTextInfo on incompatible receiver");
     const o = (try self.newObject()).object;
     try self.setProp(o, "direction", Value.str("ltr"));
     return Value.obj(o);
@@ -16554,8 +16554,8 @@ fn intlLocaleTextInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getWeekInfo on incompatible receiver");
-    const tag = this.object.getOwn("\x00locale").?.string;
+    if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getWeekInfo on incompatible receiver");
+    const tag = this.asObj().getOwn("\x00locale").?.string;
     const o = (try self.newObject()).object;
     // firstDay: from the -u-fw- keyword (mon..sun -> 1..7) when present, else the
     // default (1 = Monday; we lack per-region week data).
@@ -16577,8 +16577,8 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn intlLocaleTimeZonesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTimeZones on incompatible receiver");
-    const tag = this.object.getOwn("\x00locale").?.string;
+    if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTimeZones on incompatible receiver");
+    const tag = this.asObj().getOwn("\x00locale").?.string;
     // Without a region subtag in the language-id, return undefined.
     var has_region = false;
     {
@@ -16605,8 +16605,8 @@ fn intlLocaleTimeZonesFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 fn intlLocaleToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.toString on incompatible receiver");
-    return this.object.getOwn("\x00locale").?;
+    if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.toString on incompatible receiver");
+    return this.asObj().getOwn("\x00locale").?;
 }
 
 // ---- Intl formatter constructors (en-centric) -----------------------
@@ -16877,7 +16877,7 @@ fn dtfResolveLocaleExt(
 /// `\x00opts` (read by both `format` and `resolvedOptions`).
 fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalError!void {
     var r = r_in;
-    const tag = if (o.getOwn("\x00locale")) |lv| (if (lv.isString()) lv.string else "en") else "en";
+    const tag = if (o.getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     // Resolve the ca/hc/nu locale extensions (rebuilds the resolved locale and
     // fixes the effective calendar / numbering system).
     const ext = try dtfResolveLocaleExt(self, tag, r.calendar, r.hour_cycle, r.hour12, r.numbering_system);
@@ -17101,7 +17101,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     // falls back to the default ("auto", left unset) rather than throwing.
     const ug = try self.getProperty(raw, "useGrouping");
     if (!ug.isUndefined()) {
-        if (ug.isBoolean() and ug.boolean) {
+        if (ug.isBoolean() and ug.asBool()) {
             try self.setProp(ro, "useGrouping", Value.str("always"));
         } else if (!ug.toBoolean()) {
             try self.setProp(ro, "useGrouping", Value.boolVal(false));
@@ -17209,7 +17209,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             const o = blk: {
                 if (self.new_target.isObject()) {
                     const oo = (try self.newObject()).object;
-                    oo.proto = try self.ctorRealmProto(self.new_target.object, service);
+                    oo.proto = try self.ctorRealmProto(self.new_target.asObj(), service);
                     break :blk oo;
                 }
                 if (!can_call) return self.throwError("TypeError", "Constructor Intl." ++ service ++ " requires 'new'");
@@ -17217,18 +17217,18 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 // prototype (found via the Intl namespace).
                 const oo = (try self.newObject()).object;
                 if (self.global_object) |g| if (g.getOwn("Intl")) |iv| if (iv.isObject()) {
-                    if (iv.object.getOwn(service)) |cv| if (cv.isObject()) {
-                        if (cv.object.getOwn("prototype")) |pv| if (pv.isObject()) {
-                            oo.proto = pv.object;
+                    if (iv.asObj().getOwn(service)) |cv| if (cv.isObject()) {
+                        if (cv.asObj().getOwn("prototype")) |pv| if (pv.isObject()) {
+                            oo.proto = pv.asObj();
                             // OrdinaryHasInstance(service, this): is the service
                             // prototype in `this`'s prototype chain? Only
                             // NumberFormat/DateTimeFormat have the legacy
                             // FallbackSymbol chaining; Collator ignores `this`.
                             const can_chain = comptime (std.mem.eql(u8, service, "NumberFormat") or std.mem.eql(u8, service, "DateTimeFormat"));
                             if (can_chain and this.isObject()) {
-                                var p: ?*value.Object = this.object.proto;
-                                while (p) |pp| : (p = pp.proto) if (pp == pv.object) {
-                                    chain_this = this.object;
+                                var p: ?*value.Object = this.asObj().proto;
+                                while (p) |pp| : (p = pp.proto) if (pp == pv.asObj()) {
+                                    chain_this = this.asObj();
                                     break;
                                 };
                             }
@@ -17239,7 +17239,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             };
             // Resolve the locale (first requested, else "en").
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else .undefined);
-            const resolved: []const u8 = if (locs.elements.items.len > 0) locs.elements.items[0].string else "en";
+            const resolved: []const u8 = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
             try self.setProp(o, "\x00intl", Value.str(service));
             try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
             try self.setProp(o, "\x00locale", Value.str(resolved));
@@ -17275,7 +17275,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const raw = if (args.len > 1) args[1] else Value.undefined;
                 // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
                 // BigInt, which are .object-tagged primitives) -> TypeError.
-                if (!raw.isUndefined() and !(raw.isObject() and !raw.object.is_symbol and !raw.object.is_bigint)) return self.throwError("TypeError", "options must be an object");
+                if (!raw.isUndefined() and !(raw.isObject() and !raw.asObj().is_symbol and !raw.asObj().is_bigint)) return self.throwError("TypeError", "options must be an object");
                 const ro = (try self.newObject()).object;
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
@@ -17305,7 +17305,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const raw = if (args.len > 1) args[1] else Value.undefined;
                 // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
                 // BigInt, which are .object-tagged primitives) -> TypeError.
-                if (!raw.isUndefined() and !(raw.isObject() and !raw.object.is_symbol and !raw.object.is_bigint)) return self.throwError("TypeError", "options must be an object");
+                if (!raw.isUndefined() and !(raw.isObject() and !raw.asObj().is_symbol and !raw.asObj().is_bigint)) return self.throwError("TypeError", "options must be an object");
                 const ro = (try self.newObject()).object;
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
@@ -17339,7 +17339,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const raw = if (args.len > 1) args[1] else Value.undefined;
                 // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
                 // BigInt, which are .object-tagged primitives) -> TypeError.
-                if (!raw.isUndefined() and !(raw.isObject() and !raw.object.is_symbol and !raw.object.is_bigint)) return self.throwError("TypeError", "options must be an object");
+                if (!raw.isUndefined() and !(raw.isObject() and !raw.asObj().is_symbol and !raw.asObj().is_bigint)) return self.throwError("TypeError", "options must be an object");
                 const ro = (try self.newObject()).object;
                 var base: []const u8 = "short";
                 if (raw.isObject()) {
@@ -17389,12 +17389,12 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 // DefinePropertyOrThrow(this, [[FallbackSymbol]], { value: o,
                 // writable/enumerable/configurable: false }); return this.
                 if (self.env.get("\x00IntlFallbackSym")) |fs| if (fs.isObject()) {
-                    if (ct.getOwn(fs.object.sym_key) != null) return self.throwError("TypeError", "Intl." ++ service ++ " already constructed on this object");
+                    if (ct.getOwn(fs.asObj().sym_key) != null) return self.throwError("TypeError", "Intl." ++ service ++ " already constructed on this object");
                     // Register the symbol so keyToValue recovers it (with its
                     // description) for getOwnPropertySymbols.
-                    try self.symbols.put(self.arena, fs.object.sym_key, fs.object);
-                    try ct.setOwn(self.arena, self.root_shape, fs.object.sym_key, Value.obj(o));
-                    try ct.setAttr(self.arena, fs.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
+                    try self.symbols.put(self.arena, fs.asObj().sym_key, fs.asObj());
+                    try ct.setOwn(self.arena, self.root_shape, fs.asObj().sym_key, Value.obj(o));
+                    try ct.setAttr(self.arena, fs.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
                 };
                 return Value.obj(ct);
             }
@@ -17404,7 +17404,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
 }
 
 fn intlBrandOk(this: Value, service: []const u8) bool {
-    return this.isObject() and this.object.getOwn("\x00intl") != null and std.mem.eql(u8, this.object.getOwn("\x00intl").?.string, service);
+    return this.isObject() and this.asObj().getOwn("\x00intl") != null and std.mem.eql(u8, this.asObj().getOwn("\x00intl").?.string, service);
 }
 
 /// UnwrapNumberFormat/DateTimeFormat/Collator: the branded receiver, or — for a
@@ -17414,7 +17414,7 @@ fn unwrapIntlThis(self: *Interpreter, recv: Value, comptime service: []const u8)
     if (intlBrandOk(recv, service)) return recv;
     if (recv.isObject()) {
         if (self.env.get("\x00IntlFallbackSym")) |fs| if (fs.isObject()) {
-            const inner = try self.getProperty(recv, fs.object.sym_key);
+            const inner = try self.getProperty(recv, fs.asObj().sym_key);
             if (intlBrandOk(inner, service)) return inner;
         };
     }
@@ -17454,7 +17454,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var second: u8 = 0;
     var frac_ms: u32 = 0;
     {
-        const t_obj: ?*value.TemporalData = if (args.len > 0 and args[0].isObject()) args[0].object.temporal else null;
+        const t_obj: ?*value.TemporalData = if (args.len > 0 and args[0].isObject()) args[0].asObj().temporal else null;
         const direct = t_obj != null and switch (t_obj.?.kind) {
             .plain_date, .plain_time, .plain_date_time, .plain_year_month, .plain_month_day => true,
             else => false,
@@ -17504,11 +17504,11 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var o_tzname: []const u8 = ""; // timeZoneName width (long/short/...)
     var hour12 = true;
     var any_comp = false;
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         const get = struct {
             fn s(slf: *Interpreter, obj: Value, k: []const u8) EvalError![]const u8 {
                 const v = try slf.getProperty(obj, k);
-                return if (v.isString()) v.string else "";
+                return if (v.isString()) v.asStr() else "";
             }
         }.s;
         o_weekday = try get(self, ov, "weekday");
@@ -17520,19 +17520,19 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_second = try get(self, ov, "second");
         o_day_period = try get(self, ov, "dayPeriod");
         o_tzname = try get(self, ov, "timeZoneName");
-        if (ov.object.getOwn("fractionalSecondDigits")) |f| if (f.isNumber()) {
-            o_frac = @intFromFloat(f.number);
+        if (ov.asObj().getOwn("fractionalSecondDigits")) |f| if (f.isNumber()) {
+            o_frac = @intFromFloat(f.asNum());
         };
         any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
         const hc = try get(self, ov, "hourCycle");
         const h12 = try self.getProperty(ov, "hour12");
         if (h12.isBoolean()) {
-            hour12 = h12.boolean;
+            hour12 = h12.asBool();
         } else if (hc.len > 0) {
             hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
-        } else if (this.object.getOwn("\x00locale")) |lv| if (lv.isString()) {
+        } else if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
             // No explicit hour12/hourCycle: honor the locale's -u-hc keyword.
-            if (localeUValue(lv.string, "hc")) |lhc| hour12 = std.mem.eql(u8, lhc, "h11") or std.mem.eql(u8, lhc, "h12");
+            if (localeUValue(lv.asStr(), "hc")) |lhc| hour12 = std.mem.eql(u8, lhc, "h11") or std.mem.eql(u8, lhc, "h12");
         };
         // dateStyle/timeStyle expand to a representative set of components (an
         // en approximation; the localized patterns/time-zone parts are not
@@ -17744,7 +17744,7 @@ const dtf_range_sep = " \u{2013} ";
 /// The "kind" of a formatRange argument: a Temporal kind, or null for a legacy
 /// time value (number/Date). The two arguments of formatRange must agree.
 fn dtfArgKind(v: Value) ?value.TemporalData.Kind {
-    if (v.isObject() and v.object.temporal != null) return v.object.temporal.?.kind;
+    if (v.isObject() and v.asObj().temporal != null) return v.asObj().temporal.?.kind;
     return null;
 }
 
@@ -18100,8 +18100,8 @@ fn resolveNumberingSystem(this: Value) []const u8 {
     // mishandles — so honoring it would make correct output mismatch the test's
     // own (broken-here) expected. An explicit option is safe (tests that use it
     // compare against literal digit strings).
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.object.getOwn("numberingSystem")) |ns| if (ns.isString()) {
-        if (numbering_systems.digits(ns.string) != null) return ns.string;
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.asObj().getOwn("numberingSystem")) |ns| if (ns.isString()) {
+        if (numbering_systems.digits(ns.asStr()) != null) return ns.asStr();
     };
     return "latn";
 }
@@ -18148,18 +18148,18 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var rounding_increment: u64 = 1;
     var notation: []const u8 = "standard";
     var compact_display: []const u8 = "short";
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         const o = ov;
         const nv = try self.getProperty(o, "notation");
-        if (nv.isString()) notation = nv.string;
+        if (nv.isString()) notation = nv.asStr();
         const cdv = try self.getProperty(o, "compactDisplay");
-        if (cdv.isString()) compact_display = cdv.string;
+        if (cdv.isString()) compact_display = cdv.asStr();
         const sd = try self.getProperty(o, "signDisplay");
-        if (sd.isString()) sign_display = sd.string;
+        if (sd.isString()) sign_display = sd.asStr();
         const rmv = try self.getProperty(o, "roundingMode");
-        if (rmv.isString()) rounding_mode = rmv.string;
+        if (rmv.isString()) rounding_mode = rmv.asStr();
         const rpv = try self.getProperty(o, "roundingPriority");
-        if (rpv.isString()) rounding_priority = rpv.string;
+        if (rpv.isString()) rounding_priority = rpv.asStr();
         const riv = try self.getProperty(o, "roundingIncrement");
         if (!riv.isUndefined()) rounding_increment = @intFromFloat(@trunc(try self.toNumberV(riv)));
         const msd = try self.getProperty(o, "minimumSignificantDigits");
@@ -18171,19 +18171,19 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         }
         if (min_sig != null and max_sig == null) max_sig = 21;
         const csgn = try self.getProperty(o, "currencySign");
-        if (csgn.isString() and std.mem.eql(u8, csgn.string, "accounting")) accounting = true;
+        if (csgn.isString() and std.mem.eql(u8, csgn.asStr(), "accounting")) accounting = true;
         const sv = try self.getProperty(o, "style");
-        if (sv.isString() and std.mem.eql(u8, sv.string, "percent")) {
+        if (sv.isString() and std.mem.eql(u8, sv.asStr(), "percent")) {
             is_percent = true;
             max_frac = 0;
-        } else if (sv.isString() and std.mem.eql(u8, sv.string, "currency")) {
+        } else if (sv.isString() and std.mem.eql(u8, sv.asStr(), "currency")) {
             const cv = try self.getProperty(o, "currency");
-            const code = if (cv.isString()) try std.ascii.allocUpperString(self.arena, cv.string) else "USD";
+            const code = if (cv.isString()) try std.ascii.allocUpperString(self.arena, cv.asStr()) else "USD";
             const info = currencyInfo(code);
             min_frac = info.digits;
             max_frac = info.digits;
             const disp = try self.getProperty(o, "currencyDisplay");
-            const ds: []const u8 = if (disp.isString()) disp.string else "symbol";
+            const ds: []const u8 = if (disp.isString()) disp.asStr() else "symbol";
             if (std.mem.eql(u8, ds, "code")) {
                 // "USD 1.00"
                 cur_prefix = try std.fmt.allocPrint(self.arena, "{s}\u{00a0}", .{code});
@@ -18196,11 +18196,11 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
                 cur_symbol = info.symbol;
                 cur_code = code;
             }
-        } else if (sv.isString() and std.mem.eql(u8, sv.string, "unit")) {
+        } else if (sv.isString() and std.mem.eql(u8, sv.asStr(), "unit")) {
             const uv = try self.getProperty(o, "unit");
-            const unit = if (uv.isString()) uv.string else "";
+            const unit = if (uv.isString()) uv.asStr() else "";
             const udv = try self.getProperty(o, "unitDisplay");
-            const ud: []const u8 = if (udv.isString()) udv.string else "short";
+            const ud: []const u8 = if (udv.isString()) udv.asStr() else "short";
             unit_space = !std.mem.eql(u8, ud, "narrow");
             // en cardinal plural: singular only for an exact magnitude of 1.
             const plural = !(@abs(n) == 1.0);
@@ -18224,9 +18224,9 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         if (std.mem.eql(u8, notation, "compact")) group_mode = "min2";
         const ug = try self.getProperty(o, "useGrouping");
         if (ug.isBoolean()) {
-            group_mode = if (ug.boolean) "always" else "off";
+            group_mode = if (ug.asBool()) "always" else "off";
         } else if (ug.isString()) {
-            group_mode = if (std.mem.eql(u8, ug.string, "false")) "off" else ug.string;
+            group_mode = if (std.mem.eql(u8, ug.asStr(), "false")) "off" else ug.asStr();
         }
     };
 
@@ -18309,7 +18309,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         show_neg = neg and !is_zero;
         show_pos = false;
     }
-    const locale = if (this.object.getOwn("\x00locale")) |lv| (if (lv.isString()) lv.string else "en") else "en";
+    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     const syms = localeNumberSymbols(locale);
     // USD's symbol is "$" only in en-based locales; elsewhere CLDR uses "US$".
     if (std.mem.eql(u8, cur_code, "USD") and !(locale.len >= 2 and locale[0] == 'e' and locale[1] == 'n')) cur_symbol = "US$";
@@ -18445,7 +18445,7 @@ fn nfFormatOne(self: *Interpreter, this: Value, v: Value) value.HostError![]cons
 /// Coerce a formatRange argument: a BigInt becomes its numeric value; other
 /// values pass through (nfFormatOne handles numbers and numeric strings).
 fn nfNumericArg(v: Value) Value {
-    if (v.isObject() and v.object.is_bigint) return Value.num(@floatFromInt(v.object.bigint));
+    if (v.isObject() and v.asObj().is_bigint) return Value.num(@floatFromInt(v.asObj().bigint));
     return v;
 }
 
@@ -18558,14 +18558,14 @@ fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
     if (tIsTemporal(d, .duration)) {
         // A Temporal.Duration: read its internal slots, not the (tauntable)
         // prototype getters.
-        vals = d.object.temporal.?.dur;
+        vals = d.asObj().temporal.?.dur;
         for (&vals) |*p| if (p.* == 0) {
             p.* = 0;
         };
     } else if (d.isString()) {
         // ToDurationRecord(string): ParseTemporalDurationString (RangeError on
         // malformed input). Signs are already consistent by construction.
-        vals = try parseDurationString(self, d.string);
+        vals = try parseDurationString(self, d.asStr());
         for (&vals) |*p| if (p.* == 0) {
             p.* = 0; // normalize -0 to +0
         };
@@ -18617,14 +18617,14 @@ fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
 fn durMinutesRequired(ov: ?Value, need_sep: bool, unit: []const u8, vals: [10]f64) bool {
     if (!std.mem.eql(u8, unit, "minutes") or !need_sep) return false;
     var sd: []const u8 = "auto";
-    if (ov) |o| if (o.isObject()) if (o.object.getOwn("secondsDisplay")) |s| if (s.isString()) {
-        sd = s.string;
+    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("secondsDisplay")) |s| if (s.isString()) {
+        sd = s.asStr();
     };
     return std.mem.eql(u8, sd, "always") or vals[6] != 0 or vals[7] != 0 or vals[8] != 0 or vals[9] != 0;
 }
 
 fn durUnitStyle(ov: ?Value, base: []const u8, unit: []const u8) []const u8 {
-    if (ov) |o| if (o.isObject()) if (o.object.getOwn(unit)) |s| if (s.isString()) return s.string;
+    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn(unit)) |s| if (s.isString()) return s.asStr();
     if (std.mem.eql(u8, base, "digital")) {
         // hours/minutes/seconds and the sub-second units are numeric (sub-seconds
         // combine into the seconds fraction); years/months/weeks/days are short.
@@ -18652,8 +18652,8 @@ fn durResolveUnits(ov: ?Value, base: []const u8, styles: *[10][]const u8, displa
         const is_ms = std.mem.eql(u8, u, "minutes") or std.mem.eql(u8, u, "seconds");
         const is_hms = is_ms or std.mem.eql(u8, u, "hours");
         var explicit: ?[]const u8 = null;
-        if (ov) |o| if (o.isObject()) if (o.object.getOwn(u)) |s| if (s.isString()) {
-            explicit = s.string;
+        if (ov) |o| if (o.isObject()) if (o.asObj().getOwn(u)) |s| if (s.isString()) {
+            explicit = s.asStr();
         };
         var style: []const u8 = undefined;
         var display_default: []const u8 = "always";
@@ -18669,8 +18669,8 @@ fn durResolveUnits(ov: ?Value, base: []const u8, styles: *[10][]const u8, displa
             } else style = base;
         }
         var display: []const u8 = display_default;
-        if (ov) |o| if (o.isObject()) if (o.object.getOwn(u ++ "Display")) |dv| if (dv.isString()) {
-            display = dv.string;
+        if (ov) |o| if (o.isObject()) if (o.asObj().getOwn(u ++ "Display")) |dv| if (dv.isString()) {
+            display = dv.asStr();
         };
         if (prev_numlike) {
             const numlike = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
@@ -18737,7 +18737,7 @@ fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, dec: []const u8, st
 }
 
 fn durFracDigits(ov: ?Value) ?usize {
-    if (ov) |o| if (o.isObject()) if (o.object.getOwn("fractionalDigits")) |f| if (f.isNumber()) return @intFromFloat(f.number);
+    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("fractionalDigits")) |f| if (f.isNumber()) return @intFromFloat(f.asNum());
     return null;
 }
 
@@ -18807,11 +18807,11 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const d = if (args.len > 0) args[0] else Value.undefined;
     const vals = try durationToRecord(self, d);
     var base: []const u8 = "short";
-    const ov = this.object.getOwn("\x00opts");
-    if (ov) |o| if (o.isObject()) if (o.object.getOwn("style")) |s| if (s.isString()) {
-        base = s.string;
+    const ov = this.asObj().getOwn("\x00opts");
+    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("style")) |s| if (s.isString()) {
+        base = s.asStr();
     };
-    const locale = if (this.object.getOwn("\x00locale")) |lv| (if (lv.isString()) lv.string else "en") else "en";
+    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
 
     // Build the list of formatted items. Consecutive numeric/2-digit units join
     // with ":" into one item (digital style); standalone units are separate
@@ -18887,11 +18887,11 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
     const d = if (args.len > 0) args[0] else Value.undefined;
     const vals = try durationToRecord(self, d);
     var base: []const u8 = "short";
-    const ov = this.object.getOwn("\x00opts");
-    if (ov) |o| if (o.isObject()) if (o.object.getOwn("style")) |s| if (s.isString()) {
-        base = s.string;
+    const ov = this.asObj().getOwn("\x00opts");
+    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("style")) |s| if (s.isString()) {
+        base = s.asStr();
     };
-    const locale = if (this.object.getOwn("\x00locale")) |lv| (if (lv.isString()) lv.string else "en") else "en";
+    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
 
     // Each group is one ListFormat "element" (a unit, or a ":"-joined numeric run).
     var groups: std.ArrayListUnmanaged(std.ArrayListUnmanaged(DurPart)) = .empty;
@@ -18985,17 +18985,17 @@ fn intlBoundAccessorFn(comptime service: []const u8, comptime prop: []const u8, 
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!intlBrandOk(this, service)) return self.throwError("TypeError", "get Intl." ++ service ++ ".prototype." ++ prop ++ " called on incompatible receiver");
-            if (this.object.getOwn(cache_key)) |b| return b;
+            if (this.asObj().getOwn(cache_key)) |b| return b;
             const impl = try self.getProperty(this, impl_key);
             if (!impl.isObject()) return self.throwError("TypeError", "missing " ++ prop ++ " implementation");
-            const bound = try self.makeBound(impl.object, this, &.{});
+            const bound = try self.makeBound(impl.asObj(), this, &.{});
             const ro: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-            try bound.object.setOwn(self.arena, self.root_shape, "name", Value.str(""));
-            try bound.object.setAttr(self.arena, "name", ro);
-            try bound.object.setOwn(self.arena, self.root_shape, "length", Value.num(length));
-            try bound.object.setAttr(self.arena, "length", ro);
-            try self.setProp(this.object, cache_key, bound);
-            try this.object.setAttr(self.arena, cache_key, .{ .writable = false, .enumerable = false, .configurable = false });
+            try bound.asObj().setOwn(self.arena, self.root_shape, "name", Value.str(""));
+            try bound.asObj().setAttr(self.arena, "name", ro);
+            try bound.asObj().setOwn(self.arena, self.root_shape, "length", Value.num(length));
+            try bound.asObj().setAttr(self.arena, "length", ro);
+            try self.setProp(this.asObj(), cache_key, bound);
+            try this.asObj().setAttr(self.arena, cache_key, .{ .writable = false, .enumerable = false, .configurable = false });
             return bound;
         }
     }.call;
@@ -19149,9 +19149,9 @@ fn localeLanguage(tag: []const u8) []const u8 {
 }
 
 fn pluralRulesFor(this: Value) []const cldr_plurals.Rule {
-    const tag = if (this.object.getOwn("\x00locale")) |lv| (if (lv.isString()) lv.string else "en") else "en";
+    const tag = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     const lang = localeLanguage(tag);
-    const is_ordinal = if (this.object.getOwn("\x00opts")) |ov| (ov.isObject() and ov.object.getOwn("type") != null and ov.object.getOwn("type").? == .string and std.mem.eql(u8, ov.object.getOwn("type").?.string, "ordinal")) else false;
+    const is_ordinal = if (this.asObj().getOwn("\x00opts")) |ov| (ov.isObject() and ov.asObj().getOwn("type") != null and ov.asObj().getOwn("type").? == .string and std.mem.eql(u8, ov.asObj().getOwn("type").?.string, "ordinal")) else false;
     const rules = if (is_ordinal) cldr_plurals.ordinal(lang) else cldr_plurals.cardinal(lang);
     // Fall back to English cardinal (one/other) when a language has no data.
     return rules orelse (cldr_plurals.cardinal("en") orelse &.{});
@@ -19160,12 +19160,12 @@ fn pluralRulesFor(this: Value) []const cldr_plurals.Rule {
 fn pluralFracDigits(this: Value) struct { min: usize, max: usize } {
     var min: usize = 0;
     var max: usize = 3;
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        if (ov.object.getOwn("minimumFractionDigits")) |m| if (m.isNumber()) {
-            min = @intFromFloat(m.number);
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
+        if (ov.asObj().getOwn("minimumFractionDigits")) |m| if (m.isNumber()) {
+            min = @intFromFloat(m.asNum());
         };
-        if (ov.object.getOwn("maximumFractionDigits")) |m| if (m.isNumber()) {
-            max = @intFromFloat(m.number);
+        if (ov.asObj().getOwn("maximumFractionDigits")) |m| if (m.isNumber()) {
+            max = @intFromFloat(m.asNum());
         };
     };
     if (max < min) max = min;
@@ -19181,8 +19181,8 @@ fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     var ops = pluralOperands(n, fd.min, fd.max);
     // The exponent operand (e/c) for scientific/engineering/compact notation.
     var notation: []const u8 = "standard";
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.object.getOwn("notation")) |nv| if (nv.isString()) {
-        notation = nv.string;
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.asObj().getOwn("notation")) |nv| if (nv.isString()) {
+        notation = nv.asStr();
     };
     const absn = @abs(n);
     if (absn != 0 and std.math.isFinite(absn) and !std.mem.eql(u8, notation, "standard")) {
@@ -19232,23 +19232,23 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             self.iteratorClose(it) catch {};
             return self.throwError("TypeError", "Intl.ListFormat: list items must be strings");
         }
-        try strs.append(self.arena, nv.string);
+        try strs.append(self.arena, nv.asStr());
     }
     const list = strs.items;
     var typ: []const u8 = "conjunction";
     var style: []const u8 = "long";
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         const tv = try self.getProperty(ov, "type");
-        if (tv.isString()) typ = tv.string;
+        if (tv.isString()) typ = tv.asStr();
         const sv = try self.getProperty(ov, "style");
-        if (sv.isString()) style = sv.string;
+        if (sv.isString()) style = sv.asStr();
     };
     // en connectors by type+style: pair (two items) / final (≥3) / middle.
     const is_unit = std.mem.eql(u8, typ, "unit");
     const is_disj = std.mem.eql(u8, typ, "disjunction");
     const narrow = std.mem.eql(u8, style, "narrow");
     const short = std.mem.eql(u8, style, "short");
-    const lang = if (this.object.getOwn("\x00locale")) |lv| (if (lv.isString()) localeLanguage(lv.string) else "en") else "en";
+    const lang = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) localeLanguage(lv.asStr()) else "en") else "en";
     const es = std.mem.eql(u8, lang, "es");
     var middle: []const u8 = ", ";
     var pair: []const u8 = " and ";
@@ -19359,7 +19359,7 @@ fn segDataObj(self: *Interpreter, str: []const u8, start: usize, end: usize, gra
 }
 
 fn segmenterGranularity(seg_obj: *value.Object) []const u8 {
-    if (seg_obj.getOwn("\x00gran")) |g| if (g.isString()) return g.string;
+    if (seg_obj.getOwn("\x00gran")) |g| if (g.isString()) return g.asStr();
     return "grapheme";
 }
 
@@ -19369,14 +19369,14 @@ fn intlSegmenterSegmentFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (!intlBrandOk(this, "Segmenter")) return self.throwError("TypeError", "Intl.Segmenter.prototype.segment on incompatible receiver");
     const str = try self.toStringV(if (args.len > 0) args[0] else .undefined);
     var gran: []const u8 = "grapheme";
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        if (ov.object.getOwn("granularity")) |g| if (g.isString()) {
-            gran = g.string;
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
+        if (ov.asObj().getOwn("granularity")) |g| if (g.isString()) {
+            gran = g.asStr();
         };
     };
     const o = (try self.newObject()).object;
     if (self.env.get("\x00SegmentsProto")) |p| if (p.isObject()) {
-        o.proto = p.object;
+        o.proto = p.asObj();
     };
     try self.setProp(o, "\x00segstr", Value.str(str));
     try o.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -19386,15 +19386,15 @@ fn intlSegmenterSegmentFn(ctx: *anyopaque, this: Value, args: []const Value) val
 }
 
 fn segmentsBrandOk(this: Value) bool {
-    return this.isObject() and this.object.getOwn("\x00segstr") != null;
+    return this.isObject() and this.asObj().getOwn("\x00segstr") != null;
 }
 
 /// `%Segments.prototype%.containing(index)`.
 fn intlSegmentsContainingFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!segmentsBrandOk(this)) return self.throwError("TypeError", "Segments.prototype.containing on incompatible receiver");
-    const str = this.object.getOwn("\x00segstr").?.string;
-    const gran = segmenterGranularity(this.object);
+    const str = this.asObj().getOwn("\x00segstr").?.string;
+    const gran = segmenterGranularity(this.asObj());
     const nf = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
     const n: f64 = if (std.math.isNan(nf)) 0 else @trunc(nf);
     if (n < 0 or n >= @as(f64, @floatFromInt(str.len))) return .undefined;
@@ -19415,11 +19415,11 @@ fn intlSegmentsIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (!segmentsBrandOk(this)) return self.throwError("TypeError", "Segments.prototype[@@iterator] on incompatible receiver");
     const it = (try self.newObject()).object;
     if (self.env.get("\x00SegIterProto")) |p| if (p.isObject()) {
-        it.proto = p.object;
+        it.proto = p.asObj();
     };
-    try self.setProp(it, "\x00segstr", this.object.getOwn("\x00segstr").?);
+    try self.setProp(it, "\x00segstr", this.asObj().getOwn("\x00segstr").?);
     try it.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
-    try self.setProp(it, "\x00gran", Value.str(segmenterGranularity(this.object)));
+    try self.setProp(it, "\x00gran", Value.str(segmenterGranularity(this.asObj())));
     try it.setAttr(self.arena, "\x00gran", .{ .writable = false, .enumerable = false, .configurable = false });
     try self.setProp(it, "\x00pos", Value.num(0));
     try it.setAttr(self.arena, "\x00pos", .{ .writable = true, .enumerable = false, .configurable = false });
@@ -19430,13 +19430,13 @@ fn intlSegmentsIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) val
 fn intlSegmentIterNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.getOwn("\x00pos") == null) return self.throwError("TypeError", "Segment Iterator next on incompatible receiver");
-    const str = this.object.getOwn("\x00segstr").?.string;
-    const gran = segmenterGranularity(this.object);
-    const pos: usize = @intFromFloat(this.object.getOwn("\x00pos").?.number);
+    if (!this.isObject() or this.asObj().getOwn("\x00pos") == null) return self.throwError("TypeError", "Segment Iterator next on incompatible receiver");
+    const str = this.asObj().getOwn("\x00segstr").?.string;
+    const gran = segmenterGranularity(this.asObj());
+    const pos: usize = @intFromFloat(this.asObj().getOwn("\x00pos").?.number);
     if (pos >= str.len) return self.iterResultObj(.undefined, true);
     const nx = segNext(str, pos, gran);
-    try self.setProp(this.object, "\x00pos", Value.num(@floatFromInt(nx.end)));
+    try self.setProp(this.asObj(), "\x00pos", Value.num(@floatFromInt(nx.end)));
     return self.iterResultObj(try segDataObj(self, str, pos, nx.end, gran, nx.word_like), false);
 }
 
@@ -19463,9 +19463,9 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const code = try self.toStringV(if (args.len > 0) args[0] else .undefined);
     var typ: []const u8 = "language";
     var fallback: []const u8 = "code";
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        if (ov.object.getOwn("type")) |t| typ = t.string;
-        if (ov.object.getOwn("fallback")) |f| fallback = f.string;
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
+        if (ov.asObj().getOwn("type")) |t| typ = t.asStr();
+        if (ov.asObj().getOwn("fallback")) |f| fallback = f.asStr();
     };
     const allAlpha = struct {
         fn f(s: []const u8) bool {
@@ -19599,12 +19599,12 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
 
     var numeric: []const u8 = "always";
     var style: []const u8 = "long";
-    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        if (ov.object.getOwn("numeric")) |nv| if (nv.isString()) {
-            numeric = nv.string;
+    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
+        if (ov.asObj().getOwn("numeric")) |nv| if (nv.isString()) {
+            numeric = nv.asStr();
         };
-        if (ov.object.getOwn("style")) |sv| if (sv.isString()) {
-            style = sv.string;
+        if (ov.asObj().getOwn("style")) |sv| if (sv.isString()) {
+            style = sv.asStr();
         };
     };
     const neg = std.math.signbit(valnum); // -0 formats as past
@@ -19712,7 +19712,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const this = (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
             const o = (try self.newObject()).object;
-            const loc = this.object.getOwn("\x00locale") orelse Value{ .string = "en" };
+            const loc = this.asObj().getOwn("\x00locale") orelse Value{ .string = "en" };
             try self.setProp(o, "locale", loc);
             // The spec resolvedOptions field set (with default values) per
             // service. `numberingSystem` belongs to the number/date/plural
@@ -19737,28 +19737,28 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // Reflect the resolved numbering system (option/-u-nu-/latn,
                 // limited to systems we actually support).
                 const numbering_system: []const u8 = resolveNumberingSystem(this);
-                if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
+                if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
                     const nv = try self.getProperty(ov, "notation");
-                    if (nv.isString()) notation = nv.string;
+                    if (nv.isString()) notation = nv.asStr();
                     const cdv = try self.getProperty(ov, "compactDisplay");
-                    if (cdv.isString()) compact_display = cdv.string;
+                    if (cdv.isString()) compact_display = cdv.asStr();
                     const rmv = try self.getProperty(ov, "roundingMode");
-                    if (rmv.isString()) rounding_mode = rmv.string;
+                    if (rmv.isString()) rounding_mode = rmv.asStr();
                     const rpv = try self.getProperty(ov, "roundingPriority");
-                    if (rpv.isString()) rounding_priority = rpv.string;
+                    if (rpv.isString()) rounding_priority = rpv.asStr();
                     const tzv = try self.getProperty(ov, "trailingZeroDisplay");
-                    if (tzv.isString()) trailing_zero = tzv.string;
+                    if (tzv.isString()) trailing_zero = tzv.asStr();
                     const riv = try self.getProperty(ov, "roundingIncrement");
                     if (!riv.isUndefined()) rounding_increment = @trunc(try self.toNumberV(riv));
                     const sv = try self.getProperty(ov, "style");
                     if (sv.isString()) {
-                        style = sv.string;
+                        style = sv.asStr();
                         if (std.mem.eql(u8, style, "percent")) max_frac = 0;
                         if (std.mem.eql(u8, style, "currency")) {
                             const cv = try self.getProperty(ov, "currency");
-                            currency = if (cv.isString()) try std.ascii.allocUpperString(self.arena, cv.string) else "USD";
+                            currency = if (cv.isString()) try std.ascii.allocUpperString(self.arena, cv.asStr()) else "USD";
                             const cd = try self.getProperty(ov, "currencyDisplay");
-                            if (cd.isString()) currency_display = cd.string;
+                            if (cd.isString()) currency_display = cd.asStr();
                             const dig: f64 = @floatFromInt(currencyInfo(currency.?).digits);
                             min_frac = dig;
                             max_frac = dig;
@@ -19778,20 +19778,20 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     }
                     const ug = try self.getProperty(ov, "useGrouping");
                     if (ug.isBoolean()) {
-                        grouping = Value.boolVal(ug.boolean);
+                        grouping = Value.boolVal(ug.asBool());
                     } else if (ug.isString()) {
-                        grouping = Value.str(ug.string);
+                        grouping = Value.str(ug.asStr());
                     } else if (std.mem.eql(u8, notation, "compact")) {
                         grouping = Value.str("min2"); // compact default
                     }
                     const sd = try self.getProperty(ov, "signDisplay");
-                    if (sd.isString()) sign_display = sd.string;
+                    if (sd.isString()) sign_display = sd.asStr();
                 };
                 _ = numbering_system;
                 // Resolve locale + numberingSystem from option and -u-nu- (the
                 // reported values; formatting output stays option-only above).
-                const nf_ns: ?[]const u8 = if (this.object.getOwn("\x00opts")) |ov| (if (ov.isObject()) (if (ov.object.getOwn("numberingSystem")) |n| (if (n.isString()) n.string else null) else null) else null) else null;
-                try intlResolveNumbering(self, o, loc.string, nf_ns);
+                const nf_ns: ?[]const u8 = if (this.asObj().getOwn("\x00opts")) |ov| (if (ov.isObject()) (if (ov.asObj().getOwn("numberingSystem")) |n| (if (n.isString()) n.asStr() else null) else null) else null) else null;
+                try intlResolveNumbering(self, o, loc.asStr(), nf_ns);
                 try self.setProp(o, "style", Value.str(style));
                 if (currency) |c| {
                     try self.setProp(o, "currency", Value.str(c));
@@ -19799,19 +19799,19 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     try self.setProp(o, "currencySign", Value.str("standard"));
                 }
                 if (std.mem.eql(u8, style, "unit")) {
-                    if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                        if (ov.object.getOwn("unit")) |u| try self.setProp(o, "unit", u);
-                        try self.setProp(o, "unitDisplay", ov.object.getOwn("unitDisplay") orelse Value.str("short"));
+                    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
+                        if (ov.asObj().getOwn("unit")) |u| try self.setProp(o, "unit", u);
+                        try self.setProp(o, "unitDisplay", ov.asObj().getOwn("unitDisplay") orelse Value.str("short"));
                     };
                 }
                 try self.setProp(o, "minimumIntegerDigits", Value.num(min_int));
                 // Significant-digits resolution: with the default ("auto") rounding
                 // priority a set of significant digits replaces the fraction
                 // digits; morePrecision/lessPrecision reports both.
-                const nfopts = this.object.getOwn("\x00opts");
+                const nfopts = this.asObj().getOwn("\x00opts");
                 const sig_get = struct {
                     fn s(src: ?Value, k: []const u8) ?f64 {
-                        if (src) |v| if (v.isObject()) if (v.object.getOwn(k)) |x| if (x.isNumber()) return x.number;
+                        if (src) |v| if (v.isObject()) if (v.asObj().getOwn(k)) |x| if (x.isNumber()) return x.asNum();
                         return null;
                     }
                 }.s;
@@ -19838,24 +19838,24 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 // Reflect the normalized options over the spec defaults, in the
                 // resolvedOptions field order.
-                const rv: ?Value = this.object.getOwn("\x00opts");
+                const rv: ?Value = this.asObj().getOwn("\x00opts");
                 const cget = struct {
                     fn s(src: ?Value, k: []const u8) ?Value {
-                        if (src) |v| if (v.isObject()) if (v.object.getOwn(k)) |x| return x;
+                        if (src) |v| if (v.isObject()) if (v.asObj().getOwn(k)) |x| return x;
                         return null;
                     }
                 }.s;
                 // numeric/caseFirst resolve from option or the -u-kn/-u-kf
                 // extension, and may rewrite the resolved locale.
-                const opt_num: ?bool = if (cget(rv, "numeric")) |n| n.boolean else null;
-                const opt_kf: ?[]const u8 = if (cget(rv, "caseFirst")) |c| c.string else null;
-                const res = try collatorResolveLocale(self, o, loc.string, opt_num, opt_kf);
+                const opt_num: ?bool = if (cget(rv, "numeric")) |n| n.asBool() else null;
+                const opt_kf: ?[]const u8 = if (cget(rv, "caseFirst")) |c| c.asStr() else null;
+                const res = try collatorResolveLocale(self, o, loc.asStr(), opt_num, opt_kf);
                 try self.setProp(o, "usage", cget(rv, "usage") orelse Value.str("sort"));
                 try self.setProp(o, "sensitivity", cget(rv, "sensitivity") orelse Value.str("variant"));
                 // ignorePunctuation defaults from locale data: Thai ("th") is the
                 // only locale whose CLDR default is true.
                 const ip_default = blk: {
-                    const lang = parseTriple(loc.string).l;
+                    const lang = parseTriple(loc.asStr()).l;
                     break :blk std.mem.eql(u8, lang, "th");
                 };
                 try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse Value.boolVal(ip_default));
@@ -19870,8 +19870,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 }.ok;
                 var collation: []const u8 = "default";
                 if (cget(rv, "collation")) |c| {
-                    if (c.isString() and coAvail(c.string)) collation = c.string;
-                } else if (localeUValue(loc.string, "co")) |c| {
+                    if (c.isString() and coAvail(c.asStr())) collation = c.asStr();
+                } else if (localeUValue(loc.asStr(), "co")) |c| {
                     if (coAvail(c)) collation = c;
                 }
                 try self.setProp(o, "collation", Value.str(collation));
@@ -19882,27 +19882,27 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // minimumIntegerDigits, then significant-OR-fraction digits,
                 // pluralCategories, rounding*, trailingZeroDisplay. No
                 // numberingSystem.
-                const ro: ?Value = this.object.getOwn("\x00opts");
+                const ro: ?Value = this.asObj().getOwn("\x00opts");
                 const pg = struct {
                     fn s(src: ?Value, k: []const u8) ?Value {
-                        if (src) |v| if (v.isObject()) if (v.object.getOwn(k)) |x| return x;
+                        if (src) |v| if (v.isObject()) if (v.asObj().getOwn(k)) |x| return x;
                         return null;
                     }
                 }.s;
                 try self.setProp(o, "type", pg(ro, "type") orelse Value.str("cardinal"));
-                const pr_notation: []const u8 = if (pg(ro, "notation")) |n| n.string else "standard";
+                const pr_notation: []const u8 = if (pg(ro, "notation")) |n| n.asStr() else "standard";
                 try self.setProp(o, "notation", Value.str(pr_notation));
                 // compactDisplay is reported only when notation is "compact".
                 if (std.mem.eql(u8, pr_notation, "compact")) {
                     try self.setProp(o, "compactDisplay", pg(ro, "compactDisplay") orelse Value.str("short"));
                 }
-                try self.setProp(o, "minimumIntegerDigits", Value.num(if (pg(ro, "minimumIntegerDigits")) |v| v.number else 1));
+                try self.setProp(o, "minimumIntegerDigits", Value.num(if (pg(ro, "minimumIntegerDigits")) |v| v.asNum() else 1));
                 if (pg(ro, "minimumSignificantDigits") != null or pg(ro, "maximumSignificantDigits") != null) {
-                    try self.setProp(o, "minimumSignificantDigits", Value.num(if (pg(ro, "minimumSignificantDigits")) |v| v.number else 1));
-                    try self.setProp(o, "maximumSignificantDigits", Value.num(if (pg(ro, "maximumSignificantDigits")) |v| v.number else 21));
+                    try self.setProp(o, "minimumSignificantDigits", Value.num(if (pg(ro, "minimumSignificantDigits")) |v| v.asNum() else 1));
+                    try self.setProp(o, "maximumSignificantDigits", Value.num(if (pg(ro, "maximumSignificantDigits")) |v| v.asNum() else 21));
                 } else {
-                    const minf: f64 = if (pg(ro, "minimumFractionDigits")) |v| v.number else 0;
-                    var maxf: f64 = if (pg(ro, "maximumFractionDigits")) |v| v.number else @max(minf, 3);
+                    const minf: f64 = if (pg(ro, "minimumFractionDigits")) |v| v.asNum() else 0;
+                    var maxf: f64 = if (pg(ro, "maximumFractionDigits")) |v| v.asNum() else @max(minf, 3);
                     if (maxf < minf) maxf = minf;
                     try self.setProp(o, "minimumFractionDigits", Value.num(minf));
                     try self.setProp(o, "maximumFractionDigits", Value.num(maxf));
@@ -19926,11 +19926,11 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
                 // Reflect the normalized options (stored under \x00opts at
                 // construction) in the spec's resolvedOptions property order.
-                const ro: ?Value = this.object.getOwn("\x00opts");
+                const ro: ?Value = this.asObj().getOwn("\x00opts");
                 const get = struct {
                     fn s(slf: *Interpreter, src: ?Value, k: []const u8) ?Value {
                         _ = slf;
-                        if (src) |sv| if (sv.isObject()) if (sv.object.getOwn(k)) |v| return v;
+                        if (src) |sv| if (sv.isObject()) if (sv.asObj().getOwn(k)) |v| return v;
                         return null;
                     }
                 }.s;
@@ -19938,18 +19938,18 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // computed at construction.
                 if (get(self, ro, "\x00rloc")) |rl| try self.setProp(o, "locale", rl);
                 const cal = get(self, ro, "calendar");
-                try self.setProp(o, "calendar", if (cal) |c| Value.str(c.string) else Value.str("gregory"));
+                try self.setProp(o, "calendar", if (cal) |c| Value.str(c.asStr()) else Value.str("gregory"));
                 const ns = get(self, ro, "numberingSystem");
-                try self.setProp(o, "numberingSystem", if (ns) |c| Value.str(c.string) else Value.str("latn"));
+                try self.setProp(o, "numberingSystem", if (ns) |c| Value.str(c.asStr()) else Value.str("latn"));
                 const tz = get(self, ro, "timeZone");
-                try self.setProp(o, "timeZone", if (tz) |c| Value.str(c.string) else Value.str("UTC"));
+                try self.setProp(o, "timeZone", if (tz) |c| Value.str(c.asStr()) else Value.str("UTC"));
                 // Component / style fields are reflected only when set, in order.
                 const has_style = get(self, ro, "dateStyle") != null or get(self, ro, "timeStyle") != null;
                 const has_time = get(self, ro, "hour") != null or has_style;
                 if (has_time) {
                     if (get(self, ro, "hourCycle")) |hc| {
                         try self.setProp(o, "hourCycle", hc);
-                        try self.setProp(o, "hour12", Value.boolVal(std.mem.eql(u8, hc.string, "h11") or std.mem.eql(u8, hc.string, "h12")));
+                        try self.setProp(o, "hour12", Value.boolVal(std.mem.eql(u8, hc.asStr(), "h11") or std.mem.eql(u8, hc.asStr(), "h12")));
                     } else if (get(self, ro, "hour12")) |h| {
                         try self.setProp(o, "hour12", h);
                     }
@@ -19960,55 +19960,55 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
                 var style: []const u8 = "long";
                 var numeric: []const u8 = "always";
-                if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                    if (ov.object.getOwn("style")) |sv| if (sv.isString()) {
-                        style = sv.string;
+                if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
+                    if (ov.asObj().getOwn("style")) |sv| if (sv.isString()) {
+                        style = sv.asStr();
                     };
-                    if (ov.object.getOwn("numeric")) |nv| if (nv.isString()) {
-                        numeric = nv.string;
+                    if (ov.asObj().getOwn("numeric")) |nv| if (nv.isString()) {
+                        numeric = nv.asStr();
                     };
                 };
                 try self.setProp(o, "style", Value.str(style));
                 try self.setProp(o, "numeric", Value.str(numeric));
-                const rtf_ns: ?[]const u8 = if (this.object.getOwn("\x00opts")) |ov| (if (ov.isObject()) (if (ov.object.getOwn("numberingSystem")) |n| (if (n.isString()) n.string else null) else null) else null) else null;
-                try intlResolveNumbering(self, o, loc.string, rtf_ns);
+                const rtf_ns: ?[]const u8 = if (this.asObj().getOwn("\x00opts")) |ov| (if (ov.isObject()) (if (ov.asObj().getOwn("numberingSystem")) |n| (if (n.isString()) n.asStr() else null) else null) else null) else null;
+                try intlResolveNumbering(self, o, loc.asStr(), rtf_ns);
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
                 var typ: []const u8 = "conjunction";
                 var style: []const u8 = "long";
-                if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                    if (ov.object.getOwn("type")) |tv| if (tv.isString()) {
-                        typ = tv.string;
+                if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
+                    if (ov.asObj().getOwn("type")) |tv| if (tv.isString()) {
+                        typ = tv.asStr();
                     };
-                    if (ov.object.getOwn("style")) |sv| if (sv.isString()) {
-                        style = sv.string;
+                    if (ov.asObj().getOwn("style")) |sv| if (sv.isString()) {
+                        style = sv.asStr();
                     };
                 };
                 try self.setProp(o, "type", Value.str(typ));
                 try self.setProp(o, "style", Value.str(style));
             } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
                 // Reflect the normalized record (locale, then the Table-6 order).
-                const ro: ?Value = this.object.getOwn("\x00opts");
+                const ro: ?Value = this.asObj().getOwn("\x00opts");
                 if (ro) |rv| if (rv.isObject()) {
                     inline for (.{ "style", "type", "fallback", "languageDisplay" }) |k| {
-                        if (rv.object.getOwn(k)) |val| try self.setProp(o, k, val);
+                        if (rv.asObj().getOwn(k)) |val| try self.setProp(o, k, val);
                     }
                 };
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
                 var granularity: []const u8 = "grapheme";
-                if (this.object.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                    if (ov.object.getOwn("granularity")) |g| granularity = g.string;
+                if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
+                    if (ov.asObj().getOwn("granularity")) |g| granularity = g.asStr();
                 };
                 try self.setProp(o, "granularity", Value.str(granularity));
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
-                const ro: ?Value = this.object.getOwn("\x00opts");
+                const ro: ?Value = this.asObj().getOwn("\x00opts");
                 const dget = struct {
                     fn s(src: ?Value, k: []const u8) ?Value {
-                        if (src) |v| if (v.isObject()) if (v.object.getOwn(k)) |x| return x;
+                        if (src) |v| if (v.isObject()) if (v.asObj().getOwn(k)) |x| return x;
                         return null;
                     }
                 }.s;
-                const base = if (dget(ro, "style")) |st| st.string else "short";
-                try intlResolveNumbering(self, o, loc.string, if (dget(ro, "numberingSystem")) |n| n.string else null);
+                const base = if (dget(ro, "style")) |st| st.asStr() else "short";
+                try intlResolveNumbering(self, o, loc.asStr(), if (dget(ro, "numberingSystem")) |n| n.asStr() else null);
                 try self.setProp(o, "style", Value.str(base));
                 // Resolved per-unit style/display via GetDurationUnitOptions
                 // (prevStyle cascade, digital defaults, 2-digit promotion).
@@ -20047,7 +20047,7 @@ fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const out = (try self.newArray()).object;
     for (arr.elements.items) |lv| {
         if (!lv.isString()) continue;
-        const tag = lv.string;
+        const tag = lv.asStr();
         const end = std.mem.indexOfScalar(u8, tag, '-') orelse tag.len;
         const lang = tag[0..end];
         if (std.mem.eql(u8, lang, "zxx") or std.mem.eql(u8, lang, "mul") or std.mem.eql(u8, lang, "mis")) continue;
@@ -20061,7 +20061,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     const a = env.arena;
     const tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
@@ -20077,7 +20077,7 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
     // of NumberFormat/DateTimeFormat/Collator onto an existing receiver. It gets
     // %Symbol.prototype% so its `description` accessor works.
     const sym_proto: ?*value.Object = blk: {
-        if (env.get("Symbol")) |sv| if (sv.isObject()) if (sv.object.getOwn("prototype")) |p| if (p.isObject()) break :blk p.object;
+        if (env.get("Symbol")) |sv| if (sv.isObject()) if (sv.asObj().getOwn("prototype")) |p| if (p.isObject()) break :blk p.asObj();
         break :blk null;
     };
     try env.put("\x00IntlFallbackSym", try makeSymbolObj(a, rs, "IntlLegacyConstructedSymbol", sym_proto));
@@ -20160,21 +20160,21 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
         seg_proto.* = .{ .proto = object_proto };
         try setNative(a, rs, seg_proto, "containing", 1, intlSegmentsContainingFn);
         const iter_key: ?[]const u8 = blk: {
-            if (env.get("Symbol")) |sym| if (sym.isObject()) if (sym.object.getOwn("iterator")) |it| if (it.isObject() and it.object.is_symbol) break :blk it.object.sym_key;
+            if (env.get("Symbol")) |sym| if (sym.isObject()) if (sym.object.getOwn("iterator")) |it| if (it.isObject() and it.asObj().is_symbol) break :blk it.asObj().sym_key;
             break :blk null;
         };
         if (iter_key) |sk| {
             try setNative(a, rs, seg_proto, sk, 0, intlSegmentsIteratorFn);
             // A symbol-keyed method's name is "[<description>]", not the internal key.
             if (seg_proto.getOwn(sk)) |mv| if (mv.isObject()) {
-                try mv.object.setOwn(a, rs, "name", Value.str("[Symbol.iterator]"));
-                try mv.object.setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+                try mv.asObj().setOwn(a, rs, "name", Value.str("[Symbol.iterator]"));
+                try mv.asObj().setAttr(a, "name", .{ .writable = false, .enumerable = false, .configurable = true });
             };
         }
         try env.put("\x00SegmentsProto", Value.obj(seg_proto));
         // %SegmentIterator.prototype% (proto %IteratorPrototype%): next + tag.
         const seg_iter_proto = try gc_mod.allocObj(a);
-        seg_iter_proto.* = .{ .proto = if (env.get("\x00IterProto")) |ip| (if (ip.isObject()) ip.object else object_proto) else object_proto };
+        seg_iter_proto.* = .{ .proto = if (env.get("\x00IterProto")) |ip| (if (ip.isObject()) ip.asObj() else object_proto) else object_proto };
         try setNative(a, rs, seg_iter_proto, "next", 0, intlSegmentIterNextFn);
         if (tag) |k| {
             try seg_iter_proto.setOwn(a, rs, k, Value.str("Segmenter String Iterator"));
@@ -20266,9 +20266,9 @@ fn sabGetter(comptime which: enum { byte_length, max_byte_length, growable }) va
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.array_buffer == null or !this.object.array_buffer.?.is_shared)
+            if (!this.isObject() or this.asObj().array_buffer == null or !this.asObj().array_buffer.?.is_shared)
                 return self.throwError("TypeError", "SharedArrayBuffer.prototype accessor called on a non-SharedArrayBuffer");
-            const ab = this.object.array_buffer.?;
+            const ab = this.asObj().array_buffer.?;
             return switch (which) {
                 .byte_length => Value.num(@floatFromInt(ab.bytes().len)),
                 .max_byte_length => Value.num(@floatFromInt(ab.max_byte_length orelse ab.bytes().len)),
@@ -20284,9 +20284,9 @@ fn sabGetter(comptime which: enum { byte_length, max_byte_length, growable }) va
 /// new length immediately.
 fn sabGrowFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.array_buffer == null or !this.object.array_buffer.?.is_shared)
+    if (!this.isObject() or this.asObj().array_buffer == null or !this.asObj().array_buffer.?.is_shared)
         return self.throwError("TypeError", "SharedArrayBuffer.prototype.grow called on a non-SharedArrayBuffer");
-    const ab = this.object.array_buffer.?;
+    const ab = this.asObj().array_buffer.?;
     if (ab.max_byte_length == null) return self.throwError("TypeError", "SharedArrayBuffer is not growable");
     const new_len = try toIndexArg(self, if (args.len > 0) args[0] else .undefined);
     const storage = ab.shared orelse return self.throwError("TypeError", "SharedArrayBuffer is not growable");
@@ -20328,18 +20328,18 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         if (!args[1].isObject()) return self.throwError("TypeError", "structuredClone options must be an object");
         const tv = try self.getProperty(args[1], "transfer");
         if (!tv.isUndefined() and !tv.isNull()) {
-            if (!tv.isObject() or !tv.object.is_array)
+            if (!tv.isObject() or !tv.asObj().is_array)
                 return self.throwError("TypeError", "structuredClone transfer must be an array");
-            for (tv.object.elements.items) |entry| {
-                if (!entry.isObject() or entry.object.array_buffer == null)
+            for (tv.asObj().elements.items) |entry| {
+                if (!entry.isObject() or entry.asObj().array_buffer == null)
                     return self.throwError("TypeError", "DataCloneError: only ArrayBuffers are transferable");
-                const ab = entry.object.array_buffer.?;
+                const ab = entry.asObj().array_buffer.?;
                 if (ab.is_shared) return self.throwError("TypeError", "DataCloneError: a SharedArrayBuffer is not transferable");
                 if (ab.detached) return self.throwError("TypeError", "DataCloneError: cannot transfer a detached ArrayBuffer");
                 if (ab.immutable) return self.throwError("TypeError", "DataCloneError: cannot transfer an immutable ArrayBuffer");
-                for (transfer.items) |seen| if (seen == entry.object)
+                for (transfer.items) |seen| if (seen == entry.asObj())
                     return self.throwError("TypeError", "DataCloneError: duplicate transferable");
-                try transfer.append(self.arena, entry.object);
+                try transfer.append(self.arena, entry.asObj());
             }
         }
     }
@@ -20378,7 +20378,7 @@ pub fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.
     o.array_buffer = ab;
     errdefer o.array_buffer = null;
     if (self.env.get("SharedArrayBuffer")) |c| if (c.isObject()) {
-        o.proto = try self.protoObject(c.object);
+        o.proto = try self.protoObject(c.asObj());
     };
     tracked = false;
     return o;
@@ -20398,7 +20398,7 @@ fn agentThreadRun(src: []const u8) void {
     global_obj.* = .{};
     env.put("globalThis", Value.obj(global_obj)) catch {};
     if (env.get("$262")) |d| if (d.isObject()) {
-        d.object.setOwn(a, root_shape, "global", Value.obj(global_obj)) catch {};
+        d.asObj().setOwn(a, root_shape, "global", Value.obj(global_obj)) catch {};
     };
     const tdz = gc_mod.allocObj(a) catch return;
     tdz.* = .{};
@@ -20445,7 +20445,7 @@ fn host262AgentStartFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 /// The shared storage behind a SharedArrayBuffer or shared typed-array value.
 fn sabStorageOf(v: Value) ?*shared_buffer.SharedBufferStorage {
     if (!v.isObject()) return null;
-    const o = v.object;
+    const o = v.asObj();
     if (o.array_buffer) |ab| return ab.shared;
     if (o.typed_array) |ta| {
         const ab = ta.buffer.array_buffer orelse return null;
@@ -20535,8 +20535,8 @@ fn installAgent(a: std.mem.Allocator, rs: *Shape, d: *value.Object) EvalError!vo
 /// a Float or Uint8Clamped view) over an attached buffer; returns the in-bounds
 /// element index from ToIndex(request).
 fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, only_int32: bool, require_shared: bool) value.HostError!struct { ta: *value.TypedArrayData, i: usize } {
-    if (!ta_v.isObject() or ta_v.object.typed_array == null) return self.throwError("TypeError", "Atomics operand must be an integer TypedArray");
-    const ta = ta_v.object.typed_array.?;
+    if (!ta_v.isObject() or ta_v.asObj().typed_array == null) return self.throwError("TypeError", "Atomics operand must be an integer TypedArray");
+    const ta = ta_v.asObj().typed_array.?;
     // ValidateIntegerTypedArray(typedArray, waitable): a waitable op
     // (wait/notify/waitAsync) only accepts Int32Array or BigInt64Array; the
     // kind check runs BEFORE the index is coerced to ToIndex.
@@ -20565,7 +20565,7 @@ fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, o
 fn atomicsCoerce(self: *Interpreter, ta: *value.TypedArrayData, v: Value) value.HostError!f64 {
     if (ta.kind.isBigInt()) {
         const bv = try self.toBigIntValueImpl(v, false);
-        return @floatFromInt(@as(i64, @truncate(bv.object.bigint)));
+        return @floatFromInt(@as(i64, @truncate(bv.asObj().bigint)));
     }
     // ToIntegerOrInfinity: NaN coerces to +0 and -0 normalizes to +0 (so the
     // value `Atomics.store` returns matches ToInteger, e.g. store(view,i,-0)===+0).
@@ -20589,7 +20589,7 @@ fn atomicsWriteN(ta: *value.TypedArrayData, i: usize, n: f64) void {
 fn atomicsCoerceRaw(self: *Interpreter, ta: *value.TypedArrayData, v: Value) value.HostError!u64 {
     if (ta.kind.isBigInt()) {
         const bv = try self.toBigIntValueImpl(v, false);
-        return @bitCast(@as(i64, @truncate(bv.object.bigint)));
+        return @bitCast(@as(i64, @truncate(bv.asObj().bigint)));
     }
     return value.taNumToRaw(ta.kind, try atomicsCoerce(self, ta, v));
 }
@@ -20651,7 +20651,7 @@ fn atomicsStoreFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const arg_v = if (args.len > 2) args[2] else Value.undefined;
     if (vd.ta.kind.isBigInt()) {
         const bv = try self.toBigIntValueImpl(arg_v, false);
-        const as64: i64 = @truncate(bv.object.bigint);
+        const as64: i64 = @truncate(bv.asObj().bigint);
         value.taAtomicStoreRaw(vd.ta, vd.i, @bitCast(as64));
         return self.makeBigInt(as64);
     }
@@ -20686,7 +20686,7 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         const t_ns: ?u64 = if (std.math.isNan(t_ms) or t_ms == std.math.inf(f64)) null else if (t_ms <= 0) 0 else if (t_ms >= 1e12) null else @intFromFloat(t_ms * std.time.ns_per_ms);
         return jsthread.propWait(self, args, t_ns);
     }
-    if (args.len > 0 and args[0].isObject() and args[0].object.typed_array != null and self.gil != null and jsthread.currentThreadId() != 0)
+    if (args.len > 0 and args[0].isObject() and args[0].asObj().typed_array != null and self.gil != null and jsthread.currentThreadId() != 0)
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const vd = try atomicsValidate(self, if (args.len > 0) args[0] else .undefined, if (args.len > 1) args[1] else .undefined, false, true, true);
     const expected_raw = try atomicsCoerceRaw(self, vd.ta, if (args.len > 2) args[2] else .undefined);
@@ -20732,7 +20732,7 @@ fn atomicsPauseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len > 0 and !args[0].isUndefined()) {
         const n = args[0];
-        if (!n.isNumber() or std.math.isNan(n.number) or std.math.isInf(n.number) or @trunc(n.number) != n.number)
+        if (!n.isNumber() or std.math.isNan(n.asNum()) or std.math.isInf(n.asNum()) or @trunc(n.asNum()) != n.asNum())
             return self.throwError("TypeError", "Atomics.pause iterationNumber must be an integer");
     }
     return .undefined;
@@ -20861,7 +20861,7 @@ fn moduleNsGet(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!Val
     if (std.mem.eql(u8, key, ns.tag_key)) return Value.str("Module");
     if (moduleNsIndex(ns, key)) |i| {
         const v = ns.envs[i].get(ns.locals[i]) orelse Value.undefined;
-        if (self.tdz_marker) |tz| if (v.isObject() and v.object == tz)
+        if (self.tdz_marker) |tz| if (v.isObject() and v.asObj() == tz)
             return self.throwError("ReferenceError", "Cannot access uninitialized binding");
         return v;
     }
@@ -20948,7 +20948,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Global functions.
     try defineGlobalFn(env, root_shape, "eval", 1, evalFn);
     if (env.get("eval")) |ev| {
-        if (ev.isObject()) ev.object.private_data = @ptrCast(env);
+        if (ev.isObject()) ev.asObj().private_data = @ptrCast(env);
     }
     try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
     try defineGlobalFn(env, root_shape, "parseFloat", 1, builtins.parseFloatFn);
@@ -20969,7 +20969,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
     try installRegExpProto(env, root_shape);
     if (env.get("RegExp")) |re| {
-        if (re.isObject()) try setNative(a, root_shape, re.object, "escape", 1, regexpEscapeFn);
+        if (re.isObject()) try setNative(a, root_shape, re.asObj(), "escape", 1, regexpEscapeFn);
     }
     try defineGlobalFnC(env, root_shape, "Map", 0, true, builtins.mapFn);
     if (env.get("Map")) |m| {
@@ -20987,13 +20987,13 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (env.get("WeakMap")) |wm| if (wm.isObject()) {
         if (wm.object.getOwn("prototype")) |pv| if (pv.isObject()) {
             inline for (.{ .{ "set", 2 }, .{ "get", 1 }, .{ "has", 1 }, .{ "delete", 1 }, .{ "getOrInsert", 2 }, .{ "getOrInsertComputed", 2 } }) |s|
-                try setNative(a, root_shape, pv.object, s[0], s[1], mapProtoMethod(s[0], true));
+                try setNative(a, root_shape, pv.asObj(), s[0], s[1], mapProtoMethod(s[0], true));
         };
     };
     if (env.get("WeakSet")) |ws| if (ws.isObject()) {
-        if (ws.object.getOwn("prototype")) |pv| if (pv.isObject()) {
+        if (ws.asObj().getOwn("prototype")) |pv| if (pv.isObject()) {
             inline for (.{ .{ "add", 1 }, .{ "has", 1 }, .{ "delete", 1 } }) |s|
-                try setNative(a, root_shape, pv.object, s[0], s[1], setProtoMethod(s[0], true));
+                try setNative(a, root_shape, pv.asObj(), s[0], s[1], setProtoMethod(s[0], true));
         };
     };
     try defineGlobalFnC(env, root_shape, "Boolean", 1, true, builtins.booleanFn);
@@ -21173,8 +21173,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     const early_ctors = [_][]const u8{ "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Boolean" };
     for (early_ctors) |ctor_name| {
         if (env.get(ctor_name)) |cv| if (cv.isObject()) {
-            if (cv.object.getOwn("prototype")) |pv| if (pv.isObject() and pv.object.proto == null) {
-                pv.object.proto = object_proto;
+            if (cv.asObj().getOwn("prototype")) |pv| if (pv.isObject() and pv.asObj().proto == null) {
+                pv.asObj().proto = object_proto;
             };
         };
     }
@@ -21215,7 +21215,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     var error_ctor_obj: ?*value.Object = null;
     for (error_names) |ename| {
         const ctor_v = env.get(ename) orelse continue;
-        const ctor = ctor_v.object;
+        const ctor = ctor_v.asObj();
         const is_base = std.mem.eql(u8, ename, "Error");
         if (is_base) error_ctor_obj = ctor else ctor.proto = error_ctor_obj; // NativeError [[Prototype]] is %Error%
         const proto = if (is_base) error_proto else blk: {
@@ -21299,7 +21299,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try env.put("Function", Value.obj(function_ns));
     inline for (.{ "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "String", "Number", "Object", "Array" }) |name| {
         if (env.get(name)) |cv| {
-            if (cv.isObject()) cv.object.proto = func_proto;
+            if (cv.isObject()) cv.asObj().proto = func_proto;
         }
     }
 
@@ -21307,7 +21307,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // and its `constructor`/`toString`/`valueOf` are still observable).
     if (env.get("Boolean")) |bv| {
         if (bv.isObject()) {
-            bv.object.proto = func_proto;
+            bv.asObj().proto = func_proto;
             const boolean_proto = try gc_mod.allocObj(a);
             // Boolean.prototype is a Boolean Exotic Object with [[BooleanData]]
             // = false, so brand-checked methods (`Boolean.prototype.toString()`,
@@ -21315,9 +21315,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             boolean_proto.* = .{ .proto = object_proto, .prim = Value.boolVal(false) };
             try setNative(a, root_shape, boolean_proto, "toString", 0, booleanProtoFn(true));
             try setNative(a, root_shape, boolean_proto, "valueOf", 0, booleanProtoFn(false));
-            try setConstructor(a, root_shape, boolean_proto, bv.object);
-            try bv.object.setOwn(a, root_shape, "prototype", Value.obj(boolean_proto));
-            try bv.object.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
+            try setConstructor(a, root_shape, boolean_proto, bv.asObj());
+            try bv.asObj().setOwn(a, root_shape, "prototype", Value.obj(boolean_proto));
+            try bv.asObj().setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
         }
     }
 
@@ -21443,12 +21443,12 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         const fnobj = try gc_mod.allocObj(a);
         fnobj.* = .{ .native = symbolToPrimitiveFn };
         try installNativeProps(a, root_shape, fnobj, "[Symbol.toPrimitive]", 1);
-        try symbol_proto.setOwn(a, root_shape, tp.object.sym_key, Value.obj(fnobj));
-        try symbol_proto.setAttr(a, tp.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        try symbol_proto.setOwn(a, root_shape, tp.asObj().sym_key, Value.obj(fnobj));
+        try symbol_proto.setAttr(a, tp.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
     };
     if (symbol_ns.getOwn("toStringTag")) |tst| if (tst.isObject()) {
-        try symbol_proto.setOwn(a, root_shape, tst.object.sym_key, Value.str("Symbol"));
-        try symbol_proto.setAttr(a, tst.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        try symbol_proto.setOwn(a, root_shape, tst.asObj().sym_key, Value.str("Symbol"));
+        try symbol_proto.setAttr(a, tst.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
     };
     // Array.prototype[@@unscopables]: a null-prototype object whose own data
     // properties (all `true`) hide the post-ES2015 method names from `with` scope.
@@ -21458,8 +21458,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         inline for (.{ "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values" }) |n| {
             try unsc.setOwn(a, root_shape, n, Value.boolVal(true));
         }
-        try array_proto.setOwn(a, root_shape, usk.object.sym_key, Value.obj(unsc));
-        try array_proto.setAttr(a, usk.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        try array_proto.setOwn(a, root_shape, usk.asObj().sym_key, Value.obj(unsc));
+        try array_proto.setAttr(a, usk.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
     };
     try env.put("Symbol", Value.obj(symbol_ns));
 
@@ -21467,20 +21467,20 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Wired here, once Object.prototype exists.
     math_obj.proto = object_proto;
     json_ns.proto = object_proto;
-    if (symbol_ns.getOwn("toStringTag")) |mtt| if (mtt.isObject() and mtt.object.is_symbol) {
-        try math_obj.setOwn(a, root_shape, mtt.object.sym_key, Value.str("Math"));
-        try math_obj.setAttr(a, mtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+    if (symbol_ns.getOwn("toStringTag")) |mtt| if (mtt.isObject() and mtt.asObj().is_symbol) {
+        try math_obj.setOwn(a, root_shape, mtt.asObj().sym_key, Value.str("Math"));
+        try math_obj.setAttr(a, mtt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
     };
 
     // `Symbol.toStringTag` on the collection prototypes ({!w,!e,c}), so
     // `Map.prototype[Symbol.toStringTag] === "Map"` etc. and a subclass's
     // `Object.prototype.toString` reports the right tag.
-    if (symbol_ns.getOwn("toStringTag")) |stt| if (stt.isObject() and stt.object.is_symbol) {
-        const tk = stt.object.sym_key;
+    if (symbol_ns.getOwn("toStringTag")) |stt| if (stt.isObject() and stt.asObj().is_symbol) {
+        const tk = stt.asObj().sym_key;
         inline for (.{ "Map", "Set", "WeakMap", "WeakSet", "Promise" }) |nm| {
-            if (env.get(nm)) |cv| if (cv.isObject()) if (cv.object.getOwn("prototype")) |pv| if (pv.isObject()) {
-                try pv.object.setOwn(a, root_shape, tk, Value.str(nm));
-                try pv.object.setAttr(a, tk, .{ .writable = false, .enumerable = false, .configurable = true });
+            if (env.get(nm)) |cv| if (cv.isObject()) if (cv.asObj().getOwn("prototype")) |pv| if (pv.isObject()) {
+                try pv.asObj().setOwn(a, root_shape, tk, Value.str(nm));
+                try pv.asObj().setAttr(a, tk, .{ .writable = false, .enumerable = false, .configurable = true });
             };
         }
     };
@@ -21488,12 +21488,12 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Function.prototype[Symbol.hasInstance] — a {!w,!e,!c} method backing the
     // ordinary `instanceof` (installed now that the well-known symbol exists).
     if (symbol_ns.getOwn("hasInstance")) |hi| if (hi.isObject()) {
-        if (func_proto.getOwn(hi.object.sym_key) == null) {
+        if (func_proto.getOwn(hi.asObj().sym_key) == null) {
             const m = try gc_mod.allocObj(a);
             m.* = .{ .native = functionHasInstanceFn };
             try installNativeProps(a, root_shape, m, "[Symbol.hasInstance]", 1);
-            try func_proto.setOwn(a, root_shape, hi.object.sym_key, Value.obj(m));
-            try func_proto.setAttr(a, hi.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
+            try func_proto.setOwn(a, root_shape, hi.asObj().sym_key, Value.obj(m));
+            try func_proto.setAttr(a, hi.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = false });
         }
     };
 
@@ -21502,14 +21502,14 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // constructor the spec gives a species slot, now that the well-known symbol
     // and the constructors all exist. {enumerable:false, configurable:true}.
     if (symbol_ns.getOwn("species")) |sp| if (sp.isObject()) {
-        const skey = sp.object.sym_key;
+        const skey = sp.asObj().sym_key;
         inline for (.{ "Promise", "Array", "Map", "Set", "RegExp", "ArrayBuffer" }) |ctor_name| {
             if (env.get(ctor_name)) |cv| if (cv.isObject()) {
                 const getter = try gc_mod.allocObj(a);
                 getter.* = .{ .native = returnThisFn };
                 try installNativeProps(a, root_shape, getter, "get [Symbol.species]", 0);
-                try cv.object.setAccessor(a, skey, Value.obj(getter), null);
-                try cv.object.setAttr(a, skey, .{ .enumerable = false, .configurable = true });
+                try cv.asObj().setAccessor(a, skey, Value.obj(getter), null);
+                try cv.asObj().setAttr(a, skey, .{ .enumerable = false, .configurable = true });
             };
         }
     };
@@ -21517,11 +21517,11 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // RegExp.prototype well-known-symbol methods (installed now that Symbol's
     // @@match/@@replace/etc. exist).
     if (env.get("RegExp")) |rc| if (rc.isObject()) {
-        if (rc.object.getOwn("prototype")) |rp| if (rp.isObject()) {
+        if (rc.asObj().getOwn("prototype")) |rp| if (rp.isObject()) {
             inline for (.{ "match", "search", "matchAll", "replace", "split" }) |op| {
-                if (symbol_ns.getOwn(op)) |sv| if (sv.isObject() and sv.object.is_symbol) {
+                if (symbol_ns.getOwn(op)) |sv| if (sv.isObject() and sv.asObj().is_symbol) {
                     const len: usize = if (comptime (std.mem.eql(u8, op, "replace") or std.mem.eql(u8, op, "split"))) 2 else 1;
-                    try installSymbolMethod(a, root_shape, rp.object, sv.object.sym_key, "[Symbol." ++ op ++ "]", len, regexpSymbolMethod(op));
+                    try installSymbolMethod(a, root_shape, rp.asObj(), sv.asObj().sym_key, "[Symbol." ++ op ++ "]", len, regexpSymbolMethod(op));
                 };
             }
         };
@@ -21539,14 +21539,14 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Reflect is an ordinary object: [[Prototype]] = %Object.prototype%, with a
     // `Symbol.toStringTag` of "Reflect".
     reflect_ns.* = .{ .proto = object_proto };
-    if (symbol_ns.getOwn("toStringTag")) |rtt| if (rtt.isObject() and rtt.object.is_symbol) {
-        try reflect_ns.setOwn(a, root_shape, rtt.object.sym_key, Value.str("Reflect"));
-        try reflect_ns.setAttr(a, rtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+    if (symbol_ns.getOwn("toStringTag")) |rtt| if (rtt.isObject() and rtt.asObj().is_symbol) {
+        try reflect_ns.setOwn(a, root_shape, rtt.asObj().sym_key, Value.str("Reflect"));
+        try reflect_ns.setAttr(a, rtt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
         // The JSON and Math namespaces carry the same non-enumerable tag.
         inline for (.{ .{ "JSON", "JSON" }, .{ "Math", "Math" } }) |nt| {
             if (env.get(nt[0])) |nv| if (nv.isObject()) {
-                try nv.object.setOwn(a, root_shape, rtt.object.sym_key, Value.str(nt[1]));
-                try nv.object.setAttr(a, rtt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+                try nv.asObj().setOwn(a, root_shape, rtt.asObj().sym_key, Value.str(nt[1]));
+                try nv.asObj().setAttr(a, rtt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
             };
         }
     };
@@ -21587,10 +21587,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // `Map.prototype[Symbol.iterator]` aliases `entries`, and `Set.prototype[
     // Symbol.iterator]` aliases `values` — the same function objects. Done here
     // (not in installMap/SetProto) because Symbol.iterator must already exist.
-    if (env.get("Map")) |mv| if (mv.isObject()) if (mv.object.getOwn("prototype")) |pv| if (pv.isObject())
-        try aliasIteratorToMethod(a, root_shape, env, pv.object, "entries");
-    if (env.get("Set")) |sv| if (sv.isObject()) if (sv.object.getOwn("prototype")) |pv| if (pv.isObject())
-        try aliasIteratorToMethod(a, root_shape, env, pv.object, "values");
+    if (env.get("Map")) |mv| if (mv.isObject()) if (mv.asObj().getOwn("prototype")) |pv| if (pv.isObject())
+        try aliasIteratorToMethod(a, root_shape, env, pv.asObj(), "entries");
+    if (env.get("Set")) |sv| if (sv.isObject()) if (sv.asObj().getOwn("prototype")) |pv| if (pv.isObject())
+        try aliasIteratorToMethod(a, root_shape, env, pv.asObj(), "values");
 
     // Date — callable + constructable, with Date.now and a prototype.
     const date_ns = try gc_mod.allocObj(a);
@@ -21623,12 +21623,12 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Date.prototype[Symbol.toPrimitive] — non-enumerable, non-writable,
     // configurable; OrdinaryToPrimitive with a validated hint.
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
-        if (sym.object.getOwn("toPrimitive")) |tp| if (tp.isObject() and tp.object.is_symbol) {
+        if (sym.object.getOwn("toPrimitive")) |tp| if (tp.isObject() and tp.asObj().is_symbol) {
             const m = try gc_mod.allocObj(a);
             m.* = .{ .native = dateSymbolToPrimitiveFn };
             try installNativeProps(a, root_shape, m, "[Symbol.toPrimitive]", 1);
-            try date_proto.setOwn(a, root_shape, tp.object.sym_key, Value.obj(m));
-            try date_proto.setAttr(a, tp.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            try date_proto.setOwn(a, root_shape, tp.asObj().sym_key, Value.obj(m));
+            try date_proto.setAttr(a, tp.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
     try date_ns.setOwn(a, root_shape, "prototype", Value.obj(date_proto));
@@ -21650,9 +21650,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         // BigInt.prototype[Symbol.toStringTag] = "BigInt" (so
         // `Object.prototype.toString.call(1n)` → "[object BigInt]").
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.object.is_symbol) {
-                try bi_proto.setOwn(a, root_shape, tt.object.sym_key, Value.str("BigInt"));
-                try bi_proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
+                try bi_proto.setOwn(a, root_shape, tt.asObj().sym_key, Value.str("BigInt"));
+                try bi_proto.setAttr(a, tt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
             };
         };
         const bi_ns = try gc_mod.allocObj(a);
@@ -21700,7 +21700,7 @@ fn regexpStringIterNext(ctx: *anyopaque, this: Value, args: []const Value) value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "next called on non-object");
-    const o = this.object;
+    const o = this.asObj();
     const matcher = o.getOwn("__re") orelse
         return self.throwError("TypeError", "next called on an incompatible receiver");
     if (o.getOwn("__done")) |d| if (d.toBoolean()) return self.iterResultObj(.undefined, true);
@@ -21728,12 +21728,12 @@ fn regexpStringIterNext(ctx: *anyopaque, this: Value, args: []const Value) value
 }
 
 fn canonicalCollectionKey(v: Value) Value {
-    return if (v.isNumber() and v.number == 0) Value{ .number = 0 } else v;
+    return if (v.isNumber() and v.asNum() == 0) Value{ .number = 0 } else v;
 }
 
 fn liveMapEntry(v: Value) ?*value.Object {
-    if (!v.isObject() or v.object.elementsLen() < 2) return null;
-    return v.object;
+    if (!v.isObject() or v.asObj().elementsLen() < 2) return null;
+    return v.asObj();
 }
 
 fn mapEntryMatches(entry: *value.Object, key: Value) bool {
@@ -21756,7 +21756,7 @@ fn liveMapEntryCount(o: *value.Object) usize {
 }
 
 fn liveSetEntry(v: Value) ?Value {
-    if (v.isObject() and v.object.is_set_deleted) return null;
+    if (v.isObject() and v.asObj().is_set_deleted) return null;
     return v;
 }
 
@@ -21819,7 +21819,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "next called on non-object");
-    const o = this.object;
+    const o = this.asObj();
     // Brand check: a genuine Array/Map/Set/String iterator carries its `__src`
     // cursor slot as an OWN property. A bare object, a boxed primitive, the
     // iterator *prototype* itself, or `Object.create(anIterator)` (which only
@@ -21830,7 +21830,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         if (d.toBoolean()) return self.iterResultObj(.undefined, true);
     }
     const i = toLen((o.getOwn("__i") orelse Value{ .number = 0 }).number);
-    const kind = if (o.getOwn("__kind")) |k| if (k.isNumber()) toLen(k.number) else 0 else 0;
+    const kind = if (o.getOwn("__kind")) |k| if (k.isNumber()) toLen(k.asNum()) else 0 else 0;
     var done = true;
     var val: Value = .undefined;
     var advance: usize = 1;
@@ -22134,9 +22134,9 @@ fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
                 if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
             }
             defer self.env = saved_env;
-            if (!(this.isObject() and this.object.isCallableObject()))
+            if (!(this.isObject() and this.asObj().isCallableObject()))
                 return self.throwError("TypeError", "Function.prototype." ++ name ++ " requires that 'this' be callable");
-            if (std.mem.eql(u8, name, "toString")) return self.functionToString(this.object);
+            if (std.mem.eql(u8, name, "toString")) return self.functionToString(this.asObj());
             return (try self.builtinMethod(this, name, args)) orelse .undefined;
         }
     }.call;
@@ -22148,9 +22148,9 @@ fn dateProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or !this.object.is_date)
+            if (!this.isObject() or !this.asObj().is_date)
                 return self.throwError("TypeError", "Date.prototype method called on a non-Date");
-            return (try self.dateMethod(this.object, name, args)) orelse .undefined;
+            return (try self.dateMethod(this.asObj(), name, args)) orelse .undefined;
         }
     }.call;
 }
@@ -22174,7 +22174,7 @@ fn dateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
         if (!std.math.isFinite(o.date_ms)) return .null;
     } else {
         const tv = try self.toPrimitive(Value.obj(o), .number);
-        if (tv.isNumber() and !std.math.isFinite(tv.number)) return .null;
+        if (tv.isNumber() and !std.math.isFinite(tv.asNum())) return .null;
     }
     const iso = try self.getProperty(Value.obj(o), "toISOString");
     if (!iso.isCallable()) return self.throwError("TypeError", "toISOString is not callable");
@@ -22184,9 +22184,9 @@ fn dateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 fn dateToTemporalInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or !this.object.is_date)
+    if (!this.isObject() or !this.asObj().is_date)
         return self.throwError("TypeError", "Date.prototype.toTemporalInstant called on a non-Date");
-    const ms = this.object.date_ms;
+    const ms = this.asObj().date_ms;
     if (!std.math.isFinite(ms)) return self.throwError("RangeError", "invalid Date");
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
     o.temporal.?.epoch_ns = @as(i128, @intFromFloat(ms)) * 1_000_000;
@@ -22204,9 +22204,9 @@ fn setProtoMethod(comptime name: []const u8, comptime weak: bool) value.NativeFn
             // A WeakSet shares `is_set` with a Set, so the brand check also
             // requires the weakness to match (a Set method rejects a WeakSet and
             // vice versa).
-            if (!this.isObject() or !this.object.is_set or this.object.is_weak != weak)
+            if (!this.isObject() or !this.asObj().is_set or this.asObj().is_weak != weak)
                 return self.throwError("TypeError", if (weak) "WeakSet.prototype method called on an incompatible receiver" else "Set.prototype method called on a non-Set");
-            return (try self.setMethod(this.object, name, args)) orelse .undefined;
+            return (try self.setMethod(this.asObj(), name, args)) orelse .undefined;
         }
     }.call;
 }
@@ -22237,9 +22237,9 @@ fn mapProtoMethod(comptime name: []const u8, comptime weak: bool) value.NativeFn
             // A WeakMap shares `is_map` with a Map, so the brand check also
             // requires the weakness to match (a Map method rejects a WeakMap and
             // vice versa).
-            if (!this.isObject() or !this.object.is_map or this.object.is_weak != weak)
+            if (!this.isObject() or !this.asObj().is_map or this.asObj().is_weak != weak)
                 return self.throwError("TypeError", if (weak) "WeakMap.prototype method called on an incompatible receiver" else "Map.prototype method called on a non-Map");
-            return (try self.mapMethod(this.object, name, args)) orelse .undefined;
+            return (try self.mapMethod(this.asObj(), name, args)) orelse .undefined;
         }
     }.call;
 }
@@ -22252,10 +22252,10 @@ fn collectionSizeGetter(comptime is_set_kind: bool) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const ok = this.isObject() and !this.object.is_weak and
-                (if (is_set_kind) this.object.is_set else this.object.is_map);
+            const ok = this.isObject() and !this.asObj().is_weak and
+                (if (is_set_kind) this.asObj().is_set else this.asObj().is_map);
             if (!ok) return self.throwError("TypeError", if (is_set_kind) "Set.prototype.size getter called on a non-Set" else "Map.prototype.size getter called on a non-Map");
-            const size = if (is_set_kind) liveSetEntryCount(this.object) else liveMapEntryCount(this.object);
+            const size = if (is_set_kind) liveSetEntryCount(this.asObj()) else liveMapEntryCount(this.asObj());
             return Value.num(@floatFromInt(size));
         }
     }.call;
@@ -22376,7 +22376,7 @@ fn regexpEscapeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len == 0 or !args[0].isString())
         return self.throwError("TypeError", "RegExp.escape requires a string");
-    const s = args[0].string;
+    const s = args[0].asStr();
     var out: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     var first = true;
@@ -22461,7 +22461,7 @@ fn regexFlagGetter(comptime flag: u8) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject()) return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-object");
-            const o = this.object;
+            const o = this.asObj();
             if (!o.is_regex) {
                 if (isHomeRegExpProto(self, o)) return .undefined;
                 return throwRegExpAccessorTypeError(self, "RegExp.prototype accessor called on a non-RegExp");
@@ -22475,7 +22475,7 @@ fn regexSourceGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-object");
-    const o = this.object;
+    const o = this.asObj();
     if (!o.is_regex) {
         if (isHomeRegExpProto(self, o)) return Value.str("(?:)");
         return throwRegExpAccessorTypeError(self, "RegExp.prototype.source called on a non-RegExp");
@@ -22487,7 +22487,7 @@ fn regexFlagsGetter(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!builtins.isRealObject(this)) return self.throwError("TypeError", "RegExp.prototype.flags called on a non-object");
-    const o = this.object;
+    const o = this.asObj();
     if (self.isRegExpProto(o)) return Value.str("");
 
     var buf: [8]u8 = undefined;
@@ -22525,10 +22525,10 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
                 const r = try self.regexpExecGeneric(this, str);
                 return Value.boolVal(!r.isNull());
             }
-            if (!this.isObject() or !this.object.is_regex) {
+            if (!this.isObject() or !this.asObj().is_regex) {
                 return self.throwError("TypeError", "RegExp.prototype." ++ name ++ " called on a non-RegExp");
             }
-            return (try self.regexMethod(this.object, name, args)) orelse .undefined;
+            return (try self.regexMethod(this.asObj(), name, args)) orelse .undefined;
         }
     }.call;
 }
@@ -22595,7 +22595,7 @@ pub fn recordRegexpLegacy(self: *Interpreter, input: []const u8, start: usize, e
 /// receiver throws a TypeError).
 fn regexpLegacyBrandCheck(self: *Interpreter, this: Value) EvalError!void {
     const ctor = self.env.get("RegExp") orelse return self.throwError("TypeError", "RegExp is not defined");
-    if (!this.isObject() or !ctor.isObject() or this.object != ctor.object)
+    if (!this.isObject() or !ctor.isObject() or this.asObj() != ctor.asObj())
         return self.throwError("TypeError", "RegExp legacy accessor requires the RegExp constructor as receiver");
 }
 
@@ -22640,9 +22640,9 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const ctor = env.get("RegExp") orelse return;
     if (!ctor.isObject()) return;
-    const pv = ctor.object.getOwn("prototype") orelse return;
+    const pv = ctor.asObj().getOwn("prototype") orelse return;
     if (!pv.isObject()) return;
-    const p = pv.object;
+    const p = pv.asObj();
     const accessor_data = try a.create(RegExpAccessorData);
     accessor_data.* = .{ .proto = p, .realm = env };
     try setNativeGetterWithData(a, rs, p, "source", regexSourceGetter, @ptrCast(accessor_data));
@@ -22661,7 +22661,7 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     try setNative(a, rs, p, "toString", 0, regexProtoMethod("toString"));
     // Legacy static RegExp accessors (Annex B) on the constructor itself — each a
     // {enumerable:false, configurable:true} accessor that brand-checks %RegExp%.
-    const co = ctor.object;
+    const co = ctor.asObj();
     const mkGetSet = struct {
         // The accessor functions are anonymous (name ""), matching other engines —
         // a name like "get $`" would not be a valid NativeFunction IdentifierName.
@@ -22707,9 +22707,9 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const obj_ctor = env.get("Object") orelse return;
     if (!obj_ctor.isObject()) return;
-    const op = obj_ctor.object.getOwn("prototype") orelse return;
+    const op = obj_ctor.asObj().getOwn("prototype") orelse return;
     if (!op.isObject()) return;
-    const object_proto = op.object;
+    const object_proto = op.asObj();
 
     // ArrayBuffer.
     const ab_proto = try gc_mod.allocObj(a);
@@ -22726,9 +22726,9 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try setNativeGetter(a, rs, ab_proto, "detached", arrayBufferGetter(.detached));
     try setNativeGetter(a, rs, ab_proto, "immutable", arrayBufferGetter(.immutable));
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
-        if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.object.is_symbol) {
-            try ab_proto.setOwn(a, rs, tt.object.sym_key, Value.str("ArrayBuffer"));
-            try ab_proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+        if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
+            try ab_proto.setOwn(a, rs, tt.asObj().sym_key, Value.str("ArrayBuffer"));
+            try ab_proto.setAttr(a, tt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
     const ab_ctor = try gc_mod.allocObj(a);
@@ -22741,12 +22741,12 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     // ArrayBuffer[Symbol.species] — installed here (the early generic species
     // pass runs before ArrayBuffer exists).
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
-        if (sym.object.getOwn("species")) |sp| if (sp.isObject() and sp.object.is_symbol) {
+        if (sym.object.getOwn("species")) |sp| if (sp.isObject() and sp.asObj().is_symbol) {
             const g = try gc_mod.allocObj(a);
             g.* = .{ .native = returnThisFn };
             try installNativeProps(a, rs, g, "get [Symbol.species]", 0);
-            try ab_ctor.setAccessor(a, sp.object.sym_key, Value.obj(g), null);
-            try ab_ctor.setAttr(a, sp.object.sym_key, .{ .enumerable = false, .configurable = true });
+            try ab_ctor.setAccessor(a, sp.asObj().sym_key, Value.obj(g), null);
+            try ab_ctor.setAttr(a, sp.asObj().sym_key, .{ .enumerable = false, .configurable = true });
         };
     };
     try env.put("ArrayBuffer", Value.obj(ab_ctor));
@@ -22766,9 +22766,9 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     }) |s| try setNative(a, rs, ta_proto, s[0], s[1], taProtoMethod(s[0]));
     if (env.get("Array")) |arr| {
         if (arr.isObject()) {
-            if (arr.object.getOwn("prototype")) |ap| {
+            if (arr.asObj().getOwn("prototype")) |ap| {
                 if (ap.isObject()) {
-                    if (ap.object.getOwn("toString")) |array_to_string| {
+                    if (ap.asObj().getOwn("toString")) |array_to_string| {
                         try ta_proto.setOwn(a, rs, "toString", array_to_string);
                         try ta_proto.setAttr(a, "toString", .{ .enumerable = false, .configurable = true, .writable = true });
                     }
@@ -22784,17 +22784,17 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try setNativeGetter(a, rs, ta_proto, "byteOffset", taProtoGetter(.byte_offset));
     try setNativeGetter(a, rs, ta_proto, "buffer", taProtoGetter(.buffer));
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
-        if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.object.is_symbol) {
+        if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
             const g = try gc_mod.allocObj(a);
             g.* = .{ .native = taProtoGetter(.tag) };
             try installNativeProps(a, rs, g, "get [Symbol.toStringTag]", 0);
-            try ta_proto.setAccessor(a, tt.object.sym_key, Value.obj(g), null);
-            try ta_proto.setAttr(a, tt.object.sym_key, .{ .enumerable = false, .configurable = true });
+            try ta_proto.setAccessor(a, tt.asObj().sym_key, Value.obj(g), null);
+            try ta_proto.setAttr(a, tt.asObj().sym_key, .{ .enumerable = false, .configurable = true });
         };
-        if (sym.object.getOwn("iterator")) |it| if (it.isObject() and it.object.is_symbol) {
+        if (sym.object.getOwn("iterator")) |it| if (it.isObject() and it.asObj().is_symbol) {
             const values_fn = ta_proto.getOwn("values") orelse Value.undefined;
-            try ta_proto.setOwn(a, rs, it.object.sym_key, values_fn);
-            try ta_proto.setAttr(a, it.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
+            try ta_proto.setOwn(a, rs, it.asObj().sym_key, values_fn);
+            try ta_proto.setAttr(a, it.asObj().sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
         };
     };
 
@@ -22811,12 +22811,12 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try setConstructor(a, rs, ta_proto, ta_ctor);
     // %TypedArray%[Symbol.species] — a getter returning the receiver.
     if (env.get("Symbol")) |sym| if (sym.isObject()) {
-        if (sym.object.getOwn("species")) |sp| if (sp.isObject() and sp.object.is_symbol) {
+        if (sym.object.getOwn("species")) |sp| if (sp.isObject() and sp.asObj().is_symbol) {
             const g = try gc_mod.allocObj(a);
             g.* = .{ .native = returnThisFn };
             try installNativeProps(a, rs, g, "get [Symbol.species]", 0);
-            try ta_ctor.setAccessor(a, sp.object.sym_key, Value.obj(g), null);
-            try ta_ctor.setAttr(a, sp.object.sym_key, .{ .enumerable = false, .configurable = true });
+            try ta_ctor.setAccessor(a, sp.asObj().sym_key, Value.obj(g), null);
+            try ta_ctor.setAttr(a, sp.asObj().sym_key, .{ .enumerable = false, .configurable = true });
         };
     };
 
@@ -22867,9 +22867,9 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
         try setNativeWithData(a, rs, proto, "evaluate", 1, shadowRealmEvaluateFn, @ptrCast(env));
         try setNativeWithData(a, rs, proto, "importValue", 2, shadowRealmImportValueFn, @ptrCast(env));
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.object.is_symbol) {
-                try proto.setOwn(a, rs, tt.object.sym_key, Value.str("ShadowRealm"));
-                try proto.setAttr(a, tt.object.sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
+            if (sym.object.getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
+                try proto.setOwn(a, rs, tt.asObj().sym_key, Value.str("ShadowRealm"));
+                try proto.setAttr(a, tt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
             };
         };
         const ctor = try gc_mod.allocObj(a);
@@ -23017,8 +23017,8 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
     if (!opts.isObject()) return null;
     const rv = try self.getProperty(opts, "relativeTo");
     if (rv.isUndefined() or rv.isNull()) return null;
-    if (rv.isObject() and rv.object.temporal != null) {
-        const t = rv.object.temporal.?;
+    if (rv.isObject() and rv.asObj().temporal != null) {
+        const t = rv.asObj().temporal.?;
         switch (t.kind) {
             .plain_date => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = 0 },
             .plain_date_time, .zoned_date_time => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = timeToNs(t) },
@@ -23026,7 +23026,7 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         }
     }
     if (rv.isString()) {
-        const p = try parseDateTimeNs(self, rv.string);
+        const p = try parseDateTimeNs(self, rv.asStr());
         const tod: i128 = @as(i128, p.h) * nsPerUnit(.hour) + @as(i128, p.mi) * nsPerUnit(.minute) +
             @as(i128, p.s) * nsPerUnit(.second) + @as(i128, p.ms) * nsPerUnit(.millisecond) +
             @as(i128, p.us) * nsPerUnit(.microsecond) + @as(i128, p.ns);
@@ -23216,7 +23216,7 @@ fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []
     t.* = .{ .kind = kind };
     o.temporal = t;
     if (self.env.get(proto_key)) |p| if (p.isObject()) {
-        o.proto = p.object;
+        o.proto = p.asObj();
     };
     return o;
 }
@@ -23247,7 +23247,7 @@ fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Temporal.Duration requires 'new'");
     const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     var any_sign: f64 = 0;
     for (0..10) |i| {
         // Each Duration component defaults to 0 when missing OR explicitly
@@ -23278,9 +23278,9 @@ fn temporalDurationGetter(comptime idx: usize) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration)
+            if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration)
                 return self.throwError("TypeError", "Temporal.Duration accessor called on a non-Duration");
-            return Value.num(this.object.temporal.?.dur[idx]);
+            return Value.num(this.asObj().temporal.?.dur[idx]);
         }
     }.call;
 }
@@ -23288,30 +23288,30 @@ fn temporalDurationGetter(comptime idx: usize) value.NativeFn {
 fn temporalDurationSignGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    return Value.num(durationSign(this.object.temporal.?));
+    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    return Value.num(durationSign(this.asObj().temporal.?));
 }
 fn temporalDurationBlankGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    return Value.boolVal(durationSign(this.object.temporal.?) == 0);
+    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    return Value.boolVal(durationSign(this.asObj().temporal.?) == 0);
 }
 
 fn temporalDurationNegatedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    for (0..10) |i| o.temporal.?.dur[i] = -this.object.temporal.?.dur[i];
+    for (0..10) |i| o.temporal.?.dur[i] = -this.asObj().temporal.?.dur[i];
     return Value.obj(o);
 }
 fn temporalDurationAbsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    for (0..10) |i| o.temporal.?.dur[i] = @abs(this.object.temporal.?.dur[i]);
+    for (0..10) |i| o.temporal.?.dur[i] = @abs(this.asObj().temporal.?.dur[i]);
     return Value.obj(o);
 }
 
@@ -23347,10 +23347,10 @@ fn durInRange(dur: [10]f64) bool {
 
 fn temporalDurationWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.Duration.prototype.with: argument must be an object");
-    var out = this.object.temporal.?.dur;
+    var out = this.asObj().temporal.?.dur;
     var any = false;
     for (dur_names, 0..) |nm, i| {
         const pv = try self.getProperty(bag, nm);
@@ -23367,8 +23367,8 @@ fn temporalDurationAddImpl(comptime sign: f64) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-            const a = this.object.temporal.?.dur;
+            if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+            const a = this.asObj().temporal.?.dur;
             const b = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
             var out: [10]f64 = undefined;
             for (0..10) |i| out[i] = a[i] + sign * b[i];
@@ -23385,17 +23385,17 @@ fn temporalDurationAddImpl(comptime sign: f64) value.NativeFn {
 /// Read a `total`/`round` unit from either a string or an options object's
 /// `unit`/`smallestUnit`.
 fn readUnitArg(self: *Interpreter, v: Value, key: []const u8) EvalError!?TUnit {
-    if (v.isString()) return tUnitFromStr(v.string) orelse self.throwError("RangeError", "invalid unit");
+    if (v.isString()) return tUnitFromStr(v.asStr()) orelse self.throwError("RangeError", "invalid unit");
     if (v.isObject()) {
         const u = try self.getProperty(v, key);
-        if (u.isString()) return tUnitFromStr(u.string) orelse self.throwError("RangeError", "invalid unit");
+        if (u.isString()) return tUnitFromStr(u.asStr()) orelse self.throwError("RangeError", "invalid unit");
         return null;
     }
     return null;
 }
 
 fn readUnitOption(self: *Interpreter, v: Value, key: []const u8) EvalError!?TUnit {
-    if (v.isString()) return tUnitFromStr(v.string) orelse self.throwError("RangeError", "invalid unit");
+    if (v.isString()) return tUnitFromStr(v.asStr()) orelse self.throwError("RangeError", "invalid unit");
     if (v.isObject()) {
         const u = try self.getProperty(v, key);
         if (u.isUndefined()) return null;
@@ -23406,8 +23406,8 @@ fn readUnitOption(self: *Interpreter, v: Value, key: []const u8) EvalError!?TUni
 
 fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    const dur = this.object.temporal.?.dur;
+    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const dur = this.asObj().temporal.?.dur;
     const a0 = if (args.len > 0) args[0] else .undefined;
     const rel = try resolveRelativeTo(self, a0);
     const unit = (try readUnitOption(self, a0, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
@@ -23429,8 +23429,8 @@ fn durPresentLargest(dur: [10]f64) TUnit {
 
 fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    const dur = this.object.temporal.?.dur;
+    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    const dur = this.asObj().temporal.?.dur;
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "Temporal.Duration.prototype.round requires options");
     const read = try readDurationRoundOptions(self, args[0], dur);
     var opts = read.opts;
@@ -23465,10 +23465,10 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
 /// `Temporal.Duration.prototype.toString` — ISO-8601 duration (P…T…).
 fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null or this.object.temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
+    if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else .undefined, .second);
-    const d = try durationApplyStringPrecision(self, this.object.temporal.?.dur, precision);
-    const sign = durationSign(this.object.temporal.?);
+    const d = try durationApplyStringPrecision(self, this.asObj().temporal.?.dur, precision);
+    const sign = durationSign(this.asObj().temporal.?);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (sign < 0) try buf.append(self.arena, '-');
     try buf.append(self.arena, 'P');
@@ -23521,9 +23521,9 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const a0 = if (args.len > 0) args[0] else .undefined;
     // From an existing Duration: copy. From a property bag: read each component.
-    if (a0.isObject() and a0.object.temporal != null and a0.object.temporal.?.kind == .duration) {
+    if (a0.isObject() and a0.asObj().temporal != null and a0.asObj().temporal.?.kind == .duration) {
         const o = try makeTemporal(self, .duration, "\x00T.Duration");
-        o.temporal.?.dur = a0.object.temporal.?.dur;
+        o.temporal.?.dur = a0.asObj().temporal.?.dur;
         return Value.obj(o);
     }
     if (a0.isObject()) {
@@ -23637,7 +23637,7 @@ fn regulateIsoDate(self: *Interpreter, yf: f64, mf: f64, df: f64, constrain: boo
 }
 
 fn tIsTemporal(this: Value, kind: value.TemporalData.Kind) bool {
-    return this.isObject() and this.object.temporal != null and this.object.temporal.?.kind == kind;
+    return this.isObject() and this.asObj().temporal != null and this.asObj().temporal.?.kind == kind;
 }
 
 // ---- Temporal.PlainDate ---------------------------------------------
@@ -23657,7 +23657,7 @@ fn temporalPlainDateConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(d);
     o.temporal.?.calendar = cal;
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -23669,7 +23669,7 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date) and !tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "Temporal.PlainDate accessor on incompatible receiver");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             const y: i64 = t.year;
             return switch (f) {
                 .year => Value.num(@floatFromInt(calDisplayYear(t.calendar, t.year))),
@@ -23691,15 +23691,15 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
 fn temporalMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null) return self.throwError("TypeError", "non-Temporal");
-    const m = this.object.temporal.?.month;
+    if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "non-Temporal");
+    const m = this.asObj().temporal.?.month;
     return .{ .string = try std.fmt.allocPrint(self.arena, "M{d:0>2}", .{m}) };
 }
 fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null) return self.throwError("TypeError", "Temporal calendarId accessor on incompatible receiver");
-    return Value.str(this.object.temporal.?.calendar);
+    if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "Temporal calendarId accessor on incompatible receiver");
+    return Value.str(this.asObj().temporal.?.calendar);
 }
 
 /// Whether `id` is a recognized BCP-47 calendar identifier (case-insensitive),
@@ -23812,7 +23812,7 @@ fn bagIsoYear(self: *Interpreter, bag: Value, cal: []const u8) EvalError!?i64 {
             return self.throwError("TypeError", "era and eraYear must be provided together");
         if (!ev.isString()) return self.throwError("RangeError", "era must be a string");
         const ey = try temporalIntArg(self, eyv, "eraYear");
-        from_era = calIsoFromEra(cal, ev.string, @intFromFloat(ey)) orelse
+        from_era = calIsoFromEra(cal, ev.asStr(), @intFromFloat(ey)) orelse
             return self.throwError("RangeError", "invalid era for this calendar");
     }
     const yv = try self.getProperty(bag, "year");
@@ -23859,9 +23859,9 @@ fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
 /// value is a TypeError; a malformed string is a RangeError. Every id is accepted
 /// (the engine's date math is ISO for all; only gregory adds era reflection).
 fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
-    if (v.isObject() and v.object.temporal != null) return v.object.temporal.?.calendar;
+    if (v.isObject() and v.asObj().temporal != null) return v.asObj().temporal.?.calendar;
     if (!v.isString()) return self.throwError("TypeError", "calendar must be a string or a Temporal object");
-    const s = v.string;
+    const s = v.asStr();
     if (isCalendarId(s)) {
         if (isKnownCalendar(s)) return canonCalendarId(self, s);
         // A syntactically-valid-but-unknown id may actually be a basic-format
@@ -23891,8 +23891,8 @@ fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.object.temporal == null) return self.throwError("TypeError", "Temporal era accessor on incompatible receiver");
-            const t = this.object.temporal.?;
+            if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "Temporal era accessor on incompatible receiver");
+            const t = this.asObj().temporal.?;
             // ISO 8601 (and other calendars whose era model isn't implemented) have
             // no eras: both accessors read undefined. The solar-Gregorian family
             // (gregory ce/bce, buddhist be, roc roc/broc) reports its era here.
@@ -23908,8 +23908,8 @@ fn temporalEraGetter(comptime want_year: bool) value.NativeFn {
 fn temporalYearOfWeekGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null) return self.throwError("TypeError", "Temporal yearOfWeek accessor on incompatible receiver");
-    const t = this.object.temporal.?;
+    if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "Temporal yearOfWeek accessor on incompatible receiver");
+    const t = this.asObj().temporal.?;
     return Value.num(@floatFromInt(isoWeekOfYear(t.year, t.month, t.day).year));
 }
 
@@ -23921,7 +23921,7 @@ const CalName = enum { auto, always, never, critical };
 /// argument is a TypeError; an unrecognised value is a RangeError.
 fn readCalendarName(self: *Interpreter, options: Value) EvalError!CalName {
     if (options.isUndefined()) return .auto;
-    if (!options.isObject() or options.object.is_symbol or options.object.is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
+    if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
     const v = try self.getProperty(options, "calendarName");
     if (v.isUndefined()) return .auto;
     const s = try self.toStringV(v);
@@ -23953,7 +23953,7 @@ fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else .undefined);
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, t.year);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ t.month, t.day });
@@ -23984,8 +23984,8 @@ fn isCalendarId(s: []const u8) bool {
 fn readCalendarField(self: *Interpreter, bag: Value) EvalError![]const u8 {
     const c = try self.getProperty(bag, "calendar");
     if (c.isUndefined()) return "iso8601";
-    if (c.isObject() and !c.object.is_symbol and !c.object.is_bigint) {
-        if (c.object.temporal != null) return c.object.temporal.?.calendar; // a Temporal value → its calendar
+    if (c.isObject() and !c.asObj().is_symbol and !c.asObj().is_bigint) {
+        if (c.asObj().temporal != null) return c.asObj().temporal.?.calendar; // a Temporal value → its calendar
     } else if (!c.isString()) {
         // A symbol or bigint (or any non-string primitive) is not a valid
         // calendar identifier — a TypeError, not a string-coercion RangeError.
@@ -24041,7 +24041,7 @@ fn validateTemporalOptions(self: *Interpreter, options: Value) EvalError!void {
 /// Returns true when `overflow` is "reject", false for "constrain"/absent.
 fn readOverflowReject(self: *Interpreter, options: Value) EvalError!bool {
     if (options.isUndefined()) return false;
-    if (!options.isObject() or options.object.is_symbol or options.object.is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
+    if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
     const ov = try self.getProperty(options, "overflow");
     if (ov.isUndefined()) return false;
     const s = try self.toStringV(ov);
@@ -24055,7 +24055,7 @@ fn readOverflowReject(self: *Interpreter, options: Value) EvalError!bool {
 const IsoYMD = struct { y: i64, m: u8, d: u8, cal: []const u8 = "iso8601" };
 fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYMD {
     if (tIsTemporal(v, .plain_date) or tIsTemporal(v, .plain_date_time)) {
-        const t = v.object.temporal.?;
+        const t = v.asObj().temporal.?;
         return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
     if (v.isObject()) {
@@ -24071,15 +24071,15 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             m = try temporalIntArg(self, mv, "month");
         } else {
             const mc = try self.getProperty(v, "monthCode");
-            if (!mc.isString() or mc.string.len < 3) return self.throwError("TypeError", "month or monthCode required");
-            m = @floatFromInt(std.fmt.parseInt(u8, mc.string[1..3], 10) catch return self.throwError("RangeError", "bad monthCode"));
+            if (!mc.isString() or mc.asStr().len < 3) return self.throwError("TypeError", "month or monthCode required");
+            m = @floatFromInt(std.fmt.parseInt(u8, mc.asStr()[1..3], 10) catch return self.throwError("RangeError", "bad monthCode"));
         }
         const d = try temporalIntArg(self, dv, "day");
         var r = try regulateIsoDate(self, @floatFromInt(iso_year.?), m, d, constrain);
         r.cal = bag_cal;
         return r;
     }
-    if (v.isString()) return parseIsoDate(self, v.string);
+    if (v.isString()) return parseIsoDate(self, v.asStr());
     return self.throwError("TypeError", "cannot convert to a PlainDate");
 }
 
@@ -24360,7 +24360,7 @@ fn temporalPlainDateCompareFn(ctx: *anyopaque, this: Value, args: []const Value)
 fn temporalPlainDateEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const b = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined, true);
     return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d);
 }
@@ -24372,7 +24372,7 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
             _ = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined); // validates the overflow option
             var y: i64 = t.year + @as(i64, @intFromFloat(sign * dur[0]));
@@ -24502,7 +24502,7 @@ fn parseDurationString(self: *Interpreter, s: []const u8) EvalError![10]f64 {
 /// Extract the 10 duration components from a Duration object, a fields bag, or
 /// an ISO 8601 duration string.
 fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
-    if (tIsTemporal(v, .duration)) return v.object.temporal.?.dur;
+    if (tIsTemporal(v, .duration)) return v.asObj().temporal.?.dur;
     if (v.isObject()) {
         var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
         var any = false;
@@ -24539,7 +24539,7 @@ fn temporalPlainTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     }
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     setTimeFields(o.temporal.?, vals);
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -24559,7 +24559,7 @@ fn temporalPlainTimeGetter(comptime f: PlainTimeField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_time) and !tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "Temporal.PlainTime accessor on incompatible receiver");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             return .{ .number = @floatFromInt(switch (f) {
                 .hour => t.hour,
                 .minute => t.minute,
@@ -24577,7 +24577,7 @@ fn temporalPlainTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     const precision = try readTemporalStringPrecision(self, if (args.len > 0) args[0] else .undefined, .minute);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    _ = try appendIsoTimeString(self, &buf, this.object.temporal.?, precision);
+    _ = try appendIsoTimeString(self, &buf, this.asObj().temporal.?, precision);
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
@@ -24604,7 +24604,7 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(d);
     setTimeFields(o.temporal.?, vals);
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -24614,7 +24614,7 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     const options = if (args.len > 0) args[0] else Value.undefined;
     const precision = try readTemporalStringPrecision(self, options, .minute);
     const cal = try readCalendarName(self, options);
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const rounded_time = roundNsForString(timeToNs(t), precision);
     const day_delta = @divFloor(rounded_time, 86_400_000_000_000);
     const c = tCivilFromDays(tDaysFromCivil(t.year, t.month, t.day) + @as(i64, @intCast(day_delta)));
@@ -24639,8 +24639,8 @@ fn withIntField(self: *Interpreter, bag: Value, name: []const u8, cur: i64) Eval
 /// `monthCode` override → month number, falling back to the `month` field.
 fn withMonthField(self: *Interpreter, bag: Value, cur: u8) EvalError!u8 {
     const mc = try self.getProperty(bag, "monthCode");
-    if (mc.isString() and mc.string.len >= 3) {
-        return std.fmt.parseInt(u8, mc.string[1..3], 10) catch return self.throwError("RangeError", "bad monthCode");
+    if (mc.isString() and mc.asStr().len >= 3) {
+        return std.fmt.parseInt(u8, mc.asStr()[1..3], 10) catch return self.throwError("RangeError", "bad monthCode");
     }
     // Clamp to a safe u8 range before narrowing; any value >12 (or <1) is later
     // regulated identically (constrain → 1..12, reject → RangeError).
@@ -24651,7 +24651,7 @@ fn withMonthField(self: *Interpreter, bag: Value, cur: u8) EvalError!u8 {
 fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: argument must be an object");
     const y = (try bagIsoYear(self, bag, t.calendar)) orelse t.year;
@@ -24670,7 +24670,7 @@ fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn temporalPlainTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainTime.prototype.with: argument must be an object");
     const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
@@ -24691,7 +24691,7 @@ fn temporalPlainTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be an object");
     const y = (try bagIsoYear(self, bag, t.calendar)) orelse t.year;
@@ -24733,7 +24733,7 @@ fn temporalPlainYearMonthConstructorFn(ctx: *anyopaque, this: Value, args: []con
     o.temporal.?.year = @intFromFloat(y);
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(@max(1, @min(31, refd)));
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -24744,7 +24744,7 @@ fn temporalYearMonthGetter(comptime f: YearMonthField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "Temporal.PlainYearMonth accessor on incompatible receiver");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             const y: i64 = t.year;
             return switch (f) {
                 .year => Value.num(@floatFromInt(calDisplayYear(t.calendar, t.year))),
@@ -24762,7 +24762,7 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else .undefined);
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, t.year);
     try tfmt(self, &buf, "-{d:0>2}", .{t.month});
@@ -24777,7 +24777,7 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
 const IsoYM = struct { y: i64, m: u8, cal: []const u8 = "iso8601" };
 fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYM {
     if (tIsTemporal(v, .plain_year_month)) {
-        const t = v.object.temporal.?;
+        const t = v.asObj().temporal.?;
         return .{ .y = t.year, .m = t.month, .cal = t.calendar };
     }
     if (v.isObject()) {
@@ -24792,7 +24792,7 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
     if (v.isString()) {
         // Accept a bare "YYYY-MM" (annotations allowed) as well as a full ISO
         // date string. A UTC designator makes it an exact-time string → reject.
-        const ann = try stripTemporalAnnotations(self, v.string);
+        const ann = try stripTemporalAnnotations(self, v.asStr());
         // A PlainYearMonth string only accepts the iso8601 calendar (a non-ISO
         // `[u-ca=…]` annotation, e.g. gregory/hebrew, is rejected).
         if (ann.cal) |c| if (!asciiEqlIgnoreCase(c, "iso8601"))
@@ -24831,7 +24831,7 @@ fn temporalYearMonthFromFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be an object");
     const y = (try bagIsoYear(self, bag, t.calendar)) orelse t.year;
@@ -24846,7 +24846,7 @@ fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn temporalYearMonthEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const b = try toYearMonthFields(self, if (args.len > 0) args[0] else .undefined, true);
     return Value.boolVal(t.year == b.y and t.month == b.m);
 }
@@ -24866,7 +24866,7 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
             _ = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined); // validates the overflow option
             var total: i64 = (@as(i64, t.year) * 12 + (t.month - 1)) + @as(i64, @intFromFloat(sign * (dur[0] * 12 + dur[1])));
@@ -24892,7 +24892,7 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
             if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference largestUnit must be year or month");
             if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference smallestUnit must be year or month");
             if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
-            const a = this.object.temporal.?;
+            const a = this.asObj().temporal.?;
             const earlier_first = (@as(i64, a.year) * 12 + a.month) <= (other.y * 12 + other.m);
             const e_y = if (earlier_first) a.year else other.y;
             const e_m: u8 = if (earlier_first) a.month else other.m;
@@ -24930,7 +24930,7 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
 fn temporalYearMonthToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.toPlainDate: argument must be an object");
     const dv = try self.getProperty(bag, "day");
@@ -24961,7 +24961,7 @@ fn temporalPlainMonthDayConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporal.?.year = @intFromFloat(refy);
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(d);
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -24972,7 +24972,7 @@ fn temporalMonthDayGetter(comptime f: MonthDayField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "Temporal.PlainMonthDay accessor on incompatible receiver");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             return switch (f) {
                 .month_code => .{ .string = try std.fmt.allocPrint(self.arena, "M{d:0>2}", .{t.month}) },
                 .day => Value.num(@floatFromInt(t.day)),
@@ -24985,7 +24985,7 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else .undefined);
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     // The reference year (1972) renders the short "MM-DD" form; a non-reference
     // year, or a shown calendar annotation, forces the full "YYYY-MM-DD".
@@ -25002,7 +25002,7 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
 const IsoMD = struct { m: u8, d: u8 };
 fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoMD {
     if (tIsTemporal(v, .plain_month_day)) {
-        const t = v.object.temporal.?;
+        const t = v.asObj().temporal.?;
         return .{ .m = t.month, .d = t.day };
     }
     if (v.isObject()) {
@@ -25020,7 +25020,7 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
     if (v.isString()) {
         // Accept "MM-DD" and "--MM-DD" (annotations allowed) as well as a full
         // ISO date string; a UTC designator is rejected.
-        const ann = try stripTemporalAnnotations(self, v.string);
+        const ann = try stripTemporalAnnotations(self, v.asStr());
         // A PlainMonthDay string only accepts the iso8601 calendar (a non-ISO
         // `[u-ca=…]` annotation, e.g. gregory/hebrew, is rejected).
         if (ann.cal) |c| if (!asciiEqlIgnoreCase(c, "iso8601"))
@@ -25061,7 +25061,7 @@ fn temporalMonthDayFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
 fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with: argument must be an object");
     const m = try withMonthField(self, bag, t.month);
@@ -25078,7 +25078,7 @@ fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) val
 fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const b = try toMonthDayFields(self, if (args.len > 0) args[0] else .undefined, true);
     return Value.boolVal(t.month == b.m and t.day == b.d);
 }
@@ -25086,7 +25086,7 @@ fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) v
 fn temporalMonthDayToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.toPlainDate: argument must be an object");
     const yv = try self.getProperty(bag, "year");
@@ -25278,7 +25278,7 @@ fn digitUnit(digits: u8) TUnit {
 fn readFractionalSecondDigits(self: *Interpreter, v: Value) EvalError!?u8 {
     if (v.isUndefined()) return null;
     if (v.isNumber()) {
-        const n = @floor(v.number);
+        const n = @floor(v.asNum());
         if (!std.math.isFinite(n) or n < 0 or n > 9)
             return self.throwError("RangeError", "fractionalSecondDigits out of range");
         return @intFromFloat(n);
@@ -25291,7 +25291,7 @@ fn readFractionalSecondDigits(self: *Interpreter, v: Value) EvalError!?u8 {
 fn readTemporalStringPrecision(self: *Interpreter, options: Value, min_unit: TUnit) EvalError!TemporalStringPrecision {
     var p = TemporalStringPrecision{};
     if (options.isUndefined()) return p;
-    if (!options.isObject() or options.object.is_symbol or options.object.is_bigint)
+    if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)
         return self.throwError("TypeError", "options must be an object or undefined");
 
     const fdv = try self.getProperty(options, "fractionalSecondDigits");
@@ -25416,10 +25416,10 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
         // Only round() accepts the smallestUnit string shorthand; until/since
         // require an options object (GetOptionsObject → TypeError otherwise).
         if (!allow_string) return self.throwError("TypeError", "options must be an object or undefined");
-        r.smallest = tUnitFromStr(opts.string) orelse return self.throwError("RangeError", "invalid smallestUnit");
+        r.smallest = tUnitFromStr(opts.asStr()) orelse return self.throwError("RangeError", "invalid smallestUnit");
         return r;
     }
-    if (!opts.isObject() or opts.object.is_symbol or opts.object.is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
+    if (!opts.isObject() or opts.asObj().is_symbol or opts.asObj().is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
     // Each unit/mode option is coerced to a string (GetOption) and validated
     // against its allowed set; a wrong-typed value is therefore a RangeError.
     var largest_set = false;
@@ -25459,10 +25459,10 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
 fn readDurationRoundOptions(self: *Interpreter, opts_v: Value, dur: [10]f64) EvalError!DurationRoundRead {
     var r = RoundOpts{ .largest = durPresentLargest(dur), .smallest = .nanosecond, .mode = .half_expand, .increment = 1 };
     if (opts_v.isString()) {
-        r.smallest = tUnitFromStr(opts_v.string) orelse return self.throwError("RangeError", "invalid smallestUnit");
+        r.smallest = tUnitFromStr(opts_v.asStr()) orelse return self.throwError("RangeError", "invalid smallestUnit");
         return .{ .opts = r, .relative_to = null, .has_unit = true };
     }
-    if (!opts_v.isObject() or opts_v.object.is_symbol or opts_v.object.is_bigint)
+    if (!opts_v.isObject() or opts_v.asObj().is_symbol or opts_v.asObj().is_bigint)
         return self.throwError("TypeError", "options must be an object or undefined");
 
     var largest_set = false;
@@ -25568,7 +25568,7 @@ fn temporalInstantAddFn(comptime sign: f64) value.NativeFn {
             try ensureNoCalendarUnits(self, dur);
             if (dur[3] != 0 or dur[2] != 0) return self.throwError("RangeError", "Instant arithmetic does not allow day/week units");
             const o = try makeTemporal(self, .instant, "\x00T.Instant");
-            o.temporal.?.epoch_ns = this.object.temporal.?.epoch_ns + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            o.temporal.?.epoch_ns = this.asObj().temporal.?.epoch_ns + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
             return Value.obj(o);
         }
     }.call;
@@ -25583,7 +25583,7 @@ fn temporalInstantUntilFn(comptime sign: f64) value.NativeFn {
             const other = try toInstantArg(self, if (args.len > 0) args[0] else .undefined);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .second, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant difference largestUnit must be hour or smaller");
-            var diff = @as(i128, @intFromFloat(sign)) * (other - this.object.temporal.?.epoch_ns);
+            var diff = @as(i128, @intFromFloat(sign)) * (other - this.asObj().temporal.?.epoch_ns);
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
             return makeDuration(self, balanceTimeNs(diff, opts.largest));
         }
@@ -25596,7 +25596,7 @@ fn temporalInstantRoundFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const opts = try readRoundOpts(self, if (args.len > 0) args[0] else .undefined, .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant.round smallestUnit must be hour or smaller");
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = roundNs(this.object.temporal.?.epoch_ns, opts.smallest, opts.increment, opts.mode);
+    o.temporal.?.epoch_ns = roundNs(this.asObj().temporal.?.epoch_ns, opts.smallest, opts.increment, opts.mode);
     return Value.obj(o);
 }
 
@@ -25604,7 +25604,7 @@ fn temporalInstantEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     const other = try toInstantArg(self, if (args.len > 0) args[0] else .undefined);
-    return Value.boolVal(this.object.temporal.?.epoch_ns == other);
+    return Value.boolVal(this.asObj().temporal.?.epoch_ns == other);
 }
 
 fn temporalInstantCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25621,7 +25621,7 @@ fn temporalInstantExtraEpochGetter(comptime div: i128) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
-            const ns = this.object.temporal.?.epoch_ns;
+            const ns = this.asObj().temporal.?.epoch_ns;
             if (div == 1) return self.makeBigInt(ns);
             if (div >= 1_000_000) return Value.num(@floatFromInt(@divFloor(ns, div)));
             return self.makeBigInt(@divFloor(ns, div));
@@ -25632,9 +25632,9 @@ fn temporalInstantExtraEpochGetter(comptime div: i128) value.NativeFn {
 /// Coerce a value to an Instant's epoch nanoseconds (an Instant or an ISO
 /// instant string with a `Z`/offset).
 fn toInstantArg(self: *Interpreter, v: Value) EvalError!i128 {
-    if (tIsTemporal(v, .instant)) return v.object.temporal.?.epoch_ns;
-    if (tIsTemporal(v, .zoned_date_time)) return v.object.temporal.?.epoch_ns;
-    if (v.isString()) return parseInstantString(self, v.string);
+    if (tIsTemporal(v, .instant)) return v.asObj().temporal.?.epoch_ns;
+    if (tIsTemporal(v, .zoned_date_time)) return v.asObj().temporal.?.epoch_ns;
+    if (v.isString()) return parseInstantString(self, v.asStr());
     return self.throwError("TypeError", "value is not an Instant");
 }
 
@@ -25662,7 +25662,7 @@ fn temporalPlainTimeAddFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
-            const total = timeToNs(this.object.temporal.?) + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            const total = timeToNs(this.asObj().temporal.?) + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
             const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
             nsToTime(o.temporal.?, total);
             return Value.obj(o);
@@ -25678,7 +25678,7 @@ fn temporalPlainTimeUntilFn(comptime sign: f64) value.NativeFn {
             const other = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference largestUnit must be hour or smaller");
-            var diff = @as(i128, @intFromFloat(sign)) * (timeToNs(&other) - timeToNs(this.object.temporal.?));
+            var diff = @as(i128, @intFromFloat(sign)) * (timeToNs(&other) - timeToNs(this.asObj().temporal.?));
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
             return makeDuration(self, balanceTimeNs(diff, opts.largest));
         }
@@ -25691,7 +25691,7 @@ fn temporalPlainTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "PlainTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime.round smallestUnit must be hour or smaller");
-    const rounded = roundNs(timeToNs(this.object.temporal.?), opts.smallest, opts.increment, opts.mode);
+    const rounded = roundNs(timeToNs(this.asObj().temporal.?), opts.smallest, opts.increment, opts.mode);
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     nsToTime(o.temporal.?, rounded);
     return Value.obj(o);
@@ -25708,7 +25708,7 @@ fn toPlainTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalData {
 /// time portion is optional and defaults to midnight).
 fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: bool) EvalError!value.TemporalData {
     if (tIsTemporal(v, .plain_time) or tIsTemporal(v, .plain_date_time)) {
-        return v.object.temporal.?.*;
+        return v.asObj().temporal.?.*;
     }
     var t: value.TemporalData = .{ .kind = .plain_time };
     if (v.isObject()) {
@@ -25733,7 +25733,7 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
     if (v.isString()) {
         // A bare time ("HH:MM:SS.fff"), or the time portion of a full date-time
         // string. A UTC designator is rejected, as is a date-only string.
-        const ann = try stripTemporalAnnotations(self, v.string);
+        const ann = try stripTemporalAnnotations(self, v.asStr());
         const s = ann.body;
         var tb: TBody = .{ .y = 0, .mo = 1, .d = 1, .has_time = true };
         if (s.len > 0 and (s[0] == 'T' or s[0] == 't')) {
@@ -25778,7 +25778,7 @@ fn temporalPlainTimeEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     const other = try toPlainTimeData(self, if (args.len > 0) args[0] else .undefined);
-    return Value.boolVal(timeToNs(this.object.temporal.?) == timeToNs(&other));
+    return Value.boolVal(timeToNs(this.asObj().temporal.?) == timeToNs(&other));
 }
 
 fn temporalPlainTimeCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25812,7 +25812,7 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
             _ = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined); // validates the overflow option
             // Date part with constrain, then time part carrying whole days.
@@ -25846,7 +25846,7 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
             const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else .undefined, true);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .day, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
-            const a = this.object.temporal.?;
+            const a = this.asObj().temporal.?;
             const b = &other;
             if (@intFromEnum(opts.largest) >= @intFromEnum(TUnit.day)) {
                 // Exact nanosecond difference balanced into days and below.
@@ -25935,7 +25935,7 @@ fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Valu
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "PlainDateTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDateTime.round smallestUnit must be day or smaller");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const total = dateTimeToNs(t);
     const rounded = roundNs(total, opts.smallest, opts.increment, opts.mode);
     const days = @divFloor(rounded, 86_400_000_000_000);
@@ -25950,9 +25950,9 @@ fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Valu
 
 /// Coerce to PlainDateTime fields (instance, fields bag, or ISO string).
 fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!value.TemporalData {
-    if (tIsTemporal(v, .plain_date_time)) return v.object.temporal.?.*;
+    if (tIsTemporal(v, .plain_date_time)) return v.asObj().temporal.?.*;
     if (tIsTemporal(v, .plain_date)) {
-        var t = v.object.temporal.?.*;
+        var t = v.asObj().temporal.?.*;
         t.kind = .plain_date_time;
         return t;
     }
@@ -25973,7 +25973,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
         return t;
     }
     if (v.isString()) {
-        const p = try parseDateTimeNs(self, v.string);
+        const p = try parseDateTimeNs(self, v.asStr());
         if (p.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainDateTime");
         var t: value.TemporalData = .{ .kind = .plain_date_time };
         t.year = @intCast(p.y);
@@ -25994,7 +25994,7 @@ fn temporalPlainDateTimeEqualsFn(ctx: *anyopaque, this: Value, args: []const Val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else .undefined, true);
-    return Value.boolVal(dateTimeToNs(this.object.temporal.?) == dateTimeToNs(&other));
+    return Value.boolVal(dateTimeToNs(this.asObj().temporal.?) == dateTimeToNs(&other));
 }
 
 fn temporalPlainDateTimeCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -26011,7 +26011,7 @@ fn temporalDateTimeToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Val
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = t.year;
     o.temporal.?.month = t.month;
@@ -26023,7 +26023,7 @@ fn temporalDateTimeToPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     o.temporal.?.hour = t.hour;
     o.temporal.?.minute = t.minute;
@@ -26038,7 +26038,7 @@ fn temporalDateTimeToPlainYearMonthFn(ctx: *anyopaque, this: Value, args: []cons
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     return makeYearMonth(self, t.year, t.month, t.calendar);
 }
 
@@ -26046,14 +26046,14 @@ fn temporalDateTimeToPlainMonthDayFn(ctx: *anyopaque, this: Value, args: []const
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     return makeMonthDay(self, t.month, t.day);
 }
 
 fn temporalDateTimeWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const tm = if (args.len == 0 or args[0].isUndefined()) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = t.year;
@@ -26071,7 +26071,7 @@ fn temporalDateTimeWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const V
 fn temporalDateTimeWithPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const f = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined, true);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = @intCast(f.y);
@@ -26104,7 +26104,7 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             const b = try toPlainDateFields(self, if (args.len > 0) args[0] else .undefined, true);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 }, false);
             const lg = if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.day)) TUnit.day else opts.largest;
@@ -26131,7 +26131,7 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
 fn temporalDateToPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const tm = if (args.len == 0 or args[0].isUndefined()) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = t.year;
@@ -26150,7 +26150,7 @@ fn temporalDateToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) 
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     return makeYearMonth(self, t.year, t.month, t.calendar);
 }
 
@@ -26171,9 +26171,9 @@ fn temporalValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.object.temporal == null) return self.throwError("TypeError", "toLocaleString called on a non-Temporal value");
+    if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "toLocaleString called on a non-Temporal value");
     const none: []const Value = &.{};
-    return switch (this.object.temporal.?.kind) {
+    return switch (this.asObj().temporal.?.kind) {
         .plain_date => temporalPlainDateToStringFn(ctx, this, none),
         .plain_time => temporalPlainTimeToStringFn(ctx, this, none),
         .plain_date_time => temporalPlainDateTimeToStringFn(ctx, this, none),
@@ -26189,10 +26189,10 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
 /// (iso8601): a Temporal instance contributes its own calendar; any other value
 /// is `ToString`'d and must name `iso8601`, else a RangeError.
 fn requireIsoCalendarArg(self: *Interpreter, v: Value) value.HostError!void {
-    if (v.isObject() and v.object.temporal != null) return; // a Temporal instance is iso8601 here
+    if (v.isObject() and v.asObj().temporal != null) return; // a Temporal instance is iso8601 here
     // ToTemporalCalendarIdentifier: a non-object non-String is a TypeError.
     if (!v.isString()) return self.throwError("TypeError", "calendar must be a string or a Temporal object");
-    const s = v.string;
+    const s = v.asStr();
     if (asciiEqlIgnoreCase(s, "iso8601")) return; // a bare calendar id
     // Otherwise the string is a Temporal date/time string whose calendar
     // annotation (default iso8601) must resolve to iso8601.
@@ -26203,7 +26203,7 @@ fn temporalPlainDateWithCalendarFn(ctx: *anyopaque, this: Value, args: []const V
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const cal = try toCalendarId(self, if (args.len > 0) args[0] else .undefined);
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = t.year;
     o.temporal.?.month = t.month;
@@ -26216,7 +26216,7 @@ fn temporalDateTimeWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const cal = try toCalendarId(self, if (args.len > 0) args[0] else .undefined);
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.* = t.*;
     o.temporal.?.calendar = cal;
@@ -26238,7 +26238,7 @@ fn dtLocalNs(t: *const value.TemporalData) i128 {
 /// ToTemporalTimeZoneSlotValue restricted to fixed-offset / named zones: a
 /// ZonedDateTime contributes its own zone; otherwise `ToString` then `parseTimeZone`.
 fn resolveTimeZoneArg(self: *Interpreter, v: Value) value.HostError!TimeZone {
-    if (v.isObject()) if (v.object.temporal) |t| if (t.kind == .zoned_date_time)
+    if (v.isObject()) if (v.asObj().temporal) |t| if (t.kind == .zoned_date_time)
         return TimeZone{ .name = t.tz_name, .offset_ns = t.tz_offset_ns };
     return parseTimeZone(self, try self.toStringV(v));
 }
@@ -26255,7 +26255,7 @@ fn temporalDateTimeToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const
         if (!args[1].isObject()) return self.throwError("TypeError", "options must be an object");
         _ = try dtfGetStr(self, args[1], "disambiguation", &.{ "compatible", "earlier", "later", "reject" }, "compatible");
     }
-    const local = dtLocalNs(this.object.temporal.?);
+    const local = dtLocalNs(this.asObj().temporal.?);
     return zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
 }
 
@@ -26278,7 +26278,7 @@ fn temporalDateToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
         if (item.isUndefined()) return self.throwError("TypeError", "toZonedDateTime requires a time zone");
         tz = try resolveTimeZoneArg(self, item);
     }
-    const d = this.object.temporal.?;
+    const d = this.asObj().temporal.?;
     var combined = value.TemporalData{ .kind = .plain_date_time };
     combined.year = d.year;
     combined.month = d.month;
@@ -26299,14 +26299,14 @@ fn temporalInstantToZonedDateTimeISOFn(ctx: *anyopaque, this: Value, args: []con
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "toZonedDateTimeISO requires a time zone");
     const tz = try resolveTimeZoneArg(self, args[0]);
-    return zdtMake(self, this.object.temporal.?.epoch_ns, tz.name, tz.offset_ns);
+    return zdtMake(self, this.asObj().temporal.?.epoch_ns, tz.name, tz.offset_ns);
 }
 
 fn temporalDateToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     return makeMonthDay(self, t.month, t.day);
 }
 
@@ -26316,8 +26316,8 @@ fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Temporal.Instant requires 'new'");
     const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else .undefined, false);
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = bv.object.bigint;
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    o.temporal.?.epoch_ns = bv.asObj().bigint;
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -26327,7 +26327,7 @@ fn temporalInstantEpochGetter(comptime ms: bool) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
-            const ns = this.object.temporal.?.epoch_ns;
+            const ns = this.asObj().temporal.?.epoch_ns;
             if (ms) return Value.num(@floatFromInt(@divFloor(ns, 1_000_000)));
             return self.makeBigInt(ns);
         }
@@ -26348,7 +26348,7 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
             z_suffix = false;
         }
     }
-    const ns = roundNsForString(this.object.temporal.?.epoch_ns + @as(i128, tz.offset_ns), precision);
+    const ns = roundNsForString(this.asObj().temporal.?.epoch_ns + @as(i128, tz.offset_ns), precision);
     const days = @divFloor(ns, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -26371,7 +26371,7 @@ fn temporalInstantFromEpochFn(comptime unit_ns: i128) value.NativeFn {
             const o = try makeTemporal(self, .instant, "\x00T.Instant");
             if (unit_ns == 1) {
                 const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else .undefined, false);
-                o.temporal.?.epoch_ns = bv.object.bigint;
+                o.temporal.?.epoch_ns = bv.asObj().bigint;
             } else {
                 const n = try self.toNumberV(if (args.len > 0) args[0] else .undefined);
                 const max_units: f64 = @floatFromInt(@divFloor(max_temporal_instant_ns, unit_ns));
@@ -26424,19 +26424,19 @@ fn temporalNowPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const dt = try temporalNowPlainDateTimeFn(ctx, this, args);
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = dt.object.temporal.?.year;
-    o.temporal.?.month = dt.object.temporal.?.month;
-    o.temporal.?.day = dt.object.temporal.?.day;
+    o.temporal.?.year = dt.asObj().temporal.?.year;
+    o.temporal.?.month = dt.asObj().temporal.?.month;
+    o.temporal.?.day = dt.asObj().temporal.?.day;
     return Value.obj(o);
 }
 fn temporalNowPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const dt = try temporalNowPlainDateTimeFn(ctx, this, args);
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-    o.temporal.?.hour = dt.object.temporal.?.hour;
-    o.temporal.?.minute = dt.object.temporal.?.minute;
-    o.temporal.?.second = dt.object.temporal.?.second;
-    o.temporal.?.millisecond = dt.object.temporal.?.millisecond;
+    o.temporal.?.hour = dt.asObj().temporal.?.hour;
+    o.temporal.?.minute = dt.asObj().temporal.?.minute;
+    o.temporal.?.second = dt.asObj().temporal.?.second;
+    o.temporal.?.millisecond = dt.asObj().temporal.?.millisecond;
     return Value.obj(o);
 }
 fn temporalNowTimeZoneIdFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -26476,11 +26476,11 @@ fn temporalZdtGetTimeZoneTransitionFn(ctx: *anyopaque, this: Value, args: []cons
     if (!tIsTemporal(this, .zoned_date_time)) return self.throwError("TypeError", "non-ZonedDateTime");
     const d = if (args.len > 0) args[0] else Value.undefined;
     if (d.isUndefined()) return self.throwError("TypeError", "getTimeZoneTransition requires a direction");
-    const dir: []const u8 = if (d.isString()) d.string else blk: {
+    const dir: []const u8 = if (d.isString()) d.asStr() else blk: {
         if (d.isObject()) {
             const dv = try self.getProperty(d, "direction");
             if (dv.isUndefined()) return self.throwError("RangeError", "direction is required");
-            break :blk if (dv.isString()) dv.string else "";
+            break :blk if (dv.isString()) dv.asStr() else "";
         }
         return self.throwError("TypeError", "invalid direction");
     };
@@ -26600,12 +26600,12 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else .undefined, false);
     if (args.len < 2 or args[1].isUndefined()) return self.throwError("TypeError", "ZonedDateTime requires a time zone");
     if (!args[1].isString()) return self.throwError("TypeError", "time zone must be a string");
-    const tz = try parseTimeZone(self, args[1].string);
+    const tz = try parseTimeZone(self, args[1].asStr());
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
-    o.temporal.?.epoch_ns = bv.object.bigint;
+    o.temporal.?.epoch_ns = bv.asObj().bigint;
     o.temporal.?.tz_name = tz.name;
     o.temporal.?.tz_offset_ns = tz.offset_ns;
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.object);
+    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
 
@@ -26637,7 +26637,7 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "Temporal.ZonedDateTime accessor on incompatible receiver");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             const l = zdtLocal(t);
             const y: i64 = l.year;
             return switch (f) {
@@ -26670,7 +26670,7 @@ fn temporalZdtMonthCodeGetter(ctx: *anyopaque, this: Value, args: []const Value)
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const l = zdtLocal(this.object.temporal.?);
+    const l = zdtLocal(this.asObj().temporal.?);
     return .{ .string = try std.fmt.allocPrint(self.arena, "M{d:0>2}", .{l.month}) };
 }
 
@@ -26680,7 +26680,7 @@ fn temporalZdtEpochGetter(comptime ms: bool) value.NativeFn {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-            const ns = this.object.temporal.?.epoch_ns;
+            const ns = this.asObj().temporal.?.epoch_ns;
             if (ms) return Value.num(@floatFromInt(@divFloor(ns, 1_000_000)));
             return self.makeBigInt(ns);
         }
@@ -26691,14 +26691,14 @@ fn temporalZdtTimeZoneIdGetter(ctx: *anyopaque, this: Value, args: []const Value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    return Value.str(this.object.temporal.?.tz_name);
+    return Value.str(this.asObj().temporal.?.tz_name);
 }
 
 fn temporalZdtOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    return Value.str(try offsetNsToString(self, this.object.temporal.?.tz_offset_ns));
+    return Value.str(try offsetNsToString(self, this.asObj().temporal.?.tz_offset_ns));
 }
 
 fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -26714,7 +26714,7 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         show_offset = !std.mem.eql(u8, off, "never");
         time_zone_name = (try dtfGetStr(self, options, "timeZoneName", &.{ "auto", "never", "critical" }, "auto")).?;
     }
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const local_ns = roundNsForString(t.epoch_ns + @as(i128, t.tz_offset_ns), precision);
     const days = @divFloor(local_ns, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
@@ -26745,12 +26745,12 @@ fn temporalZdtToInstantFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = this.object.temporal.?.epoch_ns;
+    o.temporal.?.epoch_ns = this.asObj().temporal.?.epoch_ns;
     return Value.obj(o);
 }
 
 fn zdtLocalToTemporal(self: *Interpreter, this: Value, kind: value.TemporalData.Kind, proto_key: []const u8) EvalError!Value {
-    const l = zdtLocal(this.object.temporal.?);
+    const l = zdtLocal(this.asObj().temporal.?);
     const o = try makeTemporal(self, kind, proto_key);
     o.temporal.?.year = l.year;
     o.temporal.?.month = l.month;
@@ -26786,7 +26786,7 @@ fn temporalZdtToYearMonthFn(ctx: *anyopaque, this: Value, args: []const Value) v
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const l = zdtLocal(t);
     return makeYearMonth(self, l.year, l.month, t.calendar);
 }
@@ -26794,7 +26794,7 @@ fn temporalZdtToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const l = zdtLocal(this.object.temporal.?);
+    const l = zdtLocal(this.asObj().temporal.?);
     return makeMonthDay(self, l.month, l.day);
 }
 
@@ -26805,7 +26805,7 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-            const t = this.object.temporal.?;
+            const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else .undefined);
             _ = try readOverflowReject(self, if (args.len > 1) args[1] else .undefined); // validates the overflow option
             var epoch = t.epoch_ns;
@@ -26834,12 +26834,12 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             const other = try toZdtArg(self, if (args.len > 0) args[0] else .undefined);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else .undefined, .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.day)) {
-                var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - this.object.temporal.?.epoch_ns);
+                var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - this.asObj().temporal.?.epoch_ns);
                 diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
                 return makeDuration(self, balanceTimeNs(diff, opts.largest));
             }
             // Calendar largestUnit: diff the local date-times.
-            const a = zdtLocal(this.object.temporal.?);
+            const a = zdtLocal(this.asObj().temporal.?);
             const b = zdtLocal(&other);
             const fwd = dateTimeToNs(&a) <= dateTimeToNs(&b);
             const e = if (fwd) a else b;
@@ -26867,7 +26867,7 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "ZonedDateTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "ZonedDateTime.round smallestUnit must be day or smaller");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     // Round the local wall-clock, then re-apply the offset.
     const local = t.epoch_ns + t.tz_offset_ns;
     const rounded = roundNs(local, opts.smallest, opts.increment, opts.mode);
@@ -26878,7 +26878,7 @@ fn temporalZdtEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const other = try toZdtArg(self, if (args.len > 0) args[0] else .undefined);
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     return Value.boolVal(t.epoch_ns == other.epoch_ns and std.mem.eql(u8, t.tz_name, other.tz_name));
 }
 
@@ -26893,7 +26893,7 @@ fn temporalZdtCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undefined;
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: argument must be an object");
     var l = zdtLocal(t);
@@ -26918,7 +26918,7 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const l = zdtLocal(t);
     const tm = if (args.len == 0 or args[0].isUndefined()) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
     var nl = l;
@@ -26935,9 +26935,9 @@ fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
 fn temporalZdtWithTimeZoneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     if (args.len == 0 or !args[0].isString()) return self.throwError("TypeError", "withTimeZone requires a time-zone string");
-    const tz = try parseTimeZone(self, args[0].string);
+    const tz = try parseTimeZone(self, args[0].asStr());
     return zdtMake(self, t.epoch_ns, tz.name, tz.offset_ns);
 }
 
@@ -26945,9 +26945,9 @@ fn temporalZdtWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const cal = try toCalendarId(self, if (args.len > 0) args[0] else .undefined);
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const r = try zdtMake(self, t.epoch_ns, t.tz_name, t.tz_offset_ns);
-    r.object.temporal.?.calendar = cal;
+    r.asObj().temporal.?.calendar = cal;
     return r;
 }
 
@@ -26955,7 +26955,7 @@ fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const t = this.object.temporal.?;
+    const t = this.asObj().temporal.?;
     const l = zdtLocal(t);
     const local_ns = @as(i128, tDaysFromCivil(l.year, l.month, l.day)) * 86_400_000_000_000;
     return zdtMake(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
@@ -26963,13 +26963,13 @@ fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
 
 /// Coerce to ZonedDateTime data (an instance or a "…[TimeZone]" string).
 fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
-    if (tIsZdt(v)) return v.object.temporal.?.*;
-    if (v.isString()) return parseZdtString(self, v.string);
+    if (tIsZdt(v)) return v.asObj().temporal.?.*;
+    if (v.isString()) return parseZdtString(self, v.asStr());
     if (v.isObject()) {
         // A fields bag with timeZone.
         const tzv = try self.getProperty(v, "timeZone");
         if (tzv.isString()) {
-            const tz = try parseTimeZone(self, tzv.string);
+            const tz = try parseTimeZone(self, tzv.asStr());
             const f = try toPlainDateFields(self, v, true);
             const tm = try toPlainTimeDataOpt(self, v, false, false);
             var l: value.TemporalData = .{ .kind = .plain_date_time };
@@ -27046,7 +27046,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     const a = env.arena;
     const tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
@@ -27075,8 +27075,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toJSON", 0, temporalDurationToStringFn);
         if (ns.getOwn("Duration")) |dc| if (dc.isObject()) {
-            try setNative(a, rs, dc.object, "from", 1, temporalDurationFromFn);
-            try setNative(a, rs, dc.object, "compare", 2, temporalDurationCompareFn);
+            try setNative(a, rs, dc.asObj(), "from", 1, temporalDurationFromFn);
+            try setNative(a, rs, dc.asObj(), "compare", 2, temporalDurationCompareFn);
         };
     }
     // Temporal.PlainDate.
@@ -27114,8 +27114,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "withCalendar", 1, temporalPlainDateWithCalendarFn);
         try setNative(a, rs, p, "toZonedDateTime", 1, temporalDateToZonedDateTimeFn);
         if (ns.getOwn("PlainDate")) |c| if (c.isObject()) {
-            try setNative(a, rs, c.object, "from", 1, temporalPlainDateFromFn);
-            try setNative(a, rs, c.object, "compare", 2, temporalPlainDateCompareFn);
+            try setNative(a, rs, c.asObj(), "from", 1, temporalPlainDateFromFn);
+            try setNative(a, rs, c.asObj(), "compare", 2, temporalPlainDateCompareFn);
         };
     }
     // Temporal.PlainTime.
@@ -27139,8 +27139,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "round", 1, temporalPlainTimeRoundFn);
         try setNative(a, rs, p, "equals", 1, temporalPlainTimeEqualsFn);
         if (ns.getOwn("PlainTime")) |c| if (c.isObject()) {
-            try setNative(a, rs, c.object, "from", 1, temporalPlainTimeFromFn);
-            try setNative(a, rs, c.object, "compare", 2, temporalPlainTimeCompareFn);
+            try setNative(a, rs, c.asObj(), "from", 1, temporalPlainTimeFromFn);
+            try setNative(a, rs, c.asObj(), "compare", 2, temporalPlainTimeCompareFn);
         };
     }
     // Temporal.PlainDateTime (reuses the PlainDate + PlainTime getters).
@@ -27188,8 +27188,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "withCalendar", 1, temporalDateTimeWithCalendarFn);
         try setNative(a, rs, p, "toZonedDateTime", 1, temporalDateTimeToZonedDateTimeFn);
         if (ns.getOwn("PlainDateTime")) |c| if (c.isObject()) {
-            try setNative(a, rs, c.object, "from", 1, temporalDateTimeFromFn);
-            try setNative(a, rs, c.object, "compare", 2, temporalPlainDateTimeCompareFn);
+            try setNative(a, rs, c.asObj(), "from", 1, temporalDateTimeFromFn);
+            try setNative(a, rs, c.asObj(), "compare", 2, temporalPlainDateTimeCompareFn);
         };
     }
     // Temporal.PlainYearMonth.
@@ -27217,8 +27217,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "since", 1, temporalYearMonthUntilFn(-1));
         try setNative(a, rs, p, "toPlainDate", 1, temporalYearMonthToPlainDateFn);
         if (ns.getOwn("PlainYearMonth")) |c| if (c.isObject()) {
-            try setNative(a, rs, c.object, "from", 1, temporalYearMonthFromFn);
-            try setNative(a, rs, c.object, "compare", 2, temporalYearMonthCompareFn);
+            try setNative(a, rs, c.asObj(), "from", 1, temporalYearMonthFromFn);
+            try setNative(a, rs, c.asObj(), "compare", 2, temporalYearMonthCompareFn);
         };
     }
     // Temporal.PlainMonthDay.
@@ -27235,7 +27235,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "equals", 1, temporalMonthDayEqualsFn);
         try setNative(a, rs, p, "toPlainDate", 1, temporalMonthDayToPlainDateFn);
         if (ns.getOwn("PlainMonthDay")) |c| if (c.isObject()) {
-            try setNative(a, rs, c.object, "from", 1, temporalMonthDayFromFn);
+            try setNative(a, rs, c.asObj(), "from", 1, temporalMonthDayFromFn);
         };
     }
     // Temporal.Instant.
@@ -27257,12 +27257,12 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "equals", 1, temporalInstantEqualsFn);
         try setNative(a, rs, p, "toZonedDateTimeISO", 1, temporalInstantToZonedDateTimeISOFn);
         if (ns.getOwn("Instant")) |c| if (c.isObject()) {
-            try setNative(a, rs, c.object, "fromEpochMilliseconds", 1, temporalInstantFromEpochFn(1_000_000));
-            try setNative(a, rs, c.object, "fromEpochNanoseconds", 1, temporalInstantFromEpochFn(1));
-            try setNative(a, rs, c.object, "fromEpochSeconds", 1, temporalInstantFromEpochFn(1_000_000_000));
-            try setNative(a, rs, c.object, "fromEpochMicroseconds", 1, temporalInstantFromEpochFn(1_000));
-            try setNative(a, rs, c.object, "from", 1, temporalInstantFromFn);
-            try setNative(a, rs, c.object, "compare", 2, temporalInstantCompareFn);
+            try setNative(a, rs, c.asObj(), "fromEpochMilliseconds", 1, temporalInstantFromEpochFn(1_000_000));
+            try setNative(a, rs, c.asObj(), "fromEpochNanoseconds", 1, temporalInstantFromEpochFn(1));
+            try setNative(a, rs, c.asObj(), "fromEpochSeconds", 1, temporalInstantFromEpochFn(1_000_000_000));
+            try setNative(a, rs, c.asObj(), "fromEpochMicroseconds", 1, temporalInstantFromEpochFn(1_000));
+            try setNative(a, rs, c.asObj(), "from", 1, temporalInstantFromFn);
+            try setNative(a, rs, c.asObj(), "compare", 2, temporalInstantCompareFn);
         };
     }
 
@@ -27320,8 +27320,8 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "startOfDay", 0, temporalZdtStartOfDayFn);
         try setNative(a, rs, p, "getTimeZoneTransition", 1, temporalZdtGetTimeZoneTransitionFn);
         if (ns.getOwn("ZonedDateTime")) |c| if (c.isObject()) {
-            try setNative(a, rs, c.object, "from", 1, temporalZdtFromFn);
-            try setNative(a, rs, c.object, "compare", 2, temporalZdtCompareFn);
+            try setNative(a, rs, c.asObj(), "from", 1, temporalZdtFromFn);
+            try setNative(a, rs, c.asObj(), "compare", 2, temporalZdtCompareFn);
         };
     }
 
@@ -27350,7 +27350,7 @@ fn installSharedArrayBufferAndAtomics(env: *Environment, rs: *Shape, object_prot
     const a = env.arena;
     const sym_tag: ?[]const u8 = blk: {
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
-            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.object.is_symbol) break :blk t.object.sym_key;
+            if (sym.object.getOwn("toStringTag")) |t| if (t.isObject() and t.asObj().is_symbol) break :blk t.asObj().sym_key;
         };
         break :blk null;
     };
@@ -27405,9 +27405,9 @@ fn installMapProto(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const ctor = env.get("Map") orelse return;
     if (!ctor.isObject()) return;
-    const proto_v = ctor.object.getOwn("prototype") orelse return;
+    const proto_v = ctor.asObj().getOwn("prototype") orelse return;
     if (!proto_v.isObject()) return;
-    const p = proto_v.object;
+    const p = proto_v.asObj();
     const specs = .{
         .{ "set", 2 },     .{ "get", 1 },         .{ "has", 1 },                 .{ "delete", 1 },
         .{ "clear", 0 },   .{ "forEach", 1 },     .{ "keys", 0 },                .{ "values", 0 },
@@ -27424,9 +27424,9 @@ fn installSetProto(env: *Environment, rs: *Shape) EvalError!void {
     const a = env.arena;
     const ctor = env.get("Set") orelse return;
     if (!ctor.isObject()) return;
-    const proto_v = ctor.object.getOwn("prototype") orelse return;
+    const proto_v = ctor.asObj().getOwn("prototype") orelse return;
     if (!proto_v.isObject()) return;
-    const p = proto_v.object;
+    const p = proto_v.asObj();
     const specs = .{
         .{ "add", 1 },        .{ "has", 1 },          .{ "delete", 1 },         .{ "clear", 0 },
         .{ "forEach", 1 },    .{ "values", 0 },       .{ "keys", 0 },           .{ "entries", 0 },
@@ -27451,11 +27451,11 @@ fn installSetProto(env: *Environment, rs: *Shape) EvalError!void {
 fn aliasIteratorToMethod(a: std.mem.Allocator, rs: *Shape, env: *Environment, proto: *value.Object, method: []const u8) EvalError!void {
     const symv = env.get("Symbol") orelse return;
     if (!symv.isObject()) return;
-    const itv = symv.object.getOwn("iterator") orelse return;
-    if (!itv.isObject() or !itv.object.is_symbol) return;
+    const itv = symv.asObj().getOwn("iterator") orelse return;
+    if (!itv.isObject() or !itv.asObj().is_symbol) return;
     const fn_v = proto.getOwn(method) orelse return;
-    try proto.setOwn(a, rs, itv.object.sym_key, fn_v);
-    try proto.setAttr(a, itv.object.sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
+    try proto.setOwn(a, rs, itv.asObj().sym_key, fn_v);
+    try proto.setAttr(a, itv.asObj().sym_key, .{ .writable = true, .enumerable = false, .configurable = true });
 }
 
 /// Monotonic id for unique Symbol property-key encodings (single-threaded;
@@ -27482,7 +27482,7 @@ fn symbolProto(self: *Interpreter) ?*value.Object {
     const sym = self.env.get("Symbol") orelse return null;
     if (!sym.isObject()) return null;
     const p = sym.object.getOwn("prototype") orelse return null;
-    return if (p.isObject()) p.object else null;
+    return if (p.isObject()) p.asObj() else null;
 }
 
 /// `Date(...)` / `new Date(...)` → a Date object for the computed time.
@@ -27666,17 +27666,17 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         // with years 0–99 mapped to 1900–1999.
         const buf = try self.arena.alloc(Value, args.len);
         for (args, 0..) |av, i| buf[i] = Value.num(try self.toNumberV(av));
-        const yi = @trunc(buf[0].number);
+        const yi = @trunc(buf[0].asNum());
         if (yi >= 0 and yi <= 99) buf[0] = Value.num(yi + 1900);
         return self.makeDate(Interpreter.dateTimeFromArgs(buf));
     }
     if (args.len == 1) {
         // `new Date(dateObject)` copies its time value; otherwise ToPrimitive
         // (a string would be parsed — not yet — else ToNumber).
-        if (args[0].isObject() and args[0].object.is_date)
-            return self.makeDate(args[0].object.date_ms);
+        if (args[0].isObject() and args[0].asObj().is_date)
+            return self.makeDate(args[0].asObj().date_ms);
         const prim = try self.toPrimitive(args[0], .default);
-        if (prim.isString()) return self.makeDate(dateParseISO(prim.string));
+        if (prim.isString()) return self.makeDate(dateParseISO(prim.asStr()));
         // ToNumber(prim): a Symbol or BigInt primitive throws a TypeError.
         return self.makeDate(try self.toNumberV(prim));
     }
@@ -27702,7 +27702,7 @@ fn dateUTCFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     }
     if (any_nan) return Value.num(std.math.nan(f64));
     // Years 0–99 are offset to 1900–1999.
-    const yi = @trunc(buf[0].number);
+    const yi = @trunc(buf[0].asNum());
     if (yi >= 0 and yi <= 99) buf[0] = Value.num(yi + 1900);
     var len = n;
     if (len == 1) {
@@ -27748,7 +27748,7 @@ fn symbolRegistry(self: *Interpreter) EvalError!?*value.Object {
     const sym = self.env.get("Symbol") orelse return null;
     if (!sym.isObject()) return null;
     if (sym.object.getOwn("\x00registry")) |r| {
-        if (r.isObject()) return r.object;
+        if (r.isObject()) return r.asObj();
     }
     const reg = (try self.newObject()).object;
     try sym.object.setOwn(self.arena, self.root_shape, "\x00registry", Value.obj(reg));
@@ -27777,18 +27777,18 @@ fn symbolForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
 fn symbolKeyForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (args.len == 0 or !args[0].isObject() or !args[0].object.is_symbol)
+    if (args.len == 0 or !args[0].isObject() or !args[0].asObj().is_symbol)
         return self.throwError("TypeError", "Symbol.keyFor requires a symbol argument");
-    return args[0].object.getOwn("\x00forKey") orelse .undefined;
+    return args[0].asObj().getOwn("\x00forKey") orelse .undefined;
 }
 
 /// Abstract Relational Comparison (subset): string<string is lexicographic,
 /// everything else compares as numbers.
 fn lessThan(self: *Interpreter, a: Value, b: Value) EvalError!bool {
     if (a.isString() and b.isString()) {
-        return std.mem.order(u8, a.string, b.string) == .lt;
+        return std.mem.order(u8, a.asStr(), b.asStr()) == .lt;
     }
-    if ((a.isObject() and a.object.is_symbol) or (b.isObject() and b.object.is_symbol))
+    if ((a.isObject() and a.asObj().is_symbol) or (b.isObject() and b.asObj().is_symbol))
         return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
     const x = a.toNumber();
     const y = b.toNumber();
@@ -27816,7 +27816,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
         if (value.canonicalIndex(name)) |idx| {
             if (c.is_array and idx < c.elements.items.len and !c.isHole(idx)) return true;
             if (c.typed_array) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
-            if (c.prim) |p| if (p.isString() and idx < Interpreter.utf16LenOfString(p.string)) return true;
+            if (c.prim) |p| if (p.isString() and idx < Interpreter.utf16LenOfString(p.asStr())) return true;
         }
         cur = c.proto;
     }
@@ -27888,7 +27888,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     if (o.prim) |p| {
         if (p.isString()) {
             if (std.mem.eql(u8, name, "length")) return true;
-            if (Interpreter.arrayIndex(name)) |i| return i < Interpreter.utf16LenOfString(p.string);
+            if (Interpreter.arrayIndex(name)) |i| return i < Interpreter.utf16LenOfString(p.asStr());
         }
     }
     if (o.is_array) {
@@ -28099,14 +28099,14 @@ test "interpreter evaluates arithmetic with precedence" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const v = try evalSource(arena.allocator(), "1 + 2 * 3");
-    try std.testing.expectEqual(@as(f64, 7), v.number);
+    try std.testing.expectEqual(@as(f64, 7), v.asNum());
 }
 
 test "interpreter concatenates strings" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const v = try evalSource(arena.allocator(), "'a' + 'b' + 1");
-    try std.testing.expectEqualStrings("ab1", v.string);
+    try std.testing.expectEqualStrings("ab1", v.asStr());
 }
 
 test "interpreter handles variables, if, and while" {
@@ -28118,7 +28118,7 @@ test "interpreter handles variables, if, and while" {
         \\while (i <= 5) { x = x + i; i = i + 1; }
         \\x
     );
-    try std.testing.expectEqual(@as(f64, 15), v.number);
+    try std.testing.expectEqual(@as(f64, 15), v.asNum());
 }
 
 test "interpreter comparisons and logical ops" {
@@ -28135,7 +28135,7 @@ test "interpreter ternary" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const v = try evalSource(arena.allocator(), "true ? 10 : 20");
-    try std.testing.expectEqual(@as(f64, 10), v.number);
+    try std.testing.expectEqual(@as(f64, 10), v.asNum());
 }
 
 test "interpreter function declaration and call" {
@@ -28145,7 +28145,7 @@ test "interpreter function declaration and call" {
         \\function add(a, b) { return a + b; }
         \\add(40, 2)
     );
-    try std.testing.expectEqual(@as(f64, 42), v.number);
+    try std.testing.expectEqual(@as(f64, 42), v.asNum());
 }
 
 test "interpreter recursion (factorial)" {
@@ -28155,7 +28155,7 @@ test "interpreter recursion (factorial)" {
         \\function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); }
         \\fact(5)
     );
-    try std.testing.expectEqual(@as(f64, 120), v.number);
+    try std.testing.expectEqual(@as(f64, 120), v.asNum());
 }
 
 test "interpreter closures capture environment" {
@@ -28166,7 +28166,7 @@ test "interpreter closures capture environment" {
         \\let add10 = makeAdder(10);
         \\add10(5)
     );
-    try std.testing.expectEqual(@as(f64, 15), v.number);
+    try std.testing.expectEqual(@as(f64, 15), v.asNum());
 }
 
 test "interpreter arrow functions" {
@@ -28193,7 +28193,7 @@ test "interpreter higher-order with closure counter" {
         \\let c = counter();
         \\c(); c(); c()
     );
-    try std.testing.expectEqual(@as(f64, 3), v.number);
+    try std.testing.expectEqual(@as(f64, 3), v.asNum());
 }
 
 test "interpreter object literal + member access" {
@@ -28311,7 +28311,7 @@ test "interpreter method call binds this" {
         \\let o = { n: 10, getN: function () { return this.n; } };
         \\o.getN()
     );
-    try std.testing.expectEqual(@as(f64, 10), v.number);
+    try std.testing.expectEqual(@as(f64, 10), v.asNum());
 }
 
 test "interpreter for loop + ++ + compound assignment" {
