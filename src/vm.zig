@@ -606,7 +606,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const iterable = stack.pop().?;
                 // The array stays on the stack (peeked); append the iterable's
                 // elements into it.
-                try vm.spreadInto(&stack.items[stack.items.len - 1].object.elements, iterable);
+                try vm.spreadInto(&stack.items[stack.items.len - 1].asObj().elements, iterable);
             },
             .throw_op => {
                 vm.exception = stack.pop().?;
@@ -624,7 +624,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try stack.append(stack_alloc, Value.num(@floatFromInt(inst.a)));
             },
             .end_finally => {
-                const kind: Completion = @enumFromInt(@as(u8, @intFromFloat(stack.pop().?.number)));
+                const kind: Completion = @enumFromInt(@as(u8, @intFromFloat(stack.pop().?.asNum())));
                 const cval = stack.pop().?;
                 switch (kind) {
                     .normal => {}, // fall through past the finally
@@ -1527,11 +1527,11 @@ test "vm: arithmetic, precedence, comparison, logical" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "1 + 2 * 3")).number);
-    try std.testing.expectEqual(@as(f64, 1024), (try vmRun(a, "2 ** 10")).number);
-    try std.testing.expect((try vmRun(a, "3 > 2 && 2 >= 2")).boolean);
-    try std.testing.expect((try vmRun(a, "false || 1 === 1")).boolean);
-    try std.testing.expectEqualStrings("ab1", (try vmRun(a, "'a' + 'b' + 1")).string);
+    try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "1 + 2 * 3")).asNum());
+    try std.testing.expectEqual(@as(f64, 1024), (try vmRun(a, "2 ** 10")).asNum());
+    try std.testing.expect((try vmRun(a, "3 > 2 && 2 >= 2")).asBool());
+    try std.testing.expect((try vmRun(a, "false || 1 === 1")).asBool());
+    try std.testing.expectEqualStrings("ab1", (try vmRun(a, "'a' + 'b' + 1")).asStr());
 }
 
 test "vm: vars, while loop, ternary" {
@@ -1542,8 +1542,8 @@ test "vm: vars, while loop, ternary" {
         \\let x = 0; let i = 1;
         \\while (i <= 5) { x = x + i; i = i + 1; }
         \\x
-    )).number);
-    try std.testing.expectEqual(@as(f64, 10), (try vmRun(a, "true ? 10 : 20")).number);
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 10), (try vmRun(a, "true ? 10 : 20")).asNum());
 }
 
 test "vm: functions, recursion, closures" {
@@ -1553,15 +1553,15 @@ test "vm: functions, recursion, closures" {
     try std.testing.expectEqual(@as(f64, 42), (try vmRun(a,
         \\function add(x, y) { return x + y; }
         \\add(40, 2)
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 120), (try vmRun(a,
         \\function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); }
         \\fact(5)
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 15), (try vmRun(a,
         \\function mk(x) { return function (y) { return x + y; }; }
         \\mk(10)(5)
-    )).number);
+    )).asNum());
 }
 
 test "vm: generator calls from bytecode are lazy" {
@@ -1571,38 +1571,38 @@ test "vm: generator calls from bytecode are lazy" {
     try std.testing.expectEqualStrings("object", (try vmRun(a,
         \\function *g() { throw new Error("body ran"); }
         \\typeof g()
-    )).string);
+    )).asStr());
 }
 
 test "vm: if/else and short-circuit value" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqual(@as(f64, 1), (try vmRun(a, "let v = 0; if (3 > 2) { v = 1; } else { v = 2; } v")).number);
-    try std.testing.expectEqual(@as(f64, 5), (try vmRun(a, "0 || 5")).number);
-    try std.testing.expectEqual(@as(f64, 0), (try vmRun(a, "0 && 5")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(a, "let v = 0; if (3 > 2) { v = 1; } else { v = 2; } v")).asNum());
+    try std.testing.expectEqual(@as(f64, 5), (try vmRun(a, "0 || 5")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try vmRun(a, "0 && 5")).asNum());
 }
 
 test "vm: objects, arrays, members, this, new, instanceof on the VM" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqual(@as(f64, 3), (try vmRun(a, "let o = { x: 1, y: 2 }; o.x + o.y")).number);
-    try std.testing.expectEqual(@as(f64, 9), (try vmRun(a, "let o = {}; o.a = 4; o['b'] = 5; o.a + o['b']")).number);
-    try std.testing.expectEqual(@as(f64, 30), (try vmRun(a, "let xs = [10, 20, 30]; xs[2]")).number);
-    try std.testing.expectEqual(@as(f64, 4), (try vmRun(a, "let xs = [1]; xs.push(2); xs.push(3); xs.push(4); xs.length")).number);
-    try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "function P(x, y) { this.x = x; this.y = y; } let p = new P(3, 4); p.x + p.y")).number);
-    try std.testing.expect((try vmRun(a, "function P(x) { this.x = x; } (new P(1)) instanceof P")).boolean);
-    try std.testing.expectEqual(@as(f64, 10), (try vmRun(a, "let o = { n: 10, get: function () { return this.n; } }; o.get()")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try vmRun(a, "let o = { x: 1, y: 2 }; o.x + o.y")).asNum());
+    try std.testing.expectEqual(@as(f64, 9), (try vmRun(a, "let o = {}; o.a = 4; o['b'] = 5; o.a + o['b']")).asNum());
+    try std.testing.expectEqual(@as(f64, 30), (try vmRun(a, "let xs = [10, 20, 30]; xs[2]")).asNum());
+    try std.testing.expectEqual(@as(f64, 4), (try vmRun(a, "let xs = [1]; xs.push(2); xs.push(3); xs.push(4); xs.length")).asNum());
+    try std.testing.expectEqual(@as(f64, 7), (try vmRun(a, "function P(x, y) { this.x = x; this.y = y; } let p = new P(3, 4); p.x + p.y")).asNum());
+    try std.testing.expect((try vmRun(a, "function P(x) { this.x = x; } (new P(1)) instanceof P")).asBool());
+    try std.testing.expectEqual(@as(f64, 10), (try vmRun(a, "let o = { n: 10, get: function () { return this.n; } }; o.get()")).asNum());
 }
 
 test "vm: for loop with ++ and compound assignment" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqual(@as(f64, 45), (try vmRun(a, "let s = 0; for (let i = 0; i < 10; i++) { s += i; } s")).number);
-    try std.testing.expectEqual(@as(f64, 5), (try vmRun(a, "let x = 5; let y = x++; y")).number);
-    try std.testing.expectEqual(@as(f64, 6), (try vmRun(a, "let x = 5; let y = ++x; y")).number);
+    try std.testing.expectEqual(@as(f64, 45), (try vmRun(a, "let s = 0; for (let i = 0; i < 10; i++) { s += i; } s")).asNum());
+    try std.testing.expectEqual(@as(f64, 5), (try vmRun(a, "let x = 5; let y = x++; y")).asNum());
+    try std.testing.expectEqual(@as(f64, 6), (try vmRun(a, "let x = 5; let y = ++x; y")).asNum());
 }
 
 test "vm: compiler still falls back for try/catch" {

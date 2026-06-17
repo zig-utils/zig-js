@@ -1045,7 +1045,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
     const o = args[0].asObj();
     const key_tmp = try self.keyOf(argAt(args, 1));
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.waitAsync: object has no own data property");
-    const res = (try self.newObject()).object;
+    const res = (try self.newObject()).asObj();
     if (!sameValueZero(cur, argAt(args, 2))) {
         try self.setProp(res, "async", Value.boolVal(false));
         try self.setProp(res, "value", Value.str("not-equal"));

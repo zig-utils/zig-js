@@ -24,9 +24,9 @@ fn jsAssert(ctx: *anyopaque, this: Value, args: []const Value) js.HostError!Valu
     _ = this;
     if (args.len < 1 or !args[0].toBoolean()) {
         failed = true;
-        fail_msg = if (args.len >= 2 and args[1] == .string) args[1].string else "assertion failed";
+        fail_msg = if (args.len >= 2 and args[1].isString()) args[1].asStr() else "assertion failed";
     }
-    return .undefined;
+    return Value.undef();
 }
 
 fn jsAssertEq(ctx: *anyopaque, this: Value, args: []const Value) js.HostError!Value {
@@ -37,7 +37,7 @@ fn jsAssertEq(ctx: *anyopaque, this: Value, args: []const Value) js.HostError!Va
         failed = true;
         fail_msg = "assertEq mismatch";
     }
-    return .undefined;
+    return Value.undef();
 }
 
 const Case = struct { name: []const u8, src: []const u8 };
@@ -81,7 +81,7 @@ const cases = [_]Case{
 fn defineNative(ctx: *js.Context, name: []const u8, f: js.NativeFn) !void {
     const obj = try ctx.arena().create(js.Object);
     obj.* = .{ .native = f };
-    try ctx.env.put(name, .{ .object = obj });
+    try ctx.env.put(name, Value.obj(obj));
 }
 
 fn runCase(case: Case) bool {

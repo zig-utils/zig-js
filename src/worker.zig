@@ -333,7 +333,7 @@ test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
     }
     // Every worker's Atomics.add landed in the one shared storage.
     const count = try ctx.evaluate("new Int32Array(globalThis.__msg.sab)[0]");
-    try std.testing.expectEqual(@as(f64, 4), count.number);
+    try std.testing.expectEqual(@as(f64, 4), count.asNum());
 
     // Terminate a worker stuck in an infinite loop: the stop word fires at a
     // step checkpoint and the thread joins.
@@ -409,7 +409,7 @@ test "workers: host hook wakes on message and on outbox close" {
 
     // The worker fires the hook for the reply message and again at outbox close.
     const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(f64, 42), reply.number);
+    try std.testing.expectEqual(@as(f64, 42), reply.asNum());
     w.join();
     w.destroy();
     try std.testing.expect(sink.woken.load(.acquire) >= 1);
@@ -435,5 +435,5 @@ test "workers: module-graph worker resolves imports and round-trips a message" {
 
     // The imported `bump` ran against the shared storage.
     const count = try ctx.evaluate("new Int32Array(globalThis.__msg.sab)[0]");
-    try std.testing.expectEqual(@as(f64, 1), count.number);
+    try std.testing.expectEqual(@as(f64, 1), count.asNum());
 }

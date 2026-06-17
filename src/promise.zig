@@ -38,7 +38,7 @@ pub const Reaction = struct {
 pub const Promise = struct {
     lock: std.atomic.Mutex = .unlocked,
     state: State = .pending,
-    value: Value = .undefined,
+    value: Value = Value.undef(),
     /// Reaction list buffers are owned by the GC backing allocator when this
     /// promise cell is GC-owned; arena contexts keep the legacy arena path.
     gc_owned: bool = false,
@@ -77,8 +77,8 @@ pub const Microtask = struct {
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
-    thenable: Value = .undefined,
-    then_fn: Value = .undefined,
+    thenable: Value = Value.undef(),
+    then_fn: Value = Value.undef(),
     promise: ?*Promise = null,
 };
 
@@ -113,22 +113,22 @@ pub const Elem = struct {
 fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const fnobj = self.active_native orelse return .undefined;
+    const fnobj = self.active_native orelse return Value.undef();
     const data: *Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
-    if (data.already) return .undefined;
+    if (data.already) return Value.undef();
     data.already = true;
-    try resolve(self, data.promise, if (args.len > 0) args[0] else .undefined);
+    try resolve(self, data.promise, if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
 
 fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const fnobj = self.active_native orelse return .undefined;
+    const fnobj = self.active_native orelse return Value.undef();
     const data: *Resolving = @ptrCast(@alignCast(fnobj.private_data.?));
-    if (data.already) return .undefined;
+    if (data.already) return Value.undef();
     data.already = true;
-    try reject(self, data.promise, if (args.len > 0) args[0] else .undefined);
+    try reject(self, data.promise, if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
 
@@ -257,7 +257,7 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
         }
         // `await`/`then` on the inner: when it settles, settle `p`.
         const nr = try nativeResolveReject(self, p);
-        try performThen(self, inner, .undefined, .undefined, nr.resolve, nr.reject);
+        try performThen(self, inner, Value.undef(), Value.undef(), nr.resolve, nr.reject);
         return;
     }
     // Arbitrary thenable: adopt its state by calling `v.then(resolve, reject)`
@@ -267,7 +267,7 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
         const then_fn = self.getProperty(v, "then") catch |err| {
             if (err == error.Throw) {
                 const reason = self.exception;
-                self.exception = .undefined;
+                self.exception = Value.undef();
                 try reject(self, p, reason);
                 return;
             }
@@ -277,7 +277,7 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
             try enqueue(self, .{
                 .kind = .thenable,
                 .reaction = undefined,
-                .argument = .undefined,
+                .argument = Value.undef(),
                 .fulfilled = true,
                 .thenable = v,
                 .then_fn = then_fn,
@@ -362,7 +362,7 @@ pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
         if (self.callValueWithThis(task.then_fn, &.{ nr.resolve, nr.reject }, task.thenable)) |_| {} else |err| {
             if (err == error.Throw) {
                 const reason = self.exception;
-                self.exception = .undefined;
+                self.exception = Value.undef();
                 _ = try self.callValue(nr.reject, &.{reason});
             } else return err;
         }
@@ -370,12 +370,12 @@ pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
     }
     const r = task.reaction;
     if (r.handler) |h| {
-        if (self.callValueWithThis(h, &.{task.argument}, .undefined)) |res| {
+        if (self.callValueWithThis(h, &.{task.argument}, Value.undef())) |res| {
             _ = try self.callValue(r.resolve, &.{res});
         } else |err| {
             if (err == error.Throw) {
                 const reason = self.exception;
-                self.exception = .undefined;
+                self.exception = Value.undef();
                 _ = try self.callValue(r.reject, &.{reason});
             } else return err;
         }

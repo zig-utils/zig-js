@@ -2,6 +2,8 @@ const std = @import("std");
 const Shape = @import("shape.zig").Shape;
 const SharedBufferStorage = @import("shared_buffer.zig").SharedBufferStorage;
 const gc_runtime = @import("gc_runtime.zig");
+const strcell = @import("strcell.zig");
+const StringCell = strcell.StringCell;
 
 /// Incremental-GC insertion write barrier for a `Value` being stored into a
 /// live GC cell (issue #1 Phase 7 / M2). Only `.object` carries a cell; the
@@ -156,7 +158,7 @@ pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
         .i64 => @floatFromInt(std.mem.readInt(i64, bytes[off..][0..8], .little)),
         .u64 => @floatFromInt(std.mem.readInt(u64, bytes[off..][0..8], .little)),
     };
-    return .{ .number = n };
+    return Value.num(n);
 }
 
 /// Read a BigInt typed-array element `i` as an `i128` (the raw 64-bit value,
@@ -424,14 +426,14 @@ pub const TemporalData = struct {
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
     src: Value, // the underlying iterator (its `.next()` is pulled)
-    next_method: Value = .undefined, // captured once (GetIteratorDirect); called per step
+    next_method: Value = Value.undef(), // captured once (GetIteratorDirect); called per step
     kind: Kind,
-    func: Value = .undefined, // mapper/filterer/flatMapper; or zip_keyed's key array
+    func: Value = Value.undef(), // mapper/filterer/flatMapper; or zip_keyed's key array
     counter: f64 = 0, // index argument to the callback
     limit: f64 = 0, // take/drop count; or zip mode (0 shortest, 1 longest, 2 strict)
     inner: ?Value = null, // flat_map's current inner iterator; or zip's per-source done-flag array
-    inner_next: Value = .undefined, // flat_map inner iterator's captured `next`
-    padding: Value = .undefined, // zip(longest)'s per-source padding values
+    inner_next: Value = Value.undef(), // flat_map inner iterator's captured `next`
+    padding: Value = Value.undef(), // zip(longest)'s per-source padding values
     done: bool = false,
     started: bool = false, // drop: the initial skip has run
     is_async: bool = false, // AsyncIterator helper: `next` returns a promise
@@ -440,12 +442,12 @@ pub const IterHelper = struct {
 
 pub const WeakCollectionEntry = struct {
     key: ?*anyopaque = null,
-    value: Value = .undefined,
+    value: Value = Value.undef(),
 };
 
 pub const FinalizationRecord = struct {
     target: ?*anyopaque = null,
-    held: Value = .undefined,
+    held: Value = Value.undef(),
     token: ?*anyopaque = null,
     ready: bool = false,
 };
@@ -679,7 +681,7 @@ pub const Object = struct {
     /// Marks a `FinalizationRegistry`. Dead targets make records ready for
     /// explicit `cleanupSome()` delivery at quiescent collection points.
     is_finalization_registry: bool = false,
-    finalization_callback: Value = .undefined,
+    finalization_callback: Value = Value.undef(),
     finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
     /// Lazy Iterator-Helper state (`map`/`filter`/`take`/`drop`/`flatMap`/wrap),
     /// non-null on a helper iterator returned by those methods.
@@ -1456,64 +1458,83 @@ pub const PropAttr = struct {
 };
 
 /// A JavaScript value. Strings and objects point into the Context arena.
-pub const Value = union(enum) {
-    undefined,
-    null,
-    boolean: bool,
-    number: f64,
-    string: []const u8,
-    object: *Object,
+/// A JavaScript value — an 8-byte NaN-boxed word (issue #1 Phase 7, blocker #7).
+/// A number is any non-boxed word; non-number values live in the negative
+/// quiet-NaN region with a 3-bit tag in bits 50..48 and a 48-bit payload in bits
+/// 47..0 (a pointer, or a boolean bit). Strings point at a `StringCell`. This
+/// encoding is the one proven in `nanbox.zig` / `value_nb.zig`; every call site
+/// reaches the value only through the API below (`kind`/`num`/`str`/`obj`/
+/// `boolVal`/`undef`/`nul`/`asNum`/`asStr`/`asObj`/`asBool`/`isX`).
+pub const Value = struct {
+    bits: u64,
 
-    /// The value-kind discriminant, independent of the payload representation.
-    /// Phase 7 / blocker #7 introduces a representation-agnostic `Value` API
-    /// (this `Kind` + the `num`/`str`/`obj`/… constructors and `asNum`/`asStr`/…
-    /// accessors below). They are byte-identical over today's tagged union, so
-    /// migrating call sites onto them is a no-op — but once every site uses the
-    /// API instead of `switch (v)` / `.{ .string = … }` / `v.string`, swapping
-    /// the underlying representation to the 8-byte NaN-box (`nanbox.zig`, with
-    /// strings as `*StringCell` per `strcell.zig`) touches only this type, not
-    /// the ~2,600 call sites. See docs/threads/P7-gil-removal.md (#7).
-    pub const Kind = std.meta.Tag(Value);
+    const box_mask: u64 = 0xFFF8_0000_0000_0000;
+    const canon_nan: u64 = 0x7FF8_0000_0000_0000;
+    const tag_shift: u6 = 48;
+    const payload_mask: u64 = 0x0000_FFFF_FFFF_FFFF;
+    const tag_object: u3 = 1;
+    const tag_string: u3 = 2;
+    const tag_boolean: u3 = 3;
+    const tag_undefined: u3 = 4;
+    const tag_null: u3 = 5;
+
+    pub const Kind = enum { undefined, null, boolean, number, string, object };
+
+    inline fn boxed(tag: u3, payload: u64) Value {
+        return .{ .bits = box_mask | (@as(u64, tag) << tag_shift) | payload };
+    }
+    inline fn boxedTag(self: Value) u3 {
+        return @truncate(self.bits >> tag_shift);
+    }
 
     pub inline fn kind(self: Value) Kind {
-        return std.meta.activeTag(self);
+        if ((self.bits & box_mask) != box_mask) return .number;
+        return switch (self.boxedTag()) {
+            tag_object => .object,
+            tag_string => .string,
+            tag_boolean => .boolean,
+            tag_undefined => .undefined,
+            tag_null => .null,
+            else => .number,
+        };
     }
 
-    // Representation-agnostic constructors.
+    // Constructors.
     pub inline fn num(n: f64) Value {
-        return .{ .number = n };
+        return .{ .bits = if (std.math.isNan(n)) canon_nan else @bitCast(n) };
     }
     pub inline fn str(s: []const u8) Value {
-        return .{ .string = s };
+        return boxed(tag_string, @intFromPtr(strcell.makeCell(s)));
     }
     pub inline fn obj(o: *Object) Value {
-        return .{ .object = o };
+        return boxed(tag_object, @intFromPtr(o));
     }
     pub inline fn boolVal(b: bool) Value {
-        return .{ .boolean = b };
+        return boxed(tag_boolean, @intFromBool(b));
     }
     pub inline fn undef() Value {
-        return .undefined;
+        return boxed(tag_undefined, 0);
     }
     pub inline fn nul() Value {
-        return .null;
+        return boxed(tag_null, 0);
     }
 
-    // Representation-agnostic accessors (caller has checked `kind()` first).
+    // Accessors (caller has checked `kind()` first).
     pub inline fn asNum(self: Value) f64 {
-        return self.number;
+        return @bitCast(self.bits);
     }
     pub inline fn asStr(self: Value) []const u8 {
-        return self.string;
+        const cell: *const StringCell = @ptrFromInt(self.bits & payload_mask);
+        return cell.bytes;
     }
     pub inline fn asObj(self: Value) *Object {
-        return self.object;
+        return @ptrFromInt(self.bits & payload_mask);
     }
     pub inline fn asBool(self: Value) bool {
-        return self.boolean;
+        return (self.bits & payload_mask) != 0;
     }
 
-    // Representation-agnostic kind predicates (replace `v == .object` etc.).
+    // Kind predicates.
     pub inline fn isNumber(self: Value) bool {
         return self.kind() == .number;
     }
@@ -1901,7 +1922,7 @@ test "object named properties serialize concurrent same-name writes" {
     const value = object.getOwn("shared") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), object.slots.items.len);
     try std.testing.expectEqual(@as(?u32, 0), object.shape.?.lookup("shared"));
-    try std.testing.expect(value == .number);
+    try std.testing.expect(value.isNumber());
 }
 
 test "object named property delete rebuild serializes with writers" {

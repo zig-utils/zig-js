@@ -47,7 +47,7 @@ pub const CellKind = enum {
 /// Mark a `Value` if it carries a heap reference (only `.object` does — every
 /// other variant is an immediate or a primitive).
 inline fn markValue(v: anytype, val: Value) void {
-    if (val == .object) v.mark(val.object);
+    if (val.isObject()) v.mark(val.asObj());
 }
 
 inline fn markValueOpt(v: anytype, val: ?Value) void {
@@ -472,7 +472,7 @@ pub const Binding = struct {
             }
         }
         if (ctx.mod_cache) |cache| traceModuleGraph(cache, v);
-        markValue(v, ctx.exception orelse .undefined);
+        markValue(v, ctx.exception orelse Value.undef());
         // C-API protected handles: each ref is a `*Boxed` ({ value: Value }),
         // so the pointer aliases `*Value`.
         for (ctx.c_api_handles.items) |h| {
@@ -627,7 +627,7 @@ fn barrierThunk(raw_heap: *anyopaque, cell: ?*anyopaque) void {
 /// Call at every post-creation store of a reference into a live GC cell. A
 /// near-no-op outside incremental marking; see docs/threads/P7-gc-design.md.
 pub inline fn barrierValue(v: Value) void {
-    if (v == .object) gc_runtime.barrier(@ptrCast(v.object));
+    if (v.isObject()) gc_runtime.barrier(@ptrCast(v.asObj()));
 }
 
 /// Insertion write barrier for a stored cell pointer (Object/Environment/…).
@@ -749,9 +749,9 @@ test "gc binding: real Object graph — proto/slots/accessors survive, garbage s
     const garbage = try heap.create(Object, .object);
     garbage.* = .{};
 
-    try root.slots.append(a, .{ .object = child });
+    try root.slots.append(a, Value.obj(child));
     child.proto = gp;
-    try gp.slots.append(a, .{ .object = root }); // cycle back to the root
+    try gp.slots.append(a, Value.obj(root)); // cycle back to the root
     // `garbage` is unreferenced.
     try eng.roots.append(a, root);
     try std.testing.expectEqual(@as(usize, 4), heap.live_cells);
@@ -767,7 +767,7 @@ test "gc binding: real Object graph — proto/slots/accessors survive, garbage s
     acc_target.* = .{};
     const map = try a.create(std.StringHashMapUnmanaged(value.Accessor));
     map.* = .{};
-    try map.put(a, "x", .{ .get = .{ .object = acc_target }, .set = null });
+    try map.put(a, "x", .{ .get = Value.obj(acc_target), .set = null });
     holder.accessors = map;
     try eng.roots.append(a, holder);
 

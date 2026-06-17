@@ -48,8 +48,8 @@ pub fn encodeLiteral(comptime s: []const u8) NanBox {
 pub fn decode(nb: NanBox) Value {
     if (nb.isNumber()) return Value.num(nb.asNumber());
     return switch (nb.tag().?) {
-        .undefined => .undefined,
-        .null => .null,
+        .undefined => Value.undef(),
+        .null => Value.nul(),
         .boolean => Value.boolVal(nb.asBool()),
         .object => Value.obj(@ptrCast(@alignCast(nb.asPointer()))),
         .string => blk: {
@@ -87,8 +87,8 @@ test "valuebox: primitives round-trip through the NaN-box bridge" {
     var intern = strcell.InternTable.init(a);
     defer intern.deinit();
 
-    try expectRoundTrip(&intern, .undefined);
-    try expectRoundTrip(&intern, .null);
+    try expectRoundTrip(&intern, Value.undef());
+    try expectRoundTrip(&intern, Value.nul());
     try expectRoundTrip(&intern, Value.boolVal(true));
     try expectRoundTrip(&intern, Value.boolVal(false));
     const nums = [_]f64{ 0, -0.0, 1, -1, 3.14159, 1e308, -1e-308, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), std.math.floatMax(f64) };

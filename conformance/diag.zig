@@ -251,18 +251,18 @@ fn reportErr(ctx: *js.Context, err: anyerror, m: anytype) void {
     var name: []const u8 = "?";
     var msg: []const u8 = "";
     if (ctx.exception) |ex| {
-        if (ex == .object) {
-            const o = ex.object;
+        if (ex.isObject()) {
+            const o = ex.asObj();
             if (o.error_name.len > 0) name = o.error_name;
-            if (o.getOwn("name")) |nv| if (nv == .string) {
-                name = nv.string;
+            if (o.getOwn("name")) |nv| if (nv.isString()) {
+                name = nv.asStr();
             };
-            if (o.getOwn("message")) |mv| if (mv == .string) {
-                msg = mv.string;
+            if (o.getOwn("message")) |mv| if (mv.isString()) {
+                msg = mv.asStr();
             };
-        } else if (ex == .string) {
+        } else if (ex.isString()) {
             name = "(string)";
-            msg = ex.string;
+            msg = ex.asStr();
         } else name = @tagName(ex);
     }
     std.debug.print("OUTCOME: FAIL err={s} | {s}: {s}\n", .{ @errorName(err), name, msg });
@@ -316,18 +316,18 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, root: []const u8, out: std.Io.File
         var name: []const u8 = "?";
         var msg: []const u8 = "";
         if (ctx.exception) |ex| {
-            if (ex == .object) {
-                const o = ex.object;
+            if (ex.isObject()) {
+                const o = ex.asObj();
                 if (o.error_name.len > 0) name = o.error_name;
                 if (o.getOwn("name")) |nv| {
-                    if (nv == .string) name = nv.string;
+                    if (nv.isString()) name = nv.asStr();
                 }
                 if (o.getOwn("message")) |mv| {
-                    if (mv == .string) msg = mv.string;
+                    if (mv.isString()) msg = mv.asStr();
                 }
-            } else if (ex == .string) {
+            } else if (ex.isString()) {
                 name = "(string)";
-                msg = ex.string;
+                msg = ex.asStr();
             } else name = @tagName(ex);
         }
         emit2(out, io, buf, name, msg, path);

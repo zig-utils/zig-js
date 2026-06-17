@@ -1302,29 +1302,29 @@ test "modules namespace exotica observe TDZ and integrity semantics" {
 
 test "Date basics" {
     // Components constructor (month is 0-based) + UTC getters.
-    try std.testing.expectEqual(@as(f64, 2020), (try evalIn("new Date(2020, 0, 15).getUTCFullYear()")).number);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(2020, 0, 15).getUTCMonth()")).number);
-    try std.testing.expectEqual(@as(f64, 15), (try evalIn("new Date(2020, 0, 15).getUTCDate()")).number);
+    try std.testing.expectEqual(@as(f64, 2020), (try evalIn("new Date(2020, 0, 15).getUTCFullYear()")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(2020, 0, 15).getUTCMonth()")).asNum());
+    try std.testing.expectEqual(@as(f64, 15), (try evalIn("new Date(2020, 0, 15).getUTCDate()")).asNum());
     // Epoch round-trips.
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(0).getTime()")).number);
-    try std.testing.expectEqual(@as(f64, 1970), (try evalIn("new Date(0).getUTCFullYear()")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(0).getTime()")).asNum());
+    try std.testing.expectEqual(@as(f64, 1970), (try evalIn("new Date(0).getUTCFullYear()")).asNum());
     try expectEvalStr("number", "typeof Date.now()");
     try expectEvalStr("1970-01-01T00:00:00.000Z", "new Date(0).toISOString()");
-    try std.testing.expect((try evalIn("typeof new Date() === 'object'")).boolean);
+    try std.testing.expect((try evalIn("typeof new Date() === 'object'")).asBool());
 }
 
 test "String generics + .constructor + match/search" {
     // String.prototype method on a non-string this (coerced).
     try expectEvalStr("123", "String.prototype.trim.call(123)");
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("String.prototype.indexOf.call(12345, '3')")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("String.prototype.indexOf.call(12345, '3')")).asNum());
     // .constructor falls back to the kind's global.
-    try std.testing.expect((try evalIn("[].constructor === Array")).boolean);
-    try std.testing.expect((try evalIn("({}).constructor === Object")).boolean);
-    try std.testing.expect((try evalIn("'x'.constructor === String")).boolean);
-    try std.testing.expect((try evalIn("(5).constructor === Number")).boolean);
+    try std.testing.expect((try evalIn("[].constructor === Array")).asBool());
+    try std.testing.expect((try evalIn("({}).constructor === Object")).asBool());
+    try std.testing.expect((try evalIn("'x'.constructor === String")).asBool());
+    try std.testing.expect((try evalIn("(5).constructor === Number")).asBool());
     // search / match.
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("'abcd'.search(/cd/)")).number);
-    try std.testing.expect((try evalIn("'hello'.match(/l+/)[0] === 'll'")).boolean);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("'abcd'.search(/cd/)")).asNum());
+    try std.testing.expect((try evalIn("'hello'.match(/l+/)[0] === 'll'")).asBool());
     try expectEvalStr("abc", "'abc'.normalize()");
 }
 
@@ -1332,11 +1332,11 @@ test "Array.prototype generics on array-likes" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\var o = { length: 3, 0: 1, 1: 2, 2: 3 };
         \\Array.prototype.reduce.call(o, function (a, b) { return a + b; }, 0)
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 1), (try evalIn(
         \\var o = { length: 3, 0: 'a', 1: 'b', 2: 'c' };
         \\Array.prototype.indexOf.call(o, 'b')
-    )).number);
+    )).asNum());
     try expectEvalStr("a-b-c",
         \\var o = { length: 3, 0: 'a', 1: 'b', 2: 'c' };
         \\Array.prototype.join.call(o, '-')
@@ -1344,7 +1344,7 @@ test "Array.prototype generics on array-likes" {
     try std.testing.expect((try evalIn(
         \\var o = { length: 2, 0: 10, 1: 20 };
         \\Array.prototype.every.call(o, function (x) { return x >= 10; })
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var hit = false;
         \\var p = new Proxy({ length: 1, 0: 42 }, {
@@ -1352,7 +1352,7 @@ test "Array.prototype generics on array-likes" {
         \\});
         \\try { Array.prototype.copyWithin.call(p, 0, 0); false; }
         \\catch (e) { hit && e.message === "has"; }
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\function StopReverse() {}
         \\var o = { length: 2 ** 53 + 2 };
@@ -1361,7 +1361,7 @@ test "Array.prototype generics on array-likes" {
         \\});
         \\try { Array.prototype.reverse.call(o); false; }
         \\catch (e) { e instanceof StopReverse; }
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\function StopUnshift() {}
         \\var o = { length: 2 ** 53 - 2 };
@@ -1371,12 +1371,12 @@ test "Array.prototype generics on array-likes" {
         \\o["9007199254740987"] = "hi";
         \\try { Array.prototype.unshift.call(o, null); false; }
         \\catch (e) { e instanceof StopUnshift && o["9007199254740988"] === "hi"; }
-    )).boolean);
+    )).asBool());
     try std.testing.expectEqual(@as(f64, 9007199254740991), (try evalIn(
         \\var o = { length: Infinity };
         \\Array.prototype.unshift.call(o);
         \\o.length
-    )).number);
+    )).asNum());
     try expectEvalStr("hi,there",
         \\var o = { length: 2 ** 53 + 2 };
         \\o["9007199254740989"] = "hi";
@@ -1390,29 +1390,29 @@ test "Array.prototype generics on array-likes" {
         \\var first = a.shift();
         \\delete Array.prototype[1];
         \\first === 3 && a[0] === 17 && a[1] === undefined
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\try { Array.prototype.shift.call(Object.defineProperty({}, "length", { writable: false })); false; }
         \\catch (e) { e instanceof TypeError; }
-    )).boolean);
+    )).asBool());
 }
 
 test "array instances inherit from Array.prototype (incl. holes)" {
-    try std.testing.expect((try evalIn("Object.getPrototypeOf([]) === Array.prototype")).boolean);
-    try std.testing.expect((try evalIn("[].map === Array.prototype.map")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf([]) === Array.prototype")).asBool());
+    try std.testing.expect((try evalIn("[].map === Array.prototype.map")).asBool());
     // A hole reads through the prototype chain (inherited index), so an
     // accessor installed on Array.prototype is seen by index access + iteration.
     try std.testing.expectEqual(@as(f64, 11), (try evalIn(
         \\Object.defineProperty(Array.prototype, "0", { get: function () { return 11; }, configurable: true });
         \\[, , ,][0]
-    )).number);
+    )).asNum());
     try std.testing.expect((try evalIn(
         \\Object.defineProperty(Array.prototype, "0", { get: function () { return 11; }, configurable: true });
         \\var r = false; [, , ,].forEach(function (v, i) { if (i === 0) r = (v === 11); }); r
-    )).boolean);
+    )).asBool());
     // Ordinary arrays are unaffected: a real hole with no inherited index is undefined.
-    try std.testing.expect((try evalIn("[1, , 3][1] === undefined")).boolean);
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("[1, 2, 3][1]")).number);
+    try std.testing.expect((try evalIn("[1, , 3][1] === undefined")).asBool());
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("[1, 2, 3][1]")).asNum());
     try std.testing.expect((try evalIn(
         \\var hit = 0;
         \\try {
@@ -1423,7 +1423,7 @@ test "array instances inherit from Array.prototype (incl. holes)" {
         \\} finally {
         \\  delete Array.prototype[0];
         \\}
-    )).boolean);
+    )).asBool());
     try expectEvalStr("0|false|1",
         \\try {
         \\  Object.defineProperty(Array.prototype, "0", { value: 1, writable: false, configurable: true });
@@ -1437,14 +1437,14 @@ test "array instances inherit from Array.prototype (incl. holes)" {
 }
 
 test "Array / Object constructors" {
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).number);
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array(1, 2).length")).number);
-    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var a = new Array(5, 6, 7); a[2]")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array(1, 2).length")).asNum());
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var a = new Array(5, 6, 7); a[2]")).asNum());
     try expectEvalStr("function", "typeof Array");
-    try std.testing.expect((try evalIn("var o = new Object(); typeof o === 'object'")).boolean);
-    try std.testing.expect((try evalIn("var x = {}; Object(x) === x")).boolean);
+    try std.testing.expect((try evalIn("var o = new Object(); typeof o === 'object'")).asBool());
+    try std.testing.expect((try evalIn("var x = {}; Object(x) === x")).asBool());
     // Invalid array length throws RangeError.
-    try std.testing.expect((try evalIn("var t = false; try { new Array(-1); } catch (e) { t = e.name === 'RangeError'; } t")).boolean);
+    try std.testing.expect((try evalIn("var t = false; try { new Array(-1); } catch (e) { t = e.name === 'RangeError'; } t")).asBool());
 }
 
 test "destructuring catch parameter" {
@@ -1452,51 +1452,51 @@ test "destructuring catch parameter" {
         \\var r = 0;
         \\try { throw { a: 1, b: 2 }; } catch ({ a, b }) { r = a + b; }
         \\r
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 30), (try evalIn(
         \\var r = 0;
         \\try { throw [10, 20]; } catch ([x, y]) { r = x + y; }
         \\r
-    )).number);
+    )).asNum());
 }
 
 test "Array.from with iterables + map fn" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\function* g() { yield 1; yield 2; yield 3; }
         \\Array.from(g()).length + 3
-    )).number);
-    try std.testing.expectEqual(@as(f64, 12), (try evalIn("Array.from([1,2,3], function(x){return x*2;}).reduce(function(a,b){return a+b;},0)")).number);
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Array.from('abc').length")).number);
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array.from({length: 2}).length")).number);
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 12), (try evalIn("Array.from([1,2,3], function(x){return x*2;}).reduce(function(a,b){return a+b;},0)")).asNum());
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Array.from('abc').length")).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array.from({length: 2}).length")).asNum());
 }
 
 test "spread of iterables (generator, string, user iterator)" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\function* g() { yield 1; yield 2; yield 3; }
         \\var a = [...g()]; a[0] + a[1] + a[2]
-    )).number);
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("[...'abc'].length")).number);
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("[...'abc'].length")).asNum());
     // Spread feeding a call.
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\function add(a, b, c) { return a + b + c; }
         \\add(...[1, 2, 3])
-    )).number);
+    )).asNum());
 }
 
 test "Symbol: typeof, identity, description, property keys, iterator" {
     try expectEvalStr("symbol", "typeof Symbol()");
-    try std.testing.expect((try evalIn("var s = Symbol(); s === s && Symbol() !== Symbol()")).boolean);
+    try std.testing.expect((try evalIn("var s = Symbol(); s === s && Symbol() !== Symbol()")).asBool());
     try expectEvalStr("d", "Symbol('d').description");
     try expectEvalStr("symbol", "typeof Symbol.iterator");
     // Symbol-keyed property: works, but invisible to string enumeration.
     try std.testing.expectEqual(@as(f64, 5), (try evalIn(
         \\var s = Symbol(); var o = { a: 1 }; o[s] = 5;
         \\o[s]
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 1), (try evalIn(
         \\var s = Symbol(); var o = { a: 1 }; o[s] = 5;
         \\Object.keys(o).length
-    )).number);
+    )).asNum());
     // User iterator via Symbol.iterator drives for-of.
     try std.testing.expectEqual(@as(f64, 3), (try evalIn(
         \\var obj = {};
@@ -1505,15 +1505,15 @@ test "Symbol: typeof, identity, description, property keys, iterator" {
         \\  return { next: function () { return i < 3 ? { value: i++, done: false } : { value: undefined, done: true }; } };
         \\};
         \\var s = 0; for (var x of obj) { s += x; } s
-    )).number);
+    )).asNum());
 }
 
 test "array literal elision (holes)" {
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var a = [1, , 3]; a.length")).number);
-    try std.testing.expectEqual(@as(f64, 4), (try evalIn("var a = [, , 4]; a[2]")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var a = [1, , 3]; a.length")).asNum());
+    try std.testing.expectEqual(@as(f64, 4), (try evalIn("var a = [, , 4]; a[2]")).asNum());
     // Elision in array destructuring assignment.
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("var a, b; [, a, , b] = [1, 2, 3, 4]; a")).number);
-    try std.testing.expectEqual(@as(f64, 4), (try evalIn("var a, b; [, a, , b] = [1, 2, 3, 4]; b")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("var a, b; [, a, , b] = [1, 2, 3, 4]; a")).asNum());
+    try std.testing.expectEqual(@as(f64, 4), (try evalIn("var a, b; [, a, , b] = [1, 2, 3, 4]; b")).asNum());
 }
 
 test "new.target" {
@@ -1521,12 +1521,12 @@ test "new.target" {
     try std.testing.expect((try evalIn(
         \\function F() { return new.target === F; }
         \\F() === false && new F() instanceof F
-    )).boolean);
+    )).asBool());
     try std.testing.expectEqual(@as(f64, 1), (try evalIn(
         \\var hit = 0;
         \\function F() { if (new.target) hit = 1; }
         \\new F(); hit
-    )).number);
+    )).asNum());
 }
 
 test "object spread" {
@@ -1534,11 +1534,11 @@ test "object spread" {
         \\var base = { a: 1, b: 2 };
         \\var o = { ...base, c: 3 };
         \\o.a + o.b + o.c
-    )).number);
+    )).asNum());
     // Later properties override earlier spread ones.
-    try std.testing.expectEqual(@as(f64, 9), (try evalIn("var o = { x: 1, ...{ x: 9 } }; o.x")).number);
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn("var o = { x: 1, ...{ x: 9 } }; o.x")).asNum());
     // Spreading null/undefined is a no-op.
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var o = { ...null, ...undefined, a: 1 }; o.a")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var o = { ...null, ...undefined, a: 1 }; o.a")).asNum());
 }
 
 test "delete operator" {
@@ -1546,29 +1546,29 @@ test "delete operator" {
         \\var o = { a: 1, b: 2 };
         \\var ok = delete o.a;
         \\ok && !("a" in o) && o.b === 2
-    )).boolean);
+    )).asBool());
     // Non-configurable property can't be deleted.
     try std.testing.expect((try evalIn(
         \\var o = {};
         \\Object.defineProperty(o, "x", { value: 1, configurable: false });
         \\var r = delete o.x;
         \\!r && ("x" in o)
-    )).boolean);
+    )).asBool());
     // delete of a non-reference / missing property is true.
-    try std.testing.expect((try evalIn("delete 1 && delete {}.nope")).boolean);
+    try std.testing.expect((try evalIn("delete 1 && delete {}.nope")).asBool());
 }
 
 test "for-of / for-in with destructuring + member targets" {
     try std.testing.expectEqual(@as(f64, 10), (try evalIn(
         \\var s = 0; for (const [a, b] of [[1, 2], [3, 4]]) { s += a + b; } s
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 3), (try evalIn(
         \\var s = 0; for (const { x } of [{ x: 1 }, { x: 2 }]) { s += x; } s
-    )).number);
+    )).asNum());
     // Assignment form with a member target.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\var o = {}; for (o.k of [5, 6, 7]) {} o.k
-    )).number);
+    )).asNum());
     // Plain identifier (regression) + for-in still work.
     try expectEvalStr("ab",
         \\var r = ""; for (var k in { a: 1, b: 2 }) { r += k; } r
@@ -1582,13 +1582,13 @@ test "empty statements + class-declaration sequencing" {
         \\class C { m() { return 2; } };
         \\var c = new C();
         \\c.m()
-    )).number);
-    try std.testing.expectEqual(@as(f64, 5), (try evalIn(";;; var x = 5;;; x")).number);
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn(";;; var x = 5;;; x")).asNum());
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
         \\class C { [1.1]() { return 2; } static [1.1]() { return 2; } };
         \\var c = new C();
         \\c[1.1]()
-    )).number);
+    )).asNum());
 }
 
 test "context persists globals across evaluations" {
@@ -1597,7 +1597,7 @@ test "context persists globals across evaluations" {
     _ = try ctx.evaluate("var counter = 41;");
     const v = try ctx.evaluate("counter = counter + 1;");
     try std.testing.expectEqual(@as(f64, 42), v.asNum());
-    try std.testing.expect((try ctx.evaluate("Object.getPrototypeOf(globalThis).isPrototypeOf(globalThis)")).boolean);
+    try std.testing.expect((try ctx.evaluate("Object.getPrototypeOf(globalThis).isPrototypeOf(globalThis)")).asBool());
 }
 
 test "direct eval keeps lexical declarations local but hoists var" {
@@ -1610,7 +1610,7 @@ test "direct eval keeps lexical declarations local but hoists var" {
         \\eval('"use strict"; let strictOnly = 3;');
         \\eval('var visible = 5;');
         \\typeof strictOnly === 'undefined' && visible === 5 && outside === 23
-    )).boolean);
+    )).asBool());
 }
 
 test "primitive property assignment observes inherited proxy setters" {
@@ -1625,7 +1625,7 @@ test "primitive property assignment observes inherited proxy setters" {
         \\Object.setPrototypeOf(Symbol.prototype, new Proxy({}, { set: function() { symbolCount += 1; return true; } }));
         \\Symbol().test262 = null;
         \\numberCount === 1 && stringCount === 1 && booleanCount === 1 && symbolCount === 1
-    )).boolean);
+    )).asBool());
 }
 
 test "primitive property retrieval walks wrapper prototypes" {
@@ -1638,7 +1638,7 @@ test "primitive property retrieval walks wrapper prototypes" {
         \\"".test262 === "string prototype" &&
         \\true.test262 === "boolean prototype" &&
         \\Symbol().test262 === "symbol prototype"
-    )).boolean);
+    )).asBool());
 }
 
 test "indirect eval uses the callee realm global" {
@@ -1650,7 +1650,7 @@ test "indirect eval uses the callee realm global" {
         \\other.Symbol.prototype.test262 = "symbol prototype";
         \\other.value = Symbol();
         \\numberOk && other.eval("value.test262") === "symbol prototype"
-    )).boolean);
+    )).asBool());
 }
 
 test "delete distinguishes var bindings from sloppy global properties" {
@@ -1661,7 +1661,7 @@ test "delete distinguishes var bindings from sloppy global properties" {
         \\typeof declared === "object" &&
         \\delete undeclared === true &&
         \\typeof undeclared === "undefined"
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp.escape escapes pattern text" {
@@ -1673,7 +1673,7 @@ test "RegExp.escape escapes pattern text" {
     try expectEvalStr("\u{10000}", "RegExp.escape('\\ud800\\udc00')");
     try std.testing.expect((try evalIn(
         \\try { RegExp.escape(123); false } catch (e) { e.name === "TypeError" }
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp source and toString escape line terminators canonically" {
@@ -1690,7 +1690,7 @@ test "RegExp source and toString escape line terminators canonically" {
         \\same(RegExp("\\/"), "\\/") &&
         \\same(/[/]/, "[/]") &&
         \\same(/[\/]/, "[\\/]")
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp flags and toString use generic canonical accessors" {
@@ -1707,7 +1707,7 @@ test "RegExp flags and toString use generic canonical accessors" {
         \\  try { get.call(4n); } catch (e) { bigintThrows = e.name === "TypeError"; }
         \\  return symbolThrows && bigintThrows;
         \\})(Object.getOwnPropertyDescriptor(RegExp.prototype, "flags").get)
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp accessors use their own realm prototype" {
@@ -1728,7 +1728,7 @@ test "RegExp accessors use their own realm prototype" {
         \\var otherThrow = false;
         \\try { otherUnicode.call(mainProto); } catch (e) { otherThrow = e.constructor === other.TypeError; }
         \\ownDefaults && mainThrow && otherThrow
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp exec coerces and preserves lastIndex per spec" {
@@ -1742,7 +1742,7 @@ test "RegExp exec coerces and preserves lastIndex per spec" {
         \\r.lastIndex = { valueOf: function() { called += 1; return 0; }, toString: function() { called -= 10; } };
         \\r.exec(".");
         \\called === 3 && typeof r.lastIndex === "object"
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp lastIndex writes throw when non-writable" {
@@ -1754,7 +1754,7 @@ test "RegExp lastIndex writes throw when non-writable" {
         \\var execThrow = false;
         \\try { r.exec("abc000"); } catch (e) { execThrow = e.name === "TypeError"; }
         \\testThrow && execThrow && r.lastIndex === 0
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp compile mutates before throwing on non-writable lastIndex" {
@@ -1765,7 +1765,7 @@ test "RegExp compile mutates before throwing on non-writable lastIndex" {
         \\try { r.compile("^bar", "m"); } catch (e) { threw = e.name === "TypeError"; }
         \\threw && r.source === "^bar" && r.multiline === true && r.ignoreCase === false &&
         \\r.lastIndex === 42 && r.test("x\nbar") === true
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp generic exec dispatch validates protocol results" {
@@ -1798,7 +1798,7 @@ test "RegExp generic exec dispatch validates protocol results" {
         \\  }, "foo");
         \\} catch (e) { symbolThrow = e.name === "TypeError"; }
         \\testOk && regexpFallback && nonCallableThrow && objectReturn && primitiveThrow && symbolThrow
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp search uses generic exec and restores lastIndex" {
@@ -1820,7 +1820,7 @@ test "RegExp search uses generic exec and restores lastIndex" {
         \\catch (e) { nonObjectThrow = e.name === "TypeError"; }
         \\hit && nonObjectThrow &&
         \\log === "get:lastIndex,set:zero,get:exec,call:exec,get:lastIndex,set:old,"
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp match reads flags and observes lastIndex recompilation" {
@@ -1839,7 +1839,7 @@ test "RegExp match reads flags and observes lastIndex recompilation" {
         \\r.lastIndex = { valueOf: function() { r.compile("a", "g"); return 0; } };
         \\r[Symbol.match]("a");
         \\matched && log === "flags,set:0," && r.lastIndex === 1
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp replace uses generic exec and UTF-16 positions" {
@@ -1864,7 +1864,7 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
         \\};
         \\RegExp.prototype[Symbol.replace].call(rx, target, "_");
         \\log === "flags,set:0,set:5,set:5,"
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var args;
         \\var rx2 = {
@@ -1874,14 +1874,14 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
         \\RegExp.prototype[Symbol.replace].call(rx2, "aBC", function() { args = arguments; return "_"; });
         \\args.length === 5 && args[0] === "BC" && args[1] === "B" &&
         \\args[2] === 1 && args[3] === "aBC" && args[4].name === "B"
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var rx3 = {
         \\  flags: "",
         \\  exec: function() { return { 0: "x", length: 1, index: 0, groups: { a: "A" } }; }
         \\};
         \\RegExp.prototype[Symbol.replace].call(rx3, "x", "$<a>$&") === "Ax"
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var rx4 = {
         \\  flags: "",
@@ -1889,7 +1889,7 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
         \\};
         \\try { RegExp.prototype[Symbol.replace].call(rx4, "x", ""); false }
         \\catch (e) { e.name === "TypeError" }
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var rx5 = /./g;
         \\var called = false;
@@ -1901,13 +1901,13 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
         \\};
         \\rx5[Symbol.replace]("", "") === "" &&
         \\  rx5.lastIndex === Math.pow(2, 53)
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var r = /^|\udf06/g;
         \\Object.defineProperty(r, "unicode", { writable: true });
         \\r.unicode = undefined;
         \\r[Symbol.replace]("\ud834\udf06", "XXX") === "XXX\ud834XXX"
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp builtin exec exposes UTF-16 positions" {
@@ -1921,7 +1921,7 @@ test "RegExp builtin exec exposes UTF-16 positions" {
         \\  m.index === 0 &&
         \\  m.indices[0][0] === 0 &&
         \\  m.indices[0][1] === 2
-    )).boolean);
+    )).asBool());
 }
 
 test "JSON stringify preserves proxy array shape" {
@@ -1943,7 +1943,7 @@ test "RegExp constructor honors IsRegExp and flags rules" {
         \\try { /a/.compile(/b/my, "g"); } catch (e) { compileThrow = e.name === "TypeError"; }
         \\same && copied !== re && copied.toString() === "/foo/my" &&
         \\fromLike && returnedLike && compileOk && compileThrow
-    )).boolean);
+    )).asBool());
 }
 
 test "object literal __proto__ sets ordinary object prototype" {
@@ -1954,7 +1954,7 @@ test "object literal __proto__ sets ordinary object prototype" {
         \\o.marker === 1 && !o.hasOwnProperty("marker") &&
         \\Object.getPrototypeOf(o) === p &&
         \\Object.getPrototypeOf(n) === null
-    )).boolean);
+    )).asBool());
 }
 
 test "RegExp duplicate named captures use participating group" {
@@ -1963,7 +1963,7 @@ test "RegExp duplicate named captures use participating group" {
         \\m[0] === "xxyy" && m[1] === undefined && m[2] === "y" &&
         \\m.groups.a === "y" &&
         \\"xxyy".replace(/(?:(?:(?<a>x)|(?<a>y))\k<a>)/, "2$<a>") === "2xyy"
-    )).boolean);
+    )).asBool());
 }
 
 test "ShadowRealm uses ordinary globals and caller realm wrappers" {
@@ -1972,7 +1972,7 @@ test "ShadowRealm uses ordinary globals and caller realm wrappers" {
         \\r.evaluate('Object.getPrototypeOf(globalThis) === Object.prototype') &&
         \\r.evaluate('globalThis.constructor === Object') &&
         \\Object.getPrototypeOf(r.evaluate('() => 1')) === Function.prototype
-    )).boolean);
+    )).asBool());
 }
 
 test "ShadowRealm evaluate wraps child abrupt completions" {
@@ -2003,7 +2003,7 @@ test "ShadowRealm constructor metadata" {
         \\d.value === "ShadowRealm" && d.enumerable === false &&
         \\d.writable === false && d.configurable === true &&
         \\still && deleted && !Object.hasOwn(ShadowRealm, "name")
-    )).boolean);
+    )).asBool());
 }
 
 test "ShadowRealm wrapped function length descriptors" {
@@ -2181,20 +2181,20 @@ test "$262.AbstractModuleSource host intrinsic surface" {
         \\tagDesc.get.call(262) === undefined &&
         \\tagDesc.get.call(C.prototype) === undefined &&
         \\threw
-    )).boolean);
+    )).asBool());
 }
 
 test "function name + length own properties" {
     // `name` and `length` are own, non-enumerable, configurable, non-writable.
     try expectEvalStr("foo", "function foo(a, b) {} foo.name");
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function foo(a, b) {} foo.length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function foo(a, b) {} foo.length")).asNum());
     try std.testing.expect((try evalIn(
         \\function foo(a, b) {}
         \\foo.hasOwnProperty("name") && foo.hasOwnProperty("length")
-    )).boolean);
+    )).asBool());
     // `length` counts params before the first default / rest.
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("function f(a, b = 1, c) {} f.length")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("function f(a, ...r) {} f.length")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("function f(a, b = 1, c) {} f.length")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("function f(a, ...r) {} f.length")).asNum());
     // An anonymous function expression *not* in a naming position has the
     // empty name; assigned to a binding it takes that name (NamedEvaluation).
     try expectEvalStr("", "(function (x) {}).name");
@@ -2204,15 +2204,15 @@ test "function name + length own properties" {
         \\function f() {}
         \\var d = Object.getOwnPropertyDescriptor(f, "length");
         \\!d.writable && !d.enumerable && d.configurable
-    )).boolean);
+    )).asBool());
     // name/length are not enumerable (skipped by Object.keys / for-in).
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("function f(a) {} Object.keys(f).length")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("function f(a) {} Object.keys(f).length")).asNum());
     // Class constructor carries name + constructor arity.
     try expectEvalStr("C", "class C { constructor(a, b) {} } C.name");
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("class C { constructor(a, b) {} } C.length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("class C { constructor(a, b) {} } C.length")).asNum());
     // Bound function: name is "bound <target>", length is reduced by bound args.
     try expectEvalStr("bound f", "function f(a, b, c) {} f.bind(null, 1).name");
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f(a, b, c) {} f.bind(null, 1).length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f(a, b, c) {} f.bind(null, 1).length")).asNum());
 }
 
 test "sloppy function calls bind this through the callee realm" {
@@ -2232,35 +2232,35 @@ test "sloppy function calls bind this through the callee realm" {
         \\f.call(null) === other &&
         \\otherNumber.constructor === other.Number &&
         \\otherNumber instanceof other.Number
-    )).boolean);
+    )).asBool());
 }
 
 test "native functions carry name + length own properties" {
     // Built-in methods/globals/constructors report their spec name and arity.
     try expectEvalStr("defineProperty", "Object.defineProperty.name");
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Object.defineProperty.length")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Object.defineProperty.length")).asNum());
     try expectEvalStr("push", "Array.prototype.push.name");
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("Array.prototype.push.length")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("Array.prototype.push.length")).asNum());
     try expectEvalStr("parseInt", "parseInt.name");
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("parseInt.length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("parseInt.length")).asNum());
     try expectEvalStr("Object", "Object.name");
     // Same name can have a different arity on a different prototype.
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.prototype.toString.length")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("Number.prototype.toString.length")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.prototype.toString.length")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("Number.prototype.toString.length")).asNum());
     // Own + non-enumerable + non-writable + configurable, like user functions.
     try std.testing.expect((try evalIn(
         \\Object.keys.hasOwnProperty("name") && Object.keys.hasOwnProperty("length")
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var d = Object.getOwnPropertyDescriptor(Math.max, "length");
         \\!d.writable && !d.enumerable && d.configurable
-    )).boolean);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).number);
+    )).asBool());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Object.keys(Math.floor).length")).asNum());
 }
 
 test "typeof on an undeclared identifier is \"undefined\" (no throw)" {
     try expectEvalStr("undefined", "typeof undeclaredXYZ");
-    try std.testing.expect((try evalIn("typeof undeclaredXYZ === 'undefined'")).boolean);
+    try std.testing.expect((try evalIn("typeof undeclaredXYZ === 'undefined'")).asBool());
     try expectEvalStr("undefined", "function f() { return typeof zzz; } f()");
     // A declared-but-undefined var is still "undefined".
     try expectEvalStr("undefined", "var y; typeof y");
@@ -2271,106 +2271,106 @@ test "typeof on an undeclared identifier is \"undefined\" (no throw)" {
         \\var t = "";
         \\try { undeclaredABC; } catch (e) { t = e.name; }
         \\t === "ReferenceError"
-    )).boolean);
+    )).asBool());
 }
 
 test "global undefined is an immutable binding, not a literal token" {
     try std.testing.expect((try evalIn(
         \\undefined = 5;
         \\undefined === void 0
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var newProperty = undefined = 42;
         \\newProperty === 42 && undefined === void 0
-    )).boolean);
-    try std.testing.expect((try evalIn("delete undefined === false")).boolean);
+    )).asBool());
+    try std.testing.expect((try evalIn("delete undefined === false")).asBool());
     try std.testing.expect((try evalIn(
         \\var d = Object.getOwnPropertyDescriptor(globalThis, "undefined");
         \\d.value === void 0 && !d.writable && !d.enumerable && !d.configurable
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\(function () { let undefined = 7; return undefined; })() === 7
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\(function (undefined) { undefined = 9; return undefined; })(1) === 9
-    )).boolean);
+    )).asBool());
     try std.testing.expectError(error.Throw, evalIn("let undefined;"));
 }
 
 test "function declarations are hoisted" {
     // Forward references work at program scope and inside function bodies.
-    try std.testing.expectEqual(@as(f64, 5), (try evalIn("bar(); function bar() { return 5; }\nbar()")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("bar(); function bar() { return 5; }\nbar()")).asNum());
     try expectEvalStr("function", "typeof foo; function foo() {}");
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("foo.x = 1; function foo() {} foo.x")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("foo.x = 1; function foo() {} foo.x")).asNum());
     try std.testing.expectEqual(@as(f64, 9), (try evalIn(
         \\function f() { return inner(); function inner() { return 9; } }
         \\f()
-    )).number);
+    )).asNum());
     // The hoisted binding is the same function object referenced before its text.
-    try std.testing.expect((try evalIn("var g = bar; function bar() {} g === bar")).boolean);
+    try std.testing.expect((try evalIn("var g = bar; function bar() {} g === bar")).asBool());
     // A later declaration of the same name wins.
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f() { return 1; } function f() { return 2; } f()")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f() { return 1; } function f() { return 2; } f()")).asNum());
 }
 
 test "built-in methods are non-enumerable" {
     // Prototype methods and namespace statics are skipped by Object.keys/for-in.
-    try std.testing.expect((try evalIn("Object.keys(Math).indexOf('max') === -1")).boolean);
-    try std.testing.expect((try evalIn("Object.keys(JSON).length === 0")).boolean);
-    try std.testing.expect((try evalIn("Object.keys(Array.prototype).indexOf('push') === -1")).boolean);
-    try std.testing.expect(!(try evalIn("Array.prototype.propertyIsEnumerable('push')")).boolean);
-    try std.testing.expect((try evalIn("Object.keys(Object).indexOf('keys') === -1")).boolean);
+    try std.testing.expect((try evalIn("Object.keys(Math).indexOf('max') === -1")).asBool());
+    try std.testing.expect((try evalIn("Object.keys(JSON).length === 0")).asBool());
+    try std.testing.expect((try evalIn("Object.keys(Array.prototype).indexOf('push') === -1")).asBool());
+    try std.testing.expect(!(try evalIn("Array.prototype.propertyIsEnumerable('push')")).asBool());
+    try std.testing.expect((try evalIn("Object.keys(Object).indexOf('keys') === -1")).asBool());
     // They remain present and callable.
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Math.max(1, 2, 3)")).number);
-    try std.testing.expect((try evalIn("Array.prototype.hasOwnProperty('push')")).boolean);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("Math.max(1, 2, 3)")).asNum());
+    try std.testing.expect((try evalIn("Array.prototype.hasOwnProperty('push')")).asBool());
 }
 
 test "built-in prototypes carry constructor; Boolean.prototype exists" {
     // Every built-in prototype links back to its constructor (non-enumerable).
-    try std.testing.expect((try evalIn("Object.prototype.constructor === Object")).boolean);
-    try std.testing.expect((try evalIn("Array.prototype.constructor === Array")).boolean);
-    try std.testing.expect((try evalIn("String.prototype.constructor === String")).boolean);
-    try std.testing.expect((try evalIn("Number.prototype.constructor === Number")).boolean);
-    try std.testing.expect((try evalIn("Function.prototype.constructor === Function")).boolean);
-    try std.testing.expect((try evalIn("Date.prototype.constructor === Date")).boolean);
-    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Object)")).boolean);
-    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Array)")).boolean);
-    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(String)")).boolean);
-    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Date)")).boolean);
-    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(RegExp)")).boolean);
+    try std.testing.expect((try evalIn("Object.prototype.constructor === Object")).asBool());
+    try std.testing.expect((try evalIn("Array.prototype.constructor === Array")).asBool());
+    try std.testing.expect((try evalIn("String.prototype.constructor === String")).asBool());
+    try std.testing.expect((try evalIn("Number.prototype.constructor === Number")).asBool());
+    try std.testing.expect((try evalIn("Function.prototype.constructor === Function")).asBool());
+    try std.testing.expect((try evalIn("Date.prototype.constructor === Date")).asBool());
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Object)")).asBool());
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Array)")).asBool());
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(String)")).asBool());
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Date)")).asBool());
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(RegExp)")).asBool());
     // `constructor` is non-enumerable.
-    try std.testing.expect((try evalIn("Object.keys(Array.prototype).indexOf('constructor') === -1")).boolean);
+    try std.testing.expect((try evalIn("Object.keys(Array.prototype).indexOf('constructor') === -1")).asBool());
     // Boolean.prototype now exists with constructor + generic toString/valueOf.
     try expectEvalStr("object", "typeof Boolean.prototype");
-    try std.testing.expect((try evalIn("Boolean.prototype.constructor === Boolean")).boolean);
-    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Boolean)")).boolean);
-    try std.testing.expect((try evalIn("Object.prototype.isPrototypeOf(Boolean.prototype)")).boolean);
+    try std.testing.expect((try evalIn("Boolean.prototype.constructor === Boolean")).asBool());
+    try std.testing.expect((try evalIn("Function.prototype.isPrototypeOf(Boolean)")).asBool());
+    try std.testing.expect((try evalIn("Object.prototype.isPrototypeOf(Boolean.prototype)")).asBool());
     try expectEvalStr("true", "Boolean.prototype.toString.call(true)");
-    try std.testing.expect(!(try evalIn("Boolean.prototype.valueOf.call(false)")).boolean);
+    try std.testing.expect(!(try evalIn("Boolean.prototype.valueOf.call(false)")).asBool());
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
         \\var C = new other.Function();
         \\C.prototype = null;
         \\Object.getPrototypeOf(Reflect.construct(Boolean, [], C)) === other.Boolean.prototype
-    )).boolean);
+    )).asBool());
 }
 
 test "Symbol.prototype: toString / valueOf / chain" {
     try expectEvalStr("object", "typeof Symbol.prototype");
-    try std.testing.expect((try evalIn("Symbol.prototype.constructor === Symbol")).boolean);
+    try std.testing.expect((try evalIn("Symbol.prototype.constructor === Symbol")).asBool());
     try expectEvalStr("function", "typeof Symbol.prototype.toString");
     // toString renders the description; valueOf returns the symbol itself.
     try expectEvalStr("Symbol(f)", "Symbol('f').toString()");
     try expectEvalStr("Symbol()", "Symbol().toString()");
-    try std.testing.expect((try evalIn("var s = Symbol('q'); s.valueOf() === s")).boolean);
+    try std.testing.expect((try evalIn("var s = Symbol('q'); s.valueOf() === s")).asBool());
     // Instances are linked to Symbol.prototype; the methods are generic via .call.
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(Symbol()) === Symbol.prototype")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Symbol()) === Symbol.prototype")).asBool());
     try expectEvalStr("Symbol(z)", "Symbol.prototype.toString.call(Symbol('z'))");
     // A non-symbol receiver throws TypeError.
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { Symbol.prototype.toString.call({}); } catch (e) { t = e.name === "TypeError"; }
         \\t
-    )).boolean);
+    )).asBool());
 }
 
 test "Symbol constructor probes and ordinary wrapper coercion" {
@@ -2382,7 +2382,7 @@ test "Symbol constructor probes and ordinary wrapper coercion" {
         \\try { new Symbol({ toString: function() { touched = true; return 'x'; } }); }
         \\catch (e) { threw = e instanceof TypeError; }
         \\probed && threw && !touched
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\Object.defineProperty(Symbol.prototype, Symbol.toPrimitive, { configurable: true, value: null });
         \\var result = `${Object(Symbol())}`;
@@ -2392,7 +2392,7 @@ test "Symbol constructor probes and ordinary wrapper coercion" {
         \\try { Object(Symbol()) <= ''; } catch (e) { related = e instanceof TypeError; }
         \\delete Symbol.prototype[Symbol.toPrimitive];
         \\result === 'Symbol()' && threw && related
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\delete Symbol.prototype[Symbol.toPrimitive];
         \\var gets = 0;
@@ -2403,7 +2403,7 @@ test "Symbol constructor probes and ordinary wrapper coercion" {
         \\});
         \\var str = ''.concat(Object(Symbol()));
         \\str === 'Symbol()' && gets === 0
-    )).boolean);
+    )).asBool());
 }
 
 test "Error.prototype.stack accessor" {
@@ -2413,14 +2413,14 @@ test "Error.prototype.stack accessor" {
     try expectEvalStr("set stack", "Object.getOwnPropertyDescriptor(Error.prototype, 'stack').set.name");
     // The getter returns a string for an Error receiver, undefined otherwise.
     try expectEvalStr("string", "typeof new Error('x').stack");
-    try std.testing.expect((try evalIn("({ __proto__: new Error('y') }).stack === undefined")).boolean);
+    try std.testing.expect((try evalIn("({ __proto__: new Error('y') }).stack === undefined")).asBool());
     // The setter installs an own { writable, enumerable, configurable } data
     // property shadowing the accessor (SetterThatIgnoresPrototypeProperties).
-    try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 'custom'; e.stack === 'custom'")).boolean);
-    try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 's'; Object.getOwnPropertyDescriptor(e, 'stack').enumerable")).boolean);
+    try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 'custom'; e.stack === 'custom'")).asBool());
+    try std.testing.expect((try evalIn("var e = new Error('x'); e.stack = 's'; Object.getOwnPropertyDescriptor(e, 'stack').enumerable")).asBool());
     // A non-String value throws a TypeError; assigning to %Error.prototype% throws.
-    try std.testing.expect((try evalIn("var e = new Error('x'); try { e.stack = 42; false } catch (x) { x instanceof TypeError }")).boolean);
-    try std.testing.expect((try evalIn("try { Error.prototype.stack = 's'; false } catch (x) { x instanceof TypeError }")).boolean);
+    try std.testing.expect((try evalIn("var e = new Error('x'); try { e.stack = 42; false } catch (x) { x instanceof TypeError }")).asBool());
+    try std.testing.expect((try evalIn("try { Error.prototype.stack = 's'; false } catch (x) { x instanceof TypeError }")).asBool());
     try std.testing.expect((try evalIn(
         \\var setA = Object.getOwnPropertyDescriptor(Error.prototype, "stack").set;
         \\var realmB = $262.createRealm().global;
@@ -2430,39 +2430,39 @@ test "Error.prototype.stack accessor" {
         \\} catch (e) {
         \\  Object.getPrototypeOf(e) === realmB.TypeError.prototype;
         \\}
-    )).boolean);
+    )).asBool());
 }
 
 test "AggregateError" {
     try expectEvalStr("function", "typeof AggregateError");
     // errors comes from the (iterable) first arg; message is the second.
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new AggregateError([1, 2, 3]).errors.length")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new AggregateError([1, 2, 3]).errors.length")).asNum());
     try expectEvalStr("boom", "new AggregateError([], 'boom').message");
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("new AggregateError(new Set([1, 2])).errors.length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("new AggregateError(new Set([1, 2])).errors.length")).asNum());
     // Prototype chain + name, and the cause option (third arg).
-    try std.testing.expect((try evalIn("new AggregateError([]) instanceof Error")).boolean);
-    try std.testing.expect((try evalIn("new AggregateError([]) instanceof AggregateError")).boolean);
+    try std.testing.expect((try evalIn("new AggregateError([]) instanceof Error")).asBool());
+    try std.testing.expect((try evalIn("new AggregateError([]) instanceof AggregateError")).asBool());
     try expectEvalStr("AggregateError", "AggregateError.prototype.name");
-    try std.testing.expectEqual(@as(f64, 5), (try evalIn("new AggregateError([], 'm', { cause: 5 }).cause")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("new AggregateError([], 'm', { cause: 5 }).cause")).asNum());
     // `errors` is a non-enumerable own property.
-    try std.testing.expect((try evalIn("new AggregateError([1]).hasOwnProperty('errors') && Object.keys(new AggregateError([1])).indexOf('errors') === -1")).boolean);
+    try std.testing.expect((try evalIn("new AggregateError([1]).hasOwnProperty('errors') && Object.keys(new AggregateError([1])).indexOf('errors') === -1")).asBool());
     try std.testing.expect((try evalIn(
         \\var proto = {};
         \\function Target() {}
         \\Target.prototype = proto;
         \\Object.getPrototypeOf(Reflect.construct(AggregateError, [[]], Target)) === proto
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
         \\var Target = new other.Function();
         \\Target.prototype = undefined;
         \\Object.getPrototypeOf(Reflect.construct(AggregateError, [[]], Target)) === other.AggregateError.prototype
-    )).boolean);
-    try std.testing.expect((try evalIn("try { new AggregateError(); false } catch (e) { e instanceof TypeError }")).boolean);
+    )).asBool());
+    try std.testing.expect((try evalIn("try { new AggregateError(); false } catch (e) { e instanceof TypeError }")).asBool());
     try std.testing.expect((try evalIn(
         \\var bad = { [Symbol.iterator]() { return { next() { return undefined; } }; } };
         \\try { new AggregateError(bad); false } catch (e) { e instanceof TypeError }
-    )).boolean);
+    )).asBool());
 }
 
 test "SuppressedError creates message before error and suppressed" {
@@ -2472,22 +2472,22 @@ test "SuppressedError creates message before error and suppressed" {
         \\keys.indexOf("message") !== -1 &&
         \\keys.indexOf("error") === keys.indexOf("message") + 1 &&
         \\keys.indexOf("suppressed") === keys.indexOf("error") + 1
-    )).boolean);
+    )).asBool());
 }
 
 test "Error cause option (ES2022)" {
     // `new Error(msg, { cause })` installs a non-enumerable own `cause`.
-    try std.testing.expectEqual(@as(f64, 42), (try evalIn("new Error('m', { cause: 42 }).cause")).number);
-    try std.testing.expect((try evalIn("new TypeError('t', { cause: 'x' }).cause === 'x'")).boolean);
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn("new Error('m', { cause: 42 }).cause")).asNum());
+    try std.testing.expect((try evalIn("new TypeError('t', { cause: 'x' }).cause === 'x'")).asBool());
     // Present-but-undefined cause is still an own property; absent options is not.
-    try std.testing.expect((try evalIn("new Error('m', { cause: undefined }).hasOwnProperty('cause')")).boolean);
-    try std.testing.expect(!(try evalIn("new Error('m').hasOwnProperty('cause')")).boolean);
-    try std.testing.expect(!(try evalIn("new Error('m', {}).hasOwnProperty('cause')")).boolean);
+    try std.testing.expect((try evalIn("new Error('m', { cause: undefined }).hasOwnProperty('cause')")).asBool());
+    try std.testing.expect(!(try evalIn("new Error('m').hasOwnProperty('cause')")).asBool());
+    try std.testing.expect(!(try evalIn("new Error('m', {}).hasOwnProperty('cause')")).asBool());
     // cause is non-enumerable, writable, configurable.
     try std.testing.expect((try evalIn(
         \\var d = Object.getOwnPropertyDescriptor(new Error('m', { cause: 1 }), 'cause');
         \\!d.enumerable && d.writable && d.configurable
-    )).boolean);
+    )).asBool());
 }
 
 test "Error prototypes: chain, name/message inheritance, toString" {
@@ -2495,18 +2495,18 @@ test "Error prototypes: chain, name/message inheritance, toString" {
     try expectEvalStr("object", "typeof Error.prototype");
     try expectEvalStr("Error", "Error.prototype.name");
     try expectEvalStr("", "Error.prototype.message");
-    try std.testing.expect((try evalIn("Error.prototype.constructor === Error")).boolean);
-    try std.testing.expect((try evalIn("Error.hasOwnProperty('prototype')")).boolean);
+    try std.testing.expect((try evalIn("Error.prototype.constructor === Error")).asBool());
+    try std.testing.expect((try evalIn("Error.hasOwnProperty('prototype')")).asBool());
     // Prototype chain: TypeError.prototype -> Error.prototype -> Object.prototype.
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(new Error()) === Error.prototype")).boolean);
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError.prototype) === Error.prototype")).boolean);
-    try std.testing.expect((try evalIn("new TypeError('x') instanceof Error")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(new Error()) === Error.prototype")).asBool());
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError.prototype) === Error.prototype")).asBool());
+    try std.testing.expect((try evalIn("new TypeError('x') instanceof Error")).asBool());
     // name is inherited; message is own only when supplied.
     try expectEvalStr("Error", "new Error().name");
     try expectEvalStr("TypeError", "new TypeError().name");
-    try std.testing.expect((try evalIn("new Error('m').hasOwnProperty('message')")).boolean);
-    try std.testing.expect(!(try evalIn("new Error().hasOwnProperty('message')")).boolean);
-    try std.testing.expect(!(try evalIn("new Error().hasOwnProperty('name')")).boolean);
+    try std.testing.expect((try evalIn("new Error('m').hasOwnProperty('message')")).asBool());
+    try std.testing.expect(!(try evalIn("new Error().hasOwnProperty('message')")).asBool());
+    try std.testing.expect(!(try evalIn("new Error().hasOwnProperty('name')")).asBool());
     // toString: "name: message", or just one when the other is empty; generic.
     try expectEvalStr("Error: hi", "new Error('hi').toString()");
     try expectEvalStr("TypeError: x", "new TypeError('x').toString()");
@@ -2517,49 +2517,49 @@ test "Error prototypes: chain, name/message inheritance, toString" {
 test "Object.prototype legacy accessor helpers (__define/lookup__)" {
     try std.testing.expectEqual(@as(f64, 42), (try evalIn(
         \\var o = {}; o.__defineGetter__("x", function () { return 42; }); o.x
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\var o = {}; var v = 0; o.__defineSetter__("y", function (n) { v = n; }); o.y = 7; v
-    )).number);
+    )).asNum());
     // __lookupGetter__/__lookupSetter__ return the accessor fn, walking the proto chain.
     try std.testing.expect((try evalIn(
         \\var o = {}; o.__defineGetter__("x", function () { return 1; });
         \\typeof o.__lookupGetter__("x") === "function" && o.__lookupGetter__("x")() === 1
-    )).boolean);
+    )).asBool());
     // Missing / data properties have no getter; a non-callable arg throws TypeError.
-    try std.testing.expect((try evalIn("({}).__lookupGetter__('nope') === undefined")).boolean);
-    try std.testing.expect((try evalIn("({ a: 1 }).__lookupGetter__('a') === undefined")).boolean);
+    try std.testing.expect((try evalIn("({}).__lookupGetter__('nope') === undefined")).asBool());
+    try std.testing.expect((try evalIn("({ a: 1 }).__lookupGetter__('a') === undefined")).asBool());
     try std.testing.expect((try evalIn(
         \\var t = false; try { ({}).__defineGetter__("x", 5); } catch (e) { t = e.name === "TypeError"; } t
-    )).boolean);
+    )).asBool());
     // Defined accessor is enumerable + configurable.
     try std.testing.expect((try evalIn(
         \\var o = {}; o.__defineGetter__("x", function () {});
         \\var d = Object.getOwnPropertyDescriptor(o, "x"); d.enumerable && d.configurable
-    )).boolean);
+    )).asBool());
 }
 
 test "large array length is logical (no OOM) + length assignment" {
     // `new Array(huge)` tracks length without materializing 4 billion holes.
-    try std.testing.expectEqual(@as(f64, 4294967295), (try evalIn("new Array(4294967295).length")).number);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Array(0).length")).number);
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).number);
-    try std.testing.expectEqual(@as(f64, 100), (try evalIn("new Array(100).length")).number);
+    try std.testing.expectEqual(@as(f64, 4294967295), (try evalIn("new Array(4294967295).length")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Array(0).length")).asNum());
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).asNum());
+    try std.testing.expectEqual(@as(f64, 100), (try evalIn("new Array(100).length")).asNum());
     // Assigning length truncates (dropping elements) or grows logically.
     try std.testing.expect((try evalIn(
         \\var a = [1, 2, 3]; a.length = 2;
         \\a.length === 2 && a[1] === 2 && a[2] === undefined
-    )).boolean);
-    try std.testing.expectEqual(@as(f64, 5), (try evalIn("var a = [1, 2, 3]; a.length = 5; a.length")).number);
+    )).asBool());
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("var a = [1, 2, 3]; a.length = 5; a.length")).asNum());
     // A large index extends the logical length past it.
-    try std.testing.expectEqual(@as(f64, 6), (try evalIn("var a = []; a[5] = 1; a.length")).number);
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn("var a = []; a[5] = 1; a.length")).asNum());
     // Invalid lengths throw RangeError.
     try std.testing.expect((try evalIn(
         \\var t = false; try { [].length = -1; } catch (e) { t = e.name === "RangeError"; } t
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var t = false; try { [].length = 1.5; } catch (e) { t = e.name === "RangeError"; } t
-    )).boolean);
+    )).asBool());
 }
 
 test "Date setters + string conversions" {
@@ -2567,17 +2567,17 @@ test "Date setters + string conversions" {
     try std.testing.expect((try evalIn(
         \\var d = new Date(2016, 6, 1); d.setHours(0, 0, 0, 543);
         \\d.getTime() === new Date(2016, 6, 1, 0, 0, 0, 543).getTime()
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var d = new Date(2016, 6, 1); d.setHours(0, 0, 0, -1);
         \\d.getTime() === new Date(2016, 5, 30, 23, 59, 59, 999).getTime()
-    )).boolean);
+    )).asBool());
     // setMonth/setDate roll into adjacent months/years.
-    try std.testing.expectEqual(@as(f64, 1971), (try evalIn("var d = new Date(0); d.setMonth(13); d.getUTCFullYear()")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var d = new Date(0); d.setDate(32); d.getUTCMonth()")).number);
+    try std.testing.expectEqual(@as(f64, 1971), (try evalIn("var d = new Date(0); d.setMonth(13); d.getUTCFullYear()")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var d = new Date(0); d.setDate(32); d.getUTCMonth()")).asNum());
     // setFullYear revives an invalid date; other setters leave it invalid.
-    try std.testing.expectEqual(@as(f64, 2020), (try evalIn("var d = new Date(NaN); d.setFullYear(2020); d.getUTCFullYear()")).number);
-    try std.testing.expect(std.math.isNan((try evalIn("var d = new Date(NaN); d.setHours(5); d.getTime()")).number));
+    try std.testing.expectEqual(@as(f64, 2020), (try evalIn("var d = new Date(NaN); d.setFullYear(2020); d.getUTCFullYear()")).asNum());
+    try std.testing.expect(std.math.isNan((try evalIn("var d = new Date(NaN); d.setHours(5); d.getTime()")).asNum()));
     // String conversions.
     try expectEvalStr("Thu, 01 Jan 1970 00:00:00 GMT", "new Date(0).toUTCString()");
     try expectEvalStr("Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)", "new Date(0).toString()");
@@ -2588,42 +2588,42 @@ test "Date setters + string conversions" {
         \\var t = false;
         \\try { new Date(NaN).toISOString(); } catch (e) { t = e.name === "RangeError"; }
         \\t
-    )).boolean);
-    try std.testing.expect((try evalIn("new Date(NaN).toJSON() === null")).boolean);
+    )).asBool());
+    try std.testing.expect((try evalIn("new Date(NaN).toJSON() === null")).asBool());
 }
 
 test "Function constructor builds callable functions from source" {
     // Params + body, called and constructed.
-    try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).number);
-    try std.testing.expectEqual(@as(f64, 12), (try evalIn("new Function('a,b', 'return a * b')(3, 4)")).number);
-    try std.testing.expectEqual(@as(f64, 42), (try evalIn("Function('return 42')()")).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).asNum());
+    try std.testing.expectEqual(@as(f64, 12), (try evalIn("new Function('a,b', 'return a * b')(3, 4)")).asNum());
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn("Function('return 42')()")).asNum());
     try std.testing.expect((try evalIn(
         \\var i = 0;
         \\var p = { toString: function() { return "a" + (++i); } };
         \\var f = Function(p, p, p, "return a3 + a2 + a1.length;");
         \\f("x", "", 2) === "21" && i === 3
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var p = { toString: function() { p = 1; return "a"; } };
         \\var body = { toString: function() { throw "body"; } };
         \\try { Function(p, body); false; } catch (e) { e === "body" && p === 1; }
-    )).boolean);
+    )).asBool());
     // Spec name + arity of the synthesized function.
     try expectEvalStr("anonymous", "Function('return 1').name");
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Function('a', 'b', 'return 0').length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Function('a', 'b', 'return 0').length")).asNum());
     try expectEvalStr("function", "typeof Function('return 1')");
     // A syntactically invalid body throws SyntaxError.
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { Function("return )("); } catch (e) { t = e.name === "SyntaxError"; }
         \\t
-    )).boolean);
+    )).asBool());
 }
 
 test "String.prototype.split: limit + regex separators" {
     // `limit` truncates the result.
     try expectEvalStr("a|b", "'a,b,c'.split(',', 2).join('|')");
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("'a,b,c'.split(',', 0).length")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("'a,b,c'.split(',', 0).length")).asNum());
     // Regex separators split on each match.
     try expectEvalStr("2016|01|02", "'2016-01-02'.split(/-/).join('|')");
     try expectEvalStr("a|b|c", "'a1b2c'.split(/\\d/).join('|')");
@@ -2633,27 +2633,27 @@ test "String.prototype.split: limit + regex separators" {
     // Capture groups are spliced into the result.
     try expectEvalStr(",t,es,t,", "'test'.split(/(t)/).join(',')");
     // Empty input: [""] unless the pattern matches the empty string (then []).
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("''.split(/x/).length")).number);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("''.split(/(?:)/).length")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("''.split(/x/).length")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("''.split(/(?:)/).length")).asNum());
     // String separators (and no separator) still behave.
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("'a,b,c'.split(',').length")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("'abc'.split().length")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("'a,b,c'.split(',').length")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("'abc'.split().length")).asNum());
 }
 
 test "Object.hasOwn" {
-    try std.testing.expect((try evalIn("Object.hasOwn({ a: 1 }, \"a\")")).boolean);
-    try std.testing.expect(!(try evalIn("Object.hasOwn({ a: 1 }, \"b\")")).boolean);
+    try std.testing.expect((try evalIn("Object.hasOwn({ a: 1 }, \"a\")")).asBool());
+    try std.testing.expect(!(try evalIn("Object.hasOwn({ a: 1 }, \"b\")")).asBool());
     // Own only — inherited properties are excluded.
-    try std.testing.expect(!(try evalIn("Object.hasOwn(Object.create({ a: 1 }), \"a\")")).boolean);
+    try std.testing.expect(!(try evalIn("Object.hasOwn(Object.create({ a: 1 }), \"a\")")).asBool());
     // Array indices, array length, and string indices/length.
-    try std.testing.expect((try evalIn("Object.hasOwn([1, 2], 0) && Object.hasOwn([1, 2], \"length\") && !Object.hasOwn([1, 2], 5)")).boolean);
-    try std.testing.expect((try evalIn("Object.hasOwn(\"ab\", 0) && Object.hasOwn(\"ab\", \"length\") && !Object.hasOwn(\"ab\", 9)")).boolean);
+    try std.testing.expect((try evalIn("Object.hasOwn([1, 2], 0) && Object.hasOwn([1, 2], \"length\") && !Object.hasOwn([1, 2], 5)")).asBool());
+    try std.testing.expect((try evalIn("Object.hasOwn(\"ab\", 0) && Object.hasOwn(\"ab\", \"length\") && !Object.hasOwn(\"ab\", 9)")).asBool());
     // null / undefined throw a TypeError.
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { Object.hasOwn(null, "x"); } catch (e) { t = e.name === "TypeError"; }
         \\t
-    )).boolean);
+    )).asBool());
     // Object.hasOwn performs ToObject before ToPropertyKey.
     try std.testing.expect((try evalIn(
         \\var touched = false;
@@ -2661,7 +2661,7 @@ test "Object.hasOwn" {
         \\var ok = false;
         \\try { Object.hasOwn(null, key); } catch (e) { ok = e instanceof TypeError && !touched; }
         \\ok
-    )).boolean);
+    )).asBool());
 }
 
 test "defineProperty rejects incompatible redefinition of non-configurable props" {
@@ -2686,17 +2686,17 @@ test "defineProperty rejects incompatible redefinition of non-configurable props
         const ctx = try Context.create(std.testing.allocator);
         defer ctx.destroy();
         try std.testing.expectError(error.Throw, ctx.evaluate(src));
-        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.object.error_name);
+        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.asObj().error_name);
     }
     // Compatible redefinitions are still allowed.
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
         \\var o = {}; Object.defineProperty(o, "p", { value: 1, configurable: true });
         \\Object.defineProperty(o, "p", { value: 2 }); o.p
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
         \\var o = {}; Object.defineProperty(o, "p", { value: 1, writable: true, configurable: false });
         \\Object.defineProperty(o, "p", { value: 2 }); o.p
-    )).number);
+    )).asNum());
 }
 
 test "Object.create applies its properties (second) argument" {
@@ -2704,27 +2704,27 @@ test "Object.create applies its properties (second) argument" {
     try std.testing.expectEqual(@as(f64, 42), (try evalIn(
         \\var o = Object.create({}, { x: { value: 42, enumerable: true } });
         \\o.x
-    )).number);
+    )).asNum());
     // Accessor descriptor.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\var o = Object.create(null, { a: { get: function () { return 7; }, enumerable: true } });
         \\o.a
-    )).number);
+    )).asNum());
     // Descriptor attributes are honored (non-enumerable stays off Object.keys).
     try std.testing.expectEqual(@as(f64, 0), (try evalIn(
         \\var o = Object.create({}, { a: { value: 1, enumerable: false } });
         \\Object.keys(o).length
-    )).number);
+    )).asNum());
     // The prototype argument still wires up the chain; omitted props is a no-op.
     try std.testing.expectEqual(@as(f64, 5), (try evalIn(
         \\var p = { v: 5 }; var o = Object.create(p); o.v
-    )).number);
+    )).asNum());
     // A non-object descriptor value throws TypeError, like defineProperties.
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { Object.create({}, { x: 1 }); } catch (e) { t = e.name === "TypeError"; }
         \\t
-    )).boolean);
+    )).asBool());
 }
 
 test "new on a non-constructor built-in throws TypeError" {
@@ -2740,42 +2740,42 @@ test "new on a non-constructor built-in throws TypeError" {
         const ctx = try Context.create(std.testing.allocator);
         defer ctx.destroy();
         try std.testing.expectError(error.Throw, ctx.evaluate(src));
-        try std.testing.expect(ctx.exception.?.object.is_error);
-        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.object.error_name);
+        try std.testing.expect(ctx.exception.?.asObj().is_error);
+        try std.testing.expectEqualStrings("TypeError", ctx.exception.?.asObj().error_name);
     }
     // The real constructors still build instances.
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).number);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(0).getTime()")).number);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Map().size")).number);
-    try std.testing.expectEqual(@as(f64, 5), (try evalIn("new Number(5).valueOf()")).number);
-    try std.testing.expect((try evalIn("typeof new Object() === 'object'")).boolean);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(3).length")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Date(0).getTime()")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("new Map().size")).asNum());
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("new Number(5).valueOf()")).asNum());
+    try std.testing.expect((try evalIn("typeof new Object() === 'object'")).asBool());
 }
 
 test "Function.prototype: call / apply / bind" {
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\function add(a, b) { return a + b; }
         \\add.call(null, 3, 4)
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\function add(a, b) { return a + b; }
         \\add.apply(null, [3, 4])
-    )).number);
+    )).asNum());
     // `this` binding via call.
     try std.testing.expectEqual(@as(f64, 42), (try evalIn(
         \\function getX() { return this.x; }
         \\getX.call({ x: 42 })
-    )).number);
+    )).asNum());
     // bind fixes `this` and leading args.
     try std.testing.expectEqual(@as(f64, 15), (try evalIn(
         \\function add3(a, b, c) { return a + b + c; }
         \\var f = add3.bind(null, 1, 2);
         \\f(12)
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 100), (try evalIn(
         \\var o = { v: 100, get: function () { return this.v; } };
         \\var g = o.get.bind(o);
         \\g()
-    )).number);
+    )).asNum());
 }
 
 test "Function.prototype.toString returns source (decl/expr) or native syntax" {
@@ -2835,7 +2835,7 @@ test "Function.prototype.toString returns source (decl/expr) or native syntax" {
 }
 
 test "String.prototype[Symbol.iterator] yields a String Iterator" {
-    try std.testing.expect((try evalIn("typeof ''[Symbol.iterator] === 'function'")).boolean);
+    try std.testing.expect((try evalIn("typeof ''[Symbol.iterator] === 'function'")).asBool());
     try expectEvalStr("a,b,c", "[...'abc'].join(',')");
     try expectEvalStr("a", "var it = 'ab'[Symbol.iterator](); it.next().value");
     // RequireObjectCoercible: a null/undefined receiver throws.
@@ -2860,16 +2860,16 @@ test "WeakMap/WeakSet reject non-weakly-holdable keys; collection toStringTag" {
     try std.testing.expectError(error.Throw, evalIn("new WeakMap().set(5, 1)"));
     try std.testing.expectError(error.Throw, evalIn("new WeakSet().add('x')"));
     try std.testing.expectError(error.Throw, evalIn("new WeakSet().add(Symbol.for('registered'))"));
-    try std.testing.expect((try evalIn("var s = Symbol('plain'); var ws = new WeakSet(); ws.add(s); ws.has(s)")).boolean);
+    try std.testing.expect((try evalIn("var s = Symbol('plain'); var ws = new WeakSet(); ws.add(s); ws.has(s)")).asBool());
     // An object key is fine.
-    try std.testing.expect((try evalIn("var k = {}; var wm = new WeakMap(); wm.set(k, 1); wm.get(k) === 1")).boolean);
+    try std.testing.expect((try evalIn("var k = {}; var wm = new WeakMap(); wm.set(k, 1); wm.get(k) === 1")).asBool());
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
         \\var C = new other.Function();
         \\C.prototype = null;
         \\Object.getPrototypeOf(Reflect.construct(WeakMap, [], C)) === other.WeakMap.prototype &&
         \\Object.getPrototypeOf(Reflect.construct(WeakSet, [], C)) === other.WeakSet.prototype
-    )).boolean);
+    )).asBool());
     // Symbol.toStringTag on the collection prototypes.
     try expectEvalStr("Map", "Map.prototype[Symbol.toStringTag]");
     try expectEvalStr("Set", "Set.prototype[Symbol.toStringTag]");
@@ -2905,8 +2905,8 @@ test "new import(...) is an early error" {
     try expectParseError("do { new import(''); } while (false)");
     try expectParseError("new import('x').then");
     // Ordinary `new` still works (import.meta, which is `.import_meta`, is untouched).
-    try std.testing.expect((try evalIn("(new Object()) instanceof Object")).boolean);
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(1, 2, 3).length")).number);
+    try std.testing.expect((try evalIn("(new Object()) instanceof Object")).asBool());
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(1, 2, 3).length")).asNum());
 }
 
 test "delete of a private member is an early error" {
@@ -2916,7 +2916,7 @@ test "delete of a private member is an early error" {
     // Deleting a public property — even of an object reached through a private
     // field — is allowed.
     _ = try evalIn("class C { #x = {}; m() { return delete this.#x.y; } }");
-    try std.testing.expect((try evalIn("delete ({ a: 1 }).a")).boolean);
+    try std.testing.expect((try evalIn("delete ({ a: 1 }).a")).asBool());
 }
 
 test "duplicate lexical declarations are early errors" {
@@ -2932,105 +2932,105 @@ test "duplicate lexical declarations are early errors" {
     // sloppy block.
     _ = try evalIn("let x = 1; { let x = 2; } x");
     _ = try evalIn("{ let a = 1; } { let a = 2; }");
-    try std.testing.expect((try evalIn("var v = 1; var v = 2; v")).number == 2);
+    try std.testing.expect((try evalIn("var v = 1; var v = 2; v")).asNum() == 2);
     _ = try evalIn("{ function f() { return 1; } function f() { return 2; } f(); }");
 }
 
 test "numeric separators: valid between digits, rejected when misplaced" {
     // Valid: a `_` between two digits of the radix.
-    try std.testing.expectEqual(@as(f64, 1000), (try evalIn("1_000")).number);
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("0b1_0")).number);
-    try std.testing.expectEqual(@as(f64, 31), (try evalIn("0x1_F")).number);
-    try std.testing.expectEqual(@as(f64, 10.01), (try evalIn("1_0.0_1")).number);
-    try std.testing.expectEqual(@as(f64, 1e10), (try evalIn("1e1_0")).number);
+    try std.testing.expectEqual(@as(f64, 1000), (try evalIn("1_000")).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("0b1_0")).asNum());
+    try std.testing.expectEqual(@as(f64, 31), (try evalIn("0x1_F")).asNum());
+    try std.testing.expectEqual(@as(f64, 10.01), (try evalIn("1_0.0_1")).asNum());
+    try std.testing.expectEqual(@as(f64, 1e10), (try evalIn("1e1_0")).asNum());
     // Misplaced separators are early errors.
     for ([_][]const u8{ "_1", "1_", "1__0", "0x_1", "0b1_", "1_.5", "1._5", "1_e3", "1e_3", "0_1", "0_8" }) |bad|
         try expectParseError(bad);
 }
 
 test "Math.sumPrecise sums exactly" {
-    try std.testing.expectEqual(@as(f64, 6), (try evalIn("Math.sumPrecise([1, 2, 3])")).number);
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn("Math.sumPrecise([1, 2, 3])")).asNum());
     // Exact summation survives intermediate overflow + cancellation.
     try std.testing.expectEqual(@as(f64, 0.30000000000000004), (try evalIn(
         \\Math.sumPrecise([1e308, 1e308, 0.1, 0.1, 1e30, 0.1, -1e30, -1e308, -1e308])
-    )).number);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Math.sumPrecise([1e308, -1e308])")).number);
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Math.sumPrecise([1e308, -1e308])")).asNum());
     // Special values.
-    try std.testing.expect(std.math.isNan((try evalIn("Math.sumPrecise([NaN, 1])")).number));
-    try std.testing.expect(std.math.isNan((try evalIn("Math.sumPrecise([Infinity, -Infinity])")).number));
-    try std.testing.expect((try evalIn("Math.sumPrecise([Infinity, 1])")).number == std.math.inf(f64));
+    try std.testing.expect(std.math.isNan((try evalIn("Math.sumPrecise([NaN, 1])")).asNum()));
+    try std.testing.expect(std.math.isNan((try evalIn("Math.sumPrecise([Infinity, -Infinity])")).asNum()));
+    try std.testing.expect((try evalIn("Math.sumPrecise([Infinity, 1])")).asNum() == std.math.inf(f64));
     // Empty is -0; a finite cancellation is +0; all -0 is -0.
-    try std.testing.expect((try evalIn("1 / Math.sumPrecise([])")).number == -std.math.inf(f64));
-    try std.testing.expect((try evalIn("1 / Math.sumPrecise([0.1, -0.1])")).number == std.math.inf(f64));
-    try std.testing.expect((try evalIn("1 / Math.sumPrecise([-0, -0])")).number == -std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.sumPrecise([])")).asNum() == -std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.sumPrecise([0.1, -0.1])")).asNum() == std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.sumPrecise([-0, -0])")).asNum() == -std.math.inf(f64));
     // A non-Number element and a non-iterable argument both throw.
     try std.testing.expectError(error.Throw, evalIn("Math.sumPrecise([1, '2'])"));
     try std.testing.expectError(error.Throw, evalIn("Math.sumPrecise(5)"));
 }
 
 test "Math.f16round rounds to binary16" {
-    try std.testing.expect((try evalIn("typeof Math.f16round === 'function'")).boolean);
-    try std.testing.expectEqual(@as(f64, 1.5), (try evalIn("Math.f16round(1.5)")).number); // exact in f16
-    try std.testing.expectEqual(@as(f64, 65504), (try evalIn("Math.f16round(65504)")).number); // max f16
-    try std.testing.expect((try evalIn("Math.f16round(65536)")).number == std.math.inf(f64)); // overflows f16
-    try std.testing.expect(std.math.isNan((try evalIn("Math.f16round(NaN)")).number));
-    try std.testing.expect((try evalIn("Math.f16round(Infinity)")).number == std.math.inf(f64));
+    try std.testing.expect((try evalIn("typeof Math.f16round === 'function'")).asBool());
+    try std.testing.expectEqual(@as(f64, 1.5), (try evalIn("Math.f16round(1.5)")).asNum()); // exact in f16
+    try std.testing.expectEqual(@as(f64, 65504), (try evalIn("Math.f16round(65504)")).asNum()); // max f16
+    try std.testing.expect((try evalIn("Math.f16round(65536)")).asNum() == std.math.inf(f64)); // overflows f16
+    try std.testing.expect(std.math.isNan((try evalIn("Math.f16round(NaN)")).asNum()));
+    try std.testing.expect((try evalIn("Math.f16round(Infinity)")).asNum() == std.math.inf(f64));
     // 1.337 is not representable; rounds to the nearest binary16 value.
-    try std.testing.expectEqual(@as(f64, 1.3369140625), (try evalIn("Math.f16round(1.337)")).number);
+    try std.testing.expectEqual(@as(f64, 1.3369140625), (try evalIn("Math.f16round(1.337)")).asNum());
 }
 
 test "Math: signed-zero, pow/hypot edge cases, prototype + toStringTag" {
     // max prefers +0, min prefers -0.
-    try std.testing.expect((try evalIn("1 / Math.max(-0, 0)")).number == std.math.inf(f64));
-    try std.testing.expect((try evalIn("1 / Math.min(0, -0)")).number == -std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.max(-0, 0)")).asNum() == std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.min(0, -0)")).asNum() == -std.math.inf(f64));
     // round of a value that rounds to zero keeps the operand's sign.
-    try std.testing.expect((try evalIn("1 / Math.round(-0.5)")).number == -std.math.inf(f64));
+    try std.testing.expect((try evalIn("1 / Math.round(-0.5)")).asNum() == -std.math.inf(f64));
     try std.testing.expect((try evalIn(
         \\var x = -(2 / Number.EPSILON - 1);
         \\Math.round(x) === x
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var calls = 0;
         \\Math.max(NaN, { valueOf: function() { calls++; } });
         \\calls === 1
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var calls = 0;
         \\Math.min(NaN, { valueOf: function() { calls++; } });
         \\calls === 1
-    )).boolean);
+    )).asBool());
     // pow: NaN exponent and (±1, ±Infinity) are NaN.
-    try std.testing.expect(std.math.isNan((try evalIn("Math.pow(1, NaN)")).number));
-    try std.testing.expect(std.math.isNan((try evalIn("Math.pow(-1, Infinity)")).number));
+    try std.testing.expect(std.math.isNan((try evalIn("Math.pow(1, NaN)")).asNum()));
+    try std.testing.expect(std.math.isNan((try evalIn("Math.pow(-1, Infinity)")).asNum()));
     // hypot: ±Infinity wins over a NaN argument.
-    try std.testing.expect((try evalIn("Math.hypot(NaN, Infinity)")).number == std.math.inf(f64));
+    try std.testing.expect((try evalIn("Math.hypot(NaN, Infinity)")).asNum() == std.math.inf(f64));
     // each element is ToNumber-coerced (a Symbol throws).
     try std.testing.expectError(error.Throw, evalIn("Math.max(1, Symbol())"));
     // Math is an ordinary object with the right prototype + tag.
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(Math) === Object.prototype")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Math) === Object.prototype")).asBool());
     try expectEvalStr("[object Math]", "Object.prototype.toString.call(Math)");
 }
 
 test "Map/Set constructors take any iterable (AddEntriesFromIterable)" {
     // A non-array iterable (here a Set / a string) populates the collection.
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Set('abc').size")).number);
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("new Map(new Map([['a',1],['b',2]])).size")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Set('abc').size")).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("new Map(new Map([['a',1],['b',2]])).size")).asNum());
     // A generator of entries works for Map.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\function* g() { yield ['x', 3]; yield ['y', 4]; }
         \\var m = new Map(g()); m.get('x') + m.get('y')
-    )).number);
+    )).asNum());
     try std.testing.expect((try evalIn(
         \\function Target() {}
         \\Target.prototype = null;
         \\Object.getPrototypeOf(Reflect.construct(Map, [], Target)) === Map.prototype
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
         \\other.Set.prototype.marker = true;
         \\var s = Reflect.construct(Set, [], other.Set);
         \\Object.getPrototypeOf(s) === other.Set.prototype && s.marker === true
-    )).boolean);
+    )).asBool());
     // A non-object Map entry, a non-iterable argument, and a non-callable adder
     // each throw a TypeError.
     try std.testing.expectError(error.Throw, evalIn("new Map([1, 2])"));
@@ -3048,15 +3048,15 @@ test "Map/Set constructors take any iterable (AddEntriesFromIterable)" {
         \\var calls = 0;
         \\class M extends Map { set(k, v) { calls++; return super.set(k, v); } }
         \\new M([['a', 1]]); calls
-    )).number);
+    )).asNum());
 }
 
 test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     // `Map.prototype[Symbol.iterator]` is the same function as `entries`, and
     // `Set.prototype[Symbol.iterator]`/`keys`/`values` are all the same.
-    try std.testing.expect((try evalIn("Map.prototype[Symbol.iterator] === Map.prototype.entries")).boolean);
-    try std.testing.expect((try evalIn("Set.prototype[Symbol.iterator] === Set.prototype.values")).boolean);
-    try std.testing.expect((try evalIn("Set.prototype.keys === Set.prototype.values")).boolean);
+    try std.testing.expect((try evalIn("Map.prototype[Symbol.iterator] === Map.prototype.entries")).asBool());
+    try std.testing.expect((try evalIn("Set.prototype[Symbol.iterator] === Set.prototype.values")).asBool());
+    try std.testing.expect((try evalIn("Set.prototype.keys === Set.prototype.values")).asBool());
     // for-of and spread over a Map/Set go through the property iterator.
     try expectEvalStr("a,1|b,2",
         \\var m = new Map([['a', 1], ['b', 2]]);
@@ -3073,13 +3073,13 @@ test "Map/Set forEach tolerate deletion during iteration" {
         \\var count = 0;
         \\map.forEach(function(value, key) { if (count === 0) map.delete('bar'); count++; });
         \\count
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 1), (try evalIn(
         \\var set = new Set(['foo', 'bar']);
         \\var count = 0;
         \\set.forEach(function(value) { if (count === 0) set.delete('bar'); count++; });
         \\count
-    )).number);
+    )).asNum());
     try expectEvalStr("1,2,3,1|3|2,3,1",
         \\var set = new Set([1, 2, 3]);
         \\var out = [];
@@ -3107,7 +3107,7 @@ test "Map/Set forEach tolerate deletion during iteration" {
         \\map.delete('foo');
         \\map.set('foo', 'baz');
         \\map.size
-    )).number);
+    )).asNum());
 }
 
 test "Map getOrInsertComputed validates callback and canonicalizes keys" {
@@ -3116,13 +3116,13 @@ test "Map getOrInsertComputed validates callback and canonicalizes keys" {
         \\var map = new Map([[1, 'present']]);
         \\try { map.getOrInsertComputed(1, 1); } catch (e) { ok = e instanceof TypeError; }
         \\ok
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var seen;
         \\var map = new Map();
         \\map.getOrInsertComputed(-0, function(key) { seen = 1 / key; return 'value'; });
         \\seen === Infinity && map.has(+0) && map.has(-0)
-    )).boolean);
+    )).asBool());
 }
 
 test "oversized BigInt literals preserve identity for keyed collections" {
@@ -3130,13 +3130,13 @@ test "oversized BigInt literals preserve identity for keyed collections" {
         \\var s = '100000000000000000000000000000000000000000000000000000000000000000000000000000000001';
         \\var n = 100000000000000000000000000000000000000000000000000000000000000000000000000000000001n;
         \\n === BigInt(s) && String(n) === s
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var s = '100000000000000000000000000000000000000000000000000000000000000000000000000000000001';
         \\var n = 100000000000000000000000000000000000000000000000000000000000000000000000000000000001n;
         \\var m = new Map([[n, 'ok']]);
         \\m.get(BigInt(s)) === 'ok' && m.has(n)
-    )).boolean);
+    )).asBool());
 }
 
 test "BigInt constructor parses oversized radix strings and rejects construction early" {
@@ -3145,7 +3145,7 @@ test "BigInt constructor parses oversized radix strings and rejects construction
         \\for (var i = 0; i < 128; i++) bits += '0';
         \\var decimal = '340282366920938463463374607431768211456';
         \\BigInt('0b' + bits) === BigInt(decimal) && BigInt('0B' + bits) === BigInt(decimal)
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var probed = false;
         \\try { Reflect.construct(function() {}, [], BigInt); probed = true; } catch (e) {}
@@ -3154,14 +3154,14 @@ test "BigInt constructor parses oversized radix strings and rejects construction
         \\try { new BigInt({ valueOf: function() { touched = true; return 1; } }); }
         \\catch (e) { threw = e instanceof TypeError; }
         \\probed && threw && !touched
-    )).boolean);
+    )).asBool());
 }
 
 test "Object boxes BigInt primitives through BigInt.prototype" {
     try std.testing.expect((try evalIn(
         \\var boxed = Object(1n);
         \\boxed !== 1n && Object.getPrototypeOf(boxed) === BigInt.prototype
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var original = BigInt.prototype.toString;
         \\var gets = 0;
@@ -3177,43 +3177,43 @@ test "Object boxes BigInt primitives through BigInt.prototype" {
         \\delete BigInt.prototype.toString;
         \\Object.defineProperty(BigInt.prototype, 'toString', { configurable: true, writable: true, value: original });
         \\out === '1foo' && gets === 1 && calls === 1
-    )).boolean);
+    )).asBool());
 }
 
 test "BigInt.asIntN/asUintN wrap text-backed BigInts" {
     try std.testing.expect((try evalIn(
         \\-0x100000000000000000000000000000000n === BigInt('-340282366920938463463374607431768211456')
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\~0x100000000000000000000000000000000n === BigInt('-340282366920938463463374607431768211457')
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\BigInt.asUintN(200,
         \\  0xbffffffffffffffffffffffffffffffffffffffffffffffffffn
         \\) === 0x0ffffffffffffffffffffffffffffffffffffffffffffffffffn
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\BigInt.asIntN(200,
         \\  0xcffffffffffffffffffffffffffffffffffffffffffffffffffn
         \\) === -1n
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\BigInt.asIntN(201,
         \\  0xc89e081df68b65fedb32cffea660e55df9605650a603ad5fc54n
         \\) === 0x89e081df68b65fedb32cffea660e55df9605650a603ad5fc54n
-    )).boolean);
+    )).asBool());
 }
 
 test "__lookupGetter__/__lookupSetter__ walk the chain, proxy-aware" {
     // Returns the accessor's getter; a data property yields undefined.
-    try std.testing.expect((try evalIn("var o = { get x() { return 1; } }; o.__lookupGetter__('x') === Object.getOwnPropertyDescriptor(o, 'x').get")).boolean);
+    try std.testing.expect((try evalIn("var o = { get x() { return 1; } }; o.__lookupGetter__('x') === Object.getOwnPropertyDescriptor(o, 'x').get")).asBool());
     try std.testing.expect((try evalIn("({ a: 1 }).__lookupGetter__('a')")).isUndefined());
     // Walks the prototype chain to find an inherited accessor.
     try std.testing.expect((try evalIn(
         \\var proto = { get y() { return 2; } };
         \\var o = Object.create(proto);
         \\o.__lookupGetter__('y') === Object.getOwnPropertyDescriptor(proto, 'y').get
-    )).boolean);
+    )).asBool());
     // A throwing [[GetOwnProperty]] trap propagates.
     try std.testing.expectError(error.Throw, evalIn(
         \\var p = new Proxy({}, { getOwnPropertyDescriptor() { throw new TypeError('x'); } });
@@ -3225,7 +3225,7 @@ test "__defineGetter__/__defineSetter__ honor DefinePropertyOrThrow" {
     // Success: installs an accessor.
     try std.testing.expectEqual(@as(f64, 5), (try evalIn(
         \\var o = {}; o.__defineGetter__('x', function () { return 5; }); o.x
-    )).number);
+    )).asNum());
     // Redefining a non-configurable property throws.
     try std.testing.expectError(error.Throw, evalIn(
         \\var o = Object.defineProperty({}, 'a', { value: 1, configurable: false });
@@ -3242,34 +3242,34 @@ test "__defineGetter__/__defineSetter__ honor DefinePropertyOrThrow" {
 
 test "plain objects inherit from Object.prototype" {
     // The [[Prototype]] of a plain object / object literal is Object.prototype.
-    try std.testing.expect((try evalIn("Object.getPrototypeOf({}) === Object.prototype")).boolean);
-    try std.testing.expect((try evalIn("({}).__proto__ === Object.prototype")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf({}) === Object.prototype")).asBool());
+    try std.testing.expect((try evalIn("({}).__proto__ === Object.prototype")).asBool());
     // Inherited Object.prototype methods resolve through the chain (as values and calls).
-    try std.testing.expect((try evalIn("typeof ({}).hasOwnProperty === 'function'")).boolean);
-    try std.testing.expect((try evalIn("({ a: 1 }).hasOwnProperty('a')")).boolean);
-    try std.testing.expect((try evalIn("'toString' in {}")).boolean);
+    try std.testing.expect((try evalIn("typeof ({}).hasOwnProperty === 'function'")).asBool());
+    try std.testing.expect((try evalIn("({ a: 1 }).hasOwnProperty('a')")).asBool());
+    try std.testing.expect((try evalIn("'toString' in {}")).asBool());
     try expectEvalStr("[object Object]", "({}).toString()");
     // Object.prototype.valueOf returns the object itself.
-    try std.testing.expect((try evalIn("var o = {}; o.valueOf() === o")).boolean);
+    try std.testing.expect((try evalIn("var o = {}; o.valueOf() === o")).asBool());
     try std.testing.expect((try evalIn(
         \\var subject = {};
         \\var set = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__").set;
         \\set.call(subject, Symbol());
         \\Object.getPrototypeOf(subject) === Object.prototype
-    )).boolean);
+    )).asBool());
     try std.testing.expectError(error.Throw, evalIn(
         \\var get = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__").get;
         \\get.call(new Proxy({}, { getPrototypeOf() { throw new Error("boom"); } }));
     ));
     try std.testing.expectError(error.Throw, evalIn("Object.setPrototypeOf(Object.prototype, {})"));
-    try std.testing.expect(!(try evalIn("Reflect.setPrototypeOf(Object.prototype, {})")).boolean);
+    try std.testing.expect(!(try evalIn("Reflect.setPrototypeOf(Object.prototype, {})")).asBool());
     // A user toString on the chain still wins.
     try expectEvalStr("hi", "var o = { toString() { return 'hi'; } }; o.toString()");
     // Object.create(null) keeps a null prototype; for-in over {} sees no inherited keys.
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(Object.create(null)) === null")).boolean);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("var n = 0; for (var k in {}) n++; n")).number);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Object.create(null)) === null")).asBool());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("var n = 0; for (var k in {}) n++; n")).asNum());
     // Class/function .prototype objects inherit from Object.prototype too.
-    try std.testing.expect((try evalIn("function F() {} Object.getPrototypeOf(F.prototype) === Object.prototype")).boolean);
+    try std.testing.expect((try evalIn("function F() {} Object.getPrototypeOf(F.prototype) === Object.prototype")).asBool());
 }
 
 test "Symbol() and Symbol.for() ToString their argument" {
@@ -3288,16 +3288,16 @@ test "string concatenation rejects Symbols through ToString" {
 }
 
 test "Reflect: prototype, toStringTag, array-like argumentsList" {
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(Reflect) === Object.prototype")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Reflect) === Object.prototype")).asBool());
     try expectEvalStr("Reflect", "Reflect[Symbol.toStringTag]");
     // apply/construct accept an array-like (not just a real Array) argumentsList.
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
         \\Reflect.apply(function () { return arguments.length; }, null, { length: 2, 0: 'a', 1: 'b' })
-    )).number);
+    )).asNum());
     try std.testing.expectEqual(@as(f64, 5), (try evalIn(
         \\function P(a, b) { this.sum = a + b; }
         \\Reflect.construct(P, { length: 2, 0: 2, 1: 3 }).sum
-    )).number);
+    )).asNum());
     // apply on a non-callable target throws; a throwing length getter propagates.
     try std.testing.expectError(error.Throw, evalIn("Reflect.apply({}, null, [])"));
     try std.testing.expectError(error.Throw, evalIn("Reflect.apply(function(){}, null, { get length() { throw new TypeError('x'); } })"));
@@ -3314,65 +3314,65 @@ test "Reflect.* require a real Object target (Symbol/primitive throws)" {
     try std.testing.expectError(error.Throw, evalIn("Object.setPrototypeOf({}, Symbol())"));
     // setPrototypeOf returns a boolean: true on success, false (not a throw) on
     // a non-extensible target.
-    try std.testing.expect((try evalIn("Reflect.setPrototypeOf({}, null)")).boolean);
+    try std.testing.expect((try evalIn("Reflect.setPrototypeOf({}, null)")).asBool());
     try std.testing.expect(!(try evalIn(
         \\var o = {}; Object.preventExtensions(o);
         \\Reflect.setPrototypeOf(o, { a: 1 })
-    )).boolean);
+    )).asBool());
 }
 
 test "NativeError constructors inherit from Error; Error from Function.prototype" {
     // Each NativeError constructor's [[Prototype]] is the Error constructor.
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError) === Error")).boolean);
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(RangeError) === Error")).boolean);
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(AggregateError) === Error")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError) === Error")).asBool());
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(RangeError) === Error")).asBool());
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(AggregateError) === Error")).asBool());
     // Error itself is a function, so its [[Prototype]] is Function.prototype.
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(Error) === Function.prototype")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(Error) === Function.prototype")).asBool());
     // The prototype chain was already linked: TypeError.prototype -> Error.prototype.
-    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError.prototype) === Error.prototype")).boolean);
+    try std.testing.expect((try evalIn("Object.getPrototypeOf(TypeError.prototype) === Error.prototype")).asBool());
     // Static inheritance through the constructor chain works.
-    try std.testing.expect((try evalIn("typeof TypeError.isError === 'function'")).boolean);
+    try std.testing.expect((try evalIn("typeof TypeError.isError === 'function'")).asBool());
 }
 
 test "parseInt skips the full StrWhiteSpace set" {
     // U+2028/U+2029 line separators and non-ASCII spaces are leading whitespace.
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('\\u20281')")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('\\u20291')")).number);
-    try std.testing.expectEqual(@as(f64, 42), (try evalIn("parseInt('\\u00A0\\u000B42')")).number);
-    try std.testing.expectEqual(@as(f64, 255), (try evalIn("parseInt('  0xff')")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('\\u20281')")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('\\u20291')")).asNum());
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn("parseInt('\\u00A0\\u000B42')")).asNum());
+    try std.testing.expectEqual(@as(f64, 255), (try evalIn("parseInt('  0xff')")).asNum());
 }
 
 test "parseFloat: Unicode whitespace, Infinity, and no numeric separators" {
     // Leading StrWhiteSpace (incl. VT/FF/NBSP) is skipped, like `1.1`.
-    try std.testing.expectEqual(@as(f64, 1.1), (try evalIn("parseFloat('\\u000B\\u000C\\u00A01.1')")).number);
+    try std.testing.expectEqual(@as(f64, 1.1), (try evalIn("parseFloat('\\u000B\\u000C\\u00A01.1')")).asNum());
     // Longest StrDecimalLiteral prefix; trailing junk and `_` separators stop it.
-    try std.testing.expectEqual(@as(f64, 3.14), (try evalIn("parseFloat('3.14abc')")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('1_0')")).number);
-    try std.testing.expectEqual(@as(f64, 1e100), (try evalIn("parseFloat('1e+100')")).number);
+    try std.testing.expectEqual(@as(f64, 3.14), (try evalIn("parseFloat('3.14abc')")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('1_0')")).asNum());
+    try std.testing.expectEqual(@as(f64, 1e100), (try evalIn("parseFloat('1e+100')")).asNum());
     // Signed Infinity, and a bare `e` is not part of the number.
-    try std.testing.expect(std.math.isInf((try evalIn("parseFloat('-Infinity')")).number));
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('1e')")).number);
-    try std.testing.expect(std.math.isNan((try evalIn("parseFloat('.e5')")).number));
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('0.1e1' + String.fromCharCode(0x0130))")).number);
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { return 0; } })")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { return {}; } })")).number);
+    try std.testing.expect(std.math.isInf((try evalIn("parseFloat('-Infinity')")).asNum()));
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('1e')")).asNum());
+    try std.testing.expect(std.math.isNan((try evalIn("parseFloat('.e5')")).asNum()));
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat('0.1e1' + String.fromCharCode(0x0130))")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { return 0; } })")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { return {}; } })")).asNum());
     try std.testing.expectError(error.Throw, evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { throw 'error'; } })"));
 }
 
 test "parseInt radix coercion follows ToInt32" {
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', 4294967298)")).number);
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', -4294967294)")).number);
-    try std.testing.expect(std.math.isNan((try evalIn("parseInt('0', 1)")).number));
-    try std.testing.expect(std.math.isNan((try evalIn("parseInt('0', 37)")).number));
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('0x1', 0)")).number);
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', { valueOf: function() { return 2; }, toString: function() { throw 'error'; } })")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', 4294967298)")).asNum());
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', -4294967294)")).asNum());
+    try std.testing.expect(std.math.isNan((try evalIn("parseInt('0', 1)")).asNum()));
+    try std.testing.expect(std.math.isNan((try evalIn("parseInt('0', 37)")).asNum()));
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("parseInt('0x1', 0)")).asNum());
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', { valueOf: function() { return 2; }, toString: function() { throw 'error'; } })")).asNum());
 }
 
 test "URI encode/decode handles surrogate pairs" {
     try expectEvalStr("%F0%90%80%80", "encodeURI(String.fromCharCode(0xD800, 0xDC00))");
     try expectEvalStr("%F4%8F%BF%BF", "encodeURIComponent(String.fromCharCode(0xDBFF, 0xDFFF))");
-    try std.testing.expect((try evalIn("decodeURI('%F0%90%80%80') === String.fromCharCode(0xD800, 0xDC00)")).boolean);
-    try std.testing.expect((try evalIn("decodeURIComponent('%F4%8F%BF%BF') === String.fromCharCode(0xDBFF, 0xDFFF)")).boolean);
+    try std.testing.expect((try evalIn("decodeURI('%F0%90%80%80') === String.fromCharCode(0xD800, 0xDC00)")).asBool());
+    try std.testing.expect((try evalIn("decodeURIComponent('%F4%8F%BF%BF') === String.fromCharCode(0xDBFF, 0xDFFF)")).asBool());
     try std.testing.expectError(error.Throw, evalIn("encodeURI(String.fromCharCode(0xD800))"));
     try std.testing.expectError(error.Throw, evalIn("encodeURIComponent(String.fromCharCode(0xDC00))"));
 }
@@ -3384,7 +3384,7 @@ test "DataView constructor observes NewTarget prototype side effects" {
         \\C.prototype = null;
         \\var view = Reflect.construct(DataView, [new ArrayBuffer(0), 0], C);
         \\Object.getPrototypeOf(view) === other.DataView.prototype
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var buffer = new ArrayBuffer(8);
         \\var called = false;
@@ -3394,14 +3394,14 @@ test "DataView constructor observes NewTarget prototype side effects" {
         \\var ok = false;
         \\try { Reflect.construct(DataView, [buffer, byteOffset], newTarget); } catch (e) { ok = e instanceof TypeError; }
         \\ok && called
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var buffer = new ArrayBuffer(3, { maxByteLength: 3 });
         \\var newTarget = function() {}.bind(null);
         \\Object.defineProperty(newTarget, "prototype", { get: function() { buffer.resize(2); } });
         \\var view = Reflect.construct(DataView, [buffer, 2], newTarget);
         \\view.byteLength === 0
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var buffer = new ArrayBuffer(3, { maxByteLength: 3 });
         \\var newTarget = function() {}.bind(null);
@@ -3409,30 +3409,30 @@ test "DataView constructor observes NewTarget prototype side effects" {
         \\var ok = false;
         \\try { Reflect.construct(DataView, [buffer, 1, 2], newTarget); } catch (e) { ok = e instanceof RangeError; }
         \\ok
-    )).boolean);
+    )).asBool());
 }
 
 test "isFinite / isNaN coerce via ToNumber (Symbol throws, strings convert)" {
     // `Let num be ? ToNumber(number)`: strings/booleans convert, a Symbol throws.
-    try std.testing.expect((try evalIn("isFinite('0')")).boolean);
-    try std.testing.expect(!(try evalIn("isFinite('Infinity')")).boolean);
-    try std.testing.expect((try evalIn("isNaN('not a number')")).boolean);
-    try std.testing.expect(!(try evalIn("isNaN('42')")).boolean);
+    try std.testing.expect((try evalIn("isFinite('0')")).asBool());
+    try std.testing.expect(!(try evalIn("isFinite('Infinity')")).asBool());
+    try std.testing.expect((try evalIn("isNaN('not a number')")).asBool());
+    try std.testing.expect(!(try evalIn("isNaN('42')")).asBool());
     try std.testing.expectError(error.Throw, evalIn("isFinite(Symbol())"));
     try std.testing.expectError(error.Throw, evalIn("isNaN(Symbol())"));
 }
 
 test "Number string conversion trims ECMAScript whitespace" {
-    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Number('\\u00A0\\u1680\\u2000\\u2028\\u2029\\u202F\\u205F\\u3000')")).number);
+    try std.testing.expectEqual(@as(f64, 0), (try evalIn("Number('\\u00A0\\u1680\\u2000\\u2028\\u2029\\u202F\\u205F\\u3000')")).asNum());
     try std.testing.expectEqual(@as(f64, 1234567890), (try evalIn(
         \\Number('\u000B\u00A0\u1680\u20001234567890\u2028\u2029\u202F\u205F\u3000')
-    )).number);
+    )).asNum());
     try std.testing.expect((try evalIn(
         \\Number('\u00A0\u2000Infinity\u202F') === Infinity
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\Number('\u00A0\u2000-Infinity\u202F') === -Infinity
-    )).boolean);
+    )).asBool());
 }
 
 test "strict arguments.callee is the %ThrowTypeError% poison pill" {
@@ -3441,14 +3441,14 @@ test "strict arguments.callee is the %ThrowTypeError% poison pill" {
     try std.testing.expect((try evalIn(
         \\function f() { "use strict"; try { arguments.callee; return false; } catch (e) { return e instanceof TypeError; } }
         \\f()
-    )).boolean);
+    )).asBool());
     // The same intrinsic backs both `arguments.callee` and `Function.prototype.caller`.
     try std.testing.expect((try evalIn(
         \\var g = function () { "use strict"; return arguments; }();
         \\var callee = Object.getOwnPropertyDescriptor(g, "callee").get;
         \\var caller = Object.getOwnPropertyDescriptor(Function.prototype, "caller").get;
         \\callee === caller
-    )).boolean);
+    )).asBool());
 }
 
 test "Number/Boolean/String prototypes are Exotic Objects with their primitive" {
@@ -3483,20 +3483,20 @@ test "Array.prototype.concat honors Symbol.isConcatSpreadable" {
     try std.testing.expectEqual(@as(f64, 1), (try evalIn(
         \\var a = [1, 2, 3]; a[Symbol.isConcatSpreadable] = false;
         \\[].concat(a).length
-    )).number);
+    )).asNum());
 }
 
 test "function objects inherit from Function.prototype" {
     // A user function links to `Function.prototype`, so instanceof, the
     // prototype identity, and inherited methods all resolve through the chain.
-    try std.testing.expect((try evalIn("function f() {} f instanceof Function")).boolean);
-    try std.testing.expect((try evalIn("var g = () => {}; g instanceof Function")).boolean);
+    try std.testing.expect((try evalIn("function f() {} f instanceof Function")).asBool());
+    try std.testing.expect((try evalIn("var g = () => {}; g instanceof Function")).asBool());
     try std.testing.expect((try evalIn(
         \\function f() {}
         \\Object.getPrototypeOf(f) === Function.prototype
-    )).boolean);
+    )).asBool());
     // The inherited `call` is the same function object reached via the chain.
-    try std.testing.expect((try evalIn("function f() {} f.call === Function.prototype.call")).boolean);
+    try std.testing.expect((try evalIn("function f() {} f.call === Function.prototype.call")).asBool());
 }
 
 test "dynamic Function observes NewTarget and constructor realms" {
@@ -3505,7 +3505,7 @@ test "dynamic Function observes NewTarget and constructor realms" {
         \\var C = new other.Function();
         \\C.prototype = null;
         \\Object.getPrototypeOf(Reflect.construct(Function, [], C)) === other.Function.prototype
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var realmA = $262.createRealm().global;
         \\realmA.calls = 0;
@@ -3517,7 +3517,7 @@ test "dynamic Function observes NewTarget and constructor realms" {
         \\Object.getPrototypeOf(fn.prototype) === realmA.Object.prototype &&
         \\new fn() instanceof realmA.Object &&
         \\realmA.calls === 1
-    )).boolean);
+    )).asBool());
 }
 
 test "dynamic AsyncFunction uses NewTarget realm prototype fallback" {
@@ -3538,11 +3538,11 @@ test "dynamic AsyncFunction uses NewTarget realm prototype fallback" {
         \\ok = ok && Object.getPrototypeOf(Reflect.construct(AsyncFunction, [], newTarget)) === OtherAsyncFunction.prototype;
         \\newTarget.prototype = 1;
         \\ok && Object.getPrototypeOf(Reflect.construct(AsyncFunction, [], newTarget)) === OtherAsyncFunction.prototype
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\async function f() {}
         \\f.prototype === undefined && !f.hasOwnProperty('prototype')
-    )).boolean);
+    )).asBool());
 }
 
 test "dynamic generator functions validate params and prototype realms" {
@@ -3551,13 +3551,13 @@ test "dynamic generator functions validate params and prototype realms" {
         \\var ok = false;
         \\try { GeneratorFunction('x = yield', ''); } catch (e) { ok = e instanceof SyntaxError; }
         \\ok
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var AsyncGeneratorFunction = Object.getPrototypeOf(async function*() {}).constructor;
         \\var ok = false;
         \\try { AsyncGeneratorFunction('x = yield', ''); } catch (e) { ok = e instanceof SyntaxError; }
         \\ok
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var realmA = $262.createRealm().global;
         \\realmA.calls = 0;
@@ -3574,7 +3574,7 @@ test "dynamic generator functions validate params and prototype realms" {
         \\Object.getPrototypeOf(fn.prototype) === aGeneratorPrototype &&
         \\gen instanceof realmA.Object &&
         \\realmA.calls === 1
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var realmA = $262.createRealm().global;
         \\realmA.calls = 0;
@@ -3591,7 +3591,7 @@ test "dynamic generator functions validate params and prototype realms" {
         \\Object.getPrototypeOf(fn.prototype) === aAsyncGeneratorPrototype &&
         \\gen instanceof realmA.Object &&
         \\realmA.calls === 1
-    )).boolean);
+    )).asBool());
 }
 
 test "Iterator constructor uses NewTarget realm prototype fallback" {
@@ -3600,12 +3600,12 @@ test "Iterator constructor uses NewTarget realm prototype fallback" {
         \\var C = new other.Function();
         \\C.prototype = null;
         \\Object.getPrototypeOf(Reflect.construct(Iterator, [], C)) === other.Iterator.prototype
-    )).boolean);
+    )).asBool());
 }
 
 test "Date call remains string-returning through bind" {
-    try std.testing.expect((try evalIn("typeof Date(0, 0, 0) === 'string'")).boolean);
-    try std.testing.expect((try evalIn("typeof Date.bind(null)(0, 0, 0) === 'string'")).boolean);
+    try std.testing.expect((try evalIn("typeof Date(0, 0, 0) === 'string'")).asBool());
+    try std.testing.expect((try evalIn("typeof Date.bind(null)(0, 0, 0) === 'string'")).asBool());
 }
 
 test "ordinary toPrimitive calls borrowed native toString methods" {
@@ -3614,7 +3614,7 @@ test "ordinary toPrimitive calls borrowed native toString methods" {
     ));
     try std.testing.expect((try evalIn(
         \\String(Function.prototype).indexOf("[native code]") >= 0
-    )).boolean);
+    )).asBool());
 }
 
 test "prototype objects: Function.prototype.call.bind + X.prototype methods" {
@@ -3626,11 +3626,11 @@ test "prototype objects: Function.prototype.call.bind + X.prototype methods" {
     try std.testing.expect((try evalIn(
         \\var __hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
         \\__hasOwn({ a: 1 }, "a") && !__hasOwn({ a: 1 }, "b")
-    )).boolean);
+    )).asBool());
     // Direct prototype-method access + .call.
     try std.testing.expectEqual(@as(f64, 3), (try evalIn(
         \\Array.prototype.indexOf.call([10, 20, 30], 30) + 1
-    )).number);
+    )).asNum());
 }
 
 test "property descriptors: defineProperty attrs + getOwnPropertyDescriptor" {
@@ -3640,27 +3640,27 @@ test "property descriptors: defineProperty attrs + getOwnPropertyDescriptor" {
         \\Object.defineProperty(o, "x", { value: 5 });
         \\var d = Object.getOwnPropertyDescriptor(o, "x");
         \\d.value === 5 && d.writable === false && d.enumerable === false && d.configurable === false
-    )).boolean);
+    )).asBool());
     // A non-writable property ignores assignment (sloppy mode).
     try std.testing.expectEqual(@as(f64, 5), (try evalIn(
         \\var o = {};
         \\Object.defineProperty(o, "x", { value: 5, writable: false });
         \\o.x = 99;
         \\o.x
-    )).number);
+    )).asNum());
     // Non-enumerable property is skipped by Object.keys / for-in but kept by getOwnPropertyNames.
     try std.testing.expect((try evalIn(
         \\var o = { a: 1 };
         \\Object.defineProperty(o, "hidden", { value: 2, enumerable: false });
         \\Object.keys(o).length === 1 && Object.getOwnPropertyNames(o).length === 2 &&
         \\  !o.propertyIsEnumerable("hidden") && o.propertyIsEnumerable("a")
-    )).boolean);
+    )).asBool());
     // Plain-assignment properties are writable/enumerable/configurable.
     try std.testing.expect((try evalIn(
         \\var o = { a: 1 };
         \\var d = Object.getOwnPropertyDescriptor(o, "a");
         \\d.writable && d.enumerable && d.configurable
-    )).boolean);
+    )).asBool());
 }
 
 test "Object.getOwnPropertySymbols rejects nullish inputs" {
@@ -3669,7 +3669,7 @@ test "Object.getOwnPropertySymbols rejects nullish inputs" {
         \\try { Object.getOwnPropertySymbols(undefined); } catch (e) { count += e instanceof TypeError ? 1 : 0; }
         \\try { Object.getOwnPropertySymbols(null); } catch (e) { count += e instanceof TypeError ? 1 : 0; }
         \\count === 2 && Object.getOwnPropertySymbols(1).length === 0
-    )).boolean);
+    )).asBool());
 }
 
 test "global object writes update object-backed global bindings" {
@@ -3680,7 +3680,7 @@ test "global object writes update object-backed global bindings" {
         \\var ok = Object === fakeObject && globalThis.Object === fakeObject;
         \\globalThis.Object = original;
         \\ok && Object === original
-    )).boolean);
+    )).asBool());
 }
 
 test "Object.freeze / seal / preventExtensions" {
@@ -3690,49 +3690,49 @@ test "Object.freeze / seal / preventExtensions" {
         \\Object.freeze(o);
         \\o.a = 2; o.b = 3;
         \\o.a === 1 && o.b === undefined && Object.isFrozen(o) && !Object.isExtensible(o)
-    )).boolean);
+    )).asBool());
     // seal: existing writable, but no new props, isSealed true (not frozen).
     try std.testing.expect((try evalIn(
         \\var o = { a: 1 };
         \\Object.seal(o);
         \\o.a = 9; o.b = 3;
         \\o.a === 9 && o.b === undefined && Object.isSealed(o) && !Object.isFrozen(o)
-    )).boolean);
+    )).asBool());
     // preventExtensions: can't add, can still modify.
     try std.testing.expect((try evalIn(
         \\var o = { a: 1 };
         \\Object.preventExtensions(o);
         \\o.b = 3; o.a = 5;
         \\o.a === 5 && o.b === undefined && !Object.isExtensible(o)
-    )).boolean);
+    )).asBool());
     // empty frozen object is frozen.
-    try std.testing.expect((try evalIn("Object.isFrozen(Object.freeze({}))")).boolean);
+    try std.testing.expect((try evalIn("Object.isFrozen(Object.freeze({}))")).asBool());
 }
 
 test "Object.prototype: hasOwnProperty / isPrototypeOf" {
     try std.testing.expect((try evalIn(
         \\var o = { a: 1 }; o.hasOwnProperty("a")
-    )).boolean);
+    )).asBool());
     try std.testing.expect(!(try evalIn(
         \\var o = { a: 1 }; o.hasOwnProperty("b")
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var a = [1, 2, 3]; a.hasOwnProperty("length") && a.hasOwnProperty(0) && !a.hasOwnProperty(9)
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var hint = "";
         \\var key = { toString() { hint = "string"; throw new Error("key"); } };
         \\try { Object.prototype.hasOwnProperty.call(null, key); } catch (e) {}
         \\hint === "string"
-    )).boolean);
-    try std.testing.expect(!(try evalIn("Object.prototype.isPrototypeOf.call(null, false)")).boolean);
-    try std.testing.expect(!(try evalIn("Object.prototype.isPrototypeOf.call(null, Symbol())")).boolean);
+    )).asBool());
+    try std.testing.expect(!(try evalIn("Object.prototype.isPrototypeOf.call(null, false)")).asBool());
+    try std.testing.expect(!(try evalIn("Object.prototype.isPrototypeOf.call(null, Symbol())")).asBool());
     try std.testing.expect((try evalIn(
         \\var proto = [];
         \\var proxy = new Proxy({}, { getPrototypeOf() { return proto; } });
         \\proto.isPrototypeOf(proxy)
-    )).boolean);
-    try std.testing.expect((try evalIn("typeof Object.prototype.valueOf.call(false) === 'object'")).boolean);
+    )).asBool());
+    try std.testing.expect((try evalIn("typeof Object.prototype.valueOf.call(false) === 'object'")).asBool());
 }
 
 test "generators: manual next() yields values then done" {
@@ -3741,34 +3741,34 @@ test "generators: manual next() yields values then done" {
         \\var it = g();
         \\var a = it.next().value, b = it.next().value, c = it.next().value;
         \\a + b + c
-    )).number);
+    )).asNum());
     // After exhaustion, next().done is true and value undefined.
     try std.testing.expect((try evalIn(
         \\function* g() { yield 1; }
         \\var it = g(); it.next();
         \\it.next().done
-    )).boolean);
+    )).asBool());
 }
 
 test "generators: for-of drives the generator" {
     try std.testing.expectEqual(@as(f64, 30), (try evalIn(
         \\function* g() { yield 10; yield 20; }
         \\var s = 0; for (var x of g()) { s += x; } s
-    )).number);
+    )).asNum());
 }
 
 test "generators: next(v) is the value of the resumed yield" {
     try std.testing.expectEqual(@as(f64, 15), (try evalIn(
         \\function* g() { var x = yield 1; yield x + 10; }
         \\var it = g(); it.next(); it.next(5).value
-    )).number);
+    )).asNum());
 }
 
 test "generators: infinite generator bounded by the consumer" {
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
         \\function* nat() { var i = 0; while (true) { yield i; i = i + 1; } }
         \\var it = nat(); it.next(); it.next(); it.next().value
-    )).number);
+    )).asNum());
 }
 
 test "generators: yield* delegates to arrays, strings, and generators" {
@@ -3776,13 +3776,13 @@ test "generators: yield* delegates to arrays, strings, and generators" {
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\function* g() { yield* [1, 2, 3]; }
         \\var s = 0; for (var x of g()) { s += x; } s
-    )).number);
+    )).asNum());
     // Delegate to another generator, interleaved with own yields.
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\function* inner() { yield 1; yield 2; }
         \\function* outer() { yield 0; yield* inner(); yield 3; }
         \\var s = 0; for (var x of outer()) { s += x; } s
-    )).number);
+    )).asNum());
     // Delegate to a string (yields each character).
     try expectEvalStr("ab",
         \\function* g() { yield* "ab"; }
@@ -3793,14 +3793,14 @@ test "generators: yield* delegates to arrays, strings, and generators" {
         \\function* inner() { yield 1; return 99; }
         \\function* outer() { var r = yield* inner(); yield r; }
         \\var it = outer(); it.next(); it.next().value
-    )).number);
+    )).asNum());
 }
 
 test "generators: a return value finishes with done:true" {
     try std.testing.expectEqual(@as(f64, 99), (try evalIn(
         \\function* g() { yield 1; return 99; }
         \\var it = g(); it.next(); it.next().value
-    )).number);
+    )).asNum());
 }
 
 test "generators: locals persist across yields, closures captured" {
@@ -3808,7 +3808,7 @@ test "generators: locals persist across yields, closures captured" {
         \\var base = 1;
         \\function* g() { var n = base; yield n; n = n + 1; yield n; }
         \\var it = g(); it.next(); it.next().value + base
-    )).number);
+    )).asNum());
 }
 
 test "generators: BigInt literal yields feed BigInt typed arrays" {
@@ -3816,49 +3816,49 @@ test "generators: BigInt literal yields feed BigInt typed arrays" {
         \\function* g() { yield 7n; yield 42n; }
         \\var ta = new BigInt64Array(g());
         \\ta.length === 2 && ta[0] === 7n && ta[1] === 42n;
-    )).boolean);
+    )).asBool());
 }
 
 test "identifiers: unicode escapes decode to the canonical name" {
     // \uXXXX in an identifier resolves to the same name written literally.
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var \\u0061 = 1; a")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var \\u0061 = 1; a")).asNum());
     // \u{...} code-point escape form.
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("var \\u{62} = 2; b")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("var \\u{62} = 2; b")).asNum());
     // Escape in a non-leading position: `fo` is the identifier `fo`.
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var f\\u006f = 3; fo")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var f\\u006f = 3; fo")).asNum());
 }
 
 test "identifiers: raw non-ASCII Unicode letters" {
     // Greek + a letter-like symbol used as identifiers.
-    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var \u{03C0} = 7; \u{03C0}")).number);
-    try std.testing.expectEqual(@as(f64, 8), (try evalIn("var caf\u{00E9} = 8; caf\u{00E9}")).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var \u{03C0} = 7; \u{03C0}")).asNum());
+    try std.testing.expectEqual(@as(f64, 8), (try evalIn("var caf\u{00E9} = 8; caf\u{00E9}")).asNum());
 }
 
 test "whitespace: vertical tab, form feed, NBSP, and U+2028 separate tokens" {
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var\u{0B}x\u{0C}=\u{00A0}1\u{2028}x + 2")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var\u{0B}x\u{0C}=\u{00A0}1\u{2028}x + 2")).asNum());
 }
 
 test "hashbang comment at start of source is ignored" {
-    try std.testing.expectEqual(@as(f64, 5), (try evalIn("#!/usr/bin/env node\nvar x = 5; x")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("#!/usr/bin/env node\nvar x = 5; x")).asNum());
 }
 
 test "async: declarations/expressions/arrows/methods parse; never-called is valid" {
     // A never-called async function is fully valid (parses + binds).
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function f() { await 1; return 2; } 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function f() { await 1; return 2; } 1")).asNum());
     // async function expression, async arrow, async method — all parse.
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async function () { return await g(); }; 1")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async (a, b) => await a + b; 1")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async x => await x; 1")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var o = { async m() { return await 1; } }; 1")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("class C { async m() { await this.x; } static async s() {} } 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async function () { return await g(); }; 1")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async (a, b) => await a + b; 1")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var f = async x => await x; 1")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var o = { async m() { return await 1; } }; 1")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("class C { async m() { await this.x; } static async s() {} } 1")).asNum());
     // async generator parses.
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function* ag() { yield await 1; } 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("async function* ag() { yield await 1; } 1")).asNum());
     try expectEvalStr("[Symbol.asyncIterator]", "async function* g() {} Object.getPrototypeOf(Object.getPrototypeOf(g.prototype))[Symbol.asyncIterator].name");
 }
 
 test "async/await: suspendable runtime with spec ordering" {
     // An async function returns a Promise.
-    try std.testing.expect((try evalIn("(async function () { return 1; })() instanceof Promise")).boolean);
+    try std.testing.expect((try evalIn("(async function () { return 1; })() instanceof Promise")).asBool());
     // The body runs synchronously up to the first `await` (no await here), so a
     // write before any suspension is observable synchronously.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
@@ -3866,7 +3866,7 @@ test "async/await: suspendable runtime with spec ordering" {
         \\async function f() { x = 7; return 1; }
         \\f();
         \\x
-    )).number);
+    )).asNum());
     // A continuation *after* an `await` runs in a microtask, so it is NOT visible
     // synchronously (it was, incorrectly, under the old synchronous-settling
     // model). The value is verified end-to-end by the test262 async suite.
@@ -3875,14 +3875,14 @@ test "async/await: suspendable runtime with spec ordering" {
         \\async function f() { result = await Promise.resolve(41) + 1; }
         \\f();
         \\result
-    )).number);
-    try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).boolean);
+    )).asNum());
+    try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).asBool());
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
         \\var C = new other.Function();
         \\C.prototype = null;
         \\Object.getPrototypeOf(Reflect.construct(Promise, [function() {}], C)) === other.Promise.prototype
-    )).boolean);
+    )).asBool());
     try std.testing.expectEqual(@as(f64, 1), (try evalIn(
         \\var promise = new Promise(function() {});
         \\var returnCount = 0;
@@ -3896,7 +3896,7 @@ test "async/await: suspendable runtime with spec ordering" {
         \\promise.then = function() { throw new Test262Error(); };
         \\Promise.race(iter);
         \\returnCount
-    )).number);
+    )).asNum());
 }
 
 test "array destructuring over the iterator protocol (generator, Set, string, rest)" {
@@ -3904,38 +3904,38 @@ test "array destructuring over the iterator protocol (generator, Set, string, re
     try std.testing.expectEqual(@as(f64, 3), (try evalIn(
         \\function* g() { yield 1; yield 2; }
         \\var [a, b] = g(); a + b
-    )).number);
+    )).asNum());
     // Set (iterable, not array).
     try std.testing.expectEqual(@as(f64, 30), (try evalIn(
         \\var [a, b] = new Set([10, 20]); a + b
-    )).number);
+    )).asNum());
     // Rest collects the tail of a generator.
     try std.testing.expectEqual(@as(f64, 2), (try evalIn(
         \\function* g() { yield 1; yield 2; yield 3; }
         \\var [first, ...rest] = g(); rest.length
-    )).number);
+    )).asNum());
     // Default applies when the iterator runs dry.
     try std.testing.expectEqual(@as(f64, 9), (try evalIn(
         \\function* g() { yield 1; }
         \\var [a, b = 9] = g(); b
-    )).number);
+    )).asNum());
     // Destructuring a non-iterable still throws a TypeError.
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { var [x] = 5; } catch (e) { t = e instanceof TypeError; }
         \\t
-    )).boolean);
+    )).asBool());
 }
 
 test "ToPrimitive: own valueOf/toString in arithmetic, string, relational" {
-    try std.testing.expectEqual(@as(f64, 11), (try evalIn("var o = { valueOf: function () { return 10; } }; o + 1")).number);
-    try std.testing.expectEqual(@as(f64, 20), (try evalIn("var o = { valueOf: function () { return 10; } }; o * 2")).number);
+    try std.testing.expectEqual(@as(f64, 11), (try evalIn("var o = { valueOf: function () { return 10; } }; o + 1")).asNum());
+    try std.testing.expectEqual(@as(f64, 20), (try evalIn("var o = { valueOf: function () { return 10; } }; o * 2")).asNum());
     try expectEvalStr("hi!", "var o = { toString: function () { return 'hi'; } }; o + '!'");
     try expectEvalStr("1,2,3", "'' + [1, 2, 3]");
     try expectEvalStr("[object Object]x", "({}) + 'x'");
-    try std.testing.expect((try evalIn("var o = { valueOf: function () { return 5; } }; o < 6")).boolean);
+    try std.testing.expect((try evalIn("var o = { valueOf: function () { return 5; } }; o < 6")).asBool());
     // A class's prototype valueOf/toString is honored too.
-    try std.testing.expectEqual(@as(f64, 6), (try evalIn("class C { valueOf() { return 5; } } new C() + 1")).number);
+    try std.testing.expectEqual(@as(f64, 6), (try evalIn("class C { valueOf() { return 5; } } new C() + 1")).asNum());
     try expectEvalStr("C!", "class C { toString() { return 'C'; } } new C() + '!'");
 }
 
@@ -3946,19 +3946,19 @@ test "class methods/accessors/constructor are non-enumerable" {
         \\class C { m() {} }
         \\var d = Object.getOwnPropertyDescriptor(C.prototype, 'm');
         \\!d.enumerable && d.writable && d.configurable
-    )).boolean);
+    )).asBool());
     // Accessors too.
     try std.testing.expect((try evalIn(
         \\class C { get x() { return 1; } }
         \\!Object.getOwnPropertyDescriptor(C.prototype, 'x').enumerable
-    )).boolean);
+    )).asBool());
     // Static methods.
     try expectEvalStr("", "class C { static s() {} } Object.keys(C).join(',')");
     // `constructor` is non-enumerable.
     try std.testing.expect((try evalIn(
         \\class C {}
         \\!Object.getOwnPropertyDescriptor(C.prototype, 'constructor').enumerable
-    )).boolean);
+    )).asBool());
     // Instance fields ARE enumerable.
     try expectEvalStr("f", "class C { f = 1; m() {} } Object.keys(new C()).join(',')");
 }
@@ -3966,17 +3966,17 @@ test "class methods/accessors/constructor are non-enumerable" {
 test "Array change-by-copy methods (toReversed/toSorted/toSpliced/with)" {
     // toReversed: new array, original untouched.
     try expectEvalStr("3,2,1", "[1,2,3].toReversed().join(',')");
-    try std.testing.expect((try evalIn("var a=[1,2,3]; a.toReversed(); a.join(',') === '1,2,3'")).boolean);
+    try std.testing.expect((try evalIn("var a=[1,2,3]; a.toReversed(); a.join(',') === '1,2,3'")).asBool());
     // toSorted with a comparator.
     try expectEvalStr("1,2,3,10", "[10,2,1,3].toSorted(function(a,b){return a-b;}).join(',')");
-    try std.testing.expect((try evalIn("var a=[3,1,2]; a.toSorted(); a.join(',') === '3,1,2'")).boolean);
+    try std.testing.expect((try evalIn("var a=[3,1,2]; a.toSorted(); a.join(',') === '3,1,2'")).asBool());
     // with: replaces one index, returns a new array; negative index; RangeError.
     try expectEvalStr("1,9,3", "[1,2,3].with(1,9).join(',')");
     try expectEvalStr("1,2,9", "[1,2,3].with(-1,9).join(',')");
-    try std.testing.expect((try evalIn("var t=false; try{[1,2].with(5,0);}catch(e){t=e instanceof RangeError;} t")).boolean);
+    try std.testing.expect((try evalIn("var t=false; try{[1,2].with(5,0);}catch(e){t=e instanceof RangeError;} t")).asBool());
     // toSpliced: delete + insert into a copy.
     try expectEvalStr("1,9,9,3", "[1,2,3].toSpliced(1,1,9,9).join(',')");
-    try std.testing.expect((try evalIn("var a=[1,2,3]; a.toSpliced(0,2); a.length === 3")).boolean);
+    try std.testing.expect((try evalIn("var a=[1,2,3]; a.toSpliced(0,2); a.length === 3")).asBool());
 }
 
 test "defineProperty descriptor validation (accessor+data mix, non-callable get/set)" {
@@ -3985,16 +3985,16 @@ test "defineProperty descriptor validation (accessor+data mix, non-callable get/
         \\var t = false;
         \\try { Object.defineProperty({}, 'p', { value: 1, get: function () {} }); }
         \\catch (e) { t = e instanceof TypeError; } t
-    )).boolean);
+    )).asBool());
     // A non-callable getter throws TypeError.
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { Object.defineProperty({}, 'p', { get: 5 }); } catch (e) { t = e instanceof TypeError; } t
-    )).boolean);
+    )).asBool());
     // get: undefined is a valid accessor descriptor (no throw).
     try std.testing.expect((try evalIn(
         \\Object.defineProperty({}, 'p', { get: undefined }); true
-    )).boolean);
+    )).asBool());
 }
 
 test "array index property attributes (defineProperty honors writable/enumerable)" {
@@ -4003,33 +4003,33 @@ test "array index property attributes (defineProperty honors writable/enumerable
         \\var a = [10];
         \\var d = Object.getOwnPropertyDescriptor(a, 0);
         \\d.value === 10 && d.writable && d.enumerable && d.configurable
-    )).boolean);
+    )).asBool());
     // defineProperty can make an element non-writable; a sloppy write is a no-op.
     try std.testing.expectEqual(@as(f64, 10), (try evalIn(
         \\var a = [10];
         \\Object.defineProperty(a, 0, { writable: false });
         \\a[0] = 99; a[0]
-    )).number);
+    )).asNum());
     // The recorded descriptor is reflected.
     try std.testing.expect((try evalIn(
         \\var a = [10];
         \\Object.defineProperty(a, 0, { writable: false, enumerable: false });
         \\var d = Object.getOwnPropertyDescriptor(a, 0);
         \\!d.writable && !d.enumerable
-    )).boolean);
+    )).asBool());
     // defineProperty can set a new value on a configurable element.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\var a = [1];
         \\Object.defineProperty(a, 0, { value: 7 });
         \\a[0]
-    )).number);
+    )).asNum());
     // A non-configurable element cannot be deleted (sloppy: delete returns false).
     try std.testing.expect((try evalIn(
         \\var a = [1];
         \\Object.defineProperty(a, 0, { configurable: false });
         \\var ok = delete a[0];
         \\!ok && a[0] === 1
-    )).boolean);
+    )).asBool());
 }
 
 test "array length defineProperty invariants" {
@@ -4038,25 +4038,25 @@ test "array length defineProperty invariants" {
         \\Object.defineProperty(a, "length", { writable: false });
         \\try { Object.defineProperty(a, "length", { writable: true }); false; }
         \\catch (e) { e instanceof TypeError && Object.getOwnPropertyDescriptor(a, "length").writable === false; }
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var a = [1, 2, 3];
         \\Object.defineProperty(a, "length", { writable: false });
         \\try { Object.defineProperty(a, "3", { value: "abc" }); false; }
         \\catch (e) { e instanceof TypeError && !a.hasOwnProperty("3") && a.length === 3; }
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var a = [1, 2, 3];
         \\Object.defineProperty(a, "length", { writable: false });
         \\try { Object.defineProperties(a, { "4": { value: "abc" } }); false; }
         \\catch (e) { e instanceof TypeError && !a.hasOwnProperty("4") && a.length === 3; }
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var a = [1, 2, 3];
         \\Object.defineProperty(a, "length", { writable: false });
         \\Reflect.defineProperty(a, "3", { value: "abc" }) === false &&
         \\!a.hasOwnProperty("3") && a.length === 3
-    )).boolean);
+    )).asBool());
 }
 
 test "Object defineProperties uses ToObject and proxy ownKeys" {
@@ -4064,7 +4064,7 @@ test "Object defineProperties uses ToObject and proxy ownKeys" {
         \\var threw = false;
         \\try { Object.create({}, "hello"); } catch (e) { threw = e instanceof TypeError; }
         \\threw
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var target = {};
         \\target.foo = 2;
@@ -4075,7 +4075,7 @@ test "Object defineProperties uses ToObject and proxy ownKeys" {
         \\});
         \\Object.defineProperties({}, proxy);
         \\seen.length === 2 && seen[0] === "0" && seen[1] === "foo"
-    )).boolean);
+    )).asBool());
 }
 
 test "deleted Object.prototype.toString is not synthesized" {
@@ -4086,20 +4086,20 @@ test "deleted Object.prototype.toString is not synthesized" {
         \\try { Object.prototype.toString(); } catch (e) { threw = e instanceof TypeError; }
         \\Object.defineProperty(Object.prototype, "toString", { value: f, writable: true, configurable: true });
         \\deleted && threw
-    )).boolean);
+    )).asBool());
 }
 
 test "Object.keys/values/entries enumerate array indices" {
     try expectEvalStr("0,1,2", "Object.keys([10, 20, 30]).join(',')");
-    try std.testing.expectEqual(@as(f64, 60), (try evalIn("Object.values([10, 20, 30]).reduce(function(a,b){return a+b;}, 0)")).number);
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Object.entries([7, 8]).length")).number);
+    try std.testing.expectEqual(@as(f64, 60), (try evalIn("Object.values([10, 20, 30]).reduce(function(a,b){return a+b;}, 0)")).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Object.entries([7, 8]).length")).asNum());
     try expectEvalStr("0,7", "Object.entries([7, 8])[0].join(',')");
     // A non-enumerable index is skipped.
     try expectEvalStr("1", "var a = [10, 20]; Object.defineProperty(a, 0, { enumerable: false }); Object.keys(a).join(',')");
 }
 
 test "Array.isArray follows proxies and recognizes Array.prototype" {
-    try std.testing.expect((try evalIn("Array.isArray(Array.prototype)")).boolean);
+    try std.testing.expect((try evalIn("Array.isArray(Array.prototype)")).asBool());
     try std.testing.expect((try evalIn(
         \\var objectProxy = new Proxy({}, {});
         \\var arrayProxy = new Proxy([], {});
@@ -4107,20 +4107,20 @@ test "Array.isArray follows proxies and recognizes Array.prototype" {
         \\Array.isArray(objectProxy) === false &&
         \\Array.isArray(arrayProxy) === true &&
         \\Array.isArray(arrayProxyProxy) === true
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var handle = Proxy.revocable([], {});
         \\handle.revoke();
         \\try { Array.isArray(handle.proxy); false; } catch (e) { e instanceof TypeError; }
-    )).boolean);
+    )).asBool());
 }
 
 test "Array.prototype Symbol.iterator aliases values and rejects nullish this" {
-    try std.testing.expect((try evalIn("Array.prototype[Symbol.iterator] === Array.prototype.values")).boolean);
+    try std.testing.expect((try evalIn("Array.prototype[Symbol.iterator] === Array.prototype.values")).asBool());
     try std.testing.expect((try evalIn(
         \\var it = Array.prototype[Symbol.iterator];
         \\try { it(); false; } catch (e) { e instanceof TypeError; }
-    )).boolean);
+    )).asBool());
 }
 
 test "array mutators throw when final length set hits non-writable length" {
@@ -4136,25 +4136,25 @@ test "array mutators throw when final length set hits non-writable length" {
         \\throwsWith("unshift", function(a) { Object.defineProperty(a, "length", { writable: false }); }) &&
         \\throwsWith("pop", Object.freeze) &&
         \\throwsWith("shift", Object.freeze)
-    )).boolean);
+    )).asBool());
 }
 
 test "sloppy-mode property set on a primitive is a no-op; null/undefined throws" {
     // No-op on a primitive: doesn't throw, doesn't store.
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var n = 5; n.foo = 1; n.foo === undefined ? 1 : 0")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("'str'.x = 1; 1")).number);
-    try std.testing.expectEqual(@as(f64, 1), (try evalIn("true.y = 1; 1")).number);
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("var n = 5; n.foo = 1; n.foo === undefined ? 1 : 0")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("'str'.x = 1; 1")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try evalIn("true.y = 1; 1")).asNum());
     // null / undefined still throw a TypeError.
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { var o = null; o.x = 1; } catch (e) { t = e instanceof TypeError; }
         \\t
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { var o; o.x = 1; } catch (e) { t = e instanceof TypeError; }
         \\t
-    )).boolean);
+    )).asBool());
 }
 
 test "Object.prototype.toString tags ([object X]) + Symbol.toStringTag" {
@@ -4176,9 +4176,9 @@ test "Object.prototype.toString tags ([object X]) + Symbol.toStringTag" {
 
 test "Symbol.for / Symbol.keyFor (global symbol registry)" {
     // Same key returns the same (===) registered symbol.
-    try std.testing.expect((try evalIn("Symbol.for('x') === Symbol.for('x')")).boolean);
+    try std.testing.expect((try evalIn("Symbol.for('x') === Symbol.for('x')")).asBool());
     // A registry symbol is distinct from a plain Symbol() of the same desc.
-    try std.testing.expect((try evalIn("Symbol.for('y') !== Symbol('y')")).boolean);
+    try std.testing.expect((try evalIn("Symbol.for('y') !== Symbol('y')")).asBool());
     // keyFor returns the registration key.
     try expectEvalStr("z", "Symbol.keyFor(Symbol.for('z'))");
     // keyFor on an unregistered symbol is undefined.
@@ -4190,7 +4190,7 @@ test "Symbol.for / Symbol.keyFor (global symbol registry)" {
         \\var t = false;
         \\try { Symbol.keyFor('not a symbol'); } catch (e) { t = e instanceof TypeError; }
         \\t
-    )).boolean);
+    )).asBool());
 }
 
 test "NamedEvaluation: anonymous function/class takes its binding name" {
@@ -4218,76 +4218,76 @@ test "generators with destructuring / default / rest parameters" {
     try std.testing.expectEqual(@as(f64, 3), (try evalIn(
         \\function* g([a, b]) { yield a + b; }
         \\g([1, 2]).next().value
-    )).number);
+    )).asNum());
     // Object-pattern parameter.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn(
         \\function* g({ x, y }) { yield x + y; }
         \\g({ x: 3, y: 4 }).next().value
-    )).number);
+    )).asNum());
     // Default parameter (evaluated at generator creation).
     try std.testing.expectEqual(@as(f64, 5), (try evalIn(
         \\function* g(a = 5) { yield a; }
         \\g().next().value
-    )).number);
+    )).asNum());
     // Rest parameter.
     try std.testing.expectEqual(@as(f64, 3), (try evalIn(
         \\function* g(first, ...rest) { yield rest.length; }
         \\g(0, 1, 2, 3).next().value
-    )).number);
+    )).asNum());
     // Generator method with a destructuring parameter (the class/dstr family).
     try std.testing.expectEqual(@as(f64, 30), (try evalIn(
         \\var o = { *m([a, b]) { yield a + b; } };
         \\o.m([10, 20]).next().value
-    )).number);
+    )).asNum());
 }
 
 test "Set/Map are iterable: for-of, spread, Array.from, destructuring" {
     // for-of over a Set.
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
         \\var s = 0; for (var x of new Set([1, 2, 3])) s += x; s
-    )).number);
+    )).asNum());
     // Spread a Set into an array.
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("[...new Set([1, 2, 2, 3])].length")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("[...new Set([1, 2, 2, 3])].length")).asNum());
     // Map yields [k, v] pairs; destructure them in a for-of head.
     try std.testing.expectEqual(@as(f64, 33), (try evalIn(
         \\var m = new Map(); m.set('a', 11); m.set('b', 22);
         \\var t = 0; for (var [k, v] of m) t += v; t
-    )).number);
+    )).asNum());
     // Array.from over a Set.
-    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array.from(new Set([5, 5, 9])).length")).number);
+    try std.testing.expectEqual(@as(f64, 2), (try evalIn("Array.from(new Set([5, 5, 9])).length")).asNum());
 }
 
 test "eval: direct eval runs in the caller's scope" {
     // Returns the completion value of the program.
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("eval('1 + 2')")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("eval('1 + 2')")).asNum());
     // Reads a binding from the surrounding scope.
-    try std.testing.expectEqual(@as(f64, 42), (try evalIn("var x = 42; eval('x')")).number);
+    try std.testing.expectEqual(@as(f64, 42), (try evalIn("var x = 42; eval('x')")).asNum());
     // Mutates a binding in the surrounding scope.
-    try std.testing.expectEqual(@as(f64, 9), (try evalIn("var x = 1; eval('x = 9'); x")).number);
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn("var x = 1; eval('x = 9'); x")).asNum());
     // Introduces a new binding visible after the eval.
-    try std.testing.expectEqual(@as(f64, 7), (try evalIn("eval('var y = 7;'); y")).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("eval('var y = 7;'); y")).asNum());
     // A non-string argument is returned unchanged.
-    try std.testing.expectEqual(@as(f64, 5), (try evalIn("eval(5)")).number);
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("eval(5)")).asNum());
     // A syntax error in the source throws a SyntaxError.
     try std.testing.expect((try evalIn(
         \\var t = false;
         \\try { eval('var ='); } catch (e) { t = e instanceof SyntaxError; }
         \\t
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var t = false, o = {};
         \\try { eval('o.#f'); } catch (e) { t = e instanceof SyntaxError; }
         \\t
-    )).boolean);
+    )).asBool());
 }
 
 test "async: `async` remains usable as an ordinary identifier" {
-    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var async = 1; async + 2")).number);
+    try std.testing.expectEqual(@as(f64, 3), (try evalIn("var async = 1; async + 2")).asNum());
     // `async` as a property name / shorthand / method name (not a modifier).
-    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var o = { async: 7 }; o.async")).number);
-    try std.testing.expectEqual(@as(f64, 5), (try evalIn("var o = { async() { return 5; } }; o.async()")).number);
+    try std.testing.expectEqual(@as(f64, 7), (try evalIn("var o = { async: 7 }; o.async")).asNum());
+    try std.testing.expectEqual(@as(f64, 5), (try evalIn("var o = { async() { return 5; } }; o.async()")).asNum());
     // `async` called as a function.
-    try std.testing.expectEqual(@as(f64, 9), (try evalIn("function async(x) { return x; } async(9)")).number);
+    try std.testing.expectEqual(@as(f64, 9), (try evalIn("function async(x) { return x; } async(9)")).asNum());
 }
 
 test "Context is thread-affine: owner recognized, foreign thread rejected" {
@@ -4344,7 +4344,7 @@ test "SharedArrayBuffer resolves newTarget prototype before data allocation" {
         \\} catch (e) {
         \\  e instanceof MarkerError;
         \\}
-    )).boolean);
+    )).asBool());
 }
 
 test "ArrayBuffer immutable methods preserve spec ordering" {
@@ -4357,7 +4357,7 @@ test "ArrayBuffer immutable methods preserve spec ordering" {
         \\  if (!(e instanceof TypeError)) throw e;
         \\}
         \\calls.length === 1 && calls[0] === "newLength.valueOf";
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var source = new ArrayBuffer(10, { maxByteLength: 10 });
         \\var start = { valueOf() { source.resize(9); return -7; } };
@@ -4367,7 +4367,7 @@ test "ArrayBuffer immutable methods preserve spec ordering" {
         \\} catch (e) {
         \\  e instanceof RangeError;
         \\}
-    )).boolean);
+    )).asBool());
 }
 
 test "ArrayBuffer slice rejects immutable species result" {
@@ -4385,7 +4385,7 @@ test "ArrayBuffer slice rejects immutable species result" {
         \\} catch (e) {
         \\  e instanceof TypeError && calls.length === 1 && calls[0] === 1;
         \\}
-    )).boolean);
+    )).asBool());
 }
 
 test "ArrayBuffer byteLength copied onto SharedArrayBuffer keeps brand check" {
@@ -4398,7 +4398,7 @@ test "ArrayBuffer byteLength copied onto SharedArrayBuffer keeps brand check" {
         \\} catch (e) {
         \\  e instanceof TypeError;
         \\}
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray from/of reject immutable constructor result before writes" {
@@ -4415,7 +4415,7 @@ test "TypedArray from/of reject immutable constructor result before writes" {
         \\  if (!(e instanceof TypeError)) throw e;
         \\}
         \\calls.join("|") === "construct(1)";
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var calls = [];
         \\function immutable(len) {
@@ -4435,7 +4435,7 @@ test "TypedArray from/of reject immutable constructor result before writes" {
         \\  if (!(e instanceof TypeError)) throw e;
         \\}
         \\calls.join("|") === "iterator|length|construct(1)";
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray Reflect.set honors ordinary receiver failures" {
@@ -4451,14 +4451,14 @@ test "TypedArray Reflect.set honors ordinary receiver failures" {
         \\target[0] === 0 &&
         \\receiver[0] === 1 &&
         \\valueOfCalls === 0;
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var target = new BigInt64Array([0n, 0n]);
         \\var receiver = new BigInt64Array([1n]);
         \\Reflect.set(target, 1, { valueOf() { throw new Error("coerce"); } }, receiver) === false &&
         \\target[1] === 0n &&
         \\receiver.hasOwnProperty(1) === false;
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray constructor processes arguments before prototype allocation" {
@@ -4473,7 +4473,7 @@ test "TypedArray constructor processes arguments before prototype allocation" {
         \\} catch (e) {
         \\  e instanceof TypeError;
         \\}
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray constructor copies live source typed array length" {
@@ -4484,7 +4484,7 @@ test "TypedArray constructor copies live source typed array length" {
         \\rab.resize(8);
         \\var copy = new Uint8Array(source);
         \\copy.length === 4 && copy[0] === 5 && copy[1] === 6 && copy[2] === 0 && copy[3] === 0;
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray subarray omits species length for length-tracking views" {
@@ -4505,7 +4505,7 @@ test "TypedArray subarray omits species length for length-tracking views" {
         \\result.length === 15 &&
         \\(rab.resize(8), true) &&
         \\result.length === 7;
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray toString shares Array.prototype function object" {
@@ -4514,7 +4514,7 @@ test "TypedArray toString shares Array.prototype function object" {
         \\var sample = new Uint8Array([1, 2]);
         \\proto.toString === Array.prototype.toString &&
         \\sample.toString() === "1,2";
-    )).boolean);
+    )).asBool());
     try std.testing.expect((try evalIn(
         \\var sample = new Uint8Array([1]);
         \\$262.detachArrayBuffer(sample.buffer);
@@ -4523,7 +4523,7 @@ test "TypedArray toString shares Array.prototype function object" {
         \\} catch (e) {
         \\  e instanceof TypeError;
         \\}
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray default sort orders negative zero before positive zero" {
@@ -4531,7 +4531,7 @@ test "TypedArray default sort orders negative zero before positive zero" {
         \\var sample = new Float64Array([1, 0, -0, 2]).sort();
         \\Object.is(sample[0], -0) && Object.is(sample[1], 0) &&
         \\sample[2] === 1 && sample[3] === 2;
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray sort skips writeback when comparator shrinks fixed view out of bounds" {
@@ -4545,7 +4545,7 @@ test "TypedArray sort skips writeback when comparator shrinks fixed view out of 
         \\  return a - b;
         \\});
         \\full.length === 2 && full[0] === 10 && full[1] === 9;
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray toLocaleString uses empty strings after shrink" {
@@ -4564,7 +4564,7 @@ test "TypedArray toLocaleString uses empty strings after shrink" {
         \\} finally {
         \\  Number.prototype.toLocaleString = old;
         \\}
-    )).boolean);
+    )).asBool());
 }
 
 test "TypedArray set skips writes after source getters shrink target" {
@@ -4582,7 +4582,7 @@ test "TypedArray set skips writes after source getters shrink target" {
         \\});
         \\fixed.set(source);
         \\full.length === 3 && full[0] === 1 && full[1] === 2 && full[2] === 4;
-    )).boolean);
+    )).asBool());
 }
 
 test "Atomics.waitAsync: not-equal sync, timeout, and cross-agent notify settle" {

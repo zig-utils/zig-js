@@ -731,7 +731,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
         } else if (o.prim != null and o.prim.?.isString())
             // A String wrapper exposes only its char indices as enumerable own keys.
-            (arrayIndexOf(k) != null and arrayIndexOf(k).? < o.prim.?.string.len)
+            (arrayIndexOf(k) != null and arrayIndexOf(k).? < o.prim.?.asStr().len)
         else if ((o.is_array or o.typed_array != null) and std.mem.eql(u8, k, "length"))
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
@@ -805,7 +805,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
             } else if (from.prim != null and from.prim.?.isString())
                 // A String wrapper's only enumerable own keys are its char indices
                 // ("length" and inherited methods are non-enumerable).
-                (arrayIndexOf(k) != null and arrayIndexOf(k).? < from.prim.?.string.len)
+                (arrayIndexOf(k) != null and arrayIndexOf(k).? < from.prim.?.asStr().len)
             else if ((from.is_array or from.typed_array != null) and std.mem.eql(u8, k, "length"))
                 false
             else
@@ -933,7 +933,7 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
     if (self.new_target.isObject()) {
         if (self.active_native) |callee| {
             if (self.new_target.asObj() != callee) {
-                const obj = (try self.newObject()).object;
+                const obj = (try self.newObject()).asObj();
                 obj.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Object");
                 return Value.obj(obj);
             }
@@ -942,7 +942,7 @@ pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) Host
     const v = arg(args, 0);
     if (v.isObject() and !v.asObj().is_bigint and !v.asObj().is_symbol) return v;
     if (v.isUndefined() or v.isNull()) {
-        const obj = (try self.newObject()).object;
+        const obj = (try self.newObject()).asObj();
         if (self.new_target.isObject()) obj.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Object");
         return Value.obj(obj);
     }
@@ -961,7 +961,7 @@ fn createDataIndexOrThrow(self: *Interpreter, target: Value, k: usize, v: Value)
         return;
     }
     const key = try std.fmt.allocPrint(self.arena, "{d}", .{k});
-    const desc = (try self.newObject()).object;
+    const desc = (try self.newObject()).asObj();
     try desc.setOwn(self.arena, self.root_shape, "value", v);
     try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
     try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
@@ -1382,7 +1382,7 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) H
 pub fn objectCreate(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const obj = (try self.newObject()).object;
+    const obj = (try self.newObject()).asObj();
     switch (arg(args, 0).kind()) {
         .object => obj.proto = arg(args, 0).asObj(),
         .null => obj.proto = null,
@@ -1439,7 +1439,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // Materialize the descriptor once over the prototype chain (a field may be
     // inherited or itself an accessor), into a plain own-property record the
     // rest of this function reads via `getOwn`.
-    const d = (try self.newObject()).object;
+    const d = (try self.newObject()).asObj();
     for ([_][]const u8{ "enumerable", "configurable", "value", "writable", "get", "set" }) |f| {
         if (try descField(self, d_obj, f)) |v| try d.setOwn(self.arena, self.root_shape, f, v);
     }
@@ -1850,7 +1850,7 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
             const cur = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(o), self.keyToValue(k) });
             if (!cur.isObject()) continue; // [[GetOwnProperty]] returned undefined
             const is_accessor = cur.asObj().getOwn("get") != null or cur.asObj().getOwn("set") != null;
-            const d = (try self.newObject()).object;
+            const d = (try self.newObject()).asObj();
             try self.setProp(d, "configurable", Value.boolVal(false));
             // A frozen *data* property is also made non-writable; an accessor only
             // gets {configurable:false} (writable is invalid on an accessor).
@@ -2053,7 +2053,7 @@ fn completeDescriptor(self: *Interpreter, desc_obj: *value.Object) HostError!Val
         if (!s.isUndefined() and !(s.isObject() and s.asObj().isCallableObject()))
             return self.throwError("TypeError", "Setter must be a function");
     }
-    const out = (try self.newObject()).object;
+    const out = (try self.newObject()).asObj();
     if (is_accessor) {
         try self.setMember(Value.obj(out), "get", getf orelse Value.undef());
         try self.setMember(Value.obj(out), "set", setf orelse Value.undef());
@@ -2426,7 +2426,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     }
 
     // Wrap the value in a holder { "": value } so toJSON/replacer apply to it.
-    const holder = (try self.newObject()).object;
+    const holder = (try self.newObject()).asObj();
     try holder.setOwn(self.arena, self.root_shape, "", arg(args, 0));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (!try st.serialize(&buf, Value.obj(holder), "")) return Value.undef();
@@ -2685,7 +2685,7 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     // the reviver returns undefined) each property by the reviver's return.
     const reviver = arg(args, 1);
     if (reviver.isObject() and reviver.asObj().isCallableObject()) {
-        const holder = (try self.newObject()).object;
+        const holder = (try self.newObject()).asObj();
         // CreateDataPropertyOrThrow(holder, "", v) — not [[Set]], so an inherited
         // Object.prototype[""] setter is not invoked.
         try holder.setOwn(self.arena, self.root_shape, "", v);
@@ -2724,7 +2724,7 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
 }
 
 fn jsonReviverContext(self: *Interpreter, holder: Value, key: []const u8, val: Value, sources: []const JsonSourceEntry) HostError!Value {
-    const ctx = (try self.newObject()).object;
+    const ctx = (try self.newObject()).asObj();
     if (holder.isObject()) {
         var i = sources.len;
         while (i > 0) {
@@ -2754,7 +2754,7 @@ fn internalizeStore(self: *Interpreter, o: *value.Object, val: Value, key: []con
         return;
     }
     // CreateDataProperty(o, key, nv) — a full {value,w,e,c}=true data descriptor.
-    const desc = (try self.newObject()).object;
+    const desc = (try self.newObject()).asObj();
     try desc.setOwn(self.arena, self.root_shape, "value", nv);
     try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
     try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));

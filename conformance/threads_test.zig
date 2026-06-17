@@ -403,8 +403,8 @@ pub fn main(init: std.process.Init) !void {
                 }
                 var balanced = false;
                 for (0..3000) |_| {
-                    const status = ctx.evaluate("drainMicrotasks(); __asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undefined;
-                    if (status == .boolean and status.boolean) {
+                    const status = ctx.evaluate("drainMicrotasks(); __asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undef();
+                    if (status.isBoolean() and status.asBool()) {
                         balanced = true;
                         break;
                     }
@@ -429,7 +429,7 @@ pub fn main(init: std.process.Init) !void {
                     continue;
                 }
                 if (ctx.exception) |e| {
-                    if (e == .string and std.mem.eql(u8, e.string, "__zigjs_threads_quit__")) {
+                    if (e.isString() and std.mem.eql(u8, e.asStr(), "__zigjs_threads_quit__")) {
                         std.debug.print("  PASS  {s}\n", .{name});
                         continue;
                     }
