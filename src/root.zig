@@ -87,6 +87,7 @@ test {
     _ = @import("nanbox.zig");
     _ = @import("strcell.zig");
     _ = @import("valuebox.zig");
+    _ = @import("value_nb.zig");
 }
 
 test "evalNumber convenience" {
