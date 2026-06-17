@@ -216,6 +216,14 @@ pub const Context = struct {
             bind.* = .{ .context = self };
             const h = try gpa.create(GcHeap);
             h.* = GcHeap.init(gpa, bind);
+            // GC scratch (`mark_stack`/`barrier_buf`) is touched by both a
+            // concurrent marker thread and the mutator under M3, so it must use
+            // a thread-safe allocator distinct from the (mutator-only) cell
+            // backing. The page allocator is process-global and thread-safe; for
+            // M1/M2 this only changes where the pointer stacks live, not
+            // behavior. Set before any allocation so deinit frees with the same
+            // allocator. See zig-gc `Heap.setAuxAllocator`.
+            h.setAuxAllocator(std.heap.page_allocator);
             self.gc = h;
             self.gc_binding = bind;
         }
@@ -5211,6 +5219,93 @@ test "enable_gc incremental: insertion write barrier keeps a reparented object a
     try std.testing.expect(adopted.isObject());
     const tag = adopted.asObj().getOwn("tag") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f64, 777), tag.asNum());
+}
+
+test "enable_gc concurrent (M3): a marker thread races a mutator appending into a rooted array" {
+    // Phase 7 / M3, the GC half: prove the collector can mark *concurrently with
+    // a live mutator* against real engine `Object` graphs — the WebKit-Riptide
+    // model adapted to one GIL-serialized mutator plus a dedicated marker thread.
+    // The mutator appends previously-white objects into a rooted array while the
+    // marker thread is tracing; each append fires the engine's insertion write
+    // barrier (handing the new cell to the marker) and the marker reads the
+    // array's element storage under the same `elements_lock` the mutator takes,
+    // so the only shared access is race-free. Without the barrier the appended
+    // cells would be swept; without the lock/atomics the read would tear (this is
+    // exactly what the `gc.zig` `traceObject` concurrent path and the `aux`
+    // thread-safe scratch allocator exist to make sound — validated TSan-clean).
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage(); // stabilize the post-intrinsics baseline
+
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc); // arms the mutator's barrier
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const heap = ctx.gc.?;
+    const a = ctx.arena();
+
+    // A rooted array (own property of globalThis) the mutator will fill.
+    const holder = try gc_mod.allocObj(a);
+    holder.* = .{ .is_array = true };
+    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "holder", Value.obj(holder));
+
+    // A pool of objects reachable from no root yet (white at mark start), each
+    // tagged so we can prove it survived *intact*, not merely un-swept.
+    const pool_n = 1500;
+    var pool: [pool_n]*value.Object = undefined;
+    for (&pool, 0..) |*slot, i| {
+        const child = try gc_mod.allocObj(a);
+        child.* = .{};
+        try child.setOwn(ctx.gpa, ctx.root_shape, "id", Value.num(@floatFromInt(i)));
+        slot.* = child;
+    }
+    // A guaranteed-garbage object: tagged, but never linked to any root and never
+    // touched by the barrier — it must be reclaimed.
+    const garbage = try gc_mod.allocObj(a);
+    garbage.* = .{};
+    const live_before = heap.live_cells;
+
+    // Snapshot roots with the world stopped (single-threaded here — only globalThis
+    // → holder is reachable; the pool and garbage are white), then go concurrent.
+    // Precise roots only: the pool lives in a native local we deliberately do not
+    // scan, so survival must come from the barrier + finish-time root rescan.
+    heap.beginConcurrentMark();
+
+    const Shared = struct {
+        heap: *Context.GcHeap,
+        done: std.atomic.Value(bool) = .init(false),
+        fn markLoop(s: *@This()) void {
+            while (true) {
+                const quiescent = s.heap.concurrentMarkRound();
+                if (s.done.load(.acquire) and quiescent) break;
+                std.atomic.spinLoopHint();
+            }
+        }
+    };
+    var shared = Shared{ .heap = heap };
+    const marker = try std.Thread.spawn(.{}, Shared.markLoop, .{&shared});
+
+    // Mutator: append every white child into the rooted array. `appendElement`
+    // holds `elements_lock` and fires the insertion barrier, exactly the engine
+    // funnel — concurrent with the marker reading `holder.elements` under the
+    // same lock.
+    for (pool) |child| try holder.appendElement(a, Value.obj(child));
+    shared.done.store(true, .release);
+    marker.join();
+
+    // World stopped again: re-scan roots (catches anything the barrier missed via
+    // holder → elements) and sweep.
+    heap.finishConcurrentMark();
+
+    // Every child survived and is intact, and the array holds them all in order.
+    try std.testing.expectEqual(@as(usize, pool_n), holder.elementsLen());
+    for (pool, 0..) |child, i| {
+        const id = child.getOwn("id") orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(f64, @floatFromInt(i)), id.asNum());
+    }
+    // The unreferenced garbage was reclaimed — proof the concurrent mark didn't
+    // simply retain everything.
+    try std.testing.expect(heap.live_cells <= live_before + pool_n);
+    std.mem.doNotOptimizeAway(&garbage);
 }
 
 test "enable_gc: conservative native-stack scan keeps a stack-only value alive" {

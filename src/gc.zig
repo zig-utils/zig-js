@@ -68,22 +68,47 @@ inline fn markManaged(v: anytype, cell: anytype) void {
 /// keys are registered as weak edges so collection clears them when the target
 /// is otherwise unreachable.
 pub fn traceObject(o: *Object, v: anytype) void {
-    v.mark(o.proto);
+    // Single-word pointer fields. `proto` is the one that a *reachable* object's
+    // mutator can rewrite post-creation (a `setPrototypeOf` reparent, which also
+    // fires the insertion barrier to shade the new target); under a concurrent
+    // mark we read it with a relaxed atomic load to be race-free per the memory
+    // model (a plain mov on x86_64/arm64). The reparent sites pair this with an
+    // atomic store. `ctor_ref`/`proxy_target`/`proxy_handler` are written only at
+    // creation, before the cell is published to the marker (the born-grey
+    // hand-off establishes happens-before), so a plain read is safe.
+    const concurrent = v.concurrent();
+    v.mark(if (concurrent) @atomicLoad(?*Object, &o.proto, .monotonic) else o.proto);
     v.mark(o.ctor_ref);
     v.mark(o.proxy_target);
     v.mark(o.proxy_handler);
+
+    // Growable storage (slots/accessors behind `property_lock`, elements behind
+    // `elements_lock`): under a *concurrent* mark (M3) the marker must read it
+    // under the same lock the mutator takes, or a concurrent append/realloc
+    // tears the slice. Under stop-the-world (M1) / GIL-held incremental (M2)
+    // marking the world is quiescent during the read, so we skip the lock.
+    if (concurrent) o.lockProperties();
     for (o.slots.items) |slot| markValue(v, slot);
-    if (o.is_weak and (o.is_map or o.is_set)) {
-        for (o.weak_entries.items) |*entry| v.markWeak(&entry.key);
-    } else {
-        for (o.elements.items) |el| markValue(v, el);
-    }
     if (o.accessors) |acc| {
         var it = acc.valueIterator();
         while (it.next()) |a| {
             markValueOpt(v, a.get);
             markValueOpt(v, a.set);
         }
+    }
+    if (concurrent) o.unlockProperties();
+
+    if (o.is_weak and (o.is_map or o.is_set)) {
+        // WeakMap/WeakSet entry storage is not yet funneled behind a per-object
+        // lock (still GIL-coupled — see P7-gil-removal.md blocker #5/weak paths),
+        // so it cannot be marked race-free while a mutator runs concurrently.
+        // Concurrent marking of weak collections is gated on funneling those
+        // mutation sites first; under M1/M2 (quiescent) this read is safe.
+        for (o.weak_entries.items) |*entry| v.markWeak(&entry.key);
+    } else {
+        if (concurrent) o.lockElements();
+        for (o.elements.items) |el| markValue(v, el);
+        if (concurrent) o.unlockElements();
     }
     markValueOpt(v, o.prim);
     markWeakObject(v, &o.weak_ref_target);

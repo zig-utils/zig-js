@@ -492,6 +492,40 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   `P7-gil-removal.md` blocker map), drop the GIL, run mark concurrently with
   mutators behind the barrier; safepoint-coordinate sweep. TSan campaign to
   zero unsuppressed races; serial-perf gate; stress amplifiers.
+  *Concurrent-marking mechanism landed in `zig-gc`.* The collector now marks on
+  its own thread while a mutator runs (the WebKit-Riptide model adapted to one
+  GIL-serialized mutator + a dedicated marker): `beginConcurrentMark` (world
+  stopped — whiten + grey roots) → the marker loops `concurrentMarkRound`
+  (trace grey, fold in the mutator's hand-off) while the mutator executes →
+  `finishConcurrentMark` (world stopped — re-scan roots for cells moved onto a
+  root mid-mark, drain, ephemeron/weak pass, sweep). The white→grey claim is an
+  atomic compare-and-set (`claimMark`) so the marker and the mutator's
+  `writeBarrier` never double-push; the barrier and born-grey allocations hand
+  cells to the marker through a lock-guarded `barrier_buf`. Two races against a
+  live mutator were closed and proven TSan-clean: (1) GC scratch
+  (`mark_stack`/`barrier_buf`) moved onto a separate thread-safe `aux` allocator
+  (cell slabs stay on the mutator-only `backing`) — the localized answer to
+  blocker #1 for the one-mutator model; (2) a bare reference slot the marker
+  reads while a mutator writes is accessed with relaxed atomics (a plain mov on
+  x86_64/arm64), and collection-backed storage is read under the same per-object
+  lock the mutator takes. `Visitor.concurrent()` lets the binding choose the
+  locking path only when marking concurrently, so M1/M2 stay byte-identical.
+  *Engine binding wired + validated.* `gc.zig`'s `traceObject` takes
+  `property_lock`/`elements_lock` around slot/accessor/element reads and reads
+  `proto` atomically when `v.concurrent()`; `Context` installs a thread-safe
+  `aux` allocator for GC scratch. An engine-level test
+  (`enable_gc concurrent (M3)`) runs a marker thread against real `Object`
+  graphs while the mutator appends previously-white objects into a rooted array
+  through the engine's `appendElement` funnel (insertion barrier + `elements_lock`):
+  every appended cell survives intact and unreferenced garbage is still
+  reclaimed, TSan-clean. *Remaining for M3:* WeakMap/WeakSet entry storage and
+  FinalizationRegistry records are not yet funneled behind a per-object lock
+  (still GIL-coupled), so concurrent marking of weak-collection internals is
+  gated on funneling those sites first; then drive the production
+  `collectMidScript` driver to run the marker concurrently (instead of only
+  while peers are parked), drop the GIL for true multi-mutator parallelism
+  (needs thread-safe cell allocation + the full per-structure-lock audit), and
+  run the TSan campaign + serial-perf gate + stress amplifiers.
 
 ## Verification
 

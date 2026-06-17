@@ -51,11 +51,24 @@ safety net aborts collection unless every peer is parked-and-published). See
 the full threading model with the GIL still held; lifting the GIL itself is M3
 (NaN-boxed `Value`, write barrier, concurrent mark).
 
+**M3 progress:** the NaN-boxed 8-byte `Value` (#7) has landed (the slot is now a
+single atomic word), and the collector can now **mark concurrently with a live
+mutator** — a dedicated marker thread traces while one GIL-serialized mutator
+runs, with the insertion barrier handing newly-stored cells to the marker and
+the tracer reading per-object storage under the same `property_lock`/
+`elements_lock` the mutator takes (validated TSan-clean against real `Object`
+graphs; see `P7-gc-design.md` M3). This is the GC half of GIL removal. The
+remaining ungil work is: funnel the still-GIL-coupled paths (WeakMap/WeakSet
+entries, FinalizationRegistry records, microtask queues), drive the production
+collector to mark concurrently rather than only while peers are parked, make
+cell allocation thread-safe for multiple parallel mutators, then drop the GIL
+and run the TSan campaign + serial-perf gate.
+
 ## Blocker map (each is GIL-protected today)
 
 | # | Structure | Site | Tear without the GIL | Fix direction |
 |---|---|---|---|---|
-| 1 | Per-context arena | `context.zig:22`, alloc via `arena()` | `ArenaAllocator` + backing GPA are not thread-safe; concurrent alloc corrupts free lists | GC-managed heap, or per-thread nurseries with a shared old space |
+| 1 | Per-context arena | `context.zig:22`, alloc via `arena()` | `ArenaAllocator` + backing GPA are not thread-safe; concurrent alloc corrupts free lists | GC-managed heap, or per-thread nurseries with a shared old space. **Partially addressed for the one-mutator + concurrent-marker model:** GC scratch (`mark_stack`/`barrier_buf`) is on a separate thread-safe `aux` allocator while cell slabs stay on the (GIL-serialized, mutator-only) `backing`, so marker and mutator never race on an allocator. Multiple *parallel* mutators still need thread-safe cell allocation. |
 | 2 | **Shape transition map** | `shape.zig` `transitions: StringHashMapUnmanaged(*Shape)` plus per-shape `transition_lock`, mutated only in `Shape.transition()` | **Closed for the map itself:** `Shape.transition` locks the table around lookup/allocation/publish, so two mutators adding the same property to one parent shape converge on one child instead of corrupting/diverging. Arena allocation remains covered by #1 until the shared heap/nursery story is complete. | Keep all transition writes behind `Shape.transition`; later Layer-C work may swap the lock for a lock-free table only with equivalent convergence tests. |
 | 3 | Object shape pointer | `value.zig` `Object.property_lock`, `shape`, `setOwnUnlocked`, `deleteNamedDataOwn`; VM property ICs in `vm.zig` | **Closed for ordinary named properties:** `Object.setOwn` / `getOwn` / `deleteNamedDataOwn` and VM plain-property IC reads/writes hold `property_lock` while reading, publishing, or rebuilding the shape pointer. | Keep all ordinary named-property shape publication behind `property_lock`; later Layer-C work may replace this with an atomic shape slot only if it preserves publish ordering and delete/rebuild convergence. |
 | 4 | Object slot storage | `value.zig` `Object.property_lock`, `slots: ArrayListUnmanaged(Value)`, `setOwnUnlocked`, `deleteNamedDataOwn`; VM property ICs in `vm.zig` | **Closed for ordinary named properties:** slot append, same-slot updates, and delete/rebuild compaction through `Object` helpers and VM plain-property ICs are serialized by `property_lock`. Dense element storage and direct array/collection element mutations remain separate blockers. | Keep slot-vector mutation behind `property_lock`; move any future direct slot side door into `Object` before removing the GIL. |
