@@ -171,6 +171,32 @@ pub const InternTable = struct {
 
 threadlocal var active_table: ?*InternTable = null;
 
+/// Threadlocal active *arena* for non-interned string cells — the rep-flip's
+/// `Value.str(s)` backend. Set to the current realm's arena at the engine entry
+/// points (alongside the GC active-heap), so a string `Value` allocates a
+/// `StringCell` with no per-site allocator. Unlike `internActive`, this does not
+/// dedup (one cell per call) — cheaper (no hash/lock) and the cells live with
+/// the realm arena (freed at `Context.destroy`, no leak). A process-global
+/// fallback (its own allocator, invisible to per-test leak checks) covers the
+/// rare path with no active arena, so `makeCell` never fails.
+threadlocal var active_arena: ?std.mem.Allocator = null;
+
+/// Install `a` as this thread's active string arena; returns the previous one.
+pub fn setActiveArena(a: ?std.mem.Allocator) ?std.mem.Allocator {
+    const prev = active_arena;
+    active_arena = a;
+    return prev;
+}
+
+/// Allocate a (non-interned) `StringCell` owning a copy of `s` from the active
+/// arena, or the (thread-safe, never-freed) page allocator if none is active.
+/// Never fails except on true OOM. The allocator-free string constructor
+/// `Value.str` will call this at flip time.
+pub fn makeCell(s: []const u8) *StringCell {
+    const a = active_arena orelse std.heap.page_allocator;
+    return createCell(a, s) catch @panic("strcell.makeCell OOM");
+}
+
 /// Install `t` as this thread's active intern table; returns the previous one
 /// so nested entry points can restore it. Pass null for "no interning".
 pub fn setActiveTable(t: ?*InternTable) ?*InternTable {
@@ -194,6 +220,24 @@ pub fn internActive(bytes: []const u8) ?*StringCell {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "strcell: makeCell allocates from the active arena (no per-site allocator)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit(); // frees every cell — no leak
+    const prev = setActiveArena(arena_state.allocator());
+    defer _ = setActiveArena(prev);
+
+    var buf = [_]u8{ 'a', 'b', 'c' };
+    const c = makeCell(&buf); // no allocator argument
+    buf[0] = 'Z'; // cell kept its own copy
+    try std.testing.expectEqualStrings("abc", c.bytes);
+    try std.testing.expectEqual(hashBytes("abc"), c.hash);
+    // Non-interned: two calls with equal bytes yield distinct cells (equality is
+    // by bytes, so this is still correct for the NaN-box value).
+    const d = makeCell("abc");
+    try std.testing.expect(c != d);
+    try std.testing.expect(c.eql(d));
+}
 
 test "strcell: threadlocal active table interns with no per-call allocator" {
     const a = std.testing.allocator;
