@@ -128,22 +128,22 @@ const Serializer = struct {
     }
 
     fn ser(s: *Serializer, v: Value) HostError!void {
-        switch (v) {
+        switch (v.kind()) {
             .undefined => try s.w.tag(.undef),
             .null => try s.w.tag(.null_v),
-            .boolean => |b| {
+            .boolean => {
                 try s.w.tag(.bool_v);
-                try s.w.byte(@intFromBool(b));
+                try s.w.byte(@intFromBool(v.asBool()));
             },
-            .number => |n| {
+            .number => {
                 try s.w.tag(.number);
-                try s.w.num(n);
+                try s.w.num(v.asNum());
             },
-            .string => |str| {
+            .string => {
                 try s.w.tag(.string);
-                try s.w.str(str);
+                try s.w.str(v.asStr());
             },
-            .object => |o| try s.serObject(o),
+            .object => try s.serObject(v.asObj()),
         }
     }
 
@@ -229,10 +229,10 @@ const Serializer = struct {
             try s.w.tag(.map);
             try s.w.int(u32, @intCast(o.elements.items.len));
             for (o.elements.items) |entry| {
-                if (entry != .object or entry.object.elements.items.len < 2)
+                if (!entry.isObject() or entry.asObj().elements.items.len < 2)
                     return s.throwClone("DataCloneError: malformed Map entry");
-                try s.ser(entry.object.elements.items[0]);
-                try s.ser(entry.object.elements.items[1]);
+                try s.ser(entry.asObj().elements.items[0]);
+                try s.ser(entry.asObj().elements.items[1]);
             }
             return;
         }
@@ -245,10 +245,10 @@ const Serializer = struct {
         if (o.is_error) {
             try s.w.tag(.error_obj);
             try s.w.str(o.error_name);
-            const msg = try s.self.getProperty(.{ .object = o }, "message");
-            if (msg == .string) {
+            const msg = try s.self.getProperty(Value.obj(o), "message");
+            if (msg.isString()) {
                 try s.w.byte(1);
-                try s.w.str(msg.string);
+                try s.w.str(msg.asStr());
             } else {
                 try s.w.byte(0);
             }
@@ -291,7 +291,7 @@ const Serializer = struct {
         for (keys) |k| {
             if (skip_indices and isIndexKey(k)) continue;
             try s.w.str(k);
-            try s.ser(try s.self.getProperty(.{ .object = o }, k));
+            try s.ser(try s.self.getProperty(Value.obj(o), k));
         }
     }
 };
@@ -410,34 +410,34 @@ const Deserializer = struct {
 
     fn protoFor(d: *Deserializer, name: []const u8) ?*value.Object {
         const c = d.self.env.get(name) orelse return null;
-        if (c != .object) return null;
-        return d.self.protoObject(c.object) catch null;
+        if (!c.isObject()) return null;
+        return d.self.protoObject(c.asObj()) catch null;
     }
 
     fn deser(d: *Deserializer) HostError!Value {
         const a = d.self.arena;
         const t = d.r.tag() catch return d.fail();
         switch (t) {
-            .undef => return .undefined,
-            .null_v => return .null,
-            .bool_v => return .{ .boolean = (d.r.byte() catch return d.fail()) != 0 },
-            .number => return .{ .number = d.r.num() catch return d.fail() },
-            .string => return .{ .string = try a.dupe(u8, d.r.str() catch return d.fail()) },
+            .undef => return Value.undef(),
+            .null_v => return Value.nul(),
+            .bool_v => return Value.boolVal((d.r.byte() catch return d.fail()) != 0),
+            .number => return Value.num(d.r.num() catch return d.fail()),
+            .string => return Value.str(try a.dupe(u8, d.r.str() catch return d.fail())),
             .bigint => return d.self.makeBigInt(d.r.int(i128) catch return d.fail()),
             .bigint_text => return d.self.makeBigIntText(try a.dupe(u8, d.r.str() catch return d.fail())),
             .ref => {
                 const id = d.r.int(u32) catch return d.fail();
                 if (id >= d.objs.items.len) return d.fail();
-                return .{ .object = d.objs.items[id] };
+                return Value.obj(d.objs.items[id]);
             },
             .object => {
-                const o = (try d.self.newObject()).object;
+                const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 try d.deserNamedProps(o);
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .array => {
-                const arr = (try d.self.newArray()).object;
+                const arr = (try d.self.newArray()).asObj();
                 try d.objs.append(a, arr);
                 const len: usize = @intCast(d.r.int(u64) catch return d.fail());
                 const n = d.r.int(u32) catch return d.fail();
@@ -445,7 +445,7 @@ const Deserializer = struct {
                 while (i < n) : (i += 1) {
                     const hole = (d.r.byte() catch return d.fail()) != 0;
                     if (hole) {
-                        try arr.elements.append(arr.elementsAllocator(a), .undefined);
+                        try arr.elements.append(arr.elementsAllocator(a), Value.undef());
                         try arr.markHole(a, i);
                     } else {
                         try arr.elements.append(arr.elementsAllocator(a), try d.deser());
@@ -453,15 +453,15 @@ const Deserializer = struct {
                 }
                 arr.array_len = len;
                 try d.deserNamedProps(arr);
-                return .{ .object = arr };
+                return Value.obj(arr);
             },
             .date => {
-                const o = (try d.self.newObject()).object;
+                const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 o.is_date = true;
                 o.date_ms = d.r.num() catch return d.fail();
                 if (d.protoFor("Date")) |p| o.proto = p;
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .regexp => {
                 const src = try a.dupe(u8, d.r.str() catch return d.fail());
@@ -469,14 +469,14 @@ const Deserializer = struct {
                 // Rebuild through the realm's RegExp constructor so the
                 // compiled program and lastIndex slot are consistent.
                 const ctor = d.self.env.get("RegExp") orelse return d.fail();
-                if (ctor != .object) return d.fail();
-                const re = try d.self.construct(ctor, &.{ .{ .string = src }, .{ .string = flags } });
-                if (re != .object) return d.fail();
-                try d.objs.append(a, re.object);
+                if (!ctor.isObject()) return d.fail();
+                const re = try d.self.construct(ctor, &.{ Value.str(src), Value.str(flags) });
+                if (!re.isObject()) return d.fail();
+                try d.objs.append(a, re.asObj());
                 return re;
             },
             .map => {
-                const o = (try d.self.newObject()).object;
+                const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 o.is_map = true;
                 if (d.protoFor("Map")) |p| o.proto = p;
@@ -485,51 +485,51 @@ const Deserializer = struct {
                 while (i < n) : (i += 1) {
                     const k = try d.deser();
                     const v = try d.deser();
-                    const pair = (try d.self.newArray()).object;
+                    const pair = (try d.self.newArray()).asObj();
                     try pair.elements.append(pair.elementsAllocator(a), k);
                     try pair.elements.append(pair.elementsAllocator(a), v);
                     pair.array_len = 2;
-                    try o.elements.append(o.elementsAllocator(a), .{ .object = pair });
+                    try o.elements.append(o.elementsAllocator(a), Value.obj(pair));
                 }
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .set => {
-                const o = (try d.self.newObject()).object;
+                const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 o.is_set = true;
                 if (d.protoFor("Set")) |p| o.proto = p;
                 const n = d.r.int(u32) catch return d.fail();
                 var i: u32 = 0;
                 while (i < n) : (i += 1) try o.elements.append(o.elementsAllocator(a), try d.deser());
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .error_obj => {
                 const name = try a.dupe(u8, d.r.str() catch return d.fail());
-                const o = (try d.self.newObject()).object;
+                const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 o.is_error = true;
                 o.error_name = name;
                 o.proto = d.protoFor(name) orelse d.protoFor("Error");
                 if ((d.r.byte() catch return d.fail()) == 1) {
                     const msg = try a.dupe(u8, d.r.str() catch return d.fail());
-                    try o.setOwn(a, d.self.root_shape, "message", .{ .string = msg });
+                    try o.setOwn(a, d.self.root_shape, "message", Value.str(msg));
                     try o.setAttr(a, "message", .{ .writable = true, .enumerable = false, .configurable = true });
                 }
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .wrapper => {
                 const p = try d.deser();
-                const o = (try d.self.newObject()).object;
+                const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 o.prim = p;
-                const ctor_name: []const u8 = switch (p) {
+                const ctor_name: []const u8 = switch (p.kind()) {
                     .number => "Number",
                     .string => "String",
                     .boolean => "Boolean",
                     else => return d.fail(),
                 };
                 if (d.protoFor(ctor_name)) |pr| o.proto = pr;
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .array_buffer => {
                 const max_raw = d.r.int(u64) catch return d.fail();
@@ -538,26 +538,26 @@ const Deserializer = struct {
                 try d.objs.append(a, o);
                 @memcpy(o.array_buffer.?.bytes()[0..bytes.len], bytes);
                 if (max_raw != std.math.maxInt(u64)) o.array_buffer.?.max_byte_length = @intCast(max_raw);
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .shared_array_buffer => {
                 const storage: *shared_buffer.SharedBufferStorage = @ptrFromInt(d.r.int(u64) catch return d.fail());
                 // The stream's reference transfers to the wrapper.
                 const o = try interpreter.makeSharedArrayBufferWrapper(d.self, storage);
                 try d.objs.append(a, o);
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .typed_array => {
                 const kind_b = d.r.byte() catch return d.fail();
                 if (kind_b > @intFromEnum(value.TAKind.u64)) return d.fail();
                 const kind: value.TAKind = @enumFromInt(kind_b);
-                const o = (try d.self.newObject()).object;
+                const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 const buf = try d.deser();
-                if (buf != .object or buf.object.array_buffer == null) return d.fail();
+                if (!buf.isObject() or buf.asObj().array_buffer == null) return d.fail();
                 const ta = try o.typedArrayAllocator(a).create(value.TypedArrayData);
                 ta.* = .{
-                    .buffer = buf.object,
+                    .buffer = buf.asObj(),
                     .byte_offset = @intCast(d.r.int(u64) catch return d.fail()),
                     .length = @intCast(d.r.int(u64) catch return d.fail()),
                     .kind = kind,
@@ -565,23 +565,23 @@ const Deserializer = struct {
                 };
                 o.typed_array = ta;
                 if (d.protoFor(kind.ctorName())) |p| o.proto = p;
-                return .{ .object = o };
+                return Value.obj(o);
             },
             .data_view => {
-                const o = (try d.self.newObject()).object;
+                const o = (try d.self.newObject()).asObj();
                 try d.objs.append(a, o);
                 const buf = try d.deser();
-                if (buf != .object or buf.object.array_buffer == null) return d.fail();
+                if (!buf.isObject() or buf.asObj().array_buffer == null) return d.fail();
                 const dv = try o.dataViewAllocator(a).create(value.DataViewData);
                 dv.* = .{
-                    .buffer = buf.object,
+                    .buffer = buf.asObj(),
                     .byte_offset = @intCast(d.r.int(u64) catch return d.fail()),
                     .byte_length = @intCast(d.r.int(u64) catch return d.fail()),
                     .track_length = (d.r.byte() catch return d.fail()) != 0,
                 };
                 o.data_view = dv;
                 if (d.protoFor("DataView")) |p| o.proto = p;
-                return .{ .object = o };
+                return Value.obj(o);
             },
         }
     }

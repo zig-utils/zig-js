@@ -1492,6 +1492,12 @@ pub const Value = union(enum) {
     pub inline fn boolVal(b: bool) Value {
         return .{ .boolean = b };
     }
+    pub inline fn undef() Value {
+        return .undefined;
+    }
+    pub inline fn nul() Value {
+        return .null;
+    }
 
     // Representation-agnostic accessors (caller has checked `kind()` first).
     pub inline fn asNum(self: Value) f64 {
@@ -1505,6 +1511,26 @@ pub const Value = union(enum) {
     }
     pub inline fn asBool(self: Value) bool {
         return self.boolean;
+    }
+
+    // Representation-agnostic kind predicates (replace `v == .object` etc.).
+    pub inline fn isNumber(self: Value) bool {
+        return self.kind() == .number;
+    }
+    pub inline fn isString(self: Value) bool {
+        return self.kind() == .string;
+    }
+    pub inline fn isObject(self: Value) bool {
+        return self.kind() == .object;
+    }
+    pub inline fn isBoolean(self: Value) bool {
+        return self.kind() == .boolean;
+    }
+    pub inline fn isUndefined(self: Value) bool {
+        return self.kind() == .undefined;
+    }
+    pub inline fn isNull(self: Value) bool {
+        return self.kind() == .null;
     }
 
     pub fn isCallable(self: Value) bool {
