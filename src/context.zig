@@ -111,6 +111,13 @@ pub const Context = struct {
     gc_generator_backing_stores_live: usize = 0,
     /// The heap's root-tracing binding (wraps this Context); freed in `destroy`.
     gc_binding: ?*GcBinding = null,
+    /// Phase 7 / M3: drive `collectMidScript` as a *concurrent* mark (a dedicated
+    /// marker thread runs while the mutator continues between safepoints).
+    /// Opt-in, single-mutator. `gc_marker` is the per-cycle marker thread; joined
+    /// at the finish safepoint. `gc_marker_stop` tells it to stop and return.
+    gc_concurrent: bool = false,
+    gc_marker: ?std.Thread = null,
+    gc_marker_stop: std.atomic.Value(bool) = .init(false),
     /// C-API `Boxed` handles (`JSValueRef`s) protected by the embedder.
     /// `JSValueProtect` registers a wrapper here when the GC is on (`*Boxed`
     /// aliases `*Value`, its first field); `gc.zig`'s `traceRoots` marks them
@@ -150,6 +157,10 @@ pub const Context = struct {
         /// the collector. Mid-run collection is gated separately until the
         /// whole allocation surface is migrated.
         enable_gc: bool = false,
+        /// Phase 7 / M3 (opt-in, requires `enable_gc`): mark on a dedicated
+        /// thread *concurrently* with the mutator at safepoints. Single-mutator
+        /// only (no `enable_threads`); default off. See docs/threads/P7-gc-design.md.
+        concurrent_gc: bool = false,
     };
 
     /// Test/conformance-only creation knobs. These model harness flags such as
@@ -158,6 +169,7 @@ pub const Context = struct {
     pub const TestingOptions = struct {
         enable_threads: bool = false,
         enable_gc: bool = false,
+        concurrent_gc: bool = false,
         /// Host-defined `[[CanBlock]]` for this VM. When false, blocking APIs
         /// throw if they would have to park; non-blocking fast paths and async
         /// APIs still work.
@@ -184,6 +196,7 @@ pub const Context = struct {
         return createWithTestingOptions(gpa, .{
             .enable_threads = options.enable_threads,
             .enable_gc = options.enable_gc,
+            .concurrent_gc = options.concurrent_gc,
         });
     }
 
@@ -226,6 +239,8 @@ pub const Context = struct {
             h.setAuxAllocator(std.heap.page_allocator);
             self.gc = h;
             self.gc_binding = bind;
+            // Single-mutator only for now: concurrent marking + no peer mutators.
+            self.gc_concurrent = options.concurrent_gc and !options.enable_threads;
         }
         // Route all cell allocation (the global object + TDZ sentinel,
         // installGlobals, and the mirror loop below) through the GC when
@@ -357,6 +372,7 @@ pub const Context = struct {
         // arena. Keep `sab_retains` alive until after finalizers run: live
         // SharedArrayBuffer wrapper cells release their tracked storage refs
         // there when GC is enabled.
+        self.finishConcurrentGCIfActive(); // join any marker before heap teardown
         if (self.gc) |h| {
             h.deinit();
             self.gpa.destroy(h);
@@ -437,6 +453,7 @@ pub const Context = struct {
     /// the GC is off.
     pub fn collectGarbage(self: *Context) void {
         const h = self.gc orelse return;
+        self.finishConcurrentGCIfActive(); // close any in-flight concurrent mark first
         if (self.hasRunningJsThreads()) {
             const g = self.gil orelse return;
             if (!g.holds() or !stack_scan.supported or !g.allOthersParked()) return;
@@ -474,10 +491,61 @@ pub const Context = struct {
     /// between safepoints, so a cycle converges in a few steps.
     const mark_budget: usize = 4096;
 
+    /// Marker-thread body for concurrent marking (M3): drain grey work + fold in
+    /// the mutator's barrier hand-off until the mutator sets `gc_marker_stop`.
+    /// Never scans the native stack, never traces a cell born this cycle (those
+    /// are deferred to finish), and allocates only on the thread-safe `aux`.
+    fn gcMarkerLoop(self: *Context) void {
+        const h = self.gc orelse return;
+        while (!self.gc_marker_stop.load(.acquire)) {
+            if (h.concurrentMarkRound()) std.atomic.spinLoopHint();
+        }
+    }
+
+    /// Stop+join the marker and close any in-flight concurrent cycle
+    /// (world-stopped: fold born cells, re-scan roots, sweep). Called at the
+    /// finish safepoint and every quiescent boundary so a marker never outlives it.
+    fn finishConcurrentGCIfActive(self: *Context) void {
+        const h = self.gc orelse return;
+        if (self.gc_marker) |t| {
+            self.gc_marker_stop.store(true, .release);
+            t.join();
+            self.gc_marker = null;
+        }
+        if (h.concurrent) {
+            self.gc_scan_native_stack = true;
+            defer self.gc_scan_native_stack = false;
+            h.finishConcurrentMark();
+        }
+    }
+
     fn collectMidScript(raw_ctx: *anyopaque) void {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const h = self.gc orelse return;
         if (!stack_scan.supported) return;
+        // M3 concurrent driver (single-mutator, opt-in): begin a concurrent mark
+        // at one safepoint and close it at the next, a dedicated marker thread
+        // tracing during the window while the mutator runs. Stores feed the marker
+        // via the insertion barrier; cells born this cycle are deferred (traced at
+        // finish, so the marker never sees a half-built cell); begin/finish
+        // snapshot the native stack at the safepoint, and finish re-scans roots.
+        if (self.gc_concurrent) {
+            if (h.concurrent) {
+                self.finishConcurrentGCIfActive();
+            } else if (h.bytes_live >= h.threshold_bytes) {
+                self.gc_scan_native_stack = true;
+                h.beginConcurrentMark();
+                self.gc_scan_native_stack = false;
+                self.gc_marker_stop.store(false, .release);
+                self.gc_marker = std.Thread.spawn(.{}, gcMarkerLoop, .{self}) catch blk: {
+                    self.gc_scan_native_stack = true;
+                    h.finishConcurrentMark();
+                    self.gc_scan_native_stack = false;
+                    break :blk null;
+                };
+            }
+            return;
+        }
         // Only advance marking while every peer is parked-and-published: the
         // start/finish root scans then see complete roots (own + parked peers'
         // native stacks), and the collector holds the GIL so those stacks are
@@ -527,6 +595,9 @@ pub const Context = struct {
         // the GC is on.
         const ss_saved = stack_scan.enter(@frameAddress());
         defer stack_scan.leave(ss_saved);
+        // Close any concurrent mark before returning (runs first at exit, LIFO,
+        // so the stack boundary above is still valid for its re-scan).
+        defer self.finishConcurrentGCIfActive();
         // Quiescent point: reclaim garbage from prior evaluations on this
         // context before running (nothing is executing yet, so the Context
         // roots are complete).
@@ -659,6 +730,7 @@ pub const Context = struct {
         // collection during module execution.
         const ss_saved = stack_scan.enter(@frameAddress());
         defer stack_scan.leave(ss_saved);
+        defer self.finishConcurrentGCIfActive(); // close any concurrent mark (see evaluate)
         // Quiescent point before module execution; a prior shell `gc()` request
         // can be serviced before the live module graph is installed.
         self.collectRequestedGarbage();
@@ -5137,6 +5209,50 @@ test "enable_gc: mid-script collection reclaims garbage during a running loop (b
     // The heap stayed bounded: nothing like the ~150k object graphs a leak would
     // accumulate over 50k iterations survived.
     try std.testing.expect(ctx.gc.?.live_cells < 20000);
+}
+
+test "enable_gc concurrent (M3): the production driver marks on a thread while JS runs" {
+    // Phase 7 / M3: with `concurrent_gc`, `collectMidScript` marks on a dedicated
+    // thread *concurrently* with the mutator between safepoints. Same workload
+    // and exact-result/bounded-heap assertions as the M2 mid-script test, now
+    // driven concurrently end-to-end: the mutator allocates objects and per-
+    // iteration `let` environments (objects' storage and envs' `vars` are read by
+    // the marker under their per-structure locks; cells born this cycle are
+    // deferred to the world-stopped finish), its stores feed the marker via the
+    // insertion barrier, and finish re-scans the native stack. So live values are
+    // never wrongly freed, the arithmetic is exact, and it is TSan-clean.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .concurrent_gc = true });
+    defer ctx.destroy();
+    try std.testing.expect(ctx.gc_concurrent);
+
+    // 4,000 iterations (each allocating several cells + a per-iter `let` env) is
+    // enough to cross the heap-growth threshold many times — driving multiple
+    // begin→marker→finish concurrent cycles — while staying feasible under TSan
+    // instrumentation (~15× slowdown).
+    const result = try ctx.evaluate(
+        \\let acc = 0;
+        \\for (let i = 0; i < 4000; i++) {
+        \\  const o = { a: i, b: { c: i }, arr: [i, i, i] };
+        \\  acc += o.b.c + o.arr[1];
+        \\}
+        \\acc;
+    );
+    // sum_{i=0..3999}(i + i) = (3999*4000) = 15,996,000.
+    try std.testing.expectEqual(@as(f64, 15996000), result.asNum());
+    try std.testing.expect(ctx.gc.?.collections > 2); // multiple concurrent cycles closed
+    try std.testing.expect(ctx.gc.?.live_cells < 20000); // heap stayed bounded
+    try std.testing.expect(ctx.gc_marker == null); // no marker outlived the run
+    try std.testing.expect(!ctx.gc.?.concurrent);
+
+    // A retained graph built + repeatedly assigned (env writes) under concurrent
+    // marking is intact afterward.
+    const r = try ctx.evaluate(
+        \\globalThis.keep = { sum: 0 };
+        \\for (let i = 0; i < 4000; i++) { globalThis.keep.sum += 1; const junk = { i }; }
+        \\globalThis.keep.sum;
+    );
+    try std.testing.expectEqual(@as(f64, 4000), r.asNum());
 }
 
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
