@@ -457,16 +457,34 @@ pub const Context = struct {
     /// rather than risk missing a live native-stack root. The collector holds
     /// the GIL throughout, so parked peers cannot run and their stacks stay
     /// frozen during the scan.
+    /// Per-`markStep` cell budget for incremental marking (M2): bounds the pause
+    /// per safepoint while still draining faster than the mutator allocates
+    /// between safepoints, so a cycle converges in a few steps.
+    const mark_budget: usize = 4096;
+
     fn collectMidScript(raw_ctx: *anyopaque) void {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const h = self.gc orelse return;
         if (!stack_scan.supported) return;
+        // Only advance marking while every peer is parked-and-published: the
+        // start/finish root scans then see complete roots (own + parked peers'
+        // native stacks), and the collector holds the GIL so those stacks are
+        // frozen. Heap stores by peers between steps are caught by the global
+        // insertion write barrier; mid-cycle allocations are born grey.
         if (self.gil) |g| {
             if (!g.allOthersParked()) return;
         }
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
-        h.maybeCollect();
+        if (h.marking) {
+            // Drain a bounded slice of the grey set; when it empties, close the
+            // cycle (re-scan roots under the GIL, then sweep).
+            if (h.markStep(mark_budget)) h.finishMarking();
+        } else if (h.bytes_live >= h.threshold_bytes) {
+            // Begin an incremental cycle: snapshot roots, then let the mutator
+            // run between safepoints with the barrier shading its stores.
+            h.startMarking();
+        }
     }
 
     pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
@@ -5103,6 +5121,38 @@ test "enable_gc: mid-script collection reclaims garbage during a running loop (b
     // The heap stayed bounded: nothing like the ~150k object graphs a leak would
     // accumulate over 50k iterations survived.
     try std.testing.expect(ctx.gc.?.live_cells < 20000);
+}
+
+test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
+    // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
+    // safepoints (collectMidScript), a long-lived structure that keeps growing
+    // — array `push`, `Map.set`, `Set.add` — is repeatedly traced black and then
+    // mutated. Every such store must shade the new element via the insertion
+    // write barrier, or it would be swept while live. Heavy garbage churn forces
+    // many incremental cycles in between. Exact final sizes + spot-checked values
+    // prove no live element was ever wrongly freed.
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\const keep = { arr: [], map: new Map(), set: new Set() };
+        \\for (let i = 0; i < 20000; i++) {
+        \\  const garbage = { a: i, b: [i, i, i], c: { nested: i } }; // churn
+        \\  keep.arr.push({ id: i });   // push into the (already-marked) array
+        \\  keep.map.set(i, { id: i }); // entry into the (already-marked) map
+        \\  keep.set.add(i);            // key into the (already-marked) set
+        \\  void garbage;
+        \\}
+        \\if (keep.arr.length !== 20000) throw new Error("arr len " + keep.arr.length);
+        \\if (keep.map.size !== 20000) throw new Error("map size " + keep.map.size);
+        \\if (keep.set.size !== 20000) throw new Error("set size " + keep.set.size);
+        \\if (keep.arr[12345].id !== 12345) throw new Error("arr[12345] corrupted");
+        \\if (keep.map.get(9999).id !== 9999) throw new Error("map.get(9999) corrupted");
+        \\if (!keep.set.has(7777)) throw new Error("set.has(7777) lost");
+    );
+    // Collection ran during the loop (the structure exceeded the heap threshold
+    // repeatedly), exercising the barriers.
+    try std.testing.expect(ctx.gc.?.collections >= 1);
 }
 
 test "enable_gc incremental: insertion write barrier keeps a reparented object alive" {

@@ -169,6 +169,7 @@ pub const Environment = struct {
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
+        gc_mod.barrierValue(v); // binding stored into this (GC-cell) environment
         const a = self.bindingAllocator();
         const gop = try self.vars.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
@@ -229,6 +230,7 @@ pub const Environment = struct {
         var env: ?*Environment = self;
         while (env) |e| {
             if (e.vars.getPtr(name)) |ptr| {
+                gc_mod.barrierValue(v); // reassigned binding in a (GC-cell) env
                 ptr.* = v;
                 return;
             }
@@ -5235,6 +5237,7 @@ pub const Interpreter = struct {
                     return self_v;
                 };
             }
+            gc_mod.barrierCell(@ptrCast(pair)); // new entry hidden behind the live map
             try o.elements.append(o.elementsAllocator(self.arena), .{ .object = pair });
             return self_v;
         }
@@ -5355,6 +5358,7 @@ pub const Interpreter = struct {
             for (o.elements.items) |e| {
                 if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
             }
+            gc_mod.barrierValue(key); // new key hidden behind the live set
             try o.elements.append(o.elementsAllocator(self.arena), key);
             return self_v;
         }
@@ -5708,6 +5712,7 @@ pub const Interpreter = struct {
             if (c.proxy_handler != null or c.proxy_revoked) break;
             cur = self.effectiveProto(c);
         }
+        if (new_proto) |np| gc_mod.barrierCell(@ptrCast(np)); // proto reparent on a live object
         o.proto = new_proto;
         return true;
     }
@@ -14001,6 +14006,7 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (value.strictEquals(target, held)) return self.throwError("TypeError", "FinalizationRegistry.register: target and held value must not be the same");
     const token = if (args.len > 2) args[2] else Value.undefined;
     if (token != .undefined and !canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.register: unregister token must be an object or a symbol");
+    gc_mod.barrierValue(held); // strong held value stored into the live registry cell
     try this.object.finalization_records.append(this.object.finalizationRecordsAllocator(self.arena), .{
         .target = weakKeyPtr(target),
         .held = held,

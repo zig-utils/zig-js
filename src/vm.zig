@@ -456,6 +456,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         if (!o.is_array and o.accessors == null and o.attrs == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (o.shape != null and o.shape == ic.shape) {
+                                gc_mod.barrierValue(v); // IC fast-path slot store
                                 o.slots.items[ic.slot] = v;
                                 break :fast;
                             }
@@ -463,6 +464,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                                 if (sh.lookup(name)) |slot| {
                                     ic.shape = sh;
                                     ic.slot = slot;
+                                    gc_mod.barrierValue(v); // IC fast-path slot store
                                     o.slots.items[slot] = v;
                                     break :fast;
                                 }
@@ -1079,6 +1081,10 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
     const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
     const rp = try promise.newPromise(vm);
     const was_idle = g.requests.items.len == 0;
+    // Incremental-GC barrier: the request's value + result promise are stored
+    // into the live generator cell (which may already be marked).
+    gc_mod.barrierValue(val);
+    gc_mod.barrierCell(@ptrCast(rp));
     try g.requests.append(g.requestsAllocator(vm.arena), .{ .kind = kind, .value = val, .result = rp });
     // A completed generator never resumes: each new request settles immediately
     // (next/return → `{done:true}`, throw → reject) rather than re-running the

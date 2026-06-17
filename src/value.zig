@@ -825,6 +825,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (i >= self.elements.items.len) return false;
+        gcBarrier(v);
         self.elements.items[i] = v;
         return true;
     }
@@ -832,6 +833,7 @@ pub const Object = struct {
     pub fn appendElement(self: *Object, arena: std.mem.Allocator, v: Value) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
+        gcBarrier(v);
         try self.elements.append(self.elementsAllocator(arena), v);
     }
 

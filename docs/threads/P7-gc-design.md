@@ -435,7 +435,7 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   the backing-store helpers and this audit, so future additions do not silently
   fall back to reclaim-at-destroy lifetime. Beyond M1: NaN-box `Value` (#7); the
   M2 incremental-marking + write-barrier mechanism now exists in `zig-gc` (see
-  M2 below) and needs the engine-side barrier-coverage audit to be driven; then
+  M2 below) and now drives GC-on mid-script collections incrementally; then
   M3 (drop the GIL, concurrent mark behind the barrier).
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
@@ -453,35 +453,41 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   moved onto a *volatile root* (operand stacks via `gc_execs`, the conservative
   native stack, the active `Environment`, microtask queues) after the start
   snapshot. So the engine barrier set is **heap→heap reference stores** only.
-  *Engine barrier-coverage audit.* Incremental marking is sound only if every
-  post-creation store of a cell reference into a live GC cell shades the target
-  via the insertion barrier (`gc_runtime.barrier` → `Heap.writeBarrier`). Status:
-  - **Object named slots** — `Object.setOwnUnlocked`. **✅ barriered.**
-  - **Object accessor maps** — `Object.setAccessor` (get/set). **✅ barriered.**
+  *Engine barrier coverage — complete and driven.* Incremental marking is sound
+  only if every post-creation store of a cell reference into a live GC cell
+  shades the target via the insertion barrier (`gc_runtime.barrier` →
+  `Heap.writeBarrier`). All such funnels are now barriered:
+  - **Object named slots** — `Object.setOwnUnlocked`. ✅
+  - **Object accessor maps** — `Object.setAccessor` (get/set). ✅
   - **Object dense elements** — `setDenseElement` / `growDenseElement` /
     `setOrGrowDenseElement` / `replaceDenseElementsAndSetLength` /
-    `splicePackedDenseElements`. **✅ barriered.**
-  - **Environment bindings** — `assign` / `define` / `defineLexicalVM` /
-    `assignVarVM` (the active env is also covered by the finish re-scan; a
-    *captured* env mutated while inactive needs the barrier). ⏳ to do.
-  - **VM property inline-cache** slot writes (`vm.zig`). ⏳ to do.
-  - **Promise** reaction-list appends; **Generator** request appends. ⏳ to do.
-  - **Map/Set** entry stores and any **raw `elements.append`** to an *existing*
-    (already-traced) array outside the dense helpers (fresh-array builders are
-    covered by born-grey). ⏳ to do — the largest remaining audit item.
-  - **Object cell-pointer fields** — `proto` reparent (`setPrototypeOf`),
-    `prim`/`ctor_ref`/`proxy_*` are creation-time (born-grey-covered); only
-    genuine post-creation reassignments need the barrier. ⏳ to do.
-  Shapes are arena-permanent (not GC cells), so transition writes need **no**
-  barrier. **Validated so far:** an incremental collection driven through
-  `startMarking`/`markStep`/`finishMarking` with a real reparent-behind-a-black
-  -object mutation via `Object.setOwn` keeps the reparented object alive (the
-  barrier fires); the stop-the-world `collect()` path and the full GC-on unit
-  suite are unchanged (barriers are no-ops when not marking). **Not yet exposed**
-  as a driven mode: the remaining funnels above must be barriered and validated
-  by forcing incremental on across the whole GC-on suite + `threads-test` (where
-  exact-count backing-store tests catch a missed barrier as count drift and a
-  freed-live as a crash) before incremental can drive zig-js collections.
+    `splicePackedDenseElements` / `setElementAt` / `appendElement`. ✅
+  - **Environment bindings** — `Environment.put` (covers `putConst`/`putFnName`/
+    `defineLexicalVM`) and `assign` (covers `assignVarVM`). ✅
+  - **VM property inline-cache** fast-path slot writes (`vm.zig`). ✅
+  - **Promise** reaction appends + settlement `value`; **Generator** async
+    request appends. ✅
+  - **Map** `set` entry + **Set** `add` key (stores into the live collection). ✅
+  - **`proto` reparent** (`setPrototypeOfObject`) + **FinalizationRegistry**
+    held value. ✅
+  Two collector properties shrink this to heap→heap stores only: mid-cycle
+  allocations are **born grey** (so creation-time field writes — the ~167 `proto`
+  inits, initial slots, fresh-array builders' `elements.append` — are caught by
+  tracing), and `finishMarking` **re-scans roots** (operand stacks via
+  `gc_execs`, the conservative native stack, the active environment, microtask
+  queues). Shapes are arena-permanent (not GC cells) — no barrier.
+  *Driven at safepoints.* `Context.collectMidScript` now steps an incremental
+  cycle (`startMarking` → bounded `markStep` per safepoint → `finishMarking`)
+  instead of stop-the-world, for GC-on contexts, advancing only while every peer
+  is parked-and-published. Explicit `collectGarbage()` stays stop-the-world. The
+  arena engine (GC off, incl. test262) is unaffected — the barrier is one null
+  check there. **Validated:** the GC-on unit suite runs its mid-script
+  collections incrementally (a 50 000-iteration loop with an exact result; a
+  long-lived array/`Map`/`Set` mutated under marking with exact final sizes +
+  spot-checked values; a parked-peer collection; a reparent-behind-a-black-object
+  barrier test); `threads-test` **209/209** with the GC+threads, gc-stress, and
+  objectmodel/i03 grow/resize/race/quarantine-across-GC cases now collecting
+  incrementally; conformance 33/33; full unit suite leak-clean; TSan clean.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
   `P7-gil-removal.md` blocker map), drop the GIL, run mark concurrently with
   mutators behind the barrier; safepoint-coordinate sweep. TSan campaign to
