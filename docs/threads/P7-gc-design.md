@@ -546,18 +546,30 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   1. **Production concurrent driver** — drive `collectMidScript` to mark on a
      dedicated thread between safepoints (begin at one safepoint, finish at the
      next), instead of stepping incrementally on the mutator. A flag-gated
-     single-mutator prototype surfaced the blocker: **born-grey is unsafe when
-     the mutator allocates during the concurrent window.** `Heap.create` hands a
-     new cell to the marker (born grey) *before* the caller initializes the
-     payload (`o.* = .{}`), so the marker can trace a half-constructed cell — and
-     the init overwrites the per-object lock mid-critical-section (caught as a
-     spinlock unlock-assert). The explicit-marker tests above don't hit this
-     (they allocate before marking and only *mutate* during it); a real workload
-     allocates mid-mark. The fix is **born-black during concurrent marking**
-     (allocate marked, never trace the new cell) **plus barriering the
-     creation-time field inits** that born-grey deliberately left unbarriered
-     (the ~167 `o.proto = …` at construction, initial slot/element fills) — the
-     WebKit-Riptide allocate-black model. This is the next focused change.
+     (`concurrent_gc`) single-mutator prototype was built and run; it surfaced —
+     and two of its blockers are now **fixed** — the requirements for marking
+     while the mutator *allocates*:
+     - *Born-cell hazard (FIXED, zig-gc `born_concurrent`).* `Heap.create` used to
+       hand a new cell to the marker (born grey) before the caller initialized
+       the payload, so the marker could trace a half-built cell (and the init
+       overwrote a per-object lock mid-critical-section). Now cells born during a
+       concurrent mark are born marked but deferred to a mutator-private list and
+       traced at the world-stopped finish, where payloads are complete.
+     - *`isManaged` list-walk race (FIXED, zig-gc).* `Visitor.isManaged` walked
+       the all-cells list, racing `create`'s prepend; it is now an O(1) magic
+       check.
+     - *Remaining: per-cell-type concurrent-trace synchronization.* The marker
+       reads each traced cell's mutable storage while the mutator may write it.
+       `Object` is covered (slots/accessors/elements under their locks, `proto`
+       atomic), but **`Environment` is not** — `traceEnv` reads the `vars`/
+       `aliases` hashmaps and `disposables` while the mutator does
+       `Environment.put`/`assign` (TSan-flagged on a `let`-loop's binding
+       writes), and `Function`/`Promise`/`Generator` side-cells likely need the
+       same. Extending the Object-style locking (or single-word atomic slot
+       reads, since `Value` is now 8 bytes) to these traced cell types is the
+       remaining work before the production driver is TSan-clean. The prototype
+       was reverted pending it; the validated concurrent-marking capability
+       (objects/arrays + weak collections, via explicit-marker tests) stands.
   2. Drop the GIL for true multi-mutator parallelism (needs thread-safe cell
      allocation + the full per-structure-lock audit).
   3. TSan campaign to zero unsuppressed races; serial-perf gate; stress amplifiers.
