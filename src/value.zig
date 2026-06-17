@@ -140,7 +140,7 @@ pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
     const off = ta.byte_offset + i * ta.kind.byteSize();
     // A resizable buffer may have shrunk below the view's cached length; reading
     // out of bounds returns 0 rather than a panic.
-    if (off + ta.kind.byteSize() > bytes.len) return .{ .number = 0 };
+    if (off + ta.kind.byteSize() > bytes.len) return Value.num(0);
     const n: f64 = switch (ta.kind) {
         .i8 => @floatFromInt(@as(i8, @bitCast(bytes[off]))),
         .u8, .u8c => @floatFromInt(bytes[off]),
@@ -907,7 +907,7 @@ pub const Object = struct {
         defer self.unlockElements();
         gcBarrier(v);
         const gap_start = self.elements.items.len;
-        while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), .undefined);
+        while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), Value.undef());
         self.elements.items[i] = v;
         self.clearHoleUnlocked(i);
         var g = gap_start;
@@ -932,7 +932,7 @@ pub const Object = struct {
         }
         if (i >= dense_cap or i > self.elements.items.len + 1024) return false;
         const gap_start = self.elements.items.len;
-        while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), .undefined);
+        while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), Value.undef());
         self.elements.items[i] = v;
         self.clearHoleUnlocked(i);
         var g = gap_start;
@@ -944,7 +944,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (i >= self.elements.items.len) return false;
-        self.elements.items[i] = .undefined;
+        self.elements.items[i] = Value.undef();
         try self.markHoleUnlocked(arena, i);
         return true;
     }
@@ -1887,7 +1887,7 @@ test "object named properties serialize concurrent same-name writes" {
 
     const Worker = struct {
         fn run(o: *Object, root_shape: *Shape, n: usize) void {
-            o.setOwn(std.heap.page_allocator, root_shape, "shared", .{ .number = @floatFromInt(n) }) catch @panic("setOwn failed");
+            o.setOwn(std.heap.page_allocator, root_shape, "shared", Value.num(@floatFromInt(n))) catch @panic("setOwn failed");
             _ = o.getOwn("shared") orelse @panic("missing shared property");
         }
     };
@@ -1907,12 +1907,12 @@ test "object named properties serialize concurrent same-name writes" {
 test "object named property delete rebuild serializes with writers" {
     const root = try Shape.createRoot(std.heap.page_allocator);
     var object = Object{};
-    try object.setOwn(std.heap.page_allocator, root, "anchor", .{ .number = 1 });
+    try object.setOwn(std.heap.page_allocator, root, "anchor", Value.num(1));
 
     const Worker = struct {
         fn run(o: *Object, root_shape: *Shape, n: usize) void {
             if ((n & 1) == 0) {
-                o.setOwn(std.heap.page_allocator, root_shape, "shared", .{ .number = @floatFromInt(n) }) catch @panic("setOwn failed");
+                o.setOwn(std.heap.page_allocator, root_shape, "shared", Value.num(@floatFromInt(n))) catch @panic("setOwn failed");
             } else {
                 _ = o.deleteNamedDataOwn(std.heap.page_allocator, root_shape, "shared") catch @panic("deleteNamedDataOwn failed");
             }
