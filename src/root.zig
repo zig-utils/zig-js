@@ -85,6 +85,7 @@ test {
     _ = @import("c_api.zig");
     _ = @import("gc.zig");
     _ = @import("nanbox.zig");
+    _ = @import("strcell.zig");
 }
 
 test "evalNumber convenience" {
