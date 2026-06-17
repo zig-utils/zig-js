@@ -10,7 +10,7 @@ const gc_runtime = @import("gc_runtime.zig");
 /// store funnels below so a reference newly hidden behind an already-marked
 /// object is never missed.
 inline fn gcBarrier(v: Value) void {
-    if (v == .object) gc_runtime.barrier(@ptrCast(v.object));
+    if (v.isObject()) gc_runtime.barrier(@ptrCast(v.asObj()));
 }
 
 /// The C-ABI shape of a host (Zig/C) function exposed to JS via
@@ -1534,34 +1534,34 @@ pub const Value = union(enum) {
     }
 
     pub fn isCallable(self: Value) bool {
-        return switch (self) {
-            .object => |o| o.isCallableObject(),
+        return switch (self.kind()) {
+            .object => self.asObj().isCallableObject(),
             else => false,
         };
     }
 
     /// ECMAScript ToBoolean.
     pub fn toBoolean(self: Value) bool {
-        return switch (self) {
+        return switch (self.kind()) {
             .undefined, .null => false,
-            .boolean => |b| b,
-            .number => |n| n != 0 and !std.math.isNan(n),
-            .string => |s| s.len != 0,
-            .object => |o| if (o.is_htmldda) false else if (o.is_bigint) !bigIntIsZero(o) else true,
+            .boolean => self.asBool(),
+            .number => self.asNum() != 0 and !std.math.isNan(self.asNum()),
+            .string => self.asStr().len != 0,
+            .object => if (self.asObj().is_htmldda) false else if (self.asObj().is_bigint) !bigIntIsZero(self.asObj()) else true,
         };
     }
 
     /// ECMAScript ToNumber (subset: objects coerce to NaN for now).
     pub fn toNumber(self: Value) f64 {
-        return switch (self) {
+        return switch (self.kind()) {
             .undefined => std.math.nan(f64),
             .null => 0,
-            .boolean => |b| if (b) 1 else 0,
-            .number => |n| n,
-            .string => |s| stringToNumber(s),
+            .boolean => if (self.asBool()) 1 else 0,
+            .number => self.asNum(),
+            .string => stringToNumber(self.asStr()),
             // A BigInt's mathematical value (explicit `Number(1n) === 1`); other
             // objects coerce to NaN here (proper ToPrimitive is `Interpreter`-level).
-            .object => |o| if (o.is_bigint) bigIntToNumber(o) else std.math.nan(f64),
+            .object => if (self.asObj().is_bigint) bigIntToNumber(self.asObj()) else std.math.nan(f64),
         };
     }
 
@@ -1591,25 +1591,25 @@ pub const Value = union(enum) {
 
     /// The `typeof` operator result.
     pub fn typeOf(self: Value) []const u8 {
-        return switch (self) {
+        return switch (self.kind()) {
             .undefined => "undefined",
             .null => "object",
             .boolean => "boolean",
             .number => "number",
             .string => "string",
-            .object => |o| if (o.is_htmldda) "undefined" else if (o.is_symbol) "symbol" else if (o.is_bigint) "bigint" else if (o.isCallableObject()) "function" else "object",
+            .object => if (self.asObj().is_htmldda) "undefined" else if (self.asObj().is_symbol) "symbol" else if (self.asObj().is_bigint) "bigint" else if (self.asObj().isCallableObject()) "function" else "object",
         };
     }
 
     /// ECMAScript ToString, allocating in `arena`.
     pub fn toString(self: Value, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
-        return switch (self) {
+        return switch (self.kind()) {
             .undefined => "undefined",
             .null => "null",
-            .boolean => |b| if (b) "true" else "false",
-            .number => |n| try numberToString(arena, n),
-            .string => |s| s,
-            .object => |o| if (o.is_bigint) try bigIntToString(o, arena) else try objectToString(o, arena),
+            .boolean => if (self.asBool()) "true" else "false",
+            .number => try numberToString(arena, self.asNum()),
+            .string => self.asStr(),
+            .object => if (self.asObj().is_bigint) try bigIntToString(self.asObj(), arena) else try objectToString(self.asObj(), arena),
         };
     }
 };
@@ -1650,11 +1650,11 @@ fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]con
     if (o.prim) |p| return p.toString(arena);
     if (o.is_error) {
         const name = if (o.getOwn("name")) |v|
-            (if (v == .string) v.string else o.error_name)
+            (if (v.isString()) v.asStr() else o.error_name)
         else
             o.error_name;
         const msg = if (o.getOwn("message")) |v|
-            (if (v == .string) v.string else "")
+            (if (v.isString()) v.asStr() else "")
         else
             "";
         if (msg.len == 0) return name;
@@ -1665,7 +1665,7 @@ fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]con
         for (o.elements.items, 0..) |el, i| {
             if (i != 0) try buf.append(arena, ',');
             // null/undefined render as empty per Array.prototype.join.
-            const part = switch (el) {
+            const part = switch (el.kind()) {
                 .undefined, .null => "",
                 else => try el.toString(arena),
             };
@@ -1817,62 +1817,62 @@ pub fn stringToNumber(s: []const u8) f64 {
 
 /// Strict equality (===).
 pub fn strictEquals(a: Value, b: Value) bool {
-    return switch (a) {
-        .undefined => b == .undefined,
-        .null => b == .null,
-        .boolean => |x| b == .boolean and b.boolean == x,
-        .number => |x| b == .number and b.number == x,
-        .string => |x| b == .string and std.mem.eql(u8, x, b.string),
+    return switch (a.kind()) {
+        .undefined => b.isUndefined(),
+        .null => b.isNull(),
+        .boolean => b.isBoolean() and b.asBool() == a.asBool(),
+        .number => b.isNumber() and b.asNum() == a.asNum(),
+        .string => b.isString() and std.mem.eql(u8, a.asStr(), b.asStr()),
         // BigInt is a primitive: `===` compares its value, not object identity.
-        .object => |x| if (x.is_bigint)
-            (b == .object and b.object.is_bigint and bigIntEquals(x, b.object))
+        .object => if (a.asObj().is_bigint)
+            (b.isObject() and b.asObj().is_bigint and bigIntEquals(a.asObj(), b.asObj()))
         else
-            (b == .object and b.object == x and !b.object.is_bigint),
+            (b.isObject() and b.asObj() == a.asObj() and !b.asObj().is_bigint),
     };
 }
 
 /// SameValueZero: strict equality except NaN equals NaN (and +0 equals -0).
 /// Used by `Array.prototype.includes` and Map/Set key comparison.
 pub fn sameValueZero(a: Value, b: Value) bool {
-    if (a == .number and b == .number) {
-        if (std.math.isNan(a.number) and std.math.isNan(b.number)) return true;
-        return a.number == b.number;
+    if (a.isNumber() and b.isNumber()) {
+        if (std.math.isNan(a.asNum()) and std.math.isNan(b.asNum())) return true;
+        return a.asNum() == b.asNum();
     }
     return strictEquals(a, b);
 }
 
 /// Abstract Equality Comparison (==), simplified for the v1 value set.
 pub fn looseEquals(a: Value, b: Value) bool {
-    if (@as(std.meta.Tag(Value), a) == @as(std.meta.Tag(Value), b)) {
+    if (a.kind() == b.kind()) {
         return strictEquals(a, b);
     }
-    if ((a == .null and b == .undefined) or (a == .undefined and b == .null)) return true;
+    if ((a.isNull() and b.isUndefined()) or (a.isUndefined() and b.isNull())) return true;
     // An [[IsHTMLDDA]] object is loosely equal to null and undefined.
-    if ((a == .object and a.object.is_htmldda) and (b == .null or b == .undefined)) return true;
-    if ((b == .object and b.object.is_htmldda) and (a == .null or a == .undefined)) return true;
+    if ((a.isObject() and a.asObj().is_htmldda) and (b.isNull() or b.isUndefined())) return true;
+    if ((b.isObject() and b.asObj().is_htmldda) and (a.isNull() or a.isUndefined())) return true;
     // BigInt == Number/Boolean/String: compare mathematically (a string is parsed
     // to a BigInt; a non-integer/unparseable comparand is unequal).
-    const a_big = a == .object and a.object.is_bigint;
-    const b_big = b == .object and b.object.is_bigint;
+    const a_big = a.isObject() and a.asObj().is_bigint;
+    const b_big = b.isObject() and b.asObj().is_bigint;
     if (a_big != b_big) {
-        const big_obj = if (a_big) a.object else b.object;
+        const big_obj = if (a_big) a.asObj() else b.asObj();
         const other = if (a_big) b else a;
         if (big_obj.bigint_text != null) {
-            return switch (other) {
-                .string => |s| std.mem.eql(u8, std.mem.trim(u8, s, " \t\r\n"), big_obj.bigint_text.?),
+            return switch (other.kind()) {
+                .string => std.mem.eql(u8, std.mem.trim(u8, other.asStr(), " \t\r\n"), big_obj.bigint_text.?),
                 else => false,
             };
         }
         const big: i128 = big_obj.bigint;
-        return switch (other) {
-            .number => |n| @as(f64, @floatFromInt(big)) == n,
-            .boolean => |x| big == @as(i128, if (x) 1 else 0),
-            .string => |s| if (std.fmt.parseInt(i128, std.mem.trim(u8, s, " \t\r\n"), 10)) |p| p == big else |_| false,
+        return switch (other.kind()) {
+            .number => @as(f64, @floatFromInt(big)) == other.asNum(),
+            .boolean => big == @as(i128, if (other.asBool()) 1 else 0),
+            .string => if (std.fmt.parseInt(i128, std.mem.trim(u8, other.asStr(), " \t\r\n"), 10)) |p| p == big else |_| false,
             else => false,
         };
     }
-    switch (a) {
-        .number, .string, .boolean => switch (b) {
+    switch (a.kind()) {
+        .number, .string, .boolean => switch (b.kind()) {
             .number, .string, .boolean => return a.toNumber() == b.toNumber(),
             else => {},
         },
