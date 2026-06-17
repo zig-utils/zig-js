@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const interp = @import("interpreter.zig");
 const ast = @import("ast.zig");
 const value = @import("value.zig");
+const Value = value.Value;
 const compiler = @import("compiler.zig");
 const vm = @import("vm.zig");
 const Shape = @import("shape.zig").Shape;
@@ -236,11 +237,11 @@ pub const Context = struct {
 
         try interp.installGlobals(&self.env, self.root_shape);
         // `globalThis` names the global object itself.
-        try self.env.put("globalThis", .{ .object = global_obj });
+        try self.env.put("globalThis", Value.obj(global_obj));
         if (self.env.get("Object")) |object_ctor| {
-            if (object_ctor == .object) {
-                if (object_ctor.object.getOwn("prototype")) |object_proto| {
-                    if (object_proto == .object) global_obj.proto = object_proto.object;
+            if (object_ctor.isObject()) {
+                if (object_ctor.asObj().getOwn("prototype")) |object_proto| {
+                    if (object_proto.isObject()) global_obj.proto = object_proto.asObj();
                 }
             }
         }
@@ -262,7 +263,7 @@ pub const Context = struct {
         }
         // `$262.global` is this realm's global object.
         if (self.env.get("$262")) |d| {
-            if (d == .object) try d.object.setOwn(a, self.root_shape, "global", .{ .object = global_obj });
+            if (d.isObject()) try d.asObj().setOwn(a, self.root_shape, "global", Value.obj(global_obj));
         }
         if (options.enable_threads) {
             const g = try gpa.create(gil_mod.Gil);
@@ -288,7 +289,7 @@ pub const Context = struct {
             .arena = self.arena(),
             .env = &self.env,
             .global_object = self.global_object,
-            .this_value = .{ .object = self.global_object },
+            .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
             .print_buffer = &self.print_buffer,
@@ -674,7 +675,7 @@ pub const Context = struct {
             if (err == error.Throw) self.exception = machine.exception;
             return err;
         };
-        return .undefined;
+        return Value.undef();
     }
 
     /// Recursively load and parse a module and its dependencies into `cache`
@@ -735,10 +736,10 @@ pub const Context = struct {
         const a = self.arena();
         const obj = try gc_mod.allocObj(a);
         obj.* = .{};
-        if (self.env.get("$262")) |host| if (host == .object) {
-            if (host.object.getOwn("AbstractModuleSource")) |ctor| if (ctor == .object) {
-                if (ctor.object.getOwn("prototype")) |proto| if (proto == .object) {
-                    obj.proto = proto.object;
+        if (self.env.get("$262")) |host| if (host.isObject()) {
+            if (host.asObj().getOwn("AbstractModuleSource")) |ctor| if (ctor.isObject()) {
+                if (ctor.asObj().getOwn("prototype")) |proto| if (proto.isObject()) {
+                    obj.proto = proto.asObj();
                 };
             };
         };
@@ -844,9 +845,9 @@ pub const Context = struct {
                 const dep = if (m.deps.get(imp.specifier)) |d| d else null;
                 for (imp.entries) |entry| {
                     if (isSourceImport(entry)) {
-                        try m.env.putConst(entry.local, .{ .object = try self.newModuleSourceObject() });
+                        try m.env.putConst(entry.local, Value.obj(try self.newModuleSourceObject()));
                     } else if (std.mem.eql(u8, entry.imported, "*")) {
-                        try m.env.putConst(entry.local, .{ .object = try self.namespaceObject(dep.?) });
+                        try m.env.putConst(entry.local, Value.obj(try self.namespaceObject(dep.?)));
                     } else if (resolveExport(dep.?, entry.imported, 0)) |res| {
                         try m.env.putAlias(entry.local, res.env, res.name);
                     } else {
@@ -858,7 +859,7 @@ pub const Context = struct {
                 // `export * as ns from "m"` needs a namespace object for `m`.
                 if (e.star and e.star_as.len > 0) {
                     const dep = m.deps.get(e.from).?;
-                    try m.env.put(e.star_as, .{ .object = try self.namespaceObject(dep) });
+                    try m.env.put(e.star_as, Value.obj(try self.namespaceObject(dep)));
                 }
             },
             else => {},
@@ -874,7 +875,7 @@ pub const Context = struct {
     /// Pre-declare a statement's top-level lexical (`let`/`const`) bindings as
     /// TDZ sentinels in the module environment.
     fn instantiateLexical(self: *Context, m: *Module, item: *ast.Node) void {
-        const tdz = value.Value{ .object = self.tdz_marker };
+        const tdz = Value.obj(self.tdz_marker);
         switch (item.*) {
             .var_decl => |v| if (v.kind != .@"var") m.env.put(v.name, tdz) catch {},
             .decl_group => |g| for (g) |s| self.instantiateLexical(m, s),
@@ -911,7 +912,7 @@ pub const Context = struct {
         const saved_this = machine.this_value;
         const saved_mod = machine.cur_module;
         machine.env = m.env;
-        machine.this_value = .undefined; // module top-level `this` is undefined
+        machine.this_value = Value.undef(); // module top-level `this` is undefined
         machine.cur_module = m.path; // referrer for runtime import()
         defer {
             machine.env = saved_env;
@@ -954,7 +955,7 @@ pub const Context = struct {
         self.evalModule(machine, dep) catch return self.surfaceFail(machine);
         const ns = self.namespaceObject(dep) catch return self.surfaceFail(machine);
         self.fillNamespace(machine, dep, ns) catch return self.surfaceFail(machine);
-        out.* = .{ .object = ns };
+        out.* = Value.obj(ns);
         return true;
     }
 
@@ -979,9 +980,9 @@ pub const Context = struct {
         _ = this;
         _ = args;
         const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
-        const fnobj = machine.active_native orelse return .undefined;
+        const fnobj = machine.active_native orelse return Value.undef();
         const b: *NsBinding = @ptrCast(@alignCast(fnobj.private_data.?));
-        return b.env.get(b.name) orelse .undefined;
+        return b.env.get(b.name) orelse Value.undef();
     }
 
     /// Wire a module's exported bindings onto its namespace object as live
@@ -1004,7 +1005,7 @@ pub const Context = struct {
             fn sameObjectBinding(env: *interp.Environment, local: []const u8, res: interp.Environment.Alias) bool {
                 const left = env.get(local) orelse return false;
                 const right = res.env.get(res.name) orelse return false;
-                return left == .object and right == .object and left.object == right.object;
+                return left.isObject() and right.isObject() and left.asObj() == right.asObj();
             }
 
             fn f(
@@ -1595,7 +1596,7 @@ test "context persists globals across evaluations" {
     defer ctx.destroy();
     _ = try ctx.evaluate("var counter = 41;");
     const v = try ctx.evaluate("counter = counter + 1;");
-    try std.testing.expectEqual(@as(f64, 42), v.number);
+    try std.testing.expectEqual(@as(f64, 42), v.asNum());
     try std.testing.expect((try ctx.evaluate("Object.getPrototypeOf(globalThis).isPrototypeOf(globalThis)")).boolean);
 }
 
@@ -2060,7 +2061,7 @@ test "Promise.resolve queues thenable jobs" {
         \\p.then(function () { seq.push(4); });
     );
     const v = try ctx.evaluate("seq.join('')");
-    try std.testing.expectEqualStrings("1234", v.string);
+    try std.testing.expectEqualStrings("1234", v.asStr());
 }
 
 test "Promise resolving function rejects self resolution" {
@@ -2074,7 +2075,7 @@ test "Promise resolving function rejects self resolution" {
         \\p.then(function () { result = "fulfilled"; }, function (err) { result = err.name; });
     );
     const v = try ctx.evaluate("result");
-    try std.testing.expectEqualStrings("TypeError", v.string);
+    try std.testing.expectEqualStrings("TypeError", v.asStr());
 }
 
 test "Promise.resolve rejects poisoned then getter" {
@@ -2090,7 +2091,7 @@ test "Promise.resolve rejects poisoned then getter" {
         \\});
     );
     const v = try ctx.evaluate("result");
-    try std.testing.expectEqualStrings("same", v.string);
+    try std.testing.expectEqualStrings("same", v.asStr());
 }
 
 test "Promise thenable job ignores throw after resolve" {
@@ -2103,7 +2104,7 @@ test "Promise thenable job ignores throw after resolve" {
         \\Promise.resolve(outer).then(function (value) { result = value; }, function () { result = "rejected"; });
     );
     const v = try ctx.evaluate("result");
-    try std.testing.expectEqualStrings("ok", v.string);
+    try std.testing.expectEqualStrings("ok", v.asStr());
 }
 
 test "Array.fromAsync awaits thenable elements" {
@@ -2122,7 +2123,7 @@ test "Array.fromAsync awaits thenable elements" {
         \\  .then(undefined, function (reason) { rejected = reason === err; });
     );
     const v = try ctx.evaluate("value + ':' + rejected");
-    try std.testing.expectEqualStrings("1:ok:true", v.string);
+    try std.testing.expectEqualStrings("1:ok:true", v.asStr());
 }
 
 /// Evaluate `src` in a fresh context and return its completion value. Only safe
@@ -2148,7 +2149,7 @@ fn expectEvalStr(expected: []const u8, src: []const u8) !void {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
     const v = try ctx.evaluate(src);
-    try std.testing.expectEqualStrings(expected, v.string);
+    try std.testing.expectEqualStrings(expected, v.asStr());
 }
 
 test "$262.AbstractModuleSource host intrinsic surface" {
@@ -3206,7 +3207,7 @@ test "BigInt.asIntN/asUintN wrap text-backed BigInts" {
 test "__lookupGetter__/__lookupSetter__ walk the chain, proxy-aware" {
     // Returns the accessor's getter; a data property yields undefined.
     try std.testing.expect((try evalIn("var o = { get x() { return 1; } }; o.__lookupGetter__('x') === Object.getOwnPropertyDescriptor(o, 'x').get")).boolean);
-    try std.testing.expect((try evalIn("({ a: 1 }).__lookupGetter__('a')")) == .undefined);
+    try std.testing.expect((try evalIn("({ a: 1 }).__lookupGetter__('a')")).isUndefined());
     // Walks the prototype chain to find an inherited accessor.
     try std.testing.expect((try evalIn(
         \\var proto = { get y() { return 2; } };
@@ -5065,7 +5066,7 @@ test "enable_gc: object-heavy program runs and tears down clean (no leaks)" {
         \\acc + obj.x + obj.y;
     );
     // sum_{i=0..199}(i + 2i + (i+2)) = sum(4i+2) = 80000, plus obj.x+obj.y = 3.
-    try std.testing.expectEqual(@as(f64, 80003), result.number);
+    try std.testing.expectEqual(@as(f64, 80003), result.asNum());
 }
 
 test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
@@ -5091,7 +5092,7 @@ test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
 
     // The retained object is intact and usable after collection.
     const r = try ctx.evaluate("globalThis.keep.kept + globalThis.keep.nested.deep[2]");
-    try std.testing.expectEqual(@as(f64, 4), r.number); // 1 + 3
+    try std.testing.expectEqual(@as(f64, 4), r.asNum()); // 1 + 3
 }
 
 test "enable_gc: mid-script collection reclaims garbage during a running loop (bounded heap)" {
@@ -5114,7 +5115,7 @@ test "enable_gc: mid-script collection reclaims garbage during a running loop (b
         \\acc;
     );
     // sum_{i=0..49999}(i + i) = 2 * (49999*50000/2) = 2499950000.
-    try std.testing.expectEqual(@as(f64, 2499950000), result.number);
+    try std.testing.expectEqual(@as(f64, 2499950000), result.asNum());
     // Collection ran repeatedly mid-loop — far more than the single quiescent
     // collect at the top of `evaluate`.
     try std.testing.expect(ctx.gc.?.collections > 2);
@@ -5177,13 +5178,13 @@ test "enable_gc incremental: insertion write barrier keeps a reparented object a
     // reachable from any root yet — they are white when marking starts.
     const holder = try gc_mod.allocObj(a);
     holder.* = .{};
-    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "holder", .{ .object = holder });
+    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "holder", Value.obj(holder));
     const donor = try gc_mod.allocObj(a);
     donor.* = .{};
     const child = try gc_mod.allocObj(a);
     child.* = .{};
-    try child.setOwn(ctx.gpa, ctx.root_shape, "tag", .{ .number = 777 });
-    try donor.setOwn(ctx.gpa, ctx.root_shape, "child", .{ .object = child });
+    try child.setOwn(ctx.gpa, ctx.root_shape, "tag", Value.num(777));
+    try donor.setOwn(ctx.gpa, ctx.root_shape, "child", Value.obj(child));
 
     // Snapshot roots and fully drain: globalThis → holder go black; donor and
     // child stay white (donor is unreachable from any root).
@@ -5192,17 +5193,17 @@ test "enable_gc incremental: insertion write barrier keeps a reparented object a
 
     // Mutator hides `child` behind the already-black `holder` (the barrier fires
     // inside setOwn) and lets `donor` fall away.
-    try holder.setOwn(ctx.gpa, ctx.root_shape, "adopted", .{ .object = child });
-    try donor.setOwn(ctx.gpa, ctx.root_shape, "child", .undefined);
+    try holder.setOwn(ctx.gpa, ctx.root_shape, "adopted", Value.obj(child));
+    try donor.setOwn(ctx.gpa, ctx.root_shape, "child", Value.undef());
 
     heap.finishMarking();
 
     // `child` survived via the barrier and is intact; `donor` (unreachable) was
     // swept.
     const adopted = holder.getOwn("adopted") orelse return error.TestUnexpectedResult;
-    try std.testing.expect(adopted == .object);
-    const tag = adopted.object.getOwn("tag") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(f64, 777), tag.number);
+    try std.testing.expect(adopted.isObject());
+    const tag = adopted.asObj().getOwn("tag") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 777), tag.asNum());
 }
 
 test "enable_gc: conservative native-stack scan keeps a stack-only value alive" {
@@ -5222,7 +5223,7 @@ test "enable_gc: conservative native-stack scan keeps a stack-only value alive" 
 
     // Reachable ONLY through this local — no JS root, no Context root.
     const orphan = try gc_mod.allocObj(ctx.arena());
-    try orphan.setOwn(ctx.gpa, ctx.root_shape, "marker", .{ .number = 12345 });
+    try orphan.setOwn(ctx.gpa, ctx.root_shape, "marker", Value.num(12345));
 
     // Collect with the native-stack scan armed, exactly as `collectMidScript`
     // does. A precise-only collection would sweep `orphan`; the conservative
@@ -5234,7 +5235,7 @@ test "enable_gc: conservative native-stack scan keeps a stack-only value alive" 
 
     // Survived and intact.
     const got = orphan.getOwn("marker") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(f64, 12345), got.number);
+    try std.testing.expectEqual(@as(f64, 12345), got.asNum());
 
     // Control: with the scan off (the quiescent path), the now-unreferenced
     // orphan is unreachable and reclaimed — confirming it only survived above
@@ -5259,7 +5260,7 @@ test "enable_gc: active module cache roots module environments during collection
 
     const kept = try gc_mod.allocObj(a);
     kept.* = .{};
-    try env.put("kept", .{ .object = kept });
+    try env.put("kept", Value.obj(kept));
 
     const garbage = try gc_mod.allocObj(a);
     garbage.* = .{};
@@ -5326,11 +5327,11 @@ test "enable_gc: active module interpreter roots import.meta during requested mi
     , mh);
 
     const alive = try ctx.evaluate("globalThis.aliveAfterGc === true");
-    try std.testing.expectEqual(true, alive.boolean);
+    try std.testing.expectEqual(true, alive.asBool());
 
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 }
 
 test "enable_gc: WeakRef target clears when only weakly reachable" {
@@ -5344,7 +5345,7 @@ test "enable_gc: WeakRef target clears when only weakly reachable" {
     ctx.collectGarbage();
 
     const r = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, r.boolean);
+    try std.testing.expectEqual(true, r.asBool());
 }
 
 test "enable_gc: shell gc request is deferred to the next quiescent entry" {
@@ -5444,7 +5445,7 @@ test "enable_gc: requested GC runs between microtasks after joined threads" {
     try std.testing.expect(!ctx.gc_requested);
     try std.testing.expect(ctx.gc.?.collections > before);
     const collected = try ctx.evaluate("globalThis.__microtaskGcCollected");
-    try std.testing.expect(collected == .boolean and collected.boolean);
+    try std.testing.expect(collected.isBoolean() and collected.asBool());
 }
 
 test "enable_gc: WeakRef keeps target while strongly reachable" {
@@ -5458,12 +5459,12 @@ test "enable_gc: WeakRef keeps target while strongly reachable" {
     );
     ctx.collectGarbage();
     const alive = try ctx.evaluate("globalThis.ref.deref().tag");
-    try std.testing.expectEqual(@as(f64, 9), alive.number);
+    try std.testing.expectEqual(@as(f64, 9), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 }
 
 test "enable_gc: SharedArrayBuffer retain releases when wrapper is collected" {
@@ -5480,13 +5481,13 @@ test "enable_gc: SharedArrayBuffer retain releases when wrapper is collected" {
     ctx.collectGarbage();
     try std.testing.expectEqual(@as(usize, 1), ctx.sab_retains.items.items.len);
     const alive = try ctx.evaluate("globalThis.ref.deref().byteLength");
-    try std.testing.expectEqual(@as(f64, 16), alive.number);
+    try std.testing.expectEqual(@as(f64, 16), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     try std.testing.expectEqual(@as(usize, 0), ctx.sab_retains.items.items.len);
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 }
 
 test "enable_gc: ArrayBuffer bytes release when wrapper is collected" {
@@ -5504,13 +5505,13 @@ test "enable_gc: ArrayBuffer bytes release when wrapper is collected" {
     ctx.collectGarbage();
     try std.testing.expectEqual(baseline + 64, ctx.gc_array_buffer_bytes_live);
     const alive = try ctx.evaluate("globalThis.ref.deref().byteLength");
-    try std.testing.expectEqual(@as(f64, 64), alive.number);
+    try std.testing.expectEqual(@as(f64, 64), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     try std.testing.expectEqual(baseline, ctx.gc_array_buffer_bytes_live);
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 }
 
 test "enable_gc: ArrayBuffer resize releases old backing bytes" {
@@ -5551,13 +5552,13 @@ test "enable_gc: pending Promise reaction lists release when collected" {
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc_promise_reactions_live > baseline);
     const alive = try ctx.evaluate("globalThis.ref.deref() !== undefined");
-    try std.testing.expectEqual(true, alive.boolean);
+    try std.testing.expectEqual(true, alive.asBool());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     try std.testing.expectEqual(baseline, ctx.gc_promise_reactions_live);
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 }
 
 test "enable_gc: settling Promise releases reaction lists" {
@@ -5596,13 +5597,13 @@ test "enable_gc: Environment binding names release when closure environment is c
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc_environment_name_bytes_live > baseline);
     const alive = try ctx.evaluate("globalThis.keep()");
-    try std.testing.expectEqual(@as(f64, 9), alive.number);
+    try std.testing.expectEqual(@as(f64, 9), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     try std.testing.expectEqual(baseline, ctx.gc_environment_name_bytes_live);
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 }
 
 test "enable_gc: Object named-property backing stores release when collected" {
@@ -5640,12 +5641,12 @@ test "enable_gc: Object named-property backing stores release when collected" {
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
     const alive = try ctx.evaluate("globalThis.keep.accessor + globalThis.keep.locked + (1 in globalThis.keep.arr ? 1000 : 0)");
-    try std.testing.expectEqual(@as(f64, 134), alive.number);
+    try std.testing.expectEqual(@as(f64, 134), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
     ctx.collectGarbage();
@@ -5686,12 +5687,12 @@ test "enable_gc: weak collection and finalization record backing stores release 
         \\globalThis.keep.wm.has(globalThis.keep.targets[0]) &&
         \\globalThis.keep.ws.has(globalThis.keep.targets[0])
     );
-    try std.testing.expectEqual(true, alive.boolean);
+    try std.testing.expectEqual(true, alive.asBool());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
     ctx.collectGarbage();
@@ -5726,12 +5727,12 @@ test "enable_gc: dense Object elements release when collected" {
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
     const alive = try ctx.evaluate("globalThis.keep.arr[79].index + globalThis.keep.map.size + globalThis.keep.set.size");
-    try std.testing.expectEqual(@as(f64, 139), alive.number);
+    try std.testing.expectEqual(@as(f64, 139), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
     ctx.collectGarbage();
@@ -5769,12 +5770,12 @@ test "enable_gc: typed-array and DataView metadata release when collected" {
         \\globalThis.keep.clone.ta.length +
         \\globalThis.keep.clone.dv.getUint8(4)
     );
-    try std.testing.expectEqual(@as(f64, 673), alive.number);
+    try std.testing.expectEqual(@as(f64, 673), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
     ctx.collectGarbage();
@@ -5810,12 +5811,12 @@ test "enable_gc: Temporal metadata releases when collected" {
         \\globalThis.keep.duration.hours +
         \\globalThis.keep.duration.minutes
     );
-    try std.testing.expectEqual(@as(f64, 2060), alive.number);
+    try std.testing.expectEqual(@as(f64, 2060), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
     ctx.collectGarbage();
@@ -5842,12 +5843,12 @@ test "enable_gc: mapped arguments parameter-map names release when collected" {
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
     const alive = try ctx.evaluate("globalThis.keep[0] = 10; globalThis.read()");
-    try std.testing.expectEqual(@as(f64, 14), alive.number);
+    try std.testing.expectEqual(@as(f64, 14), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; globalThis.read = undefined; globalThis.f = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
     ctx.collectGarbage();
@@ -5884,12 +5885,12 @@ test "enable_gc: suspended generator execution buffers release when collected" {
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc_generator_backing_stores_live > baseline);
     const alive = try ctx.evaluate("globalThis.keep.next(5).value");
-    try std.testing.expectEqual(@as(f64, 6), alive.number);
+    try std.testing.expectEqual(@as(f64, 6), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
     ctx.collectGarbage();
@@ -5922,12 +5923,12 @@ test "enable_gc: async generator request buffers release when collected" {
     ctx.collectGarbage();
     try std.testing.expect(ctx.gc_generator_backing_stores_live > baseline);
     const alive = try ctx.evaluate("typeof globalThis.keep.p1.then === 'function' && typeof globalThis.keep.p2.then === 'function' && typeof globalThis.keep.p3.then === 'function'");
-    try std.testing.expectEqual(true, alive.boolean);
+    try std.testing.expectEqual(true, alive.asBool());
 
     _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.ref.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
     ctx.collectGarbage();
@@ -5947,12 +5948,12 @@ test "enable_gc: WeakMap value is live only while weak key is live" {
     );
     ctx.collectGarbage();
     const alive = try ctx.evaluate("globalThis.valueRef.deref().tag");
-    try std.testing.expectEqual(@as(f64, 11), alive.number);
+    try std.testing.expectEqual(@as(f64, 11), alive.asNum());
 
     _ = try ctx.evaluate("globalThis.key = undefined; 0");
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.valueRef.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 }
 
 test "enable_gc: WeakSet does not keep value alive" {
@@ -5967,7 +5968,7 @@ test "enable_gc: WeakSet does not keep value alive" {
     );
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.valueRef.deref() === undefined");
-    try std.testing.expectEqual(true, cleared.boolean);
+    try std.testing.expectEqual(true, cleared.asBool());
 }
 
 test "enable_gc: FinalizationRegistry cleanupSome delivers collected holdings" {
@@ -5987,10 +5988,10 @@ test "enable_gc: FinalizationRegistry cleanupSome delivers collected holdings" {
         \\registry.cleanupSome();
         \\globalThis.cleanup.join(",");
     );
-    try std.testing.expectEqualStrings("21", delivered.string);
+    try std.testing.expectEqualStrings("21", delivered.asStr());
 
     const target_cleared = try ctx.evaluate("globalThis.targetRef.deref() === undefined");
-    try std.testing.expectEqual(true, target_cleared.boolean);
+    try std.testing.expectEqual(true, target_cleared.asBool());
 }
 
 test "enable_gc: FinalizationRegistry cleanup callback runs as a host cleanup job" {
@@ -6011,7 +6012,7 @@ test "enable_gc: FinalizationRegistry cleanup callback runs as a host cleanup jo
     ctx.collectGarbage();
     _ = try ctx.evaluate("0");
     const delivered = try ctx.evaluate("globalThis.cleanup.join(',')");
-    try std.testing.expectEqualStrings("auto,microtask", delivered.string);
+    try std.testing.expectEqualStrings("auto,microtask", delivered.asStr());
 }
 
 test "enable_gc: FinalizationRegistry unregister prevents cleanup delivery" {
@@ -6033,5 +6034,5 @@ test "enable_gc: FinalizationRegistry unregister prevents cleanup delivery" {
         \\registry.cleanupSome();
         \\globalThis.cleanup.length;
     );
-    try std.testing.expectEqual(@as(f64, 0), r.number);
+    try std.testing.expectEqual(@as(f64, 0), r.asNum());
 }
