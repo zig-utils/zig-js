@@ -178,6 +178,12 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
 }
 
 pub fn traceEnv(e: *Environment, v: anytype) void {
+    // `vars`/`disposables`/`aliases` are mutated by binding writes; under a
+    // concurrent mark read them under the same `binding_lock` those writers take
+    // (or a `put` rehash / append could tear the iteration). `parent`/`with_object`
+    // are set at env creation and never rewritten, so they need no lock.
+    const concurrent = v.concurrent();
+    if (concurrent) e.lockBindings();
     var vit = e.vars.valueIterator();
     while (vit.next()) |val| markValue(v, val.*);
     for (e.disposables.items) |d| {
@@ -186,6 +192,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     }
     var ait = e.aliases.valueIterator();
     while (ait.next()) |a| markManaged(v, a.env);
+    if (concurrent) e.unlockBindings();
     if (e.parent) |p| markManaged(v, p);
     if (e.with_object) |o| v.mark(o);
 }

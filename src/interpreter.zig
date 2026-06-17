@@ -166,11 +166,30 @@ pub const Environment = struct {
     /// shadows outer scopes — and a function defined inside the `with` captures
     /// it through its closure.
     with_object: ?*value.Object = null,
+    /// Phase 7 / M3: serializes the binding storage a concurrent GC marker reads
+    /// in `traceEnv` (`vars` values, `disposables`, `aliases`) against the
+    /// mutator's binding writes (`put`/`assign`/`putAlias`, `using` registration).
+    /// Like `Object.property_lock`: writers take it; lookups (`get`/`isConst`/…),
+    /// which only read, do not. Uncontended when the GC is off or not marking
+    /// concurrently (a single atomic CAS, mirroring the Object element locks).
+    binding_lock: std.atomic.Mutex = .unlocked,
+
+    pub fn lockBindings(self: *Environment) void {
+        var spins: usize = 0;
+        while (!self.binding_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+    pub fn unlockBindings(self: *Environment) void {
+        self.binding_lock.unlock();
+    }
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
         gc_mod.barrierValue(v); // binding stored into this (GC-cell) environment
         const a = self.bindingAllocator();
+        self.lockBindings();
+        defer self.unlockBindings();
         const gop = try self.vars.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
         gop.value_ptr.* = v;
@@ -231,7 +250,13 @@ pub const Environment = struct {
         while (env) |e| {
             if (e.vars.getPtr(name)) |ptr| {
                 gc_mod.barrierValue(v); // reassigned binding in a (GC-cell) env
+                // Lock `e` around the value write so it serializes with a
+                // concurrent marker reading `e.vars`. `ptr` stays valid: only a
+                // structural `put` rehashes, and a single mutator never races its
+                // own put here (the marker only reads).
+                e.lockBindings();
                 ptr.* = v;
+                e.unlockBindings();
                 return;
             }
             env = e.parent;
@@ -247,6 +272,8 @@ pub const Environment = struct {
     /// Install an indirect binding `local` → `target.name` (a module import).
     pub fn putAlias(self: *Environment, local: []const u8, target: *Environment, name: []const u8) EvalError!void {
         const a = self.bindingAllocator();
+        self.lockBindings(); // traceEnv reads `aliases`; serialize the structural write
+        defer self.unlockBindings();
         const gop = try self.aliases.getOrPut(a, local);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(local);
         gop.value_ptr.* = .{ .env = target, .name = try self.dupeBindingName(name) };
@@ -807,6 +834,10 @@ pub const Interpreter = struct {
             method = try self.getProperty(val, k);
         }
         if (!method.isCallable()) return self.throwError("TypeError", "a 'using' declaration value must have a [Symbol.dispose] method");
+        gc_mod.barrierValue(val);
+        gc_mod.barrierValue(method);
+        self.env.lockBindings(); // traceEnv reads disposables; serialize the append
+        defer self.env.unlockBindings();
         try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = val, .method = method, .is_async = is_async });
     }
 
@@ -6817,6 +6848,8 @@ pub const Interpreter = struct {
         if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {
             const root = rootEnv(self.env);
             if (!root.consts.contains(key)) {
+                root.lockBindings(); // serialize vs a concurrent marker reading root.vars
+                defer root.unlockBindings();
                 if (root.vars.getPtr(key)) |slot| slot.* = v;
             }
         }
