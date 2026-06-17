@@ -607,10 +607,32 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
             .allocator = heap.backing,
             .stores_live = &heap.ctx.context.gc_object_backing_stores_live,
         } });
+        _ = gc_runtime.setBarrier(raw, barrierThunk);
     } else {
         _ = gc_runtime.setActive(.{});
+        _ = gc_runtime.setBarrier(null, null);
     }
     return prev;
+}
+
+/// Type-erased entry the `gc_runtime` shim calls at reference-store sites; the
+/// `Heap.writeBarrier` it forwards to is a no-op unless an incremental mark is
+/// in progress (M2). See `gc_runtime.barrier`.
+fn barrierThunk(raw_heap: *anyopaque, cell: ?*anyopaque) void {
+    const heap: *Heap = @ptrCast(@alignCast(raw_heap));
+    heap.writeBarrier(cell);
+}
+
+/// Insertion write barrier for a stored `Value` (only `.object` carries a cell).
+/// Call at every post-creation store of a reference into a live GC cell. A
+/// near-no-op outside incremental marking; see docs/threads/P7-gc-design.md.
+pub inline fn barrierValue(v: Value) void {
+    if (v == .object) gc_runtime.barrier(@ptrCast(v.object));
+}
+
+/// Insertion write barrier for a stored cell pointer (Object/Environment/…).
+pub inline fn barrierCell(cell: ?*anyopaque) void {
+    gc_runtime.barrier(cell);
 }
 
 /// Allocate an `Object` cell from the thread's active GC heap (tagged

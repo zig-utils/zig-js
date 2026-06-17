@@ -3,6 +3,16 @@ const Shape = @import("shape.zig").Shape;
 const SharedBufferStorage = @import("shared_buffer.zig").SharedBufferStorage;
 const gc_runtime = @import("gc_runtime.zig");
 
+/// Incremental-GC insertion write barrier for a `Value` being stored into a
+/// live GC cell (issue #1 Phase 7 / M2). Only `.object` carries a cell; the
+/// barrier shades it grey if the heap is mid-incremental-mark, else it is a
+/// near-no-op (see `gc_runtime.barrier`). Called from the property/element
+/// store funnels below so a reference newly hidden behind an already-marked
+/// object is never missed.
+inline fn gcBarrier(v: Value) void {
+    if (v == .object) gc_runtime.barrier(@ptrCast(v.object));
+}
+
 /// The C-ABI shape of a host (Zig/C) function exposed to JS via
 /// `JSObjectMakeFunctionWithCallback`. Kept here so both the interpreter and
 /// the C-API layer agree on the type. All ref args are word-sized opaque
@@ -884,6 +894,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (i >= self.elements.items.len) return false;
+        gcBarrier(v);
         self.elements.items[i] = v;
         self.clearHoleUnlocked(i);
         return true;
@@ -892,6 +903,7 @@ pub const Object = struct {
     pub fn growDenseElement(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!usize {
         self.lockElements();
         defer self.unlockElements();
+        gcBarrier(v);
         const gap_start = self.elements.items.len;
         while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), .undefined);
         self.elements.items[i] = v;
@@ -910,6 +922,7 @@ pub const Object = struct {
     ) std.mem.Allocator.Error!bool {
         self.lockElements();
         defer self.unlockElements();
+        gcBarrier(v);
         if (i < self.elements.items.len) {
             self.elements.items[i] = v;
             self.clearHoleUnlocked(i);
@@ -963,6 +976,7 @@ pub const Object = struct {
     ) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
+        for (values) |v| gcBarrier(v);
         self.elements.clearRetainingCapacity();
         try self.elements.appendSlice(self.elementsAllocator(arena), values);
         if (self.holes) |h| h.clearRetainingCapacity();
@@ -979,6 +993,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (self.holes != null or self.array_len > self.elements.items.len) return false;
+        for (inserts) |v| gcBarrier(v);
         var i: usize = 0;
         while (i < delete_count) : (i += 1) {
             if (start < self.elements.items.len) {
@@ -1239,8 +1254,14 @@ pub const Object = struct {
             try self.ensureKeyOrderUnlocked(arena);
             try self.recordKeyOrderUnlocked(arena, gop.key_ptr.*);
         }
-        if (get) |g| gop.value_ptr.get = g;
-        if (set) |s| gop.value_ptr.set = s;
+        if (get) |g| {
+            gcBarrier(g);
+            gop.value_ptr.get = g;
+        }
+        if (set) |s| {
+            gcBarrier(s);
+            gop.value_ptr.set = s;
+        }
     }
 
     /// Append `name` to `key_order` unless it's already recorded — so converting
@@ -1308,6 +1329,7 @@ pub const Object = struct {
     }
 
     pub fn setOwnUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
+        gcBarrier(v); // stored into this cell's slots on either path below
         if (self.shape) |sh| {
             if (sh.lookup(name)) |slot| {
                 self.slots.items[slot] = v;

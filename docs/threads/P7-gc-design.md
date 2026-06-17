@@ -445,36 +445,43 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   Tested in the collector: a stepped drain matches stop-the-world reachability,
   the barrier saves a cell reparented behind an already-black object, and
   mid-cycle allocations survive. This is the concurrent-marking enabler for M3.
-  *Remaining — the engine-side barrier-coverage audit.* Incremental marking is
-  sound only if **every** store of a cell reference into a live GC cell shades
-  the target via `Heap.writeBarrier` while marking. That is the gating work
-  before incremental can drive zig-js collections, and it is exactly the funnel
-  discipline already established for M1 backing stores — wire `writeBarrier`
-  into:
-  - **Object named slots** — `Object.setOwnUnlocked` / `setSlot` (and the
-    delete/rebuild path) — one funnel.
+  *Born-grey + finish-root-rescan refinement.* Cells allocated mid-cycle are
+  born **grey** (traced), so their *creation-time* field writes (e.g. the ~167
+  `proto` inits, initial slots) are caught when traced — the engine only needs
+  barriers on **post-creation mutations**, not every initializing store.
+  `finishMarking` re-scans roots, covering reachable-but-white cells the mutator
+  moved onto a *volatile root* (operand stacks via `gc_execs`, the conservative
+  native stack, the active `Environment`, microtask queues) after the start
+  snapshot. So the engine barrier set is **heap→heap reference stores** only.
+  *Engine barrier-coverage audit.* Incremental marking is sound only if every
+  post-creation store of a cell reference into a live GC cell shades the target
+  via the insertion barrier (`gc_runtime.barrier` → `Heap.writeBarrier`). Status:
+  - **Object named slots** — `Object.setOwnUnlocked`. **✅ barriered.**
+  - **Object accessor maps** — `Object.setAccessor` (get/set). **✅ barriered.**
   - **Object dense elements** — `setDenseElement` / `growDenseElement` /
     `setOrGrowDenseElement` / `replaceDenseElementsAndSetLength` /
-    `splicePackedDenseElements` and the Map/Set entry stores — the
-    `elements_lock` funnel.
-  - **Object accessor maps** — `setAccessor` (get/set Values).
-  - **Environment bindings** — `Environment.assign` / `define` /
-    `defineLexicalVM` / `assignVarVM` and any direct `vars.put` (the binding
-    write set).
-  - **Object cell-pointer fields** — `proto` (~167 sites, the bulk; route
-    through a `setProto` helper), plus `ctor_ref`, `prim`, `proxy_target` /
-    `proxy_handler`, `weak_ref_target`, `arg_map_env`, and the side-cell
-    pointers (`js_func` / `bound` / `promise` / `gen` / `iter_helper` /
-    `module_ns`) — each set in a handful of places, funnel via small setters.
-  - **Promise / Generator / Function captured Values** — set mostly at
-    creation; the cell is born black mid-cycle, so its later-stored captured
-    references need the barrier too.
+    `splicePackedDenseElements`. **✅ barriered.**
+  - **Environment bindings** — `assign` / `define` / `defineLexicalVM` /
+    `assignVarVM` (the active env is also covered by the finish re-scan; a
+    *captured* env mutated while inactive needs the barrier). ⏳ to do.
+  - **VM property inline-cache** slot writes (`vm.zig`). ⏳ to do.
+  - **Promise** reaction-list appends; **Generator** request appends. ⏳ to do.
+  - **Map/Set** entry stores and any **raw `elements.append`** to an *existing*
+    (already-traced) array outside the dense helpers (fresh-array builders are
+    covered by born-grey). ⏳ to do — the largest remaining audit item.
+  - **Object cell-pointer fields** — `proto` reparent (`setPrototypeOf`),
+    `prim`/`ctor_ref`/`proxy_*` are creation-time (born-grey-covered); only
+    genuine post-creation reassignments need the barrier. ⏳ to do.
   Shapes are arena-permanent (not GC cells), so transition writes need **no**
-  barrier. Until that audit is complete and validated (forcing incremental on
-  across the GC-on unit suite + `threads-test`, where the exact-count
-  backing-store accounting tests detect a missed barrier as a reclamation-count
-  drift and a freed-live as a crash), incremental marking is **not** exposed —
-  the mechanism is ready in the collector, the engine wiring is the next step.
+  barrier. **Validated so far:** an incremental collection driven through
+  `startMarking`/`markStep`/`finishMarking` with a real reparent-behind-a-black
+  -object mutation via `Object.setOwn` keeps the reparented object alive (the
+  barrier fires); the stop-the-world `collect()` path and the full GC-on unit
+  suite are unchanged (barriers are no-ops when not marking). **Not yet exposed**
+  as a driven mode: the remaining funnels above must be barriered and validated
+  by forcing incremental on across the whole GC-on suite + `threads-test` (where
+  exact-count backing-store tests catch a missed barrier as count drift and a
+  freed-live as a crash) before incremental can drive zig-js collections.
 - **M3 — concurrent (Phase 7).** Per-shape/per-object locks (per
   `P7-gil-removal.md` blocker map), drop the GIL, run mark concurrently with
   mutators behind the barrier; safepoint-coordinate sweep. TSan campaign to

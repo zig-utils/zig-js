@@ -5105,6 +5105,56 @@ test "enable_gc: mid-script collection reclaims garbage during a running loop (b
     try std.testing.expect(ctx.gc.?.live_cells < 20000);
 }
 
+test "enable_gc incremental: insertion write barrier keeps a reparented object alive" {
+    // Phase 7 / M2: drive a collection through the incremental phases
+    // (startMarking / markStep / finishMarking) with a real mutation in between,
+    // and prove the engine's `Object.setOwn` store funnel fires the insertion
+    // write barrier. The classic incremental hazard: a reachable-but-unmarked
+    // object is reparented behind an already-marked object and dropped from its
+    // original (still-white) holder; without the barrier it would be swept while
+    // live. Born-grey allocation + finish-time root re-scan + this barrier make
+    // it survive.
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    ctx.collectGarbage(); // stabilize the post-intrinsics baseline
+
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const heap = ctx.gc.?;
+    const a = ctx.arena();
+
+    // `holder` is rooted (own property of globalThis); `donor`/`child` are not
+    // reachable from any root yet — they are white when marking starts.
+    const holder = try gc_mod.allocObj(a);
+    holder.* = .{};
+    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "holder", .{ .object = holder });
+    const donor = try gc_mod.allocObj(a);
+    donor.* = .{};
+    const child = try gc_mod.allocObj(a);
+    child.* = .{};
+    try child.setOwn(ctx.gpa, ctx.root_shape, "tag", .{ .number = 777 });
+    try donor.setOwn(ctx.gpa, ctx.root_shape, "child", .{ .object = child });
+
+    // Snapshot roots and fully drain: globalThis → holder go black; donor and
+    // child stay white (donor is unreachable from any root).
+    heap.startMarking();
+    _ = heap.markStep(0);
+
+    // Mutator hides `child` behind the already-black `holder` (the barrier fires
+    // inside setOwn) and lets `donor` fall away.
+    try holder.setOwn(ctx.gpa, ctx.root_shape, "adopted", .{ .object = child });
+    try donor.setOwn(ctx.gpa, ctx.root_shape, "child", .undefined);
+
+    heap.finishMarking();
+
+    // `child` survived via the barrier and is intact; `donor` (unreachable) was
+    // swept.
+    const adopted = holder.getOwn("adopted") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(adopted == .object);
+    const tag = adopted.object.getOwn("tag") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 777), tag.number);
+}
+
 test "enable_gc: conservative native-stack scan keeps a stack-only value alive" {
     // The safety-critical direction of mid-script collection: a `Value` held
     // only as a native Zig local (the tree-walker's case) must survive a
