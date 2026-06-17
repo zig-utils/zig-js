@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const interp = @import("interpreter.zig");
 const ast = @import("ast.zig");
 const value = @import("value.zig");
+const strcell = @import("strcell.zig");
 const Value = value.Value;
 const compiler = @import("compiler.zig");
 const vm = @import("vm.zig");
@@ -225,6 +226,8 @@ pub const Context = struct {
         // cells (required once mid-run collection marks from them).
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(self.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
 
         const global_obj = try gc_mod.allocObj(a);
         global_obj.* = .{};
@@ -508,6 +511,8 @@ pub const Context = struct {
         self.assertOwnerThread();
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(self.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
         // Register this frame as the high boundary of the live native stack so a
         // mid-script collection can conservatively root the interpreter's
         // `Value` locals below it (`stack_scan.zig`). Cheap; matters only when
@@ -640,6 +645,8 @@ pub const Context = struct {
         self.assertOwnerThread();
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(self.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
         // See `evaluate`: register the native-stack scan boundary for mid-script
         // collection during module execution.
         const ss_saved = stack_scan.enter(@frameAddress());
