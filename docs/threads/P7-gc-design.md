@@ -542,11 +542,25 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   TSan-clean; WeakRef still uses `markWeak(&o.weak_ref_target)` (a stable field
   address, safe). `WeakRef`/`WeakMap`/`WeakSet`/`FinalizationRegistry` test262
   buckets stay 100%; threads-test 209/209.
-  *Remaining for M3:* drive the production `collectMidScript` driver to run the
-  marker concurrently (instead of only while peers are parked), drop the GIL for
-  true multi-mutator parallelism (needs thread-safe cell allocation + the full
-  per-structure-lock audit), and run the TSan campaign + serial-perf gate +
-  stress amplifiers.
+  *Remaining for M3:*
+  1. **Production concurrent driver** — drive `collectMidScript` to mark on a
+     dedicated thread between safepoints (begin at one safepoint, finish at the
+     next), instead of stepping incrementally on the mutator. A flag-gated
+     single-mutator prototype surfaced the blocker: **born-grey is unsafe when
+     the mutator allocates during the concurrent window.** `Heap.create` hands a
+     new cell to the marker (born grey) *before* the caller initializes the
+     payload (`o.* = .{}`), so the marker can trace a half-constructed cell — and
+     the init overwrites the per-object lock mid-critical-section (caught as a
+     spinlock unlock-assert). The explicit-marker tests above don't hit this
+     (they allocate before marking and only *mutate* during it); a real workload
+     allocates mid-mark. The fix is **born-black during concurrent marking**
+     (allocate marked, never trace the new cell) **plus barriering the
+     creation-time field inits** that born-grey deliberately left unbarriered
+     (the ~167 `o.proto = …` at construction, initial slot/element fills) — the
+     WebKit-Riptide allocate-black model. This is the next focused change.
+  2. Drop the GIL for true multi-mutator parallelism (needs thread-safe cell
+     allocation + the full per-structure-lock audit).
+  3. TSan campaign to zero unsuppressed races; serial-perf gate; stress amplifiers.
 
 ## Verification
 
