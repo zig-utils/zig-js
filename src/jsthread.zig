@@ -34,7 +34,7 @@ pub const ThreadRecord = struct {
     /// release the lock while parked.
     done: bool = false,
     threw: bool = false,
-    result: Value = .undefined,
+    result: Value = Value.undef(),
     done_cond: std.Io.Condition = .init,
     /// The realm's wrapper object (`Thread.current` returns it).
     js_obj: ?*value.Object = null,
@@ -67,14 +67,14 @@ pub fn installThreadAPI(ctx: *Context) !void {
     const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = threadCtorFn, .native_ctor = true, .private_data = ctx };
     try interp.installNativeProps(a, rs, ctor, "Thread", 1);
-    try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try interp.setConstructor(a, rs, proto, ctor);
     try interp.setNativeGetter(a, rs, ctor, "current", threadCurrentGetter);
     try interp.setNative(a, rs, ctor, "restrict", 1, threadRestrictFn);
 
-    try ctx.env.put("Thread", .{ .object = ctor });
-    try ctx.global_object.setOwn(a, rs, "Thread", .{ .object = ctor });
+    try ctx.env.put("Thread", Value.obj(ctor));
+    try ctx.global_object.setOwn(a, rs, "Thread", Value.obj(ctor));
     try ctx.global_object.setAttr(a, "Thread", .{ .writable = true, .enumerable = false, .configurable = true });
 
     // The main thread's record: id 0, never "joinable-blocking" (done from
@@ -97,26 +97,26 @@ fn installConcurrentAccessError(ctx: *Context) !void {
     const rs = ctx.root_shape;
     const name = "ConcurrentAccessError";
     const base_v = ctx.env.get("Error") orelse return;
-    if (base_v != .object) return;
-    const base_proto_v = base_v.object.getOwn("prototype") orelse return;
-    if (base_proto_v != .object) return;
+    if (!base_v.isObject()) return;
+    const base_proto_v = base_v.asObj().getOwn("prototype") orelse return;
+    if (!base_proto_v.isObject()) return;
 
     const ctor = try gc_mod.allocObj(a);
-    ctor.* = .{ .error_ctor = name, .private_data = @ptrCast(&ctx.env), .proto = base_v.object };
+    ctor.* = .{ .error_ctor = name, .private_data = @ptrCast(&ctx.env), .proto = base_v.asObj() };
     try interp.installNativeProps(a, rs, ctor, name, 1);
     const proto = try gc_mod.allocObj(a);
-    proto.* = .{ .proto = base_proto_v.object };
+    proto.* = .{ .proto = base_proto_v.asObj() };
     const ro = value.PropAttr{ .writable = true, .enumerable = false, .configurable = true };
-    try proto.setOwn(a, rs, "name", .{ .string = name });
+    try proto.setOwn(a, rs, "name", Value.str(name));
     try proto.setAttr(a, "name", ro);
-    try proto.setOwn(a, rs, "message", .{ .string = "" });
+    try proto.setOwn(a, rs, "message", Value.str(""));
     try proto.setAttr(a, "message", ro);
-    try proto.setOwn(a, rs, "constructor", .{ .object = ctor });
+    try proto.setOwn(a, rs, "constructor", Value.obj(ctor));
     try proto.setAttr(a, "constructor", ro);
-    try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
-    try ctx.env.put(name, .{ .object = ctor });
-    try ctx.global_object.setOwn(a, rs, name, .{ .object = ctor });
+    try ctx.env.put(name, Value.obj(ctor));
+    try ctx.global_object.setOwn(a, rs, name, Value.obj(ctor));
     try ctx.global_object.setAttr(a, name, .{ .writable = true, .enumerable = false, .configurable = true });
 }
 
@@ -124,25 +124,25 @@ fn makeWrapper(ctx: *Context, rec: *ThreadRecord) !*value.Object {
     const a = ctx.arena();
     const o = try gc_mod.allocObj(a);
     o.* = .{ .private_data = rec };
-    if (ctx.env.get("Thread")) |c| if (c == .object) {
-        if (try threadProtoOf(ctx, c.object)) |p| o.proto = p;
+    if (ctx.env.get("Thread")) |c| if (c.isObject()) {
+        if (try threadProtoOf(ctx, c.asObj())) |p| o.proto = p;
     };
     return o;
 }
 
 fn threadProtoOf(ctx: *Context, ctor: *value.Object) !?*value.Object {
     var machine = ctx.interpreter();
-    const p = try machine.getProperty(.{ .object = ctor }, "prototype");
-    return if (p == .object) p.object else null;
+    const p = try machine.getProperty(Value.obj(ctor), "prototype");
+    return if (p.isObject()) p.asObj() else null;
 }
 
 fn recordOf(self: *Interpreter, this: Value) ?*ThreadRecord {
     _ = self;
-    if (this != .object) return null;
-    const pd = this.object.private_data orelse return null;
+    if (!this.isObject()) return null;
+    const pd = this.asObj().private_data orelse return null;
     // Only Thread wrappers reach the Thread.prototype methods in practice;
     // the private_data brand is the check.
-    if (this.object.proto == null) return null;
+    if (this.asObj().proto == null) return null;
     return @ptrCast(@alignCast(pd));
 }
 
@@ -150,12 +150,12 @@ fn recordOf(self: *Interpreter, this: Value) ?*ThreadRecord {
 fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    if (self.new_target == .undefined) return self.throwError("TypeError", "calling Thread constructor without new is invalid");
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "calling Thread constructor without new is invalid");
     const native = self.active_native orelse return self.throwError("TypeError", "Thread constructor lost its context");
     const ctx: *Context = @ptrCast(@alignCast(native.private_data.?));
     const g = ctx.gil orelse return self.throwError("TypeError", "Thread requires an enable_threads Context");
 
-    const fn_v = if (args.len > 0) args[0] else Value.undefined;
+    const fn_v = if (args.len > 0) args[0] else Value.undef();
     if (!fn_v.isCallable())
         return self.throwError("TypeError", "Thread constructor requires a callable argument");
 
@@ -184,7 +184,7 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
         rec.done = true;
         return self.throwError("Error", "Thread: could not spawn OS thread");
     };
-    return .{ .object = rec.js_obj.? };
+    return Value.obj(rec.js_obj.?);
 }
 
 fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
@@ -216,7 +216,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     var machine = rec.ctx.interpreter();
     rec.ctx.pushActiveInterpreter(&machine) catch {
         rec.threw = true;
-        rec.result = .undefined;
+        rec.result = Value.undef();
         rec.done = true;
         rec.done_cond.broadcast(agent.engineIo());
         return;
@@ -224,7 +224,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer rec.ctx.popActiveInterpreter(&machine);
     machine.microtasks = &microtasks;
     machine.async_waiters = &async_waiters;
-    if (machine.callValueWithThis(fn_v, args, .undefined)) |out| {
+    if (machine.callValueWithThis(fn_v, args, Value.undef())) |out| {
         machine.drainMicrotasks() catch {};
         pumpTasks(&machine);
         machine.settleAsyncWaiters();
@@ -237,7 +237,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // Settle asyncJoin promises on this (the settling) thread, then drain
     // the reactions it just queued.
     for (rec.pending_joins.items) |p_obj| {
-        if (promise.promiseOf(.{ .object = p_obj })) |pp| {
+        if (promise.promiseOf(Value.obj(p_obj))) |pp| {
             if (rec.threw)
                 promise.reject(&machine, pp, rec.result) catch {}
             else
@@ -275,7 +275,7 @@ fn threadIdGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.H
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.id called on incompatible receiver");
-    return .{ .number = @floatFromInt(rec.id) };
+    return Value.num(@floatFromInt(rec.id));
 }
 
 fn threadCurrentGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -283,8 +283,8 @@ fn threadCurrentGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     _ = self;
-    const rec = t_current orelse return .undefined;
-    return .{ .object = rec.js_obj.? };
+    const rec = t_current orelse return Value.undef();
+    return Value.obj(rec.js_obj.?);
 }
 
 // ---- Lock / Condition / ThreadLocal (Phase 6 step 3) -----------------------
@@ -399,7 +399,7 @@ fn installSyncAPI(ctx: *Context) !void {
     getter.* = .{ .native = tlValueGetFn };
     const setter = try gc_mod.allocObj(a);
     setter.* = .{ .native = tlValueSetFn };
-    try tl_proto.setAccessor(a, "value", .{ .object = getter }, .{ .object = setter });
+    try tl_proto.setAccessor(a, "value", Value.obj(getter), Value.obj(setter));
     try tl_proto.setAttr(a, "value", .{ .enumerable = false, .configurable = true });
     try setTag(ctx, tl_proto, "ThreadLocal");
     _ = try installCtor(ctx, "ThreadLocal", tlCtorFn, tl_proto);
@@ -409,11 +409,11 @@ fn installSyncAPI(ctx: *Context) !void {
     // records while exposing the draft's token-oriented static methods.
     try installMutexStaticAPI(ctx, lock_ctor);
     try installConditionStaticAPI(ctx, cond_ctor);
-    if (ctx.env.get("Atomics")) |atomics_v| if (atomics_v == .object) {
-        try atomics_v.object.setOwn(a, rs, "Mutex", .{ .object = lock_ctor });
-        try atomics_v.object.setAttr(a, "Mutex", .{ .writable = true, .enumerable = false, .configurable = true });
-        try atomics_v.object.setOwn(a, rs, "Condition", .{ .object = cond_ctor });
-        try atomics_v.object.setAttr(a, "Condition", .{ .writable = true, .enumerable = false, .configurable = true });
+    if (ctx.env.get("Atomics")) |atomics_v| if (atomics_v.isObject()) {
+        try atomics_v.asObj().setOwn(a, rs, "Mutex", Value.obj(lock_ctor));
+        try atomics_v.asObj().setAttr(a, "Mutex", .{ .writable = true, .enumerable = false, .configurable = true });
+        try atomics_v.asObj().setOwn(a, rs, "Condition", Value.obj(cond_ctor));
+        try atomics_v.asObj().setAttr(a, "Condition", .{ .writable = true, .enumerable = false, .configurable = true });
     };
 }
 
@@ -422,7 +422,7 @@ fn setTag(ctx: *Context, proto: *value.Object, name: []const u8) !void {
     var machine = ctx.interpreter();
     const k = machine.wellKnownSymbolKey("toStringTag") orelse return;
     const a = ctx.arena();
-    try proto.setOwn(a, ctx.root_shape, k, .{ .string = name });
+    try proto.setOwn(a, ctx.root_shape, k, Value.str(name));
     try proto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
 }
 
@@ -431,11 +431,11 @@ fn installCtor(ctx: *Context, name: []const u8, f: value.NativeFn, proto: *value
     const rs = ctx.root_shape;
     const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = f, .native_ctor = true, .private_data = ctx };
-    try ctor.setOwn(a, rs, "prototype", .{ .object = proto });
+    try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try interp.setConstructor(a, rs, proto, ctor);
-    try ctx.env.put(name, .{ .object = ctor });
-    try ctx.global_object.setOwn(a, rs, name, .{ .object = ctor });
+    try ctx.env.put(name, Value.obj(ctor));
+    try ctx.global_object.setOwn(a, rs, name, Value.obj(ctor));
     try ctx.global_object.setAttr(a, name, .{ .writable = true, .enumerable = false, .configurable = true });
     return ctor;
 }
@@ -456,11 +456,11 @@ fn installMutexStaticAPI(ctx: *Context, lock_ctor: *value.Object) !void {
     const token_ctor = try gc_mod.allocObj(a);
     token_ctor.* = .{ .native = unlockTokenCtorFn, .native_ctor = true, .private_data = ctx };
     try interp.installNativeProps(a, rs, token_ctor, "UnlockToken", 0);
-    try token_ctor.setOwn(a, rs, "prototype", .{ .object = token_proto });
+    try token_ctor.setOwn(a, rs, "prototype", Value.obj(token_proto));
     try token_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try interp.setConstructor(a, rs, token_proto, token_ctor);
 
-    try lock_ctor.setOwn(a, rs, "UnlockToken", .{ .object = token_ctor });
+    try lock_ctor.setOwn(a, rs, "UnlockToken", Value.obj(token_ctor));
     try lock_ctor.setAttr(a, "UnlockToken", .{ .writable = true, .enumerable = false, .configurable = true });
     try interp.setNative(a, rs, lock_ctor, "lock", 1, mutexStaticLockFn);
     try interp.setNative(a, rs, lock_ctor, "lockIfAvailable", 2, mutexStaticLockIfAvailableFn);
@@ -481,7 +481,7 @@ fn syncCtor(comptime T: type, comptime ctor_name: []const u8) value.NativeFn {
             _ = this;
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-            if (self.new_target == .undefined) return self.throwError("TypeError", "calling " ++ ctor_name ++ " constructor without new is invalid");
+            if (self.new_target.isUndefined()) return self.throwError("TypeError", "calling " ++ ctor_name ++ " constructor without new is invalid");
             const native = self.active_native orelse return self.throwError("TypeError", "constructor lost its context");
             const ctx: *Context = @ptrCast(@alignCast(native.private_data.?));
             const g = ctx.gil orelse return self.throwError("TypeError", "requires an enable_threads Context");
@@ -490,9 +490,9 @@ fn syncCtor(comptime T: type, comptime ctor_name: []const u8) value.NativeFn {
             rec.* = if (T == TLRecord) .{ .gil = g, .arena = a } else .{ .gil = g };
             const o = try gc_mod.allocObj(a);
             o.* = .{ .private_data = rec };
-            const p = try self.getProperty(.{ .object = native }, "prototype");
-            if (p == .object) o.proto = p.object;
-            return .{ .object = o };
+            const p = try self.getProperty(Value.obj(native), "prototype");
+            if (p.isObject()) o.proto = p.asObj();
+            return Value.obj(o);
         }
     }.call;
 }
@@ -510,8 +510,8 @@ fn brandOf(comptime T: type) SyncBrand {
 }
 
 fn recOf(comptime T: type, this: Value) ?*T {
-    if (this != .object) return null;
-    const pd = this.object.private_data orelse return null;
+    if (!this.isObject()) return null;
+    const pd = this.asObj().private_data orelse return null;
     const tag: *SyncBrand = @ptrCast(@alignCast(pd));
     if (tag.* != brandOf(T)) return null;
     return @ptrCast(@alignCast(pd));
@@ -561,18 +561,18 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
 }
 
 fn unlockTokenCreate(self: *Interpreter, token_v: Value, lock: *LockRecord) value.HostError!Value {
-    const token = if (token_v == .undefined) blk: {
+    const token = if (token_v.isUndefined()) blk: {
         const rec = try self.arena.create(UnlockTokenRecord);
         rec.* = .{};
         const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .private_data = rec };
-        if (self.env.get("Atomics")) |atomics_v| if (atomics_v == .object) {
-            const mutex_v = try self.getProperty(.{ .object = atomics_v.object }, "Mutex");
-            if (mutex_v == .object) {
+        if (self.env.get("Atomics")) |atomics_v| if (atomics_v.isObject()) {
+            const mutex_v = try self.getProperty(Value.obj(atomics_v.asObj()), "Mutex");
+            if (mutex_v.isObject()) {
                 const token_ctor_v = try self.getProperty(mutex_v, "UnlockToken");
-                if (token_ctor_v == .object) {
+                if (token_ctor_v.isObject()) {
                     const proto_v = try self.getProperty(token_ctor_v, "prototype");
-                    if (proto_v == .object) obj.proto = proto_v.object;
+                    if (proto_v.isObject()) obj.proto = proto_v.asObj();
                 }
             }
         };
@@ -582,18 +582,18 @@ fn unlockTokenCreate(self: *Interpreter, token_v: Value, lock: *LockRecord) valu
             return self.throwError("TypeError", "Atomics.Mutex expected an UnlockToken");
         if (rec.lock != null)
             return self.throwError("TypeError", "Atomics.Mutex UnlockToken is already locked");
-        break :blk token_v.object;
+        break :blk token_v.asObj();
     };
-    const rec = recOf(UnlockTokenRecord, .{ .object = token }).?;
+    const rec = recOf(UnlockTokenRecord, Value.obj(token)).?;
     rec.lock = lock;
-    return .{ .object = token };
+    return Value.obj(token);
 }
 
 fn unlockTokenCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    if (self.new_target == .undefined)
+    if (self.new_target.isUndefined())
         return self.throwError("TypeError", "calling Atomics.Mutex.UnlockToken constructor without new is invalid");
     const native = self.active_native orelse return self.throwError("TypeError", "UnlockToken constructor lost its context");
     const ctx: *Context = @ptrCast(@alignCast(native.private_data.?));
@@ -601,9 +601,9 @@ fn unlockTokenCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
     rec.* = .{};
     const obj = try gc_mod.allocObj(ctx.arena());
     obj.* = .{ .private_data = rec };
-    const proto = try self.getProperty(.{ .object = native }, "prototype");
-    if (proto == .object) obj.proto = proto.object;
-    return .{ .object = obj };
+    const proto = try self.getProperty(Value.obj(native), "prototype");
+    if (proto.isObject()) obj.proto = proto.asObj();
+    return Value.obj(obj);
 }
 
 fn unlockTokenLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -611,7 +611,7 @@ fn unlockTokenLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(UnlockTokenRecord, this) orelse
         return self.throwError("TypeError", "Atomics.Mutex.UnlockToken.prototype.locked called on incompatible receiver");
-    return .{ .boolean = rec.lock != null };
+    return Value.boolVal(rec.lock != null);
 }
 
 fn unlockTokenUnlock(self: *Interpreter, rec: *UnlockTokenRecord) value.HostError!bool {
@@ -628,7 +628,7 @@ fn unlockTokenUnlockFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(UnlockTokenRecord, this) orelse
         return self.throwError("TypeError", "Atomics.Mutex.UnlockToken.prototype.unlock called on incompatible receiver");
-    return .{ .boolean = try unlockTokenUnlock(self, rec) };
+    return Value.boolVal(try unlockTokenUnlock(self, rec));
 }
 
 fn unlockTokenDisposeFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -637,16 +637,16 @@ fn unlockTokenDisposeFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) v
     const rec = recOf(UnlockTokenRecord, this) orelse
         return self.throwError("TypeError", "Atomics.Mutex.UnlockToken.prototype[Symbol.dispose] called on incompatible receiver");
     _ = try unlockTokenUnlock(self, rec);
-    return .undefined;
+    return Value.undef();
 }
 
 fn mutexStaticLockFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
+    const rec = recOf(LockRecord, if (args.len > 0) args[0] else Value.undef()) orelse
         return self.throwError("TypeError", "Atomics.Mutex.lock requires a Mutex argument");
     _ = try acquireLock(self, rec, null, "Atomics.Mutex.lock cannot acquire the mutex");
-    return unlockTokenCreate(self, if (args.len > 1) args[1] else .undefined, rec) catch |err| {
+    return unlockTokenCreate(self, if (args.len > 1) args[1] else Value.undef(), rec) catch |err| {
         if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
         return err;
     };
@@ -655,18 +655,18 @@ fn mutexStaticLockFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
 fn mutexStaticLockIfAvailableFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
+    const rec = recOf(LockRecord, if (args.len > 0) args[0] else Value.undef()) orelse
         return self.throwError("TypeError", "Atomics.Mutex.lockIfAvailable requires a Mutex argument");
-    const timeout_v = if (args.len > 1) args[1] else Value.undefined;
-    if (timeout_v == .undefined)
+    const timeout_v = if (args.len > 1) args[1] else Value.undef();
+    if (timeout_v.isUndefined())
         return self.throwError("TypeError", "Atomics.Mutex.lockIfAvailable requires a timeout");
     const timeout_ns = try timeoutMillisToNs(try self.toNumberV(timeout_v));
     switch (try acquireLock(self, rec, timeout_ns, "Atomics.Mutex.lockIfAvailable cannot acquire the mutex")) {
-        .acquired => return unlockTokenCreate(self, if (args.len > 2) args[2] else .undefined, rec) catch |err| {
+        .acquired => return unlockTokenCreate(self, if (args.len > 2) args[2] else Value.undef(), rec) catch |err| {
             if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
             return err;
         },
-        .timed_out => return .null,
+        .timed_out => return Value.nul(),
     }
 }
 
@@ -675,12 +675,12 @@ fn mutexStaticLockIfAvailableFn(ctx_ptr: *anyopaque, this: Value, args: []const 
 fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.hold called on incompatible receiver");
-    const cb = if (args.len > 0) args[0] else Value.undefined;
+    const cb = if (args.len > 0) args[0] else Value.undef();
     if (!cb.isCallable()) return self.throwError("TypeError", "Lock.prototype.hold requires a callable argument");
     if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid()))
         return self.throwError("Error", "Lock is not recursive");
     _ = try acquireLock(self, rec, null, "Lock.prototype.hold cannot block the current thread");
-    const out = self.callValueWithThis(cb, &.{}, .undefined);
+    const out = self.callValueWithThis(cb, &.{}, Value.undef());
     // Epilogue guard: a termination thrown from a cond.wait inside cb left
     // the lock unheld (D9) — releasing here would corrupt the lock state.
     if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
@@ -691,7 +691,7 @@ fn lockLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.locked called on incompatible receiver");
-    return .{ .boolean = rec.locked };
+    return Value.boolVal(rec.locked);
 }
 
 fn removeSyncCondTicket(rec: *CondRecord, ticket: *SyncCondTicket) void {
@@ -754,14 +754,14 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
 fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(CondRecord, this) orelse return self.throwError("TypeError", "Condition.prototype.wait called on incompatible receiver");
-    const lock = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
+    const lock = recOf(LockRecord, if (args.len > 0) args[0] else Value.undef()) orelse
         return self.throwError("TypeError", "Condition.prototype.wait requires a Lock argument");
     if (!lock.locked or lock.holder != currentTid())
         return self.throwError("TypeError", "Condition.prototype.wait requires the lock to be held by the caller");
     if (!self.main_can_block)
         return self.throwError("TypeError", "Condition.prototype.wait cannot block the current thread");
     _ = try condWaitCore(self, rec, lock, null);
-    return .undefined;
+    return Value.undef();
 }
 
 fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostError!usize {
@@ -810,7 +810,7 @@ fn condNotifyFn(comptime all: bool) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
             const rec = recOf(CondRecord, this) orelse return self.throwError("TypeError", "Condition.prototype.notify called on incompatible receiver");
             const n = try condNotify(self, rec, if (all) std.math.maxInt(usize) else 1);
-            return .{ .number = @floatFromInt(n) };
+            return Value.num(@floatFromInt(n));
         }
     }.call;
 }
@@ -824,45 +824,45 @@ fn lockFromToken(self: *Interpreter, token_v: Value, name: []const u8) value.Hos
 fn conditionStaticWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(CondRecord, if (args.len > 0) args[0] else .undefined) orelse
+    const rec = recOf(CondRecord, if (args.len > 0) args[0] else Value.undef()) orelse
         return self.throwError("TypeError", "Atomics.Condition.wait requires a Condition argument");
-    const lock = try lockFromToken(self, if (args.len > 1) args[1] else .undefined, "Atomics.Condition.wait requires a locked UnlockToken");
+    const lock = try lockFromToken(self, if (args.len > 1) args[1] else Value.undef(), "Atomics.Condition.wait requires a locked UnlockToken");
     _ = try condWaitCore(self, rec, lock, null);
-    return .undefined;
+    return Value.undef();
 }
 
 fn conditionStaticWaitForFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(CondRecord, if (args.len > 0) args[0] else .undefined) orelse
+    const rec = recOf(CondRecord, if (args.len > 0) args[0] else Value.undef()) orelse
         return self.throwError("TypeError", "Atomics.Condition.waitFor requires a Condition argument");
-    const lock = try lockFromToken(self, if (args.len > 1) args[1] else .undefined, "Atomics.Condition.waitFor requires a locked UnlockToken");
-    const timeout_v = if (args.len > 2) args[2] else Value.undefined;
-    if (timeout_v == .undefined)
+    const lock = try lockFromToken(self, if (args.len > 1) args[1] else Value.undef(), "Atomics.Condition.waitFor requires a locked UnlockToken");
+    const timeout_v = if (args.len > 2) args[2] else Value.undef();
+    if (timeout_v.isUndefined())
         return self.throwError("TypeError", "Atomics.Condition.waitFor requires a timeout");
     const timeout_ns = try timeoutMillisToNs(try self.toNumberV(timeout_v));
-    const pred = if (args.len > 3) args[3] else Value.undefined;
-    if (pred != .undefined and !pred.isCallable())
+    const pred = if (args.len > 3) args[3] else Value.undef();
+    if (!pred.isUndefined() and !pred.isCallable())
         return self.throwError("TypeError", "Atomics.Condition.waitFor predicate must be callable");
 
     const start = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
     while (true) {
         if (pred.isCallable()) {
-            const ok = try self.callValueWithThis(pred, &.{}, .undefined);
-            if (ok.toBoolean()) return .{ .boolean = true };
+            const ok = try self.callValueWithThis(pred, &.{}, Value.undef());
+            if (ok.toBoolean()) return Value.boolVal(true);
         }
         const remaining: ?u64 = if (timeout_ns) |ns| blk: {
             const elapsed: u64 = @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds - start, 0));
-            if (elapsed >= ns) return .{ .boolean = false };
+            if (elapsed >= ns) return Value.boolVal(false);
             break :blk ns - elapsed;
         } else null;
         const notified = try condWaitCore(self, rec, lock, remaining);
-        if (!pred.isCallable()) return .{ .boolean = notified };
+        if (!pred.isCallable()) return Value.boolVal(notified);
     }
 }
 
 fn conditionNotifyCount(self: *Interpreter, v: Value) value.HostError!usize {
-    if (v == .undefined) return std.math.maxInt(usize);
+    if (v.isUndefined()) return std.math.maxInt(usize);
     const n = try self.toNumberV(v);
     if (n == std.math.inf(f64)) return std.math.maxInt(usize);
     if (std.math.isNan(n) or n < 0 or @trunc(n) != n)
@@ -874,25 +874,25 @@ fn conditionNotifyCount(self: *Interpreter, v: Value) value.HostError!usize {
 fn conditionStaticNotifyFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const rec = recOf(CondRecord, if (args.len > 0) args[0] else .undefined) orelse
+    const rec = recOf(CondRecord, if (args.len > 0) args[0] else Value.undef()) orelse
         return self.throwError("TypeError", "Atomics.Condition.notify requires a Condition argument");
-    const count = try conditionNotifyCount(self, if (args.len > 1) args[1] else .undefined);
-    return .{ .number = @floatFromInt(try condNotify(self, rec, count)) };
+    const count = try conditionNotifyCount(self, if (args.len > 1) args[1] else Value.undef());
+    return Value.num(@floatFromInt(try condNotify(self, rec, count)));
 }
 
 fn tlValueGetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.prototype.value called on incompatible receiver");
-    return rec.map.get(currentTid()) orelse .undefined;
+    return rec.map.get(currentTid()) orelse Value.undef();
 }
 
 fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.prototype.value called on incompatible receiver");
-    const v = if (args.len > 0) args[0] else Value.undefined;
+    const v = if (args.len > 0) args[0] else Value.undef();
     try rec.map.put(rec.arena, currentTid(), v);
-    return .undefined;
+    return Value.undef();
 }
 
 // ---- Atomics on plain object properties (Phase 6 step 4) -------------------
@@ -910,17 +910,17 @@ fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
 /// Whether an Atomics call should take the property path.
 pub fn isPropertyMode(self: *Interpreter, v: Value) bool {
     return self.gil != null and
-        v == .object and
-        !v.object.is_symbol and
-        !v.object.is_bigint and
-        v.object.proxy_target == null and
-        v.object.typed_array == null and
-        v.object.data_view == null;
+        v.isObject() and
+        !v.asObj().is_symbol and
+        !v.asObj().is_bigint and
+        v.asObj().proxy_target == null and
+        v.asObj().typed_array == null and
+        v.asObj().data_view == null;
 }
 
 fn sameValueZero(a: Value, b: Value) bool {
-    if (a == .number and b == .number)
-        return a.number == b.number or (std.math.isNan(a.number) and std.math.isNan(b.number));
+    if (a.isNumber() and b.isNumber())
+        return a.asNum() == b.asNum() or (std.math.isNan(a.asNum()) and std.math.isNan(b.asNum()));
     return value.strictEquals(a, b);
 }
 
@@ -935,7 +935,7 @@ fn ownDataOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: [
     // Array dense elements (and other index-shaped own data) live outside the
     // shape slots; the generic own check + [[Get]] covers them (one step
     // under the GIL either way).
-    if (interp.objectHasOwn(o, key)) return self.getProperty(.{ .object = o }, key);
+    if (interp.objectHasOwn(o, key)) return self.getProperty(Value.obj(o), key);
     return self.throwError("TypeError", what);
 }
 
@@ -944,17 +944,17 @@ fn writableOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: 
 }
 
 fn argAt(args: []const Value, i: usize) Value {
-    return if (args.len > i) args[i] else .undefined;
+    return if (args.len > i) args[i] else Value.undef();
 }
 
 pub fn propLoad(self: *Interpreter, args: []const Value) value.HostError!Value {
-    const o = args[0].object;
+    const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     return ownDataOrThrow(self, o, key, "Atomics.load: object has no own property");
 }
 
 pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value {
-    const o = args[0].object;
+    const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const v = argAt(args, 2);
     if (isAccessor(o, key)) return self.throwError("TypeError", "Atomics.store: property is an accessor");
@@ -965,49 +965,49 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
     }
     // [[Set]] writes shape props and index elements alike, preserving
     // attributes and creating fresh default-attribute properties.
-    try self.setMember(.{ .object = o }, key, v);
+    try self.setMember(Value.obj(o), key, v);
     return v;
 }
 
 pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
-    const o = args[0].object;
+    const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const old = try ownDataOrThrow(self, o, key, "Atomics.exchange: object has no own data property");
     try writableOrThrow(self, o, key, "Atomics.exchange: property is not writable");
-    try self.setMember(.{ .object = o }, key, argAt(args, 2));
+    try self.setMember(Value.obj(o), key, argAt(args, 2));
     return old;
 }
 
 pub fn propCompareExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
-    const o = args[0].object;
+    const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const old = try ownDataOrThrow(self, o, key, "Atomics.compareExchange: object has no own data property");
     // The writability rule throws unconditionally — even when the compare
     // would fail.
     try writableOrThrow(self, o, key, "Atomics.compareExchange: property is not writable");
     if (sameValueZero(old, argAt(args, 2)))
-        try self.setMember(.{ .object = o }, key, argAt(args, 3));
+        try self.setMember(Value.obj(o), key, argAt(args, 3));
     return old;
 }
 
 pub const PropRmwOp = enum { add, sub, and_, or_, xor };
 
 pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.HostError!Value {
-    const o = args[0].object;
+    const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const operand = try self.toNumberV(argAt(args, 2));
     const old = try ownDataOrThrow(self, o, key, "Atomics RMW: object has no own data property");
     try writableOrThrow(self, o, key, "Atomics RMW: property is not writable");
-    if (old != .number) return self.throwError("TypeError", "Atomics RMW: stored value is not a number");
+    if (!old.isNumber()) return self.throwError("TypeError", "Atomics RMW: stored value is not a number");
     const result: f64 = switch (op) {
-        .add => old.number + operand,
-        .sub => old.number - operand,
+        .add => old.asNum() + operand,
+        .sub => old.asNum() - operand,
         // Bitwise ops use JS ToInt32 semantics on both sides.
-        .and_ => @floatFromInt(jsInt32(old.number) & jsInt32(operand)),
-        .or_ => @floatFromInt(jsInt32(old.number) | jsInt32(operand)),
-        .xor => @floatFromInt(jsInt32(old.number) ^ jsInt32(operand)),
+        .and_ => @floatFromInt(jsInt32(old.asNum()) & jsInt32(operand)),
+        .or_ => @floatFromInt(jsInt32(old.asNum()) | jsInt32(operand)),
+        .xor => @floatFromInt(jsInt32(old.asNum()) ^ jsInt32(operand)),
     };
-    try self.setMember(.{ .object = o }, key, .{ .number = result });
+    try self.setMember(Value.obj(o), key, Value.num(result));
     return old;
 }
 
@@ -1042,19 +1042,19 @@ pub const PropAsyncTicket = struct {
 /// Settlement: a notify resolves "ok" on the notifying thread; expiry
 /// resolves "timed-out" from the awaiters' poll points.
 pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value.HostError!Value {
-    const o = args[0].object;
+    const o = args[0].asObj();
     const key_tmp = try self.keyOf(argAt(args, 1));
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.waitAsync: object has no own data property");
     const res = (try self.newObject()).object;
     if (!sameValueZero(cur, argAt(args, 2))) {
-        try self.setProp(res, "async", .{ .boolean = false });
-        try self.setProp(res, "value", .{ .string = "not-equal" });
-        return .{ .object = res };
+        try self.setProp(res, "async", Value.boolVal(false));
+        try self.setProp(res, "value", Value.str("not-equal"));
+        return Value.obj(res);
     }
     if (timeout_ns != null and timeout_ns.? == 0) {
-        try self.setProp(res, "async", .{ .boolean = false });
-        try self.setProp(res, "value", .{ .string = "timed-out" });
-        return .{ .object = res };
+        try self.setProp(res, "async", Value.boolVal(false));
+        try self.setProp(res, "value", Value.str("timed-out"));
+        return Value.obj(res);
     }
     const p_obj = try promise.newPromise(self);
     const t = prop_alloc.create(PropAsyncTicket) catch return error.OutOfMemory;
@@ -1071,14 +1071,14 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         prop_alloc.destroy(t);
         return error.OutOfMemory;
     };
-    try self.setProp(res, "async", .{ .boolean = true });
-    try self.setProp(res, "value", .{ .object = p_obj });
-    return .{ .object = res };
+    try self.setProp(res, "async", Value.boolVal(true));
+    try self.setProp(res, "value", Value.obj(p_obj));
+    return Value.obj(res);
 }
 
 fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8) void {
-    if (promise.promiseOf(.{ .object = t.promise })) |pp| {
-        promise.resolve(self, pp, .{ .string = outcome }) catch {};
+    if (promise.promiseOf(Value.obj(t.promise))) |pp| {
+        promise.resolve(self, pp, Value.str(outcome)) catch {};
     }
     prop_alloc.destroy(t);
 }
@@ -1129,11 +1129,11 @@ pub fn abandonPropAsync(g: *gil_mod.Gil) void {
 }
 
 pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value.HostError!Value {
-    const o = args[0].object;
+    const o = args[0].asObj();
     const key_tmp = try self.keyOf(argAt(args, 1));
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
-    if (!sameValueZero(cur, argAt(args, 2))) return .{ .string = "not-equal" };
-    if (timeout_ns != null and timeout_ns.? == 0) return .{ .string = "timed-out" };
+    if (!sameValueZero(cur, argAt(args, 2))) return Value.str("not-equal");
+    if (timeout_ns != null and timeout_ns.? == 0) return Value.str("timed-out");
     if (!self.main_can_block)
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
     const key = try self.arena.dupe(u8, key_tmp);
@@ -1159,7 +1159,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
         var tick_ns: u64 = 5 * std.time.ns_per_ms;
         if (deadline_ns) |d| {
             const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
-            if (d <= now) return .{ .string = "timed-out" };
+            if (d <= now) return Value.str("timed-out");
             tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
         }
         g.waitTimeout(&ticket.cond, .{ .duration = .{
@@ -1167,14 +1167,14 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
             .clock = .awake,
         } }) catch {};
     }
-    return .{ .string = "ok" };
+    return Value.str("ok");
 }
 
 pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value {
-    const o = args[0].object;
+    const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     var count: usize = std.math.maxInt(usize);
-    if (args.len > 2 and args[2] != .undefined) {
+    if (args.len > 2 and !args[2].isUndefined()) {
         const n = try self.toNumberV(args[2]);
         if (std.math.isNan(n) or n <= 0) count = 0 else if (n != std.math.inf(f64) and n < 1e18) count = @intFromFloat(@trunc(n));
     }
@@ -1201,7 +1201,7 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
         }
         i += 1;
     }
-    return .{ .number = @floatFromInt(n) };
+    return Value.num(@floatFromInt(n));
 }
 
 /// `Thread.prototype.asyncJoin()` — a promise for the thread's completion.
@@ -1213,13 +1213,13 @@ fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.asyncJoin called on incompatible receiver");
     const p_obj = try promise.newPromise(self);
-    const pp = promise.promiseOf(.{ .object = p_obj }).?;
+    const pp = promise.promiseOf(Value.obj(p_obj)).?;
     if (rec.done) {
         if (rec.threw) try promise.reject(self, pp, rec.result) else try promise.resolve(self, pp, rec.result);
     } else {
         try rec.pending_joins.append(self.arena, p_obj);
     }
-    return .{ .object = p_obj };
+    return Value.obj(p_obj);
 }
 
 /// `Thread.restrict(obj)` — pin `obj` to the calling thread; any enforced
@@ -1230,9 +1230,9 @@ fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
 fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const v = if (args.len > 0) args[0] else Value.undefined;
-    if (v != .object) return self.throwError("TypeError", "cannot restrict this object");
-    const o = v.object;
+    const v = if (args.len > 0) args[0] else Value.undef();
+    if (!v.isObject()) return self.throwError("TypeError", "cannot restrict this object");
+    const o = v.asObj();
     const plain = o.js_func == null and o.native == null and o.callback == null and o.bound == null and
         o.gen == null and o.proxy_target == null and !o.proxy_revoked and
         o != (self.global_object orelse o) and
@@ -1335,7 +1335,7 @@ fn parkPump(self: *Interpreter, g: *gil_mod.Gil, cond: *std.Io.Condition) value.
 }
 
 fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
-    const outer_pp = promise.promiseOf(.{ .object = job.outer }).?;
+    const outer_pp = promise.promiseOf(Value.obj(job.outer)).?;
     if (!job.lock.locked) {
         job.lock.locked = true;
         job.lock.holder = async_holder;
@@ -1350,7 +1350,7 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         // cond.asyncWait may consume it, but sync cond.wait still requires a
         // genuine sync hold.
         job.lock.async_runner = currentTid();
-        const out = self.callValueWithThis(cb, &.{}, .undefined);
+        const out = self.callValueWithThis(cb, &.{}, Value.undef());
         // fn may itself have consumed the hold (same-thread asyncWait, I23);
         // only release when this grant still owns the lock.
         if (job.lock.locked and job.lock.async_runner == currentTid()) {
@@ -1362,7 +1362,7 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         } else |err| {
             if (err != error.Throw) return err;
             const reason = self.exception;
-            self.exception = .undefined;
+            self.exception = Value.undef();
             try promise.reject(self, outer_pp, reason);
         }
         return;
@@ -1373,34 +1373,34 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     job.lock.active_release = st;
     const rel = try gc_mod.allocObj(self.arena);
     rel.* = .{ .native = releaseFnNative, .private_data = st };
-    try promise.resolve(self, outer_pp, .{ .object = rel });
+    try promise.resolve(self, outer_pp, Value.obj(rel));
 }
 
 fn releaseFnNative(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
-    const native = self.active_native orelse return .undefined;
+    const native = self.active_native orelse return Value.undef();
     const st: *ReleaseState = @ptrCast(@alignCast(native.private_data.?));
     if (st.used) return self.throwError("Error", "Lock release function called more than once");
     st.used = true;
     if (st.lock.active_release == st) st.lock.active_release = null;
     lockRelease(self, st.lock);
-    return .undefined;
+    return Value.undef();
 }
 
 /// `Lock.prototype.asyncHold(fn?)`.
 fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.asyncHold called on incompatible receiver");
-    const cb = if (args.len > 0) args[0] else Value.undefined;
-    if (cb != .undefined and !cb.isCallable())
+    const cb = if (args.len > 0) args[0] else Value.undef();
+    if (!cb.isUndefined() and !cb.isCallable())
         return self.throwError("TypeError", "Lock.prototype.asyncHold requires a callable argument when one is provided");
     if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid()))
         return self.throwError("Error", "Lock is not recursive");
     const outer = try promise.newPromise(self);
     const job = try self.arena.create(HoldJob);
-    job.* = .{ .lock = rec, .outer = outer, .cb = if (cb == .undefined) null else cb };
+    job.* = .{ .lock = rec, .outer = outer, .cb = if (cb.isUndefined()) null else cb };
     if (!rec.locked) {
         rec.locked = true; // the grant happens at registration (5.5a)
         rec.holder = async_holder;
@@ -1409,7 +1409,7 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     } else {
         try rec.pending.append(self.arena, job);
     }
-    return .{ .object = outer };
+    return Value.obj(outer);
 }
 
 const AsyncCondWaiter = struct { lock: *LockRecord, outer: *value.Object };
@@ -1419,7 +1419,7 @@ const AsyncCondWaiter = struct { lock: *LockRecord, outer: *value.Object };
 fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(CondRecord, this) orelse return self.throwError("TypeError", "Condition.prototype.asyncWait called on incompatible receiver");
-    const lock = recOf(LockRecord, if (args.len > 0) args[0] else .undefined) orelse
+    const lock = recOf(LockRecord, if (args.len > 0) args[0] else Value.undef()) orelse
         return self.throwError("TypeError", "Condition.prototype.asyncWait requires a Lock argument");
     // 4.3(b) hold-state rules: an UNDELIVERED grant is not held; a delivered
     // no-fn grant is consumable from anywhere (poisoning its release()); a
@@ -1439,7 +1439,7 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     w.* = .{ .lock = lock, .outer = outer };
     try rec.queue.append(self.arena, .{ .asynchronous = w });
     lockRelease(self, lock);
-    return .{ .object = outer };
+    return Value.obj(outer);
 }
 
 /// Notify-side wake of an async cond waiter: the wake is a no-fn asyncHold
