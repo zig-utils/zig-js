@@ -1412,7 +1412,7 @@ pub const Interpreter = struct {
         } else {
             // for-in: enumerate keys (skip null/undefined per spec, ToObject any
             // other primitive — e.g. a string's character indices).
-            switch (iter) {
+            switch (iter.kind()) {
                 .undefined, .null => {}, // iterating null/undefined is a no-op
                 else => {
                     const o = try self.toObject(iter);
@@ -3826,22 +3826,25 @@ pub const Interpreter = struct {
     }
 
     pub fn toBigIntValueImpl(self: *Interpreter, v: Value, number_ok: bool) EvalError!Value {
-        switch (v) {
-            .object => |o| {
+        switch (v.kind()) {
+            .object => {
+                const o = v.asObj();
                 if (o.is_bigint) return v;
                 if (o.is_symbol) return self.throwError("TypeError", "Cannot convert a Symbol value to a BigInt");
                 const p = try self.toPrimitive(v, .number);
                 if (p.isObject() and !p.asObj().is_bigint and !p.asObj().is_symbol) return self.throwError("TypeError", "Cannot convert object to a BigInt");
                 return self.toBigIntValueImpl(p, number_ok);
             },
-            .boolean => |b| return self.makeBigInt(if (b) 1 else 0),
-            .number => |n| {
+            .boolean => return self.makeBigInt(if (v.asBool()) 1 else 0),
+            .number => {
+                const n = v.asNum();
                 if (!number_ok) return self.throwError("TypeError", "Cannot convert a Number to a BigInt; use BigInt()");
                 if (std.math.isNan(n) or std.math.isInf(n) or @trunc(n) != n)
                     return self.throwError("RangeError", "The number is not a safe integer");
                 return self.makeBigInt(@intFromFloat(n));
             },
-            .string => |s| {
+            .string => {
+                const s = v.asStr();
                 // StringToBigInt: trim whitespace; empty → 0n; otherwise a decimal
                 // (optional sign) or a `0x`/`0o`/`0b` literal (no sign).
                 const t = std.mem.trim(u8, s, " \t\r\n\x0b\x0c\u{00a0}\u{feff}");
@@ -6080,8 +6083,9 @@ pub const Interpreter = struct {
     /// lookup starts. Reflect.get and Proxy forwarding rely on this when an
     /// inherited accessor observes `this`.
     fn getPropertyWithReceiver(self: *Interpreter, recv: Value, key: []const u8, receiver: Value) EvalError!Value {
-        switch (recv) {
-            .object => |o| {
+        switch (recv.kind()) {
+            .object => {
+                const o = recv.asObj();
                 if (o.is_symbol or o.is_bigint) return self.getPrimitiveMember(recv, key);
                 if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, receiver);
                 if (moduleNsOf(o)) |ns| return moduleNsGet(self, ns, key);
@@ -8263,9 +8267,10 @@ pub const Interpreter = struct {
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (i != 0) try buf.appendSlice(self.arena, sep);
-                switch (try self.arrIndexGet(o, i)) {
+                const el = try self.arrIndexGet(o, i);
+                switch (el.kind()) {
                     .undefined, .null => {},
-                    else => |el| try buf.appendSlice(self.arena, try self.toStringV(el)),
+                    else => try buf.appendSlice(self.arena, try self.toStringV(el)),
                 }
             }
             return Value{ .string = try buf.toOwnedSlice(self.arena) };
@@ -11064,22 +11069,25 @@ fn protoSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const tag_obj: ?*value.Object = switch (this) {
+    const tag_obj: ?*value.Object = switch (this.kind()) {
         .undefined => return Value.str("[object Undefined]"),
         .null => return Value.str("[object Null]"),
-        .object => |o| o,
+        .object => this.asObj(),
         else => try self.toObject(this),
     };
-    const builtin_tag: []const u8 = switch (this) {
+    const builtin_tag: []const u8 = switch (this.kind()) {
         .number => "Number",
         .boolean => "Boolean",
         .string => "String",
-        .object => |o| if (o.is_arguments) "Arguments" else if (try objectToStringIsArray(self, o)) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.prim) |p| (switch (p) {
-            .number => "Number",
-            .string => "String",
-            .boolean => "Boolean",
-            else => "Object",
-        }) else if (o.isCallableObject()) "Function" else "Object",
+        .object => blk: {
+            const o = this.asObj();
+            break :blk if (o.is_arguments) "Arguments" else if (try objectToStringIsArray(self, o)) "Array" else if (o.is_error) "Error" else if (o.is_date) "Date" else if (o.is_regex) "RegExp" else if (o.prim) |p| (switch (p.kind()) {
+                .number => "Number",
+                .string => "String",
+                .boolean => "Boolean",
+                else => "Object",
+            }) else if (o.isCallableObject()) "Function" else "Object";
+        },
         else => "Object",
     };
     // `Symbol.toStringTag` (a string) wins over the builtin tag.
