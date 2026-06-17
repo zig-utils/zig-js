@@ -154,8 +154,71 @@ pub const InternTable = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Threadlocal active intern table — the final rep-flip prerequisite.
+//
+// The NaN-box `Value` swap (#7) makes a string `Value` a single pointer to a
+// `StringCell`, so `Value.str(s)` must turn a `[]const u8` into a `*StringCell`.
+// But `Value.str` is a static constructor with no allocator in scope, and there
+// are ~424 such sites. Rather than thread an allocator through all of them, the
+// engine installs the current realm's `InternTable` as a *threadlocal active
+// table* at the same entry points the GC active-heap is set (`createWith`,
+// `evaluate`, `evaluateModule`, spawned-thread entry). `internActive(s)` then
+// turns a slice into a canonical cell with no per-site allocator — mirroring the
+// `gc_runtime` active-heap pattern. Null active table (the arena engine / before
+// the swap) means callers keep using the inline slice; this is inert until the
+// flip wires `Value.str` to it.
+// ---------------------------------------------------------------------------
+
+threadlocal var active_table: ?*InternTable = null;
+
+/// Install `t` as this thread's active intern table; returns the previous one
+/// so nested entry points can restore it. Pass null for "no interning".
+pub fn setActiveTable(t: ?*InternTable) ?*InternTable {
+    const prev = active_table;
+    active_table = t;
+    return prev;
+}
+
+pub fn activeTable() ?*InternTable {
+    return active_table;
+}
+
+/// Intern `bytes` into the thread's active table → canonical `*StringCell`, or
+/// null if no table is active (caller falls back to the inline slice). The
+/// allocator-free string constructor the rep-flip's `Value.str` will call.
+pub fn internActive(bytes: []const u8) ?*StringCell {
+    const t = active_table orelse return null;
+    return t.intern(bytes) catch null;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "strcell: threadlocal active table interns with no per-call allocator" {
+    const a = std.testing.allocator;
+    // No active table → internActive returns null (caller uses inline slice).
+    try std.testing.expect(internActive("x") == null);
+
+    var t = InternTable.init(a);
+    defer t.deinit();
+    const prev = setActiveTable(&t);
+    defer _ = setActiveTable(prev);
+
+    // With a table active, internActive needs no allocator arg and dedups.
+    const c1 = internActive("hello").?;
+    const c2 = internActive("hello").?;
+    const d = internActive("world").?;
+    try std.testing.expectEqual(c1, c2);
+    try std.testing.expect(c1 != d);
+    try std.testing.expectEqualStrings("hello", c1.bytes);
+    try std.testing.expectEqual(@as(usize, 2), t.count());
+
+    // Restoring null disables interning again.
+    _ = setActiveTable(null);
+    try std.testing.expect(internActive("hello") == null);
+    _ = setActiveTable(&t);
+}
 
 test "strcell: createCell owns its bytes and caches the hash" {
     const a = std.testing.allocator;
