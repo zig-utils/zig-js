@@ -50,6 +50,21 @@ pub const StringCell = struct {
     }
 };
 
+/// A compile-time-interned cell for a string *literal* — **no allocator
+/// needed**. This resolves the one real design wrinkle of the NaN-box `Value`
+/// swap: hundreds of `Value{ .string = "literal" }` sites construct strings with
+/// no allocator in scope, but a NaN-boxed string must point at a `StringCell`.
+/// `staticCell` returns a pointer into static storage that lives for the whole
+/// program, and Zig memoizes the instantiation by the comptime `s`, so repeated
+/// calls with the *same* literal return the *same* pointer (literals are
+/// interned for free, at compile time). Runtime strings (concatenation results,
+/// etc.) use `createCell` / `InternTable.intern` with their in-scope allocator.
+pub fn staticCell(comptime s: []const u8) *const StringCell {
+    return &struct {
+        const cell = StringCell{ .bytes = s, .hash = hashBytes(s) };
+    }.cell;
+}
+
 /// Allocate a fresh (un-interned) cell that owns a copy of `bytes`. This is the
 /// minimal constructor the NaN-box `Value` swap needs; interning is optional
 /// (below). `allocator` owns both the cell and the byte copy.
@@ -155,6 +170,23 @@ test "strcell: createCell owns its bytes and caches the hash" {
     try std.testing.expectEqual(hashBytes("hi"), cell.hash);
     try std.testing.expect(cell.eqlBytes("hi"));
     try std.testing.expect(!cell.eqlBytes("hX"));
+}
+
+test "strcell: staticCell needs no allocator and comptime-interns literals" {
+    // No allocator argument — usable at the literal-construction sites that
+    // have none. Same literal → same static pointer (comptime memoization);
+    // distinct literals → distinct cells.
+    const a = staticCell("undefined");
+    const b = staticCell("undefined");
+    const c = staticCell("null");
+    try std.testing.expectEqual(a, b);
+    try std.testing.expect(a != c);
+    try std.testing.expectEqualStrings("undefined", a.bytes);
+    try std.testing.expectEqual(hashBytes("undefined"), a.hash);
+    // Its hash matches what the runtime intern path would compute for the same
+    // bytes, so a literal cell and an interned cell of equal content agree on
+    // hash (equality stays by-bytes; only identity differs across the boundary).
+    try std.testing.expectEqual(hashBytes("null"), c.hash);
 }
 
 test "strcell: intern dedups equal bytes to one cell, separates distinct" {

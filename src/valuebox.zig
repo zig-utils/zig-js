@@ -33,6 +33,16 @@ pub fn encode(intern: *strcell.InternTable, v: Value) std.mem.Allocator.Error!Na
     };
 }
 
+/// Pack a string *literal* `Value` into one NaN-boxed word **without an
+/// allocator**, via a comptime-interned static cell. This is the path for the
+/// hundreds of `Value{ .string = "..." }` literal sites that have no allocator
+/// in scope; runtime strings use `encode` (which interns through the table).
+pub fn encodeLiteral(comptime s: []const u8) NanBox {
+    // The static cell is immutable and only ever read back (on decode), so
+    // dropping const to fit the opaque payload is sound.
+    return NanBox.encodeString(@constCast(@ptrCast(strcell.staticCell(s))));
+}
+
 /// Recover a `Value` from its NaN-boxed word. A string decodes to a slice over
 /// the interned cell's bytes (stable for the table's lifetime).
 pub fn decode(nb: NanBox) Value {
@@ -101,6 +111,23 @@ test "valuebox: strings round-trip and equal strings share one cell" {
     const n2 = try encode(&intern, Value.str(&buf));
     try std.testing.expectEqual(n1.asPointer(), n2.asPointer());
     try std.testing.expect(n1.isString());
+}
+
+test "valuebox: string literals encode with no allocator and decode equal" {
+    // The literal-construction path (no InternTable, no allocator) — what the
+    // ~424 `Value{ .string = "..." }` sites become after the swap.
+    const nb = encodeLiteral("undefined");
+    try std.testing.expect(nb.isString());
+    try std.testing.expectEqualStrings("undefined", decode(nb).asStr());
+    // Same literal encodes to the same cell pointer (comptime-interned); a
+    // runtime intern of equal bytes is byte-equal though a distinct cell.
+    try std.testing.expectEqual(encodeLiteral("undefined").asPointer(), nb.asPointer());
+
+    const a = std.testing.allocator;
+    var intern = strcell.InternTable.init(a);
+    defer intern.deinit();
+    const runtime = try encode(&intern, Value.str("undefined"));
+    try std.testing.expectEqualStrings(decode(runtime).asStr(), decode(nb).asStr());
 }
 
 test "valuebox: object pointers round-trip exactly" {
