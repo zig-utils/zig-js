@@ -560,12 +560,26 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   runs` — a 4,000-iteration loop allocates objects + per-iter `let` environments
   and reassigns a global while the marker traces (~dozens of begin→marker→finish
   cycles); exact arithmetic, bounded heap, no marker outlives the run,
-  **TSan-clean** (`-Dtsan`). (`Function`/`Promise`/`Generator` side-cells aren't
-  exercised concurrently by this workload; extend the same per-cell-type sync to
-  them before relying on concurrent marking for workloads dominated by those.)
+  **TSan-clean** (`-Dtsan`).
+  An audit of the other traced side-cells: **`Promise` is already
+  concurrent-safe** (`tracePromise` and the resolve/reject/then mutators both
+  take `Promise.lock`), and **`Function`/`BoundFn`/`ModuleNs` are
+  creation-immutable** (their traced fields are written once at construction, so
+  born-cell handling covers them). The two with post-creation mutation a
+  concurrent marker would still race are **`Generator`** (`exec.stack`/`requests`
+  are mutated during resume — and a *running* generator's `exec` is also the
+  active VM `Exec`, so the sync must coordinate with the active-exec root, not
+  just take a lock) and **`IterHelper`** (`inner`/`inner_next`/`padding` are
+  updated mid-`.next()`, interleaved with JS callbacks, and `inner` is a 16-byte
+  `?Value` needing a per-access lock — never held across a callback — not a
+  single-word atomic). So today concurrent marking is sound for object / array /
+  Map / Set / WeakMap / WeakSet / FinReg / Environment / Promise / closure
+  workloads (the common case); generator- or iterator-helper-heavy code under
+  `concurrent_gc` can still race the marker.
   *Remaining for M3:*
-  1. Extend concurrent-trace synchronization to the remaining mutable traced
-     side-cells (`Function`/`Promise`/`Generator`) for full workload coverage.
+  1. Concurrent-trace sync for `Generator` (coordinate with the active-exec root)
+     and `IterHelper` (per-access lock around the callback-interleaved updates) —
+     the last two mutable traced cell types.
   2. Drop the GIL for true multi-mutator parallelism (needs thread-safe cell
      allocation + the full per-structure-lock audit).
   3. TSan campaign to zero unsuppressed races; serial-perf gate; stress amplifiers.
