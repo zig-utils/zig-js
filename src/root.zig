@@ -84,6 +84,7 @@ test {
     _ = @import("context.zig");
     _ = @import("c_api.zig");
     _ = @import("gc.zig");
+    _ = @import("nanbox.zig");
 }
 
 test "evalNumber convenience" {
