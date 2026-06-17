@@ -518,12 +518,25 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   graphs while the mutator appends previously-white objects into a rooted array
   through the engine's `appendElement` funnel (insertion barrier + `elements_lock`):
   every appended cell survives intact and unreferenced garbage is still
-  reclaimed, TSan-clean. *Remaining for M3:* WeakMap/WeakSet entry storage and
-  FinalizationRegistry records are not yet funneled behind a per-object lock
-  (still GIL-coupled), so concurrent marking of weak-collection internals is
-  gated on funneling those sites first; then drive the production
-  `collectMidScript` driver to run the marker concurrently (instead of only
-  while peers are parked), drop the GIL for true multi-mutator parallelism
+  reclaimed, TSan-clean.
+  *Weak-collection storage funneled.* WeakMap/WeakSet `weak_entries` and
+  FinalizationRegistry `finalization_records` mutation now goes through
+  `Object.weakEntry*`/`finRecord*` helpers — each self-contained and guarded by
+  `elements_lock`, with the lock never held across the `getOrInsertComputed` /
+  cleanup callbacks (which may re-enter the collection). That is the funnel
+  prerequisite. *Concurrent marking of weak collections still needs one more
+  thing:* the marker registers *interior* weak slots (`markWeak(&entry.key)`)
+  that point into the growable `weak_entries`/`finalization_records` buffer, so a
+  concurrent append can reallocate the buffer and dangle a slot registered
+  earlier in the cycle — a hazard the read lock does not address (caught by the
+  TSan-slowed marker as an alignment fault on a freed entry). The fix is
+  isMarked-based weak clearing (decide key/target liveness by `isMarked` in the
+  world-stopped finish pass instead of pre-registering interior pointers); until
+  then weak collections are marked only under stop-the-world (M1) / GIL-held
+  (M2) marking, where the buffer cannot grow mid-cycle.
+  *Remaining for M3:* land isMarked-based weak clearing (above); then drive the
+  production `collectMidScript` driver to run the marker concurrently (instead of
+  only while peers are parked), drop the GIL for true multi-mutator parallelism
   (needs thread-safe cell allocation + the full per-structure-lock audit), and
   run the TSan campaign + serial-perf gate + stress amplifiers.
 

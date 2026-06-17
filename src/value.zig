@@ -845,6 +845,110 @@ pub const Object = struct {
         self.elements.clearRetainingCapacity();
     }
 
+    // --- WeakMap/WeakSet entry storage + FinalizationRegistry records --------
+    // All guarded by `elements_lock` (the object's collection/side-storage lock)
+    // so a *concurrent* GC marker reading `weak_entries`/`finalization_records`
+    // (gc.zig `traceObject`) races neither an append nor a remove. Each helper is
+    // self-contained — the lock is never held across a JS callback, so WeakMap
+    // `getOrInsertComputed` and `FinalizationRegistry` cleanup callbacks (which
+    // may re-enter the same collection) are safe. Keys/tokens compare by
+    // identity, so no callback runs inside the locked region.
+
+    /// WeakMap `[[Get]]`: the value stored under `key`, or null if absent.
+    pub fn weakEntryGet(self: *Object, key: ?*anyopaque) ?Value {
+        self.lockElements();
+        defer self.unlockElements();
+        for (self.weak_entries.items) |entry| {
+            if (entry.key == key) return entry.value;
+        }
+        return null;
+    }
+
+    /// WeakMap/WeakSet `[[Has]]`.
+    pub fn weakEntryHas(self: *Object, key: ?*anyopaque) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        for (self.weak_entries.items) |entry| {
+            if (entry.key == key) return true;
+        }
+        return false;
+    }
+
+    /// WeakMap `[[Set]]` upsert: update the entry for `key` or append a new one.
+    pub fn weakEntrySet(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque, v: Value) std.mem.Allocator.Error!void {
+        self.lockElements();
+        defer self.unlockElements();
+        for (self.weak_entries.items) |*entry| {
+            if (entry.key == key) {
+                entry.value = v;
+                return;
+            }
+        }
+        try self.weak_entries.append(self.weakEntriesAllocator(fallback), .{ .key = key, .value = v });
+    }
+
+    /// WeakSet `add`: append `key` if it is not already present.
+    pub fn weakEntryAdd(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque) std.mem.Allocator.Error!void {
+        self.lockElements();
+        defer self.unlockElements();
+        for (self.weak_entries.items) |entry| {
+            if (entry.key == key) return;
+        }
+        try self.weak_entries.append(self.weakEntriesAllocator(fallback), .{ .key = key });
+    }
+
+    /// WeakMap/WeakSet `delete`: remove the entry for `key`; returns whether one
+    /// was found.
+    pub fn weakEntryDelete(self: *Object, key: ?*anyopaque) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        for (self.weak_entries.items, 0..) |entry, i| {
+            if (entry.key == key) {
+                _ = self.weak_entries.orderedRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// FinalizationRegistry `register`: append a record (the strong `held` value
+    /// is barriered by the caller before this store into the live registry cell).
+    pub fn finRecordAppend(self: *Object, fallback: std.mem.Allocator, record: FinalizationRecord) std.mem.Allocator.Error!void {
+        self.lockElements();
+        defer self.unlockElements();
+        try self.finalization_records.append(self.finalizationRecordsAllocator(fallback), record);
+    }
+
+    /// FinalizationRegistry `unregister`: remove every record whose token matches
+    /// `token`; returns whether any were removed.
+    pub fn finRecordUnregister(self: *Object, token: ?*anyopaque) bool {
+        self.lockElements();
+        defer self.unlockElements();
+        var removed = false;
+        var i: usize = 0;
+        while (i < self.finalization_records.items.len) {
+            if (self.finalization_records.items[i].token == token) {
+                _ = self.finalization_records.orderedRemove(i);
+                removed = true;
+            } else i += 1;
+        }
+        return removed;
+    }
+
+    /// Pop the next `ready` finalization record (its target died), or null. The
+    /// caller runs the cleanup callback *after* this returns — never under the
+    /// lock — so the callback may re-enter the registry.
+    pub fn finRecordTakeReady(self: *Object) ?FinalizationRecord {
+        self.lockElements();
+        defer self.unlockElements();
+        var i: usize = 0;
+        while (i < self.finalization_records.items.len) : (i += 1) {
+            if (self.finalization_records.items[i].ready)
+                return self.finalization_records.orderedRemove(i);
+        }
+        return null;
+    }
+
     pub fn packedDenseElementsCoverLength(self: *const Object) bool {
         self.lockElements();
         defer self.unlockElements();

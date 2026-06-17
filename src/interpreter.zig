@@ -3582,14 +3582,8 @@ pub const Interpreter = struct {
             if (!registry.is_finalization_registry) continue;
             const cb = registry.finalization_callback;
             if (!cb.isCallable()) continue;
-            var r: usize = 0;
-            while (r < registry.finalization_records.items.len) {
-                const record = registry.finalization_records.items[r];
-                if (!record.ready) {
-                    r += 1;
-                    continue;
-                }
-                _ = registry.finalization_records.orderedRemove(r);
+            // Pop each ready record under the lock; run its callback unlocked.
+            while (registry.finRecordTakeReady()) |record| {
                 if (self.callValue(cb, &.{record.held})) |_| {} else |err| {
                     if (err == error.Throw) {
                         self.exception = Value.undef();
@@ -5172,36 +5166,20 @@ pub const Interpreter = struct {
         }
         if (o.is_weak) {
             const key_obj = weakKeyPtr(key);
+            // weak_entries access goes through the elements_lock'd helpers so a
+            // concurrent GC marker reading them never races an append/remove.
             if (eq(name, "set")) {
-                for (o.weak_entries.items) |*entry| {
-                    if (entry.key == key_obj) {
-                        entry.value = arg(args, 1);
-                        return self_v;
-                    }
-                }
-                try o.weak_entries.append(o.weakEntriesAllocator(self.arena), .{ .key = key_obj, .value = arg(args, 1) });
+                try o.weakEntrySet(self.arena, key_obj, arg(args, 1));
                 return self_v;
             }
             if (eq(name, "get")) {
-                for (o.weak_entries.items) |entry| {
-                    if (entry.key == key_obj) return entry.value;
-                }
-                return Value.undef();
+                return o.weakEntryGet(key_obj) orelse Value.undef();
             }
             if (eq(name, "has")) {
-                for (o.weak_entries.items) |entry| {
-                    if (entry.key == key_obj) return Value.boolVal(true);
-                }
-                return Value.boolVal(false);
+                return Value.boolVal(o.weakEntryHas(key_obj));
             }
             if (eq(name, "delete")) {
-                for (o.weak_entries.items, 0..) |entry, i| {
-                    if (entry.key == key_obj) {
-                        _ = o.weak_entries.orderedRemove(i);
-                        return Value.boolVal(true);
-                    }
-                }
-                return Value.boolVal(false);
+                return Value.boolVal(o.weakEntryDelete(key_obj));
             }
             if (eq(name, "getOrInsert") or eq(name, "getOrInsertComputed")) {
                 const cb = if (eq(name, "getOrInsertComputed")) cb: {
@@ -5209,21 +5187,11 @@ pub const Interpreter = struct {
                     if (!candidate.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed: callback is not a function");
                     break :cb candidate;
                 } else Value.undef();
-                for (o.weak_entries.items) |entry| {
-                    if (entry.key == key_obj) return entry.value;
-                }
-                const v = if (eq(name, "getOrInsertComputed")) blk: {
-                    break :blk try self.callValue(cb, &.{key});
-                } else arg(args, 1);
-                if (eq(name, "getOrInsertComputed")) {
-                    for (o.weak_entries.items) |*entry| {
-                        if (entry.key == key_obj) {
-                            entry.value = v;
-                            return v;
-                        }
-                    }
-                }
-                try o.weak_entries.append(o.weakEntriesAllocator(self.arena), .{ .key = key_obj, .value = v });
+                if (o.weakEntryGet(key_obj)) |existing| return existing;
+                // The callback runs with no lock held (it may re-enter the map);
+                // the upsert then keeps existing-entry-wins semantics.
+                const v = if (eq(name, "getOrInsertComputed")) try self.callValue(cb, &.{key}) else arg(args, 1);
+                try o.weakEntrySet(self.arena, key_obj, v);
                 return v;
             }
             return null;
@@ -5332,27 +5300,16 @@ pub const Interpreter = struct {
         const key = canonicalCollectionKey(arg0(args));
         if (o.is_weak) {
             const key_obj = weakKeyPtr(key);
+            // elements_lock'd helpers — race-free against a concurrent GC marker.
             if (eq(name, "add")) {
-                for (o.weak_entries.items) |entry| {
-                    if (entry.key == key_obj) return self_v;
-                }
-                try o.weak_entries.append(o.weakEntriesAllocator(self.arena), .{ .key = key_obj });
+                try o.weakEntryAdd(self.arena, key_obj);
                 return self_v;
             }
             if (eq(name, "has")) {
-                for (o.weak_entries.items) |entry| {
-                    if (entry.key == key_obj) return Value.boolVal(true);
-                }
-                return Value.boolVal(false);
+                return Value.boolVal(o.weakEntryHas(key_obj));
             }
             if (eq(name, "delete")) {
-                for (o.weak_entries.items, 0..) |entry, i| {
-                    if (entry.key == key_obj) {
-                        _ = o.weak_entries.orderedRemove(i);
-                        return Value.boolVal(true);
-                    }
-                }
-                return Value.boolVal(false);
+                return Value.boolVal(o.weakEntryDelete(key_obj));
             }
             return null;
         }
@@ -14024,7 +13981,7 @@ fn finRegRegisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const token = if (args.len > 2) args[2] else Value.undef();
     if (!token.isUndefined() and !canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.register: unregister token must be an object or a symbol");
     gc_mod.barrierValue(held); // strong held value stored into the live registry cell
-    try this.asObj().finalization_records.append(this.asObj().finalizationRecordsAllocator(self.arena), .{
+    try this.asObj().finRecordAppend(self.arena, .{
         .target = weakKeyPtr(target),
         .held = held,
         .token = if (token.isUndefined()) null else weakKeyPtr(token),
@@ -14038,17 +13995,8 @@ fn finRegUnregisterFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const token = if (args.len > 0) args[0] else Value.undef();
     if (!canBeHeldWeakly(token)) return self.throwError("TypeError", "FinalizationRegistry.unregister: token must be an object or a symbol");
     // Remove every cell whose [[UnregisterToken]] is SameValue(token); return
-    // whether any were removed.
-    const token_ptr = weakKeyPtr(token);
-    var removed = false;
-    var i: usize = 0;
-    while (i < this.asObj().finalization_records.items.len) {
-        if (this.asObj().finalization_records.items[i].token == token_ptr) {
-            _ = this.asObj().finalization_records.orderedRemove(i);
-            removed = true;
-        } else i += 1;
-    }
-    return Value.boolVal(removed);
+    // whether any were removed. (elements_lock'd — race-free vs a concurrent marker.)
+    return Value.boolVal(this.asObj().finRecordUnregister(weakKeyPtr(token)));
 }
 
 fn finRegCleanupSomeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -14056,14 +14004,9 @@ fn finRegCleanupSomeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (!this.isObject() or !this.asObj().is_finalization_registry) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome called on an incompatible receiver");
     const cb = if (args.len > 0 and !args[0].isUndefined()) args[0] else this.asObj().finalization_callback;
     if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry.prototype.cleanupSome callback is not callable");
-    var i: usize = 0;
-    while (i < this.asObj().finalization_records.items.len) {
-        const record = this.asObj().finalization_records.items[i];
-        if (!record.ready) {
-            i += 1;
-            continue;
-        }
-        _ = this.asObj().finalization_records.orderedRemove(i);
+    // Pop each ready record under the lock, then run the callback with no lock
+    // held (it may re-enter the registry) — race-free vs a concurrent marker.
+    while (this.asObj().finRecordTakeReady()) |record| {
         _ = try self.callValue(cb, &.{record.held});
     }
     return Value.undef();

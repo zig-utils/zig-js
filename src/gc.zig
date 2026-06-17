@@ -99,11 +99,16 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (concurrent) o.unlockProperties();
 
     if (o.is_weak and (o.is_map or o.is_set)) {
-        // WeakMap/WeakSet entry storage is not yet funneled behind a per-object
-        // lock (still GIL-coupled — see P7-gil-removal.md blocker #5/weak paths),
-        // so it cannot be marked race-free while a mutator runs concurrently.
-        // Concurrent marking of weak collections is gated on funneling those
-        // mutation sites first; under M1/M2 (quiescent) this read is safe.
+        // `weak_entries`/`finalization_records` register *interior* pointers
+        // (`&entry.key`) as weak slots. Those addresses point into a growable
+        // ArrayList, so a concurrent mutator append can reallocate the buffer
+        // and dangle a slot registered earlier this cycle — which the lock
+        // around the read does NOT prevent. So weak collections are still marked
+        // only under stop-the-world (M1) / GIL-held (M2) marking, where
+        // `weak_entries` cannot grow during the cycle. Making them concurrent
+        // needs isMarked-based weak clearing (no registered interior pointers);
+        // until then the mutator funnels (`weakEntry*`/`finRecord*`) keep the
+        // storage behind `elements_lock` so that rework is a localized change.
         for (o.weak_entries.items) |*entry| v.markWeak(&entry.key);
     } else {
         if (concurrent) o.lockElements();
