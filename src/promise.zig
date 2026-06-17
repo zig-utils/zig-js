@@ -118,7 +118,7 @@ fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     if (data.already) return .undefined;
     data.already = true;
     try resolve(self, data.promise, if (args.len > 0) args[0] else .undefined);
-    return .undefined;
+    return Value.undef();
 }
 
 fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -129,12 +129,12 @@ fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     if (data.already) return .undefined;
     data.already = true;
     try reject(self, data.promise, if (args.len > 0) args[0] else .undefined);
-    return .undefined;
+    return Value.undef();
 }
 
 pub fn promiseOf(v: Value) ?*Promise {
-    if (v == .object) {
-        if (v.object.promise) |p| return @ptrCast(@alignCast(p));
+    if (v.isObject()) {
+        if (v.asObj().promise) |p| return @ptrCast(@alignCast(p));
     }
     return null;
 }
@@ -158,7 +158,7 @@ pub fn newPromise(self: *Interpreter) EvalError!*Object {
     const obj = try gc_mod.allocObj(self.arena);
     obj.* = .{ .promise = @ptrCast(p) };
     if (self.env.get("Promise")) |ctor| {
-        if (ctor == .object) obj.proto = try self.protoObject(ctor.object);
+        if (ctor.isObject()) obj.proto = try self.protoObject(ctor.asObj());
     }
     return obj;
 }
@@ -263,7 +263,7 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
     // Arbitrary thenable: adopt its state by calling `v.then(resolve, reject)`
     // bound to this promise (a throw rejects). The pending-state guard makes any
     // settle beyond the first a no-op.
-    if (v == .object and !v.object.is_array) {
+    if (v.isObject() and !v.asObj().is_array) {
         const then_fn = self.getProperty(v, "then") catch |err| {
             if (err == error.Throw) {
                 const reason = self.exception;
@@ -305,7 +305,7 @@ pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { r
     res.* = .{ .native = resolveThunk, .private_data = @ptrCast(data) };
     const rej = try gc_mod.allocObj(self.arena);
     rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(data) };
-    return .{ .resolve = .{ .object = res }, .reject = .{ .object = rej } };
+    return .{ .resolve = Value.obj(res), .reject = Value.obj(rej) };
 }
 
 /// `p.then(...)` with an intrinsic result promise (the non-species path used
@@ -315,7 +315,7 @@ pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError
     const rp: *Promise = @ptrCast(@alignCast(result.promise.?));
     const nr = try nativeResolveReject(self, rp);
     try performThen(self, p, on_f, on_r, nr.resolve, nr.reject);
-    return .{ .object = result };
+    return Value.obj(result);
 }
 
 /// PerformPromiseThen: register fulfill/reject reactions that settle the result

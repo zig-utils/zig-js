@@ -247,11 +247,11 @@ fn workerMain(w: *Worker) void {
         defer alloc.free(bytes);
         var machine = ctx.interpreter();
         const data = structured_clone.deserialize(&machine, bytes) catch continue;
-        const handler = machine.getProperty(.{ .object = ctx.global_object }, "onmessage") catch continue;
-        if (handler != .object) continue;
+        const handler = machine.getProperty(Value.obj(ctx.global_object), "onmessage") catch continue;
+        if (!handler.isObject()) continue;
         const event = machine.newObject() catch continue;
-        machine.setProp(event.object, "data", data) catch continue;
-        _ = machine.callValueWithThis(handler, &.{event}, .undefined) catch {};
+        machine.setProp(event.asObj(), "data", data) catch continue;
+        _ = machine.callValueWithThis(handler, &.{event}, Value.undef()) catch {};
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
     }
@@ -269,8 +269,8 @@ fn installWorkerGlobals(ctx: *Context, w: *Worker) !void {
     }) |entry| {
         const o = try gc_mod.allocObj(a);
         o.* = .{ .native = entry[1], .private_data = w };
-        try ctx.env.put(entry[0], .{ .object = o });
-        try ctx.global_object.setOwn(a, ctx.root_shape, entry[0], .{ .object = o });
+        try ctx.env.put(entry[0], Value.obj(o));
+        try ctx.global_object.setOwn(a, ctx.root_shape, entry[0], Value.obj(o));
         try ctx.global_object.setAttr(a, entry[0], .{ .writable = true, .enumerable = false, .configurable = true });
     }
 }
@@ -283,21 +283,21 @@ fn workerOf(self: *interp.Interpreter) ?*Worker {
 fn workerPostMessageFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *interp.Interpreter = @ptrCast(@alignCast(ctx));
-    const w = workerOf(self) orelse return .undefined;
-    const v = if (args.len > 0) args[0] else Value.undefined;
+    const w = workerOf(self) orelse return Value.undef();
+    const v = if (args.len > 0) args[0] else Value.undef();
     const bytes = try structured_clone.serialize(self, alloc, v);
     w.outbox.push(bytes);
     w.notifyHost(); // wake the embedder's loop to drain via `receive`
-    return .undefined;
+    return Value.undef();
 }
 
 fn workerCloseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     _ = args;
     const self: *interp.Interpreter = @ptrCast(@alignCast(ctx));
-    const w = workerOf(self) orelse return .undefined;
+    const w = workerOf(self) orelse return Value.undef();
     w.inbox.close(); // delivery loop drains the remaining messages, then exits
-    return .undefined;
+    return Value.undef();
 }
 
 test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
@@ -325,7 +325,7 @@ test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
     for (workers) |w| {
         const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
         const done = try machine.getProperty(reply, "done");
-        try std.testing.expect(done == .boolean and done.boolean);
+        try std.testing.expect(done.isBoolean() and done.asBool());
     }
     for (workers) |w| {
         w.join();
@@ -405,7 +405,7 @@ test "workers: host hook wakes on message and on outbox close" {
         \\globalThis.onmessage = (e) => { postMessage(e.data * 2); close(); };
     );
     w.setHostHooks(&hooks);
-    try w.postMessage(&machine, .{ .number = 21 });
+    try w.postMessage(&machine, Value.num(21));
 
     // The worker fires the hook for the reply message and again at outbox close.
     const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
@@ -429,7 +429,7 @@ test "workers: module-graph worker resolves imports and round-trips a message" {
     try w.postMessage(&machine, msg);
     const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
     const done = try machine.getProperty(reply, "done");
-    try std.testing.expect(done == .boolean and done.boolean);
+    try std.testing.expect(done.isBoolean() and done.asBool());
     w.join();
     w.destroy();
 
