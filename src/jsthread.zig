@@ -1316,6 +1316,11 @@ fn lockRelease(self: *Interpreter, rec: *LockRecord) void {
 /// waitUntil/sleepMs rendezvous depend on it).
 fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     const g = self.gil orelse return;
+    // The run-loop task queue is shared across threads; guard the append with
+    // api_lock so it stays consistent once the GIL is dropped (a granting thread
+    // enqueues while a pumping thread dequeues). No JS runs under the lock.
+    g.lockApi();
+    defer g.unlockApi();
     try g.tasks.append(self.arena, @ptrCast(job));
 }
 
@@ -1324,9 +1329,15 @@ fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
 /// from the drain tail and from every parking point.
 pub fn pumpTasks(self: *Interpreter) void {
     const g = self.gil orelse return;
-    while (g.tasks.items.len > 0) {
-        const raw = g.tasks.orderedRemove(0);
-        const job: *HoldJob = @ptrCast(@alignCast(raw));
+    while (true) {
+        // Dequeue under api_lock (consistent with `enqueueHoldJob`), but run the
+        // job OUTSIDE the lock — runHoldJob executes JS and takes per-structure
+        // locks, so holding api_lock across it would invert lock order.
+        g.lockApi();
+        const raw: ?*anyopaque = if (g.tasks.items.len > 0) g.tasks.orderedRemove(0) else null;
+        g.unlockApi();
+        const r = raw orelse break;
+        const job: *HoldJob = @ptrCast(@alignCast(r));
         runHoldJob(self, job) catch {};
         self.drainMicrotasks() catch {};
     }
