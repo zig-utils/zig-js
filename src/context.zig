@@ -5773,6 +5773,70 @@ test "parallel_gc (M3 GIL-removal bring-up): rich builtin-heavy workload in para
     for (&workers) |*w| try std.testing.expectEqual(@as(i64, 40000), w.result.load(.monotonic));
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): concurrent lazy .prototype install yields one identity" {
+    // A function's `.prototype` is materialized lazily on first `new`/`.prototype`
+    // access (`Interpreter.protoObject`) — a check-then-act over shared object
+    // storage. With the GIL dropped, N threads racing that first access on the
+    // SAME constructor could each install a distinct prototype, breaking
+    // `F.prototype === F.prototype`. The double-checked lock (`Gil.lazy_init_lock`)
+    // must make exactly one install win and all threads observe it. `enable_threads`
+    // gives the realm a Gil (the lock's home); the workers call `protoObject`
+    // directly with no GIL held, modelling the dropped-GIL future. A go-barrier
+    // makes them all hit the un-materialized state together. TSan-clean.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true, .enable_threads = true });
+    defer ctx.destroy();
+    _ = ctx.gil orelse return error.TestUnexpectedResult; // the lock needs a Gil
+
+    const sh0 = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(sh0);
+    const sa0 = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa0);
+
+    // A bare object standing in for a constructor: no `prototype` slot yet, so the
+    // first `protoObject` call must materialize one.
+    const ctor = try gc_mod.allocObj(ctx.arena());
+    ctor.* = .{};
+
+    const nthreads = 8;
+    const Worker = struct {
+        ctx: *Context,
+        ctor: *value.Object,
+        go: *std.atomic.Value(bool),
+        result: std.atomic.Value(?*value.Object) = .init(null),
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            var machine = s.ctx.interpreter();
+            s.ctx.pushActiveInterpreter(&machine) catch return;
+            defer s.ctx.popActiveInterpreter(&machine);
+            while (!s.go.load(.acquire)) std.atomic.spinLoopHint();
+            const p = machine.protoObject(s.ctor) catch return;
+            s.result.store(p, .release);
+        }
+    };
+    var go = std.atomic.Value(bool).init(false);
+    var workers: [nthreads]Worker = undefined;
+    for (&workers) |*w| w.* = .{ .ctx = ctx, .ctor = ctor, .go = &go };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    go.store(true, .release);
+    for (&pool) |*th| th.join();
+
+    // Exactly one prototype was installed, and every thread observed that same
+    // object — no duplicate install slipped through the check-then-act.
+    const canonical = (ctor.getOwn("prototype") orelse return error.TestUnexpectedResult).asObj();
+    for (&workers) |*w| {
+        const got = w.result.load(.acquire) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(canonical, got);
+    }
+    // The installed prototype links back: F.prototype.constructor === F.
+    const back = (canonical.getOwn("constructor") orelse return error.TestUnexpectedResult);
+    try std.testing.expect(back.isObject() and back.asObj() == ctor);
+}
+
 test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a shared array lose nothing" {
     // Beyond disjoint work: N threads mutate the *same* object in parallel,
     // contending the per-structure lock. Each appends a distinct block of

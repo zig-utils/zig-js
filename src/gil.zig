@@ -63,6 +63,15 @@ pub const Gil = struct {
     /// claim the same id. Held only across the (rare) bookkeeping mutation.
     api_lock: std.atomic.Mutex = .unlocked,
 
+    /// Serializes shared-realm lazy materialization that is a check-then-act over
+    /// shared object storage — chiefly a function's lazily-installed `.prototype`
+    /// (`Interpreter.protoObject`). Without it two threads `new`-ing the same
+    /// not-yet-materialized constructor (or reading its `.prototype`) could both
+    /// miss the slot and install *distinct* prototype objects, breaking
+    /// `F.prototype === F.prototype` and instance-prototype identity. Used with
+    /// double-checked locking, so it is taken only on the (one-time) install.
+    lazy_init_lock: std.atomic.Mutex = .unlocked,
+
     /// Lock/unlock the GlobalSymbolRegistry critical section (spin lock, like the
     /// per-structure locks). Non-recursive: a single critical section must take
     /// it exactly once.
@@ -71,6 +80,15 @@ pub const Gil = struct {
     }
     pub fn unlockSymbolRegistry(g: *Gil) void {
         g.symbol_registry_lock.unlock();
+    }
+
+    /// Lock/unlock the shared-realm lazy-materialization critical section
+    /// (double-checked locking; non-recursive).
+    pub fn lockLazyInit(g: *Gil) void {
+        spinLock(&g.lazy_init_lock);
+    }
+    pub fn unlockLazyInit(g: *Gil) void {
+        g.lazy_init_lock.unlock();
     }
 
     /// Lock/unlock the threading-API bookkeeping critical section. Non-recursive.

@@ -3590,6 +3590,25 @@ pub const Interpreter = struct {
         if (ctor.getOwn("prototype")) |p| {
             if (p.isObject()) return p.asObj();
         }
+        // Lazy install is a check-then-act over shared object storage: with the
+        // GIL dropped, two threads `new`-ing (or reading `.prototype` of) the same
+        // not-yet-materialized constructor could both miss above and install
+        // *distinct* prototypes, breaking `F.prototype === F.prototype`. Take the
+        // realm lazy-init lock and RE-CHECK (double-checked locking), so exactly
+        // one thread installs and the others observe it. No-op when threads are
+        // off (gil == null), so the single-thread path is unchanged.
+        if (self.gil) |g| {
+            g.lockLazyInit();
+            defer g.unlockLazyInit();
+            if (ctor.getOwn("prototype")) |p| {
+                if (p.isObject()) return p.asObj();
+            }
+            return try self.installProtoObject(ctor);
+        }
+        return try self.installProtoObject(ctor);
+    }
+
+    fn installProtoObject(self: *Interpreter, ctor: *value.Object) EvalError!*value.Object {
         const proto = (try self.newObject()).asObj();
         try self.setProp(ctor, "prototype", Value.obj(proto));
         // `F.prototype.constructor === F` (writable, non-enumerable,
