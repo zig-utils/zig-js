@@ -164,26 +164,44 @@ per-thread before threads stop holding the GIL):
    evaluate-top `collectGarbage` (stop-the-world; parallel evaluates collide —
    gate behind the safepoint protocol or a collection lock), `gc_execs`
    registration, and the realm microtask/finalization drains.
-   *Parallel mid-script collection — attempted, deferred (deadlock to debug).* A
-   stop-the-world safepoint barrier (a thread elects itself collector via CAS,
-   waits for `par_active == 1` as peers park at their GC safepoints, runs a STW
-   collection rooting parked threads via `active_interpreters`/`gc_execs`, then
-   resumes — with a bounded-spin abort valve) was prototyped and *deadlocked*: a
-   sample showed peers stuck in `Object.lockProperties` (a `property_lock`
-   appearing held-but-unowned) while the collector spun for `par_active == 1`, so
-   the safety valve never triggered (the hang was the held lock, not the spin).
-   Root cause not yet pinned — likely a per-structure lock observable as held
-   across the barrier (the VM property IC, or a lock-order interaction with the
-   barrier). Reverted; **parallel_gc keeps quiescent-only collection** (the
-   `h.parallel` guard skips mid-script collection — safe and validated). Pinning
-   this deadlock is the prerequisite for mid-script parallel collection; the
-   parked-thread rooting machinery (`active_interpreters` + `gc_execs`) is already
-   in place.
+   *Parallel mid-script collection.* The **quiescent** model is validated and
+   shipping: parallel threads build a rooted shared graph (contended
+   `elements_lock`/`property_lock` + insertion barrier), join, then a
+   `collectGarbage` reclaims the garbage while keeping the live graph intact —
+   TSan-clean (`parallel_gc … quiescent collection after a parallel build` in
+   `context.zig`). The `h.parallel` guard skips the *mid-script* safepoint
+   collector in this mode, so parallel execution never races a marker.
+
+   *Mid-script parallel collection — the STW barrier was a dead end; the fix is a
+   ragged handshake.* A stop-the-world safepoint barrier (peers park at their GC
+   safepoints, collector waits for `par_active == 1`) was prototyped and
+   *deadlocked*: a mutator spinning to **acquire** a per-structure lock (e.g.
+   `Object.property_lock`) can't reach its safepoint, while the thread holding
+   that lock had already blocked at the barrier — so the lock is never released
+   and the barrier never completes (a `sample` showed exactly this:
+   `property_lock` held-but-unowned while the collector spun). The defect is
+   fundamental to **any** protocol that blocks a mutator where it may transitively
+   hold a lock. The replacement is now built: a **ragged (non-blocking)
+   root-publication handshake** (`src/root_handshake.zig`) — the collector
+   *requests* roots, and each mutator publishes its own roots at its safepoint
+   (between bytecodes, where it provably holds no per-structure lock) and **keeps
+   running**, so no mutator ever blocks and can always progress to release a lock.
+   Only the collector waits, on a monotonic ack counter. The primitive is
+   standalone + tested (a test reproduces the exact lock-contention hazard the STW
+   barrier deadlocked on), TSan-clean. Wiring it into a concurrent parallel marker
+   (collector marks while mutators run behind the insertion barrier; a second
+   handshake re-scans roots at finish; sweep with born-black allocation) is the
+   next step — the parked-thread rooting machinery (`active_interpreters` +
+   `gc_execs` + park records) is already in place.
 2. **Thread-API shared state in `Gil`** (`tasks`, `prop_waiters`, `prop_async`,
    `next_thread_id`, `park_records`) — currently "mutated/read only under the
-   GIL." The spawn critical section (live-cap check + id allocation +
-   `js_threads.append`) must become one atomic/locked unit; the waiter tables and
-   run-loop task queue need their own lock.
+   GIL." **Spawn done:** the spawn critical section (live-cap check + id
+   allocation + `js_threads.append` + OS spawn) is now one atomic unit under
+   `Gil.api_lock` (`lockApi`/`unlockApi`), independent of the GIL — two concurrent
+   `Thread` constructions can't both pass the cap or claim the same id. *Remaining:*
+   the property-mode waiter tables (`prop_waiters`/`prop_async`) and the run-loop
+   task queue (`tasks`) still need to move onto `api_lock` (or a dedicated waiter
+   lock) for `Atomics.wait`/`notify`/`waitAsync` under GIL-free execution.
 3. **Lock-free READ paths vs concurrent writes — the central hot-path decision.**
    Bring-up tests (`parallel_gc`) prove **writer-vs-writer** is safe: 4 threads
    concurrently appending to a shared array (`elements_lock`) and adding distinct
@@ -203,9 +221,18 @@ per-thread before threads stop holding the GIL):
    TSan-clean. (A seqlock/RCU read path remains a possible future optimization if
    the lock proves a parallel-throughput bottleneck, but it is no longer a
    correctness blocker.)
-4. **Other shared globals** — the symbol registry (`Symbol.for`), any realm-level
-   caches (Date/regex), and the string story (arena slices today; a shared intern
-   table would need the sharded `strcell.InternTable`).
+4. **Other shared globals** — **symbol registry done:** the cross-realm
+   GlobalSymbolRegistry get-or-create (`Symbol.for` + lazy registry creation) is
+   now atomic under `Gil.symbol_registry_lock` (the key `ToString` is computed
+   *before* the lock, so a user `toString` can't reenter it); a test drives the
+   racing critical section, TSan-clean. *Remaining:* the VM plain-property inline
+   caches (`chunk.ics`) are shared mutable state written from the hot
+   `get_prop`/`set_prop` path — two threads racing the same instruction over
+   different objects can tear the `(shape, slot)` pair (a stable inconsistency
+   from two completed racing writers needs an atomic pair update, not just
+   release/acquire); this must be made race-safe before bytecode runs GIL-free.
+   Plus any realm-level caches (Date/regex) and the string story (arena slices
+   today; a shared intern table would need the sharded `strcell.InternTable`).
 5. **Corpus semantics.** The threads corpus partly *pins GIL-serialized
    behavior* (deterministic interleavings, run-loop grant ordering). Dropping the
    GIL changes the model, so the campaign must re-derive which corpus expectations
@@ -218,10 +245,15 @@ per-thread before threads stop holding the GIL):
 Validated so far (`parallel_gc` bring-up tests, all TSan-clean): parallel heap
 mutation; parallel parse+compile+VM execution of disjoint scripts; contended
 parallel append to a shared array; contended parallel property-add + shape
-growth on a shared object. These cover allocation, the object/shape model, and
-the writer-vs-writer locks under real parallelism — the heap/execution
-foundation. The reader-vs-writer decision (#3) and the production-`threadMain`
-GIL drop + corpus campaign (#5) are what remain.
+growth on a shared object; quiescent collection after a parallel build (live
+graph kept, garbage reclaimed); atomic GlobalSymbolRegistry get-or-create under
+contention. Plus the standalone ragged root-publication handshake primitive. These
+cover allocation, the object/shape model, the writer-vs-writer and reader-vs-writer
+locks, quiescent GC, and the two named shared-global prerequisites (symbol
+registry + spawn bookkeeping) under real parallelism. What remains: wire the root
+handshake into a concurrent parallel marker (mid-script collection #1); move the
+waiter/task queues onto `api_lock` (#2); make the VM inline caches race-safe (#4);
+the production-`threadMain` GIL drop + corpus campaign (#5).
 
 This is the final, largest step — major surgery on the core execution path plus a
 semantics campaign, to be done as a focused effort (not a mechanical flip), now

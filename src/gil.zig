@@ -54,17 +54,38 @@ pub const Gil = struct {
     /// Symbol.for(k)` invariant. Held only across the (rare) registry mutation.
     symbol_registry_lock: std.atomic.Mutex = .unlocked,
 
+    /// Serializes the threading-API shared bookkeeping that today is protected
+    /// only by the GIL: the `Thread` id allocator (`next_thread_id`), the live
+    /// `Context.js_threads` cap-check + append transaction, and the run-loop /
+    /// waiter queues below. Once the GIL is dropped during bytecode these
+    /// operations still need a single mutual-exclusion point — e.g. two
+    /// concurrent `Thread` constructions must not both pass the live cap or
+    /// claim the same id. Held only across the (rare) bookkeeping mutation.
+    api_lock: std.atomic.Mutex = .unlocked,
+
     /// Lock/unlock the GlobalSymbolRegistry critical section (spin lock, like the
     /// per-structure locks). Non-recursive: a single critical section must take
     /// it exactly once.
     pub fn lockSymbolRegistry(g: *Gil) void {
-        var spins: usize = 0;
-        while (!g.symbol_registry_lock.tryLock()) : (spins += 1) {
-            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
-        }
+        spinLock(&g.symbol_registry_lock);
     }
     pub fn unlockSymbolRegistry(g: *Gil) void {
         g.symbol_registry_lock.unlock();
+    }
+
+    /// Lock/unlock the threading-API bookkeeping critical section. Non-recursive.
+    pub fn lockApi(g: *Gil) void {
+        spinLock(&g.api_lock);
+    }
+    pub fn unlockApi(g: *Gil) void {
+        g.api_lock.unlock();
+    }
+
+    fn spinLock(m: *std.atomic.Mutex) void {
+        var spins: usize = 0;
+        while (!m.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
     }
 
     fn currentId() u64 {

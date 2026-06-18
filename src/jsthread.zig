@@ -160,6 +160,14 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     if (!fn_v.isCallable())
         return self.throwError("TypeError", "Thread constructor requires a callable argument");
 
+    // The cap-check → id-claim → list-append must be one atomic transaction:
+    // two concurrent constructions (once the GIL is dropped during bytecode)
+    // must not both pass the live cap or claim the same `next_thread_id`. The
+    // GIL serializes this today; `api_lock` keeps it serialized independently of
+    // the GIL. No JS runs inside, so there is no reentrancy back into the lock.
+    g.lockApi();
+    defer g.unlockApi();
+
     // Live cap and id-space checks come BEFORE the id is consumed — a
     // refused spawn must not burn a TID or leak a live entry (I17).
     if (ctx.max_js_threads) |cap| {
