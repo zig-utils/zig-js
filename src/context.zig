@@ -5810,6 +5810,83 @@ test "parallel_gc (M3 GIL-removal bring-up): concurrent reader + writer on a sha
     }
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): quiescent collection after a parallel build keeps the live graph, reclaims the garbage" {
+    // The complete parallel-GC model, end-to-end: N threads concurrently build a
+    // *rooted* shared object graph (each appends `id`-bearing objects to one array
+    // hung off `globalThis`, contending `elements_lock` + the insertion barrier)
+    // while also churning out throwaway garbage. Threads join — bringing the heap
+    // to quiescence — and only THEN does a collection run (`collectGarbage`).
+    //
+    // This is the model that holds today without the (deferred) mid-script STW
+    // barrier: mutate fully in parallel, collect at a quiescent point. The
+    // collector must (a) keep every object reachable from the rooted array alive
+    // and intact, and (b) actually reclaim the per-thread garbage. TSan-clean
+    // proves the parallel build that feeds the collector is itself race-free.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    const sh0 = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(sh0);
+    const sa0 = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa0);
+
+    // The shared array is rooted: hung off the (root-traced) global object, so the
+    // graph reachable through it must survive collection.
+    const shared = try gc_mod.allocObj(ctx.arena());
+    shared.* = .{ .is_array = true };
+    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "live", Value.obj(shared));
+
+    const nthreads = 4;
+    const per = 1000;
+    const Worker = struct {
+        ctx: *Context,
+        arr: *value.Object,
+        base: usize,
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            var i: usize = 0;
+            while (i < per) : (i += 1) {
+                // Live: an id-bearing object appended to the rooted array.
+                const o = gc_mod.allocObj(a) catch return;
+                o.* = .{};
+                o.setOwn(a, s.ctx.root_shape, "id", Value.num(@floatFromInt(s.base + i))) catch return;
+                s.arr.appendElement(a, Value.obj(o)) catch return;
+                // Garbage: an unreachable object created and immediately dropped.
+                const g = gc_mod.allocObj(a) catch return;
+                g.* = .{};
+                g.setOwn(a, s.ctx.root_shape, "junk", Value.num(@floatFromInt(s.base + i))) catch return;
+            }
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers, 0..) |*w, t| w.* = .{ .ctx = ctx, .arr = shared, .base = t * per };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+
+    // Quiescent collection: every thread has joined, the heap is at rest.
+    ctx.collectGarbage();
+    try std.testing.expect(ctx.gc.?.collections >= 1);
+
+    // The live graph is intact: exactly N*M elements, each a surviving id-bearing
+    // object whose property reads back correctly (the multiset of ids is
+    // {0 .. N*M-1}, checked by exact sum).
+    try std.testing.expectEqual(@as(usize, nthreads * per), shared.elementsLen());
+    var sum: f64 = 0;
+    for (shared.elements.items) |el| {
+        try std.testing.expect(el.isObject());
+        const got = el.asObj().getOwn("id") orelse return error.TestUnexpectedResult;
+        sum += got.asNum();
+    }
+    const n: f64 = @floatFromInt(nthreads * per);
+    try std.testing.expectEqual(n * (n - 1) / 2, sum); // sum_{0..N*M-1}
+}
+
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
     // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
     // safepoints (collectMidScript), a long-lived structure that keeps growing
