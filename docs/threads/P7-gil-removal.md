@@ -154,12 +154,16 @@ What remains is dropping the GIL from the **execution path** so the `Thread` API
 actually runs JS in parallel. The touchpoints (each must be synchronized or made
 per-thread before threads stop holding the GIL):
 
-1. **`evaluate` / `evaluateModule` realm state.** `active_interpreters`
-   (push/pop on a shared list), the evaluate-top `collectGarbage` (stop-the-world;
-   two parallel evaluates would collide — gate behind a safepoint protocol or a
-   collection lock), `gc_execs` registration, and the microtask/finalization
-   drains. Most per-interpreter state is already thread-local; the shared lists
-   are the work.
+1. **`evaluate` / `evaluateModule` realm state.** Good news from the audit: the
+   *executing* state is already per-thread — each `Thread` runs its own
+   `Interpreter` (`ctx.interpreter()` in `threadMain`) with its own
+   `Interpreter.exception` (the `Context.exception` slot is only the host/join
+   hand-off, written at quiescent points), so threads don't clobber each other's
+   throw state. The shared touchpoints that remain: `active_interpreters`
+   (push/pop + GC-trace iteration on a shared list — needs a lock), the
+   evaluate-top `collectGarbage` (stop-the-world; parallel evaluates collide —
+   gate behind the safepoint protocol or a collection lock), `gc_execs`
+   registration, and the realm microtask/finalization drains.
 2. **Thread-API shared state in `Gil`** (`tasks`, `prop_waiters`, `prop_async`,
    `next_thread_id`, `park_records`) — currently "mutated/read only under the
    GIL." The spawn critical section (live-cap check + id allocation +
