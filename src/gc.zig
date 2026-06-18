@@ -504,7 +504,11 @@ pub const Binding = struct {
             if (rec.js_obj) |o| v.mark(o);
             for (rec.pending_joins.items) |p| v.mark(p);
         }
+        // Under the GIL/world-stopped collection this is uncontended; the lock is
+        // for future parallel collection where a mutator may push/pop concurrently.
+        ctx.lockActiveInterpreters();
         for (ctx.active_interpreters.items) |machine| traceInterpreterRoots(machine, v);
+        ctx.unlockActiveInterpreters();
         if (ctx.gil) |g| {
             for (g.prop_async.items) |raw| {
                 const t: *jsthread.PropAsyncTicket = @ptrCast(@alignCast(raw));

@@ -196,6 +196,11 @@ pub const Context = struct {
     /// quiescent checkpoints; arbitrary native/Zig stack scanning is still a
     /// separate Layer-C requirement.
     active_interpreters: std.ArrayListUnmanaged(*interp.Interpreter) = .empty,
+    /// Serializes `active_interpreters` push/pop + the GC's iteration of it, so
+    /// parallel mutators registering/unregistering interpreters don't race each
+    /// other or a collector. Uncontended under the GIL; needed once threads run
+    /// JS without it. A brief atomic spinlock.
+    active_interp_lock: std.atomic.Value(u32) = .init(0),
     /// TDZ sentinel for uninitialized let/const bindings.
     tdz_marker: *value.Object,
     /// Test262 host module source for `import source x from "<module source>"`.
@@ -536,11 +541,22 @@ pub const Context = struct {
         return false;
     }
 
+    pub fn lockActiveInterpreters(self: *Context) void {
+        while (self.active_interp_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    }
+    pub fn unlockActiveInterpreters(self: *Context) void {
+        self.active_interp_lock.store(0, .release);
+    }
+
     pub fn pushActiveInterpreter(self: *Context, machine: *interp.Interpreter) !void {
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
         try self.active_interpreters.append(self.gpa, machine);
     }
 
     pub fn popActiveInterpreter(self: *Context, machine: *interp.Interpreter) void {
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
         var i: usize = self.active_interpreters.items.len;
         while (i > 0) {
             i -= 1;
@@ -631,6 +647,13 @@ pub const Context = struct {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const h = self.gc orelse return;
         if (!stack_scan.supported) return;
+        // Parallel-mutator mode (parallel_gc): mid-script collection is not yet
+        // safe with multiple mutators running without the GIL — it needs the
+        // world-stop/safepoint protocol generalized to parallel threads (a later
+        // step of the execution-path GIL drop). Until then, collection in this
+        // mode is explicit/quiescent only (`collectGarbage`); skip the safepoint
+        // collector so parallel execution never races a marker.
+        if (h.parallel) return;
         // M3 concurrent driver (single-mutator, opt-in): begin a concurrent mark
         // at one safepoint and close it at the next, a dedicated marker thread
         // tracing during the window while the mutator runs. Stores feed the marker
@@ -5552,6 +5575,52 @@ test "parallel_gc (M3 GIL-removal bring-up): mutators create+shape+mutate disjoi
             try std.testing.expectEqual(@as(f64, 1), gt.asNum());
         }
     }
+}
+
+test "parallel_gc (M3 GIL-removal bring-up): parse+compile+VM-execute disjoint scripts in parallel, no GIL" {
+    // Parallel JS *execution* (not just heap mutation): each thread parses,
+    // compiles, and runs its own pure-computation script — local vars, a loop,
+    // local object allocation, no globalThis writes — on its own Interpreter,
+    // truly in parallel with no GIL. Exercises the parser/compiler/VM and the
+    // shared heap/arena/shapes + active_interpreters lock under real parallelism.
+    // Mid-script GC is off in parallel_gc mode (the safepoint protocol for
+    // parallel collection is a later step), so this isolates execution safety.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    const nthreads = 4;
+    const Worker = struct {
+        ctx: *Context,
+        result: std.atomic.Value(i64) = .init(-1),
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            const src = "(function(){ let s = 0; for (let i = 0; i < 2000; i++) { const o = { x: i }; s += o.x; } return s; })()";
+            const owned = a.dupe(u8, src) catch return;
+            var parser = Parser.init(a, owned) catch return;
+            const prog = parser.parseProgram() catch return;
+            var machine = s.ctx.interpreter();
+            s.ctx.pushActiveInterpreter(&machine) catch return; // exercises active_interp_lock
+            defer s.ctx.popActiveInterpreter(&machine);
+            const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
+                vm.run(&machine, chunk, null)
+            else |_| machine.eval(prog);
+            if (outcome) |val| {
+                if (val.isNumber()) s.result.store(@intFromFloat(val.asNum()), .monotonic);
+            } else |_| {}
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers) |*w| w.* = .{ .ctx = ctx };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+    // sum_{i=0..1999} i = 1999000 — each thread computed it independently, in parallel.
+    for (&workers) |*w| try std.testing.expectEqual(@as(i64, 1999000), w.result.load(.monotonic));
 }
 
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
