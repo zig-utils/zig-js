@@ -561,26 +561,26 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   and reassigns a global while the marker traces (~dozens of begin→marker→finish
   cycles); exact arithmetic, bounded heap, no marker outlives the run,
   **TSan-clean** (`-Dtsan`).
-  An audit of the other traced side-cells: **`Promise` is already
-  concurrent-safe** (`tracePromise` and the resolve/reject/then mutators both
-  take `Promise.lock`), and **`Function`/`BoundFn`/`ModuleNs` are
-  creation-immutable** (their traced fields are written once at construction, so
-  born-cell handling covers them). The two with post-creation mutation a
-  concurrent marker would still race are **`Generator`** (`exec.stack`/`requests`
-  are mutated during resume — and a *running* generator's `exec` is also the
-  active VM `Exec`, so the sync must coordinate with the active-exec root, not
-  just take a lock) and **`IterHelper`** (`inner`/`inner_next`/`padding` are
-  updated mid-`.next()`, interleaved with JS callbacks, and `inner` is a 16-byte
-  `?Value` needing a per-access lock — never held across a callback — not a
-  single-word atomic). So today concurrent marking is sound for object / array /
-  Map / Set / WeakMap / WeakSet / FinReg / Environment / Promise / closure
-  workloads (the common case); generator- or iterator-helper-heavy code under
-  `concurrent_gc` can still race the marker.
+  **Every traced cell type is now concurrent-safe**, by one of three strategies:
+  - *Inline under a per-structure lock / atomic slot* — `Object`
+    (slots/accessors/elements under their locks, `proto` atomic), `Environment`
+    (`binding_lock`), `Promise` (`Promise.lock`, both tracer and mutators).
+  - *Creation-immutable* (born-cell handling covers them) — `Function`,
+    `BoundFn`, `ModuleNs`.
+  - *Deferred to the world-stopped finish* (`Visitor.deferToFinish`) — `Generator`
+    (its `exec` is the live VM stack during resume) and `IterHelper`
+    (`inner`/`inner_next`/`padding` update around JS callbacks; `inner` is a
+    16-byte `?Value`). These are marked so they survive the cycle, but their
+    edges are traced at `finishConcurrentMark`, where the mutator is at a
+    safepoint and the storage is stable. Validated by `enable_gc concurrent (M3):
+    generators and iterator helpers are safe under concurrent marking`
+    (400 rounds of resumed generators + map/filter/take chains while the marker
+    traces), TSan-clean.
+
+  So the production concurrent driver is sound for **all** workloads under
+  `concurrent_gc`.
   *Remaining for M3:*
-  1. Concurrent-trace sync for `Generator` (coordinate with the active-exec root)
-     and `IterHelper` (per-access lock around the callback-interleaved updates) —
-     the last two mutable traced cell types.
-  2. Drop the GIL for true multi-mutator parallelism (needs thread-safe cell
+  1. Drop the GIL for true multi-mutator parallelism (needs thread-safe cell
      allocation + the full per-structure-lock audit).
   3. TSan campaign to zero unsuppressed races; serial-perf gate; stress amplifiers.
 
