@@ -225,14 +225,21 @@ per-thread before threads stop holding the GIL):
    GlobalSymbolRegistry get-or-create (`Symbol.for` + lazy registry creation) is
    now atomic under `Gil.symbol_registry_lock` (the key `ToString` is computed
    *before* the lock, so a user `toString` can't reenter it); a test drives the
-   racing critical section, TSan-clean. *Remaining:* the VM plain-property inline
-   caches (`chunk.ics`) are shared mutable state written from the hot
-   `get_prop`/`set_prop` path — two threads racing the same instruction over
-   different objects can tear the `(shape, slot)` pair (a stable inconsistency
-   from two completed racing writers needs an atomic pair update, not just
-   release/acquire); this must be made race-safe before bytecode runs GIL-free.
-   Plus any realm-level caches (Date/regex) and the string story (arena slices
-   today; a shared intern table would need the sharded `strcell.InternTable`).
+   racing critical section, TSan-clean. **VM inline caches done:** the
+   plain-property inline caches (`chunk.ics`) — shared mutable `(shape, slot)`
+   written from the hot `get_prop`/`set_prop` path, where two threads racing the
+   same instruction over different objects could tear the pair into a *stable*
+   inconsistency — are now a **seqlock** (`InlineCache.lookupSlot`/`record`: a
+   version-bracketed read + a try-claim write, best-effort so a writer that can't
+   claim just skips caching). Gated by `bytecode.ic_seqlock_enabled` (set with
+   `binding_locks_enabled` for the parallel/concurrent contexts); the default
+   GIL-serialized path keeps plain field access (one extra relaxed flag load),
+   behavior-identical. Validated by an isolation test (two writers, distinct
+   shapes, one cache) **and** an integrated test (4 threads run one shared chunk
+   over one shared object, no GIL — never-written reads never tear), both
+   TSan-clean. *Remaining:* realm-level caches (Date/regex) and the string story
+   (arena slices today; a shared intern table would need the sharded
+   `strcell.InternTable`) — to be surfaced empirically by the GIL-free bring-up.
 5. **Corpus semantics.** The threads corpus partly *pins GIL-serialized
    behavior* (deterministic interleavings, run-loop grant ordering). Dropping the
    GIL changes the model, so the campaign must re-derive which corpus expectations
@@ -247,13 +254,17 @@ mutation; parallel parse+compile+VM execution of disjoint scripts; contended
 parallel append to a shared array; contended parallel property-add + shape
 growth on a shared object; quiescent collection after a parallel build (live
 graph kept, garbage reclaimed); atomic GlobalSymbolRegistry get-or-create under
-contention. Plus the standalone ragged root-publication handshake primitive. These
-cover allocation, the object/shape model, the writer-vs-writer and reader-vs-writer
-locks, quiescent GC, and the two named shared-global prerequisites (symbol
-registry + spawn bookkeeping) under real parallelism. What remains: wire the root
-handshake into a concurrent parallel marker (mid-script collection #1); move the
-waiter/task queues onto `api_lock` (#2); make the VM inline caches race-safe (#4);
-the production-`threadMain` GIL drop + corpus campaign (#5).
+contention; **seqlock inline caches** (isolation: two writers, distinct shapes,
+one cache); and **one shared compiled chunk run over one shared object on 4
+threads with no GIL** (shared ICs + `property_lock` + `binding_lock`, never-written
+reads never tear). Plus the standalone ragged root-publication handshake primitive.
+These cover allocation, the object/shape model, the writer-vs-writer and
+reader-vs-writer locks, the inline caches, quiescent GC, and the named shared-global
+prerequisites (symbol registry + spawn bookkeeping) under real parallel bytecode.
+What remains: wire the root handshake into a concurrent parallel marker (mid-script
+collection #1); move the waiter/task queues onto `api_lock` (#2); the
+production-`threadMain` GIL drop + corpus campaign (#5) — best driven empirically
+now that every known shared-state hazard bytecode touches is locked.
 
 This is the final, largest step — major surgery on the core execution path plus a
 semantics campaign, to be done as a focused effort (not a mechanical flip), now
