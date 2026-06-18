@@ -3620,6 +3620,36 @@ pub const Interpreter = struct {
         return proto;
     }
 
+    /// Lazily materialize a generator function's `.prototype` (no `constructor`
+    /// back-link; its [[Prototype]] is %(Async)GeneratorPrototype%). Same
+    /// check-then-act race as `protoObject`, so it shares the double-checked
+    /// realm lazy-init lock.
+    pub fn genProtoObject(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!*value.Object {
+        if (o.getOwn("prototype")) |p| {
+            if (p.isObject()) return p.asObj();
+        }
+        if (self.gil) |g| {
+            g.lockLazyInit();
+            defer g.unlockLazyInit();
+            if (o.getOwn("prototype")) |p| {
+                if (p.isObject()) return p.asObj();
+            }
+            return try self.installGenProto(o, is_async);
+        }
+        return try self.installGenProto(o, is_async);
+    }
+
+    fn installGenProto(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!*value.Object {
+        const tag = if (is_async) "\x00AsyncGenProto" else "\x00GenProto";
+        const proto = try gc_mod.allocObj(self.arena);
+        const gen_proto = (try self.functionRealmIntrinsicObject(o, tag)) orelse
+            if (Interpreter.envIntrinsicObject(self.env, tag)) |gp| gp else null;
+        proto.* = .{ .proto = gen_proto };
+        try o.setOwn(self.arena, self.root_shape, "prototype", Value.obj(proto));
+        try o.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
+        return proto;
+    }
+
     /// Run queued Promise reactions to completion (the event loop's microtask
     /// checkpoint). Each job may enqueue more; the step budget bounds runaways.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
@@ -6167,14 +6197,7 @@ pub const Interpreter = struct {
                         // `constructor` back-link; it is the [[Prototype]] of every
                         // instance the generator produces.
                         if (f.is_generator) {
-                            const tag = if (f.is_async) "\x00AsyncGenProto" else "\x00GenProto";
-                            const proto = try gc_mod.allocObj(self.arena);
-                            const gen_proto = (try self.functionRealmIntrinsicObject(o, tag)) orelse
-                                if (Interpreter.envIntrinsicObject(self.env, tag)) |gp| gp else null;
-                            proto.* = .{ .proto = gen_proto };
-                            try o.setOwn(self.arena, self.root_shape, "prototype", Value.obj(proto));
-                            try o.setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
-                            return Value.obj(proto);
+                            return Value.obj(try self.genProtoObject(o, f.is_async));
                         }
                         if (!f.is_arrow) {
                             const proto = try self.protoObject(o);
