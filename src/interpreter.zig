@@ -9992,7 +9992,7 @@ pub const Interpreter = struct {
                     break;
                 }
                 if (c.getOwn(m)) |fv| {
-                    if (fv.isObject() and (fv.asObj().js_func != null or (c == o and fv.asObj().native != null))) method = fv
+                    if (fv.isObject() and (fv.asObj().js_func != null or (c == o and fv.asObj().native != null) or (o.temporal != null and std.mem.eql(u8, m, "valueOf") and fv.asObj().native != null))) method = fv
                         // Primitive wrappers' native valueOf is a spec builtin that
                         // produces the boxed primitive at this position in the
                         // OrdinaryToPrimitive order, so do not continue to a later
