@@ -174,16 +174,20 @@ per-thread before threads stop holding the GIL):
    concurrently appending to a shared array (`elements_lock`) and adding distinct
    properties to a shared object (`property_lock` + `Shape.transition`) lose
    nothing and are TSan-clean — the per-structure *write* locks serialize
-   mutators correctly. But the **reader-vs-writer** case is not: `Object.getOwn`
-   and `Environment.get` (the hot read paths) intentionally take *no* lock, so a
-   concurrent `setOwn`/`put` that **rehashes or reallocs** the slots/vars storage
-   races the reader (a read of a structure mid-realloc — potential torn read or
-   UAF). Today the GIL serializes reads against writes; once it's gone, true
-   parallel "one thread reads shared object X while another writes it" needs the
-   read paths synchronized. Options (a hot-path perf decision): lock the read
-   (a CAS per property/var read — simplest, measurable cost), a seqlock/optimistic
-   read (retry on a version bump), or an RCU-style immutable-snapshot swap. This
-   is the key design choice of the execution-path drop, not yet made.
+   mutators correctly. **Reader-vs-writer is now also handled (RESOLVED).**
+   `Object.getOwn` already read under `property_lock`; `Environment.get`/
+   `isConst`/`isFnName`/`isAlias` now read each scope's binding tables under
+   `binding_lock` (the writers `put`/`assign`/`putAlias`/`putConst`/`putFnName`
+   lock the matching tables), so a reader can't tear against or read a freed table
+   from a concurrent rehash. The hot-path perf concern is handled by **gating all
+   binding locks on `Environment.binding_locks_enabled`** — set only for a
+   `concurrent_gc`/`parallel_gc` context, so the default GIL-serialized engine
+   leaves `lockBindings`/`unlockBindings` a single relaxed load (no CAS) and is
+   byte-identical/full-speed (verified: test262 unchanged at 90.7%, same run
+   time). Validated by a concurrent reader+writer test on a shared global env,
+   TSan-clean. (A seqlock/RCU read path remains a possible future optimization if
+   the lock proves a parallel-throughput bottleneck, but it is no longer a
+   correctness blocker.)
 4. **Other shared globals** — the symbol registry (`Symbol.for`), any realm-level
    caches (Date/regex), and the string story (arena slices today; a shared intern
    table would need the sharded `strcell.InternTable`).
