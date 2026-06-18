@@ -5966,6 +5966,78 @@ test "parallel_gc (M3 GIL-removal bring-up): contended Map.set on a shared Map v
     try std.testing.expect(allok.isBoolean() and allok.asBool());
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): shared closure upvalue mutated in parallel stays consistent" {
+    // The upvalue path: a closure captures a parent function's local (`n`), and
+    // that ONE closure is shared across threads, so every `bump()` reads+writes
+    // the same captured binding through `store_upval`/`load_upval` against the
+    // shared closure environment. N threads hammer it in parallel with no GIL.
+    // `n++` is a read-modify-write so the final value races (lost updates are
+    // legal without Atomics), but every observed value must be a valid integer
+    // in range — never torn/garbage — and the run must be TSan-clean: the proof
+    // that `Environment.binding_lock` serializes upvalue reads/writes + table
+    // growth under real parallel bytecode.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true, .enable_threads = true });
+    defer ctx.destroy();
+
+    // `shared.bump` closes over the local `n` of `makeCounter`'s activation.
+    _ = try ctx.evaluate(
+        \\globalThis.shared = (function makeCounter(){
+        \\  var n = 0;
+        \\  return { bump: function(){ n = n + 1; return n; } };
+        \\})();
+    );
+
+    const nthreads = 4;
+    const per = 1000;
+    const Worker = struct {
+        ctx: *Context,
+        bad: std.atomic.Value(bool) = .init(false), // a bump ever returned out of range
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            // Each call returns the post-increment value of the shared upvalue;
+            // it must always be an integer in (0, nthreads*per].
+            const src =
+                \\(function(){
+                \\  var worst = 0;
+                \\  for (var i = 0; i < 1000; i++) {
+                \\    var v = shared.bump();
+                \\    if (typeof v !== "number" || v < 1 || v > 4000 || (v | 0) !== v) worst = -1;
+                \\  }
+                \\  return worst;
+                \\})()
+            ;
+            const owned = a.dupe(u8, src) catch return;
+            var parser = Parser.init(a, owned) catch return;
+            const prog = parser.parseProgram() catch return;
+            var machine = s.ctx.interpreter();
+            s.ctx.pushActiveInterpreter(&machine) catch return;
+            defer s.ctx.popActiveInterpreter(&machine);
+            const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
+                vm.run(&machine, chunk, null)
+            else |_| machine.eval(prog);
+            if (outcome) |val| {
+                if (val.isNumber() and val.asNum() < 0) s.bad.store(true, .release);
+            } else |_| s.bad.store(true, .release);
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers) |*w| w.* = .{ .ctx = ctx };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+
+    for (&workers) |*w| try std.testing.expect(!w.bad.load(.acquire)); // every bump in range
+    // The final upvalue is some valid count in (0, N*M] (lost updates allowed).
+    const final = try ctx.evaluate("shared.bump()");
+    try std.testing.expect(final.isNumber());
+    try std.testing.expect(final.asNum() >= 1 and final.asNum() <= nthreads * per + 1);
+}
+
 test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a shared array lose nothing" {
     // Beyond disjoint work: N threads mutate the *same* object in parallel,
     // contending the per-structure lock. Each appends a distinct block of
