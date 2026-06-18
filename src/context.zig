@@ -5711,6 +5711,68 @@ test "parallel_gc (M3 GIL-removal bring-up): one shared chunk over a shared obje
     try std.testing.expect(counter.asNum() >= 1 and counter.asNum() <= nthreads * iters);
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): rich builtin-heavy workload in parallel, no GIL" {
+    // Broadens parallel-execution coverage past arithmetic/loops onto the shared
+    // realm machinery the simpler bring-up tests miss: function calls + closures,
+    // Array.prototype methods (push/map/reduce/filter), String concat, Math,
+    // object literals + property reads. Each thread parses + compiles (parallel
+    // arena allocation through LockedArena) and runs its OWN script, so results
+    // are deterministic, but they all hammer the SAME realm intrinsics and
+    // prototype chains in parallel with no GIL. TSan-clean here is what surfaces
+    // residual shared-state hazards (lazy prototype/method installation, realm
+    // caches) that small workloads don't reach.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    const nthreads = 4;
+    const Worker = struct {
+        ctx: *Context,
+        result: std.atomic.Value(i64) = .init(-1),
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            // reduce of (2i+1 for i in 0..199) = 200^2 = 40000; filter/map/closures
+            // and the builtins along the way all run against shared intrinsics.
+            const src =
+                \\(function(){
+                \\  let arr = [];
+                \\  for (let i = 0; i < 200; i++) arr.push(i);
+                \\  let mapped = arr.map(function(x){ return 2 * x + 1; });
+                \\  let evens = mapped.filter(function(x){ return x % 2 === 1; });
+                \\  let sum = evens.reduce(function(acc, x){ return acc + x; }, 0);
+                \\  let label = "sum=" + sum + "/" + Math.max(1, 2);
+                \\  let o = { total: sum, tag: label, root: Math.sqrt(sum) };
+                \\  return o.total;
+                \\})()
+            ;
+            const owned = a.dupe(u8, src) catch return;
+            var parser = Parser.init(a, owned) catch return;
+            const prog = parser.parseProgram() catch return;
+            var machine = s.ctx.interpreter();
+            s.ctx.pushActiveInterpreter(&machine) catch return;
+            defer s.ctx.popActiveInterpreter(&machine);
+            const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
+                vm.run(&machine, chunk, null)
+            else |_| machine.eval(prog);
+            if (outcome) |val| {
+                if (val.isNumber()) s.result.store(@intFromFloat(val.asNum()), .monotonic);
+            } else |_| {}
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers) |*w| w.* = .{ .ctx = ctx };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+    // All 200 mapped values 2i+1 are odd, so the filter keeps them all and the
+    // reduce gives 200^2 = 40000 — each thread computed it independently.
+    for (&workers) |*w| try std.testing.expectEqual(@as(i64, 40000), w.result.load(.monotonic));
+}
+
 test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a shared array lose nothing" {
     // Beyond disjoint work: N threads mutate the *same* object in parallel,
     // contending the per-structure lock. Each appends a distinct block of
