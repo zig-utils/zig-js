@@ -89,6 +89,7 @@ test {
     _ = @import("valuebox.zig");
     _ = @import("value_nb.zig");
     _ = @import("root_handshake.zig");
+    _ = @import("parallel_lock.zig");
 }
 
 test "evalNumber convenience" {
