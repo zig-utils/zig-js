@@ -5837,6 +5837,71 @@ test "parallel_gc (M3 GIL-removal bring-up): concurrent lazy .prototype install 
     try std.testing.expect(back.isObject() and back.asObj() == ctor);
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): concurrent first .prototype access via real bytecode is consistent" {
+    // End-to-end version of the lazy-`.prototype` fix through the *full* getProperty
+    // path (not just `protoObject`): a function `Foo` is defined on globalThis with
+    // its `.prototype` left unmaterialized, then N threads each run real bytecode
+    // that first-touches `Foo.prototype`, reads `.prototype.constructor`, and
+    // constructs an instance — all racing the one-time lazy install with no GIL.
+    // Every thread must see `Foo.prototype.constructor === Foo`, `new Foo()
+    // instanceof Foo`, and `Foo.length === 2`. A duplicate install (or torn
+    // attr/constructor tweak) would break the identity. TSan-clean.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true, .enable_threads = true });
+    defer ctx.destroy();
+    _ = ctx.gil orelse return error.TestUnexpectedResult;
+
+    // Define the shared function WITHOUT touching `.prototype`, so the first
+    // access happens concurrently on the worker threads below.
+    _ = try ctx.evaluate("function Foo(a, b) { this.tag = 1; }");
+
+    const nthreads = 8;
+    const Worker = struct {
+        ctx: *Context,
+        go: *std.atomic.Value(bool),
+        result: std.atomic.Value(i64) = .init(-999),
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            const src =
+                \\(function(){
+                \\  var p = Foo.prototype;                 // race the lazy install
+                \\  var okCtor = (p.constructor === Foo) ? 1 : 0;
+                \\  var inst = new Foo();                  // uses Foo.prototype
+                \\  var okInst = (inst instanceof Foo) ? 1 : 0;
+                \\  return okCtor * 100 + okInst * 10 + Foo.length; // expect 110 + 2 = 112
+                \\})()
+            ;
+            const owned = a.dupe(u8, src) catch return;
+            var parser = Parser.init(a, owned) catch return;
+            const prog = parser.parseProgram() catch return;
+            var machine = s.ctx.interpreter();
+            s.ctx.pushActiveInterpreter(&machine) catch return;
+            defer s.ctx.popActiveInterpreter(&machine);
+            while (!s.go.load(.acquire)) std.atomic.spinLoopHint();
+            const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
+                vm.run(&machine, chunk, null)
+            else |_| machine.eval(prog);
+            if (outcome) |val| {
+                if (val.isNumber()) s.result.store(@intFromFloat(val.asNum()), .monotonic);
+            } else |_| {}
+        }
+    };
+    var go = std.atomic.Value(bool).init(false);
+    var workers: [nthreads]Worker = undefined;
+    for (&workers) |*w| w.* = .{ .ctx = ctx, .go = &go };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    go.store(true, .release);
+    for (&pool) |*th| th.join();
+
+    // 110 (constructor identity + instanceof) + Foo.length(2) = 112, for every thread.
+    for (&workers) |*w| try std.testing.expectEqual(@as(i64, 112), w.result.load(.monotonic));
+}
+
 test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a shared array lose nothing" {
     // Beyond disjoint work: N threads mutate the *same* object in parallel,
     // contending the per-structure lock. Each appends a distinct block of
