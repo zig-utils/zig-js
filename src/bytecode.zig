@@ -18,12 +18,74 @@ const Shape = @import("shape.zig").Shape;
 
 const Value = value.Value;
 
+/// Process-wide switch for the parallel-safe (seqlock) inline-cache protocol.
+/// Off by default — the GIL-serialized engine reads/writes the cache fields
+/// directly (no atomics). Turned on for the parallel/concurrent contexts (set
+/// next to `Environment.binding_locks_enabled`), where bytecode may execute on
+/// multiple threads and two threads can race the same instruction's cache over
+/// different objects. See `InlineCache.lookupSlot`/`record`.
+pub var ic_seqlock_enabled: std.atomic.Value(bool) = .init(false);
+
 /// A monomorphic inline cache for a `get_prop`/`set_prop` site: remembers the
 /// last object shape seen there and the slot the property lived at, so a repeat
 /// access on the same shape skips the lookup entirely. One per instruction.
 pub const InlineCache = struct {
     shape: ?*Shape = null,
     slot: u32 = 0,
+    /// Seqlock version for the parallel protocol: even = stable, odd = a writer
+    /// is mid-update. Untouched on the default (GIL-serialized) path. Fits in
+    /// the struct's existing padding, so the cache stays 16 bytes.
+    version: std.atomic.Value(u32) = .init(0),
+
+    /// Return the cached slot iff the cache currently maps `obj_shape`. On the
+    /// default path this is the plain `shape == ic.shape` test; under
+    /// `ic_seqlock_enabled` it is a seqlock read (`loadHit`) that rejects a
+    /// torn or in-progress cache. Null = miss → caller does the real lookup.
+    pub fn lookupSlot(ic: *InlineCache, obj_shape: ?*Shape) ?u32 {
+        if (ic_seqlock_enabled.load(.monotonic)) return ic.loadHit(obj_shape);
+        if (obj_shape != null and obj_shape == ic.shape) return ic.slot;
+        return null;
+    }
+
+    /// Publish `(sh, slot)` into the cache. Plain field stores on the default
+    /// path; a try-claim seqlock write under `ic_seqlock_enabled` (best-effort —
+    /// skips on writer contention, so a missed update only costs a future
+    /// lookup, never correctness).
+    pub fn record(ic: *InlineCache, sh: *Shape, slot: u32) void {
+        if (ic_seqlock_enabled.load(.monotonic)) {
+            ic.tryStore(sh, slot);
+            return;
+        }
+        ic.shape = sh;
+        ic.slot = slot;
+    }
+
+    /// Seqlock read: re-read the version around the field loads and reject if a
+    /// writer was in progress (odd) or the version moved (torn). When it returns
+    /// a slot, `(shape, slot)` came from a single stable cache state and the
+    /// shape matched `obj_shape`.
+    fn loadHit(ic: *InlineCache, obj_shape: ?*Shape) ?u32 {
+        const v1 = ic.version.load(.acquire);
+        if (v1 & 1 != 0) return null; // a writer holds the cache
+        const sh = @atomicLoad(?*Shape, &ic.shape, .acquire);
+        const sl = @atomicLoad(u32, &ic.slot, .monotonic);
+        if (ic.version.load(.acquire) != v1) return null; // torn against a write
+        if (sh != null and sh == obj_shape) return sl;
+        return null;
+    }
+
+    /// Seqlock write: claim the cache by CAS-ing the version even→odd, publish
+    /// the pair, then bump it back to even. A writer that cannot claim (another
+    /// writer holds it) skips — caching is best-effort. Atomic field stores keep
+    /// concurrent `loadHit` readers race-free.
+    fn tryStore(ic: *InlineCache, sh: *Shape, slot: u32) void {
+        const v = ic.version.load(.monotonic);
+        if (v & 1 != 0) return; // a writer is already in progress
+        if (ic.version.cmpxchgStrong(v, v +% 1, .acq_rel, .monotonic) != null) return; // lost the claim
+        @atomicStore(u32, &ic.slot, slot, .monotonic);
+        @atomicStore(?*Shape, &ic.shape, sh, .release);
+        ic.version.store(v +% 2, .release); // republish: stable (even)
+    }
 };
 
 pub const Op = enum(u8) {
@@ -255,3 +317,73 @@ pub const Chunk = struct {
         return self.code.items.len;
     }
 };
+
+test "InlineCache seqlock: concurrent writers never tear the (shape, slot) pair" {
+    // The hazard the seqlock fixes: two threads racing the *same* instruction's
+    // cache over *different* shapes (each holds a different object's
+    // `property_lock`, so the per-object locks don't serialize them). With plain
+    // field stores the cache can settle into a *stable* inconsistency — shape of
+    // A paired with slot of B — and a reader matching shape A would read B's
+    // slot. The seqlock guarantees any `(shape, slot)` a reader observes came
+    // from a single `record` call, so each shape always reads back its own slot.
+    // TSan-clean proves the atomic field accesses are race-free too (the plain
+    // path would be a data race here).
+    const builtin = @import("builtin");
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const prev = ic_seqlock_enabled.swap(true, .release);
+    defer ic_seqlock_enabled.store(prev, .release);
+
+    // Two distinct *Shape pointers; the cache only compares/stores them (never
+    // dereferences), so undefined Shape storage is fine. Shape S0 ⇒ slot 0,
+    // S1 ⇒ slot 1: the invariant every reader must observe.
+    var s0: Shape = undefined;
+    var s1: Shape = undefined;
+    var ic = InlineCache{};
+
+    const Shared = struct {
+        ic: *InlineCache,
+        s0: *Shape,
+        s1: *Shape,
+        go: std.atomic.Value(bool) = .init(false),
+        stop: std.atomic.Value(bool) = .init(false),
+        torn: std.atomic.Value(bool) = .init(false), // set if a hit ever mispairs
+
+        fn writer0(s: *@This()) void {
+            while (!s.go.load(.acquire)) std.atomic.spinLoopHint();
+            while (!s.stop.load(.acquire)) s.ic.record(s.s0, 0);
+        }
+        fn writer1(s: *@This()) void {
+            while (!s.go.load(.acquire)) std.atomic.spinLoopHint();
+            while (!s.stop.load(.acquire)) s.ic.record(s.s1, 1);
+        }
+        fn reader(s: *@This()) void {
+            while (!s.go.load(.acquire)) std.atomic.spinLoopHint();
+            while (!s.stop.load(.acquire)) {
+                if (s.ic.lookupSlot(s.s0)) |sl| {
+                    if (sl != 0) s.torn.store(true, .release);
+                }
+                if (s.ic.lookupSlot(s.s1)) |sl| {
+                    if (sl != 1) s.torn.store(true, .release);
+                }
+            }
+        }
+    };
+
+    var shared = Shared{ .ic = &ic, .s0 = &s0, .s1 = &s1 };
+    const w0 = try std.Thread.spawn(.{}, Shared.writer0, .{&shared});
+    const w1 = try std.Thread.spawn(.{}, Shared.writer1, .{&shared});
+    const r0 = try std.Thread.spawn(.{}, Shared.reader, .{&shared});
+    const r1 = try std.Thread.spawn(.{}, Shared.reader, .{&shared});
+    shared.go.store(true, .release);
+    // Let the threads contend for a while.
+    var spins: usize = 0;
+    while (spins < 2_000_000) : (spins += 1) std.atomic.spinLoopHint();
+    shared.stop.store(true, .release);
+    w0.join();
+    w1.join();
+    r0.join();
+    r1.join();
+
+    try std.testing.expect(!shared.torn.load(.acquire)); // no shape↔slot mispairing
+}

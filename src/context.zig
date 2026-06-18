@@ -346,8 +346,12 @@ pub const Context = struct {
             // Turn on Environment binding locks process-wide: needed only when the
             // marker runs concurrently (concurrent_gc) or mutators run in parallel
             // (parallel_gc). The default engine leaves them no-ops (a relaxed load).
-            if (options.concurrent_gc or options.parallel_gc)
+            if (options.concurrent_gc or options.parallel_gc) {
                 interp.Environment.binding_locks_enabled.store(true, .release);
+                // Same trigger: bytecode may run on multiple threads, so the VM
+                // inline caches need the parallel-safe (seqlock) protocol.
+                @import("bytecode.zig").ic_seqlock_enabled.store(true, .release);
+            }
         }
         // Route all cell allocation (the global object + TDZ sentinel,
         // installGlobals, and the mirror loop below) through the GC when

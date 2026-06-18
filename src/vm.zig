@@ -415,14 +415,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         defer o.unlockProperties();
                         if (!o.is_array and o.accessors == null and o.attrs == null) {
                             const ic = &chunk.ics[ip - 1];
-                            if (o.shape != null and o.shape == ic.shape) {
-                                result = o.slots.items[ic.slot];
+                            if (ic.lookupSlot(o.shape)) |sl| {
+                                result = o.slots.items[sl];
                                 break :fast;
                             }
                             if (o.shape) |sh| {
                                 if (sh.lookup(name)) |slot| {
-                                    ic.shape = sh;
-                                    ic.slot = slot;
+                                    ic.record(sh, slot);
                                     result = o.slots.items[slot];
                                     break :fast;
                                 }
@@ -455,15 +454,14 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                         defer o.unlockProperties();
                         if (!o.is_array and o.accessors == null and o.attrs == null) {
                             const ic = &chunk.ics[ip - 1];
-                            if (o.shape != null and o.shape == ic.shape) {
+                            if (ic.lookupSlot(o.shape)) |sl| {
                                 gc_mod.barrierValue(v); // IC fast-path slot store
-                                o.slots.items[ic.slot] = v;
+                                o.slots.items[sl] = v;
                                 break :fast;
                             }
                             if (o.shape) |sh| {
                                 if (sh.lookup(name)) |slot| {
-                                    ic.shape = sh;
-                                    ic.slot = slot;
+                                    ic.record(sh, slot);
                                     gc_mod.barrierValue(v); // IC fast-path slot store
                                     o.slots.items[slot] = v;
                                     break :fast;
