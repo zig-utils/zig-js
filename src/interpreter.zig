@@ -27790,6 +27790,18 @@ fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 /// `evaluate` calls, so the registry does too. NUL-prefixed so it never shows
 /// up in enumeration.
 fn symbolRegistry(self: *Interpreter) EvalError!?*value.Object {
+    // Atomic get-or-create vs. concurrent `Symbol.for` / realm setup on peer
+    // threads — otherwise two threads could each create a fresh registry and
+    // one set of registrations would be lost.
+    if (self.gil) |g| g.lockSymbolRegistry();
+    defer if (self.gil) |g| g.unlockSymbolRegistry();
+    return symbolRegistryLocked(self);
+}
+
+/// The registry get-or-create proper; the caller must already hold
+/// `Gil.symbol_registry_lock` (when threads are on). Non-recursive, so a
+/// critical section that also does the key lookup calls this, not `symbolRegistry`.
+fn symbolRegistryLocked(self: *Interpreter) EvalError!?*value.Object {
     const sym = self.env.get("Symbol") orelse return null;
     if (!sym.isObject()) return null;
     if (sym.asObj().getOwn("\x00registry")) |r| {
@@ -27809,7 +27821,12 @@ fn symbolForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     // `key` is ToString(arg) — honoring a `{toString}`/`{valueOf}` object and
     // throwing for a Symbol — not the raw default stringification.
     const key = if (args.len > 0) try self.toStringV(args[0]) else "undefined";
-    const reg = (try symbolRegistry(self)) orelse return self.throwError("TypeError", "Symbol registry unavailable");
+    // The whole lookup-or-register must be atomic vs. peer `Symbol.for(key)`
+    // calls, or two threads could both miss `getOwn(key)` and register distinct
+    // symbols for the same key — breaking `Symbol.for(k) === Symbol.for(k)`.
+    if (self.gil) |g| g.lockSymbolRegistry();
+    defer if (self.gil) |g| g.unlockSymbolRegistry();
+    const reg = (try symbolRegistryLocked(self)) orelse return self.throwError("TypeError", "Symbol registry unavailable");
     if (reg.getOwn(key)) |existing| return existing;
     const sym = try makeSymbolObj(self.arena, self.root_shape, key, symbolProto(self));
     try sym.asObj().setOwn(self.arena, self.root_shape, "\x00forKey", Value.str(key));

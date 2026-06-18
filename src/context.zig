@@ -5887,6 +5887,92 @@ test "parallel_gc (M3 GIL-removal bring-up): quiescent collection after a parall
     try std.testing.expectEqual(n * (n - 1) / 2, sum); // sum_{0..N*M-1}
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): GlobalSymbolRegistry get-or-create is atomic" {
+    // The GlobalSymbolRegistry (`Symbol.for`) is a check-then-act over shared
+    // object storage: look the key up, and only register a fresh symbol if
+    // absent. Without serialization, two threads calling `Symbol.for(k)` could
+    // both miss the lookup and register *distinct* symbols for the same key —
+    // breaking `Symbol.for(k) === Symbol.for(k)`. `Gil.symbol_registry_lock`
+    // (taken by `symbolForFn`/`symbolRegistry`) makes the whole get-or-create
+    // atomic. This drives that exact critical section concurrently over a shared
+    // registry object: every thread must agree on one symbol identity per key,
+    // and the registry must hold exactly one entry per key. TSan-clean.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true, .enable_threads = true });
+    defer ctx.destroy();
+    const g = ctx.gil orelse return error.TestUnexpectedResult;
+
+    const sh0 = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(sh0);
+    const sa0 = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa0);
+
+    const reg = try gc_mod.allocObj(ctx.arena());
+    reg.* = .{};
+
+    const nthreads = 4;
+    const nkeys = 16;
+    const Worker = struct {
+        ctx: *Context,
+        gil: *@import("gil.zig").Gil,
+        reg: *value.Object,
+        seen: [nkeys]?*value.Object = undefined,
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            for (&s.seen) |*p| p.* = null;
+            const a = s.ctx.arena();
+            // Several passes so threads heavily overlap on the same keys.
+            var pass: usize = 0;
+            while (pass < 64) : (pass += 1) {
+                var k: usize = 0;
+                while (k < nkeys) : (k += 1) {
+                    var buf: [8]u8 = undefined;
+                    const key = std.fmt.bufPrint(&buf, "s{d}", .{k}) catch return;
+                    // The exact `symbolForFn` critical section: atomic get-or-create.
+                    s.gil.lockSymbolRegistry();
+                    const sym = if (s.reg.getOwn(key)) |existing| existing.asObj() else blk: {
+                        const o = gc_mod.allocObj(a) catch {
+                            s.gil.unlockSymbolRegistry();
+                            return;
+                        };
+                        o.* = .{ .is_symbol = true };
+                        s.reg.setOwn(a, s.ctx.root_shape, key, Value.obj(o)) catch {
+                            s.gil.unlockSymbolRegistry();
+                            return;
+                        };
+                        break :blk o;
+                    };
+                    s.gil.unlockSymbolRegistry();
+                    // Identity must be stable for this key across all passes/threads.
+                    if (s.seen[k]) |prev| {
+                        if (prev != sym) return; // leaves a null/ mismatch the assert catches
+                    } else s.seen[k] = sym;
+                }
+            }
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers) |*w| w.* = .{ .ctx = ctx, .gil = g, .reg = reg };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+
+    // Every key resolved to exactly one symbol object, and all threads agree.
+    var k: usize = 0;
+    while (k < nkeys) : (k += 1) {
+        var buf: [8]u8 = undefined;
+        const key = try std.fmt.bufPrint(&buf, "s{d}", .{k});
+        const canonical = (reg.getOwn(key) orelse return error.TestUnexpectedResult).asObj();
+        for (workers) |w| {
+            const got = w.seen[k] orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(canonical, got); // single shared identity
+        }
+    }
+}
+
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
     // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
     // safepoints (collectMidScript), a long-lived structure that keeps growing

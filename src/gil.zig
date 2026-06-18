@@ -46,6 +46,26 @@ pub const Gil = struct {
     park_records: std.ArrayListUnmanaged(*stack_scan.ParkScan) = .empty,
     /// Backing allocator for `park_records` (the Context's gpa).
     park_alloc: ?std.mem.Allocator = null,
+    /// Serializes the cross-realm GlobalSymbolRegistry get-or-create
+    /// (`Symbol.for` / lazy registry creation). The registry is a check-then-act
+    /// over shared object storage: without this, two threads calling
+    /// `Symbol.for(k)` could both miss the lookup and register distinct symbols
+    /// (or both create a fresh registry), breaking the `Symbol.for(k) ===
+    /// Symbol.for(k)` invariant. Held only across the (rare) registry mutation.
+    symbol_registry_lock: std.atomic.Mutex = .unlocked,
+
+    /// Lock/unlock the GlobalSymbolRegistry critical section (spin lock, like the
+    /// per-structure locks). Non-recursive: a single critical section must take
+    /// it exactly once.
+    pub fn lockSymbolRegistry(g: *Gil) void {
+        var spins: usize = 0;
+        while (!g.symbol_registry_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+    pub fn unlockSymbolRegistry(g: *Gil) void {
+        g.symbol_registry_lock.unlock();
+    }
 
     fn currentId() u64 {
         return @intCast(std.Thread.getCurrentId());
