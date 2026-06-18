@@ -127,6 +127,56 @@ Mirror PR-249's phase-2 ladder, already proven for Layer B:
 
 ## Action
 
-No code change in this phase. This note is the prerequisite record; the next
-concrete step toward Layer C is the **tracing GC** (a tier-5 item independent
-of the threading API), after which #2/#3/#7 are the critical path.
+This note began as the prerequisite record. The tracing GC (M1/M2),
+NaN-boxed `Value` (#7), and concurrent marking (M3 GC half) have since landed,
+and the **heap is now parallel-safe and proven** (see below). The remaining work
+is the execution-path GIL drop, specified next.
+
+## Execution-path GIL removal — the remaining campaign
+
+The GC half of M3 is complete and the heap-mutation foundations for GIL removal
+are done and validated:
+
+- **Thread-safe allocation.** GC cell slabs: `zig-gc` `Heap.setParallel` (all-list
+  prepend + counters + born hand-off under `alloc_lock`). Arena (shapes, strings,
+  AST, binding tables): `Context.LockedArena`, installed **before** the
+  create-time arena is captured, so `root_shape`/`env` and `Shape.transition`
+  (which reuses the root shape's captured allocator) are thread-safe. Backing-store
+  accounting counters are atomic.
+- **Per-structure locks** (the object model + collections): `Object.property_lock`
+  / `elements_lock`, `Shape.transition_lock`, `Environment.binding_lock`,
+  `Promise.lock`; weak collections use isMarked-based clearing.
+- **Proven:** the `parallel_gc` bring-up test runs 4 threads creating +
+  shape-transitioning + writing 4,000 disjoint objects **with no GIL** — intact
+  and TSan-clean.
+
+What remains is dropping the GIL from the **execution path** so the `Thread` API
+actually runs JS in parallel. The touchpoints (each must be synchronized or made
+per-thread before threads stop holding the GIL):
+
+1. **`evaluate` / `evaluateModule` realm state.** `active_interpreters`
+   (push/pop on a shared list), the evaluate-top `collectGarbage` (stop-the-world;
+   two parallel evaluates would collide — gate behind a safepoint protocol or a
+   collection lock), `gc_execs` registration, and the microtask/finalization
+   drains. Most per-interpreter state is already thread-local; the shared lists
+   are the work.
+2. **Thread-API shared state in `Gil`** (`tasks`, `prop_waiters`, `prop_async`,
+   `next_thread_id`, `park_records`) — currently "mutated/read only under the
+   GIL." The spawn critical section (live-cap check + id allocation +
+   `js_threads.append`) must become one atomic/locked unit; the waiter tables and
+   run-loop task queue need their own lock.
+3. **Other shared globals** — the symbol registry (`Symbol.for`), any realm-level
+   caches (Date/regex), and the string story (arena slices today; a shared intern
+   table would need the sharded `strcell.InternTable`).
+4. **Corpus semantics.** The threads corpus partly *pins GIL-serialized
+   behavior* (deterministic interleavings, run-loop grant ordering). Dropping the
+   GIL changes the model, so the campaign must re-derive which corpus expectations
+   are synchronization-correctness (must still hold under true parallelism — Lock/
+   Condition/Atomics) vs. GIL-specific ordering (may legitimately change), and
+   drive real races to zero under TSan with the whole corpus running in parallel.
+5. **Gates:** whole-corpus TSan campaign to zero unsuppressed races; serial-perf
+   gate (single-thread throughput must not regress); stress amplifiers.
+
+This is the final, largest step — major surgery on the core execution path plus a
+semantics campaign, to be done as a focused effort (not a mechanical flip), now
+that every heap prerequisite is in place.
