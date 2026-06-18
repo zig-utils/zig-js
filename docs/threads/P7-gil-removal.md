@@ -169,17 +169,40 @@ per-thread before threads stop holding the GIL):
    GIL." The spawn critical section (live-cap check + id allocation +
    `js_threads.append`) must become one atomic/locked unit; the waiter tables and
    run-loop task queue need their own lock.
-3. **Other shared globals** — the symbol registry (`Symbol.for`), any realm-level
+3. **Lock-free READ paths vs concurrent writes — the central hot-path decision.**
+   Bring-up tests (`parallel_gc`) prove **writer-vs-writer** is safe: 4 threads
+   concurrently appending to a shared array (`elements_lock`) and adding distinct
+   properties to a shared object (`property_lock` + `Shape.transition`) lose
+   nothing and are TSan-clean — the per-structure *write* locks serialize
+   mutators correctly. But the **reader-vs-writer** case is not: `Object.getOwn`
+   and `Environment.get` (the hot read paths) intentionally take *no* lock, so a
+   concurrent `setOwn`/`put` that **rehashes or reallocs** the slots/vars storage
+   races the reader (a read of a structure mid-realloc — potential torn read or
+   UAF). Today the GIL serializes reads against writes; once it's gone, true
+   parallel "one thread reads shared object X while another writes it" needs the
+   read paths synchronized. Options (a hot-path perf decision): lock the read
+   (a CAS per property/var read — simplest, measurable cost), a seqlock/optimistic
+   read (retry on a version bump), or an RCU-style immutable-snapshot swap. This
+   is the key design choice of the execution-path drop, not yet made.
+4. **Other shared globals** — the symbol registry (`Symbol.for`), any realm-level
    caches (Date/regex), and the string story (arena slices today; a shared intern
    table would need the sharded `strcell.InternTable`).
-4. **Corpus semantics.** The threads corpus partly *pins GIL-serialized
+5. **Corpus semantics.** The threads corpus partly *pins GIL-serialized
    behavior* (deterministic interleavings, run-loop grant ordering). Dropping the
    GIL changes the model, so the campaign must re-derive which corpus expectations
    are synchronization-correctness (must still hold under true parallelism — Lock/
    Condition/Atomics) vs. GIL-specific ordering (may legitimately change), and
    drive real races to zero under TSan with the whole corpus running in parallel.
-5. **Gates:** whole-corpus TSan campaign to zero unsuppressed races; serial-perf
+6. **Gates:** whole-corpus TSan campaign to zero unsuppressed races; serial-perf
    gate (single-thread throughput must not regress); stress amplifiers.
+
+Validated so far (`parallel_gc` bring-up tests, all TSan-clean): parallel heap
+mutation; parallel parse+compile+VM execution of disjoint scripts; contended
+parallel append to a shared array; contended parallel property-add + shape
+growth on a shared object. These cover allocation, the object/shape model, and
+the writer-vs-writer locks under real parallelism — the heap/execution
+foundation. The reader-vs-writer decision (#3) and the production-`threadMain`
+GIL drop + corpus campaign (#5) are what remain.
 
 This is the final, largest step — major surgery on the core execution path plus a
 semantics campaign, to be done as a focused effort (not a mechanical flip), now
