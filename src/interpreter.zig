@@ -4024,6 +4024,14 @@ pub const Interpreter = struct {
         return Value.obj(obj);
     }
 
+    /// ArrayCreate(length): allocate a fresh array with a logical length.
+    fn newArrayWithLength(self: *Interpreter, len: usize) EvalError!Value {
+        if (len > 4294967295) return self.throwError("RangeError", "Invalid array length");
+        const arr = try self.newArray();
+        arr.asObj().extendArrayLengthFloor(len);
+        return arr;
+    }
+
     /// `Array.prototype`, resolved from the live `Array` binding, so array
     /// instances inherit from it (inherited index access, `in`, iteration over
     /// inherited indices). Null only before globals are installed.
@@ -7155,7 +7163,7 @@ pub const Interpreter = struct {
     /// non-constructor species throws a TypeError, and any other constructor is
     /// `new`-ed with the length (its abrupt completion propagates).
     pub fn arraySpeciesCreate(self: *Interpreter, original: Value, len: usize) EvalError!Value {
-        if (!original.isObject() or !try objectToStringIsArray(self, original.asObj())) return self.newArray();
+        if (!original.isObject() or !try objectToStringIsArray(self, original.asObj())) return self.newArrayWithLength(len);
         const c = try self.getProperty(original, "constructor");
         if (c.isObject() and (c.asObj().is_symbol or c.asObj().is_bigint))
             return self.throwError("TypeError", "Array species is not a constructor");
@@ -7164,21 +7172,21 @@ pub const Interpreter = struct {
         // consulting its @@species (so a cross-realm species getter is untouched).
         if (c.isObject() and c.asObj().native == builtins.arrayConstructor) {
             const cur = self.env.get("Array");
-            if (cur == null or !cur.?.isObject() or c.asObj() != cur.?.asObj()) return self.newArray();
+            if (cur == null or !cur.?.isObject() or c.asObj() != cur.?.asObj()) return self.newArrayWithLength(len);
         }
         var ctor: Value = c;
         if (c.isObject()) {
-            const skey = self.wellKnownSymbolKey("species") orelse return self.newArray();
+            const skey = self.wellKnownSymbolKey("species") orelse return self.newArrayWithLength(len);
             const s = try self.getProperty(c, skey);
-            if (s.isNull() or s.isUndefined()) return self.newArray();
+            if (s.isNull() or s.isUndefined()) return self.newArrayWithLength(len);
             ctor = s;
         } else if (c.isUndefined()) {
-            return self.newArray();
+            return self.newArrayWithLength(len);
         }
         // The intrinsic Array constructor → a plain array (fast path, matching
         // `new Array(len)` then filling in 0..len).
         if (self.env.get("Array")) |arr| {
-            if (ctor.isObject() and arr.isObject() and ctor.asObj() == arr.asObj()) return self.newArray();
+            if (ctor.isObject() and arr.isObject() and ctor.asObj() == arr.asObj()) return self.newArrayWithLength(len);
         }
         if (!isConstructorValue(ctor)) return self.throwError("TypeError", "Array species is not a constructor");
         return self.construct(ctor, &.{Value.num(@floatFromInt(len))});
@@ -7497,9 +7505,9 @@ pub const Interpreter = struct {
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
         if (result.isObject() and result.asObj().is_array and result.asObj().accessors == null and
             result.asObj().attrs == null and !result.asObj().proxy_revoked and result.asObj().proxy_handler == null and
-            idx == result.asObj().elements.items.len and idx >= result.asObj().array_len)
+            idx == result.asObj().elements.items.len)
         {
-            try result.asObj().elements.append(result.asObj().elementsAllocator(self.arena), v);
+            try result.asObj().appendElement(self.arena, v);
         } else {
             // CreateDataPropertyOrThrow(result, ToString(idx), v) — a non-Array
             // species result (or one carrying accessors) takes the generic define

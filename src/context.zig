@@ -1610,6 +1610,41 @@ test "Array.prototype generics on array-likes" {
         \\o["9007199254740990"] = "there";
         \\Array.prototype.slice.call(o, -2).join(",")
     );
+    try expectEvalStr("RangeError|0",
+        \\var array = [];
+        \\var callCount = 0;
+        \\var proxy = new Proxy(array, {
+        \\  get: function(_, name) {
+        \\    if (name === "length") return Math.pow(2, 32);
+        \\    return array[name];
+        \\  },
+        \\  set: function() {
+        \\    callCount += 1;
+        \\    return true;
+        \\  }
+        \\});
+        \\try {
+        \\  Array.prototype.splice.call(proxy, 0);
+        \\  "no throw";
+        \\} catch (e) {
+        \\  e.name + "|" + callCount;
+        \\}
+    );
+    try expectEvalStr("TypeError",
+        \\var A = function(_length) {
+        \\  this.length = 0;
+        \\  Object.preventExtensions(this);
+        \\};
+        \\var arr = [1];
+        \\arr.constructor = {};
+        \\arr.constructor[Symbol.species] = A;
+        \\try {
+        \\  arr.splice(0);
+        \\  "no throw";
+        \\} catch (e) {
+        \\  e.name;
+        \\}
+    );
     try std.testing.expect((try evalIn(
         \\Array.prototype[1] = 17;
         \\var a = [3];
