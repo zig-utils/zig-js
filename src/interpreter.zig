@@ -24870,8 +24870,14 @@ fn withIntField(self: *Interpreter, bag: Value, name: []const u8, cur: i64) Eval
 /// `monthCode` override → month number, falling back to the `month` field.
 fn withMonthField(self: *Interpreter, bag: Value, cur: u8) EvalError!u8 {
     const mc = try self.getProperty(bag, "monthCode");
-    if (mc.isString() and mc.asStr().len >= 3) {
-        return std.fmt.parseInt(u8, mc.asStr()[1..3], 10) catch return self.throwError("RangeError", "bad monthCode");
+    if (!mc.isUndefined()) {
+        const month_code = try readMonthCode(self, mc);
+        const mv = try self.getProperty(bag, "month");
+        if (!mv.isUndefined()) {
+            const month: i64 = @intFromFloat(try temporalIntArg(self, mv, "month"));
+            if (month != @as(i64, month_code)) return self.throwError("RangeError", "month and monthCode mismatch");
+        }
+        return month_code;
     }
     // Clamp to a safe u8 range before narrowing; any value >12 (or <1) is later
     // regulated identically (constrain → 1..12, reject → RangeError).
@@ -25228,6 +25234,12 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     }
     try appendCalAnnotation(self, &buf, cal, t.calendar);
     return Value.str(try buf.toOwnedSlice(self.arena));
+}
+
+fn temporalMonthDayToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const none = [_]Value{};
+    return temporalMonthDayToStringFn(ctx, this, &none);
 }
 
 const IsoMD = struct { m: u8, d: u8 };
@@ -27494,7 +27506,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalMonthDayToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalMonthDayToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalMonthDayToJSONFn);
         try setNative(a, rs, p, "with", 1, temporalMonthDayWithFn);
         try setNative(a, rs, p, "equals", 1, temporalMonthDayEqualsFn);
         try setNative(a, rs, p, "toPlainDate", 1, temporalMonthDayToPlainDateFn);
