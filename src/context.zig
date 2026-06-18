@@ -85,6 +85,10 @@ pub const Context = struct {
     /// (null otherwise → raw arena). Makes parallel shape/string/AST/binding
     /// allocation safe once the GIL is gone (#1). See `LockedArena`.
     locked_arena: ?*LockedArena = null,
+    /// Thread-safe wrapper over `gpa` used as the GC heap's cell backing under
+    /// `parallel_gc`, so multiple mutators can allocate cells concurrently. Freed
+    /// after `gc.deinit()` in `destroy`. Null unless `parallel_gc`.
+    gc_backing_lock: ?*LockedArena = null,
     /// A Context is single-thread-affine: every mutating entry point (evaluate,
     /// evaluateModule, the C API) must run on the thread that created it. The
     /// arena, environments, shapes, and microtask queue are unsynchronized by
@@ -231,6 +235,12 @@ pub const Context = struct {
         enable_threads: bool = false,
         enable_gc: bool = false,
         concurrent_gc: bool = false,
+        /// Experimental (GIL-removal bring-up, requires `enable_gc`): make GC cell
+        /// allocation thread-safe so multiple mutators can `create` concurrently —
+        /// the heap's cell backing is wrapped in a thread-safe lock and
+        /// `Heap.setParallel(true)` serializes its bookkeeping. Validates the
+        /// parallel-allocation/mutation path ahead of the GIL actually dropping.
+        parallel_gc: bool = false,
         /// Host-defined `[[CanBlock]]` for this VM. When false, blocking APIs
         /// throw if they would have to park; non-blocking fast paths and async
         /// APIs still work.
@@ -268,12 +278,27 @@ pub const Context = struct {
             arena_state.deinit();
             gpa.destroy(arena_state);
         }
-        const a = arena_state.allocator();
+        // When threads (or the parallel-GC bring-up) are enabled, every
+        // arena-allocated structure — shapes, strings, AST, binding tables —
+        // must allocate through a thread-safe wrapper, because the raw
+        // `ArenaAllocator` corrupts under parallel allocation (#1). Crucially the
+        // wrapper must be installed *before* `a` is captured here: `root_shape`,
+        // the global `env`, and every later create-time alloc bind this `a`, and
+        // `Shape.transition` reuses the root shape's captured allocator — so a
+        // wrapper installed later would leave shape transitions on the raw arena.
+        var locked_arena: ?*LockedArena = null;
+        const a = if (options.enable_threads or options.parallel_gc) blk: {
+            const la = try gpa.create(LockedArena);
+            la.* = .{ .inner = arena_state.allocator() };
+            locked_arena = la;
+            break :blk la.allocator();
+        } else arena_state.allocator();
 
         const self = try gpa.create(Context);
         self.* = .{
             .gpa = gpa,
             .arena_state = arena_state,
+            .locked_arena = locked_arena,
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = gpa },
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
@@ -289,7 +314,18 @@ pub const Context = struct {
             const bind = try gpa.create(GcBinding);
             bind.* = .{ .context = self };
             const h = try gpa.create(GcHeap);
-            h.* = GcHeap.init(gpa, bind);
+            // Under parallel_gc the cell backing must be thread-safe (multiple
+            // mutators allocate at once): wrap gpa in a lock and route every cell
+            // slab alloc/free through it, consistently for the heap's lifetime.
+            var cell_backing = gpa;
+            if (options.parallel_gc) {
+                const bl = try gpa.create(LockedArena);
+                bl.* = .{ .inner = gpa };
+                self.gc_backing_lock = bl;
+                cell_backing = bl.allocator();
+            }
+            h.* = GcHeap.init(cell_backing, bind);
+            if (options.parallel_gc) h.setParallel(true);
             // GC scratch (`mark_stack`/`barrier_buf`) is touched by both a
             // concurrent marker thread and the mutator under M3, so it must use
             // a thread-safe allocator distinct from the (mutator-only) cell
@@ -353,13 +389,8 @@ pub const Context = struct {
             if (d.isObject()) try d.asObj().setOwn(a, self.root_shape, "global", Value.obj(global_obj));
         }
         if (options.enable_threads) {
-            // Make arena allocation thread-safe before any spawned thread can run
-            // (shapes/strings/AST/binding tables are arena-allocated). The GIL
-            // still serializes today, so this lock is uncontended; it is the
-            // readiness for GIL removal (#1). Wraps the *raw* arena allocator.
-            const la = try gpa.create(LockedArena);
-            la.* = .{ .inner = arena_state.allocator() };
-            self.locked_arena = la;
+            // `locked_arena` (the thread-safe arena, #1) was installed before any
+            // create-time allocation above, so shapes/env/etc. already use it.
             const g = try gpa.create(gil_mod.Gil);
             g.* = .{};
             g.park_alloc = gpa;
@@ -446,9 +477,13 @@ pub const Context = struct {
         // there when GC is enabled.
         self.finishConcurrentGCIfActive(); // join any marker before heap teardown
         if (self.gc) |h| {
-            h.deinit();
+            h.deinit(); // frees cells via heap.backing (the gc_backing_lock wrapper under parallel_gc)
             self.gpa.destroy(h);
             self.gc = null;
+        }
+        if (self.gc_backing_lock) |bl| {
+            self.gpa.destroy(bl); // safe now: heap.deinit() is done using it
+            self.gc_backing_lock = null;
         }
         if (self.gc_binding) |b| {
             self.gpa.destroy(b);
@@ -5453,6 +5488,70 @@ test "LockedArena: concurrent allocation from many threads is race-free (GIL-rem
 
     // Every one of the threads*per allocations succeeded and read back intact.
     try std.testing.expectEqual(@as(u32, threads * per), w.ok.load(.monotonic));
+}
+
+test "parallel_gc (M3 GIL-removal bring-up): mutators create+shape+mutate disjoint objects in parallel" {
+    // The payoff of the GIL-removal prerequisites composed: with thread-safe cell
+    // allocation (setParallel), thread-safe arena (LockedArena → shapes/strings),
+    // atomic backing counters, and the per-structure object/shape locks, multiple
+    // mutators run real object operations *in parallel with no GIL* — allocating
+    // cells, transitioning shapes (shared root, converging under transition_lock),
+    // and writing slots (per-object property_lock). Each thread owns a disjoint
+    // set of objects; afterward every object is intact and correctly shaped.
+    // This is the first true parallel-JS-heap-mutation demonstration. TSan-clean.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    const nthreads = 4;
+    const per = 1000;
+    const Worker = struct {
+        ctx: *Context,
+        objs: []*value.Object,
+        ok: std.atomic.Value(u32) = .init(0),
+        fn run(s: *@This()) void {
+            // Allocate into the shared heap/arena from this thread: set the
+            // threadlocal active heap + intern arena. No GIL — the thread-safe
+            // arena/backing + per-structure locks are what make it safe.
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            for (s.objs, 0..) |*slot, i| {
+                const o = gc_mod.allocObj(a) catch return;
+                o.* = .{};
+                // Two property adds → shape transitions on the shared root shape
+                // (serialized + converged by transition_lock), slots under this
+                // object's property_lock.
+                o.setOwn(a, s.ctx.root_shape, "v", Value.num(@floatFromInt(i))) catch return;
+                o.setOwn(a, s.ctx.root_shape, "t", Value.num(1)) catch return;
+                slot.* = o;
+                if (o.getOwn("v")) |gv| {
+                    if (gv.asNum() == @as(f64, @floatFromInt(i))) _ = s.ok.fetchAdd(1, .monotonic);
+                }
+            }
+        }
+    };
+    var storage: [nthreads][per]*value.Object = undefined;
+    var workers: [nthreads]Worker = undefined;
+    for (&workers, 0..) |*w, t| w.* = .{ .ctx = ctx, .objs = storage[t][0..] };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+
+    var total_ok: u32 = 0;
+    for (&workers) |*w| total_ok += w.ok.load(.monotonic);
+    try std.testing.expectEqual(@as(u32, nthreads * per), total_ok);
+    // Every object across all threads is intact and correctly shaped.
+    for (&storage) |*arr| {
+        for (arr, 0..) |o, i| {
+            const gv = o.getOwn("v") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(f64, @floatFromInt(i)), gv.asNum());
+            const gt = o.getOwn("t") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(f64, 1), gt.asNum());
+        }
+    }
 }
 
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
