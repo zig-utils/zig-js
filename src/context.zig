@@ -5632,6 +5632,85 @@ test "parallel_gc (M3 GIL-removal bring-up): parse+compile+VM-execute disjoint s
     for (&workers) |*w| try std.testing.expectEqual(@as(i64, 1999000), w.result.load(.monotonic));
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): one shared chunk over a shared object, in parallel, no GIL" {
+    // The strongest execution case: all threads run the **same compiled chunk**
+    // (so they share its inline caches) over the **same globalThis-rooted object**
+    // (so they share its `property_lock` and shape), truly in parallel with no
+    // GIL. Each iteration does a `get_prop`+`set_prop` on `shared.counter`
+    // (exercises the IC write/record path + the insertion barrier under
+    // contention — lost updates are fine, JS without Atomics) and a `get_prop`
+    // on `shared.base` (a property never written — its reads must NEVER tear, so
+    // every thread's `base`-sum is exact). This drives the seqlock inline caches,
+    // `property_lock`, and `binding_lock` (the global `shared` lookup) all at
+    // once under real parallel bytecode. TSan-clean is the proof.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    const sh0 = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(sh0);
+    const sa0 = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa0);
+    const a = ctx.arena();
+
+    // A shared object rooted on globalThis: fixed shape {counter, base}.
+    const shared = try gc_mod.allocObj(a);
+    shared.* = .{};
+    try shared.setOwn(a, ctx.root_shape, "counter", Value.num(0));
+    try shared.setOwn(a, ctx.root_shape, "base", Value.num(100));
+    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "shared", Value.obj(shared));
+
+    // Compile ONCE on this thread; every worker runs this same chunk (shared ICs).
+    const iters = 1000;
+    const src =
+        \\(function(){
+        \\  let sum = 0;
+        \\  for (let i = 0; i < 1000; i++) {
+        \\    shared.counter = shared.counter + 1; // set_prop + get_prop (contended)
+        \\    sum += shared.base;                  // get_prop of a never-written prop
+        \\  }
+        \\  return sum;
+        \\})()
+    ;
+    const owned = try a.dupe(u8, src);
+    var parser = try Parser.init(a, owned);
+    const prog = try parser.parseProgram();
+    const chunk = compiler.Compiler.compileProgram(a, prog) catch return error.TestUnexpectedResult;
+
+    const nthreads = 4;
+    const Worker = struct {
+        ctx: *Context,
+        chunk: *@import("bytecode.zig").Chunk,
+        result: std.atomic.Value(i64) = .init(-1),
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            var machine = s.ctx.interpreter();
+            s.ctx.pushActiveInterpreter(&machine) catch return;
+            defer s.ctx.popActiveInterpreter(&machine);
+            if (vm.run(&machine, s.chunk, null)) |val| {
+                if (val.isNumber()) s.result.store(@intFromFloat(val.asNum()), .monotonic);
+            } else |_| {}
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers) |*w| w.* = .{ .ctx = ctx, .chunk = chunk };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+
+    // Every thread summed `shared.base` (== 100, never written) exactly `iters`
+    // times: a torn read through the shared IC would corrupt this. Exact for all.
+    for (&workers) |*w| try std.testing.expectEqual(@as(i64, iters * 100), w.result.load(.monotonic));
+    // `counter` raced (no Atomics) so its value is nondeterministic, but it must
+    // be a valid in-range number — never torn/garbage — and writes happened.
+    const counter = shared.getOwn("counter") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(counter.isNumber());
+    try std.testing.expect(counter.asNum() >= 1 and counter.asNum() <= nthreads * iters);
+}
+
 test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a shared array lose nothing" {
     // Beyond disjoint work: N threads mutate the *same* object in parallel,
     // contending the per-structure lock. Each appends a distinct block of
