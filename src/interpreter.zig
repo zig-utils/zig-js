@@ -25236,12 +25236,6 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
-fn temporalMonthDayToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
-    const none = [_]Value{};
-    return temporalMonthDayToStringFn(ctx, this, &none);
-}
-
 const IsoMD = struct { m: u8, d: u8 };
 
 fn regulateMonthDay(self: *Interpreter, ref_year: i64, mf: i64, df: i64, constrain: bool) EvalError!IsoMD {
@@ -27349,7 +27343,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalDurationToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalDurationToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
         if (ns.getOwn("Duration")) |dc| if (dc.isObject()) {
             try setNative(a, rs, dc.asObj(), "from", 1, temporalDurationFromFn);
             try setNative(a, rs, dc.asObj(), "compare", 2, temporalDurationCompareFn);
@@ -27377,7 +27371,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalPlainDateToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalPlainDateToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "equals", 1, temporalPlainDateEqualsFn);
         try setNative(a, rs, p, "add", 1, temporalPlainDateAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalPlainDateAddFn(-1));
@@ -27406,7 +27400,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalPlainTimeToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalPlainTimeToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "with", 1, temporalPlainTimeWithFn);
         try setNative(a, rs, p, "add", 1, temporalPlainTimeAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalPlainTimeAddFn(-1));
@@ -27447,7 +27441,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalPlainDateTimeToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalPlainDateTimeToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "with", 1, temporalPlainDateTimeWithFn);
         try setNative(a, rs, p, "add", 1, temporalPlainDateTimeAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalPlainDateTimeAddFn(-1));
@@ -27484,7 +27478,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalYearMonthToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalYearMonthToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "with", 1, temporalYearMonthWithFn);
         try setNative(a, rs, p, "equals", 1, temporalYearMonthEqualsFn);
         try setNative(a, rs, p, "add", 1, temporalYearMonthAddFn(1));
@@ -27506,7 +27500,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalMonthDayToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalMonthDayToJSONFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "with", 1, temporalMonthDayWithFn);
         try setNative(a, rs, p, "equals", 1, temporalMonthDayEqualsFn);
         try setNative(a, rs, p, "toPlainDate", 1, temporalMonthDayToPlainDateFn);
@@ -27524,7 +27518,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalInstantToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalInstantToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "add", 1, temporalInstantAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalInstantAddFn(-1));
         try setNative(a, rs, p, "until", 1, temporalInstantUntilFn(1));
@@ -27576,7 +27570,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalZdtToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalZdtToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
         try setNative(a, rs, p, "toInstant", 0, temporalZdtToInstantFn);
         try setNative(a, rs, p, "toPlainDateTime", 0, temporalZdtToPlainDateTimeFn);
         try setNative(a, rs, p, "toPlainDate", 0, temporalZdtToPlainDateFn);
