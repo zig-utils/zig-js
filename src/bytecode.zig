@@ -64,27 +64,34 @@ pub const InlineCache = struct {
     /// writer was in progress (odd) or the version moved (torn). When it returns
     /// a slot, `(shape, slot)` came from a single stable cache state and the
     /// shape matched `obj_shape`.
+    ///
+    /// All operations are `.seq_cst`: on a weakly-ordered target (e.g. arm64)
+    /// plain acquire/release is *not* enough — the field loads could sink past
+    /// the second version load, so a torn `(shape, slot)` would slip through the
+    /// bracket. A single total order over the version + field ops makes the
+    /// classic seqlock argument hold. This path is gated to the parallel modes,
+    /// so the seq_cst cost never touches the default GIL-serialized engine.
     fn loadHit(ic: *InlineCache, obj_shape: ?*Shape) ?u32 {
-        const v1 = ic.version.load(.acquire);
+        const v1 = ic.version.load(.seq_cst);
         if (v1 & 1 != 0) return null; // a writer holds the cache
-        const sh = @atomicLoad(?*Shape, &ic.shape, .acquire);
-        const sl = @atomicLoad(u32, &ic.slot, .monotonic);
-        if (ic.version.load(.acquire) != v1) return null; // torn against a write
+        const sh = @atomicLoad(?*Shape, &ic.shape, .seq_cst);
+        const sl = @atomicLoad(u32, &ic.slot, .seq_cst);
+        if (ic.version.load(.seq_cst) != v1) return null; // torn against a write
         if (sh != null and sh == obj_shape) return sl;
         return null;
     }
 
     /// Seqlock write: claim the cache by CAS-ing the version even→odd, publish
     /// the pair, then bump it back to even. A writer that cannot claim (another
-    /// writer holds it) skips — caching is best-effort. Atomic field stores keep
-    /// concurrent `loadHit` readers race-free.
+    /// writer holds it) skips — caching is best-effort. `.seq_cst` throughout so
+    /// it shares the single total order the reader relies on.
     fn tryStore(ic: *InlineCache, sh: *Shape, slot: u32) void {
-        const v = ic.version.load(.monotonic);
+        const v = ic.version.load(.seq_cst);
         if (v & 1 != 0) return; // a writer is already in progress
-        if (ic.version.cmpxchgStrong(v, v +% 1, .acq_rel, .monotonic) != null) return; // lost the claim
-        @atomicStore(u32, &ic.slot, slot, .monotonic);
-        @atomicStore(?*Shape, &ic.shape, sh, .release);
-        ic.version.store(v +% 2, .release); // republish: stable (even)
+        if (ic.version.cmpxchgStrong(v, v +% 1, .seq_cst, .seq_cst) != null) return; // lost the claim
+        @atomicStore(u32, &ic.slot, slot, .seq_cst);
+        @atomicStore(?*Shape, &ic.shape, sh, .seq_cst);
+        ic.version.store(v +% 2, .seq_cst); // republish: stable (even)
     }
 };
 
