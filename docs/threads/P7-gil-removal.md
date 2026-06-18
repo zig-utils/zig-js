@@ -269,3 +269,76 @@ now that every known shared-state hazard bytecode touches is locked.
 This is the final, largest step — major surgery on the core execution path plus a
 semantics campaign, to be done as a focused effort (not a mechanical flip), now
 that every heap prerequisite is in place.
+
+## Coordination-primitive rewrite — the critical path (design)
+
+The heap and bytecode-execution prerequisites are done and validated under real
+parallel GIL-free bytecode (objects/shapes/elements/env/arena/GC-alloc/promise/
+inline-caches/symbol-registry/lazy-prototypes; strings are uninterned so there is
+no shared intern-table race). The remaining blocker for true parallel JS *via the
+`Thread` API* is that the **coordination primitives still use the GIL as their
+condition mutex**. Concretely, in `src/jsthread.zig`:
+
+- `LockRecord` (`Atomics.Mutex` / `Lock`) state — `locked`, `holder`,
+  `sync_waiting`, `sync_generation`, `pending`, `grant_pending`, `async_runner` —
+  is mutated **only while holding the GIL**, and `acquireLock`/`releaseLock` rely
+  on that for atomicity (no per-record lock).
+- Parking is `parkPump(self, rec.gil, &rec.cond)` → `g.waitTimeout(&rec.cond, …)`,
+  i.e. the per-record condvar `rec.cond` is waited on with **`g.mutex` (the GIL)**
+  as its associated mutex. The same holds for `Condition` (`rec.cond` +
+  `SyncCondTicket`) and property-mode `Atomics.wait` (`PropTicket.cond` +
+  `prop_waiters`, woken under the GIL by `propNotify`).
+
+Why it cannot be half-migrated: the condvar contract requires the waiter and the
+notifier to use the *same* mutex. Today that mutex is the GIL, and `g.wait`
+atomically releases the GIL while parked so *other* threads can run — the entire
+GIL'd model depends on this. Swapping in a per-record mutex for one primitive
+without dropping the GIL breaks that release-while-parked invariant. So the
+rewrite is effectively atomic with the GIL drop.
+
+**Target design (per-waitable mutex+condvar).** Give each waitable its own real
+`std.Io.Mutex`:
+
+- `LockRecord`: add `mutex: std.Io.Mutex`. `acquireLock` locks `rec.mutex`, tests
+  `locked`/generation, and `rec.cond.wait(&rec.mutex)` on contention;
+  `releaseLock` locks `rec.mutex`, hands off / signals `rec.cond`. The state fields
+  move from "GIL-protected" to "`rec.mutex`-protected". The async hold-job
+  machinery (`HoldJob`, `pending`, grant delivery, `enqueueHoldJob`/`pumpTasks`)
+  re-expresses "deliver a grant" as a `rec.mutex`-guarded transition plus the
+  existing `api_lock`-guarded run-loop queue.
+- `Condition`: the waiter atomically releases the *associated `Lock`'s* `rec.mutex`
+  (TC39 `Atomics.Condition` pairs a condition with a mutex), so `conditionWait`
+  becomes `cond.wait(&lock.mutex)` — no GIL.
+- Property `Atomics.wait`/`notify`: a per-realm waiter-table `mutex` (or shard by
+  object identity) guards `prop_waiters`/`prop_async`; `PropTicket.woken` becomes
+  atomic; `propNotify` collects matching async tickets under the table mutex and
+  settles them *after* releasing it (settling runs JS → per-structure locks, lock
+  order: table-mutex must not be held across JS).
+- Termination/abandon (`teardown_stop`, worker `terminate`, D9 trap-on-parked):
+  each park loop keeps polling `stop_flag` between waits, as today.
+
+**The GIL becomes the "bytecode runs without it" lock.** It stays as the home of
+the threading bookkeeping (`api_lock`, `symbol_registry_lock`, `lazy_init_lock`,
+`park_records`) and is acquired only by the specific shared-bookkeeping operations
+— never held across bytecode. `threadMain`/`evaluate` stop wrapping execution in
+`g.acquire()`/`g.release()`; the per-structure locks (already validated) carry
+correctness during execution.
+
+**Corpus-semantics caveat.** The threads corpus partly *pins* GIL-serialized
+interleavings and run-loop grant ordering (`docs/threads/api.md`, the `cve/mc-*`
+and `lock/`/`condition/` cases). Dropping the GIL changes the model, so this is a
+re-derivation: classify each expectation as synchronization-correctness (must hold
+under true parallelism) vs. GIL-specific ordering (may legitimately change), adjust
+the corpus/notes, and drive races to zero under a whole-corpus TSan run. This is
+why it is a campaign, not a flip.
+
+**Sequencing.** (1) Per-record `mutex` on `LockRecord` + migrate
+`acquireLock`/`releaseLock`/hold-jobs off the GIL, behind a gated `parallel_js`
+option; validate with TSan + the `lock/`/`condition/` corpus subset. (2) Property
+`Atomics.wait`/`notify` waiter-table mutex + atomic ticket flags. (3) Drop the
+execution-path GIL in `threadMain`/`evaluate` under `parallel_js`; enable the
+per-structure-lock flags for that mode. (4) Whole-corpus TSan campaign +
+serial-perf gate. Mid-script concurrent-parallel GC (the ragged
+`root_handshake` → concurrent marker) is independent of this and is a GC
+pause-time optimization, not on this critical path (quiescent collection is
+already correct under parallel mutation).
