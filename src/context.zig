@@ -5902,6 +5902,70 @@ test "parallel_gc (M3 GIL-removal bring-up): concurrent first .prototype access 
     for (&workers) |*w| try std.testing.expectEqual(@as(i64, 112), w.result.load(.monotonic));
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): contended Map.set on a shared Map via real bytecode" {
+    // A distinct shared subsystem under real parallel bytecode: N threads each
+    // insert a disjoint block of keys into ONE shared `Map` via `m.set(k, v)`,
+    // contending the Map's `elements_lock` (which funnels insertion + table
+    // rehash). The global `m` lookup goes through `binding_lock`, the method
+    // dispatch + entry storage through `elements_lock`. After join the map must
+    // hold exactly N*M entries with the right values — no insert lost or torn,
+    // no rehash corruption. TSan-clean proves the Map insertion/rehash funnel is
+    // race-free under parallel mutation.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true, .enable_threads = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate("globalThis.m = new Map();");
+
+    const nthreads = 4;
+    const per = 250;
+    const Worker = struct {
+        ctx: *Context,
+        base: usize,
+        ok: std.atomic.Value(bool) = .init(false),
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            // Each thread writes its own [base, base+per) block; values = key*2.
+            var buf: [128]u8 = undefined;
+            const src = std.fmt.bufPrint(&buf,
+                \\(function(){{ for (var i = {d}; i < {d}; i++) m.set(i, i * 2); return true; }})()
+            , .{ s.base, s.base + per }) catch return;
+            const owned = a.dupe(u8, src) catch return;
+            var parser = Parser.init(a, owned) catch return;
+            const prog = parser.parseProgram() catch return;
+            var machine = s.ctx.interpreter();
+            s.ctx.pushActiveInterpreter(&machine) catch return;
+            defer s.ctx.popActiveInterpreter(&machine);
+            const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
+                vm.run(&machine, chunk, null)
+            else |_| machine.eval(prog);
+            if (outcome) |val| s.ok.store(val.isBoolean() and val.asBool(), .release) else |_| {}
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers, 0..) |*w, t| w.* = .{ .ctx = ctx, .base = t * per };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+
+    for (&workers) |*w| try std.testing.expect(w.ok.load(.acquire));
+    // Exactly N*M entries, each key k mapping to k*2 — verified through the
+    // engine on the main thread (quiescent).
+    const size = try ctx.evaluate("m.size");
+    try std.testing.expectEqual(@as(f64, nthreads * per), size.asNum());
+    const allok = try ctx.evaluate(
+        \\(function(){
+        \\  for (var k = 0; k < 1000; k++) { if (m.get(k) !== k * 2) return false; }
+        \\  return m.size === 1000;
+        \\})()
+    );
+    try std.testing.expect(allok.isBoolean() and allok.asBool());
+}
+
 test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a shared array lose nothing" {
     // Beyond disjoint work: N threads mutate the *same* object in parallel,
     // contending the per-structure lock. Each appends a distinct block of
