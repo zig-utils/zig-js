@@ -10555,7 +10555,7 @@ fn finallyReactionFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const td = try self.arena.create(FinallyData);
     td.* = .{ .on_finally = Value.undef(), .captured = incoming, .is_catch = d.is_catch };
     thunk.* = .{ .native = finallyThunkFn, .private_data = @ptrCast(td) };
-    try installNativeProps(self.arena, self.root_shape, thunk, "", 1);
+    try installNativeProps(self.arena, self.root_shape, thunk, "", 0);
     return self.callMethod(wrapped, "then", &.{Value.obj(thunk)});
 }
 
@@ -10992,8 +10992,9 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         // Invoke(nextPromise, "then", «resolveElement, rejectElement»): for a
         // native promise this is the native `then`; for a thenable it runs its
         // own `then` (which may settle synchronously).
+        const fulfill_element = if (kind == .any) cap.resolve else Value.obj(f);
         const reject_element = if (kind == .all) cap.reject else Value.obj(r);
-        _ = self.callMethod(next, "then", &.{ Value.obj(f), reject_element }) catch |err| return closeAndReject(self, cap, iter, err);
+        _ = self.callMethod(next, "then", &.{ fulfill_element, reject_element }) catch |err| return closeAndReject(self, cap, iter, err);
         index += 1;
     }
     combine.remaining -= 1; // the loop's own count
@@ -21396,7 +21397,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     const object_proto = try gc_mod.allocObj(a);
     object_proto.* = .{};
     try setConstructor(a, root_shape, object_proto, object_ns);
-    const early_ctors = [_][]const u8{ "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Boolean" };
+    const early_ctors = [_][]const u8{ "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Boolean", "Promise" };
     for (early_ctors) |ctor_name| {
         if (env.get(ctor_name)) |cv| if (cv.isObject()) {
             if (cv.asObj().getOwn("prototype")) |pv| if (pv.isObject() and pv.asObj().proto == null) {
