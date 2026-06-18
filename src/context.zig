@@ -5675,6 +5675,61 @@ test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a sha
     try std.testing.expectEqual(n * (n - 1) / 2, sum); // sum_{0..N*M-1}
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): contended parallel property adds + shape growth on a shared object" {
+    // The strongest contended case: N threads add distinct *named* properties to
+    // the *same* object in parallel — contending `property_lock` AND growing the
+    // shared object's shape chain (each add is a `Shape.transition`, serialized +
+    // converged under `transition_lock`, allocating through the thread-safe
+    // arena). After join the object must carry all N*M properties with correct
+    // values — no slot/shape update lost or torn. TSan-clean.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    const sh0 = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(sh0);
+    const sa0 = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa0);
+
+    const shared = try gc_mod.allocObj(ctx.arena());
+    shared.* = .{};
+
+    const nthreads = 4;
+    const per = 500;
+    const Worker = struct {
+        ctx: *Context,
+        obj: *value.Object,
+        base: usize,
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            var buf: [24]u8 = undefined;
+            var i: usize = 0;
+            while (i < per) : (i += 1) {
+                const key = std.fmt.bufPrint(&buf, "k{d}", .{s.base + i}) catch return;
+                s.obj.setOwn(a, s.ctx.root_shape, key, Value.num(@floatFromInt(s.base + i))) catch return;
+            }
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers, 0..) |*w, t| w.* = .{ .ctx = ctx, .obj = shared, .base = t * per };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+
+    // Every one of the N*M distinct properties is present with the right value.
+    var buf: [24]u8 = undefined;
+    var k: usize = 0;
+    while (k < nthreads * per) : (k += 1) {
+        const key = try std.fmt.bufPrint(&buf, "k{d}", .{k});
+        const got = shared.getOwn(key) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(f64, @floatFromInt(k)), got.asNum());
+    }
+}
+
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
     // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
     // safepoints (collectMidScript), a long-lived structure that keeps growing
