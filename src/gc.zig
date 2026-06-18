@@ -524,6 +524,18 @@ pub const Binding = struct {
     }
 
     pub fn trace(cell: *anyopaque, kind: Kind, v: anytype) void {
+        // `generator` and `iter_helper` have mutable storage that is too
+        // entangled to read safely while the mutator runs (a running generator's
+        // `exec` is the live VM stack; an iterator helper's `inner`/`padding`
+        // update around JS callbacks and `inner` is a 16-byte `?Value`). Under a
+        // concurrent mark, defer their tracing to the world-stopped finish (the
+        // cell is already marked, so it survives; its edges are found at finish).
+        // Object/Environment/Promise are synchronized for concurrent tracing
+        // directly (per-structure locks / atomic slots), so they trace inline.
+        if (v.concurrent() and (kind == .generator or kind == .iter_helper)) {
+            v.deferToFinish(cell);
+            return;
+        }
         switch (kind) {
             .object => traceObject(@ptrCast(@alignCast(cell)), v),
             .environment => traceEnv(@ptrCast(@alignCast(cell)), v),

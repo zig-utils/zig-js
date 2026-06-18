@@ -5255,6 +5255,41 @@ test "enable_gc concurrent (M3): the production driver marks on a thread while J
     try std.testing.expectEqual(@as(f64, 4000), r.asNum());
 }
 
+test "enable_gc concurrent (M3): generators and iterator helpers are safe under concurrent marking" {
+    // The deferred-trace path: a *running* generator's `exec` is the live VM
+    // stack and an iterator helper's fields update around JS callbacks, so the
+    // marker can't read them mid-cycle — `gc.zig` defers tracing those cell kinds
+    // to the world-stopped finish (the cell is still marked, so it survives; its
+    // edges are found when the mutator is quiescent). This workload runs many
+    // generators and Iterator-helper chains while the concurrent marker traces,
+    // proving the deferral keeps their reachable state alive and is race-free.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .concurrent_gc = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\function* range(n) { for (let i = 0; i < n; i++) yield i; }
+        \\let total = 0;
+        \\for (let r = 0; r < 400; r++) {
+        \\  // A suspended-and-resumed generator (its exec is live during resume).
+        \\  let g = range(20), s = 0;
+        \\  for (const x of g) s += x;
+        \\  // An iterator-helper chain (map/filter/take — inner state updated
+        \\  // around the callbacks the marker must not race).
+        \\  const h = range(50).map(x => x * 2).filter(x => x % 3 === 0).take(5);
+        \\  for (const y of h) s += y;
+        \\  total += s;
+        \\}
+        \\total;
+    );
+    // Per round r: sum_{i=0..19} i = 190; helper picks first 5 of {0,6,12,18,...}
+    // = 0+6+12+18+24 = 60. So s = 250 per round, × 400 = 100000.
+    try std.testing.expectEqual(@as(f64, 100000), result.asNum());
+    try std.testing.expect(ctx.gc.?.collections > 2); // concurrent cycles ran mid-workload
+    try std.testing.expect(ctx.gc_marker == null);
+    try std.testing.expect(!ctx.gc.?.concurrent);
+}
+
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
     // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
     // safepoints (collectMidScript), a long-lived structure that keeps growing
