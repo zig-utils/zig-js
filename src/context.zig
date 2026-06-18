@@ -343,6 +343,11 @@ pub const Context = struct {
             self.gc_binding = bind;
             // Single-mutator only for now: concurrent marking + no peer mutators.
             self.gc_concurrent = options.concurrent_gc and !options.enable_threads;
+            // Turn on Environment binding locks process-wide: needed only when the
+            // marker runs concurrently (concurrent_gc) or mutators run in parallel
+            // (parallel_gc). The default engine leaves them no-ops (a relaxed load).
+            if (options.concurrent_gc or options.parallel_gc)
+                interp.Environment.binding_locks_enabled.store(true, .release);
         }
         // Route all cell allocation (the global object + TDZ sentinel,
         // installGlobals, and the mirror loop below) through the GC when
@@ -5727,6 +5732,81 @@ test "parallel_gc (M3 GIL-removal bring-up): contended parallel property adds + 
         const key = try std.fmt.bufPrint(&buf, "k{d}", .{k});
         const got = shared.getOwn(key) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(f64, @floatFromInt(k)), got.asNum());
+    }
+}
+
+test "parallel_gc (M3 GIL-removal bring-up): concurrent reader + writer on a shared global env is race-free" {
+    // The reader-vs-writer case: one thread defines bindings on the shared global
+    // env (`put` → `binding_lock`, rehashing the table) while another thread
+    // repeatedly reads them (`get`). Now that `get` reads each scope's binding
+    // tables under the same `binding_lock` the writer takes, the read can't tear
+    // against, or read a freed table from, a concurrent rehash. The reader sees
+    // each binding as either absent or its correct value — never garbage —
+    // and the run is TSan-clean.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    const sh0 = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(sh0);
+    const sa0 = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa0);
+
+    const n = 1000;
+    const Shared = struct {
+        ctx: *Context,
+        done: std.atomic.Value(bool) = .init(false),
+        bad: std.atomic.Value(bool) = .init(false), // set if a read ever sees a wrong value
+
+        fn writer(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            var buf: [24]u8 = undefined;
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const name = std.fmt.bufPrint(&buf, "g{d}", .{i}) catch break;
+                s.ctx.env.put(name, Value.num(@floatFromInt(i))) catch break;
+            }
+            s.done.store(true, .release);
+        }
+        fn reader(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            var buf: [24]u8 = undefined;
+            // Keep reading until the writer is done (and one full pass after).
+            while (true) {
+                const fin = s.done.load(.acquire);
+                var i: usize = 0;
+                while (i < n) : (i += 1) {
+                    const name = std.fmt.bufPrint(&buf, "g{d}", .{i}) catch break;
+                    if (s.ctx.env.get(name)) |v| {
+                        // Present → must be the exact value the writer stored.
+                        if (v.asNum() != @as(f64, @floatFromInt(i))) s.bad.store(true, .release);
+                    }
+                }
+                if (fin) break;
+                std.atomic.spinLoopHint();
+            }
+        }
+    };
+    var shared = Shared{ .ctx = ctx };
+    const wt = try std.Thread.spawn(.{}, Shared.writer, .{&shared});
+    const rt = try std.Thread.spawn(.{}, Shared.reader, .{&shared});
+    wt.join();
+    rt.join();
+
+    try std.testing.expect(!shared.bad.load(.acquire)); // no torn/garbage read
+    // After both finish, every binding is present and correct.
+    var buf: [24]u8 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const name = try std.fmt.bufPrint(&buf, "g{d}", .{i});
+        const v = ctx.env.get(name) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(f64, @floatFromInt(i)), v.asNum());
     }
 }
 

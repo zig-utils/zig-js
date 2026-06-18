@@ -174,13 +174,26 @@ pub const Environment = struct {
     /// concurrently (a single atomic CAS, mirroring the Object element locks).
     binding_lock: std.atomic.Mutex = .unlocked,
 
+    /// Binding locks are only needed when a context runs the GC marker
+    /// concurrently (`concurrent_gc`) or multiple mutators in parallel
+    /// (`parallel_gc`). The default engine is GIL-serialized / single-threaded,
+    /// where they would be pure overhead on the hottest paths (`get` on every
+    /// variable read, `put` on every binding). So gate every `binding_lock`
+    /// acquisition on this process-global flag — set once when such a context is
+    /// created (before any thread runs), so a lock/unlock pair always observes
+    /// the same value. Off → `lockBindings`/`unlockBindings` are a single relaxed
+    /// load and return (no CAS), keeping the default path fast.
+    pub var binding_locks_enabled: std.atomic.Value(bool) = .init(false);
+
     pub fn lockBindings(self: *Environment) void {
+        if (!binding_locks_enabled.load(.acquire)) return;
         var spins: usize = 0;
         while (!self.binding_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
     }
     pub fn unlockBindings(self: *Environment) void {
+        if (!binding_locks_enabled.load(.acquire)) return;
         self.binding_lock.unlock();
     }
 
@@ -199,6 +212,8 @@ pub const Environment = struct {
     pub fn putConst(self: *Environment, name: []const u8, v: Value) EvalError!void {
         try self.put(name, v);
         const a = self.bindingAllocator();
+        self.lockBindings(); // serialize the consts table vs a concurrent isConst read
+        defer self.unlockBindings();
         const gop = try self.consts.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -207,6 +222,8 @@ pub const Environment = struct {
     pub fn putFnName(self: *Environment, name: []const u8, v: Value) EvalError!void {
         try self.put(name, v);
         const a = self.bindingAllocator();
+        self.lockBindings(); // serialize the fn_names table vs a concurrent isFnName read
+        defer self.unlockBindings();
         const gop = try self.fn_names.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -216,7 +233,13 @@ pub const Environment = struct {
     pub fn isFnName(self: *Environment, name: []const u8) bool {
         var env: ?*Environment = self;
         while (env) |e| {
-            if (e.vars.contains(name)) return e.fn_names.contains(name);
+            e.lockBindings(); // see `get`: per-env read lock vs concurrent binding writes
+            if (e.vars.contains(name)) {
+                const r = e.fn_names.contains(name);
+                e.unlockBindings();
+                return r;
+            }
+            e.unlockBindings();
             env = e.parent;
         }
         return false;
@@ -227,7 +250,13 @@ pub const Environment = struct {
     pub fn isConst(self: *Environment, name: []const u8) ?bool {
         var env: ?*Environment = self;
         while (env) |e| {
-            if (e.vars.contains(name)) return e.consts.contains(name);
+            e.lockBindings();
+            if (e.vars.contains(name)) {
+                const r = e.consts.contains(name);
+                e.unlockBindings();
+                return r;
+            }
+            e.unlockBindings();
             env = e.parent;
         }
         return null;
@@ -284,8 +313,16 @@ pub const Environment = struct {
     pub fn isAlias(self: *Environment, name: []const u8) bool {
         var env: ?*Environment = self;
         while (env) |e| {
-            if (e.aliases.contains(name)) return true;
-            if (e.vars.contains(name)) return false;
+            e.lockBindings();
+            if (e.aliases.contains(name)) {
+                e.unlockBindings();
+                return true;
+            }
+            if (e.vars.contains(name)) {
+                e.unlockBindings();
+                return false;
+            }
+            e.unlockBindings();
             env = e.parent;
         }
         return false;
@@ -296,8 +333,21 @@ pub const Environment = struct {
     pub fn get(self: *Environment, name: []const u8) ?Value {
         var env: ?*Environment = self;
         while (env) |e| {
-            if (e.aliases.get(name)) |a| return a.env.get(a.name);
-            if (e.vars.get(name)) |v| return v;
+            // Read each scope's binding tables under its own `binding_lock` so a
+            // concurrent `put`/`putAlias` rehash on a shared env (post-GIL) can't
+            // tear the read or free the table under us. Locked per-env, never
+            // nested (the alias recursion runs after unlock), so no deadlock; and
+            // `get` is never called while a `binding_lock` is held.
+            e.lockBindings();
+            if (e.aliases.get(name)) |a| {
+                e.unlockBindings();
+                return a.env.get(a.name);
+            }
+            if (e.vars.get(name)) |v| {
+                e.unlockBindings();
+                return v;
+            }
+            e.unlockBindings();
             env = e.parent;
         }
         return null;
