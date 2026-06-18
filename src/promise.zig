@@ -296,8 +296,10 @@ pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { r
     data.* = .{ .promise = p };
     const res = try gc_mod.allocObj(self.arena);
     res.* = .{ .native = resolveThunk, .private_data = @ptrCast(data) };
+    try interp.installNativeProps(self.arena, self.root_shape, res, "", 1);
     const rej = try gc_mod.allocObj(self.arena);
     rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(data) };
+    try interp.installNativeProps(self.arena, self.root_shape, rej, "", 1);
     return .{ .resolve = Value.obj(res), .reject = Value.obj(rej) };
 }
 

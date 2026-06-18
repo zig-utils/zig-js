@@ -10792,8 +10792,17 @@ fn combineSettle(self: *Interpreter, c: *promise.Combine) value.HostError!void {
         for (keys, 0..) |key, i| {
             try self.setProp(result, key, c.values.elements.items[i]);
         }
-        _ = try self.callValue(c.resolve, &.{Value.obj(result)});
-    } else _ = try self.callValue(c.resolve, &.{Value.obj(c.values)});
+        try callCapabilityResolve(self, c, Value.obj(result));
+    } else try callCapabilityResolve(self, c, Value.obj(c.values));
+}
+
+fn callCapabilityResolve(self: *Interpreter, c: *promise.Combine, value_arg: Value) value.HostError!void {
+    if (self.callValue(c.resolve, &.{value_arg})) |_| return else |err| {
+        if (err != error.Throw) return err;
+        const reason = self.exception;
+        self.exception = Value.undef();
+        _ = try self.callValue(c.reject, &.{reason});
+    }
 }
 
 inline fn tracePrivateValue(v: anytype, val: Value) void {
@@ -10977,7 +10986,8 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         // Invoke(nextPromise, "then", «resolveElement, rejectElement»): for a
         // native promise this is the native `then`; for a thenable it runs its
         // own `then` (which may settle synchronously).
-        _ = self.callMethod(next, "then", &.{ Value.obj(f), Value.obj(r) }) catch |err| return closeAndReject(self, cap, iter, err);
+        const reject_element = if (kind == .all) cap.reject else Value.obj(r);
+        _ = self.callMethod(next, "then", &.{ Value.obj(f), reject_element }) catch |err| return closeAndReject(self, cap, iter, err);
         index += 1;
     }
     combine.remaining -= 1; // the loop's own count
@@ -11012,7 +11022,8 @@ fn addCombineElement(
     re.* = .{ .combine = combine, .index = index, .is_reject = true, .already = already };
     r.* = .{ .native = combineElemFn, .private_data = @ptrCast(re) };
     try installNativeProps(self.arena, self.root_shape, r, "", 1);
-    _ = self.callMethod(next, "then", &.{ Value.obj(f), Value.obj(r) }) catch |err| {
+    const reject_element = if (combine.kind == .all_keyed) cap.reject else Value.obj(r);
+    _ = self.callMethod(next, "then", &.{ Value.obj(f), reject_element }) catch |err| {
         _ = try rejectAbrupt(self, cap, err);
         return false;
     };
