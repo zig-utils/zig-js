@@ -10536,7 +10536,7 @@ fn promiseCatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 
 /// Captured state for a `finally` reaction (`then`/`catch` side) and its inner
 /// value-restoring thunk.
-const FinallyData = struct { on_finally: Value, captured: Value = Value.undef(), is_catch: bool };
+const FinallyData = struct { on_finally: Value, ctor: Value = Value.undef(), captured: Value = Value.undef(), is_catch: bool };
 
 /// `thenFinally`/`catchFinally`: run `onFinally()`, then — once its result
 /// settles — re-yield the original value (or re-throw the original reason),
@@ -10548,15 +10548,15 @@ fn finallyReactionFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const d: *FinallyData = @ptrCast(@alignCast(fnobj.private_data.?));
     const incoming = if (args.len > 0) args[0] else Value.undef();
     const result = try self.callValue(d.on_finally, &.{}); // may throw → propagates (rejects)
-    const wrapped = try promiseResolveValue(self, result);
-    const wp = promise.promiseOf(wrapped).?;
+    const wrapped = try promiseResolveForConstructor(self, d.ctor, result);
     // After onFinally's result settles, a thunk that ignores its argument and
     // reinstates the original completion.
     const thunk = try gc_mod.allocObj(self.arena);
     const td = try self.arena.create(FinallyData);
     td.* = .{ .on_finally = Value.undef(), .captured = incoming, .is_catch = d.is_catch };
     thunk.* = .{ .native = finallyThunkFn, .private_data = @ptrCast(td) };
-    return promise.then(self, wp, Value.obj(thunk), Value.undef());
+    try installNativeProps(self.arena, self.root_shape, thunk, "", 1);
+    return self.callMethod(wrapped, "then", &.{Value.obj(thunk)});
 }
 
 fn finallyThunkFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -10577,20 +10577,32 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     // `finally` requires an Object `this` (not necessarily a Promise) and ends in
     // `Invoke(this, "then", …)`, so it composes over any thenable.
     if (!this.isObject()) return self.throwError("TypeError", "Promise.prototype.finally called on a non-object");
+    const default_ctor = self.env.get("Promise") orelse Value.undef();
+    const c = try self.speciesConstructor(this, default_ctor);
     const cb = if (args.len > 0) args[0] else Value.undef();
     // A non-callable `onFinally` is used directly for both reactions (spec).
     if (!cb.isCallable()) return self.callMethod(this, "then", &.{ cb, cb });
     const onf = try gc_mod.allocObj(self.arena);
     const ond = try self.arena.create(FinallyData);
-    ond.* = .{ .on_finally = cb, .is_catch = false };
+    ond.* = .{ .on_finally = cb, .ctor = c, .is_catch = false };
     onf.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ond) };
     try installNativeProps(self.arena, self.root_shape, onf, "", 1);
     const onr = try gc_mod.allocObj(self.arena);
     const ord = try self.arena.create(FinallyData);
-    ord.* = .{ .on_finally = cb, .is_catch = true };
+    ord.* = .{ .on_finally = cb, .ctor = c, .is_catch = true };
     onr.* = .{ .native = finallyReactionFn, .private_data = @ptrCast(ord) };
     try installNativeProps(self.arena, self.root_shape, onr, "", 1);
     return self.callMethod(this, "then", &.{ Value.obj(onf), Value.obj(onr) });
+}
+
+fn promiseResolveForConstructor(self: *Interpreter, c: Value, v: Value) EvalError!Value {
+    if (promise.promiseOf(v) != null) {
+        const ctor = try self.getProperty(v, "constructor");
+        if (ctor.isObject() and c.isObject() and ctor.asObj() == c.asObj()) return v;
+    }
+    const cap = try newPromiseCapability(self, c);
+    _ = try self.callValue(cap.resolve, &.{v});
+    return cap.promise;
 }
 
 /// Internal `PromiseResolve(%Promise%, v)`: `v` itself only when it is a native
@@ -10635,13 +10647,7 @@ fn promiseResolveStaticFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (!this.isObject() or this.asObj().is_symbol or this.asObj().is_bigint)
         return self.throwError("TypeError", "Promise.resolve called on a non-object");
     const v = if (args.len > 0) args[0] else Value.undef();
-    if (promise.promiseOf(v) != null) {
-        const ctor = try self.getProperty(v, "constructor");
-        if (ctor.isObject() and ctor.asObj() == this.asObj()) return v;
-    }
-    const cap = try newPromiseCapability(self, this);
-    _ = try self.callValue(cap.resolve, &.{v});
-    return cap.promise;
+    return promiseResolveForConstructor(self, this, v);
 }
 
 /// `Promise.reject(e)` — builds `this`'s capability and rejects it with `e`.
@@ -21215,6 +21221,11 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Promise — constructor, prototype (then/catch/finally), and statics.
     const promise_proto = try gc_mod.allocObj(a);
     promise_proto.* = .{};
+    if (env.get("Object")) |ov| if (ov.isObject()) {
+        if (ov.asObj().getOwn("prototype")) |op| {
+            if (op.isObject()) promise_proto.proto = op.asObj();
+        }
+    };
     try setNative(a, root_shape, promise_proto, "then", 2, promiseThenFn);
     try setNative(a, root_shape, promise_proto, "catch", 1, promiseCatchFn);
     try setNative(a, root_shape, promise_proto, "finally", 1, promiseFinallyFn);
