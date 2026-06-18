@@ -92,8 +92,9 @@ pub const Combine = struct {
     resolve: Value,
     reject: Value,
     values: *Object,
+    keys: ?[]const []const u8 = null,
     remaining: usize,
-    kind: enum { all, all_settled, any },
+    kind: enum { all, all_settled, any, all_keyed, all_settled_keyed },
 };
 
 /// A per-element reaction's captured context: which `Combine` it belongs to and

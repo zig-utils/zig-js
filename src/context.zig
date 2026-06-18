@@ -2384,6 +2384,37 @@ test "Promise thenable job ignores throw after resolve" {
     try std.testing.expectEqualStrings("ok", v.asStr());
 }
 
+test "Promise keyed combinators preserve enumerable own keys" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var sym = Symbol("s");
+        \\var input = { first: Promise.resolve(1) };
+        \\input[sym] = Promise.resolve(2);
+        \\Object.defineProperty(input, "hidden", { value: Promise.resolve(3), enumerable: false });
+        \\var all = "pending";
+        \\Promise.allKeyed(input).then(function (result) {
+        \\  all = [
+        \\    Object.getPrototypeOf(result) === null,
+        \\    Reflect.ownKeys(result)[0] === "first",
+        \\    Reflect.ownKeys(result)[1] === sym,
+        \\    result.first === 1,
+        \\    result[sym] === 2,
+        \\    Object.prototype.hasOwnProperty.call(result, "hidden") === false
+        \\  ].join("|");
+        \\});
+        \\var settled = "pending";
+        \\Promise.allSettledKeyed({
+        \\  a: Promise.resolve("ok"),
+        \\  b: Promise.reject("bad")
+        \\}).then(function (result) {
+        \\  settled = result.a.status + ":" + result.a.value + "|" + result.b.status + ":" + result.b.reason;
+        \\});
+    );
+    try std.testing.expectEqualStrings("true|true|true|true|true|true", (try ctx.evaluate("all")).asStr());
+    try std.testing.expectEqualStrings("fulfilled:ok|rejected:bad", (try ctx.evaluate("settled")).asStr());
+}
+
 test "Array.fromAsync awaits thenable elements" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

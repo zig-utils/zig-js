@@ -10740,6 +10740,24 @@ fn combineElemFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
             }
             c.values.elements.items[e.index] = Value.obj(o);
         },
+        .all_keyed => {
+            if (e.is_reject) {
+                _ = try self.callValue(c.reject, &.{val}); // first rejection wins
+                return Value.undef();
+            }
+            c.values.elements.items[e.index] = val;
+        },
+        .all_settled_keyed => {
+            const o = (try self.newObject()).asObj();
+            if (e.is_reject) {
+                try self.setProp(o, "status", Value.str("rejected"));
+                try self.setProp(o, "reason", val);
+            } else {
+                try self.setProp(o, "status", Value.str("fulfilled"));
+                try self.setProp(o, "value", val);
+            }
+            c.values.elements.items[e.index] = Value.obj(o);
+        },
         .any => {
             if (!e.is_reject) {
                 _ = try self.callValue(c.resolve, &.{val}); // first fulfillment wins
@@ -10760,6 +10778,13 @@ fn combineSettle(self: *Interpreter, c: *promise.Combine) value.HostError!void {
     if (c.kind == .any) {
         const agg = try self.makeErrorWithArgs("AggregateError", &.{Value.obj(c.values)});
         _ = try self.callValue(c.reject, &.{agg});
+    } else if (c.keys) |keys| {
+        const result = (try self.newObject()).asObj();
+        result.proto = null;
+        for (keys, 0..) |key, i| {
+            try self.setProp(result, key, c.values.elements.items[i]);
+        }
+        _ = try self.callValue(c.resolve, &.{Value.obj(result)});
     } else _ = try self.callValue(c.resolve, &.{Value.obj(c.values)});
 }
 
@@ -10952,6 +10977,69 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
     return cap.promise;
 }
 
+fn addCombineElement(
+    self: *Interpreter,
+    cap: Capability,
+    combine: *promise.Combine,
+    promise_resolve: Value,
+    c: Value,
+    next_value: Value,
+    index: usize,
+) value.HostError!bool {
+    try combine.values.appendElement(self.arena, Value.undef());
+    combine.remaining += 1;
+    const next = self.callValueWithThis(promise_resolve, &.{next_value}, c) catch |err| {
+        _ = try rejectAbrupt(self, cap, err);
+        return false;
+    };
+    const already = try self.arena.create(bool);
+    already.* = false;
+    const f = try gc_mod.allocObj(self.arena);
+    const fe = try self.arena.create(promise.Elem);
+    fe.* = .{ .combine = combine, .index = index, .is_reject = false, .already = already };
+    f.* = .{ .native = combineElemFn, .private_data = @ptrCast(fe) };
+    try installNativeProps(self.arena, self.root_shape, f, "", 1);
+    const r = try gc_mod.allocObj(self.arena);
+    const re = try self.arena.create(promise.Elem);
+    re.* = .{ .combine = combine, .index = index, .is_reject = true, .already = already };
+    r.* = .{ .native = combineElemFn, .private_data = @ptrCast(re) };
+    try installNativeProps(self.arena, self.root_shape, r, "", 1);
+    _ = self.callMethod(next, "then", &.{ Value.obj(f), Value.obj(r) }) catch |err| {
+        _ = try rejectAbrupt(self, cap, err);
+        return false;
+    };
+    return true;
+}
+
+fn setupKeyedCombinator(self: *Interpreter, this: Value, promises: Value, kind: @TypeOf(@as(promise.Combine, undefined).kind)) value.HostError!Value {
+    const cap = try newPromiseCapability(self, this);
+    const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, cap, err);
+    if (!promises.isObject() or promises.asObj().is_symbol or promises.asObj().is_bigint) {
+        _ = try self.callValue(cap.reject, &.{try self.makeError("TypeError", "Promise keyed combinator argument is not an object")});
+        return cap.promise;
+    }
+    const source = promises.asObj();
+    const all_keys = self.objectOwnKeysList(source) catch |err| return rejectAbrupt(self, cap, err);
+    var kept_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    const values = (try self.newArray()).asObj();
+    const combine = try self.arena.create(promise.Combine);
+    combine.* = .{ .resolve = cap.resolve, .reject = cap.reject, .values = values, .remaining = 1, .kind = kind };
+    for (all_keys) |key| {
+        const desc = builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(source), self.keyToValue(key) }) catch |err| return rejectAbrupt(self, cap, err);
+        if (desc.isUndefined()) continue;
+        const enumerable = self.getProperty(desc, "enumerable") catch |err| return rejectAbrupt(self, cap, err);
+        if (!enumerable.toBoolean()) continue;
+        try kept_keys.append(self.arena, key);
+        const next_value = self.getProperty(promises, key) catch |err| return rejectAbrupt(self, cap, err);
+        if (!try addCombineElement(self, cap, combine, promise_resolve, this, next_value, kept_keys.items.len - 1))
+            return cap.promise;
+    }
+    combine.keys = kept_keys.items;
+    combine.remaining -= 1;
+    if (combine.remaining == 0) try combineSettle(self, combine);
+    return cap.promise;
+}
+
 /// IfAbruptRejectPromise: a thrown completion rejects the capability and returns
 /// its promise; any non-throw (host) error propagates unchanged.
 fn rejectAbrupt(self: *Interpreter, cap: Capability, err: value.HostError) value.HostError!Value {
@@ -10982,6 +11070,16 @@ fn promiseAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
 fn promiseAllSettledFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     return setupCombinator(self, this, if (args.len > 0) args[0] else Value.undef(), .all_settled);
+}
+
+fn promiseAllKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return setupKeyedCombinator(self, this, if (args.len > 0) args[0] else Value.undef(), .all_keyed);
+}
+
+fn promiseAllSettledKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return setupKeyedCombinator(self, this, if (args.len > 0) args[0] else Value.undef(), .all_settled_keyed);
 }
 
 fn promiseAnyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -21108,6 +21206,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, promise_ns, "reject", 1, promiseRejectStaticFn);
     try setNative(a, root_shape, promise_ns, "all", 1, promiseAllFn);
     try setNative(a, root_shape, promise_ns, "allSettled", 1, promiseAllSettledFn);
+    try setNative(a, root_shape, promise_ns, "allKeyed", 1, promiseAllKeyedFn);
+    try setNative(a, root_shape, promise_ns, "allSettledKeyed", 1, promiseAllSettledKeyedFn);
     try setNative(a, root_shape, promise_ns, "any", 1, promiseAnyFn);
     try setNative(a, root_shape, promise_ns, "race", 1, promiseRaceFn);
     try setNative(a, root_shape, promise_ns, "withResolvers", 0, promiseWithResolversFn);
@@ -27837,7 +27937,9 @@ fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
         try self.toStringV(args[0])
     else
         null;
-    return makeSymbolObj(self.arena, self.root_shape, desc, symbolProto(self));
+    const sym = try makeSymbolObj(self.arena, self.root_shape, desc, symbolProto(self));
+    _ = self.registerSymbol(sym.asObj());
+    return sym;
 }
 
 /// The cross-realm GlobalSymbolRegistry, kept as a hidden object on the `Symbol`
@@ -27884,6 +27986,7 @@ fn symbolForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     const reg = (try symbolRegistryLocked(self)) orelse return self.throwError("TypeError", "Symbol registry unavailable");
     if (reg.getOwn(key)) |existing| return existing;
     const sym = try makeSymbolObj(self.arena, self.root_shape, key, symbolProto(self));
+    _ = self.registerSymbol(sym.asObj());
     try sym.asObj().setOwn(self.arena, self.root_shape, "\x00forKey", Value.str(key));
     try reg.setOwn(self.arena, self.root_shape, key, sym);
     return sym;
