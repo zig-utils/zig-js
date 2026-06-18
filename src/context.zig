@@ -17,6 +17,63 @@ const stack_scan = @import("stack_scan.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
+/// A mutex-guarded wrapper over the per-context arena allocator. Shapes,
+/// interned strings, AST nodes, and Environment binding tables are all
+/// arena-allocated, and `std.heap.ArenaAllocator` is not thread-safe — so once
+/// the GIL is gone and multiple JS threads allocate at once, the arena's free
+/// list would corrupt (issue #1 blocker #1). This serializes every arena
+/// alloc/resize/remap/free behind a brief atomic spinlock. Installed only when
+/// `enable_threads` (a single-thread context keeps the raw arena, no lock); the
+/// GIL still serializes today, so this is uncontended now and the readiness for
+/// GIL removal that it provides costs nothing on the single-thread path.
+pub const LockedArena = struct {
+    inner: std.mem.Allocator,
+    lock: std.atomic.Value(u32) = .init(0),
+
+    inline fn acquire(self: *LockedArena) void {
+        while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    }
+    inline fn unlock(self: *LockedArena) void {
+        self.lock.store(0, .release);
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *LockedArena = @ptrCast(@alignCast(ctx));
+        self.acquire();
+        defer self.unlock();
+        return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
+    }
+    fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *LockedArena = @ptrCast(@alignCast(ctx));
+        self.acquire();
+        defer self.unlock();
+        return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
+    }
+    fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *LockedArena = @ptrCast(@alignCast(ctx));
+        self.acquire();
+        defer self.unlock();
+        return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
+    }
+    fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *LockedArena = @ptrCast(@alignCast(ctx));
+        self.acquire();
+        defer self.unlock();
+        self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+
+    pub fn allocator(self: *LockedArena) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+};
+
 /// An isolated engine instance — the homegrown analogue of a JSC
 /// `JSGlobalContextRef`. Owns an arena for all interpreter-lived allocations
 /// (AST, strings, objects, boxed values) and a persistent global environment
@@ -24,6 +81,10 @@ pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 pub const Context = struct {
     gpa: std.mem.Allocator,
     arena_state: *std.heap.ArenaAllocator,
+    /// Thread-safe wrapper over `arena_state` installed when `enable_threads`
+    /// (null otherwise → raw arena). Makes parallel shape/string/AST/binding
+    /// allocation safe once the GIL is gone (#1). See `LockedArena`.
+    locked_arena: ?*LockedArena = null,
     /// A Context is single-thread-affine: every mutating entry point (evaluate,
     /// evaluateModule, the C API) must run on the thread that created it. The
     /// arena, environments, shapes, and microtask queue are unsynchronized by
@@ -292,6 +353,13 @@ pub const Context = struct {
             if (d.isObject()) try d.asObj().setOwn(a, self.root_shape, "global", Value.obj(global_obj));
         }
         if (options.enable_threads) {
+            // Make arena allocation thread-safe before any spawned thread can run
+            // (shapes/strings/AST/binding tables are arena-allocated). The GIL
+            // still serializes today, so this lock is uncontended; it is the
+            // readiness for GIL removal (#1). Wraps the *raw* arena allocator.
+            const la = try gpa.create(LockedArena);
+            la.* = .{ .inner = arena_state.allocator() };
+            self.locked_arena = la;
             const g = try gpa.create(gil_mod.Gil);
             g.* = .{};
             g.park_alloc = gpa;
@@ -363,6 +431,10 @@ pub const Context = struct {
         } else {
             self.assertOwnerThread();
         }
+        if (self.locked_arena) |la| {
+            self.gpa.destroy(la);
+            self.locked_arena = null;
+        }
         self.js_threads.deinit(self.gpa);
         self.active_interpreters.deinit(self.gpa);
         self.finalization_cleanup_jobs.deinit(self.gpa);
@@ -413,6 +485,7 @@ pub const Context = struct {
     }
 
     pub fn arena(self: *Context) std.mem.Allocator {
+        if (self.locked_arena) |la| return la.allocator();
         return self.arena_state.allocator();
     }
 
@@ -5342,6 +5415,44 @@ test "enable_gc concurrent (M3): mixed-workload stress amplifier stays correct +
     try std.testing.expect(ctx.gc.?.collections > 2);
     try std.testing.expect(ctx.gc_marker == null);
     try std.testing.expect(!ctx.gc.?.concurrent);
+}
+
+test "LockedArena: concurrent allocation from many threads is race-free (GIL-removal prereq #1)" {
+    // Blocker #1 for GIL removal: shapes/strings/AST/binding tables are
+    // arena-allocated, and `ArenaAllocator` is not thread-safe. `LockedArena`
+    // serializes arena access so parallel JS threads can allocate once the GIL
+    // is gone. Hammer it directly from 8 threads (bypassing the GIL, as the
+    // post-GIL engine would) and confirm every allocation is valid and distinct.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var la = LockedArena{ .inner = arena_state.allocator() };
+    const a = la.allocator();
+
+    const threads = 8;
+    const per = 1000;
+    const Worker = struct {
+        alloc: std.mem.Allocator,
+        ok: std.atomic.Value(u32) = .init(0),
+        fn run(s: *@This()) void {
+            var i: usize = 0;
+            while (i < per) : (i += 1) {
+                // Mixed sizes + writes, like real shape/string/binding allocs.
+                const buf = s.alloc.alloc(u8, 8 + (i % 56)) catch return;
+                @memset(buf, @intCast(i & 0xff));
+                // Verify our own write survived (a torn arena would corrupt it).
+                if (buf[0] == @as(u8, @intCast(i & 0xff)) and buf[buf.len - 1] == @as(u8, @intCast(i & 0xff)))
+                    _ = s.ok.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+    var w = Worker{ .alloc = a };
+    var pool: [threads]std.Thread = undefined;
+    for (&pool) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{&w});
+    for (&pool) |*t| t.join();
+
+    // Every one of the threads*per allocations succeeded and read back intact.
+    try std.testing.expectEqual(@as(u32, threads * per), w.ok.load(.monotonic));
 }
 
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
