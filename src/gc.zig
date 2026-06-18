@@ -381,8 +381,7 @@ fn finalizeGenerator(g: *vm.Generator, a: std.mem.Allocator, live: *usize) void 
         released += 1;
     }
     if (released > 0) {
-        std.debug.assert(live.* >= released);
-        live.* -= released;
+        _ = @atomicRmw(usize, live, .Sub, released, .monotonic);
     }
     g.backing_flags = .{};
     g.backing_allocator = null;
@@ -579,8 +578,7 @@ pub const Binding = struct {
                 const o: *Object = @ptrCast(@alignCast(cell));
                 const released = finalizeObjectBacking(o, self.context.gpa);
                 if (released > 0) {
-                    std.debug.assert(self.context.gc_object_backing_stores_live >= released);
-                    self.context.gc_object_backing_stores_live -= released;
+                    _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
                 }
                 if (o.array_buffer) |ab| {
                     if (ab.shared) |storage| {
@@ -589,8 +587,7 @@ pub const Binding = struct {
                         if (sab_released) ab.shared = null;
                     } else if (ab.gc_owned and ab.local_data.len > 0) {
                         self.context.gpa.rawFree(ab.local_data, .@"8", @returnAddress());
-                        std.debug.assert(self.context.gc_array_buffer_bytes_live >= ab.local_data.len);
-                        self.context.gc_array_buffer_bytes_live -= ab.local_data.len;
+                        _ = @atomicRmw(usize, &self.context.gc_array_buffer_bytes_live, .Sub, ab.local_data.len, .monotonic);
                         ab.local_data = &.{};
                     }
                     if (ab.gc_owned) {
@@ -614,8 +611,7 @@ pub const Binding = struct {
                     p.on_fulfill = .empty;
                     p.on_reject = .empty;
                     if (count > 0) {
-                        std.debug.assert(self.context.gc_promise_reactions_live >= count);
-                        self.context.gc_promise_reactions_live -= count;
+                        _ = @atomicRmw(usize, &self.context.gc_promise_reactions_live, .Sub, count, .monotonic);
                     }
                 }
             },

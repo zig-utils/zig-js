@@ -698,7 +698,9 @@ pub const Object = struct {
         if (self.backing_allocator == null) self.backing_allocator = state.allocator;
         if (!@field(self.backing_flags, field)) {
             @field(self.backing_flags, field) = true;
-            if (state.stores_live) |live| live.* += 1;
+            // Atomic: parallel mutators (post-GIL) bump this shared accounting
+            // counter concurrently. Identical result single-threaded.
+            if (state.stores_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
         }
         return self.backing_allocator.?;
     }
@@ -708,8 +710,7 @@ pub const Object = struct {
         @field(self.backing_flags, field) = false;
         if (gc_runtime.activeObjectBacking()) |state| {
             if (state.stores_live) |live| {
-                std.debug.assert(live.* > 0);
-                live.* -= 1;
+                _ = @atomicRmw(usize, live, .Sub, 1, .monotonic);
             }
         }
     }

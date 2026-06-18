@@ -145,7 +145,7 @@ pub const Generator = struct {
         const a = self.backing_allocator orelse return fallback;
         if (!@field(self.backing_flags, field)) {
             @field(self.backing_flags, field) = true;
-            if (self.backing_stores_live) |live| live.* += 1;
+            if (self.backing_stores_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
         }
         return a;
     }

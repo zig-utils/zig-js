@@ -310,7 +310,7 @@ pub const Environment = struct {
     fn dupeBindingName(self: *Environment, name: []const u8) EvalError![]u8 {
         const copy = try self.bindingAllocator().dupe(u8, name);
         if (self.bindings_allocator != null) {
-            if (self.gc_name_bytes_live) |live| live.* += copy.len;
+            if (self.gc_name_bytes_live) |live| _ = @atomicRmw(usize, live, .Add, copy.len, .monotonic);
         }
         return copy;
     }
@@ -319,8 +319,7 @@ pub const Environment = struct {
         if (self.bindings_allocator) |a| {
             a.free(name);
             if (self.gc_name_bytes_live) |live| {
-                std.debug.assert(live.* >= name.len);
-                live.* -= name.len;
+                _ = @atomicRmw(usize, live, .Sub, name.len, .monotonic);
             }
         }
     }
@@ -7174,7 +7173,7 @@ pub const Interpreter = struct {
         if (len == 0) return &.{};
         const data = if (self.gc_backing) |a| blk: {
             const p = a.rawAlloc(len, .@"8", @returnAddress()) orelse return error.OutOfMemory;
-            if (self.gc_array_buffer_bytes_live) |live| live.* += len;
+            if (self.gc_array_buffer_bytes_live) |live| _ = @atomicRmw(usize, live, .Add, len, .monotonic);
             break :blk p[0..len];
         } else try self.arena.alignedAlloc(u8, .@"8", len);
         @memset(data, 0);
@@ -7186,8 +7185,7 @@ pub const Interpreter = struct {
         const a = self.gc_backing orelse return;
         a.rawFree(bytes, .@"8", @returnAddress());
         if (self.gc_array_buffer_bytes_live) |live| {
-            std.debug.assert(live.* >= bytes.len);
-            live.* -= bytes.len;
+            _ = @atomicRmw(usize, live, .Sub, bytes.len, .monotonic);
         }
     }
 

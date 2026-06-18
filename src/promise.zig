@@ -169,14 +169,13 @@ inline fn reactionAllocator(self: *Interpreter) std.mem.Allocator {
 
 fn noteReactionAdded(self: *Interpreter, p: *Promise) void {
     if (!p.gc_owned) return;
-    if (self.gc_promise_reactions_live) |live| live.* += 1;
+    if (self.gc_promise_reactions_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
 }
 
 fn noteReactionsRemoved(self: *Interpreter, p: *Promise, count: usize) void {
     if (!p.gc_owned or count == 0) return;
     if (self.gc_promise_reactions_live) |live| {
-        std.debug.assert(live.* >= count);
-        live.* -= count;
+        _ = @atomicRmw(usize, live, .Sub, count, .monotonic);
     }
 }
 
