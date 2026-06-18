@@ -263,7 +263,7 @@ fn reportErr(ctx: *js.Context, err: anyerror, m: anytype) void {
         } else if (ex.isString()) {
             name = "(string)";
             msg = ex.asStr();
-        } else name = @tagName(ex);
+        } else name = @tagName(ex.kind());
     }
     std.debug.print("OUTCOME: FAIL err={s} | {s}: {s}\n", .{ @errorName(err), name, msg });
 }
@@ -328,7 +328,7 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, root: []const u8, out: std.Io.File
             } else if (ex.isString()) {
                 name = "(string)";
                 msg = ex.asStr();
-            } else name = @tagName(ex);
+            } else name = @tagName(ex.kind());
         }
         emit2(out, io, buf, name, msg, path);
     }

@@ -25231,6 +25231,32 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
 }
 
 const IsoMD = struct { m: u8, d: u8 };
+
+fn regulateMonthDay(self: *Interpreter, ref_year: i64, mf: i64, df: i64, constrain: bool) EvalError!IsoMD {
+    var m = mf;
+    var d = df;
+    if (constrain) {
+        m = @max(1, @min(12, m));
+        const dim = isoDaysInMonth(ref_year, @intCast(m));
+        d = @max(1, @min(@as(i64, dim), d));
+    } else {
+        if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
+        const dim = isoDaysInMonth(ref_year, @intCast(m));
+        if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
+    }
+    return .{ .m = @intCast(m), .d = @intCast(d) };
+}
+
+fn readMonthCode(self: *Interpreter, v: Value) EvalError!u8 {
+    if (!v.isString()) return self.throwError("TypeError", "monthCode must be a string");
+    const s = v.asStr();
+    if (s.len != 3 or s[0] != 'M' or !std.ascii.isDigit(s[1]) or !std.ascii.isDigit(s[2]))
+        return self.throwError("RangeError", "bad monthCode");
+    const m = std.fmt.parseInt(u8, s[1..3], 10) catch return self.throwError("RangeError", "bad monthCode");
+    if (m < 1 or m > 12) return self.throwError("RangeError", "bad monthCode");
+    return m;
+}
+
 fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoMD {
     if (tIsTemporal(v, .plain_month_day)) {
         const t = v.asObj().temporal.?;
@@ -25240,13 +25266,20 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
         _ = try readCalendarField(self, v);
         const dv = try self.getProperty(v, "day");
         if (dv.isUndefined()) return self.throwError("TypeError", "PlainMonthDay fields require day");
-        const m = try withMonthField(self, v, 0);
-        _ = constrain;
-        if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
-        const d = try temporalIntArg(self, dv, "day");
-        const dim: f64 = @floatFromInt(isoDaysInMonth(1972, m));
-        if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
-        return .{ .m = m, .d = @intFromFloat(d) };
+        const mv = try self.getProperty(v, "month");
+        const mcv = try self.getProperty(v, "monthCode");
+        if (mv.isUndefined() and mcv.isUndefined())
+            return self.throwError("TypeError", "PlainMonthDay fields require month or monthCode");
+        var m: i64 = if (!mv.isUndefined()) @intFromFloat(try temporalIntArg(self, mv, "month")) else 0;
+        if (!mcv.isUndefined()) {
+            const mc = try readMonthCode(self, mcv);
+            if (!mv.isUndefined() and m != mc) return self.throwError("RangeError", "month and monthCode mismatch");
+            m = mc;
+        }
+        const yv = try self.getProperty(v, "year");
+        const ref_year: i64 = if (!yv.isUndefined()) @intFromFloat(try temporalIntArg(self, yv, "year")) else 1972;
+        const d: i64 = @intFromFloat(try temporalIntArg(self, dv, "day"));
+        return regulateMonthDay(self, ref_year, m, d, constrain);
     }
     if (v.isString()) {
         // Accept "MM-DD" and "--MM-DD" (annotations allowed) as well as a full
