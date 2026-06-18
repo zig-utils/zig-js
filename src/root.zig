@@ -88,6 +88,7 @@ test {
     _ = @import("strcell.zig");
     _ = @import("valuebox.zig");
     _ = @import("value_nb.zig");
+    _ = @import("root_handshake.zig");
 }
 
 test "evalNumber convenience" {
