@@ -29,7 +29,8 @@ but it is not true parallel JavaScript heap mutation.
   `main_can_block` and `max_js_threads`.
 - `Context.TestingOptions.parallel_js` is a test-only Layer-C bring-up switch,
   not a public embedder API. It currently validates the sync `Atomics.Mutex` /
-  `Lock` path with real `Thread` workers running without the context GIL.
+  `Lock` path and `Lock.asyncHold` grant delivery with real `Thread` workers
+  running without the context GIL.
 - Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`,
   `noInline`, `gc`, and the supported `$vm` compatibility hooks (`gc`,
   `edenGC`, `indexingMode`, `useThreadGIL`, `noInline`) exist for conformance

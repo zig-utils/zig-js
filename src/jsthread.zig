@@ -605,9 +605,13 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
                 }
                 break :blk @min(@as(u64, @intCast(d - now)), 5 * std.time.ns_per_ms);
             } else 5 * std.time.ns_per_ms;
+            rec.mutex.unlock(io);
             pumpTasks(self);
-            if (self.stop_flag) |sf| if (sf.load(.monotonic))
+            const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
+            rec.mutex.lockUncancelable(io);
+            if (stopped)
                 return self.throwError("Error", "worker terminated");
+            if (!rec.locked and rec.sync_generation != my_generation) break;
             waitOnLockCond(self, rec, .{ .duration = .{
                 .raw = .fromNanoseconds(tick_ns),
                 .clock = .awake,
@@ -676,12 +680,16 @@ fn unlockTokenLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value
 
 fn unlockTokenUnlock(self: *Interpreter, rec: *UnlockTokenRecord) value.HostError!bool {
     const lock = rec.lock orelse return false;
+    var job_to_enqueue: ?*HoldJob = null;
     lock.mutex.lockUncancelable(agent.engineIo());
-    defer lock.mutex.unlock(agent.engineIo());
-    if (!lock.locked or lock.holder != currentTid())
+    if (!lock.locked or lock.holder != currentTid()) {
+        lock.mutex.unlock(agent.engineIo());
         return self.throwError("TypeError", "Atomics.Mutex.UnlockToken does not own the mutex");
+    }
     rec.lock = null;
-    lockReleaseLocked(self, lock);
+    job_to_enqueue = lockReleaseLocked(lock);
+    lock.mutex.unlock(agent.engineIo());
+    if (job_to_enqueue) |job| enqueueHoldJob(self, job) catch {};
     return true;
 }
 
@@ -825,7 +833,10 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     const rec = recOf(CondRecord, this) orelse return self.throwError("TypeError", "Condition.prototype.wait called on incompatible receiver");
     const lock = recOf(LockRecord, if (args.len > 0) args[0] else Value.undef()) orelse
         return self.throwError("TypeError", "Condition.prototype.wait requires a Lock argument");
-    if (!lock.locked or lock.holder != currentTid())
+    lock.mutex.lockUncancelable(agent.engineIo());
+    const held_by_me = lock.locked and lock.holder == currentTid();
+    lock.mutex.unlock(agent.engineIo());
+    if (!held_by_me)
         return self.throwError("TypeError", "Condition.prototype.wait requires the lock to be held by the caller");
     if (!self.main_can_block)
         return self.throwError("TypeError", "Condition.prototype.wait cannot block the current thread");
@@ -1348,36 +1359,40 @@ const async_holder: u64 = std.math.maxInt(u64);
 /// (granted on this, the releasing thread), else open it and wake a parked
 /// hold.
 fn lockRelease(self: *Interpreter, rec: *LockRecord) void {
+    var job_to_enqueue: ?*HoldJob = null;
     rec.mutex.lockUncancelable(agent.engineIo());
-    defer rec.mutex.unlock(agent.engineIo());
-    lockReleaseLocked(self, rec);
+    job_to_enqueue = lockReleaseLocked(rec);
+    rec.mutex.unlock(agent.engineIo());
+    if (job_to_enqueue) |job| enqueueHoldJob(self, job) catch {};
 }
 
 fn lockReleaseIfHeldByCurrent(self: *Interpreter, rec: *LockRecord) void {
+    var job_to_enqueue: ?*HoldJob = null;
     rec.mutex.lockUncancelable(agent.engineIo());
-    defer rec.mutex.unlock(agent.engineIo());
-    if (rec.locked and rec.holder == currentTid()) lockReleaseLocked(self, rec);
+    if (rec.locked and rec.holder == currentTid()) job_to_enqueue = lockReleaseLocked(rec);
+    rec.mutex.unlock(agent.engineIo());
+    if (job_to_enqueue) |job| enqueueHoldJob(self, job) catch {};
 }
 
-fn lockReleaseLocked(self: *Interpreter, rec: *LockRecord) void {
+fn lockReleaseLocked(rec: *LockRecord) ?*HoldJob {
     if (rec.sync_waiting > 0) {
         rec.locked = false;
         rec.holder = 0;
         rec.sync_generation +%= 1;
         rec.cond.signal(agent.engineIo());
-        return;
+        return null;
     }
     if (rec.pending.items.len > 0) {
         const job = rec.pending.orderedRemove(0);
         rec.locked = false;
         rec.holder = 0;
         rec.grant_pending = false;
-        enqueueHoldJob(self, job) catch {};
-        return;
+        return job;
     }
     rec.locked = false;
     rec.holder = 0;
     rec.cond.signal(agent.engineIo());
+    return null;
 }
 
 /// Queue `job` on the realm's run-loop TASK queue (gil.tasks). Tasks are
@@ -1428,11 +1443,27 @@ fn parkPump(self: *Interpreter, g: *gil_mod.Gil, cond: *std.Io.Condition) value.
 
 fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     const outer_pp = promise.promiseOf(Value.obj(job.outer)).?;
+    var release_state: ?*ReleaseState = null;
+    var release_fn: ?*value.Object = null;
+    if (job.cb == null) {
+        const st = try self.arena.create(ReleaseState);
+        st.* = .{ .lock = job.lock };
+        const rel = try gc_mod.allocObj(self.arena);
+        rel.* = .{ .native = releaseFnNative, .private_data = st };
+        release_state = st;
+        release_fn = rel;
+    }
+    const tid = currentTid();
+    job.lock.mutex.lockUncancelable(agent.engineIo());
     if (!job.lock.locked) {
         job.lock.locked = true;
         job.lock.holder = async_holder;
     } else if (!job.lock.grant_pending or job.lock.holder != async_holder) {
-        try job.lock.pending.insert(self.arena, 0, job);
+        job.lock.pending.insert(self.arena, 0, job) catch |err| {
+            job.lock.mutex.unlock(agent.engineIo());
+            return err;
+        };
+        job.lock.mutex.unlock(agent.engineIo());
         return;
     }
     // The grant is now DELIVERED.
@@ -1441,14 +1472,19 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         // A live with-fn grant is async-held by the thread running fn (D12):
         // cond.asyncWait may consume it, but sync cond.wait still requires a
         // genuine sync hold.
-        job.lock.async_runner = currentTid();
+        job.lock.async_runner = tid;
+        job.lock.mutex.unlock(agent.engineIo());
         const out = self.callValueWithThis(cb, &.{}, Value.undef());
         // fn may itself have consumed the hold (same-thread asyncWait, I23);
         // only release when this grant still owns the lock.
-        if (job.lock.locked and job.lock.async_runner == currentTid()) {
+        var job_to_enqueue: ?*HoldJob = null;
+        job.lock.mutex.lockUncancelable(agent.engineIo());
+        if (job.lock.locked and job.lock.async_runner == tid) {
             job.lock.async_runner = 0;
-            lockRelease(self, job.lock); // implicit release, throw or not
+            job_to_enqueue = lockReleaseLocked(job.lock); // implicit release, throw or not
         }
+        job.lock.mutex.unlock(agent.engineIo());
+        if (job_to_enqueue) |next| enqueueHoldJob(self, next) catch {};
         if (out) |v| {
             try promise.resolve(self, outer_pp, v);
         } else |err| {
@@ -1460,12 +1496,9 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         return;
     }
     // no-fn arity: resolve with a once-only release() function.
-    const st = try self.arena.create(ReleaseState);
-    st.* = .{ .lock = job.lock };
-    job.lock.active_release = st;
-    const rel = try gc_mod.allocObj(self.arena);
-    rel.* = .{ .native = releaseFnNative, .private_data = st };
-    try promise.resolve(self, outer_pp, Value.obj(rel));
+    job.lock.active_release = release_state.?;
+    job.lock.mutex.unlock(agent.engineIo());
+    try promise.resolve(self, outer_pp, Value.obj(release_fn.?));
 }
 
 fn releaseFnNative(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -1474,10 +1507,19 @@ fn releaseFnNative(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const native = self.active_native orelse return Value.undef();
     const st: *ReleaseState = @ptrCast(@alignCast(native.private_data.?));
-    if (st.used) return self.throwError("Error", "Lock release function called more than once");
-    st.used = true;
-    if (st.lock.active_release == st) st.lock.active_release = null;
-    lockRelease(self, st.lock);
+    var already_used = false;
+    var job_to_enqueue: ?*HoldJob = null;
+    st.lock.mutex.lockUncancelable(agent.engineIo());
+    if (st.used) {
+        already_used = true;
+    } else {
+        st.used = true;
+        if (st.lock.active_release == st) st.lock.active_release = null;
+        job_to_enqueue = lockReleaseLocked(st.lock);
+    }
+    st.lock.mutex.unlock(agent.engineIo());
+    if (already_used) return self.throwError("Error", "Lock release function called more than once");
+    if (job_to_enqueue) |job| enqueueHoldJob(self, job) catch {};
     return Value.undef();
 }
 
@@ -1488,19 +1530,28 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     const cb = if (args.len > 0) args[0] else Value.undef();
     if (!cb.isUndefined() and !cb.isCallable())
         return self.throwError("TypeError", "Lock.prototype.asyncHold requires a callable argument when one is provided");
-    if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid()))
-        return self.throwError("Error", "Lock is not recursive");
     const outer = try promise.newPromise(self);
     const job = try self.arena.create(HoldJob);
     job.* = .{ .lock = rec, .outer = outer, .cb = if (cb.isUndefined()) null else cb };
-    if (!rec.locked) {
+    var enqueue_now = false;
+    rec.mutex.lockUncancelable(agent.engineIo());
+    if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid())) {
+        rec.mutex.unlock(agent.engineIo());
+        return self.throwError("Error", "Lock is not recursive");
+    }
+    if (!rec.locked and rec.sync_waiting == 0) {
         rec.locked = true; // the grant happens at registration (5.5a)
         rec.holder = async_holder;
         rec.grant_pending = true;
-        try enqueueHoldJob(self, job);
+        enqueue_now = true;
     } else {
-        try rec.pending.append(self.arena, job);
+        rec.pending.append(self.arena, job) catch |err| {
+            rec.mutex.unlock(agent.engineIo());
+            return err;
+        };
     }
+    rec.mutex.unlock(agent.engineIo());
+    if (enqueue_now) try enqueueHoldJob(self, job);
     return Value.obj(outer);
 }
 
@@ -1516,16 +1567,21 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     // 4.3(b) hold-state rules: an UNDELIVERED grant is not held; a delivered
     // no-fn grant is consumable from anywhere (poisoning its release()); a
     // delivered with-fn grant or sync hold is held only for its own thread.
-    if (!lock.locked or lock.grant_pending)
+    lock.mutex.lockUncancelable(agent.engineIo());
+    if (!lock.locked or lock.grant_pending) {
+        lock.mutex.unlock(agent.engineIo());
         return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
+    }
     if (lock.active_release) |st| {
         st.used = true; // consume: the original release() now throws
         lock.active_release = null;
     } else if (lock.async_runner == currentTid()) {
         lock.async_runner = 0;
     } else if (lock.holder != currentTid()) {
+        lock.mutex.unlock(agent.engineIo());
         return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
     }
+    lock.mutex.unlock(agent.engineIo());
     const outer = try promise.newPromise(self);
     const w = try self.arena.create(AsyncCondWaiter);
     w.* = .{ .lock = lock, .outer = outer };
@@ -1540,12 +1596,19 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
 fn wakeAsyncCondWaiter(self: *Interpreter, w: *AsyncCondWaiter) void {
     const job = self.arena.create(HoldJob) catch return;
     job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null };
-    if (!w.lock.locked) {
+    var enqueue_now = false;
+    w.lock.mutex.lockUncancelable(agent.engineIo());
+    if (!w.lock.locked and w.lock.sync_waiting == 0) {
         w.lock.locked = true;
         w.lock.holder = async_holder;
         w.lock.grant_pending = true;
-        enqueueHoldJob(self, job) catch {};
+        enqueue_now = true;
     } else {
-        w.lock.pending.append(self.arena, job) catch {};
+        w.lock.pending.append(self.arena, job) catch {
+            w.lock.mutex.unlock(agent.engineIo());
+            return;
+        };
     }
+    w.lock.mutex.unlock(agent.engineIo());
+    if (enqueue_now) enqueueHoldJob(self, job) catch {};
 }

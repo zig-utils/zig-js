@@ -348,6 +348,14 @@ inline fn traceReaction(r: promise.Reaction, v: anytype) void {
     markValue(v, r.reject);
 }
 
+inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
+    traceReaction(mt.reaction, v);
+    markValue(v, mt.argument);
+    markValue(v, mt.thenable);
+    markValue(v, mt.then_fn);
+    if (mt.promise) |p| v.mark(p);
+}
+
 pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     v.mark(g.env);
     for (g.exec.stack.items) |s| markValue(v, s);
@@ -422,14 +430,9 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         markValue(v, exec.acc);
     }
     if (machine.microtasks) |q| {
-        for (q.items) |mt| {
-            traceReaction(mt.reaction, v);
-            markValue(v, mt.argument);
-            markValue(v, mt.thenable);
-            markValue(v, mt.then_fn);
-            if (mt.promise) |p| v.mark(p);
-        }
+        for (q.items) |mt| traceMicrotask(mt, v);
     }
+    if (machine.current_microtask) |mt| traceMicrotask(mt, v);
     if (machine.async_waiters) |waiters| {
         for (waiters.items) |aw| markValue(v, aw.promise);
     }
@@ -490,13 +493,7 @@ pub const Binding = struct {
         v.mark(ctx.global_object);
         v.mark(ctx.tdz_marker);
         traceEnv(&ctx.env, v); // the global environment is embedded by value
-        for (ctx.microtasks.items) |mt| {
-            traceReaction(mt.reaction, v);
-            markValue(v, mt.argument);
-            markValue(v, mt.thenable);
-            markValue(v, mt.then_fn);
-            if (mt.promise) |p| v.mark(p);
-        }
+        for (ctx.microtasks.items) |mt| traceMicrotask(mt, v);
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
         for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
         for (ctx.js_threads.items) |rec| {

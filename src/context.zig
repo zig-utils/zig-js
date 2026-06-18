@@ -6510,6 +6510,45 @@ test "parallel_js (M3 GIL-removal slice): real Thread contends Atomics.Mutex wit
     try std.testing.expectEqual(@as(f64, 2000), result.asNum());
 }
 
+test "parallel_js (M3 GIL-removal slice): Lock.asyncHold grants serialize without context GIL" {
+    // Async grants touch the same LockRecord state as sync lock/unlock, but
+    // delivery happens through the realm task queue. This keeps several
+    // no-GIL JS workers registering jobs while task pumps deliver and release
+    // those jobs on whichever thread observes them.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const lock = new Lock();
+        \\const shared = { n: 0 };
+        \\const threads = [];
+        \\for (let t = 0; t < 4; t++) {
+        \\  threads.push(new Thread(() => {
+        \\    if ($vm.useThreadGIL() !== false) throw new Error("worker still holds the thread GIL");
+        \\    for (let i = 0; i < 50; i++) {
+        \\      lock.asyncHold(() => {
+        \\        const next = shared.n + 1;
+        \\        shared.n = next;
+        \\        return next;
+        \\      });
+        \\    }
+        \\    return true;
+        \\  }));
+        \\}
+        \\for (const t of threads) {
+        \\  if (t.join() !== true) throw new Error("bad worker result");
+        \\}
+        \\shared.n;
+    );
+    try std.testing.expectEqual(@as(f64, 200), result.asNum());
+}
+
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
     // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
     // safepoints (collectMidScript), a long-lived structure that keeps growing

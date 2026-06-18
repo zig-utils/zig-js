@@ -100,7 +100,8 @@ the shared-realm GIL path. The narrower
 `zig build test -Dtsan=true -Dtest-filter=parallel_js` gate covers the current
 test-only execution-path GIL-removal slice: real shared-realm `Thread` workers
 running without the context GIL while contending one production
-`Atomics.Mutex`.
+`Atomics.Mutex` and while registering/delivering `Lock.asyncHold` grants through
+the realm task queue.
 
 The runner models PR-249 command-line options with
 `Context.createWithTestingOptions` and `Context.TestingOptions`:

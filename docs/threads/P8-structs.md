@@ -29,7 +29,7 @@ Three layers, escalating in cost:
 |---|---|---|
 | Struct (fixed layout) | `Shape` transition chain (`src/shape.zig`); a struct = a shape frozen at declaration | No "sealed-at-birth, never-transitions" shape kind; would be a new object flag + a fast inline-slot read path |
 | Shared struct (shared heap) | `SharedBufferStorage` (Phase 1) is the only cross-agent heap we have — raw bytes, not object graphs | **The blocker.** Shared *objects* need a shared object heap with cross-agent lifetimes = a tracing GC. We are arena-allocated; this is exactly the Phase-7/Layer-C prerequisite. |
-| `Atomics.Mutex` | `Lock` (`src/jsthread.zig`): non-recursive, `hold(fn)` finally-release, sync acquire/release now guarded by a per-record mutex; async grants still follow the Layer-B GIL path | Implemented as the same constructor as `Lock`, plus static `lock`, `lockIfAvailable`, and `UnlockToken` methods. The sync path is the first `parallel_js` vertical slice. |
+| `Atomics.Mutex` | `Lock` (`src/jsthread.zig`): non-recursive, `hold(fn)` finally-release, sync acquire/release and `Lock.asyncHold` grant state now guarded by a per-record mutex; task delivery uses `Gil.api_lock` | Implemented as the same constructor as `Lock`, plus static `lock`, `lockIfAvailable`, and `UnlockToken` methods. The sync path and async grant-delivery path are the current `parallel_js` vertical slices. |
 | `Atomics.Condition` | `Condition` (`src/jsthread.zig`): `wait(lock)` atomic release+park+reacquire, `notify`/`notifyAll`, cross-kind FIFO queue, still GIL-coupled | Implemented as the same constructor as `Condition`, plus static token-based `wait`, `waitFor`, and `notify` methods. |
 
 ## The decision
@@ -42,9 +42,10 @@ threaded contexts; shared structs remain deferred. Rationale:
   through the proposal's constructor names and token-oriented static methods.
   This gives embedders the proposal vocabulary without re-keying waiter state
   or committing to shared struct storage before the heap can support it.
-  The mutex sync path has begun its Layer-C migration: `LockRecord` has its own
-  mutex and the focused `parallel_js` real-`Thread` contention test is
-  TSan-clean. `Condition` and async lock grants remain on the Layer-B path.
+  The mutex path has begun its Layer-C migration: `LockRecord` has its own mutex,
+  sync acquire/release and async grant delivery use it, and the focused
+  `parallel_js` real-`Thread` contention tests are TSan-clean. `Condition`
+  waiter queues remain on the Layer-B path.
 - The **shared-struct** half is blocked on the same thing as Phase 7: a real
   tracing GC with safepoints. Under the current arena model there is no way to
   express an object whose lifetime spans agents. `SharedBufferStorage` carries

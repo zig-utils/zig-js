@@ -466,6 +466,9 @@ pub const Interpreter = struct {
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
     microtasks: ?*std.ArrayListUnmanaged(promise.Microtask) = null,
+    /// Microtask currently popped from the queue and executing. It is no longer
+    /// present in `microtasks`, so GC must trace it separately.
+    current_microtask: ?promise.Microtask = null,
     /// The realm's SharedArrayBuffer storage references (Context-owned, like
     /// `microtasks`; agent realms own their own). Every SAB wrapper created in
     /// this realm tracks one reference here so the realm's teardown releases
@@ -3661,6 +3664,8 @@ pub const Interpreter = struct {
         const q = self.microtasks orelse return;
         while (q.items.len > 0) {
             const job = q.orderedRemove(0);
+            self.current_microtask = job;
+            defer self.current_microtask = null;
             try promise.runJob(self, job);
             self.serviceRequestedGcCheckpoint();
         }
@@ -3744,7 +3749,10 @@ pub const Interpreter = struct {
                 jsthread.pollPropAsync(self);
                 self.drainMicrotasks() catch {};
                 const q_empty = if (self.microtasks) |q| q.items.len == 0 else true;
-                if (q_empty and g.tasks.items.len == 0) {
+                g.lockApi();
+                const tasks_empty = g.tasks.items.len == 0;
+                g.unlockApi();
+                if (q_empty and tasks_empty) {
                     if (jsthread.nextPropAsyncDeadline(self)) |deadline| {
                         const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
                         if (deadline > now) {
