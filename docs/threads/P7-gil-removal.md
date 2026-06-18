@@ -164,6 +164,21 @@ per-thread before threads stop holding the GIL):
    evaluate-top `collectGarbage` (stop-the-world; parallel evaluates collide —
    gate behind the safepoint protocol or a collection lock), `gc_execs`
    registration, and the realm microtask/finalization drains.
+   *Parallel mid-script collection — attempted, deferred (deadlock to debug).* A
+   stop-the-world safepoint barrier (a thread elects itself collector via CAS,
+   waits for `par_active == 1` as peers park at their GC safepoints, runs a STW
+   collection rooting parked threads via `active_interpreters`/`gc_execs`, then
+   resumes — with a bounded-spin abort valve) was prototyped and *deadlocked*: a
+   sample showed peers stuck in `Object.lockProperties` (a `property_lock`
+   appearing held-but-unowned) while the collector spun for `par_active == 1`, so
+   the safety valve never triggered (the hang was the held lock, not the spin).
+   Root cause not yet pinned — likely a per-structure lock observable as held
+   across the barrier (the VM property IC, or a lock-order interaction with the
+   barrier). Reverted; **parallel_gc keeps quiescent-only collection** (the
+   `h.parallel` guard skips mid-script collection — safe and validated). Pinning
+   this deadlock is the prerequisite for mid-script parallel collection; the
+   parked-thread rooting machinery (`active_interpreters` + `gc_execs`) is already
+   in place.
 2. **Thread-API shared state in `Gil`** (`tasks`, `prop_waiters`, `prop_async`,
    `next_thread_id`, `park_records`) — currently "mutated/read only under the
    GIL." The spawn critical section (live-cap check + id allocation +
