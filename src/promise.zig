@@ -248,22 +248,15 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
 /// adopt its state instead (resolution).
 pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
     if (!isPending(p)) return;
-    // Thenable assimilation: resolving with a promise/thenable chains to it.
-    if (promiseOf(v)) |inner| {
-        if (inner == p) {
-            const err = try self.makeError("TypeError", "Cannot resolve promise with itself");
-            try reject(self, p, err);
-            return;
-        }
-        // `await`/`then` on the inner: when it settles, settle `p`.
-        const nr = try nativeResolveReject(self, p);
-        try performThen(self, inner, Value.undef(), Value.undef(), nr.resolve, nr.reject);
+    if (promiseOf(v)) |inner| if (inner == p) {
+        const err = try self.makeError("TypeError", "Cannot resolve promise with itself");
+        try reject(self, p, err);
         return;
-    }
-    // Arbitrary thenable: adopt its state by calling `v.then(resolve, reject)`
-    // bound to this promise (a throw rejects). The pending-state guard makes any
-    // settle beyond the first a no-op.
-    if (v.isObject() and !v.asObj().is_array) {
+    };
+    // Thenable assimilation: `then` is read synchronously from every object
+    // resolution (including native promises and arrays), then invoked from the
+    // queued PromiseResolveThenableJob.
+    if (v.isObject()) {
         const then_fn = self.getProperty(v, "then") catch |err| {
             if (err == error.Throw) {
                 const reason = self.exception;
