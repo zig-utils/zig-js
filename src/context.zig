@@ -5623,6 +5623,58 @@ test "parallel_gc (M3 GIL-removal bring-up): parse+compile+VM-execute disjoint s
     for (&workers) |*w| try std.testing.expectEqual(@as(i64, 1999000), w.result.load(.monotonic));
 }
 
+test "parallel_gc (M3 GIL-removal bring-up): contended parallel appends to a shared array lose nothing" {
+    // Beyond disjoint work: N threads mutate the *same* object in parallel,
+    // contending the per-structure lock. Each appends a distinct block of
+    // numbers to one shared array (`appendElement` → `elements_lock` + insertion
+    // barrier + thread-safe object backing). If the lock correctly serializes the
+    // mutators, the array ends with exactly N*M elements and their sum is exact —
+    // no append is lost or torn. TSan-clean proves the contended path is race-free.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    const sh0 = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(sh0);
+    const sa0 = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa0);
+
+    const shared = try gc_mod.allocObj(ctx.arena());
+    shared.* = .{ .is_array = true };
+
+    const nthreads = 4;
+    const per = 1000;
+    const Worker = struct {
+        ctx: *Context,
+        arr: *value.Object,
+        base: usize,
+        fn run(s: *@This()) void {
+            const sh = gc_mod.setActiveHeap(s.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(sh);
+            const sa = strcell.setActiveArena(s.ctx.arena());
+            defer _ = strcell.setActiveArena(sa);
+            const a = s.ctx.arena();
+            var i: usize = 0;
+            while (i < per) : (i += 1) {
+                s.arr.appendElement(a, Value.num(@floatFromInt(s.base + i))) catch return;
+            }
+        }
+    };
+    var workers: [nthreads]Worker = undefined;
+    for (&workers, 0..) |*w, t| w.* = .{ .ctx = ctx, .arr = shared, .base = t * per };
+    var pool: [nthreads]std.Thread = undefined;
+    for (&pool, 0..) |*th, t| th.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[t]});
+    for (&pool) |*th| th.join();
+
+    // No append lost: exactly N*M elements, and the multiset of values is
+    // {0 .. N*M-1} (checked by exact sum, since each thread wrote a distinct block).
+    try std.testing.expectEqual(@as(usize, nthreads * per), shared.elementsLen());
+    var sum: f64 = 0;
+    for (shared.elements.items) |el| sum += el.asNum();
+    const n: f64 = @floatFromInt(nthreads * per);
+    try std.testing.expectEqual(n * (n - 1) / 2, sum); // sum_{0..N*M-1}
+}
+
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
     // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
     // safepoints (collectMidScript), a long-lived structure that keeps growing
