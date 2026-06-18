@@ -249,7 +249,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         if ((vm.steps & 1023) == 0) {
             if (vm.stop_flag) |sf| if (sf.load(.monotonic))
                 return vm.throwError("Error", "worker terminated");
-            if (vm.gil) |g| g.yieldIfContended();
+            if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
             // Mid-script GC: flush the live accumulator/ip into `exec` so the
             // precise tracer (which roots `exec.stack`/`exec.acc`) sees the
             // current operand state, then run a guarded collection. No-op when

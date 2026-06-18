@@ -142,6 +142,9 @@ pub const Context = struct {
     /// Host policy for whether this shared VM may block in synchronous waits.
     /// Used by PR-249 and test262 `[[CanBlock]]` coverage.
     main_can_block: bool = true,
+    /// Test-only Layer-C bring-up: run shared-realm `Thread` JS without holding
+    /// the context GIL. This is deliberately excluded from public Options.
+    parallel_js: bool = false,
     /// Optional cap on live shared-realm `Thread`s. Null means only the
     /// intrinsic id-space limit applies.
     max_js_threads: ?u32 = null,
@@ -252,6 +255,11 @@ pub const Context = struct {
         main_can_block: bool = true,
         /// Test cap for live shared-realm `Thread` objects.
         max_js_threads: ?u32 = null,
+        /// Experimental GIL-removal vertical slice (test-only): requires
+        /// `enable_threads`, `enable_gc`, and `parallel_gc`. JS execution does
+        /// not hold the context GIL; legacy blocking/result bookkeeping still
+        /// takes it briefly.
+        parallel_js: bool = false,
     };
 
     /// The engine's precise-GC heap type and its root-tracing binding (issue #1
@@ -312,7 +320,10 @@ pub const Context = struct {
             .tdz_marker = undefined, // set below
             .main_can_block = options.main_can_block,
             .max_js_threads = options.max_js_threads,
+            .parallel_js = options.parallel_js,
         };
+        if (options.parallel_js and !(options.enable_threads and options.enable_gc and options.parallel_gc))
+            return error.InvalidThreadTestingOptions;
         if (options.enable_gc) {
             // GC cells are gpa-backed (the collector frees them individually);
             // the binding wraps this Context, whose roots it traces.
@@ -438,6 +449,7 @@ pub const Context = struct {
             .finalization_cleanup_jobs = &self.finalization_cleanup_jobs,
             .stop_flag = self.stop_flag orelse &self.teardown_stop,
             .main_can_block = self.main_can_block,
+            .use_thread_gil = self.gil != null and !self.parallel_js,
             .gil = self.gil,
             .gc = self.gc,
             .gc_backing = if (self.gc != null) self.gpa else null,
@@ -522,6 +534,7 @@ pub const Context = struct {
     pub fn assertOwnerThread(self: *const Context) void {
         if (comptime builtin.mode == .Debug) {
             if (self.gil) |g| {
+                if (self.parallel_js) return;
                 if (!g.holds()) std.debug.panic(
                     "Context (enable_threads) used without holding the GIL (docs/threads/P6-thread-api.md)",
                     .{},
@@ -722,8 +735,8 @@ pub const Context = struct {
     /// constructs the compiler doesn't lower yet fall back to the tree-walker,
     /// so behavior is identical either way — the VM just handles the hot subset.
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
-        if (self.gil) |g| g.acquire();
-        defer if (self.gil) |g| g.release();
+        if (self.gil) |g| if (!self.parallel_js) g.acquire();
+        defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -785,6 +798,8 @@ pub const Context = struct {
         // thread finishes (each drains its own queue and settles its
         // asyncJoins), then drains whatever those settlements queued here.
         if (self.gil) |g| {
+            if (self.parallel_js) g.acquire();
+            defer if (self.parallel_js) g.release();
             if (top_level_failed) self.teardown_stop.store(true, .release);
             var i: usize = 0;
             while (i < self.js_threads.items.len) : (i += 1) {
@@ -859,8 +874,8 @@ pub const Context = struct {
     /// completion is the entry module having run; an uncaught throw leaves the
     /// reason in `self.exception` and returns `error.Throw`.
     pub fn evaluateModule(self: *Context, entry_path: []const u8, entry_source: []const u8, host: ModuleHost) RunError!value.Value {
-        if (self.gil) |g| g.acquire();
-        defer if (self.gil) |g| g.release();
+        if (self.gil) |g| if (!self.parallel_js) g.acquire();
+        defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
         const gc_saved = gc_mod.setActiveHeap(self.gc);
         defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -5652,7 +5667,8 @@ test "parallel_gc (M3 GIL-removal bring-up): parse+compile+VM-execute disjoint s
             defer s.ctx.popActiveInterpreter(&machine);
             const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
                 vm.run(&machine, chunk, null)
-            else |_| machine.eval(prog);
+            else |_|
+                machine.eval(prog);
             if (outcome) |val| {
                 if (val.isNumber()) s.result.store(@intFromFloat(val.asNum()), .monotonic);
             } else |_| {}
@@ -5792,7 +5808,8 @@ test "parallel_gc (M3 GIL-removal bring-up): rich builtin-heavy workload in para
             defer s.ctx.popActiveInterpreter(&machine);
             const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
                 vm.run(&machine, chunk, null)
-            else |_| machine.eval(prog);
+            else |_|
+                machine.eval(prog);
             if (outcome) |val| {
                 if (val.isNumber()) s.result.store(@intFromFloat(val.asNum()), .monotonic);
             } else |_| {}
@@ -5919,7 +5936,8 @@ test "parallel_gc (M3 GIL-removal bring-up): concurrent first .prototype access 
             while (!s.go.load(.acquire)) std.atomic.spinLoopHint();
             const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
                 vm.run(&machine, chunk, null)
-            else |_| machine.eval(prog);
+            else |_|
+                machine.eval(prog);
             if (outcome) |val| {
                 if (val.isNumber()) s.result.store(@intFromFloat(val.asNum()), .monotonic);
             } else |_| {}
@@ -5977,7 +5995,8 @@ test "parallel_gc (M3 GIL-removal bring-up): contended Map.set on a shared Map v
             defer s.ctx.popActiveInterpreter(&machine);
             const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
                 vm.run(&machine, chunk, null)
-            else |_| machine.eval(prog);
+            else |_|
+                machine.eval(prog);
             if (outcome) |val| s.ok.store(val.isBoolean() and val.asBool(), .release) else |_| {}
         }
     };
@@ -6054,7 +6073,8 @@ test "parallel_gc (M3 GIL-removal bring-up): shared closure upvalue mutated in p
             defer s.ctx.popActiveInterpreter(&machine);
             const outcome: interp.EvalError!value.Value = if (compiler.Compiler.compileProgram(a, prog)) |chunk|
                 vm.run(&machine, chunk, null)
-            else |_| machine.eval(prog);
+            else |_|
+                machine.eval(prog);
             if (outcome) |val| {
                 if (val.isNumber() and val.asNum() < 0) s.bad.store(true, .release);
             } else |_| s.bad.store(true, .release);
@@ -6416,6 +6436,47 @@ test "parallel_gc (M3 GIL-removal bring-up): GlobalSymbolRegistry get-or-create 
             try std.testing.expectEqual(canonical, got); // single shared identity
         }
     }
+}
+
+test "parallel_js (M3 GIL-removal slice): real Thread contends Atomics.Mutex with no context GIL" {
+    // Vertical slice of the execution-path GIL drop: the public shared-realm
+    // Thread entrypoint runs JS without holding the context GIL, and multiple
+    // JS threads contend the production Atomics.Mutex/Lock record. The mutex's
+    // own std.Io.Mutex+Condition must serialize the critical section; the shared
+    // object update is ordinary JS, so without the mutex exactness is not
+    // guaranteed. TSan-clean here proves the production sync path no longer
+    // depends on the GIL for mutual exclusion.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\if ($vm.useThreadGIL() !== false) throw new Error("parallel_js did not drop the thread GIL");
+        \\const mutex = new Atomics.Mutex();
+        \\const shared = { n: 0 };
+        \\const threads = [];
+        \\for (let t = 0; t < 4; t++) {
+        \\  threads.push(new Thread(() => {
+        \\    if ($vm.useThreadGIL() !== false) throw new Error("worker still holds the thread GIL");
+        \\    for (let i = 0; i < 500; i++) {
+        \\      const token = Atomics.Mutex.lock(mutex);
+        \\      shared.n = shared.n + 1;
+        \\      token.unlock();
+        \\    }
+        \\    return true;
+        \\  }));
+        \\}
+        \\for (const t of threads) {
+        \\  if (t.join() !== true) throw new Error("bad worker result");
+        \\}
+        \\shared.n;
+    );
+    try std.testing.expectEqual(@as(f64, 2000), result.asNum());
 }
 
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {

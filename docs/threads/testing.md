@@ -10,6 +10,7 @@ zig build test
 zig build threads-test
 zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
 zig build test -Dtsan=true
+zig build test -Dtsan=true -Dtest-filter=parallel_js
 bun run docs:build
 ```
 
@@ -95,7 +96,11 @@ covers:
 
 `zig build test -Dtsan=true` builds the unit suite under ThreadSanitizer. This
 is the concurrency gate for shared-buffer storage, agent waiters, workers, and
-the shared-realm GIL path.
+the shared-realm GIL path. The narrower
+`zig build test -Dtsan=true -Dtest-filter=parallel_js` gate covers the current
+test-only execution-path GIL-removal slice: real shared-realm `Thread` workers
+running without the context GIL while contending one production
+`Atomics.Mutex`.
 
 The runner models PR-249 command-line options with
 `Context.createWithTestingOptions` and `Context.TestingOptions`:
@@ -115,7 +120,7 @@ environment cell and engine-owned Promise/VM native closure side records.
 Shared-realm contexts still skip collection while any spawned JS thread is
 actively running or parked inside native code. `$vm.gc` and `$vm.edenGC` are
 aliases for that same shell request, `$vm.useThreadGIL()` reports whether the
-current context is using the shared-realm GIL, `$vm.indexingMode()` reports the
+current interpreter is using the shared-realm GIL, `$vm.indexingMode()` reports the
 engine's array/typed-array mode witness, and `$vm.ensureArrayStorage(array)`
 forces the array-mode witness used by the PR-249 shared-ArrayStorage stress
 file. Other JSC `$vm` hooks, such as `sharedHeapTest`, dictionary conversion,

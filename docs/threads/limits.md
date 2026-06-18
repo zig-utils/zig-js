@@ -27,6 +27,9 @@ but it is not true parallel JavaScript heap mutation.
 - Host/test knobs that used to be process-global are now per-context
   `Context.TestingOptions` controls for the conformance runners:
   `main_can_block` and `max_js_threads`.
+- `Context.TestingOptions.parallel_js` is a test-only Layer-C bring-up switch,
+  not a public embedder API. It currently validates the sync `Atomics.Mutex` /
+  `Lock` path with real `Thread` workers running without the context GIL.
 - Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`,
   `noInline`, `gc`, and the supported `$vm` compatibility hooks (`gc`,
   `edenGC`, `indexingMode`, `useThreadGIL`, `noInline`) exist for conformance
@@ -43,6 +46,8 @@ but it is not true parallel JavaScript heap mutation.
   structured clone.
 - Treating `Context.TestingOptions` as a general embedder API with a long-term
   compatibility contract.
+- Treating `parallel_js` as supported application behavior. It is a focused
+  synchronization test mode, not the shipped `enable_threads` model.
 - Treating test-shell helpers or `$vm` as an embedder event-loop/API surface.
 - Assuming unsupported JSC `$vm` hooks exist: `sharedHeapTest`, dictionary
   conversion, code deletion, disassembly, and related JIT artifact controls are

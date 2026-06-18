@@ -198,8 +198,8 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
 
 fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     const g = rec.gil;
-    g.acquire();
-    defer g.release();
+    if (!rec.ctx.parallel_js) g.acquire();
+    defer if (!rec.ctx.parallel_js) g.release();
     const gc_saved = gc_mod.setActiveHeap(rec.ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(rec.ctx.arena());
@@ -215,8 +215,14 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // unregistered under the GIL (held here); the defer runs before the final
     // `g.release()` above (LIFO), i.e. while we still hold the lock and before
     // our stack is torn down.
+    if (rec.ctx.parallel_js) g.acquire();
     g.registerPark(stack_scan.parkRecord());
-    defer g.unregisterPark(stack_scan.parkRecord());
+    if (rec.ctx.parallel_js) g.release();
+    defer {
+        if (rec.ctx.parallel_js) g.acquire();
+        g.unregisterPark(stack_scan.parkRecord());
+        if (rec.ctx.parallel_js) g.release();
+    }
     t_current = rec;
     // A per-thread interpreter over the SHARED realm: same arena, environment,
     // global object, and shapes (safe under the GIL), with its own job queues.
@@ -235,18 +241,24 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer rec.ctx.popActiveInterpreter(&machine);
     machine.microtasks = &microtasks;
     machine.async_waiters = &async_waiters;
+    var result: Value = Value.undef();
+    var threw = false;
     if (machine.callValueWithThis(fn_v, args, Value.undef())) |out| {
         machine.drainMicrotasks() catch {};
         pumpTasks(&machine);
         machine.settleAsyncWaiters();
-        rec.result = out;
+        result = out;
     } else |_| {
         machine.drainMicrotasks() catch {};
-        rec.threw = true;
-        rec.result = machine.exception;
+        threw = true;
+        result = machine.exception;
     }
     // Settle asyncJoin promises on this (the settling) thread, then drain
     // the reactions it just queued.
+    if (rec.ctx.parallel_js) g.acquire();
+    defer if (rec.ctx.parallel_js) g.release();
+    rec.threw = threw;
+    rec.result = result;
     for (rec.pending_joins.items) |p_obj| {
         if (promise.promiseOf(Value.obj(p_obj))) |pp| {
             if (rec.threw)
@@ -269,6 +281,8 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.join called on incompatible receiver");
     if (rec == t_current) return self.throwError("Error", "Thread cannot join itself");
+    if (!self.use_thread_gil) rec.gil.acquire();
+    defer if (!self.use_thread_gil) rec.gil.release();
     // The gate guards the BLOCK, not the call: joining a finished thread is
     // always allowed.
     if (!rec.done and !self.main_can_block)
@@ -314,6 +328,7 @@ const sync_brand_unlock_token: SyncBrand = 0x6a73_7468_7574_6f6b;
 const LockRecord = struct {
     brand: SyncBrand = sync_brand_lock,
     gil: *gil_mod.Gil,
+    mutex: std.Io.Mutex = .init,
     locked: bool = false,
     /// Holding thread (0 = unheld) — recursion detection: a nested hold on
     /// the same thread must throw, not self-deadlock.
@@ -538,7 +553,27 @@ fn timeoutMillisToNs(ms: f64) value.HostError!?u64 {
     return @intFromFloat(@ceil(clamped * std.time.ns_per_ms));
 }
 
+fn waitOnLockCond(self: *Interpreter, rec: *LockRecord, timeout: std.Io.Timeout) void {
+    const io = agent.engineIo();
+    if (self.use_thread_gil) {
+        const g = rec.gil;
+        stack_scan.beginPark();
+        g.release();
+        rec.cond.waitTimeout(io, &rec.mutex, timeout) catch {};
+        rec.mutex.unlock(io);
+        g.acquire();
+        stack_scan.endPark();
+        rec.mutex.lockUncancelable(io);
+    } else {
+        rec.cond.waitTimeout(io, &rec.mutex, timeout) catch {};
+    }
+}
+
 fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name: []const u8) value.HostError!AcquireResult {
+    const io = agent.engineIo();
+    rec.mutex.lockUncancelable(io);
+    defer rec.mutex.unlock(io);
+
     if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid())) {
         if (timeout_ns != null and timeout_ns.? == 0) return .timed_out;
         return self.throwError("TypeError", err_name);
@@ -562,7 +597,21 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
                     return .timed_out;
                 }
             }
-            try parkPump(self, rec.gil, &rec.cond);
+            const tick_ns: u64 = if (deadline_ns) |d| blk: {
+                const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+                if (d <= now) {
+                    rec.sync_waiting -= 1;
+                    return .timed_out;
+                }
+                break :blk @min(@as(u64, @intCast(d - now)), 5 * std.time.ns_per_ms);
+            } else 5 * std.time.ns_per_ms;
+            pumpTasks(self);
+            if (self.stop_flag) |sf| if (sf.load(.monotonic))
+                return self.throwError("Error", "worker terminated");
+            waitOnLockCond(self, rec, .{ .duration = .{
+                .raw = .fromNanoseconds(tick_ns),
+                .clock = .awake,
+            } });
         }
         rec.sync_waiting -= 1;
     }
@@ -627,10 +676,12 @@ fn unlockTokenLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value
 
 fn unlockTokenUnlock(self: *Interpreter, rec: *UnlockTokenRecord) value.HostError!bool {
     const lock = rec.lock orelse return false;
+    lock.mutex.lockUncancelable(agent.engineIo());
+    defer lock.mutex.unlock(agent.engineIo());
     if (!lock.locked or lock.holder != currentTid())
         return self.throwError("TypeError", "Atomics.Mutex.UnlockToken does not own the mutex");
     rec.lock = null;
-    lockRelease(self, lock);
+    lockReleaseLocked(self, lock);
     return true;
 }
 
@@ -658,7 +709,7 @@ fn mutexStaticLockFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
         return self.throwError("TypeError", "Atomics.Mutex.lock requires a Mutex argument");
     _ = try acquireLock(self, rec, null, "Atomics.Mutex.lock cannot acquire the mutex");
     return unlockTokenCreate(self, if (args.len > 1) args[1] else Value.undef(), rec) catch |err| {
-        if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
+        lockReleaseIfHeldByCurrent(self, rec);
         return err;
     };
 }
@@ -674,7 +725,7 @@ fn mutexStaticLockIfAvailableFn(ctx_ptr: *anyopaque, this: Value, args: []const 
     const timeout_ns = try timeoutMillisToNs(try self.toNumberV(timeout_v));
     switch (try acquireLock(self, rec, timeout_ns, "Atomics.Mutex.lockIfAvailable cannot acquire the mutex")) {
         .acquired => return unlockTokenCreate(self, if (args.len > 2) args[2] else Value.undef(), rec) catch |err| {
-            if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
+            lockReleaseIfHeldByCurrent(self, rec);
             return err;
         },
         .timed_out => return Value.nul(),
@@ -688,13 +739,15 @@ fn lockHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
     const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.hold called on incompatible receiver");
     const cb = if (args.len > 0) args[0] else Value.undef();
     if (!cb.isCallable()) return self.throwError("TypeError", "Lock.prototype.hold requires a callable argument");
-    if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid()))
-        return self.throwError("Error", "Lock is not recursive");
+    rec.mutex.lockUncancelable(agent.engineIo());
+    const recursive = rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid());
+    rec.mutex.unlock(agent.engineIo());
+    if (recursive) return self.throwError("Error", "Lock is not recursive");
     _ = try acquireLock(self, rec, null, "Lock.prototype.hold cannot block the current thread");
     const out = self.callValueWithThis(cb, &.{}, Value.undef());
     // Epilogue guard: a termination thrown from a cond.wait inside cb left
     // the lock unheld (D9) — releasing here would corrupt the lock state.
-    if (rec.locked and rec.holder == currentTid()) lockRelease(self, rec);
+    lockReleaseIfHeldByCurrent(self, rec);
     return out;
 }
 
@@ -702,6 +755,8 @@ fn lockLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(LockRecord, this) orelse return self.throwError("TypeError", "Lock.prototype.locked called on incompatible receiver");
+    rec.mutex.lockUncancelable(agent.engineIo());
+    defer rec.mutex.unlock(agent.engineIo());
     return Value.boolVal(rec.locked);
 }
 
@@ -718,7 +773,10 @@ fn removeSyncCondTicket(rec: *CondRecord, ticket: *SyncCondTicket) void {
 }
 
 fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout_ns: ?u64) value.HostError!bool {
-    if (!lock.locked or lock.holder != currentTid())
+    lock.mutex.lockUncancelable(agent.engineIo());
+    const held_by_me = lock.locked and lock.holder == currentTid();
+    lock.mutex.unlock(agent.engineIo());
+    if (!held_by_me)
         return self.throwError("TypeError", "Condition wait requires the lock to be held by the caller");
     if ((timeout_ns == null or timeout_ns.? != 0) and !self.main_can_block)
         return self.throwError("TypeError", "Condition wait cannot block the current thread");
@@ -1290,6 +1348,18 @@ const async_holder: u64 = std.math.maxInt(u64);
 /// (granted on this, the releasing thread), else open it and wake a parked
 /// hold.
 fn lockRelease(self: *Interpreter, rec: *LockRecord) void {
+    rec.mutex.lockUncancelable(agent.engineIo());
+    defer rec.mutex.unlock(agent.engineIo());
+    lockReleaseLocked(self, rec);
+}
+
+fn lockReleaseIfHeldByCurrent(self: *Interpreter, rec: *LockRecord) void {
+    rec.mutex.lockUncancelable(agent.engineIo());
+    defer rec.mutex.unlock(agent.engineIo());
+    if (rec.locked and rec.holder == currentTid()) lockReleaseLocked(self, rec);
+}
+
+fn lockReleaseLocked(self: *Interpreter, rec: *LockRecord) void {
     if (rec.sync_waiting > 0) {
         rec.locked = false;
         rec.holder = 0;

@@ -490,6 +490,11 @@ pub const Interpreter = struct {
     /// checkpoints yield it when contended, and blocking operations release
     /// it while parked. Null = no threads, zero cost.
     gil: ?*gil_mod.Gil = null,
+    /// Test-only Layer-C bring-up: when false, this interpreter belongs to an
+    /// `enable_threads` context but does not hold/yield the context GIL while
+    /// running JS bytecode. Blocking APIs acquire the GIL only for their legacy
+    /// waiter/result bookkeeping.
+    use_thread_gil: bool = true,
     /// Phase 7: the precise-GC heap (type-erased `Context.gc`), or null for the
     /// arena engine. Cell allocation funnels through `gc_mod.allocObject` etc.,
     /// which use this when set. See docs/threads/P7-gc-design.md.
@@ -998,7 +1003,7 @@ pub const Interpreter = struct {
         if ((self.steps & 1023) == 0) {
             if (self.stop_flag) |sf| if (sf.load(.monotonic))
                 return self.throwError("Error", "worker terminated");
-            if (self.gil) |g| g.yieldIfContended();
+            if (self.use_thread_gil) if (self.gil) |g| g.yieldIfContended();
             // Mid-script GC: the tree-walker holds live `Value`s only as native
             // Zig locals/registers, which the conservative native-stack scan
             // covers; run a guarded collection. No-op when the GC is off.
@@ -11049,7 +11054,7 @@ fn vmUseThreadGILFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return Value.boolVal(self.gil != null);
+    return Value.boolVal(self.gil != null and self.use_thread_gil);
 }
 
 fn vmIndexingModeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {

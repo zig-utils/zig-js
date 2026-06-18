@@ -249,7 +249,7 @@ per-thread before threads stop holding the GIL):
 6. **Gates:** whole-corpus TSan campaign to zero unsuppressed races; serial-perf
    gate (single-thread throughput must not regress); stress amplifiers.
 
-Validated so far (`parallel_gc` bring-up tests, all TSan-clean): parallel heap
+Validated so far (`parallel_gc` / `parallel_js` bring-up tests): parallel heap
 mutation; parallel parse+compile+VM execution of disjoint scripts; contended
 parallel append to a shared array; contended parallel property-add + shape
 growth on a shared object; quiescent collection after a parallel build (live
@@ -257,14 +257,19 @@ graph kept, garbage reclaimed); atomic GlobalSymbolRegistry get-or-create under
 contention; **seqlock inline caches** (isolation: two writers, distinct shapes,
 one cache); and **one shared compiled chunk run over one shared object on 4
 threads with no GIL** (shared ICs + `property_lock` + `binding_lock`, never-written
-reads never tear). Plus the standalone ragged root-publication handshake primitive.
+reads never tear). The first production-`Thread` vertical slice is also in place:
+test-only `Context.TestingOptions.parallel_js` drops the execution-path GIL while
+real shared-realm `Thread` workers contend the shipped `Atomics.Mutex` /
+`LockRecord` sync path; the focused `parallel_js` test is TSan-clean. Plus the
+standalone ragged root-publication handshake primitive.
 These cover allocation, the object/shape model, the writer-vs-writer and
-reader-vs-writer locks, the inline caches, quiescent GC, and the named shared-global
-prerequisites (symbol registry + spawn bookkeeping) under real parallel bytecode.
-What remains: wire the root handshake into a concurrent parallel marker (mid-script
-collection #1); move the waiter/task queues onto `api_lock` (#2); the
-production-`threadMain` GIL drop + corpus campaign (#5) — best driven empirically
-now that every known shared-state hazard bytecode touches is locked.
+reader-vs-writer locks, the inline caches, quiescent GC, the named shared-global
+prerequisites (symbol registry + spawn bookkeeping), and one real production
+sync primitive under the `Thread` entrypoint. What remains: wire the root
+handshake into a concurrent parallel marker (mid-script collection #1); move the
+property waiter tables, condition-variable state, and async lock/task grant
+paths onto their own locks (#2); broaden `parallel_js` beyond the sync-mutex
+slice; then run the full corpus campaign (#5).
 
 This is the final, largest step — major surgery on the core execution path plus a
 semantics campaign, to be done as a focused effort (not a mechanical flip), now
@@ -272,22 +277,26 @@ that every heap prerequisite is in place.
 
 ## Coordination-primitive rewrite — the critical path (design)
 
-The heap and bytecode-execution prerequisites are done and validated under real
-parallel GIL-free bytecode (objects/shapes/elements/env/arena/GC-alloc/promise/
+The heap and bytecode-execution prerequisites are validated under real parallel
+GIL-free bytecode (objects/shapes/elements/env/arena/GC-alloc/promise/
 inline-caches/symbol-registry/lazy-prototypes; strings are uninterned so there is
 no shared intern-table race). The remaining blocker for true parallel JS *via the
-`Thread` API* is that the **coordination primitives still use the GIL as their
-condition mutex**. Concretely, in `src/jsthread.zig`:
+`Thread` API* is finishing the **coordination primitives**. The first slice has
+landed: `LockRecord` (`Atomics.Mutex` / `Lock`) now has a per-record
+`std.Io.Mutex`, and sync `acquireLock`/`releaseLock`/unlock-token paths guard
+`locked`, `holder`, `sync_waiting`, and `sync_generation` with that mutex. A
+test-only `parallel_js` context drops the execution-path GIL and proves real
+`Thread` workers can contend one production `Atomics.Mutex` without races.
 
-- `LockRecord` (`Atomics.Mutex` / `Lock`) state — `locked`, `holder`,
-  `sync_waiting`, `sync_generation`, `pending`, `grant_pending`, `async_runner` —
-  is mutated **only while holding the GIL**, and `acquireLock`/`releaseLock` rely
-  on that for atomicity (no per-record lock).
-- Parking is `parkPump(self, rec.gil, &rec.cond)` → `g.waitTimeout(&rec.cond, …)`,
-  i.e. the per-record condvar `rec.cond` is waited on with **`g.mutex` (the GIL)**
-  as its associated mutex. The same holds for `Condition` (`rec.cond` +
-  `SyncCondTicket`) and property-mode `Atomics.wait` (`PropTicket.cond` +
-  `prop_waiters`, woken under the GIL by `propNotify`).
+Remaining GIL-coupled coordination state in `src/jsthread.zig`:
+
+- async lock grants (`pending`, `grant_pending`, `active_release`,
+  `async_runner`, `HoldJob` delivery) still need the same per-record lock
+  treatment plus careful task-queue ordering.
+- `Condition` still keeps its waiter queue under the GIL and uses the old
+  `parkPump(self, rec.gil, &rec.cond)` path.
+- property-mode `Atomics.wait` / `notify` still use `Gil.prop_waiters` /
+  `Gil.prop_async` as GIL-protected waiter tables.
 
 Why it cannot be half-migrated: the condvar contract requires the waiter and the
 notifier to use the *same* mutex. Today that mutex is the GIL, and `g.wait`
@@ -332,12 +341,14 @@ under true parallelism) vs. GIL-specific ordering (may legitimately change), adj
 the corpus/notes, and drive races to zero under a whole-corpus TSan run. This is
 why it is a campaign, not a flip.
 
-**Sequencing.** (1) Per-record `mutex` on `LockRecord` + migrate
-`acquireLock`/`releaseLock`/hold-jobs off the GIL, behind a gated `parallel_js`
-option; validate with TSan + the `lock/`/`condition/` corpus subset. (2) Property
-`Atomics.wait`/`notify` waiter-table mutex + atomic ticket flags. (3) Drop the
-execution-path GIL in `threadMain`/`evaluate` under `parallel_js`; enable the
-per-structure-lock flags for that mode. (4) Whole-corpus TSan campaign +
+**Sequencing.** (1) Per-record `mutex` on `LockRecord` + sync
+`acquireLock`/`releaseLock`/unlock-token paths off the GIL, behind gated
+`parallel_js`: **landed and TSan-clean for the focused real-`Thread`
+Atomics.Mutex test**. (2) Migrate hold-jobs / `Lock.asyncHold` and `Condition`
+waiter state off the GIL. (3) Property `Atomics.wait`/`notify` waiter-table
+mutex + atomic ticket flags. (4) Broaden the execution-path GIL drop in
+`threadMain`/`evaluate` under `parallel_js`; enable the per-structure-lock flags
+for that mode. (5) Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
 pause-time optimization, not on this critical path (quiescent collection is
