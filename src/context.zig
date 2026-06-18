@@ -5290,6 +5290,60 @@ test "enable_gc concurrent (M3): generators and iterator helpers are safe under 
     try std.testing.expect(!ctx.gc.?.concurrent);
 }
 
+test "enable_gc concurrent (M3): mixed-workload stress amplifier stays correct + race-free" {
+    // M3 stress amplifier: hammer the concurrent driver with every cell kind at
+    // once — plain objects, arrays (dense + push), Map/Set, WeakMap/WeakSet
+    // (keyed by live objects), Promises, closures capturing per-iteration `let`
+    // environments, generators, and iterator-helper chains — so a single
+    // collection cycle traces objects (locked), environments (binding_lock),
+    // promises (Promise.lock), weak collections (isMarked clearing), and
+    // generators/iterator-helpers (deferred) concurrently with the mutator
+    // building and mutating all of them. Exact final tallies prove nothing live
+    // was wrongly freed; TSan-clean proves no path races the marker.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .concurrent_gc = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\function* gen(n) { for (let i = 0; i < n; i++) yield i; }
+        \\const keys = [];
+        \\for (let i = 0; i < 64; i++) keys.push({ id: i }); // live weak keys
+        \\const wm = new WeakMap(), ws = new WeakSet();
+        \\const arr = [], m = new Map(), s = new Set();
+        \\const closures = [];
+        \\let acc = 0;
+        \\for (let r = 0; r < 300; r++) {
+        \\  const o = { r, nested: { v: r }, list: [r, r + 1, r + 2] };
+        \\  arr.push(o);
+        \\  if (arr.length > 50) arr.shift();          // bounded churn
+        \\  m.set('k' + (r % 32), o);
+        \\  s.add(r % 48);
+        \\  const k = keys[r % keys.length];
+        \\  wm.set(k, o); ws.add(k);
+        \\  // closure captures this iteration's `let r` and `o` (env binding writes)
+        \\  let local = r; closures.push(() => local + o.nested.v);
+        \\  if (closures.length > 20) closures.shift();
+        \\  let g = gen(10), gs = 0; for (const x of g) gs += x;       // generator
+        \\  const h = gen(30).map(x => x + 1).filter(x => x % 2 === 0).take(4);
+        \\  for (const y of h) gs += y;                                // iter-helper
+        \\  acc += gs;
+        \\  Promise.resolve(o).then(() => {});                        // promise + reaction
+        \\}
+        \\// Verify the live structures survived intact.
+        \\let sum = 0;
+        \\for (const f of closures) sum += f();
+        \\for (const k of keys) { if (wm.has(k)) sum += wm.get(k).r; }
+        \\acc * 100000 + m.size * 1000 + s.size * 10 + (sum > 0 ? 1 : 0);
+    );
+    // gen(10): sum 0..9 = 45; helper: first 4 evens of {x+1 | x in 0..29} =
+    // {1..30} evens = 2,4,6,8 = 20. gs = 65/round × 300 = 19500.
+    // m.size = 32 (keys k0..k31), s.size = 48 (0..47). sum > 0.
+    try std.testing.expectEqual(@as(f64, 19500 * 100000 + 32 * 1000 + 48 * 10 + 1), result.asNum());
+    try std.testing.expect(ctx.gc.?.collections > 2);
+    try std.testing.expect(ctx.gc_marker == null);
+    try std.testing.expect(!ctx.gc.?.concurrent);
+}
+
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
     // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
     // safepoints (collectMidScript), a long-lived structure that keeps growing
