@@ -4337,7 +4337,9 @@ pub const Interpreter = struct {
                         try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), el);
                     }
                 }
-                for (try so.enumerableKeys(self.arena)) |k| {
+                for (try so.ownKeys(self.arena)) |k| {
+                    if (value.isPrivateKey(k)) continue;
+                    if (!so.getAttr(k).enumerable) continue;
                     try self.setMember(target, k, try self.getProperty(src, k));
                 }
             },

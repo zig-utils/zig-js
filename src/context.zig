@@ -1852,6 +1852,22 @@ test "object spread" {
     try std.testing.expectEqual(@as(f64, 9), (try evalIn("var o = { x: 1, ...{ x: 9 } }; o.x")).asNum());
     // Spreading null/undefined is a no-op.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("var o = { ...null, ...undefined, a: 1 }; o.a")).asNum());
+    try std.testing.expect((try evalIn(
+        \\var sym = Symbol("foo");
+        \\var src = {};
+        \\src[sym] = 7;
+        \\var out = { ...src, a: 1 };
+        \\out[sym] === 7 && Object.keys(out).join(",") === "a" && Reflect.ownKeys(out)[1] === sym
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var calls = [];
+        \\var sym = Symbol("foo");
+        \\var src = { get z() { calls.push("z"); }, get a() { calls.push("a"); } };
+        \\Object.defineProperty(src, 1, { get: function() { calls.push("1"); }, enumerable: true });
+        \\Object.defineProperty(src, sym, { get: function() { calls.push("sym"); }, enumerable: true });
+        \\var out = { ...src };
+        \\calls.join(",") === "1,z,a,sym" && out[sym] === undefined
+    )).asBool());
 }
 
 test "delete operator" {
