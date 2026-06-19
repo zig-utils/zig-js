@@ -18727,10 +18727,18 @@ fn nfRound(self: *Interpreter, mag: f64, neg: bool, min_int: usize, min_frac: us
         }
     };
 
-    const use_sig = max_sig != null and (std.mem.eql(u8, priority, "auto") or !frac_set);
-    // morePrecision/lessPrecision with both sig+frac set is approximated as the
-    // significant-digit result (the common case in the corpus uses one or auto).
-    if (use_sig or (max_sig != null and !std.mem.eql(u8, priority, "auto"))) {
+    const use_sig = blk: {
+        if (max_sig == null) break :blk false;
+        if (std.mem.eql(u8, priority, "auto") or !frac_set) break :blk true;
+        const e = if (mag == 0) 0 else orderOfMagnitude(mag);
+        const sig_round_mag: i32 = e - @as(i32, @intCast(max_sig.?)) + 1;
+        const frac_round_mag: i32 = -@as(i32, @intCast(max_frac));
+        break :blk if (std.mem.eql(u8, priority, "morePrecision"))
+            sig_round_mag < frac_round_mag
+        else
+            sig_round_mag > frac_round_mag;
+    };
+    if (use_sig) {
         const msig = max_sig.?;
         const lsig = min_sig orelse 1;
         if (mag == 0) {
@@ -18740,10 +18748,12 @@ fn nfRound(self: *Interpreter, mag: f64, neg: bool, min_int: usize, min_frac: us
             return .{ .int_str = "0", .frac_str = try fb.toOwnedSlice(self.arena), .is_zero = true };
         }
         const e = orderOfMagnitude(mag);
-        // Cap the scaling so the scaled magnitude stays within u64; rounding
-        // beyond ~18 digits is identity at f64 precision anyway.
-        const scale_exp: i32 = @min(@as(i32, @intCast(msig)) - 1 - e, 18);
-        const scaled = if (scale_exp >= 0) mag * powi10(scale_exp) else mag / powi10(-scale_exp);
+        var scale_exp: i32 = @as(i32, @intCast(msig)) - 1 - e;
+        var scaled = if (scale_exp >= 0) mag * powi10(scale_exp) else mag / powi10(-scale_exp);
+        while (!std.math.isFinite(scaled) or scaled >= 9.0e18) {
+            scale_exp -= 1;
+            scaled = if (scale_exp >= 0) mag * powi10(scale_exp) else mag / powi10(-scale_exp);
+        }
         const r: u64 = @intFromFloat(roundMag(scaled, neg, mode));
         // Rounding up can add a digit (9.99 -> 10.0); the decimal point keeps the
         // same scale_exp, so fromScaled handles the extra integer digit.
@@ -19242,9 +19252,16 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         };
     } else if (finite) {
         const mag = @abs(n);
-        if (mag >= 9.0e18) {
+        if (mag >= 9.0e18 and max_sig == null) {
             // Beyond u64 precision: format as an integer (fraction is negligible).
             digits = try std.fmt.allocPrint(self.arena, "{d:.0}", .{mag});
+            while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
+            if (min_frac > 0) {
+                var fb: std.ArrayListUnmanaged(u8) = .empty;
+                for (0..min_frac) |_| try fb.append(self.arena, '0');
+                frac_str = try fb.toOwnedSlice(self.arena);
+            }
+            is_zero = false;
         } else {
             const r = try nfRound(self, mag, neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
             digits = r.int_str;
