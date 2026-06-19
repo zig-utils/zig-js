@@ -28987,10 +28987,11 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: argument must be an object");
     var l = zdtLocal(t);
-    const y = try withIntField(self, bag, "year", l.year);
+    const y = (try bagIsoYear(self, bag, t.calendar)) orelse l.year;
     const m = try withMonthField(self, bag, t.calendar, y, l.month);
     const d = try withIntField(self, bag, "day", l.day);
-    const r = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, m)), @floatFromInt(d), true);
+    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    const r = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, m)), @floatFromInt(d), !reject);
     const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
     const cur = [_]i64{ l.hour, l.minute, l.second, l.millisecond, l.microsecond, l.nanosecond };
     var vals: [6]f64 = undefined;
@@ -29001,7 +29002,7 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     setTimeFields(&l, vals);
     const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
     const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
-    return zdtMake(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
+    return zdtMakeWithCalendar(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns, t.calendar);
 }
 
 fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -29017,8 +29018,9 @@ fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
     nl.millisecond = tm.millisecond;
     nl.microsecond = tm.microsecond;
     nl.nanosecond = tm.nanosecond;
-    const local_ns = @as(i128, tDaysFromCivil(nl.year, nl.month, nl.day)) * 86_400_000_000_000 + timeToNs(&nl);
-    return zdtMake(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
+    const iso = calendarDateToIso(t.calendar, nl.year, nl.month, nl.day);
+    const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&nl);
+    return zdtMakeWithCalendar(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns, t.calendar);
 }
 
 fn temporalZdtWithTimeZoneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
