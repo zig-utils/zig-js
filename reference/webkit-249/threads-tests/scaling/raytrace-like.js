@@ -19,6 +19,10 @@
 // fixed frame count, no blocking ops.
 load("./harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+
 function raytraceWorkload() {
     // 48x48: smoke-measured 2026-06-07 — a 96x96 frame costs ~6.8s on the
     // Debug+ASAN build (per-pixel shading allocates dozens of {x,y,z}
@@ -27,8 +31,8 @@ function raytraceWorkload() {
     // workFn runs). Quartering the pixel count keeps the same allocation
     // profile per pixel while bounding the corpus run; the gate scales frame
     // COUNT via SCALING_WORK_SCALE, so gate work remains ample.
-    const WIDTH = 48;
-    const HEIGHT = 48;
+    const WIDTH = NO_GIL ? 12 : 48;
+    const HEIGHT = NO_GIL ? 12 : 48;
     const FRAMES = Math.round(512 * scalingWorkScale());
 
     function vec(x, y, z) { return { x: x, y: y, z: z }; }

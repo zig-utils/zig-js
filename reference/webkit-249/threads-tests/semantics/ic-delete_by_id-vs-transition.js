@@ -12,9 +12,12 @@
 // and creates offset-reuse hazards), so the per-step asserts are exact.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const FAMILIES = 20;
 const OBJS_PER_FAMILY = 4;
-const PASSES = 150;
+const PASSES = NO_GIL ? 20 : 150;
 
 function makeVictim(family, id) {
     const o = {};

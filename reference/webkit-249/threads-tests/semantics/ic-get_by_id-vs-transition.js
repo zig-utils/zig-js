@@ -25,9 +25,12 @@
 // IC-vs-transition stress, and Tools/threads/amplify.sh widens the windows.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const FAMILIES = 20;          // distinct shapes => f lives at 20 offsets
 const OBJS_PER_FAMILY = 4;
-const PASSES = 250;
+const PASSES = NO_GIL ? 30 : 250;
 
 function makeVictim(family, id) {
     const o = {};

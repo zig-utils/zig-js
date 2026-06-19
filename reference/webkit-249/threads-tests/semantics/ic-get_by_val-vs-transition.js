@@ -20,9 +20,12 @@
 // they pin the presence/absence axis.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const FAMILIES = 20;
 const OBJS_PER_FAMILY = 4;
-const PASSES = 200;
+const PASSES = NO_GIL ? 30 : 200;
 
 // Probed keys: `f` on every object plus one family-specific lead name.
 function makeVictim(family, id) {

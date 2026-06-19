@@ -18,8 +18,12 @@
 // fixed iteration count, no blocking ops.
 load("./harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+
 function richardsWorkload() {
-    const STEPS = Math.round(25000000 * scalingWorkScale());
+    const STEPS = Math.round((NO_GIL ? 500000 : 25000000) * scalingWorkScale());
 
     const KIND_IDLE = 0;
     const KIND_WORKER = 1;

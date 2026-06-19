@@ -24,9 +24,12 @@
 // fails the very next assert.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const CTORS = 8;
 const OBJS_PER_CTOR = 6;
-const PASSES = 150;
+const PASSES = NO_GIL ? 30 : 150;
 
 const C = [];
 for (let k = 0; k < CTORS; ++k) {

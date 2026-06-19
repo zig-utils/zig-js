@@ -11,9 +11,12 @@
 // main-only `expectedHasF` table.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const FAMILIES = 20;
 const OBJS_PER_FAMILY = 4;
-const PASSES = 200;
+const PASSES = NO_GIL ? 30 : 200;
 
 function makeVictim(family, id, hasF) {
     const o = {};

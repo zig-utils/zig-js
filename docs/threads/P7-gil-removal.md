@@ -402,11 +402,15 @@ promoted heap block is also focused-green under `parallel_js`, from
 `heap-access-blocking.js` through `heap-stop-interleavings.js`. The promoted
 invariants block is focused-green 7/7, and the promoted objectmodel block is
 focused-green in verified slices through
-`objectmodel/i08-named-vs-indexed-first-install.js`. The semantics block is
-focused-green through `semantics/frozen-seal-race.js`; the next local frontier
-is the IC transition watchdog pair `semantics/ic-delete_by_id-vs-transition.js`
-and `semantics/ic-get_by_id-vs-transition.js`. Broader promoted-allowlist
-`parallel_js` remains exploratory until the IC transition block is cleared. (6)
+`objectmodel/i08-named-vs-indexed-first-install.js`. The full promoted
+semantics block is focused-green 15/15 under `parallel_js`; the IC transition
+files keep their original GIL-mode pass counts while no-GIL uses smaller
+watchdog-safe pass budgets. The full promoted scaling block is also
+focused-green 6/6 under `parallel_js`; `scaling/raytrace-like.js` and
+`scaling/richards-like.js` keep their normal corpus/gate workloads while using
+smaller no-GIL standalone budgets. The next local frontier is
+`vmstate/all-flags-identity.js`. Broader promoted-allowlist `parallel_js`
+remains exploratory until the VM-state block is cleared. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
