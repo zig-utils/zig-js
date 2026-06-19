@@ -23563,7 +23563,10 @@ fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Val
         }
     }
     const out = try makeDuration(self, dur);
-    if (self.new_target.isObject()) out.asObj().proto = try self.protoObject(self.new_target.asObj());
+    if (self.new_target.isObject()) {
+        const p = try self.getProperty(self.new_target, "prototype");
+        if (p.isObject() and !p.asObj().is_symbol) out.asObj().proto = p.asObj();
+    }
     return out;
 }
 
@@ -23632,6 +23635,13 @@ fn durSignOk(dur: [10]f64) bool {
             if (s != 0 and s != cs) return false;
             s = cs;
         }
+    }
+    return true;
+}
+
+fn durSame(a: [10]f64, b: [10]f64) bool {
+    for (a, b) |av, bv| {
+        if (av != bv) return false;
     }
     return true;
 }
@@ -23773,6 +23783,7 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
         const eb = durEndpointsNs(b, rel);
         return Value.num(if (ea.end < eb.end) -1 else if (ea.end > eb.end) 1 else 0);
     }
+    if (durSame(a, b)) return Value.num(0);
     if (durHasCalendar(a) or durHasCalendar(b)) return self.throwError("RangeError", "Temporal.Duration.compare with calendar units requires relativeTo");
     const na = durationTimeNs(a);
     const nb = durationTimeNs(b);
