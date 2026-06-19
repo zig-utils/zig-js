@@ -26890,9 +26890,10 @@ fn temporalMonthDayGetter(comptime f: MonthDayField) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "Temporal.PlainMonthDay accessor on incompatible receiver");
             const t = this.asObj().temporal.?;
+            const cd = calendarDateFromIso(t.calendar, t.year, t.month, t.day);
             return switch (f) {
-                .month_code => Value.str(try calMonthCode(self, t.calendar, t.year, t.month)),
-                .day => Value.num(@floatFromInt(t.day)),
+                .month_code => Value.str(try calMonthCode(self, t.calendar, cd.y, cd.m)),
+                .day => Value.num(@floatFromInt(cd.d)),
             };
         }
     }.call;
@@ -26925,6 +26926,7 @@ const RawMD = struct {
     cal: []const u8 = "iso8601",
 };
 const MonthCodeInfo = struct { month: u8, leap: bool, iso_suitable: bool };
+const MonthDayRef = struct { iso: IsoMD, cal_year: i64 };
 
 fn regulateMonthDay(self: *Interpreter, cal: []const u8, ref_year: i64, mf: i64, df: i64, constrain: bool) EvalError!IsoMD {
     var m = mf;
@@ -26957,16 +26959,29 @@ fn readMonthCodeInfo(self: *Interpreter, v: Value) EvalError!MonthCodeInfo {
     return .{ .month = m, .leap = s.len == 4, .iso_suitable = s.len == 3 and m >= 1 and m <= 12 };
 }
 
-fn monthDayReferenceYear(self: *Interpreter, cal: []const u8, mc: ?MonthCodeInfo, month: i64, day: i64) EvalError!i64 {
-    var y: i64 = 1972;
-    while (y >= 1900) : (y -= 1) {
-        const m: u8 = if (mc) |info| calMonthFromCodeMaybe(cal, y, info) orelse continue else blk: {
-            if (month < 1 or month > calMonthsInYear(cal, y)) continue;
-            break :blk @intCast(month);
+fn monthDayReferenceIsoMaybe(cal: []const u8, mc: ?MonthCodeInfo, month: i64, day: i64) ?MonthDayRef {
+    var epoch = tDaysFromCivil(1972, 12, 31);
+    const min_epoch = tDaysFromCivil(1900, 1, 1);
+    while (epoch >= min_epoch) : (epoch -= 1) {
+        const iso = tCivilFromDays(epoch);
+        const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
+        if (cd.d != day) continue;
+        if (mc) |info| {
+            const m = calMonthFromCodeMaybe(cal, cd.y, info) orelse continue;
+            if (cd.m != m) continue;
+        } else {
+            if (month < 1 or cd.m != @as(u8, @intCast(month))) continue;
+        }
+        return .{
+            .iso = .{ .y = iso.y, .m = iso.m, .d = iso.d },
+            .cal_year = cd.y,
         };
-        const dim = calDaysInMonth(cal, y, m);
-        if (day >= 1 and day <= dim) return y;
     }
+    return null;
+}
+
+fn monthDayReferenceIso(self: *Interpreter, cal: []const u8, mc: ?MonthCodeInfo, month: i64, day: i64) EvalError!MonthDayRef {
+    if (monthDayReferenceIsoMaybe(cal, mc, month, day)) |ref| return ref;
     return self.throwError("RangeError", "PlainMonthDay reference date out of range");
 }
 
@@ -26975,9 +26990,8 @@ fn validateMonthDayRaw(self: *Interpreter, raw: RawMD, constrain: bool) EvalErro
         const code_month = try calMonthFromCode(self, raw.cal, raw.validation_year, mc);
         if (raw.m != @as(i64, code_month)) return self.throwError("RangeError", "month and monthCode mismatch");
     }
-    var out = try regulateMonthDay(self, raw.cal, raw.validation_year, raw.m, raw.d, constrain);
-    out.y = try monthDayReferenceYear(self, raw.cal, raw.month_code, out.m, out.d);
-    return out;
+    const out = try regulateMonthDay(self, raw.cal, raw.validation_year, raw.m, raw.d, constrain);
+    return (try monthDayReferenceIso(self, raw.cal, raw.month_code, out.m, out.d)).iso;
 }
 
 fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
@@ -26995,10 +27009,10 @@ fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
     const has_year = maybe_year != null;
     if (!std.mem.eql(u8, cal, "iso8601") and !has_year and maybe_m != null and mc == null)
         return self.throwError("TypeError", "non-ISO PlainMonthDay fields require monthCode or year");
-    const validation_year: i64 = if (maybe_year) |y| y else if (mc) |info|
-        try monthDayReferenceYear(self, cal, info, 0, d)
-    else
-        1972;
+    const validation_year: i64 = if (maybe_year) |y| y else if (mc) |info| blk: {
+        if (monthDayReferenceIsoMaybe(cal, info, 0, d)) |ref| break :blk ref.cal_year;
+        break :blk (try monthDayReferenceIso(self, cal, info, 0, 1)).cal_year;
+    } else 1972;
     const m = maybe_m orelse @as(i64, try calMonthFromCode(self, cal, validation_year, mc.?));
     return .{
         .validation_year = validation_year,
@@ -27093,21 +27107,24 @@ fn temporalMonthDayFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
 }
 
 fn readMonthDayPartialRaw(self: *Interpreter, bag: Value, t: *const value.TemporalData) EvalError!RawMD {
+    const cd = calendarDateFromIso(t.calendar, t.year, t.month, t.day);
     const dv = try self.getProperty(bag, "day");
     const has_day = !dv.isUndefined();
-    const d: i64 = if (has_day) @intFromFloat(try temporalIntArg(self, dv, "day")) else t.day;
+    const d: i64 = if (has_day) @intFromFloat(try temporalIntArg(self, dv, "day")) else cd.d;
     const mv = try self.getProperty(bag, "month");
     const maybe_m: ?i64 = if (!mv.isUndefined()) @intFromFloat(try temporalIntArg(self, mv, "month")) else null;
     const mcv = try self.getProperty(bag, "monthCode");
     const mc = if (!mcv.isUndefined()) try readMonthCodeInfo(self, mcv) else null;
     const yv = try self.getProperty(bag, "year");
     const has_year = !yv.isUndefined();
-    const ref_year: i64 = if (has_year) @intFromFloat(try temporalIntArg(self, yv, "year")) else t.year;
+    const ref_year: i64 = if (has_year) @intFromFloat(try temporalIntArg(self, yv, "year")) else cd.y;
     if (!has_day and maybe_m == null and mc == null and !has_year)
         return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with requires a recognized field");
+    if (!std.mem.eql(u8, t.calendar, "iso8601") and !has_year and maybe_m != null and mc == null)
+        return self.throwError("TypeError", "non-ISO PlainMonthDay fields require monthCode or year");
     return .{
         .validation_year = ref_year,
-        .m = maybe_m orelse if (mc) |info| @as(i64, try calMonthFromCode(self, t.calendar, ref_year, info)) else t.month,
+        .m = maybe_m orelse if (mc) |info| @as(i64, try calMonthFromCode(self, t.calendar, ref_year, info)) else cd.m,
         .d = d,
         .month_code = mc,
         .cal = t.calendar,
@@ -27140,7 +27157,7 @@ fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) val
     }
     const reject = try readOverflowReject(self, options);
     const f = try validateMonthDayRaw(self, raw, !reject);
-    return makeMonthDay(self, t.year, f.m, f.d, t.calendar);
+    return makeMonthDay(self, f.y, f.m, f.d, t.calendar);
 }
 
 fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
