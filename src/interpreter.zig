@@ -19580,6 +19580,20 @@ fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, dec: []const u8, st
     return nfFormatOne(self, Value.obj(nf), Value.str(dec));
 }
 
+fn durFmtCombineNumeric(self: *Interpreter, locale: []const u8, dec: []const u8, min_int: usize, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
+    const ro = (try self.newObject()).asObj();
+    try self.setProp(ro, "useGrouping", Value.boolVal(false));
+    try self.setProp(ro, "minimumIntegerDigits", Value.num(@floatFromInt(min_int)));
+    try self.setProp(ro, "minimumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 0));
+    try self.setProp(ro, "maximumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 9));
+    if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
+    const nf = (try self.newObject()).asObj();
+    try self.setProp(nf, "\x00intl", Value.str("NumberFormat"));
+    try self.setProp(nf, "\x00locale", Value.str(locale));
+    try self.setProp(nf, "\x00opts", Value.obj(ro));
+    return nfFormatOne(self, Value.obj(nf), Value.str(dec));
+}
+
 fn durFracDigits(ov: ?Value) ?usize {
     if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("fractionalDigits")) |f| if (f.isNumber()) return @intFromFloat(f.asNum());
     return null;
@@ -19693,7 +19707,7 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
                 // A standalone-styled combine unit renders the fractional value
                 // with its unit name ("444.055006 millisecond"); numeric/2-digit
                 // units stay bare digits for the ":"-joined run.
-                if (numeric) break :blk dec;
+                if (numeric) break :blk try durFmtCombineNumeric(self, locale, dec, min_int, sign_never, fd);
                 break :blk try durFmtCombineUnit(self, locale, dec, style, u[0 .. u.len - 1], sign_never, fd);
             } else try durFmtVal(self, locale, fnum, style, u[0 .. u.len - 1], sign_never);
             // Once a numeric run starts (need_sep latches), every later unit
