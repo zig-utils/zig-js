@@ -25098,6 +25098,10 @@ fn canonCalendarId(self: *Interpreter, id: []const u8) []const u8 {
     return "iso8601";
 }
 
+fn temporalCalendarIdsEqual(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
 fn intIn(comptime T: type, needle: T, haystack: []const T) bool {
     for (haystack) |item| if (item == needle) return true;
     return false;
@@ -27889,6 +27893,7 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             const a = this.asObj().temporal.?;
             const b = &other;
+            if (!temporalCalendarIdsEqual(a.calendar, b.calendar)) return self.throwError("RangeError", "calendar mismatch");
             if (@intFromEnum(opts.largest) >= @intFromEnum(TUnit.day)) {
                 // Exact nanosecond difference balanced into days and below.
                 var diff = @as(i128, @intFromFloat(sign)) * (dateTimeToNs(b) - dateTimeToNs(a));
@@ -28175,6 +28180,7 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
             const t = this.asObj().temporal.?;
             const b = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), true);
+            if (!temporalCalendarIdsEqual(t.calendar, b.cal)) return self.throwError("RangeError", "calendar mismatch");
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 }, false);
             const lg = if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.day)) TUnit.day else opts.largest;
             const fwd = calendarEpochDay(t.calendar, t.year, t.month, t.day) <= calendarEpochDay(t.calendar, b.y, b.m, b.d);
@@ -28611,6 +28617,16 @@ fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
 
 const TimeZone = struct { name: []const u8, offset_ns: i64 };
 
+fn canonicalTimeZoneName(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "Asia/Calcutta")) return "Asia/Kolkata";
+    if (std.ascii.eqlIgnoreCase(name, "utc") or std.ascii.eqlIgnoreCase(name, "gmt")) return "UTC";
+    return name;
+}
+
+fn temporalTimeZoneIdsEqual(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, canonicalTimeZoneName(a), canonicalTimeZoneName(b));
+}
+
 /// Parse a time-zone identifier: "UTC", a numeric offset ("+05:00"), or an IANA
 /// name. Returns the canonical name and the fixed UTC offset in ns.
 /// `ZonedDateTime.prototype.getTimeZoneTransition(direction)`. `direction` is
@@ -29045,15 +29061,18 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
             const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef());
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
+            const t = this.asObj().temporal.?;
+            if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
+            if (!temporalTimeZoneIdsEqual(t.tz_name, other.tz_name)) return self.throwError("RangeError", "time zone mismatch");
             if (@intFromEnum(opts.largest) >= @intFromEnum(TUnit.day)) {
-                var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - this.asObj().temporal.?.epoch_ns);
+                var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - t.epoch_ns);
                 diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
                 return makeDuration(self, balanceTimeNs(diff, opts.largest));
             }
             // Calendar largestUnit: diff the local date-times in the requested
             // direction. Month/day balancing is asymmetric, so a backward
             // difference is not just the negated forward difference.
-            const a = zdtLocal(this.asObj().temporal.?);
+            const a = zdtLocal(t);
             const b = zdtLocal(&other);
             const fwd = dateTimeToNs(&a) <= dateTimeToNs(&b);
             var dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, b.year, b.month, b.day, opts.largest);
@@ -29220,19 +29239,22 @@ fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
 
 /// Parse "YYYY-MM-DDTHH:MM:SS±OO:OO[Zone]" into ZonedDateTime data.
 fn parseZdtString(self: *Interpreter, s: []const u8) EvalError!value.TemporalData {
-    // Time-zone annotation in [...]; the rest is a date-time with offset/Z.
-    var dt_part = s;
-    var tz: TimeZone = .{ .name = "UTC", .offset_ns = 0 };
-    if (std.mem.indexOfScalar(u8, s, '[')) |lb| {
-        const rb = std.mem.indexOfScalarPos(u8, s, lb, ']') orelse return self.throwError("RangeError", "invalid ZonedDateTime string");
-        tz = try parseTimeZone(self, s[lb + 1 .. rb]);
-        dt_part = s[0..lb];
-    } else return self.throwError("RangeError", "ZonedDateTime string requires a [TimeZone] annotation");
-    const p = try parseDateTimeNs(self, dt_part);
+    const tz = (try timeZoneAnnotation(self, s)) orelse return self.throwError("RangeError", "ZonedDateTime string requires a [TimeZone] annotation");
+    const p = try parseDateTimeNs(self, s);
     var out: value.TemporalData = .{ .kind = .zoned_date_time };
     out.epoch_ns = p.epoch_ns;
     out.tz_name = tz.name;
     out.tz_offset_ns = tz.offset_ns;
+    out.year = @intCast(p.y);
+    out.month = p.mo;
+    out.day = p.d;
+    out.hour = p.h;
+    out.minute = p.mi;
+    out.second = p.s;
+    out.millisecond = p.ms;
+    out.microsecond = p.us;
+    out.nanosecond = p.ns;
+    out.calendar = p.cal;
     return out;
 }
 
