@@ -23549,6 +23549,12 @@ fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []
     return o;
 }
 
+fn applyTemporalNewTargetProto(self: *Interpreter, o: *value.Object) EvalError!void {
+    if (!self.new_target.isObject()) return;
+    const p = try self.getProperty(self.new_target, "prototype");
+    if (p.isObject() and !p.asObj().is_symbol) o.proto = p.asObj();
+}
+
 /// ToIntegerWithTruncation, rejecting non-finite.
 fn temporalIntArg(self: *Interpreter, v: Value, name: []const u8) EvalError!f64 {
     const n = try self.toNumberV(v);
@@ -24036,7 +24042,7 @@ fn temporalPlainDateConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(d);
     o.temporal.?.calendar = cal;
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
 
@@ -24920,7 +24926,7 @@ fn temporalPlainTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     }
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     setTimeFields(o.temporal.?, vals);
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
 
@@ -24987,7 +24993,7 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporal.?.day = @intFromFloat(d);
     o.temporal.?.calendar = cal;
     setTimeFields(o.temporal.?, vals);
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
 
@@ -25126,7 +25132,7 @@ fn temporalPlainYearMonthConstructorFn(ctx: *anyopaque, this: Value, args: []con
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(@max(1, @min(31, refd)));
     o.temporal.?.calendar = cal;
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
 
@@ -25357,7 +25363,7 @@ fn temporalPlainMonthDayConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(d);
     o.temporal.?.calendar = cal;
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
 
@@ -26839,7 +26845,7 @@ fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
     const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), false);
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
     o.temporal.?.epoch_ns = bv.asObj().bigint;
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
 
@@ -27138,7 +27144,7 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporal.?.tz_name = tz.name;
     o.temporal.?.tz_offset_ns = tz.offset_ns;
     o.temporal.?.calendar = cal;
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
 
