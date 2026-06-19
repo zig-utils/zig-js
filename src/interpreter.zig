@@ -23311,6 +23311,11 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         const p = try parseDateTimeNs(self, rv.asStr());
         if (p.z and !ann.has_tz)
             return self.throwError("RangeError", "relativeTo exact time string requires a time-zone annotation");
+        if (ann.has_tz and p.has_offset) {
+            const tz = try parseTimeZone(self, rv.asStr());
+            if (isFixedTimeZone(tz) and p.offset_ns != tz.offset_ns)
+                return self.throwError("RangeError", "offset does not match time zone");
+        }
         const tod: i128 = @as(i128, p.h) * nsPerUnit(.hour) + @as(i128, p.mi) * nsPerUnit(.minute) +
             @as(i128, p.s) * nsPerUnit(.second) + @as(i128, p.ms) * nsPerUnit(.millisecond) +
             @as(i128, p.us) * nsPerUnit(.microsecond) + @as(i128, p.ns);
@@ -23322,6 +23327,8 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         var m: ?f64 = null;
         var d: ?f64 = null;
         var vals: [6]f64 = .{ 0, 0, 0, 0, 0, 0 };
+        var offset_ns: ?i128 = null;
+        var time_zone: ?TimeZone = null;
 
         const dv = try self.getProperty(rv, "day");
         if (!dv.isUndefined()) d = try temporalIntArg(self, dv, "day");
@@ -23348,16 +23355,20 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         const nsv = try self.getProperty(rv, "nanosecond");
         if (!nsv.isUndefined()) vals[5] = try relativeTimeField(self, nsv, "nanosecond", 999);
         const offv = try self.getProperty(rv, "offset");
-        if (!offv.isUndefined()) try validateRelativeOffset(self, offv);
+        if (!offv.isUndefined()) offset_ns = try validateRelativeOffset(self, offv);
         const sv = try self.getProperty(rv, "second");
         if (!sv.isUndefined()) vals[2] = try relativeTimeField(self, sv, "second", 59);
         const tzv = try self.getProperty(rv, "timeZone");
-        if (!tzv.isUndefined()) _ = try relativeTimeZoneField(self, tzv);
+        if (!tzv.isUndefined()) time_zone = try relativeTimeZoneField(self, tzv);
         const yv = try self.getProperty(rv, "year");
         if (!yv.isUndefined()) y = try temporalIntArg(self, yv, "year");
 
         if (y == null or m == null or d == null)
             return self.throwError("TypeError", "relativeTo object must have year, month, and day");
+        if (offset_ns) |off| if (time_zone) |tz| {
+            if (isFixedTimeZone(tz) and off != tz.offset_ns)
+                return self.throwError("RangeError", "offset does not match time zone");
+        };
         try checkIsoDate(self, y.?, m.?, d.?);
         return .{
             .y = @intFromFloat(y.?),
@@ -23385,12 +23396,17 @@ fn relativeTimeZoneField(self: *Interpreter, v: Value) EvalError!TimeZone {
     return parseTimeZone(self, v.asStr());
 }
 
-fn validateRelativeOffset(self: *Interpreter, v: Value) EvalError!void {
-    if (!v.isString()) return self.throwError("TypeError", "invalid offset");
+fn isFixedTimeZone(tz: TimeZone) bool {
+    return std.mem.eql(u8, tz.name, "UTC") or (tz.name.len > 0 and (tz.name[0] == '+' or tz.name[0] == '-'));
+}
+
+fn validateRelativeOffset(self: *Interpreter, v: Value) EvalError!i128 {
+    const s = if (v.isString()) v.asStr() else if (v.isObject()) try self.toStringV(v) else return self.throwError("TypeError", "invalid offset");
     var body: TBody = .{ .y = 1970, .mo = 1, .d = 1 };
     var i: usize = 0;
-    try parseOffset(self, v.asStr(), &i, &body);
-    if (!body.has_offset or i != v.asStr().len) return self.throwError("RangeError", "invalid offset");
+    try parseOffset(self, s, &i, &body);
+    if (!body.has_offset or i != s.len) return self.throwError("RangeError", "invalid offset");
+    return body.off_ns;
 }
 
 const DAY_NS: i128 = 86_400_000_000_000;
@@ -24662,7 +24678,7 @@ fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
 }
 
 /// Parsed ISO date-time with its epoch nanoseconds (offset/`Z` applied).
-const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_offset: bool = false };
+const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_offset: bool = false, offset_ns: i128 = 0 };
 
 /// Parse "YYYY-MM-DD[T ]HH:MM[:SS[.fraction]][Z|±HH:MM]" (annotations stripped,
 /// time optional). The epoch is the local fields minus any UTC offset; callers
@@ -24687,6 +24703,7 @@ fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
         .epoch_ns = local_ns - b.off_ns,
         .z = b.z,
         .has_offset = b.has_offset,
+        .offset_ns = b.off_ns,
     };
 }
 
