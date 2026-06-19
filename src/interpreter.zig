@@ -16699,6 +16699,13 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     return arr;
 }
 
+fn intlLocaleSupported(tag: []const u8) bool {
+    const end = std.mem.indexOfScalar(u8, tag, '-') orelse tag.len;
+    const lang = tag[0..end];
+    if (std.mem.eql(u8, lang, "zxx") or std.mem.eql(u8, lang, "mul") or std.mem.eql(u8, lang, "mis")) return false;
+    return cldr_locale.likely(lang) != null;
+}
+
 fn intlGetCanonicalLocalesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -17916,9 +17923,15 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 };
                 break :blk oo;
             };
-            // Resolve the locale (first requested, else "en").
+            // Resolve the locale (first supported requested, else "en").
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-            const resolved: []const u8 = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
+            var resolved: []const u8 = "en";
+            for (locs.elements.items) |lv| {
+                if (lv.isString() and intlLocaleSupported(lv.asStr())) {
+                    resolved = lv.asStr();
+                    break;
+                }
+            }
             try self.setProp(o, "\x00intl", Value.str(service));
             try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
             try self.setProp(o, "\x00locale", Value.str(resolved));
@@ -20243,13 +20256,69 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
 
 // ---- Intl.Segmenter segmentation (byte-offset, code-point aware) -----------
 
-/// The byte length of the UTF-8 sequence whose lead byte is `b`.
-fn segUtf8Len(b: u8) usize {
-    if (b < 0x80) return 1;
-    if (b >= 0xF0) return 4;
-    if (b >= 0xE0) return 3;
-    if (b >= 0xC0) return 2;
-    return 1; // continuation/invalid byte: treat as one
+fn segScalarLen(str: []const u8, pos: usize) usize {
+    if (wtf8SurrogateAt(str, pos) != null) return 3;
+    return utf8SeqLen(str, pos);
+}
+
+fn segCodePoint(str: []const u8, pos: usize) u21 {
+    if (wtf8SurrogateAt(str, pos)) |cp| return cp;
+    const n = utf8SeqLen(str, pos);
+    if (n == 1) return str[pos];
+    return std.unicode.utf8Decode(str[pos .. pos + n]) catch str[pos];
+}
+
+fn segIsCombining(cp: u21) bool {
+    return (cp >= 0x0300 and cp <= 0x036F) or
+        (cp >= 0x0483 and cp <= 0x0489) or
+        (cp >= 0x0591 and cp <= 0x05BD) or
+        cp == 0x05BF or
+        (cp >= 0x05C1 and cp <= 0x05C2) or
+        (cp >= 0x05C4 and cp <= 0x05C5) or
+        cp == 0x05C7 or
+        (cp >= 0x0610 and cp <= 0x061A) or
+        (cp >= 0x064B and cp <= 0x065F) or
+        cp == 0x0670 or
+        (cp >= 0x06D6 and cp <= 0x06DC) or
+        (cp >= 0x06DF and cp <= 0x06E4) or
+        (cp >= 0x06E7 and cp <= 0x06E8) or
+        (cp >= 0x06EA and cp <= 0x06ED) or
+        (cp >= 0x0900 and cp <= 0x0DFF and !(cp >= 0x0966 and cp <= 0x096F)) or
+        (cp >= 0x0E31 and cp <= 0x0E4E) or
+        (cp >= 0xFE00 and cp <= 0xFE0F) or
+        (cp >= 0x1F3FB and cp <= 0x1F3FF) or
+        (cp >= 0xE0100 and cp <= 0xE01EF);
+}
+
+fn segIsJamo(cp: u21) bool {
+    return cp >= 0x1100 and cp <= 0x11FF;
+}
+
+fn segNextGrapheme(str: []const u8, pos: usize) usize {
+    var end = pos + segScalarLen(str, pos);
+    const first = segCodePoint(str, pos);
+    if (isHighSurrogate(first) and end < str.len) {
+        const next = segCodePoint(str, end);
+        if (isLowSurrogate(next)) end += segScalarLen(str, end);
+    }
+    if (segIsJamo(first)) {
+        while (end < str.len and segIsJamo(segCodePoint(str, end))) end += segScalarLen(str, end);
+        return end;
+    }
+    while (end < str.len) {
+        const cp = segCodePoint(str, end);
+        if (segIsCombining(cp)) {
+            end += segScalarLen(str, end);
+            continue;
+        }
+        if (cp == 0x200D) {
+            end += segScalarLen(str, end);
+            if (end < str.len) end += segScalarLen(str, end);
+            continue;
+        }
+        break;
+    }
+    return end;
 }
 
 /// Whether the code point starting at `str[pos]` is "word-like" (letters/digits).
@@ -20266,14 +20335,14 @@ fn segWordCat(str: []const u8, pos: usize) bool {
 fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, word_like: bool } {
     const len = str.len;
     if (std.mem.eql(u8, gran, "grapheme")) {
-        return .{ .end = @min(len, pos + segUtf8Len(str[pos])), .word_like = false };
+        return .{ .end = @min(len, segNextGrapheme(str, pos)), .word_like = false };
     }
     if (std.mem.eql(u8, gran, "sentence")) {
         var end = pos;
         while (end < len) {
             const c = str[end];
             const is_term = c == '.' or c == '!' or c == '?';
-            end += segUtf8Len(str[end]);
+            end += segScalarLen(str, end);
             if (is_term) {
                 while (end < len and (str[end] == ' ' or str[end] == '\t' or str[end] == '\n')) end += 1;
                 break;
@@ -20284,12 +20353,18 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
     // word: a maximal run of one category (word-like vs not). A "." or ","
     // between two digits stays inside the numeric word (UAX#29 WB11/WB12), so
     // "1.23" is one segment rather than "1", ".", "23".
+    const first_cp = segCodePoint(str, pos);
+    if (isHighSurrogate(first_cp) or isLowSurrogate(first_cp)) {
+        var end = pos + segScalarLen(str, pos);
+        if (isHighSurrogate(first_cp) and end < len and isLowSurrogate(segCodePoint(str, end))) end += segScalarLen(str, end);
+        return .{ .end = end, .word_like = false };
+    }
     const cat = segWordCat(str, pos);
     var end = pos;
     if (cat) {
         while (end < len) {
             if (segWordCat(str, end)) {
-                end += segUtf8Len(str[end]);
+                end += segScalarLen(str, end);
                 continue;
             }
             const c = str[end];
@@ -20300,7 +20375,7 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
             break;
         }
     } else {
-        while (end < len and !segWordCat(str, end)) end += segUtf8Len(str[end]);
+        while (end < len and !segWordCat(str, end)) end += segScalarLen(str, end);
     }
     return .{ .end = end, .word_like = cat };
 }
@@ -20310,7 +20385,7 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
 fn segDataObj(self: *Interpreter, str: []const u8, start: usize, end: usize, gran: []const u8, word_like: bool) EvalError!Value {
     const o = (try self.newObject()).asObj();
     try self.setProp(o, "segment", Value.str(try self.arena.dupe(u8, str[start..end])));
-    try self.setProp(o, "index", Value.num(@floatFromInt(start)));
+    try self.setProp(o, "index", Value.num(@floatFromInt(Interpreter.utf16IndexForByteOffset(str, start))));
     try self.setProp(o, "input", Value.str(str));
     if (std.mem.eql(u8, gran, "word")) try self.setProp(o, "isWordLike", Value.boolVal(word_like));
     return Value.obj(o);
@@ -20355,12 +20430,14 @@ fn intlSegmentsContainingFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const gran = segmenterGranularity(this.asObj());
     const nf = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
     const n: f64 = if (std.math.isNan(nf)) 0 else @trunc(nf);
-    if (n < 0 or n >= @as(f64, @floatFromInt(str.len))) return Value.undef();
-    const target: usize = @intFromFloat(n);
+    if (n < 0 or n >= @as(f64, @floatFromInt(Interpreter.utf16LenOfString(str)))) return Value.undef();
+    const target_units: usize = @intFromFloat(n);
     var pos: usize = 0;
     while (pos < str.len) {
         const nx = segNext(str, pos, gran);
-        if (target >= pos and target < nx.end) return try segDataObj(self, str, pos, nx.end, gran, nx.word_like);
+        const start_units = Interpreter.utf16IndexForByteOffset(str, pos);
+        const end_units = Interpreter.utf16IndexForByteOffset(str, nx.end);
+        if (target_units >= start_units and target_units < end_units) return try segDataObj(self, str, pos, nx.end, gran, nx.word_like);
         pos = nx.end;
     }
     return Value.undef();
@@ -20985,16 +21062,12 @@ fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) v
             if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
         }
     }
-    // Report requested locales as supported, except those whose primary
-    // language subtag is an ISO 639 "no linguistic content" code (zxx/mul/mis),
-    // for which no locale data could ever exist.
+    // Report requested locales as supported only when we have basic CLDR locale
+    // data for the primary language.
     const out = (try self.newArray()).asObj();
     for (arr.elements.items) |lv| {
         if (!lv.isString()) continue;
-        const tag = lv.asStr();
-        const end = std.mem.indexOfScalar(u8, tag, '-') orelse tag.len;
-        const lang = tag[0..end];
-        if (std.mem.eql(u8, lang, "zxx") or std.mem.eql(u8, lang, "mul") or std.mem.eql(u8, lang, "mis")) continue;
+        if (!intlLocaleSupported(lv.asStr())) continue;
         try out.elements.append(out.elementsAllocator(self.arena), lv);
     }
     return Value.obj(out);
