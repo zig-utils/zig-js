@@ -97,17 +97,29 @@ shouldBe(Atomics.add(i32, 0, 1), 41);
 shouldBe(Atomics.load(i32, 0), 42);
 
 // Property Atomics.wait/notify ping.
-const futex = { turn: 0 };
+const futex = { turn: 0, ready: 0, done: 0 };
 const waiter = new Thread(() => {
+    Atomics.store(futex, "ready", 1);
+    Atomics.notify(futex, "ready");
     const result = Atomics.wait(futex, "turn", 0);
+    Atomics.store(futex, "done", 1);
+    Atomics.notify(futex, "done");
     return result + ":" + futex.turn;
 });
-// Give the waiter time to park, then publish and wake.
-while (Atomics.load(futex, "turn") !== 0) { }
-let spins = 0;
-while (spins++ < 1e7) { } // crude warm-up; wait() tolerates either ordering
+// Give the waiter a chance to enter wait(), then publish and wake. In the
+// no-GIL runner the old busy-spin warm-up could dominate Debug-mode runtime,
+// so use a bounded wait/notify loop instead.
+if (Atomics.load(futex, "ready") === 0)
+    Atomics.wait(futex, "ready", 0, 1000);
 Atomics.store(futex, "turn", 1);
-Atomics.notify(futex, "turn");
+let woken = Atomics.notify(futex, "turn");
+const deadline = Date.now() + 30000;
+while (woken === 0 && Atomics.load(futex, "done") === 0) {
+    if (Date.now() > deadline)
+        throw new Error("property wait ping did not finish");
+    Atomics.wait(futex, "done", 0, 5);
+    woken += Atomics.notify(futex, "turn");
+}
 const pingResult = waiter.join();
 if (pingResult !== "ok:1" && pingResult !== "not-equal:1")
     throw new Error("unexpected wait result: " + pingResult);
