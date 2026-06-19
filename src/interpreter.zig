@@ -26091,17 +26091,9 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
             const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             _ = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef()); // validates the overflow option
-            var y: i64 = t.year + @as(i64, @intFromFloat(sign * dur[0]));
-            var m: i64 = @as(i64, t.month) + @as(i64, @intFromFloat(sign * dur[1]));
-            // Balance month into [1,12].
-            y += @divFloor(m - 1, 12);
-            m = @mod(m - 1, 12) + 1;
-            var d: i64 = t.day;
-            const dim = isoDaysInMonth(y, @intCast(m));
-            if (d > dim) d = dim; // constrain
-            const epoch = tDaysFromCivil(y, @intCast(m), @intCast(d)) + @as(i64, @intFromFloat(sign * (dur[2] * 7 + dur[3])));
-            const c = tCivilFromDays(epoch);
-            try checkIsoDate(self, @floatFromInt(c.y), @floatFromInt(c.m), @floatFromInt(c.d));
+            const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign);
+            const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
+            try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
             const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
             o.temporal.?.year = @intCast(c.y);
             o.temporal.?.month = c.m;
@@ -27738,18 +27730,33 @@ fn temporalPlainTimeCompareFn(ctx: *anyopaque, this: Value, args: []const Value)
 
 // ---- PlainDateTime arithmetic / conversions -------------------------
 
-/// Add a calendar date duration (years/months/weeks/days) to ISO y/m/d with the
-/// standard `constrain` overflow, returning the resulting civil date.
-fn addCalendarDate(y0: i64, m0: u8, d0: u8, years: f64, months: f64, weeks: f64, days: f64, sign: f64) Civil {
+fn balanceCalendarYearMonth(cal: []const u8, y0: i64, m0: u8, month_delta: i64) struct { y: i64, m: u8 } {
+    var y = y0;
+    var m: i64 = @as(i64, m0) + month_delta;
+    while (m < 1) {
+        y -= 1;
+        m += calMonthsInYear(cal, y);
+    }
+    while (m > calMonthsInYear(cal, y)) {
+        m -= calMonthsInYear(cal, y);
+        y += 1;
+    }
+    return .{ .y = y, .m = @intCast(m) };
+}
+
+/// Add a calendar date duration (years/months/weeks/days) with the standard
+/// `constrain` overflow, returning fields in the receiver's calendar.
+fn addCalendarDate(cal: []const u8, y0: i64, m0: u8, d0: u8, years: f64, months: f64, weeks: f64, days: f64, sign: f64) Civil {
     var y: i64 = y0 + @as(i64, @intFromFloat(sign * years));
-    var m: i64 = @as(i64, m0) + @as(i64, @intFromFloat(sign * months));
-    y += @divFloor(m - 1, 12);
-    m = @mod(m - 1, 12) + 1;
+    const ym = balanceCalendarYearMonth(cal, y, m0, @as(i64, @intFromFloat(sign * months)));
+    y = ym.y;
+    const m = ym.m;
     var d: i64 = d0;
-    const dim = isoDaysInMonth(y, @intCast(m));
+    const dim = calDaysInMonth(cal, calDisplayYear(cal, y), m);
     if (d > dim) d = dim;
-    const epoch = tDaysFromCivil(y, @intCast(m), @intCast(d)) + @as(i64, @intFromFloat(sign * (weeks * 7 + days)));
-    return tCivilFromDays(epoch);
+    const iso = calendarDateToIso(cal, y, m, @intCast(d));
+    const c = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + @as(i64, @intFromFloat(sign * (weeks * 7 + days))));
+    return calendarDateFromIso(cal, c.y, c.m, c.d);
 }
 
 fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
@@ -27761,12 +27768,13 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             _ = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef()); // validates the overflow option
             // Date part with constrain, then time part carrying whole days.
-            const c = addCalendarDate(t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign);
+            const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign);
             const time_ns = timeToNs(t) + @as(i128, @intFromFloat(sign)) * (durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day));
             const day_carry = @divFloor(time_ns, 86_400_000_000_000);
-            const epoch = tDaysFromCivil(c.y, c.m, c.d) + @as(i64, @intCast(day_carry));
-            const cc = tCivilFromDays(epoch);
-            try checkIsoDate(self, @floatFromInt(cc.y), @floatFromInt(cc.m), @floatFromInt(cc.d));
+            const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
+            const cc_iso = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + @as(i64, @intCast(day_carry)));
+            const cc = calendarDateFromIso(t.calendar, cc_iso.y, cc_iso.m, cc_iso.d);
+            try checkIsoDate(self, @floatFromInt(cc_iso.y), @floatFromInt(cc_iso.m), @floatFromInt(cc_iso.d));
             const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
             o.temporal.?.year = @intCast(cc.y);
             o.temporal.?.month = cc.m;
@@ -28843,8 +28851,9 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
             if (durHasCalendar(dur) or dur[3] != 0) {
                 // Apply date units to the local date.
                 const l = zdtLocal(t);
-                const c = addCalendarDate(l.year, l.month, l.day, dur[0], dur[1], dur[2], dur[3], sign);
-                const local_ns = @as(i128, tDaysFromCivil(c.y, c.m, c.d)) * 86_400_000_000_000 + timeToNs(&l);
+                const c = addCalendarDate(t.calendar, l.year, l.month, l.day, dur[0], dur[1], dur[2], dur[3], sign);
+                const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
+                const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
                 epoch = local_ns - t.tz_offset_ns;
                 // Then time-of-day units.
                 const time_only = durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day);
