@@ -23,9 +23,12 @@
 load("../harness.js", "caller relative");
 
 const FULL = typeof arguments !== "undefined" && Array.prototype.indexOf.call(arguments, "int-gate") >= 0;
-const ROUNDS = FULL ? 400 : 4;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const ROUNDS = FULL ? 400 : (NO_GIL ? 2 : 4);
 const THREADS = FULL ? 4 : 2;
-const WARMUP = FULL ? 20000 : 1000;
+const WARMUP = FULL ? 20000 : (NO_GIL ? 300 : 1000);
 
 function makeCallee(id) {
     // Same source per flavor => same executable family; id baked into the

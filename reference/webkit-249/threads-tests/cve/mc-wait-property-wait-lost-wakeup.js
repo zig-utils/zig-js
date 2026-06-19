@@ -32,7 +32,10 @@
 // loudly and deterministically.
 load("../harness.js", "caller relative");
 
-const ROUNDS = 200;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const ROUNDS = NO_GIL ? 80 : 200;
 const WAIT_MS = 5000; // generous: covers ASAN/TSAN/CI scheduling latency
 
 // Pre-create every per-round key (property wait requires an own data

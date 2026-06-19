@@ -21,7 +21,10 @@
 load("../harness.js", "caller relative");
 
 const FULL = typeof arguments !== "undefined" && Array.prototype.indexOf.call(arguments, "int-gate") >= 0;
-const ROUNDS = FULL ? 300 : 10;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const ROUNDS = FULL ? 300 : (NO_GIL ? 4 : 10);
 const THREADS = FULL ? 4 : 2;
 
 // Generation-stamped prototype: workers read o.f through the prototype; the

@@ -417,7 +417,10 @@ case is also TSan-clean as a focused `threads-test` probe. The GC-stress block
 is focused-green 4/4, the promoted Atomics block is focused-green 15/15, and
 the promoted JIT-audit subset is focused-green in verified slices through
 `jit/tid-tag-3-threads.js`. Broader promoted-allowlist `parallel_js` remains
-exploratory until the monolithic cumulative budget probe is cleared. (6)
+exploratory until the monolithic cumulative budget probe is cleared; with a
+30-minute cap the single run now clears the CVE tail and GC-stress and times
+out later in the promoted JIT-audit block around `jit/golden-disasm-corpus.js`
+/ the int-gate smoke files. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

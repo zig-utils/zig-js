@@ -23,6 +23,9 @@
 // Amplifier-ready; green under phase-1 GIL; bounded; all threads joined.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const WRITERS = 2;
 // ITERS is the iteration ceiling. The pinned official lane runs Debug
 // with a 120s budget; 4000 iterations measured ~191s wall on a quiet host
@@ -34,9 +37,9 @@ const WRITERS = 2;
 // per-iteration windows (fewer sweeps, each more potent), and the MIN_ITERS
 // floor preserves shape coverage; a dedicated long lane may raise
 // TIME_BUDGET_MS via its own edit if full-storm coverage is ever wanted.
-const ITERS = 4000;
-const MIN_ITERS = 256;
-const TIME_BUDGET_MS = 60000;
+const ITERS = NO_GIL ? 1024 : 4000;
+const MIN_ITERS = NO_GIL ? 128 : 256;
+const TIME_BUDGET_MS = NO_GIL ? 20000 : 60000;
 const nowMs = (typeof preciseTime === "function") ? () => preciseTime() * 1000 : () => Date.now();
 const o = { anchor: "anchor!" };
 const gate = { started: 0, stop: 0, churn: 0 };

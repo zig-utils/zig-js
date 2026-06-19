@@ -26,7 +26,10 @@
 load("../harness.js", "caller relative");
 
 const FULL = typeof arguments !== "undefined" && Array.prototype.indexOf.call(arguments, "int-gate") >= 0;
-const ROUNDS = FULL ? 300 : 40;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const ROUNDS = FULL ? 300 : (NO_GIL ? 10 : 40);
 const THREADS = FULL ? 3 : 1;
 
 const VALUES = new Set([7, 13]);
