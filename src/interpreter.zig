@@ -26255,7 +26255,7 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     try tfmt(self, &buf, "-{d:0>2}", .{t.month});
     // When the calendar annotation is shown the reference day completes the
     // ISO string ("YYYY-MM-DD[u-ca=iso8601]").
-    if (calShowsAnnotation(cal, t.calendar)) try tfmt(self, &buf, "-{d:0>2}", .{t.day});
+    if (!std.mem.eql(u8, t.calendar, "iso8601") or calShowsAnnotation(cal, t.calendar)) try tfmt(self, &buf, "-{d:0>2}", .{t.day});
     try appendCalAnnotation(self, &buf, cal, t.calendar);
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
@@ -26556,7 +26556,7 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     // The reference year (1972) renders the short "MM-DD" form; a non-reference
     // year, or a shown calendar annotation, forces the full "YYYY-MM-DD".
-    if (t.year != 1972 or calShowsAnnotation(cal, t.calendar)) {
+    if (t.year != 1972 or !std.mem.eql(u8, t.calendar, "iso8601") or calShowsAnnotation(cal, t.calendar)) {
         try isoYearStr(self, &buf, t.year);
         try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ t.month, t.day });
     } else {
