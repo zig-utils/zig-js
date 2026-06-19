@@ -24922,10 +24922,10 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
                 .day_of_year => Value.num(@floatFromInt(tDaysFromCivil(y, t.month, t.day) - tDaysFromCivil(y, 1, 1) + 1)),
                 .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, t.month))),
                 .days_in_year => Value.num(@floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365))),
-                .months_in_year => Value.num(12),
+                .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .days_in_week => Value.num(7),
                 .week_of_year => Value.num(@floatFromInt(isoWeekOfYear(y, t.month, t.day).week)),
-                .in_leap_year => Value.boolVal(isoLeap(y)),
+                .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, calDisplayYear(t.calendar, y))),
             };
         }
     }.call;
@@ -24960,19 +24960,81 @@ fn isKnownCalendar(id: []const u8) bool {
 
 /// Normalize a calendar identifier to its canonical (lowercase) form, mapping
 /// the common aliases. Unknown ids are returned lowercased as-is (the engine
-/// treats every calendar's date math as ISO; only gregory adds era reflection).
+/// treats most calendars' date math as ISO, while preserving the calendar id for
+/// calendar-sensitive accessors and round-tripping.
 fn canonCalendarId(self: *Interpreter, id: []const u8) []const u8 {
     const low = std.ascii.allocLowerString(self.arena, id) catch return "iso8601";
-    // Only FULLY-implemented calendars are stored as distinct ids; every other
-    // (syntactically valid) id behaves as iso8601 (the engine's prior all-ISO
-    // behavior), so partial id-tracking never regresses the trivially-all-iso8601
-    // round-trip tests. The solar-Gregorian family (gregory/buddhist/roc) shares
-    // ISO month/day math, differing only in the displayed year and era.
     if (std.mem.eql(u8, low, "gregory") or std.mem.eql(u8, low, "gregorian")) return "gregory";
     if (std.mem.eql(u8, low, "buddhist")) return "buddhist";
     if (std.mem.eql(u8, low, "roc") or std.mem.eql(u8, low, "minguo")) return "roc";
     if (std.mem.eql(u8, low, "japanese")) return "japanese";
+    if (std.mem.eql(u8, low, "islamicc")) return "islamic-civil";
+    if (std.mem.eql(u8, low, "ethiopic-amete-alem")) return "ethioaa";
+    if (isKnownCalendar(low)) return low;
     return "iso8601";
+}
+
+fn intIn(comptime T: type, needle: T, haystack: []const T) bool {
+    for (haystack) |item| if (item == needle) return true;
+    return false;
+}
+
+fn persianLeapYear(year: i64) bool {
+    const leap_years = [_]i64{
+        1210, 1214, 1218, 1222, 1226, 1230, 1234, 1238, 1243, 1247,
+        1251, 1255, 1259, 1263, 1267, 1271, 1276, 1280, 1284, 1288,
+        1292, 1296, 1300, 1304, 1309, 1313, 1317, 1321, 1325, 1329,
+        1333, 1337, 1342, 1346, 1350, 1354, 1358, 1362, 1366, 1370,
+        1375, 1379, 1383, 1387, 1391, 1395, 1399, 1403, 1408, 1412,
+        1416, 1420, 1424, 1428, 1432, 1436, 1441, 1445, 1449, 1453,
+        1457, 1461, 1465, 1469, 1474, 1478, 1482, 1486, 1490, 1494,
+        1498,
+    };
+    if (year >= 1206 and year <= 1498) return intIn(i64, year, &leap_years);
+    const ep_base = year - if (year >= 0) @as(i64, 474) else @as(i64, 473);
+    const ep_year = 474 + @mod(ep_base, 2820);
+    return @mod((ep_year + 38) * 682, 2816) < 682;
+}
+
+fn chineseLikeLeapYear(year: i64) bool {
+    const leap_years = [_]i64{
+        1971, 1974, 1976, 1979, 1982, 1984, 1987, 1990, 1993, 1995,
+        1998, 2001, 2004, 2006, 2009, 2012, 2014, 2017, 2020, 2023,
+        2025, 2028, 2031, 2033, 2036, 2039, 2042, 2044, 2047,
+    };
+    return intIn(i64, year, &leap_years);
+}
+
+fn umalquraLeapYear(year: i64) bool {
+    const leap_years = [_]i64{
+        1390, 1392, 1397, 1399, 1403, 1405, 1406, 1411, 1412, 1414,
+        1418, 1420, 1425, 1426, 1428, 1433, 1435, 1439, 1441, 1443,
+        1447, 1448, 1451, 1454, 1455, 1457, 1462, 1463, 1467, 1469,
+    };
+    return intIn(i64, year, &leap_years);
+}
+
+fn calInLeapYear(cal: []const u8, year: i64) bool {
+    if (std.mem.eql(u8, cal, "buddhist") or std.mem.eql(u8, cal, "roc") or std.mem.eql(u8, cal, "japanese") or std.mem.eql(u8, cal, "gregory"))
+        return isoLeap(calIsoFromDisplayYear(cal, year));
+    if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
+        return @mod(year, 4) == 3;
+    if (std.mem.eql(u8, cal, "hebrew")) return @mod(7 * year + 1, 19) < 7;
+    if (std.mem.eql(u8, cal, "indian")) return isoLeap(year + 78);
+    if (std.mem.eql(u8, cal, "islamic") or std.mem.eql(u8, cal, "islamic-civil") or std.mem.eql(u8, cal, "islamic-tbla") or std.mem.eql(u8, cal, "islamic-rgsa"))
+        return @mod(11 * year + 14, 30) < 11;
+    if (std.mem.eql(u8, cal, "islamic-umalqura")) return umalquraLeapYear(year);
+    if (std.mem.eql(u8, cal, "persian")) return persianLeapYear(year);
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) return chineseLikeLeapYear(year);
+    return isoLeap(year);
+}
+
+fn calMonthsInYear(cal: []const u8, year: i64) u8 {
+    if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
+        return 13;
+    if (std.mem.eql(u8, cal, "hebrew") or std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
+        return if (calInLeapYear(cal, year)) 13 else 12;
+    return 12;
 }
 
 /// Whether a date-bearing Temporal value uses the Gregorian calendar (which, for
@@ -26011,8 +26073,8 @@ fn temporalYearMonthGetter(comptime f: YearMonthField) value.NativeFn {
                 .month => Value.num(@floatFromInt(t.month)),
                 .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, t.month))),
                 .days_in_year => Value.num(@floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365))),
-                .months_in_year => Value.num(12),
-                .in_leap_year => Value.boolVal(isoLeap(y)),
+                .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
+                .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, calDisplayYear(t.calendar, y))),
             };
         }
     }.call;
@@ -28134,9 +28196,9 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
                 .day_of_year => Value.num(@floatFromInt(tDaysFromCivil(y, l.month, l.day) - tDaysFromCivil(y, 1, 1) + 1)),
                 .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, l.month))),
                 .days_in_year => Value.num(@floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365))),
-                .months_in_year => Value.num(12),
+                .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .days_in_week => Value.num(7),
-                .in_leap_year => Value.boolVal(isoLeap(y)),
+                .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, calDisplayYear(t.calendar, y))),
                 .hours_in_day => Value.num(24),
                 .offset_ns => Value.num(@floatFromInt(t.tz_offset_ns)),
                 .week_of_year => Value.num(@floatFromInt(isoWeekOfYear(y, l.month, l.day).week)),
@@ -28467,6 +28529,7 @@ fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
             out.epoch_ns = local_ns - tz.offset_ns;
             out.tz_name = tz.name;
             out.tz_offset_ns = tz.offset_ns;
+            out.calendar = f.cal;
             return out;
         }
     }
@@ -28495,7 +28558,9 @@ fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const d = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef());
-    return zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
+    const o = try zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
+    o.asObj().temporal.?.calendar = d.calendar;
+    return o;
 }
 
 /// Make a Temporal type prototype (stored under `proto_key` for `makeTemporal`),
