@@ -28743,6 +28743,9 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
 
 fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
     if (std.mem.eql(u8, name, "America/Vancouver")) {
+        const standard_time_start_1883 = -2_717_650_800_000_000_000; // 1883-11-18T17:00:00Z
+        if (epoch_ns < standard_time_start_1883)
+            return -(8 * 3_600_000_000_000 + 12 * 60_000_000_000 + 28 * 1_000_000_000);
         const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
@@ -28956,9 +28959,10 @@ fn zdtMake(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i
 }
 
 fn zdtMakeWithCalendar(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i64, calendar: []const u8) EvalError!Value {
-    const v = try zdtMake(self, epoch_ns, tz_name, tz_offset);
+    const actual_offset = timeZoneOffsetAtEpoch(tz_name, epoch_ns, tz_offset);
+    const v = try zdtMake(self, epoch_ns, tz_name, actual_offset);
     const t = v.asObj().temporal.?;
-    const local = epoch_ns + tz_offset;
+    const local = epoch_ns + actual_offset;
     const days = @divFloor(local, 86_400_000_000_000);
     const iso = tCivilFromDays(@intCast(days));
     const cd = calendarDateFromIso(calendar, iso.y, iso.m, iso.d);
