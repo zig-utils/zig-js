@@ -2954,6 +2954,19 @@ pub const Interpreter = struct {
     }
 
     fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool) EvalError!Value {
+        if (callee_node.* == .optional_chain and callee_node.optional_chain.* == .member) {
+            const m = callee_node.optional_chain.member;
+            const recv = try self.eval(m.object);
+            if (m.optional and (recv.isNull() or recv.isUndefined())) return error.OptShortCircuit;
+            const key = try self.memberKey(m.property, m.computed);
+            if (optional) {
+                const method = try self.getProperty(recv, key);
+                if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
+                return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
+            }
+            const args = try self.evalArgs(arg_nodes);
+            return self.callMethod(recv, key, args);
+        }
         // Method call `obj.m(...)`: evaluate the receiver once so it can both
         // resolve the method and bind `this`. Array/string builtins (push,
         // pop, ...) that aren't own properties are dispatched here too.
@@ -2986,7 +2999,7 @@ pub const Interpreter = struct {
         if (optional and (callee.isNull() or callee.isUndefined())) return error.OptShortCircuit;
         const args = try self.evalArgs(arg_nodes);
         const saved_direct_eval = self.direct_eval_call;
-        self.direct_eval_call = callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
+        self.direct_eval_call = !optional and callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
         defer self.direct_eval_call = saved_direct_eval;
         return self.callValue(callee, args);
     }
@@ -30545,6 +30558,15 @@ test "interpreter numeric literals (separators, binary/octal) and optional chain
     // optional call
     try std.testing.expect((try evalSource(a, "let o = { f: function () { return 7; } }; o.f?.() === 7")).asBool());
     try std.testing.expect((try evalSource(a, "let o = {}; o.missing?.() === undefined")).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\const a = { _b: { c: 42 }, b() { return this._b; } };
+        \\a?.b().c === 42 && (a?.b)().c === 42 && a.b?.().c === 42 && (a.b)?.().c === 42
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\const a = "global";
+        \\function fn() { const a = "local"; return eval?.("a"); }
+        \\fn() === "global" && ((a) => eval?.("a"))("local") === "global"
+    )).asBool());
     // optional method short-circuits the whole chain
     try std.testing.expect((try evalSource(a, "let o = null; o?.a.b.c === undefined")).asBool());
 }
