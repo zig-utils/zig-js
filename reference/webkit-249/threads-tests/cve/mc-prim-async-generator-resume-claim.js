@@ -1,26 +1,15 @@
 //@ requireOptions("--useJSThreads=1")
-//@ threadsExpectFail("gilOff")
 // MC-PRIM / MC-TEAR susceptibility test — ASYNC clone of
 // mc-prim-generator-resume-claim.js (docs/threads/cve/map-MC-PRIM.md P5,
 // map-MC-TEAR.md S6; annex N7 row R7 names JSAsyncGenerator as §N.5-covered).
 //
-// [EXPECTED-FAIL GIL-off until the §N.5 ASYNC resume-head claim lands —
-// MECHANICAL via the threadsExpectFail("gilOff") directive above: the
-// --cve runner counts a GIL-off failure as XFAIL and turns an unexplained
-// GIL-off PASS (XPASS) into a suite FAILURE, so this pin cannot rot.]
-//
-// The landed §N.5 claim/publish protects GeneratorPrototype.js and
-// JSIteratorHelperPrototype.js only. AsyncGeneratorPrototype.js still runs
-// the plain check-then-store resume head GIL-off (state read
-// AsyncGeneratorPrototype.js:35/:82-:83, plain Executing store :78, plain
-// queue-field mutations), and JSMicrotask.cpp's C++ resume paths use plain
-// setState(Executing) + a plain state re-read to decide done. The deferral is
-// recorded (SPEC-ungil-history.md "§N.5 LANDED SHAPE" supersession entry;
-// CVE-AUDIT-STATUS.md item 3 amendments). This test pins the open arm
-// mechanically: it must FLIP TO PASSING when either (a) claim/publish lands
-// on the async resume heads + the JSMicrotask setState cluster, or (b) an
-// owner-affinity CAE ruling narrows N7 R7 (in which case the cross-thread
-// resume below must surface the CAE, which this test treats as a pass arm).
+// The §N.5 async resume-head claim is landed in zig-js by protecting the
+// async-generator request queue with a per-generator mutex and a single
+// pumping owner. This test pins that claim mechanically: under GIL-off two
+// racing `agen.next()` callers must either serialize to exactly-once delivery
+// or reject a claim loser with TypeError/ConcurrentAccessError; they must not
+// double-resume the frame, tear IteratorResult publication, or crash in a
+// stale microtask continuation.
 //
 // Probe: two spawned threads race agen.next() on ONE shared async generator
 // (synchronous yields — no awaits — so every resume settles on the next

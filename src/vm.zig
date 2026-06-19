@@ -18,6 +18,7 @@ const bc = @import("bytecode.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
 const promise = @import("promise.zig");
+const agent = @import("agent.zig");
 
 const Value = value.Value;
 const Chunk = bc.Chunk;
@@ -138,6 +139,7 @@ pub const Generator = struct {
     /// `async function*` activation: each `.next()`/`.return()`/`.throw()`
     /// enqueues a request (a result promise + an action) that the driver pumps.
     is_async_gen: bool = false,
+    requests_mutex: std.Io.Mutex = .init,
     requests: std.ArrayListUnmanaged(AsyncGenRequest) = .empty,
     pumping: bool = false,
 
@@ -1078,18 +1080,32 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
 pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Value) EvalError!Value {
     const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
     const rp = try promise.newPromise(vm);
-    const was_idle = g.requests.items.len == 0;
     // Incremental-GC barrier: the request's value + result promise are stored
     // into the live generator cell (which may already be marked).
     gc_mod.barrierValue(val);
     gc_mod.barrierCell(@ptrCast(rp));
-    try g.requests.append(g.requestsAllocator(vm.arena), .{ .kind = kind, .value = val, .result = rp });
+    var start_req: ?AsyncGenRequest = null;
+    var start_done = false;
+    g.requests_mutex.lockUncancelable(agent.engineIo());
+    {
+        errdefer g.requests_mutex.unlock(agent.engineIo());
+        try g.requests.append(g.requestsAllocator(vm.arena), .{ .kind = kind, .value = val, .result = rp });
+        if (!g.pumping) {
+            g.pumping = true;
+            if (g.done)
+                start_done = true
+            else
+                start_req = g.requests.items[0];
+        }
+    }
+    g.requests_mutex.unlock(agent.engineIo());
     // A completed generator never resumes: each new request settles immediately
     // (next/return → `{done:true}`, throw → reject) rather than re-running the
     // body from its final instruction pointer.
-    if (g.done) {
-        if (was_idle) try agDrainDone(vm, g);
-    } else if (was_idle) try agStep(vm, g, kind, val);
+    if (start_done)
+        try agDrainDone(vm, g)
+    else if (start_req) |req|
+        try agStep(vm, g, req.kind, req.value);
     return Value.obj(rp);
 }
 
@@ -1179,9 +1195,39 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
 
 /// Drive the front request to its next stop, settling its promise (yield/
 /// return/throw) or wiring an await continuation.
+fn agFront(g: *Generator) ?AsyncGenRequest {
+    g.requests_mutex.lockUncancelable(agent.engineIo());
+    defer g.requests_mutex.unlock(agent.engineIo());
+    if (g.requests.items.len == 0) {
+        g.pumping = false;
+        return null;
+    }
+    return g.requests.items[0];
+}
+
+fn agRemoveFrontAndContinue(vm: *Interpreter, g: *Generator) EvalError!void {
+    var next_req: ?AsyncGenRequest = null;
+    var drain_done = false;
+    g.requests_mutex.lockUncancelable(agent.engineIo());
+    if (g.requests.items.len > 0) _ = g.requests.orderedRemove(0);
+    if (g.done)
+        drain_done = true
+    else if (g.requests.items.len > 0)
+        next_req = g.requests.items[0]
+    else
+        g.pumping = false;
+    g.requests_mutex.unlock(agent.engineIo());
+    if (drain_done)
+        try agDrainDone(vm, g)
+    else if (next_req) |req|
+        try agStep(vm, g, req.kind, req.value);
+}
+
 fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!void {
+    if (agFront(g) == null) return;
     const step = try agResume(vm, g, kind, val);
-    const front = g.requests.items[0].result;
+    const front_req = agFront(g) orelse return;
+    const front = front_req.result;
     switch (step) {
         .awaited => |awaited| {
             const ap = try promise.newPromise(vm);
@@ -1194,8 +1240,7 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
         },
         .yielded => |v| {
             try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, false));
-            _ = g.requests.orderedRemove(0);
-            try agPumpNext(vm, g);
+            try agRemoveFrontAndContinue(vm, g);
         },
         .returned => |v| {
             // AsyncGeneratorAwaitReturn: await the return value, then resolve the
@@ -1209,8 +1254,7 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
                 if (can_resume_abrupt) return agStep(vm, g, .throw_, reason);
                 g.done = true;
                 try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), reason);
-                _ = g.requests.orderedRemove(0);
-                try agDrainDone(vm, g);
+                try agRemoveFrontAndContinue(vm, g);
                 return;
             };
             g.done = true;
@@ -1223,17 +1267,33 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
         .threw => |e| {
             g.done = true;
             try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), e);
-            _ = g.requests.orderedRemove(0);
-            try agDrainDone(vm, g);
+            try agRemoveFrontAndContinue(vm, g);
         },
     }
 }
 
 fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
-    if (g.done) return agDrainDone(vm, g);
-    if (g.requests.items.len == 0) return;
-    const req = g.requests.items[0];
-    try agStep(vm, g, req.kind, req.value);
+    var req: ?AsyncGenRequest = null;
+    var drain_done = false;
+    g.requests_mutex.lockUncancelable(agent.engineIo());
+    if (g.pumping) {
+        g.requests_mutex.unlock(agent.engineIo());
+        return;
+    }
+    if (g.requests.items.len == 0) {
+        g.requests_mutex.unlock(agent.engineIo());
+        return;
+    }
+    g.pumping = true;
+    if (g.done)
+        drain_done = true
+    else
+        req = g.requests.items[0];
+    g.requests_mutex.unlock(agent.engineIo());
+    if (drain_done)
+        try agDrainDone(vm, g)
+    else if (req) |r|
+        try agStep(vm, g, r.kind, r.value);
 }
 
 fn agDoneReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -1270,8 +1330,15 @@ fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value
 /// Once the generator is done, settle every still-queued request: a `next`
 /// yields `{ undefined, done:true }`, a `return` its value, a `throw` rejects.
 fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
-    while (g.requests.items.len > 0) {
+    while (true) {
+        g.requests_mutex.lockUncancelable(agent.engineIo());
+        if (g.requests.items.len == 0) {
+            g.pumping = false;
+            g.requests_mutex.unlock(agent.engineIo());
+            break;
+        }
         const req = g.requests.orderedRemove(0);
+        g.requests_mutex.unlock(agent.engineIo());
         switch (req.kind) {
             .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promise.?)), req.value),
             .return_ => try settleAsyncGeneratorDoneReturn(vm, req.result, req.value),
@@ -1286,10 +1353,12 @@ fn agReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    if (g.requests.items.len == 0) return Value.undef();
-    const front = g.requests.items[0].result;
+    const front_req = agFront(g) orelse return Value.undef();
+    const front = front_req.result;
     try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
-    _ = g.requests.orderedRemove(0);
+    g.requests_mutex.lockUncancelable(agent.engineIo());
+    if (g.requests.items.len > 0) _ = g.requests.orderedRemove(0);
+    g.requests_mutex.unlock(agent.engineIo());
     try agDrainDone(vm, g);
     return Value.undef();
 }
@@ -1299,10 +1368,12 @@ fn agReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    if (g.requests.items.len == 0) return Value.undef();
-    const front = g.requests.items[0].result;
+    const front_req = agFront(g) orelse return Value.undef();
+    const front = front_req.result;
     try promise.reject(vm, @ptrCast(@alignCast(front.promise.?)), if (args.len > 0) args[0] else Value.undef());
-    _ = g.requests.orderedRemove(0);
+    g.requests_mutex.lockUncancelable(agent.engineIo());
+    if (g.requests.items.len > 0) _ = g.requests.orderedRemove(0);
+    g.requests_mutex.unlock(agent.engineIo());
     try agDrainDone(vm, g);
     return Value.undef();
 }

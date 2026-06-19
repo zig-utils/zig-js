@@ -409,12 +409,15 @@ watchdog-safe pass budgets. The full promoted scaling block is also
 focused-green 6/6 under `parallel_js`; `scaling/raytrace-like.js` and
 `scaling/richards-like.js` keep their normal corpus/gate workloads while using
 smaller no-GIL standalone budgets. The VM-state block is focused-green 10/10
-under `parallel_js`. A full promoted-allowlist `parallel_js` probe now passes
-the former microtask-promise GC crash in
-`cve/mc-gc-thread-shell-finalizer-storm.js` and reaches through
-`cve/mc-int-resizable-tail-quarantine.js` before the 20-minute cumulative probe
-budget expires. Broader promoted-allowlist `parallel_js` remains exploratory
-until the remaining cumulative CVE budget frontier is cleared. (6)
+under `parallel_js`. The promoted CVE tail after
+`cve/mc-int-resizable-tail-quarantine.js` is focused-green in slices through
+`cve/mc-wait-property-wait-lost-wakeup.js`, including the async-generator
+resume-head claim case `cve/mc-prim-async-generator-resume-claim.js`; that
+case is also TSan-clean as a focused `threads-test` probe. The GC-stress block
+is focused-green 4/4, the promoted Atomics block is focused-green 15/15, and
+the promoted JIT-audit subset is focused-green in verified slices through
+`jit/tid-tag-3-threads.js`. Broader promoted-allowlist `parallel_js` remains
+exploratory until the monolithic cumulative budget probe is cleared. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
