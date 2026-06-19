@@ -182,9 +182,22 @@ green gate. Named property-mode Atomics RMW/CAS/load/store, typed-array
 values, nested joins, cross-thread exception joins, contended dense-array
 push/resize, and property-mode Atomics on dense array elements now have focused
 green `parallel_js` probes. A full
-`zig build threads-test -Dthreads-parallel-js=true` probe currently reaches past
-the lifecycle and array sections before timing out in the later bench/frontier
-discovery region; it remains exploratory and is not a green gate.
+`zig build threads-test -Dthreads-parallel-js=true` probe now skips
+`cve/mc-df-segmented-length.js` as a known no-GIL budget frontier, because the
+file is green in normal mode but can spend minutes in dense-array shrink/regrow
+contention under the current interpreter lock granularity. The skip applies only
+to the broad promoted-allowlist probe; targeted
+`-Dthreads-case=cve/mc-df-segmented-length.js` still runs the file and remains
+the repro for that performance frontier. This mode remains exploratory and is
+not a green gate.
+
+The no-GIL CVE tail has also moved forward: `cve/mc-int-resizable-tail-quarantine.js`,
+`cve/mc-life-detach-quarantine-storm.js`, `cve/mc-life-sab-refchurn.js`, and
+`cve/mc-life-wasm-grow-relocate.js` are focused-green after serializing
+non-shared ArrayBuffer resize/typed-array backing-slice borrows and the
+per-realm SharedArrayBuffer retain list. The next focused semantic blocker is
+`cve/mc-lock-cow-materialize-race.js`, which currently reports a count mismatch
+under `parallel_js`.
 
 ## Sweep Runs
 

@@ -15968,9 +15968,17 @@ fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const nl: usize = @intCast(new_len);
     const fresh = try self.allocArrayBufferBytes(nl);
     errdefer self.freeArrayBufferBytes(fresh, ab.gc_owned);
-    @memcpy(fresh[0..@min(nl, ab.bytes().len)], ab.bytes()[0..@min(nl, ab.bytes().len)]);
-    self.freeArrayBufferBytes(ab.local_data, ab.gc_owned);
+    ab.lockBuffer();
+    if (ab.detached) {
+        ab.unlockBuffer();
+        return self.throwError("TypeError", "ArrayBuffer is detached");
+    }
+    const old_data = ab.local_data;
+    const copy_len = @min(nl, old_data.len);
+    @memcpy(fresh[0..copy_len], old_data[0..copy_len]);
     ab.local_data = fresh;
+    ab.unlockBuffer();
+    self.freeArrayBufferBytes(old_data, ab.gc_owned);
     return Value.undef();
 }
 

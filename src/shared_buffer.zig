@@ -104,11 +104,29 @@ pub const SharedBufferStorage = struct {
 /// the interpreter reaches it the same way it reaches the microtask queue.
 pub const RetainList = struct {
     gpa: std.mem.Allocator,
+    lock: std.atomic.Mutex = .unlocked,
     items: std.ArrayListUnmanaged(*SharedBufferStorage) = .empty,
+
+    fn lockList(self: *RetainList) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+
+    fn unlockList(self: *RetainList) void {
+        self.lock.unlock();
+    }
 
     /// Record a reference owned by this realm. On OOM the reference is
     /// released immediately and the error propagated.
     pub fn track(self: *RetainList, s: *SharedBufferStorage) error{OutOfMemory}!void {
+        self.lockList();
+        defer self.unlockList();
         self.items.append(self.gpa, s) catch |err| {
             s.release();
             return err;
@@ -119,6 +137,8 @@ pub const RetainList = struct {
     /// at the same storage, so removing one list entry mirrors one dying
     /// wrapper cell rather than dropping every reference for that backing slab.
     pub fn releaseTracked(self: *RetainList, s: *SharedBufferStorage) bool {
+        self.lockList();
+        defer self.unlockList();
         for (self.items.items, 0..) |tracked, i| {
             if (tracked == s) {
                 _ = self.items.swapRemove(i);
@@ -130,6 +150,8 @@ pub const RetainList = struct {
     }
 
     pub fn deinit(self: *RetainList) void {
+        self.lockList();
+        defer self.unlockList();
         for (self.items.items) |s| s.release();
         self.items.deinit(self.gpa);
     }

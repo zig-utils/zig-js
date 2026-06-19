@@ -370,9 +370,15 @@ witnesses. The first full-allowlist probe is intentionally not a gate yet:
 `smoke.js`, `api/condition-async-wait.js`, and the lifecycle join/exception
 cluster now pass under `parallel_js`; so do the promoted ordinary-array
 mutation probes `arrays/push-resize-multithread.js` and
-`arrays/shared-element-read-write.js`. A broad exploratory run now reaches past
-the lifecycle and array sections before timing out in the later bench/frontier
-discovery region. (6)
+`arrays/shared-element-read-write.js`. The broad promoted-allowlist
+`parallel_js` probe now carries one explicit budget skip:
+`cve/mc-df-segmented-length.js`, which is green in the normal GIL mode but is
+still too slow under no-GIL dense-array shrink/regrow contention. Targeted
+`-Dthreads-case=cve/mc-df-segmented-length.js` remains the repro for that
+frontier. The CVE tail now gets past resizable ArrayBuffer resize churn and SAB
+retain-list churn under `parallel_js`; the next focused semantic blocker is
+`cve/mc-lock-cow-materialize-race.js` (copy-on-write materialization/lost-count
+oracle). (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

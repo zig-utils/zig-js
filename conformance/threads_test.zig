@@ -239,6 +239,10 @@ fn usesBenchHarness(name: []const u8) bool {
         std.mem.eql(u8, name, "jit/fires-per-sec.js");
 }
 
+fn parallelJsBudgetSkip(name: []const u8) bool {
+    return std.mem.eql(u8, name, "cve/mc-df-segmented-length.js");
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -283,6 +287,7 @@ pub fn main(init: std.process.Init) !void {
         if (sweep) for (names.items) |n| gpa.free(n);
         names.deinit(gpa);
     }
+    const explicit_one = one != null;
     if (sweep) {
         for ([_][]const u8{ "api", "arrays", "atomics", "bench", "lifecycle", "races", "scaling", "shared-objects", "sync" }) |sub| {
             var d = dir.openDir(io, sub, .{ .iterate = true }) catch continue;
@@ -310,7 +315,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var failed: usize = 0;
+    var skipped: usize = 0;
     for (names.items) |name| {
+        if (parallel_js and !explicit_one and parallelJsBudgetSkip(name)) {
+            skipped += 1;
+            std.debug.print("  SKIP  {s} (parallel_js budget frontier)\n", .{name});
+            continue;
+        }
         // Keep corpus cases hermetic: defers in this block run at the end of
         // each file, so completed JS threads are OS-joined and all per-context
         // waiter tables/buffers are released before the next file starts.
@@ -454,6 +465,8 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-    std.debug.print("------------------------\n{d}/{d} corpus files passed\n", .{ names.items.len - failed, names.items.len });
+    std.debug.print("------------------------\n{d}/{d} corpus files passed", .{ names.items.len - failed - skipped, names.items.len });
+    if (skipped != 0) std.debug.print(" ({d} skipped)", .{skipped});
+    std.debug.print("\n", .{});
     if (failed != 0 and !sweep) return error.CorpusFailures;
 }
