@@ -17273,9 +17273,32 @@ fn dtfCanonNamedTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const u
     for (fixed) |z| if (std.ascii.eqlIgnoreCase(s, z)) return z;
     const exact_case = [_][]const u8{
         "Africa/Dar_es_Salaam",
+        "America/Argentina/ComodRivadavia",
+        "America/Knox_IN",
         "America/Port-au-Prince",
         "America/Port_of_Spain",
+        "Antarctica/DumontDUrville",
+        "Antarctica/McMurdo",
+        "Australia/ACT",
+        "Australia/LHI",
+        "Australia/NSW",
+        "Brazil/DeNoronha",
+        "Chile/EasterIsland",
         "Europe/Isle_of_Man",
+        "Mexico/BajaNorte",
+        "Mexico/BajaSur",
+        "US/Alaska",
+        "US/Aleutian",
+        "US/Arizona",
+        "US/Central",
+        "US/East-Indiana",
+        "US/Eastern",
+        "US/Hawaii",
+        "US/Indiana-Starke",
+        "US/Michigan",
+        "US/Mountain",
+        "US/Pacific",
+        "US/Samoa",
     };
     for (exact_case) |z| if (std.ascii.eqlIgnoreCase(s, z)) return z;
     if (std.mem.indexOfScalar(u8, s, '/') == null) return null;
