@@ -24872,6 +24872,36 @@ fn regulateIsoDate(self: *Interpreter, yf: f64, mf: f64, df: f64, constrain: boo
     return .{ .y = yi, .m = mi, .d = di };
 }
 
+fn regulateCalendarDate(self: *Interpreter, cal: []const u8, yf: f64, mf: f64, df: f64, constrain: bool) EvalError!IsoYMD {
+    if (std.mem.eql(u8, cal, "iso8601") or std.mem.eql(u8, cal, "gregory") or std.mem.eql(u8, cal, "buddhist") or std.mem.eql(u8, cal, "roc") or std.mem.eql(u8, cal, "japanese"))
+        return regulateIsoDate(self, yf, mf, df, constrain);
+    if (yf < -271821 or yf > 275760) return self.throwError("RangeError", "year out of range");
+    const year: i64 = @intFromFloat(yf);
+    const display_year = calDisplayYear(cal, year);
+    const max_month = calMonthsInYear(cal, display_year);
+    var m = mf;
+    if (constrain) {
+        m = @max(1, @min(@as(f64, @floatFromInt(max_month)), mf));
+    } else if (mf < 1 or mf > @as(f64, @floatFromInt(max_month))) {
+        return self.throwError("RangeError", "month out of range");
+    }
+    const month: u8 = @intFromFloat(m);
+    const dim: f64 = @floatFromInt(calDaysInMonth(cal, display_year, month));
+    var d = df;
+    if (constrain) {
+        d = @max(1, @min(dim, df));
+    } else if (df < 1 or df > dim) {
+        return self.throwError("RangeError", "day out of range");
+    }
+    const day: u8 = @intFromFloat(d);
+    const check_month: u8 = if (month > 12) 12 else month;
+    const check_day: u8 = @min(day, isoDaysInMonth(year, check_month));
+    const ed = tDaysFromCivil(year, check_month, check_day);
+    if (ed < tDaysFromCivil(-271821, 4, 19) or ed > tDaysFromCivil(275760, 9, 13))
+        return self.throwError("RangeError", "date outside the representable Temporal range");
+    return .{ .y = year, .m = month, .d = day };
+}
+
 fn tIsTemporal(this: Value, kind: value.TemporalData.Kind) bool {
     return this.isObject() and this.asObj().temporal != null and this.asObj().temporal.?.kind == kind;
 }
@@ -25459,7 +25489,7 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             m = @floatFromInt(std.fmt.parseInt(u8, mc.asStr()[1..3], 10) catch return self.throwError("RangeError", "bad monthCode"));
         }
         const d = try temporalIntArg(self, dv, "day");
-        var r = try regulateIsoDate(self, @floatFromInt(iso_year.?), m, d, constrain);
+        var r = try regulateCalendarDate(self, bag_cal, @floatFromInt(iso_year.?), m, d, constrain);
         r.cal = bag_cal;
         return r;
     }
@@ -26216,12 +26246,13 @@ fn validateYearMonthRaw(self: *Interpreter, raw: RawYM, constrain: bool) EvalErr
         if (!mc.iso_suitable) return self.throwError("RangeError", "bad monthCode");
         if (m != @as(i64, mc.month)) return self.throwError("RangeError", "month and monthCode mismatch");
     }
+    const max_month = calMonthsInYear(raw.cal, calDisplayYear(raw.cal, y));
     if (constrain) {
         if (m < 1) return self.throwError("RangeError", "month out of range");
-        m = @min(12, m);
-    } else if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
+        m = @min(@as(i64, max_month), m);
+    } else if (m < 1 or m > @as(i64, max_month)) return self.throwError("RangeError", "month out of range");
     const month: u8 = @intCast(m);
-    try checkIsoYearMonth(self, y, month);
+    try checkIsoYearMonth(self, y, if (month > 12) 12 else month);
     return .{ .y = y, .m = month, .cal = raw.cal };
 }
 
@@ -28211,6 +28242,20 @@ fn tIsZdt(this: Value) bool {
 
 /// The ZonedDateTime's local civil date-time (epoch + offset).
 fn zdtLocal(t: *const value.TemporalData) value.TemporalData {
+    if (!std.mem.eql(u8, t.calendar, "iso8601") and (t.year != 0 or t.month != 1 or t.day != 1 or t.hour != 0 or t.minute != 0 or t.second != 0 or t.millisecond != 0 or t.microsecond != 0 or t.nanosecond != 0)) {
+        var out: value.TemporalData = .{ .kind = .plain_date_time };
+        out.year = t.year;
+        out.month = t.month;
+        out.day = t.day;
+        out.hour = t.hour;
+        out.minute = t.minute;
+        out.second = t.second;
+        out.millisecond = t.millisecond;
+        out.microsecond = t.microsecond;
+        out.nanosecond = t.nanosecond;
+        out.calendar = t.calendar;
+        return out;
+    }
     const local = t.epoch_ns + t.tz_offset_ns;
     const days = @divFloor(local, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
@@ -28618,6 +28663,15 @@ fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
             out.epoch_ns = local_ns - tz.offset_ns;
             out.tz_name = tz.name;
             out.tz_offset_ns = tz.offset_ns;
+            out.year = @intCast(f.y);
+            out.month = f.m;
+            out.day = f.d;
+            out.hour = tm.hour;
+            out.minute = tm.minute;
+            out.second = tm.second;
+            out.millisecond = tm.millisecond;
+            out.microsecond = tm.microsecond;
+            out.nanosecond = tm.nanosecond;
             out.calendar = f.cal;
             return out;
         }
@@ -28648,7 +28702,17 @@ fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const d = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef());
     const o = try zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
-    o.asObj().temporal.?.calendar = d.calendar;
+    const t = o.asObj().temporal.?;
+    t.year = d.year;
+    t.month = d.month;
+    t.day = d.day;
+    t.hour = d.hour;
+    t.minute = d.minute;
+    t.second = d.second;
+    t.millisecond = d.millisecond;
+    t.microsecond = d.microsecond;
+    t.nanosecond = d.nanosecond;
+    t.calendar = d.calendar;
     return o;
 }
 
