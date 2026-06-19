@@ -27931,23 +27931,46 @@ fn calendarDateDiff(cal: []const u8, y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d
         out[3] = @floatFromInt(days);
         return out;
     }
-    // year/month: the largest whole-month span that doesn't overshoot, then days.
+    // year/month: the largest whole-month span in the direction of travel that
+    // doesn't overshoot, then the signed remaining days.
     var total_months: i64 = 0;
-    while (true) {
-        const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months + 1);
-        if (calendarEpochDay(cal, inter.y, inter.m, inter.d) <= calendarEpochDay(cal, y2, m2, d2)) {
-            total_months += 1;
-        } else break;
+    const start_day = calendarEpochDay(cal, y1, m1, d1);
+    const end_day = calendarEpochDay(cal, y2, m2, d2);
+    if (end_day >= start_day) {
+        while (true) {
+            const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months + 1);
+            if (calendarEpochDay(cal, inter.y, inter.m, inter.d) <= end_day) {
+                total_months += 1;
+            } else break;
+        }
+    } else {
+        while (true) {
+            const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months - 1);
+            if (calendarEpochDay(cal, inter.y, inter.m, inter.d) >= end_day) {
+                total_months -= 1;
+            } else break;
+        }
     }
     const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months);
     const day_rem = calendarEpochDay(cal, y2, m2, d2) - calendarEpochDay(cal, inter.y, inter.m, inter.d);
     var years: i64 = 0;
     var months = total_months;
-    var split_year = y1;
-    while (months >= calMonthsInYear(cal, calDisplayYear(cal, split_year))) {
-        months -= calMonthsInYear(cal, calDisplayYear(cal, split_year));
-        years += 1;
-        split_year += 1;
+    if (months >= 0) {
+        var split_year = y1;
+        while (months >= calMonthsInYear(cal, calDisplayYear(cal, split_year))) {
+            months -= calMonthsInYear(cal, calDisplayYear(cal, split_year));
+            years += 1;
+            split_year += 1;
+        }
+    } else {
+        var months_abs = -months;
+        var split_year = y1;
+        while (months_abs >= calMonthsInYear(cal, calDisplayYear(cal, split_year - 1))) {
+            months_abs -= calMonthsInYear(cal, calDisplayYear(cal, split_year - 1));
+            years -= 1;
+            split_year -= 1;
+        }
+        months = -months_abs;
     }
     if (largest == .month) {
         out[1] = @floatFromInt(total_months);
@@ -29018,27 +29041,29 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
             const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef());
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
-            if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.day)) {
+            if (@intFromEnum(opts.largest) >= @intFromEnum(TUnit.day)) {
                 var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - this.asObj().temporal.?.epoch_ns);
                 diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
                 return makeDuration(self, balanceTimeNs(diff, opts.largest));
             }
-            // Calendar largestUnit: diff the local date-times.
+            // Calendar largestUnit: diff the local date-times in the requested
+            // direction. Month/day balancing is asymmetric, so a backward
+            // difference is not just the negated forward difference.
             const a = zdtLocal(this.asObj().temporal.?);
             const b = zdtLocal(&other);
             const fwd = dateTimeToNs(&a) <= dateTimeToNs(&b);
-            const e = if (fwd) a else b;
-            const l = if (fwd) b else a;
-            var dd = calendarDateDiff(e.calendar, e.year, e.month, e.day, l.year, l.month, l.day, opts.largest);
-            var time_diff = timeToNs(&l) - timeToNs(&e);
-            if (time_diff < 0) {
+            var dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, b.year, b.month, b.day, opts.largest);
+            var time_diff = timeToNs(&b) - timeToNs(&a);
+            if (fwd and time_diff < 0) {
                 time_diff += 86_400_000_000_000;
                 dd[3] -= 1;
+            } else if (!fwd and time_diff > 0) {
+                time_diff -= 86_400_000_000_000;
+                dd[3] += 1;
             }
             const tparts = balanceTimeNs(time_diff, .hour);
             for (4..10) |i| dd[i] = tparts[i];
-            const s2 = sign * (if (fwd) @as(f64, 1) else -1);
-            if (s2 < 0) for (&dd) |*c| {
+            if (sign < 0) for (&dd) |*c| {
                 c.* = -c.*;
             };
             return makeDuration(self, dd);
