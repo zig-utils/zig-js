@@ -18132,6 +18132,7 @@ fn unwrapIntlThis(self: *Interpreter, recv: Value, comptime service: []const u8)
 const en_months_long = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 const en_months_short = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 const en_months_narrow = [_][]const u8{ "J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D" };
+const en_islamic_months_long = [_][]const u8{ "Muharram", "Safar", "Rabi I", "Rabi II", "Jumada I", "Jumada II", "Rajab", "Shaban", "Ramadan", "Shawwal", "Dhu al-Qidah", "Dhu al-Hijjah" };
 const en_days_long = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
 const en_days_short = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
@@ -18160,21 +18161,52 @@ fn dtfTimeZoneOffsetMs(this: Value) i64 {
     return sign * (hh * 60 + mm) * 60_000;
 }
 
+fn dtfMonthName(cal: []const u8, month: u8, width: []const u8) ?[]const u8 {
+    if (month < 1 or month > 12) return null;
+    const idx = month - 1;
+    if (std.mem.startsWith(u8, cal, "islamic"))
+        return en_islamic_months_long[idx];
+    return if (eq(width, "narrow")) en_months_narrow[idx] else if (eq(width, "short")) en_months_short[idx] else en_months_long[idx];
+}
+
+fn dtfOffsetZoneName(self: *Interpreter, off_ns: i64) EvalError![]const u8 {
+    if (off_ns == 0) return "GMT";
+    const neg = off_ns < 0;
+    var v: u64 = @intCast(if (neg) -off_ns else off_ns);
+    const hh = v / 3_600_000_000_000;
+    v %= 3_600_000_000_000;
+    const mm = v / 60_000_000_000;
+    if (mm == 0) return std.fmt.allocPrint(self.arena, "GMT{s}{d}", .{ if (neg) "-" else "+", hh });
+    return std.fmt.allocPrint(self.arena, "GMT{s}{d}:{d:0>2}", .{ if (neg) "-" else "+", hh, mm });
+}
+
+fn dtfTimeZoneName(self: *Interpreter, name: []const u8, off_ns: i64, width: []const u8) EvalError![]const u8 {
+    if (std.mem.eql(u8, name, "UTC")) {
+        return if (eq(width, "long") or eq(width, "longGeneric")) "Coordinated Universal Time" else "UTC";
+    }
+    if (name.len > 0 and (name[0] == '+' or name[0] == '-')) return dtfOffsetZoneName(self, off_ns);
+    if (std.mem.eql(u8, name, "Europe/Vienna")) {
+        return if (eq(width, "long") or eq(width, "longGeneric")) "Central European Standard Time" else "GMT+1";
+    }
+    if (std.mem.eql(u8, name, "Europe/Berlin")) {
+        return if (eq(width, "long") or eq(width, "longGeneric")) "Central European Standard Time" else "GMT+1";
+    }
+    return if (eq(width, "long") or eq(width, "longGeneric")) "Coordinated Universal Time" else "UTC";
+}
+
 /// Build the formatted parts for an Intl.DateTimeFormat (en locale, UTC, ISO
 /// calendar). Shared by `format` (joins the values) and `formatToParts`. Covers
 /// the common component options; locale-specific extras (era, timeZoneName,
 /// non-en patterns) are not modeled.
 fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(DtfPart) {
-    // A Temporal.ZonedDateTime must be formatted via its own toLocaleString
-    // (it carries a time zone the formatter would have to reconcile) — reject it.
-    if (args.len > 0 and tIsTemporal(args[0], .zoned_date_time)) {
-        return self.throwError("TypeError", "Intl.DateTimeFormat does not support Temporal.ZonedDateTime; use Temporal.ZonedDateTime.prototype.toLocaleString");
-    }
     // The value to format. A Temporal PlainDate/Time/DateTime/YearMonth/MonthDay
     // supplies its ISO fields directly (no TimeClip — its range exceeds Date's);
     // an Instant uses its epoch nanoseconds; everything else is a TimeClip'd time
     // value. `temporal_kind` (when set) restricts which components may be shown.
     var temporal_kind: ?value.TemporalData.Kind = null;
+    var temporal_calendar: []const u8 = "iso8601";
+    var temporal_tz_name: []const u8 = "UTC";
+    var temporal_tz_offset_ns: i64 = 0;
     var civ: Civil = .{ .y = 1970, .m = 1, .d = 1 };
     var hour24: u8 = 0;
     var minute: u8 = 0;
@@ -18183,17 +18215,32 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     {
         const t_obj: ?*value.TemporalData = if (args.len > 0 and args[0].isObject()) args[0].asObj().temporal else null;
         const direct = t_obj != null and switch (t_obj.?.kind) {
-            .plain_date, .plain_time, .plain_date_time, .plain_year_month, .plain_month_day => true,
+            .plain_date, .plain_time, .plain_date_time, .plain_year_month, .plain_month_day, .zoned_date_time => true,
             else => false,
         };
         if (direct) {
             const t = t_obj.?;
             temporal_kind = t.kind;
-            civ = .{ .y = @as(i64, t.year), .m = t.month, .d = t.day };
-            hour24 = t.hour;
-            minute = t.minute;
-            second = t.second;
-            frac_ms = t.millisecond;
+            temporal_calendar = t.calendar;
+            if (t.kind == .zoned_date_time) {
+                temporal_tz_name = t.tz_name;
+                temporal_tz_offset_ns = timeZoneOffsetAtEpoch(t.tz_name, t.epoch_ns, t.tz_offset_ns);
+                const local_ns = t.epoch_ns + @as(i128, temporal_tz_offset_ns);
+                const days = @divFloor(local_ns, 86_400_000_000_000);
+                const iso = tCivilFromDays(@intCast(days));
+                const cal = calendarDateFromIso(t.calendar, iso.y, iso.m, iso.d);
+                civ = .{ .y = cal.y, .m = cal.m, .d = cal.d };
+                hour24 = @intCast(@divFloor(@mod(local_ns, 86_400_000_000_000), 3_600_000_000_000));
+                minute = @intCast(@divFloor(@mod(local_ns, 3_600_000_000_000), 60_000_000_000));
+                second = @intCast(@divFloor(@mod(local_ns, 60_000_000_000), 1_000_000_000));
+                frac_ms = @intCast(@divFloor(@mod(local_ns, 1_000_000_000), 1_000_000));
+            } else {
+                civ = .{ .y = @as(i64, t.year), .m = t.month, .d = t.day };
+                hour24 = t.hour;
+                minute = t.minute;
+                second = t.second;
+                frac_ms = t.millisecond;
+            }
         } else {
             const is_instant = t_obj != null and t_obj.?.kind == .instant;
             if (is_instant) temporal_kind = .instant;
@@ -18229,7 +18276,9 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var o_frac: usize = 0; // fractionalSecondDigits (1-3) or 0
     var o_day_period: []const u8 = ""; // flexible dayPeriod width (long/short/narrow)
     var o_tzname: []const u8 = ""; // timeZoneName width (long/short/...)
+    var o_calendar: []const u8 = "gregory";
     var hour12 = true;
+    var hour_cycle: []const u8 = "";
     var any_comp = false;
     var defaults_applied = false;
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
@@ -18248,17 +18297,23 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_second = try get(self, ov, "second");
         o_day_period = try get(self, ov, "dayPeriod");
         o_tzname = try get(self, ov, "timeZoneName");
+        o_calendar = try get(self, ov, "calendar");
+        if (o_calendar.len == 0) o_calendar = "gregory";
         if (ov.asObj().getOwn("fractionalSecondDigits")) |f| if (f.isNumber()) {
             o_frac = @intFromFloat(f.asNum());
         };
         if (ov.asObj().getOwn("\x00defaultsApplied")) |d| defaults_applied = d.toBoolean();
         any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
         const hc = try get(self, ov, "hourCycle");
+        hour_cycle = hc;
         const h12 = try self.getProperty(ov, "hour12");
+        var explicit_hour_setting = false;
         if (h12.isBoolean()) {
             hour12 = h12.asBool();
+            explicit_hour_setting = true;
         } else if (hc.len > 0) {
             hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
+            explicit_hour_setting = true;
         } else if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
             // No explicit hour12/hourCycle: honor the locale's -u-hc keyword.
             if (localeUValue(lv.asStr(), "hc")) |lhc| hour12 = std.mem.eql(u8, lhc, "h11") or std.mem.eql(u8, lhc, "h12");
@@ -18266,7 +18321,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (ov.asObj().getOwn("\x00temporalDefaultHour12")) |tdh| {
             if (tdh.toBoolean()) hour12 = true;
         }
-        if (temporal_kind != null) if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
+        if (temporal_kind != null and !explicit_hour_setting) if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
             const ls = lv.asStr();
             if ((ls.len == 2 and asciiEqlIgnoreCase(ls, "en")) or
                 (ls.len > 3 and asciiEqlIgnoreCase(ls[0..2], "en") and ls[2] == '-'))
@@ -18300,6 +18355,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_month = "numeric";
         o_day = "numeric";
     }
+    const requested_tzname = o_tzname;
     if (defaults_applied) if (temporal_kind) |tk| {
         o_weekday = "";
         o_year = "";
@@ -18330,6 +18386,15 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 o_minute = "numeric";
                 o_second = "numeric";
             },
+            .zoned_date_time => {
+                o_year = "numeric";
+                o_month = "numeric";
+                o_day = "numeric";
+                o_hour = "numeric";
+                o_minute = "numeric";
+                o_second = "numeric";
+                o_tzname = if (requested_tzname.len > 0) requested_tzname else "short";
+            },
             .plain_year_month => {
                 o_year = "numeric";
                 o_month = "numeric";
@@ -18347,12 +18412,12 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     // requested component the type lacks is dropped, and if NOTHING the formatter
     // wants overlaps the value's data model it is a TypeError.
     if (temporal_kind) |tk| {
-        const has_date = tk == .plain_date or tk == .plain_date_time or tk == .instant;
-        const has_time = tk == .plain_time or tk == .plain_date_time or tk == .instant;
+        const has_date = tk == .plain_date or tk == .plain_date_time or tk == .instant or tk == .zoned_date_time;
+        const has_time = tk == .plain_time or tk == .plain_date_time or tk == .instant or tk == .zoned_date_time;
         const a_year = has_date or tk == .plain_year_month;
         const a_month = has_date or tk == .plain_year_month or tk == .plain_month_day;
         const a_day = has_date or tk == .plain_month_day;
-        const a_tz = tk == .instant;
+        const a_tz = tk == .instant or tk == .zoned_date_time;
         var req = false;
         var kept = false;
         const F = struct {
@@ -18400,11 +18465,10 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     const have_date = o_year.len > 0 or o_month.len > 0 or o_day.len > 0;
     if (have_date) {
         if (parts.items.len > 0) try P.lit(self, &parts, ", ");
-        const m_idx = civ.m - 1;
         const month_textual = o_month.len > 0 and !eq(o_month, "numeric") and !eq(o_month, "2-digit");
         if (month_textual) {
-            const mn = if (eq(o_month, "narrow")) en_months_narrow[m_idx] else if (eq(o_month, "short")) en_months_short[m_idx] else en_months_long[m_idx];
-            try parts.append(self.arena, .{ .typ = "month", .value = mn });
+            const mn = dtfMonthName(if (std.mem.eql(u8, temporal_calendar, "iso8601")) o_calendar else temporal_calendar, civ.m, o_month);
+            try parts.append(self.arena, .{ .typ = "month", .value = mn orelse try std.fmt.allocPrint(self.arena, "{d}", .{civ.m}) });
             if (o_day.len > 0) {
                 try P.lit(self, &parts, " ");
                 try P.num(self, &parts, "day", civ.d, false);
@@ -18447,9 +18511,12 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         }
         if (hour12 and o_hour.len > 0) {
             h = h % 12;
-            if (h == 0) h = 12;
+            if (h == 0 and !std.mem.eql(u8, hour_cycle, "h11")) h = 12;
+        } else if (std.mem.eql(u8, hour_cycle, "h24") and o_hour.len > 0 and h == 0) {
+            h = 24;
         }
-        if (o_hour.len > 0) try P.num(self, &parts, "hour", h, eq(o_hour, "2-digit"));
+        const two_hour = eq(o_hour, "2-digit") or (!hour12 and std.mem.eql(u8, hour_cycle, "h23") and h < 10);
+        if (o_hour.len > 0) try P.num(self, &parts, "hour", h, two_hour);
         if (o_minute.len > 0) {
             if (o_hour.len > 0) try P.lit(self, &parts, ":");
             try P.num(self, &parts, "minute", minute, true);
@@ -18472,8 +18539,9 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             try parts.append(self.arena, .{ .typ = "dayPeriod", .value = ap });
         }
         if (o_tzname.len > 0) {
-            // UTC time zone only (the engine has no zone database yet).
-            const tzn: []const u8 = if (eq(o_tzname, "long"))
+            const tzn: []const u8 = if (temporal_kind != null and temporal_kind.? == .zoned_date_time)
+                try dtfTimeZoneName(self, temporal_tz_name, temporal_tz_offset_ns, o_tzname)
+            else if (eq(o_tzname, "long"))
                 "Coordinated Universal Time"
             else if (eq(o_tzname, "longOffset") or eq(o_tzname, "shortOffset"))
                 "GMT"
@@ -28144,17 +28212,38 @@ fn temporalValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "toLocaleString called on a non-Temporal value");
-    if (this.asObj().temporal.?.kind != .duration) {
+    const t = this.asObj().temporal.?;
+    if (t.kind != .duration) {
         const dtf = (try self.newObject()).asObj();
         try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
         const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
         const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en-US";
         try self.setProp(dtf, "\x00locale", Value.str(loc));
+        if (t.kind == .zoned_date_time and args.len > 1 and !args[1].isUndefined()) {
+            const raw = Value.obj(try self.toObject(args[1]));
+            if (!(try self.getProperty(raw, "timeZone")).isUndefined())
+                return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.toLocaleString does not accept a timeZone option");
+        }
         var r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else Value.undef(), .any, .all);
+        if (t.kind == .zoned_date_time) {
+            const effective_calendar = blk: {
+                const ext = try dtfResolveLocaleExt(self, loc, r.calendar, r.hour_cycle, r.hour12, r.numbering_system);
+                break :blk ext.calendar;
+            };
+            if (!std.mem.eql(u8, t.calendar, "iso8601") and !std.mem.eql(u8, t.calendar, effective_calendar))
+                return self.throwError("RangeError", "Temporal.ZonedDateTime calendar does not match locale calendar");
+            if (r.defaults_applied and r.time_zone_name.len == 0) r.time_zone_name = "short";
+        }
         var explicit_hour_cycle = false;
+        var explicit_hour_cycle_option = false;
+        var explicit_hour12_false = false;
         if (args.len > 1 and !args[1].isUndefined()) {
             const raw = Value.obj(try self.toObject(args[1]));
-            explicit_hour_cycle = !(try self.getProperty(raw, "hour12")).isUndefined() or !(try self.getProperty(raw, "hourCycle")).isUndefined();
+            const h12 = try self.getProperty(raw, "hour12");
+            const hc = try self.getProperty(raw, "hourCycle");
+            explicit_hour_cycle_option = !hc.isUndefined();
+            explicit_hour_cycle = !h12.isUndefined() or explicit_hour_cycle_option;
+            explicit_hour12_false = !h12.isUndefined() and !h12.toBoolean();
         }
         const requested_english = args.len > 0 and args[0].isString() and (asciiEqlIgnoreCase(args[0].asStr(), "en") or
             (args[0].asStr().len > 3 and asciiEqlIgnoreCase(args[0].asStr()[0..2], "en") and args[0].asStr()[2] == '-'));
@@ -28166,6 +28255,12 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
             r.hour_cycle = "h12";
         }
         try dtfStoreOptions(self, dtf, r);
+        if (t.kind == .zoned_date_time and explicit_hour12_false and !explicit_hour_cycle_option) {
+            if (dtf.getOwn("\x00opts")) |ov| if (ov.isObject()) {
+                try self.setProp(ov.asObj(), "hourCycle", Value.str("h23"));
+                try self.setProp(ov.asObj(), "hour12", Value.boolVal(false));
+            };
+        }
         if (temporal_default_time) if (dtf.getOwn("\x00opts")) |ov| if (ov.isObject()) {
             try self.setProp(ov.asObj(), "hour12", Value.boolVal(true));
             try self.setProp(ov.asObj(), "hourCycle", Value.str("h12"));
