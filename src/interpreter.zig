@@ -23727,9 +23727,12 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const a = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
     const b = try durationFromArg(self, if (args.len > 1) args[1] else Value.undef());
+    const options = if (args.len > 2) args[2] else Value.undef();
+    if (!options.isUndefined() and (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint))
+        return self.throwError("TypeError", "options must be an object or undefined");
     // With a relativeTo anchor, compare the two durations' absolute endpoints
     // (handles calendar units of differing real length).
-    if (try resolveRelativeTo(self, if (args.len > 2) args[2] else Value.undef())) |rel| {
+    if (try resolveRelativeTo(self, options)) |rel| {
         const ea = durEndpointsNs(a, rel);
         const eb = durEndpointsNs(b, rel);
         return Value.num(if (ea.end < eb.end) -1 else if (ea.end > eb.end) 1 else 0);
