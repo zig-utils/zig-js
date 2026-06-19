@@ -25021,7 +25021,9 @@ fn withIntField(self: *Interpreter, bag: Value, name: []const u8, cur: i64) Eval
 fn withMonthField(self: *Interpreter, bag: Value, cur: u8) EvalError!u8 {
     const mc = try self.getProperty(bag, "monthCode");
     if (!mc.isUndefined()) {
-        const month_code = try readMonthCode(self, mc);
+        const info = try readMonthCodeInfo(self, mc);
+        if (!info.iso_suitable) return self.throwError("RangeError", "bad monthCode");
+        const month_code = info.month;
         const mv = try self.getProperty(bag, "month");
         if (!mv.isUndefined()) {
             const month: i64 = @intFromFloat(try temporalIntArg(self, mv, "month"));
@@ -25392,14 +25394,23 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
 }
 
 const IsoMD = struct { y: i64, m: u8, d: u8 };
+const RawMD = struct {
+    ref_year: i64,
+    m: i64,
+    d: i64,
+    month_code: ?MonthCodeInfo = null,
+};
+const MonthCodeInfo = struct { month: u8, iso_suitable: bool };
 
 fn regulateMonthDay(self: *Interpreter, ref_year: i64, mf: i64, df: i64, constrain: bool) EvalError!IsoMD {
     var m = mf;
     var d = df;
     if (constrain) {
-        m = @max(1, @min(12, m));
+        if (m < 1) return self.throwError("RangeError", "month out of range");
+        if (d < 1) return self.throwError("RangeError", "day out of range");
+        m = @min(12, m);
         const dim = isoDaysInMonth(ref_year, @intCast(m));
-        d = @max(1, @min(@as(i64, dim), d));
+        d = @min(@as(i64, dim), d);
     } else {
         if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
         const dim = isoDaysInMonth(ref_year, @intCast(m));
@@ -25408,14 +25419,42 @@ fn regulateMonthDay(self: *Interpreter, ref_year: i64, mf: i64, df: i64, constra
     return .{ .y = 1972, .m = @intCast(m), .d = @intCast(d) };
 }
 
-fn readMonthCode(self: *Interpreter, v: Value) EvalError!u8 {
-    if (!v.isString()) return self.throwError("TypeError", "monthCode must be a string");
-    const s = v.asStr();
-    if (s.len != 3 or s[0] != 'M' or !std.ascii.isDigit(s[1]) or !std.ascii.isDigit(s[2]))
+fn readMonthCodeInfo(self: *Interpreter, v: Value) EvalError!MonthCodeInfo {
+    const s = try self.toStringV(v);
+    if (!((s.len == 3 or s.len == 4) and s[0] == 'M' and std.ascii.isDigit(s[1]) and std.ascii.isDigit(s[2])))
         return self.throwError("RangeError", "bad monthCode");
     const m = std.fmt.parseInt(u8, s[1..3], 10) catch return self.throwError("RangeError", "bad monthCode");
-    if (m < 1 or m > 12) return self.throwError("RangeError", "bad monthCode");
-    return m;
+    if (s.len == 4 and s[3] != 'L') return self.throwError("RangeError", "bad monthCode");
+    return .{ .month = if (m < 1) 1 else if (m > 12) 12 else m, .iso_suitable = s.len == 3 and m >= 1 and m <= 12 };
+}
+
+fn validateMonthDayRaw(self: *Interpreter, raw: RawMD, constrain: bool) EvalError!IsoMD {
+    if (raw.month_code) |mc| {
+        if (!mc.iso_suitable) return self.throwError("RangeError", "bad monthCode");
+        if (raw.m != @as(i64, mc.month)) return self.throwError("RangeError", "month and monthCode mismatch");
+    }
+    return regulateMonthDay(self, raw.ref_year, raw.m, raw.d, constrain);
+}
+
+fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
+    _ = try readCalendarField(self, v);
+    const dv = try self.getProperty(v, "day");
+    if (dv.isUndefined()) return self.throwError("TypeError", "PlainMonthDay fields require day");
+    const d: i64 = @intFromFloat(try temporalIntArg(self, dv, "day"));
+    const mv = try self.getProperty(v, "month");
+    const maybe_m: ?i64 = if (!mv.isUndefined()) @intFromFloat(try temporalIntArg(self, mv, "month")) else null;
+    const mcv = try self.getProperty(v, "monthCode");
+    const mc = if (!mcv.isUndefined()) try readMonthCodeInfo(self, mcv) else null;
+    if (maybe_m == null and mc == null)
+        return self.throwError("TypeError", "PlainMonthDay fields require month or monthCode");
+    const yv = try self.getProperty(v, "year");
+    const ref_year: i64 = if (!yv.isUndefined()) @intFromFloat(try temporalIntArg(self, yv, "year")) else 1972;
+    return .{
+        .ref_year = ref_year,
+        .m = maybe_m orelse @as(i64, mc.?.month),
+        .d = d,
+        .month_code = mc,
+    };
 }
 
 fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoMD {
@@ -25424,23 +25463,7 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
         return .{ .y = t.year, .m = t.month, .d = t.day };
     }
     if (v.isObject()) {
-        _ = try readCalendarField(self, v);
-        const dv = try self.getProperty(v, "day");
-        if (dv.isUndefined()) return self.throwError("TypeError", "PlainMonthDay fields require day");
-        const mv = try self.getProperty(v, "month");
-        const mcv = try self.getProperty(v, "monthCode");
-        if (mv.isUndefined() and mcv.isUndefined())
-            return self.throwError("TypeError", "PlainMonthDay fields require month or monthCode");
-        var m: i64 = if (!mv.isUndefined()) @intFromFloat(try temporalIntArg(self, mv, "month")) else 0;
-        if (!mcv.isUndefined()) {
-            const mc = try readMonthCode(self, mcv);
-            if (!mv.isUndefined() and m != mc) return self.throwError("RangeError", "month and monthCode mismatch");
-            m = mc;
-        }
-        const yv = try self.getProperty(v, "year");
-        const ref_year: i64 = if (!yv.isUndefined()) @intFromFloat(try temporalIntArg(self, yv, "year")) else 1972;
-        const d: i64 = @intFromFloat(try temporalIntArg(self, dv, "day"));
-        return regulateMonthDay(self, ref_year, m, d, constrain);
+        return validateMonthDayRaw(self, try readMonthDayBagRaw(self, v), constrain);
     }
     if (v.isString()) {
         // Accept "MM-DD" and "--MM-DD" (annotations allowed) as well as a full
@@ -25457,6 +25480,25 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
             const d = std.fmt.parseInt(u8, s[3..5], 10) catch return self.throwError("RangeError", "invalid ISO day");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             const dim = isoDaysInMonth(1972, m);
+            if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
+            return .{ .y = 1972, .m = m, .d = d };
+        }
+        if (s.len == 4 and std.ascii.isDigit(s[0]) and std.ascii.isDigit(s[1]) and std.ascii.isDigit(s[2]) and std.ascii.isDigit(s[3])) {
+            const m = std.fmt.parseInt(u8, s[0..2], 10) catch return self.throwError("RangeError", "invalid ISO month");
+            const d = std.fmt.parseInt(u8, s[2..4], 10) catch return self.throwError("RangeError", "invalid ISO day");
+            if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
+            const dim = isoDaysInMonth(1972, m);
+            if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
+            return .{ .y = 1972, .m = m, .d = d };
+        }
+        if (s.len == 13 and (s[0] == '+' or s[0] == '-') and s[7] == '-' and s[10] == '-') {
+            const yraw = std.fmt.parseInt(i64, s[1..7], 10) catch return self.throwError("RangeError", "invalid ISO year");
+            if (s[0] == '-' and yraw == 0) return self.throwError("RangeError", "minus zero is not a valid extended year");
+            const y = if (s[0] == '-') -yraw else yraw;
+            const m = twoDigits(s, 8) orelse return self.throwError("RangeError", "invalid ISO month");
+            const d = twoDigits(s, 11) orelse return self.throwError("RangeError", "invalid ISO day");
+            if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
+            const dim = isoDaysInMonth(y, m);
             if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
             return .{ .y = 1972, .m = m, .d = d };
         }
@@ -25480,22 +25522,52 @@ fn temporalMonthDayFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const input = if (args.len > 0) args[0] else Value.undef();
     const options = if (args.len > 1) args[1] else Value.undef();
+    if (tIsTemporal(input, .plain_month_day)) {
+        _ = try readOverflowReject(self, options);
+        const t = input.asObj().temporal.?;
+        return makeMonthDay(self, t.year, t.month, t.day);
+    }
     if (input.isString()) {
         const f = try toMonthDayFields(self, input, true);
         _ = try readOverflowReject(self, options);
         return makeMonthDay(self, f.y, f.m, f.d);
     }
+    if (!input.isObject()) return self.throwError("TypeError", "cannot convert to a PlainMonthDay");
+    const raw = try readMonthDayBagRaw(self, input);
     const reject = try readOverflowReject(self, options);
-    const f = try toMonthDayFields(self, input, !reject);
+    const f = try validateMonthDayRaw(self, raw, !reject);
     return makeMonthDay(self, f.y, f.m, f.d);
 }
 
-fn prevalidateMonthDayPartial(self: *Interpreter, bag: Value, ref_year: i64, cur_month: u8, cur_day: u8) EvalError!void {
-    const m = try withMonthField(self, bag, cur_month);
-    const d = try withIntField(self, bag, "day", cur_day);
-    if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
-    const dim = isoDaysInMonth(ref_year, m);
-    if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
+fn readMonthDayPartialRaw(self: *Interpreter, bag: Value, t: *const value.TemporalData) EvalError!RawMD {
+    const dv = try self.getProperty(bag, "day");
+    const has_day = !dv.isUndefined();
+    const d: i64 = if (has_day) @intFromFloat(try temporalIntArg(self, dv, "day")) else t.day;
+    const mv = try self.getProperty(bag, "month");
+    const maybe_m: ?i64 = if (!mv.isUndefined()) @intFromFloat(try temporalIntArg(self, mv, "month")) else null;
+    const mcv = try self.getProperty(bag, "monthCode");
+    const mc = if (!mcv.isUndefined()) try readMonthCodeInfo(self, mcv) else null;
+    const yv = try self.getProperty(bag, "year");
+    const has_year = !yv.isUndefined();
+    const ref_year: i64 = if (has_year) @intFromFloat(try temporalIntArg(self, yv, "year")) else t.year;
+    if (!has_day and maybe_m == null and mc == null and !has_year)
+        return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with requires a recognized field");
+    return .{
+        .ref_year = ref_year,
+        .m = maybe_m orelse if (mc) |info| @as(i64, info.month) else t.month,
+        .d = d,
+        .month_code = mc,
+    };
+}
+
+fn prevalidateMonthDayRaw(self: *Interpreter, raw: RawMD) EvalError!void {
+    if (raw.month_code) |mc| {
+        if (!mc.iso_suitable) return self.throwError("RangeError", "bad monthCode");
+        if (raw.m != @as(i64, mc.month)) return self.throwError("RangeError", "month and monthCode mismatch");
+    }
+    if (raw.m < 1 or raw.m > 12) return self.throwError("RangeError", "month out of range");
+    const dim = isoDaysInMonth(raw.ref_year, @intCast(raw.m));
+    if (raw.d < 1 or raw.d > dim) return self.throwError("RangeError", "day out of range");
 }
 
 fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25507,26 +25579,14 @@ fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (bag.asObj().temporal != null) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with requires a partial object");
     if (!(try self.getProperty(bag, "calendar")).isUndefined()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with does not accept calendar");
     if (!(try self.getProperty(bag, "timeZone")).isUndefined()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with does not accept timeZone");
-    const has_known_field =
-        !(try self.getProperty(bag, "day")).isUndefined() or
-        !(try self.getProperty(bag, "month")).isUndefined() or
-        !(try self.getProperty(bag, "monthCode")).isUndefined() or
-        !(try self.getProperty(bag, "year")).isUndefined();
-    if (!has_known_field) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with requires a recognized field");
-    const ref_year = (try bagIsoYear(self, bag, t.calendar)) orelse t.year;
+    const raw = try readMonthDayPartialRaw(self, bag, t);
     const options = if (args.len > 1) args[1] else Value.undef();
     if (!options.isUndefined() and (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)) {
-        try prevalidateMonthDayPartial(self, bag, ref_year, t.month, t.day);
+        try prevalidateMonthDayRaw(self, raw);
     }
     const reject = try readOverflowReject(self, options);
-    const m = try withMonthField(self, bag, t.month);
-    const draw = try withIntField(self, bag, "day", t.day);
-    if (reject and (m < 1 or m > 12)) return self.throwError("RangeError", "month out of range");
-    const mc: u8 = @max(1, @min(12, m)); // constrain
-    const dim = isoDaysInMonth(ref_year, mc);
-    if (reject and (draw < 1 or draw > dim)) return self.throwError("RangeError", "day out of range");
-    const dc: u8 = @intCast(@max(1, @min(@as(i64, dim), draw))); // constrain
-    return makeMonthDay(self, t.year, mc, dc);
+    const f = try validateMonthDayRaw(self, raw, !reject);
+    return makeMonthDay(self, t.year, f.m, f.d);
 }
 
 fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25546,11 +25606,13 @@ fn temporalMonthDayToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Val
     const yv = try self.getProperty(bag, "year");
     if (yv.isUndefined()) return self.throwError("TypeError", "toPlainDate requires a year");
     const y = try temporalIntArg(self, yv, "year");
-    try checkIsoDate(self, y, @floatFromInt(t.month), @floatFromInt(t.day));
+    const dim = isoDaysInMonth(@intFromFloat(y), t.month);
+    const day: u8 = @intCast(@min(@as(i64, t.day), @as(i64, dim)));
+    try checkIsoDate(self, y, @floatFromInt(t.month), @floatFromInt(day));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intFromFloat(y);
     o.temporal.?.month = t.month;
-    o.temporal.?.day = t.day;
+    o.temporal.?.day = day;
     return Value.obj(o);
 }
 
