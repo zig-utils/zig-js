@@ -23737,13 +23737,11 @@ fn temporalDurationAddImpl(comptime sign: f64) value.NativeFn {
             if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
             const a = this.asObj().temporal.?.dur;
             const b = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
+            if (durHasCalendar(a) or durHasCalendar(b))
+                return self.throwError("RangeError", "Temporal.Duration add/subtract with calendar units requires relativeTo");
             var out: [10]f64 = undefined;
             for (0..10) |i| out[i] = a[i] + sign * b[i];
-            // Time/day-only durations balance to a normal form; calendar units
-            // (without a relativeTo) are summed component-wise.
-            if (!durHasCalendar(a) and !durHasCalendar(b)) {
-                out = balanceTimeNs(durationTimeNs(out), .day);
-            }
+            out = balanceTimeNs(durationTimeNs(out), .day);
             return makeDuration(self, out);
         }
     }.call;
