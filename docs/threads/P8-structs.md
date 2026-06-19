@@ -30,7 +30,7 @@ Three layers, escalating in cost:
 | Struct (fixed layout) | `Shape` transition chain (`src/shape.zig`); a struct = a shape frozen at declaration | No "sealed-at-birth, never-transitions" shape kind; would be a new object flag + a fast inline-slot read path |
 | Shared struct (shared heap) | `SharedBufferStorage` (Phase 1) is the only cross-agent heap we have — raw bytes, not object graphs | **The blocker.** Shared *objects* need a shared object heap with cross-agent lifetimes = a tracing GC. We are arena-allocated; this is exactly the Phase-7/Layer-C prerequisite. |
 | `Atomics.Mutex` | `Lock` (`src/jsthread.zig`): non-recursive, `hold(fn)` finally-release, sync acquire/release and `Lock.asyncHold` grant state now guarded by a per-record mutex; task delivery uses `Gil.api_lock` | Implemented as the same constructor as `Lock`, plus static `lock`, `lockIfAvailable`, and `UnlockToken` methods. The sync path and async grant-delivery path are the current `parallel_js` vertical slices. |
-| `Atomics.Condition` | `Condition` (`src/jsthread.zig`): `wait(lock)` atomic release+park+reacquire, `notify`/`notifyAll`, cross-kind FIFO queue, still GIL-coupled | Implemented as the same constructor as `Condition`, plus static token-based `wait`, `waitFor`, and `notify` methods. |
+| `Atomics.Condition` | `Condition` (`src/jsthread.zig`): `wait(lock)` atomic release+park+reacquire, `notify`/`notifyAll`, cross-kind FIFO queue guarded by `CondRecord.mutex` | Implemented as the same constructor as `Condition`, plus static token-based `wait`, `waitFor`, and `notify` methods. |
 
 ## The decision
 
@@ -45,7 +45,7 @@ threaded contexts; shared structs remain deferred. Rationale:
   The mutex path has begun its Layer-C migration: `LockRecord` has its own mutex,
   sync acquire/release and async grant delivery use it, and the focused
   `parallel_js` real-`Thread` contention tests are TSan-clean. `Condition`
-  waiter queues remain on the Layer-B path.
+  waiter queues have joined that Layer-C bring-up path with their own mutex.
 - The **shared-struct** half is blocked on the same thing as Phase 7: a real
   tracing GC with safepoints. Under the current arena model there is no way to
   express an object whose lifetime spans agents. `SharedBufferStorage` carries

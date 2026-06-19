@@ -66,6 +66,7 @@ before acting on one.
 | `t_current` | `src/jsthread.zig:47` | Threadlocal pointer to the current shared-realm `ThreadRecord`. | **per-thread** | Drives `Thread.current`, self-join detection, and per-thread identity. |
 | `Gil.tasks` | `src/gil.zig:28` | Per-realm run-loop task queue for `Lock.asyncHold` grant delivery. | **locked** | Enqueue, dequeue, and quiescence checks are protected by `Gil.api_lock`; backing is realm-arena owned. |
 | `Gil.prop_waiters` / `Gil.prop_async` / `Gil.prop_mutex` | `src/gil.zig:31-40` | Per-realm property-mode `Atomics.wait` and `waitAsync` waiter queues plus their table mutex. | **locked** | Protected by `Gil.prop_mutex`, not process-global; independent `enable_threads` contexts cannot race or cross-notify each other. Sync wait uses this mutex with its condition variable; async ticket settlement collects under the mutex and resolves promises after releasing it. |
+| `CondRecord.queue` / `CondRecord.mutex` | `src/jsthread.zig:392-399` | Per-condition FIFO for sync and async `Condition` waiters. | **locked** | Protected by `CondRecord.mutex`; sync wait registers before releasing the associated `Lock`, and `notify` marks/broadcasts under the same mutex. Async waiters hand off to the `Lock.asyncHold` grant path outside JS execution. |
 
 ## Engine: `src/c_api.zig`
 

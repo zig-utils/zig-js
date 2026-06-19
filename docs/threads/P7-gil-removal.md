@@ -203,8 +203,9 @@ per-thread before threads stop holding the GIL):
    `prop_async`; sync wait parks on that mutex, and notify/timeout collect async
    tickets under the mutex but settle promises after releasing it. **Run-loop
    tasks done:** `Gil.tasks` enqueue/dequeue uses `Gil.api_lock`, and grant
-   delivery runs outside that lock. *Remaining:* `Condition` keeps its own waiter
-   queue on the old GIL-coupled path.
+   delivery runs outside that lock. **Condition done:** `CondRecord.mutex`
+   guards the FIFO sync/async waiter queue, and sync waits park on
+   `CondRecord.cond` without using the context GIL as the queue mutex.
 3. **Lock-free READ paths vs concurrent writes — the central hot-path decision.**
    Bring-up tests (`parallel_gc`) prove **writer-vs-writer** is safe: 4 threads
    concurrently appending to a shared array (`elements_lock`) and adding distinct
@@ -296,23 +297,19 @@ The next slice also landed: async `Lock.asyncHold` grant state (`pending`,
 mutex, and the realm task queue is checked/enqueued/dequeued under `Gil.api_lock`
 so task delivery is TSan-clean with no context GIL.
 
-Remaining GIL-coupled coordination state in `src/jsthread.zig`:
+`src/jsthread.zig` coordination state migrated in the focused `parallel_js`
+campaign:
 
-- `Condition` still keeps its waiter queue under the GIL and uses the old
-  `parkPump(self, rec.gil, &rec.cond)` path. `Condition.asyncWait` now consults
-  lock ownership under `LockRecord.mutex`, but the condition queue itself still
-  needs its own mutex before this is a Layer-C primitive.
+- `LockRecord` sync and async-grant state uses `LockRecord.mutex`.
+- `Condition` sync/async waiter FIFO state uses `CondRecord.mutex`; waiters
+  register under the condition mutex before releasing the associated `Lock`, so
+  `notify` cannot miss the release+park transition.
 - property-mode `Atomics.wait` / `notify` use `Gil.prop_waiters` /
-  `Gil.prop_async` guarded by `Gil.prop_mutex`; this removes the waiter-table
-  lost-wakeup race from the GIL-free path, but `Condition` still needs its own
-  mutex migration.
+  `Gil.prop_async` guarded by `Gil.prop_mutex`.
 
-Why it cannot be half-migrated: the condvar contract requires the waiter and the
-notifier to use the *same* mutex. Today that mutex is the GIL, and `g.wait`
-atomically releases the GIL while parked so *other* threads can run — the entire
-GIL'd model depends on this. Swapping in a per-record mutex for one primitive
-without dropping the GIL breaks that release-while-parked invariant. So the
-rewrite is effectively atomic with the GIL drop.
+The remaining work is no longer a single coordination queue; it is broadening the
+GIL-free execution campaign across the full PR-249 corpus and continuing to
+close object/heap/shape/promise mutation paths called out in the blocker map.
 
 **Target design (per-waitable mutex+condvar).** Give each waitable its own real
 `std.Io.Mutex`:
@@ -324,9 +321,11 @@ rewrite is effectively atomic with the GIL drop.
   machinery (`HoldJob`, `pending`, grant delivery, `enqueueHoldJob`/`pumpTasks`)
   re-expresses "deliver a grant" as a `rec.mutex`-guarded transition plus the
   existing `api_lock`-guarded run-loop queue.
-- `Condition`: the waiter atomically releases the *associated `Lock`'s* `rec.mutex`
-  (TC39 `Atomics.Condition` pairs a condition with a mutex), so `conditionWait`
-  becomes `cond.wait(&lock.mutex)` — no GIL.
+- `Condition`: the condition record has its own queue mutex. A waiter registers
+  in the FIFO while holding `CondRecord.mutex`, releases the associated `Lock`
+  under that mutex, then parks on `CondRecord.cond`; `notify` pops, marks, and
+  broadcasts under the same mutex, and async waiters are handed to the already
+  migrated `Lock.asyncHold` grant path.
 - Property `Atomics.wait`/`notify`: the per-realm `Gil.prop_mutex` now guards
   `prop_waiters`/`prop_async`; `propNotify` collects matching async tickets under
   the table mutex and settles them *after* releasing it (settling runs JS →
@@ -355,10 +354,10 @@ why it is a campaign, not a flip.
 Atomics.Mutex test**. (2) Hold-jobs / `Lock.asyncHold` off the GIL: **landed and
 TSan-clean for the focused real-`Thread` async-grant test**. (3) Property
 `Atomics.wait`/`notify` waiter-table mutex: **landed and TSan-clean for the
-focused real-`Thread` property-waiter test**. (4) Migrate `Condition` waiter
-state off the GIL. (5) Broaden the execution-path GIL drop in
-`threadMain`/`evaluate` under `parallel_js`; enable the per-structure-lock flags
-for that mode. (6) Whole-corpus TSan campaign +
+focused real-`Thread` property-waiter test**. (4) `Condition` waiter queue
+mutex: **landed and TSan-clean for the focused real-`Thread` condition-waiter
+test**. (5) Broaden the execution-path GIL drop in `threadMain`/`evaluate` under
+`parallel_js`; enable the per-structure-lock flags for that mode. (6) Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
 pause-time optimization, not on this critical path (quiescent collection is

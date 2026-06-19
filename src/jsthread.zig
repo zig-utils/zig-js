@@ -391,6 +391,7 @@ const CondEntry = union(enum) {
 const CondRecord = struct {
     brand: SyncBrand = sync_brand_condition,
     gil: *gil_mod.Gil,
+    mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
     /// ONE FIFO domain for sync and async waiters (4.3: notify wakes them
     /// uniformly in arrival order — cross-kind).
@@ -785,6 +786,12 @@ fn lockLockedGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
 }
 
 fn removeSyncCondTicket(rec: *CondRecord, ticket: *SyncCondTicket) void {
+    rec.mutex.lockUncancelable(agent.engineIo());
+    defer rec.mutex.unlock(agent.engineIo());
+    removeSyncCondTicketLocked(rec, ticket);
+}
+
+fn removeSyncCondTicketLocked(rec: *CondRecord, ticket: *SyncCondTicket) void {
     for (rec.queue.items, 0..) |entry, i| {
         switch (entry) {
             .sync => |t| if (t == ticket) {
@@ -796,23 +803,56 @@ fn removeSyncCondTicket(rec: *CondRecord, ticket: *SyncCondTicket) void {
     }
 }
 
+fn waitOnCondRecord(self: *Interpreter, rec: *CondRecord, timeout: std.Io.Timeout) void {
+    const io = agent.engineIo();
+    if (self.use_thread_gil) {
+        const g = rec.gil;
+        stack_scan.beginPark();
+        g.release();
+        rec.cond.waitTimeout(io, &rec.mutex, timeout) catch {};
+        rec.mutex.unlock(io);
+        g.acquire();
+        stack_scan.endPark();
+        rec.mutex.lockUncancelable(io);
+    } else {
+        rec.cond.waitTimeout(io, &rec.mutex, timeout) catch {};
+    }
+}
+
 fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout_ns: ?u64) value.HostError!bool {
-    lock.mutex.lockUncancelable(agent.engineIo());
+    const io = agent.engineIo();
+    rec.mutex.lockUncancelable(io);
+    lock.mutex.lockUncancelable(io);
     const held_by_me = lock.locked and lock.holder == currentTid();
-    lock.mutex.unlock(agent.engineIo());
-    if (!held_by_me)
+    if (!held_by_me) {
+        lock.mutex.unlock(io);
+        rec.mutex.unlock(io);
         return self.throwError("TypeError", "Condition wait requires the lock to be held by the caller");
-    if ((timeout_ns == null or timeout_ns.? != 0) and !self.main_can_block)
+    }
+    if ((timeout_ns == null or timeout_ns.? != 0) and !self.main_can_block) {
+        lock.mutex.unlock(io);
+        rec.mutex.unlock(io);
         return self.throwError("TypeError", "Condition wait cannot block the current thread");
-    // Atomic under the GIL: nothing else runs between the release below and
-    // our enqueue+park (parks register before the VM lock drops).
-    lockRelease(self, lock);
+    }
     // Arena-allocated, NOT stack: the notifier's consume-loop reads the
     // ticket after this frame may have returned (a stack ticket dangles —
     // it read clobbered memory and spun forever).
-    const ticket = try self.arena.create(SyncCondTicket);
+    const ticket = self.arena.create(SyncCondTicket) catch |err| {
+        lock.mutex.unlock(io);
+        rec.mutex.unlock(io);
+        return err;
+    };
     ticket.* = .{};
-    try rec.queue.append(self.arena, .{ .sync = ticket });
+    rec.queue.append(self.arena, .{ .sync = ticket }) catch |err| {
+        lock.mutex.unlock(io);
+        rec.mutex.unlock(io);
+        return err;
+    };
+    const job_to_enqueue = lockReleaseLocked(lock);
+    lock.mutex.unlock(io);
+    rec.mutex.unlock(io);
+    if (job_to_enqueue) |job| enqueueHoldJob(self, job) catch {};
+    rec.mutex.lockUncancelable(io);
     const deadline_ns: ?i96 = if (timeout_ns) |ns|
         std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + ns
     else
@@ -823,18 +863,46 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
         if (deadline_ns) |d| {
             const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
             if (d <= now) {
-                removeSyncCondTicket(rec, ticket);
+                removeSyncCondTicketLocked(rec, ticket);
+                rec.mutex.unlock(io);
                 switch (try acquireLock(self, lock, null, "Condition wait cannot reacquire the lock")) {
                     .acquired => return false,
                     .timed_out => unreachable,
                 }
             }
         }
-        try parkPump(self, rec.gil, &rec.cond);
+        rec.mutex.unlock(io);
+        pumpTasks(self);
+        const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
+        rec.mutex.lockUncancelable(io);
+        if (stopped) {
+            removeSyncCondTicketLocked(rec, ticket);
+            rec.mutex.unlock(io);
+            return self.throwError("Error", "worker terminated");
+        }
+        if (ticket.woken) break;
+        var tick_ns: u64 = 5 * std.time.ns_per_ms;
+        if (deadline_ns) |d| {
+            const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+            if (d <= now) {
+                removeSyncCondTicketLocked(rec, ticket);
+                rec.mutex.unlock(io);
+                switch (try acquireLock(self, lock, null, "Condition wait cannot reacquire the lock")) {
+                    .acquired => return false,
+                    .timed_out => unreachable,
+                }
+            }
+            tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
+        }
+        waitOnCondRecord(self, rec, .{ .duration = .{
+            .raw = .fromNanoseconds(tick_ns),
+            .clock = .awake,
+        } });
     }
     // Re-register on the lock BEFORE acking the wake, so notifyAll's
     // consume-loop guarantees FIFO against async regrants.
     ticket.consumed = true;
+    rec.mutex.unlock(io);
     switch (try acquireLock(self, lock, null, "Condition wait cannot reacquire the lock")) {
         .acquired => return true,
         .timed_out => unreachable,
@@ -862,9 +930,12 @@ fn condWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostE
 
 fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostError!usize {
     // ONE FIFO domain: wake in arrival order regardless of kind.
+    const io = agent.engineIo();
     var n: usize = 0;
     var woken_sync: std.ArrayListUnmanaged(*SyncCondTicket) = .empty;
     defer woken_sync.deinit(self.arena);
+    rec.mutex.lockUncancelable(io);
+    defer rec.mutex.unlock(io);
     while (rec.queue.items.len > 0 and n < count) {
         const entry = rec.queue.orderedRemove(0);
         switch (entry) {
@@ -876,25 +947,30 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
         }
         n += 1;
     }
-    if (woken_sync.items.len > 0) rec.cond.broadcast(agent.engineIo());
+    if (woken_sync.items.len > 0) rec.cond.broadcast(io);
     // Depth-free handoff (notify-all-shared-lock) + FIFO against
     // async regrants (condition-async-wait): loop until every woken
     // sync waiter has re-registered on its lock.
-    if (self.gil) |g| {
-        var pending = true;
-        while (pending) {
-            pending = false;
-            for (woken_sync.items) |t| {
-                if (!t.consumed) pending = true;
-            }
-            if (!pending) break;
+    var pending = true;
+    while (pending) {
+        pending = false;
+        for (woken_sync.items) |t| {
+            if (!t.consumed) pending = true;
+        }
+        if (!pending) break;
+        rec.mutex.unlock(io);
+        if (self.use_thread_gil) {
+            const g = rec.gil;
             g.release();
             // A real sleep, not a bare yield: the woken waiter must
             // win the GIL to ack, and a tight relock loop can starve
             // it indefinitely (no mutex fairness).
-            std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
+            std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
             g.acquire();
+        } else {
+            std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
         }
+        rec.mutex.lockUncancelable(io);
     }
     return n;
 }
@@ -1686,8 +1762,23 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     // no-fn grant is consumable from anywhere (poisoning its release()); a
     // delivered with-fn grant or sync hold is held only for its own thread.
     lock.mutex.lockUncancelable(agent.engineIo());
-    if (!lock.locked or lock.grant_pending) {
+    const held = lock.locked and !lock.grant_pending and
+        (lock.active_release != null or lock.async_runner == currentTid() or lock.holder == currentTid());
+    if (!held) {
         lock.mutex.unlock(agent.engineIo());
+        return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
+    }
+    lock.mutex.unlock(agent.engineIo());
+    const outer = try promise.newPromise(self);
+    const w = try self.arena.create(AsyncCondWaiter);
+    w.* = .{ .lock = lock, .outer = outer };
+    const io = agent.engineIo();
+    rec.mutex.lockUncancelable(io);
+    lock.mutex.lockUncancelable(io);
+    var job_to_enqueue: ?*HoldJob = null;
+    if (!lock.locked or lock.grant_pending) {
+        lock.mutex.unlock(io);
+        rec.mutex.unlock(io);
         return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
     }
     if (lock.active_release) |st| {
@@ -1696,15 +1787,19 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     } else if (lock.async_runner == currentTid()) {
         lock.async_runner = 0;
     } else if (lock.holder != currentTid()) {
-        lock.mutex.unlock(agent.engineIo());
+        lock.mutex.unlock(io);
+        rec.mutex.unlock(io);
         return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
     }
-    lock.mutex.unlock(agent.engineIo());
-    const outer = try promise.newPromise(self);
-    const w = try self.arena.create(AsyncCondWaiter);
-    w.* = .{ .lock = lock, .outer = outer };
-    try rec.queue.append(self.arena, .{ .asynchronous = w });
-    lockRelease(self, lock);
+    rec.queue.append(self.arena, .{ .asynchronous = w }) catch |err| {
+        lock.mutex.unlock(io);
+        rec.mutex.unlock(io);
+        return err;
+    };
+    job_to_enqueue = lockReleaseLocked(lock);
+    lock.mutex.unlock(io);
+    rec.mutex.unlock(io);
+    if (job_to_enqueue) |job| enqueueHoldJob(self, job) catch {};
     return Value.obj(outer);
 }
 
