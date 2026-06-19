@@ -23307,7 +23307,10 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         }
     }
     if (rv.isString()) {
+        const ann = try stripTemporalAnnotations(self, rv.asStr());
         const p = try parseDateTimeNs(self, rv.asStr());
+        if (p.z and !ann.has_tz)
+            return self.throwError("RangeError", "relativeTo exact time string requires a time-zone annotation");
         const tod: i128 = @as(i128, p.h) * nsPerUnit(.hour) + @as(i128, p.mi) * nsPerUnit(.minute) +
             @as(i128, p.s) * nsPerUnit(.second) + @as(i128, p.ms) * nsPerUnit(.millisecond) +
             @as(i128, p.us) * nsPerUnit(.microsecond) + @as(i128, p.ns);
@@ -24424,7 +24427,7 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
 /// from the tail of a Temporal ISO string. Returns the bare date/time body and
 /// the calendar value (validated to be ISO 8601). Malformed/critical-unknown/
 /// duplicate annotations raise RangeError.
-const AnnResult = struct { body: []const u8, cal: ?[]const u8 };
+const AnnResult = struct { body: []const u8, cal: ?[]const u8, has_tz: bool = false };
 fn stripTemporalAnnotations(self: *Interpreter, s: []const u8) EvalError!AnnResult {
     const lb = std.mem.indexOfScalar(u8, s, '[') orelse return .{ .body = s, .cal = null };
     var cal: ?[]const u8 = null;
@@ -24475,7 +24478,7 @@ fn stripTemporalAnnotations(self: *Interpreter, s: []const u8) EvalError!AnnResu
     // caller canonicalizes it (a fully-supported id like gregory is kept, others
     // collapse to iso8601). A malformed id is still a RangeError.
     if (cal) |c| if (!isKnownCalendar(c)) return self.throwError("RangeError", "unknown calendar annotation");
-    return .{ .body = s[0..lb], .cal = cal };
+    return .{ .body = s[0..lb], .cal = cal, .has_tz = tz_count > 0 };
 }
 
 /// A fully-parsed Temporal ISO date/time body (annotations already stripped).
@@ -24601,13 +24604,23 @@ fn parseOffset(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalEr
     const oh = twoDigits(s, i.*) orelse return self.throwError("RangeError", "invalid UTC offset");
     i.* += 2;
     var om: u8 = 0;
-    if (i.* < s.len and s[i.*] == ':') i.* += 1;
+    var minute_had_colon = false;
+    if (i.* < s.len and s[i.*] == ':') {
+        minute_had_colon = true;
+        i.* += 1;
+    }
     if (twoDigits(s, i.*)) |mm| {
         om = mm;
         i.* += 2;
         // Optional offset seconds and fraction (consumed and validated, ignored).
-        if (i.* < s.len and s[i.*] == ':') i.* += 1;
-        if (twoDigits(s, i.*)) |_| {
+        var parse_seconds = false;
+        if (i.* < s.len and s[i.*] == ':') {
+            i.* += 1;
+            parse_seconds = true;
+        } else if (!minute_had_colon) {
+            parse_seconds = true;
+        }
+        if (parse_seconds and twoDigits(s, i.*) != null) {
             i.* += 2;
             if (i.* < s.len and (s[i.*] == '.' or s[i.*] == ',')) {
                 i.* += 1;
