@@ -24860,6 +24860,12 @@ fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
+fn temporalDurationToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const none: []const Value = &.{};
+    return temporalDurationToStringFn(ctx, this, none);
+}
+
 fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -28257,6 +28263,57 @@ fn temporalValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     return self.throwError("TypeError", "Called valueOf on a Temporal type; use compare() / equals() / a string conversion instead");
 }
 
+fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options: Value) value.HostError!*value.Object {
+    const o = (try self.newObject()).asObj();
+    try self.setProp(o, "\x00intl", Value.str("DurationFormat"));
+    try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
+    const locs = try canonicalizeLocaleList(self, locales);
+    var resolved: []const u8 = "en";
+    for (locs.elements.items) |lv| {
+        if (lv.isString() and intlLocaleSupported(lv.asStr())) {
+            resolved = lv.asStr();
+            break;
+        }
+    }
+    try self.setProp(o, "\x00locale", Value.str(resolved));
+    try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+
+    if (!options.isUndefined() and !(options.isObject() and !options.asObj().is_symbol and !options.asObj().is_bigint))
+        return self.throwError("TypeError", "options must be an object");
+    const ro = (try self.newObject()).asObj();
+    var base: []const u8 = "short";
+    if (options.isObject()) {
+        _ = try dtfGetStr(self, options, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+        if (try dtfGetType(self, options, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", Value.str(ns));
+        base = (try dtfGetStr(self, options, "style", &.{ "long", "short", "narrow", "digital" }, "short")).?;
+        try self.setProp(ro, "style", Value.str(base));
+        const time_units = [_][]const u8{ "hours", "minutes", "seconds" };
+        inline for (duration_units) |u| {
+            const is_time = for (time_units) |tu| {
+                if (std.mem.eql(u8, u, tu)) break true;
+            } else false;
+            const allowed: []const []const u8 = if (is_time) &.{ "long", "short", "narrow", "numeric", "2-digit" } else &.{ "long", "short", "narrow", "numeric" };
+            if (try dtfGetStr(self, options, u, allowed, null)) |v| try self.setProp(ro, u, Value.str(v));
+            if (try dtfGetStr(self, options, u ++ "Display", &.{ "always", "auto" }, null)) |d| try self.setProp(ro, u ++ "Display", Value.str(d));
+        }
+        const fd = try self.getProperty(options, "fractionalDigits");
+        if (!fd.isUndefined()) {
+            const n = @trunc(try self.toNumberV(fd));
+            if (std.math.isNan(n) or n < 0 or n > 9) return self.throwError("RangeError", "fractionalDigits out of range");
+            try self.setProp(ro, "fractionalDigits", Value.num(n));
+        }
+    } else {
+        try self.setProp(ro, "style", Value.str(base));
+    }
+    var styles: [10][]const u8 = undefined;
+    var displays: [10][]const u8 = undefined;
+    if (durResolveUnits(Value.obj(ro), base, &styles, &displays))
+        return self.throwError("RangeError", "invalid duration unit style following a numeric unit");
+    try self.setProp(o, "\x00opts", Value.obj(ro));
+    try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+    return o;
+}
+
 /// `Temporal.<Type>.prototype.toLocaleString(locales, options)` via the local
 /// Intl.DateTimeFormat implementation for Temporal date/time-like values.
 fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -28318,8 +28375,8 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
         };
         return try intlDateTimeFormatFn(@ptrCast(self), Value.obj(dtf), &.{this});
     }
-    const none: []const Value = &.{};
-    return temporalDurationToStringFn(ctx, this, none);
+    const df = try makeDurationFormatForLocaleString(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef());
+    return try intlDurationFormatFn(@ptrCast(self), Value.obj(df), &.{this});
 }
 
 /// ToTemporalCalendarSlotValue, restricted to the only supported calendar
@@ -29353,7 +29410,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalDurationToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalDurationToJSONFn);
         if (ns.getOwn("Duration")) |dc| if (dc.isObject()) {
             try setNative(a, rs, dc.asObj(), "from", 1, temporalDurationFromFn);
             try setNative(a, rs, dc.asObj(), "compare", 2, temporalDurationCompareFn);
