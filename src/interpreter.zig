@@ -24813,9 +24813,8 @@ fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
         if (!durInRange(out)) return self.throwError("RangeError", "duration out of range");
         return out;
     }
-    // Non-object: ToString then parse as an ISO 8601 duration (Symbol throws).
-    const s = try self.toStringV(v);
-    return parseDurationString(self, s);
+    if (!v.isString()) return self.throwError("TypeError", "duration must be an object or string");
+    return parseDurationString(self, v.asStr());
 }
 
 // ---- Temporal.PlainTime ---------------------------------------------
