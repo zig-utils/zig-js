@@ -1853,7 +1853,7 @@ pub const Parser = struct {
     fn parsePostfix(self: *Parser) ParseError!*Node {
         const e = try self.parsePrimary();
         const m = try self.parseMemberTail(e);
-        if (self.check(.plus_plus) or self.check(.minus_minus)) {
+        if ((self.check(.plus_plus) or self.check(.minus_minus)) and !self.hasLineTerminatorBefore(0)) {
             // A postfix `++`/`--` target must be a simple assignment target —
             // `import(x)++`, `f()++`, `1++` are early SyntaxErrors.
             if (m.* != .identifier and m.* != .member and m.* != .super_member)
@@ -2803,6 +2803,18 @@ test "parser accepts ASI line terminators between statements" {
     var ls = try Parser.init(arena.allocator(), "var a = 1\u{2028}var b = 2");
     const ls_prog = try ls.parseProgram();
     try std.testing.expectEqual(@as(usize, 2), ls_prog.program.len);
+
+    var prefix_inc = try Parser.init(arena.allocator(), "var x = 0; var y = 0; x\n++y");
+    const prefix_inc_prog = try prefix_inc.parseProgram();
+    try std.testing.expectEqual(@as(usize, 4), prefix_inc_prog.program.len);
+
+    var prefix_dec = try Parser.init(arena.allocator(), "var x = 0; var y = 2; x\n--y");
+    const prefix_dec_prog = try prefix_dec.parseProgram();
+    try std.testing.expectEqual(@as(usize, 4), prefix_dec_prog.program.len);
+
+    var assign_then_inc = try Parser.init(arena.allocator(), "var a=1,b=2,c=3; a=b\n++c");
+    const assign_then_inc_prog = try assign_then_inc.parseProgram();
+    try std.testing.expectEqual(@as(usize, 3), assign_then_inc_prog.program.len);
 }
 
 test "parser requires module import export statement boundaries" {
