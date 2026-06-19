@@ -26904,6 +26904,18 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else Value.undef());
     const t = this.asObj().temporal.?;
+    return Value.str(try temporalMonthDayString(self, t, cal));
+}
+
+fn temporalMonthDayToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
+    const t = this.asObj().temporal.?;
+    return Value.str(try temporalMonthDayString(self, t, .auto));
+}
+
+fn temporalMonthDayString(self: *Interpreter, t: *const value.TemporalData, cal: CalName) EvalError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     // The reference year (1972) renders the short "MM-DD" form; a non-reference
     // year, or a shown calendar annotation, forces the full "YYYY-MM-DD".
@@ -26914,7 +26926,7 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
         try tfmt(self, &buf, "{d:0>2}-{d:0>2}", .{ t.month, t.day });
     }
     try appendCalAnnotation(self, &buf, cal, t.calendar);
-    return Value.str(try buf.toOwnedSlice(self.arena));
+    return buf.toOwnedSlice(self.arena);
 }
 
 const IsoMD = struct { y: i64, m: u8, d: u8 };
@@ -29610,7 +29622,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalMonthDayToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalMonthDayToJSONFn);
         try setNative(a, rs, p, "with", 1, temporalMonthDayWithFn);
         try setNative(a, rs, p, "equals", 1, temporalMonthDayEqualsFn);
         try setNative(a, rs, p, "toPlainDate", 1, temporalMonthDayToPlainDateFn);
