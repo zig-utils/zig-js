@@ -399,10 +399,14 @@ lost-update/CAS oracle at a smaller interpreter budget. `races/counter-lock.js`
 uses the same split for contended `Lock.hold`, and the promoted race block now
 passes under `parallel_js` through `races/wait-notify-storm.js`. The next local
 promoted heap block is also focused-green under `parallel_js`, from
-`heap-access-blocking.js` through `heap-stop-interleavings.js`. The next local
-frontier is `invariants/delete-quarantine-dictionary.js`; broader
-promoted-allowlist `parallel_js` remains exploratory until the invariants block
-is cleared. (6)
+`heap-access-blocking.js` through `heap-stop-interleavings.js`. The promoted
+invariants block is focused-green 7/7, and the promoted objectmodel block is
+focused-green in verified slices through
+`objectmodel/i08-named-vs-indexed-first-install.js`. The semantics block is
+focused-green through `semantics/frozen-seal-race.js`; the next local frontier
+is the IC transition watchdog pair `semantics/ic-delete_by_id-vs-transition.js`
+and `semantics/ic-get_by_id-vs-transition.js`. Broader promoted-allowlist
+`parallel_js` remains exploratory until the IC transition block is cleared. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

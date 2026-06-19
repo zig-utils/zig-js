@@ -215,9 +215,14 @@ while no-GIL keeps the 8-worker lost-increment oracle at a smaller budget. The
 promoted race block is now focused-green under `parallel_js` through
 `races/wait-notify-storm.js`. The full promoted heap block is also
 focused-green under `parallel_js`, from `heap-access-blocking.js` through
-`heap-stop-interleavings.js`; the next local promoted frontier is
-`invariants/delete-quarantine-dictionary.js`. The promoted JIT-audit subset now
-has focused-green
+`heap-stop-interleavings.js`. The promoted invariants block is focused-green
+7/7, and the promoted objectmodel block is focused-green in
+verified slices through `objectmodel/i08-named-vs-indexed-first-install.js`.
+The semantics block is focused-green through `semantics/frozen-seal-race.js`;
+the next local frontier is the IC transition watchdog pair
+`semantics/ic-delete_by_id-vs-transition.js` and
+`semantics/ic-get_by_id-vs-transition.js`. The promoted JIT-audit subset now has
+focused-green
 `parallel_js` coverage from constructor/fire benchmark checksums through the
 tailcall, OSR/catch-loop, golden-disasm, int-gate, shared-ArrayStorage,
 spawned-thread butterfly, tag-discipline, and TID-tag witnesses. The normal
