@@ -111,6 +111,70 @@ fn jsTrim(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
     return s[lo..hi];
 }
 
+fn localeIsTurkic(loc: []const u8) bool {
+    return loc.len >= 2 and (std.mem.eql(u8, loc[0..2], "tr") or std.mem.eql(u8, loc[0..2], "az")) and
+        (loc.len == 2 or loc[2] == '-');
+}
+
+fn turkicUpper(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == 'i') {
+            try buf.appendSlice(self.arena, "\xc4\xb0");
+            i += 1;
+        } else if (i + 1 < s.len and s[i] == 0xc4 and s[i + 1] == 0xb1) {
+            try buf.append(self.arena, 'I');
+            i += 2;
+        } else {
+            try buf.append(self.arena, s[i]);
+            i += 1;
+        }
+    }
+    return unicode_case.toUpper(self.arena, try buf.toOwnedSlice(self.arena));
+}
+
+fn turkicLower(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (i + 1 < s.len and s[i] == 0xc4 and s[i + 1] == 0xb0) {
+            try buf.append(self.arena, 'i');
+            i += 2;
+        } else if (s[i] == 'I') {
+            var j = i + 1;
+            var remove_dot = false;
+            while (j + 1 < s.len) : (j += 1) {
+                if (s[j] == 'A' or (s[j] >= 'a' and s[j] <= 'z')) break;
+                if (s[j] == 0xcc and s[j + 1] == 0x80) break;
+                if (s[j] == 0xcc and s[j + 1] == 0x87) {
+                    remove_dot = true;
+                    break;
+                }
+            }
+            if (remove_dot) {
+                try buf.append(self.arena, 'i');
+                i += 1;
+                while (i < s.len) {
+                    if (i + 1 < s.len and s[i] == 0xcc and s[i + 1] == 0x87) {
+                        i += 2;
+                        break;
+                    }
+                    try buf.append(self.arena, s[i]);
+                    i += 1;
+                }
+            } else {
+                try buf.appendSlice(self.arena, "\xc4\xb1");
+                i += 1;
+            }
+        } else {
+            try buf.append(self.arena, s[i]);
+            i += 1;
+        }
+    }
+    return unicode_case.toLower(self.arena, try buf.toOwnedSlice(self.arena));
+}
+
 /// `error.Throw` is the carrier for *any* JS exception: the thrown value lives
 /// in `Interpreter.exception`. `error.OutOfMemory` is the only genuine host
 /// failure. (ReferenceError/TypeError are no longer Zig errors — they are real,
@@ -8405,7 +8469,11 @@ pub const Interpreter = struct {
                 if (i != 0) try buf.append(self.arena, ',');
                 const el = try self.arrIndexGet(o, i);
                 if (el.isUndefined() or el.isNull()) continue;
-                const r = try self.callMethod(el, "toLocaleString", args);
+                const forwarded = [_]Value{
+                    if (args.len > 0) args[0] else Value.undef(),
+                    if (args.len > 1) args[1] else Value.undef(),
+                };
+                const r = try self.callMethod(el, "toLocaleString", &forwarded);
                 try buf.appendSlice(self.arena, try self.toStringV(r));
             }
             return Value.str(try buf.toOwnedSlice(self.arena));
@@ -9221,12 +9289,19 @@ pub const Interpreter = struct {
             return Value.str(try self.stringSliceUtf16(s, a0, b0));
         }
         if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
-            // toLocaleUpperCase delegates to the locale-independent full Unicode
-            // mapping here (the engine has no ICU data); for the default locale
-            // they agree.
+            if (eq(name, "toLocaleUpperCase")) {
+                const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+                const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "";
+                if (localeIsTurkic(loc)) return Value.str(try turkicUpper(self, s));
+            }
             return Value.str(try unicode_case.toUpper(self.arena, s));
         }
         if (eq(name, "toLowerCase") or eq(name, "toLocaleLowerCase")) {
+            if (eq(name, "toLocaleLowerCase")) {
+                const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+                const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "";
+                if (localeIsTurkic(loc)) return Value.str(try turkicLower(self, s));
+            }
             return Value.str(try unicode_case.toLower(self.arena, s));
         }
         if (eq(name, "trim")) return Value.str(jsTrim(s, true, true));
@@ -12301,11 +12376,84 @@ fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     return self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), true);
 }
 
+fn bigIntRoundSignificant(self: *Interpreter, digits_in: []const u8, max_sig: usize) EvalError![]const u8 {
+    if (max_sig == 0 or digits_in.len <= max_sig) return digits_in;
+    var kept = try self.arena.dupe(u8, digits_in[0..max_sig]);
+    if (digits_in[max_sig] >= '5') {
+        var i = kept.len;
+        while (i > 0) {
+            i -= 1;
+            if (kept[i] < '9') {
+                kept[i] += 1;
+                break;
+            }
+            kept[i] = '0';
+        } else {
+            var carry: std.ArrayListUnmanaged(u8) = .empty;
+            try carry.append(self.arena, '1');
+            try carry.appendSlice(self.arena, kept);
+            kept = try carry.toOwnedSlice(self.arena);
+        }
+    }
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.appendSlice(self.arena, kept);
+    var z = digits_in.len - max_sig;
+    while (z > 0) : (z -= 1) try out.append(self.arena, '0');
+    return out.toOwnedSlice(self.arena);
+}
+
+fn bigIntGroupedDecimal(self: *Interpreter, digits: []const u8, locale: []const u8, group: []const u8) EvalError![]const u8 {
+    const indic = nfIndicGrouping(locale);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const n = digits.len;
+    for (digits, 0..) |c, i| {
+        const rem = n - i;
+        const at_boundary = if (indic)
+            (rem == 3 or (rem > 3 and (rem - 3) % 2 == 0))
+        else
+            (rem % 3 == 0);
+        if (i != 0 and at_boundary) try out.appendSlice(self.arena, group);
+        try out.append(self.arena, c);
+    }
+    return out.toOwnedSlice(self.arena);
+}
+
+fn bigIntFormatWithOptions(self: *Interpreter, big: *value.Object, loc: []const u8, ro: *value.Object) value.HostError![]const u8 {
+    var s = try value.bigIntToString(big, self.arena);
+    const neg = s.len > 0 and s[0] == '-';
+    if (neg) s = s[1..];
+    if (ro.getOwn("style")) |sv| if (sv.isString() and std.mem.eql(u8, sv.asStr(), "percent")) {
+        s = try std.fmt.allocPrint(self.arena, "{s}00", .{s});
+    };
+    if (ro.getOwn("maximumSignificantDigits")) |msv| if (msv.isNumber()) {
+        s = try bigIntRoundSignificant(self, s, @intFromFloat(msv.asNum()));
+    };
+    const syms = localeNumberSymbols(loc);
+    const grouped = try bigIntGroupedDecimal(self, s, loc, syms.group);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    if (neg) try buf.appendSlice(self.arena, syms.minus);
+    try buf.appendSlice(self.arena, grouped);
+    if (ro.getOwn("minimumFractionDigits")) |mfv| if (mfv.isNumber()) {
+        const n: usize = @intFromFloat(mfv.asNum());
+        if (n > 0) {
+            try buf.appendSlice(self.arena, syms.decimal);
+            for (0..n) |_| try buf.append(self.arena, '0');
+        }
+    };
+    if (ro.getOwn("style")) |sv| if (sv.isString() and std.mem.eql(u8, sv.asStr(), "percent")) {
+        if (loc.len >= 2 and loc[0] == 'd' and loc[1] == 'e') try buf.appendSlice(self.arena, "\xc2\xa0");
+        try buf.appendSlice(self.arena, syms.percent);
+    };
+    return buf.toOwnedSlice(self.arena);
+}
+
 fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().prim != null and this.asObj().prim.?.isObject() and this.asObj().prim.?.asObj().is_bigint) this.asObj().prim.?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
-    return Value.str(try value.bigIntToString(big, self.arena));
+    const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+    const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
+    const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
+    return Value.str(try bigIntFormatWithOptions(self, big, loc, ro));
 }
 
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
@@ -14803,7 +14951,11 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             const el = try self.taLoadIdx(ta, i);
             if (el.isUndefined()) continue;
             const method = try self.getProperty(el, "toLocaleString");
-            const r = try self.callValueWithThis(method, &.{}, el);
+            const forwarded = [_]Value{
+                if (args.len > 0) args[0] else Value.undef(),
+                if (args.len > 1) args[1] else Value.undef(),
+            };
+            const r = try self.callValueWithThis(method, &forwarded, el);
             try buf.appendSlice(self.arena, try self.toStringV(r));
         }
         return Value.str(try buf.toOwnedSlice(self.arena));
@@ -16395,7 +16547,14 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     else if (std.mem.eql(u8, key, "currency"))
         &supported_currencies
     else if (std.mem.eql(u8, key, "timeZone"))
-        &.{"UTC"}
+        &.{
+            "Etc/GMT+1",  "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2",
+            "Etc/GMT+3",  "Etc/GMT+4",  "Etc/GMT+5",  "Etc/GMT+6",  "Etc/GMT+7",
+            "Etc/GMT+8",  "Etc/GMT+9",  "Etc/GMT-1",  "Etc/GMT-10", "Etc/GMT-11",
+            "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2",  "Etc/GMT-3",
+            "Etc/GMT-4",  "Etc/GMT-5",  "Etc/GMT-6",  "Etc/GMT-7",  "Etc/GMT-8",
+            "Etc/GMT-9",  "UTC",
+        }
     else if (std.mem.eql(u8, key, "collation"))
         &.{ "emoji", "eor" }
     else if (std.mem.eql(u8, key, "unit"))
@@ -16903,6 +17062,69 @@ fn dtfGetType(self: *Interpreter, opts: Value, name: []const u8) EvalError!?[]co
     return try std.ascii.allocLowerString(self.arena, s);
 }
 
+fn dtfCanonOffsetTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const u8 {
+    if (s.len != 3 and s.len != 5 and s.len != 6) return null;
+    if (s[0] != '+' and s[0] != '-') return null;
+    if (!std.ascii.isDigit(s[1]) or !std.ascii.isDigit(s[2])) return null;
+    if (s.len == 5 and (!std.ascii.isDigit(s[3]) or !std.ascii.isDigit(s[4]))) return null;
+    if (s.len == 6 and (s[3] != ':' or !std.ascii.isDigit(s[4]) or !std.ascii.isDigit(s[5]))) return null;
+    const hh = std.fmt.parseInt(u8, s[1..3], 10) catch return null;
+    const mm = if (s.len == 5) std.fmt.parseInt(u8, s[3..5], 10) catch return null else if (s.len == 6) std.fmt.parseInt(u8, s[4..6], 10) catch return null else 0;
+    if (hh > 23 or mm > 59) return self.throwError("RangeError", "invalid timeZone");
+    const sign: u8 = if (hh == 0 and mm == 0) '+' else s[0];
+    return try std.fmt.allocPrint(self.arena, "{c}{d:0>2}:{d:0>2}", .{ sign, hh, mm });
+}
+
+fn dtfCanonNamedTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const u8 {
+    for (s) |c| if (c >= 0x80 or !(std.ascii.isAlphanumeric(c) or c == '/' or c == '_' or c == '-' or c == '+')) {
+        return self.throwError("RangeError", "invalid timeZone");
+    };
+    const fixed = [_][]const u8{
+        "CET",        "CST6CDT",   "Cuba",          "EET",           "EST",        "EST5EDT",
+        "Egypt",      "Eire",      "GB",            "GB-Eire",       "GMT",        "GMT+0",
+        "GMT-0",      "GMT0",      "Greenwich",     "HST",           "Hongkong",   "Iceland",
+        "Iran",       "Israel",    "Jamaica",       "Japan",         "Kwajalein",  "Libya",
+        "MET",        "MST",       "MST7MDT",       "NZ",            "NZ-CHAT",    "Navajo",
+        "PRC",        "PST8PDT",   "Poland",        "Portugal",      "ROC",        "ROK",
+        "Singapore",  "Turkey",    "UCT",           "UTC",           "Universal",  "W-SU",
+        "WET",        "Zulu",      "Etc/UTC",       "Etc/UCT",       "Etc/GMT",    "Etc/GMT+0",
+        "Etc/GMT-0",  "Etc/GMT0",  "Etc/Greenwich", "Etc/Universal", "Etc/Zulu",   "Etc/GMT+1",
+        "Etc/GMT+2",  "Etc/GMT+3", "Etc/GMT+4",     "Etc/GMT+5",     "Etc/GMT+6",  "Etc/GMT+7",
+        "Etc/GMT+8",  "Etc/GMT+9", "Etc/GMT+10",    "Etc/GMT+11",    "Etc/GMT+12", "Etc/GMT-1",
+        "Etc/GMT-2",  "Etc/GMT-3", "Etc/GMT-4",     "Etc/GMT-5",     "Etc/GMT-6",  "Etc/GMT-7",
+        "Etc/GMT-8",  "Etc/GMT-9", "Etc/GMT-10",    "Etc/GMT-11",    "Etc/GMT-12", "Etc/GMT-13",
+        "Etc/GMT-14",
+    };
+    for (fixed) |z| if (std.ascii.eqlIgnoreCase(s, z)) return z;
+    const exact_case = [_][]const u8{
+        "Africa/Dar_es_Salaam",
+        "America/Port-au-Prince",
+        "America/Port_of_Spain",
+        "Europe/Isle_of_Man",
+    };
+    for (exact_case) |z| if (std.ascii.eqlIgnoreCase(s, z)) return z;
+    if (std.mem.indexOfScalar(u8, s, '/') == null) return null;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var word_start = true;
+    for (s) |c| {
+        if (std.ascii.isAlphabetic(c)) {
+            try out.append(self.arena, if (word_start) std.ascii.toUpper(c) else std.ascii.toLower(c));
+            word_start = false;
+        } else {
+            try out.append(self.arena, c);
+            word_start = (c == '/' or c == '_' or c == '-');
+        }
+    }
+    return try out.toOwnedSlice(self.arena);
+}
+
+fn dtfCanonTimeZone(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    if (try dtfCanonOffsetTimeZone(self, s)) |z| return z;
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-' or s[0] >= 0x80)) return self.throwError("RangeError", "invalid timeZone");
+    if (try dtfCanonNamedTimeZone(self, s)) |z| return z;
+    return self.throwError("RangeError", "invalid timeZone");
+}
+
 /// The calendar types a full implementation reports from AvailableCalendars.
 /// An unsupported (or not-yet-adopted) request falls back to the locale default.
 const dtf_available_calendars = [_][]const u8{
@@ -17007,9 +17229,9 @@ fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequire
         if (try dtfGetStr(self, raw, "dateStyle", &.{ "full", "long", "medium", "short" }, null)) |c| r.date_style = c;
         if (try dtfGetStr(self, raw, "timeStyle", &.{ "full", "long", "medium", "short" }, null)) |c| r.time_style = c;
     }
-    // Canonicalize the time zone (we only model UTC) and map the deprecated
-    // "islamic"/"islamic-rgsa" calendars to a concrete available fallback.
-    if (std.ascii.eqlIgnoreCase(r.time_zone, "UTC") or std.ascii.eqlIgnoreCase(r.time_zone, "Etc/UTC") or std.ascii.eqlIgnoreCase(r.time_zone, "Etc/GMT")) r.time_zone = "UTC";
+    // Canonicalize the time zone and map the deprecated "islamic"/"islamic-rgsa"
+    // calendars to a concrete available fallback.
+    r.time_zone = try dtfCanonTimeZone(self, r.time_zone);
     if (r.calendar.len > 0) r.calendar = dtfCanonCalendar(r.calendar);
 
     // dateStyle/timeStyle cannot be combined with explicit component options.
@@ -17686,6 +17908,26 @@ const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
 /// ("weekday"/"year"/…/"literal") and its formatted `value`.
 const DtfPart = struct { typ: []const u8, value: []const u8 };
 
+fn dtfTimeZoneOffsetMs(this: Value) i64 {
+    const ov = this.asObj().getOwn("\x00opts") orelse return 0;
+    if (!ov.isObject()) return 0;
+    const tv = ov.asObj().getOwn("timeZone") orelse return 0;
+    if (!tv.isString()) return 0;
+    const s = tv.asStr();
+    if (std.mem.startsWith(u8, s, "Etc/GMT+") or std.mem.startsWith(u8, s, "Etc/GMT-")) {
+        const sign_ch = s["Etc/GMT".len];
+        const hours = std.fmt.parseInt(i64, s["Etc/GMT+".len..], 10) catch return 0;
+        if (hours == 0) return 0;
+        const sign: i64 = if (sign_ch == '+') -1 else 1;
+        return sign * hours * 60 * 60_000;
+    }
+    if (s.len != 6 or (s[0] != '+' and s[0] != '-') or s[3] != ':') return 0;
+    const hh = std.fmt.parseInt(i64, s[1..3], 10) catch return 0;
+    const mm = std.fmt.parseInt(i64, s[4..6], 10) catch return 0;
+    const sign: i64 = if (s[0] == '-') -1 else 1;
+    return sign * (hh * 60 + mm) * 60_000;
+}
+
 /// Build the formatted parts for an Intl.DateTimeFormat (en locale, UTC, ISO
 /// calendar). Shared by `format` (joins the values) and `formatToParts`. Covers
 /// the common component options; locale-specific extras (era, timeZoneName,
@@ -17731,7 +17973,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 try self.toNumberV(args[0]);
             if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
             const day_ms: i64 = 86_400_000;
-            const total_ms: i64 = @intFromFloat(@trunc(ms));
+            const total_ms: i64 = @intFromFloat(@trunc(ms + @as(f64, @floatFromInt(dtfTimeZoneOffsetMs(this)))));
             const epoch_days = @divFloor(total_ms, day_ms);
             var tod = @mod(total_ms, day_ms);
             if (tod < 0) tod += day_ms;
@@ -18374,7 +18616,15 @@ const NfPart = struct { typ: []const u8, value: []const u8 };
 /// Build the formatted parts for an Intl.NumberFormat value (en-style algorithm,
 /// CLDR symbols). Shared by `format` (joins the values) and `formatToParts`.
 fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(NfPart) {
-    var n = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
+    const input = if (args.len > 0) args[0] else Value.undef();
+    if (input.isObject() and input.asObj().is_bigint) {
+        const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
+        const ro = if (this.asObj().getOwn("\x00opts")) |ov| (if (ov.isObject()) ov.asObj() else (try self.newObject()).asObj()) else (try self.newObject()).asObj();
+        var parts: std.ArrayListUnmanaged(NfPart) = .empty;
+        try parts.append(self.arena, .{ .typ = "literal", .value = try bigIntFormatWithOptions(self, input.asObj(), locale, ro) });
+        return parts;
+    }
+    var n = try self.toNumberV(input);
 
     // Resolve the fraction/integer-digit and style options (en-style algorithm,
     // no CLDR): minimumIntegerDigits (1), minimumFractionDigits (0),
