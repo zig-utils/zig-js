@@ -224,9 +224,12 @@ smaller pass budgets so the files remain transition-correctness witnesses
 rather than 45-second watchdog trips. The full promoted scaling block is also
 focused-green 6/6 under `parallel_js`; `scaling/raytrace-like.js` and
 `scaling/richards-like.js` keep their normal corpus/gate workloads while using
-smaller no-GIL standalone budgets. The next local promoted frontier is
-`vmstate/all-flags-identity.js`. The promoted JIT-audit subset now has
-focused-green
+smaller no-GIL standalone budgets. The VM-state block is focused-green 10/10
+under `parallel_js`. A full promoted-allowlist `parallel_js` probe now passes
+the former microtask-promise GC crash in
+`cve/mc-gc-thread-shell-finalizer-storm.js` and reaches through
+`cve/mc-int-resizable-tail-quarantine.js` before the 20-minute cumulative probe
+budget expires. The promoted JIT-audit subset now has focused-green
 `parallel_js` coverage from constructor/fire benchmark checksums through the
 tailcall, OSR/catch-loop, golden-disasm, int-gate, shared-ArrayStorage,
 spawned-thread butterfly, tag-discipline, and TID-tag witnesses. The normal

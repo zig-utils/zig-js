@@ -356,7 +356,7 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
     markValue(v, mt.argument);
     markValue(v, mt.thenable);
     markValue(v, mt.then_fn);
-    if (mt.promise) |p| v.mark(p);
+    if (mt.promise) |p| markManaged(v, p);
 }
 
 pub fn traceGenerator(g: *vm.Generator, v: anytype) void {

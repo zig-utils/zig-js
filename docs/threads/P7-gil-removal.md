@@ -397,8 +397,8 @@ focused-green under `parallel_js`; the GIL-mode file keeps its original
 100,000-add/1,000-CAS amplifier, while no-GIL keeps the same 8-worker
 lost-update/CAS oracle at a smaller interpreter budget. `races/counter-lock.js`
 uses the same split for contended `Lock.hold`, and the promoted race block now
-passes under `parallel_js` through `races/wait-notify-storm.js`. The next local
-promoted heap block is also focused-green under `parallel_js`, from
+passes under `parallel_js` through `races/wait-notify-storm.js`. The promoted
+heap block is also focused-green under `parallel_js`, from
 `heap-access-blocking.js` through `heap-stop-interleavings.js`. The promoted
 invariants block is focused-green 7/7, and the promoted objectmodel block is
 focused-green in verified slices through
@@ -408,9 +408,13 @@ files keep their original GIL-mode pass counts while no-GIL uses smaller
 watchdog-safe pass budgets. The full promoted scaling block is also
 focused-green 6/6 under `parallel_js`; `scaling/raytrace-like.js` and
 `scaling/richards-like.js` keep their normal corpus/gate workloads while using
-smaller no-GIL standalone budgets. The next local frontier is
-`vmstate/all-flags-identity.js`. Broader promoted-allowlist `parallel_js`
-remains exploratory until the VM-state block is cleared. (6)
+smaller no-GIL standalone budgets. The VM-state block is focused-green 10/10
+under `parallel_js`. A full promoted-allowlist `parallel_js` probe now passes
+the former microtask-promise GC crash in
+`cve/mc-gc-thread-shell-finalizer-storm.js` and reaches through
+`cve/mc-int-resizable-tail-quarantine.js` before the 20-minute cumulative probe
+budget expires. Broader promoted-allowlist `parallel_js` remains exploratory
+until the remaining cumulative CVE budget frontier is cleared. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
