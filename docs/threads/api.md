@@ -50,8 +50,10 @@ Supported behavior:
   is still running, the finishing thread settles the promise.
 - Joining the current thread throws.
 - The test-shell `drainMicrotasks()` helper drains only the current
-  interpreter's promise jobs. It does not deliver threaded task-queue work such
-  as `Lock.asyncHold` grants.
+  interpreter's promise jobs. The conformance runner uses an internal
+  `$drainRunLoop()` host tick to pump pending threaded grants such as
+  `Lock.asyncHold`, expire property `Atomics.waitAsync` deadlines, and run ready
+  FinalizationRegistry cleanup jobs between top-level turns.
 
 `Thread.restrict(obj)` pins a plain object or plain array to the calling OS
 thread. Enforced foreign access throws `ConcurrentAccessError`. Exotic objects

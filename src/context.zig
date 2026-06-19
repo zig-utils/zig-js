@@ -601,12 +601,6 @@ pub const Context = struct {
         const h = self.gc orelse return;
         self.finishConcurrentGCIfActive(); // close any in-flight concurrent mark first
         if (self.hasRunningJsThreads()) {
-            const g = self.gil orelse return;
-            if (!g.holds() or !stack_scan.supported or !g.allOthersParked()) return;
-            self.gc_scan_native_stack = true;
-            defer self.gc_scan_native_stack = false;
-            h.collect();
-            self.gc_requested = false;
             return;
         }
         h.collect();
@@ -669,6 +663,7 @@ pub const Context = struct {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const h = self.gc orelse return;
         if (!stack_scan.supported) return;
+        if (self.gil != null) return;
         // Parallel-mutator mode (parallel_gc): mid-script collection is not yet
         // safe with multiple mutators running without the GIL — it needs the
         // world-stop/safepoint protocol generalized to parallel threads (a later
@@ -822,6 +817,7 @@ pub const Context = struct {
             machine.settleAsyncWaiters();
             if (top_level_failed) self.teardown_stop.store(false, .release);
         }
+        self.collectRequestedGarbage();
 
         return outcome catch |err| {
             if (err == error.Throw) self.exception = machine.exception;
@@ -6929,10 +6925,11 @@ test "enable_gc: WeakRef target clears when only weakly reachable" {
     try std.testing.expectEqual(true, r.asBool());
 }
 
-test "enable_gc: shell gc request is deferred to the next quiescent entry" {
+test "enable_gc: shell gc request runs at the evaluate-tail quiescent point" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
 
+    const collections_before = ctx.gc.?.collections;
     _ = try ctx.evaluate(
         \\globalThis.ref = undefined;
         \\{
@@ -6943,10 +6940,6 @@ test "enable_gc: shell gc request is deferred to the next quiescent entry" {
         \\}
         \\0
     );
-    try std.testing.expect(ctx.gc_requested);
-    const collections_before = ctx.gc.?.collections;
-
-    _ = try ctx.evaluate("0");
     try std.testing.expect(!ctx.gc_requested);
     try std.testing.expect(ctx.gc.?.collections > collections_before);
 }
@@ -6981,19 +6974,17 @@ test "$vm exposes only supported shell hooks" {
         \\$vm.edenGC();
         \\if (globalThis.ref.deref().tag !== 31) throw new Error("gc ran mid-stack");
     );
-    try std.testing.expect(threaded.gc_requested);
+    try std.testing.expect(!threaded.gc_requested);
 
     const gc_ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer gc_ctx.destroy();
+    const before = gc_ctx.gc.?.collections;
     _ = try gc_ctx.evaluate(
         \\if ($vm.useThreadGIL() !== false) throw new Error("non-thread GIL state");
         \\globalThis.ref = new WeakRef({ tag: 41 });
         \\$vm.gc();
         \\if (globalThis.ref.deref().tag !== 41) throw new Error("gc ran mid-stack");
     );
-    try std.testing.expect(gc_ctx.gc_requested);
-    const before = gc_ctx.gc.?.collections;
-    _ = try gc_ctx.evaluate("0");
     try std.testing.expect(!gc_ctx.gc_requested);
     try std.testing.expect(gc_ctx.gc.?.collections > before);
 }

@@ -403,7 +403,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 var balanced = false;
                 for (0..3000) |_| {
-                    const status = ctx.evaluate("drainMicrotasks(); __asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undef();
+                    const status = ctx.evaluate("$drainRunLoop(); drainMicrotasks(); __asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undef();
                     if (status.isBoolean() and status.asBool()) {
                         balanced = true;
                         break;

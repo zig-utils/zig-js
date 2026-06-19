@@ -166,7 +166,9 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
     }
     if (o.is_finalization_registry) {
         for (o.finalization_records.items) |*record| {
-            if (!heap.isLive(record.target) and !record.ready) {
+            // Once a record is ready, its target may have been swept in an
+            // earlier cycle; never ask the heap about that stale pointer again.
+            if (!record.ready and !heap.isLive(record.target)) {
                 record.ready = true;
                 cleanup_ready = true;
             }
@@ -499,7 +501,7 @@ pub const Binding = struct {
         for (ctx.js_threads.items) |rec| {
             markValue(v, rec.result);
             if (rec.js_obj) |o| v.mark(o);
-            for (rec.pending_joins.items) |p| v.mark(p);
+            for (rec.pending_joins.items) |pending| v.mark(pending.promise);
         }
         // Under the GIL/world-stopped collection this is uncontended; the lock is
         // for future parallel collection where a mutator may push/pop concurrently.

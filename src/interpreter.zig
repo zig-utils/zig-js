@@ -3665,8 +3665,11 @@ pub const Interpreter = struct {
         while (q.items.len > 0) {
             const job = q.orderedRemove(0);
             self.current_microtask = job;
-            defer self.current_microtask = null;
-            try promise.runJob(self, job);
+            promise.runJob(self, job) catch |err| {
+                self.current_microtask = null;
+                return err;
+            };
+            self.current_microtask = null;
             self.serviceRequestedGcCheckpoint();
         }
         q.clearRetainingCapacity();
@@ -3916,7 +3919,12 @@ pub const Interpreter = struct {
                 break; // nothing left to settle it
             }
             const job = queue.orderedRemove(0);
-            try promise.runJob(self, job);
+            self.current_microtask = job;
+            promise.runJob(self, job) catch |err| {
+                self.current_microtask = null;
+                return err;
+            };
+            self.current_microtask = null;
         }
         const done = promise.snapshot(p);
         return switch (done.state) {
@@ -11246,6 +11254,28 @@ fn drainMicrotasksFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     try self.drainMicrotasks();
+    return Value.undef();
+}
+
+/// Internal shell run-loop tick used by `conformance/threads_test.zig` while it
+/// waits for `asyncTestPassed()` counters. Kept separate from drainMicrotasks()
+/// because corpus tests assert that async lock grants do not settle merely by
+/// draining the Promise queue inside the same script turn.
+fn drainRunLoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    var rounds: usize = 0;
+    while (rounds < 8) : (rounds += 1) {
+        const before = if (self.microtasks) |q| q.items.len else 0;
+        jsthread.pumpTasks(self);
+        jsthread.pollPropAsync(self);
+        try self.drainMicrotasks();
+        try self.drainFinalizationCleanupJobs();
+        try self.drainMicrotasks();
+        const after = if (self.microtasks) |q| q.items.len else 0;
+        if (before == 0 and after == 0) break;
+    }
     return Value.undef();
 }
 
@@ -21183,6 +21213,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "unescape", 1, builtins.unescapeFn);
     try defineGlobalFn(env, root_shape, "setTimeout", 2, setTimeoutFn);
     try defineGlobalFn(env, root_shape, "drainMicrotasks", 0, drainMicrotasksFn);
+    try defineGlobalFn(env, root_shape, "$drainRunLoop", 0, drainRunLoopFn);
     try defineGlobalFn(env, root_shape, "noInline", 1, noInlineFn);
     try defineGlobalFn(env, root_shape, "gc", 0, gcFn);
     try defineGlobalFn(env, root_shape, "quit", 0, quitFn);

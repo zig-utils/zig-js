@@ -26,6 +26,11 @@ const Context = ContextMod.Context;
 const Value = value.Value;
 const Interpreter = interp.Interpreter;
 
+pub const PendingJoin = struct {
+    promise: *value.Object,
+    microtasks: *std.ArrayListUnmanaged(promise.Microtask),
+};
+
 pub const ThreadRecord = struct {
     id: u32,
     gil: *gil_mod.Gil,
@@ -43,7 +48,11 @@ pub const ThreadRecord = struct {
     /// finishing thread (reactions run on the settling thread's queue — the
     /// PR's ordinary-promise rule; awaiters elsewhere observe the shared
     /// state via awaitValue's GIL-yield loop).
-    pending_joins: std.ArrayListUnmanaged(*value.Object) = .empty,
+    pending_joins: std.ArrayListUnmanaged(PendingJoin) = .empty,
+    /// The live microtask queue for this JS thread. Worker queues are stack
+    /// locals in `threadMain`; outstanding async tickets are transferred away
+    /// before that stack frame exits.
+    microtasks: ?*std.ArrayListUnmanaged(promise.Microtask) = null,
 };
 
 threadlocal var t_current: ?*ThreadRecord = null;
@@ -81,7 +90,7 @@ pub fn installThreadAPI(ctx: *Context) !void {
     // The main thread's record: id 0, never "joinable-blocking" (done from
     // birth, so a stray main.join() returns undefined instead of hanging).
     const main_rec = try a.create(ThreadRecord);
-    main_rec.* = .{ .id = 0, .gil = ctx.gil.?, .ctx = ctx, .done = true };
+    main_rec.* = .{ .id = 0, .gil = ctx.gil.?, .ctx = ctx, .done = true, .microtasks = &ctx.microtasks };
     main_rec.js_obj = try makeWrapper(ctx, main_rec);
     t_current = main_rec;
     try ctx.js_threads.append(ctx.gpa, main_rec);
@@ -230,6 +239,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     // result, which is the only cross-thread microtask drain point.
     var microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty;
     var async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty;
+    rec.microtasks = &microtasks;
     var machine = rec.ctx.interpreter();
     rec.ctx.pushActiveInterpreter(&machine) catch {
         rec.threw = true;
@@ -259,16 +269,22 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer if (rec.ctx.parallel_js) g.release();
     rec.threw = threw;
     rec.result = result;
-    for (rec.pending_joins.items) |p_obj| {
-        if (promise.promiseOf(Value.obj(p_obj))) |pp| {
+    const saved_microtasks = machine.microtasks;
+    for (rec.pending_joins.items) |pending| {
+        machine.microtasks = pending.microtasks;
+        if (promise.promiseOf(Value.obj(pending.promise))) |pp| {
             if (rec.threw)
                 promise.reject(&machine, pp, rec.result) catch {}
             else
                 promise.resolve(&machine, pp, rec.result) catch {};
         }
     }
+    machine.microtasks = saved_microtasks;
     rec.pending_joins.clearRetainingCapacity();
     machine.drainMicrotasks() catch {};
+    transferPendingJoinQueue(rec.ctx, &microtasks, &rec.ctx.microtasks);
+    transferPropAsyncQueue(g, &microtasks, &rec.ctx.microtasks);
+    rec.microtasks = null;
     rec.done = true;
     rec.done_cond.broadcast(agent.engineIo());
 }
@@ -1114,6 +1130,7 @@ pub const PropAsyncTicket = struct {
     key: []const u8,
     deadline_ns: ?i96,
     promise: *value.Object,
+    microtasks: *std.ArrayListUnmanaged(promise.Microtask),
     /// The realm's gil pointer — the abandon token at Context.destroy.
     owner: *const anyopaque,
 };
@@ -1136,6 +1153,8 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         try self.setProp(res, "value", Value.str("timed-out"));
         return Value.obj(res);
     }
+    const microtasks = self.microtasks orelse
+        return self.throwError("Error", "Atomics.waitAsync requires a microtask queue");
     const p_obj = try promise.newPromise(self);
     const t = prop_alloc.create(PropAsyncTicket) catch return error.OutOfMemory;
     const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
@@ -1144,6 +1163,7 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         .key = try self.arena.dupe(u8, key_tmp),
         .deadline_ns = if (timeout_ns) |ns| now + ns else null,
         .promise = p_obj,
+        .microtasks = microtasks,
         .owner = @ptrCast(self.gil.?),
     };
     const g = self.gil.?;
@@ -1158,9 +1178,27 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
 
 fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8) void {
     if (promise.promiseOf(Value.obj(t.promise))) |pp| {
+        const saved_microtasks = self.microtasks;
+        self.microtasks = t.microtasks;
+        defer self.microtasks = saved_microtasks;
         promise.resolve(self, pp, Value.str(outcome)) catch {};
     }
     prop_alloc.destroy(t);
+}
+
+fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *std.ArrayListUnmanaged(promise.Microtask), to: *std.ArrayListUnmanaged(promise.Microtask)) void {
+    for (g.prop_async.items) |raw| {
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
+        if (t.microtasks == from) t.microtasks = to;
+    }
+}
+
+fn transferPendingJoinQueue(ctx: *Context, from: *std.ArrayListUnmanaged(promise.Microtask), to: *std.ArrayListUnmanaged(promise.Microtask)) void {
+    for (ctx.js_threads.items) |rec| {
+        for (rec.pending_joins.items) |*pending| {
+            if (pending.microtasks == from) pending.microtasks = to;
+        }
+    }
 }
 
 /// Resolve expired property waitAsync tickets — called from the awaiters'
@@ -1297,7 +1335,9 @@ fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
     if (rec.done) {
         if (rec.threw) try promise.reject(self, pp, rec.result) else try promise.resolve(self, pp, rec.result);
     } else {
-        try rec.pending_joins.append(self.arena, p_obj);
+        const microtasks = self.microtasks orelse
+            return self.throwError("Error", "Thread.prototype.asyncJoin requires a microtask queue");
+        try rec.pending_joins.append(self.arena, .{ .promise = p_obj, .microtasks = microtasks });
     }
     return Value.obj(p_obj);
 }
