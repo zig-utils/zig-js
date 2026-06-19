@@ -201,6 +201,10 @@ pub const Lexer = struct {
         return cp == 0x000A or cp == 0x000D or cp == 0x2028 or cp == 0x2029;
     }
 
+    fn lineTerminatorLenAt(self: *Lexer, idx: usize) ?usize {
+        return lineTerminatorLen(self.src, idx);
+    }
+
     /// IdentifierStart test for a decoded code point. Exact for ASCII; for
     /// non-ASCII it admits any code point that is not white space, a line
     /// terminator, a zero-width joiner (those are continue-only), or the BOM —
@@ -682,6 +686,8 @@ pub const Lexer = struct {
             if (ch == '\\') {
                 if (self.i + 1 >= self.src.len) return LexError.UnterminatedString;
                 self.i = try appendEscape(self.arena, &buf, self.src, self.i + 1);
+            } else if (self.lineTerminatorLenAt(self.i) != null) {
+                return LexError.UnterminatedString;
             } else {
                 try buf.append(self.arena, ch);
                 self.i += 1;
@@ -822,8 +828,9 @@ pub const Lexer = struct {
         var in_class = false;
         while (self.i < self.src.len) {
             const c = self.src[self.i];
-            if (c == '\n') return LexError.UnterminatedString;
+            if (self.lineTerminatorLenAt(self.i) != null) return LexError.UnterminatedString;
             if (c == '\\') {
+                if (lineTerminatorLen(self.src, self.i + 1) != null) return LexError.UnterminatedString;
                 self.i += 2;
                 continue;
             }
@@ -864,6 +871,16 @@ fn tok(kind: TokenKind, text: []const u8, pos: usize) Token {
     return .{ .kind = kind, .text = text, .pos = pos };
 }
 
+fn lineTerminatorLen(src: []const u8, idx: usize) ?usize {
+    if (idx >= src.len) return null;
+    return switch (src[idx]) {
+        '\n' => 1,
+        '\r' => if (idx + 1 < src.len and src[idx + 1] == '\n') 2 else 1,
+        0xe2 => if (idx + 2 < src.len and src[idx + 1] == 0x80 and (src[idx + 2] == 0xa8 or src[idx + 2] == 0xa9)) 3 else null,
+        else => null,
+    };
+}
+
 fn hexVal(c: u8) ?u8 {
     return switch (c) {
         '0'...'9' => c - '0',
@@ -894,6 +911,7 @@ fn appendCodePoint(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), c
 /// degrade to the literal character rather than erroring.
 pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), src: []const u8, i: usize) std.mem.Allocator.Error!usize {
     const e = src[i];
+    if (lineTerminatorLen(src, i)) |len| return i + len;
     switch (e) {
         'n' => {
             try buf.append(arena, '\n');
@@ -983,12 +1001,6 @@ pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
             try buf.append(arena, 'u');
             return i + 1;
         },
-        '\r' => {
-            // Line continuation: `\` + CR or CRLF produces nothing.
-            if (i + 1 < src.len and src[i + 1] == '\n') return i + 2;
-            return i + 1;
-        },
-        '\n' => return i + 1, // line continuation
         else => {
             // `\\ \` \$ \" \'` and any NonEscapeCharacter → the character itself.
             try buf.append(arena, e);
@@ -1136,6 +1148,53 @@ test "lexer decodes string escapes" {
     const t = try lx.next();
     try std.testing.expectEqual(TokenKind.string, t.kind);
     try std.testing.expectEqualStrings("a\nb", t.text);
+}
+
+test "lexer rejects raw line terminators in literals" {
+    const strings = [_][]const u8{
+        "'\n'",
+        "'\r'",
+        "'\xe2\x80\xa8'",
+        "'\xe2\x80\xa9'",
+    };
+    for (strings) |src| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), src);
+        try std.testing.expectError(LexError.UnterminatedString, lx.next());
+    }
+
+    const regexes = [_][]const u8{
+        "/\n/",
+        "/\r/",
+        "/\xe2\x80\xa8/",
+        "/\xe2\x80\xa9/",
+        "/\\\n/",
+        "/\\\xe2\x80\xa8/",
+    };
+    for (regexes) |src| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), src);
+        try std.testing.expectError(LexError.UnterminatedString, lx.next());
+    }
+}
+
+test "lexer string line continuations accept all line terminators" {
+    const strings = [_][]const u8{
+        "'a\\\nb'",
+        "'a\\\r\nb'",
+        "'a\\\xe2\x80\xa8b'",
+        "'a\\\xe2\x80\xa9b'",
+    };
+    for (strings) |src| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), src);
+        const t = try lx.next();
+        try std.testing.expectEqual(TokenKind.string, t.kind);
+        try std.testing.expectEqualStrings("ab", t.text);
+    }
 }
 
 test "lexer handles multi-char operators and comments" {
