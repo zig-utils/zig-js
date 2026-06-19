@@ -24010,6 +24010,13 @@ fn tIsTemporal(this: Value, kind: value.TemporalData.Kind) bool {
     return this.isObject() and this.asObj().temporal != null and this.asObj().temporal.?.kind == kind;
 }
 
+fn temporalCarriesCalendar(t: *const value.TemporalData) bool {
+    return switch (t.kind) {
+        .plain_date, .plain_date_time, .plain_year_month, .plain_month_day, .zoned_date_time => true,
+        else => false,
+    };
+}
+
 // ---- Temporal.PlainDate ---------------------------------------------
 
 fn temporalPlainDateConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -24223,34 +24230,23 @@ fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
     return null;
 }
 
-/// ToTemporalCalendarIdentifier: a Temporal instance contributes its own calendar;
-/// a string is either a bare calendar id (canonicalized) or a Temporal ISO string
-/// whose `[u-ca=…]` annotation gives the calendar (default iso8601). Any other
-/// value is a TypeError; a malformed string is a RangeError. Every id is accepted
-/// (the engine's date math is ISO for all; only gregory adds era reflection).
+/// ToTemporalCalendarIdentifier for constructor/withCalendar arguments: a
+/// date-bearing Temporal instance contributes its own calendar, and a string
+/// must be a bare calendar id. Other values are TypeError; malformed or unknown
+/// ids are RangeError.
 fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
-    if (v.isObject() and v.asObj().temporal != null) return v.asObj().temporal.?.calendar;
+    if (v.isObject() and v.asObj().temporal != null) {
+        const t = v.asObj().temporal.?;
+        if (temporalCarriesCalendar(t)) return t.calendar;
+        return self.throwError("TypeError", "calendar must be a string or a date-bearing Temporal object");
+    }
     if (!v.isString()) return self.throwError("TypeError", "calendar must be a string or a Temporal object");
     const s = v.asStr();
     if (isCalendarId(s)) {
         if (isKnownCalendar(s)) return canonCalendarId(self, s);
-        // A syntactically-valid-but-unknown id may actually be a basic-format
-        // Temporal time string (e.g. "152330" == 15:23:30): per spec the time
-        // production is tried before the bare CalendarName fallback, so such a
-        // string yields the iso8601 calendar rather than an "unknown calendar".
-        _ = toPlainTimeDataOpt(self, v, true, false) catch return self.throwError("RangeError", "unknown calendar");
-        return "iso8601";
+        return self.throwError("RangeError", "unknown calendar");
     }
-    const ann = stripTemporalAnnotations(self, s) catch return self.throwError("RangeError", "invalid calendar string");
-    if (ann.cal) |c| return canonCalendarId(self, c);
-    // No `[u-ca=…]` annotation: the calendar defaults to iso8601 only when the
-    // body is itself a valid Temporal string (a date/datetime, or a bare time);
-    // an empty or otherwise unparseable string is a RangeError (not iso8601).
-    _ = parseTemporalBody(self, ann.body) catch {
-        _ = toPlainTimeDataOpt(self, Value.str(ann.body), true, false) catch
-            return self.throwError("RangeError", "invalid calendar string");
-    };
-    return "iso8601";
+    return self.throwError("RangeError", "invalid calendar string");
 }
 
 /// `era`/`eraYear` accessors. The ISO 8601 calendar has no eras, so both read as
@@ -24355,7 +24351,8 @@ fn readCalendarField(self: *Interpreter, bag: Value) EvalError![]const u8 {
     const c = try self.getProperty(bag, "calendar");
     if (c.isUndefined()) return "iso8601";
     if (c.isObject() and !c.asObj().is_symbol and !c.asObj().is_bigint) {
-        if (c.asObj().temporal != null) return c.asObj().temporal.?.calendar; // a Temporal value → its calendar
+        if (c.asObj().temporal) |t| if (temporalCarriesCalendar(t)) return t.calendar; // a date-bearing Temporal value → its calendar
+        return self.throwError("TypeError", "calendar is not a valid calendar");
     } else if (!c.isString()) {
         // A symbol or bigint (or any non-string primitive) is not a valid
         // calendar identifier — a TypeError, not a string-coercion RangeError.
@@ -24981,10 +24978,12 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
         if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
         vals[i] = n;
     }
+    const cal = if (args.len > 9 and !args[9].isUndefined()) try toCalendarId(self, args[9]) else "iso8601";
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = @intFromFloat(y);
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(d);
+    o.temporal.?.calendar = cal;
     setTimeFields(o.temporal.?, vals);
     if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
@@ -25114,13 +25113,15 @@ fn temporalPlainYearMonthConstructorFn(ctx: *anyopaque, this: Value, args: []con
     const y = try temporalIntArg(self, if (args.len > 0) args[0] else Value.undef(), "year");
     const m = try temporalIntArg(self, if (args.len > 1) args[1] else Value.undef(), "month");
     // arg[2] is the calendar (only "iso8601" supported); arg[3] a reference day.
-    const refd = if (args.len > 3) try temporalIntArg(self, args[3], "day") else 1;
+    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2]) else "iso8601";
+    const refd = if (args.len > 3 and !args[3].isUndefined()) try temporalIntArg(self, args[3], "day") else 1;
     if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
     if (y < -271821 or y > 275760) return self.throwError("RangeError", "year out of range");
     const o = try makeTemporal(self, .plain_year_month, "\x00T.PlainYearMonth");
     o.temporal.?.year = @intFromFloat(y);
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(@max(1, @min(31, refd)));
+    o.temporal.?.calendar = cal;
     if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
@@ -25341,7 +25342,8 @@ fn temporalPlainMonthDayConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     const m = try temporalIntArg(self, if (args.len > 0) args[0] else Value.undef(), "month");
     const d = try temporalIntArg(self, if (args.len > 1) args[1] else Value.undef(), "day");
     // arg[2] is the calendar; arg[3] a reference year (default 1972, a leap year).
-    const refy: f64 = if (args.len > 3) try temporalIntArg(self, args[3], "year") else 1972;
+    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2]) else "iso8601";
+    const refy: f64 = if (args.len > 3 and !args[3].isUndefined()) try temporalIntArg(self, args[3], "year") else 1972;
     if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
     const dim = isoDaysInMonth(@intFromFloat(refy), @intFromFloat(m));
     if (d < 1 or d > @as(f64, @floatFromInt(dim))) return self.throwError("RangeError", "day out of range");
@@ -25350,6 +25352,7 @@ fn temporalPlainMonthDayConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporal.?.year = @intFromFloat(refy);
     o.temporal.?.month = @intFromFloat(m);
     o.temporal.?.day = @intFromFloat(d);
+    o.temporal.?.calendar = cal;
     if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
@@ -27065,10 +27068,12 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     if (args.len < 2 or args[1].isUndefined()) return self.throwError("TypeError", "ZonedDateTime requires a time zone");
     if (!args[1].isString()) return self.throwError("TypeError", "time zone must be a string");
     const tz = try parseTimeZone(self, args[1].asStr());
+    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2]) else "iso8601";
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
     o.temporal.?.epoch_ns = bv.asObj().bigint;
     o.temporal.?.tz_name = tz.name;
     o.temporal.?.tz_offset_ns = tz.offset_ns;
+    o.temporal.?.calendar = cal;
     if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
     return Value.obj(o);
 }
