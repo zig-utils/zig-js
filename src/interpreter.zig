@@ -25047,6 +25047,132 @@ fn persianToEpochDay(year: i64, month: u8, day: u8) i64 {
     return persianRawDay(year, month, day) + persianEpochOffset();
 }
 
+fn fixed13RawDay(year: i64, month: u8, day: u8) i64 {
+    return (year - 1) * 365 + @divFloor(year, 4) + (@as(i64, month) - 1) * 30 + @as(i64, day);
+}
+
+fn fixed13AnchorYear(cal: []const u8) i64 {
+    if (std.mem.eql(u8, cal, "coptic")) return 1716;
+    if (std.mem.eql(u8, cal, "ethioaa")) return 7492;
+    return 1992; // ethiopic
+}
+
+fn fixed13EpochOffset(cal: []const u8) i64 {
+    return tDaysFromCivil(2000, 1, 1) - fixed13RawDay(fixed13AnchorYear(cal), 4, 22);
+}
+
+fn fixed13ToEpochDay(cal: []const u8, year: i64, month: u8, day: u8) i64 {
+    return fixed13RawDay(year, month, day) + fixed13EpochOffset(cal);
+}
+
+fn fixed13FromEpochDay(cal: []const u8, epoch_day: i64) Civil {
+    var year = tCivilFromDays(epoch_day).y - (2000 - fixed13AnchorYear(cal));
+    while (epoch_day < fixed13ToEpochDay(cal, year, 1, 1)) : (year -= 1) {}
+    while (epoch_day >= fixed13ToEpochDay(cal, year + 1, 1, 1)) : (year += 1) {}
+
+    const day_of_year = epoch_day - fixed13ToEpochDay(cal, year, 1, 1);
+    return .{
+        .y = year,
+        .m = @intCast(@divFloor(day_of_year, 30) + 1),
+        .d = @intCast(@mod(day_of_year, 30) + 1),
+    };
+}
+
+fn hebrewRawDay(year: i64, month: u8, day: u8) i64 {
+    var days = hebrewElapsedDays(year) + @as(i64, day);
+    var m: u8 = 1;
+    while (m < month) : (m += 1) days += hebrewDaysInMonth(year, m);
+    return days;
+}
+
+fn hebrewEpochOffset() i64 {
+    return tDaysFromCivil(2000, 1, 1) - hebrewRawDay(5760, 4, 23);
+}
+
+fn hebrewToEpochDay(year: i64, month: u8, day: u8) i64 {
+    return hebrewRawDay(year, month, day) + hebrewEpochOffset();
+}
+
+fn hebrewFromEpochDay(epoch_day: i64) Civil {
+    var year = tCivilFromDays(epoch_day).y + 3760;
+    while (epoch_day < hebrewToEpochDay(year, 1, 1)) : (year -= 1) {}
+    while (epoch_day >= hebrewToEpochDay(year + 1, 1, 1)) : (year += 1) {}
+
+    var month: u8 = 1;
+    var day_of_year = epoch_day - hebrewToEpochDay(year, 1, 1);
+    while (true) {
+        const dim = hebrewDaysInMonth(year, month);
+        if (day_of_year < dim) break;
+        day_of_year -= dim;
+        month += 1;
+    }
+    return .{ .y = year, .m = month, .d = @intCast(day_of_year + 1) };
+}
+
+fn indianToEpochDay(year: i64, month: u8, day: u8) i64 {
+    const greg_year = year + 78;
+    var epoch_day = tDaysFromCivil(greg_year, 3, if (isoLeap(greg_year)) 21 else 22);
+    var m: u8 = 1;
+    while (m < month) : (m += 1) epoch_day += calDaysInMonth("indian", year, m);
+    return epoch_day + @as(i64, day) - 1;
+}
+
+fn indianFromEpochDay(epoch_day: i64) Civil {
+    var year = tCivilFromDays(epoch_day).y - 78;
+    while (epoch_day < indianToEpochDay(year, 1, 1)) : (year -= 1) {}
+    while (epoch_day >= indianToEpochDay(year + 1, 1, 1)) : (year += 1) {}
+
+    var month: u8 = 1;
+    var day_of_year = epoch_day - indianToEpochDay(year, 1, 1);
+    while (true) {
+        const dim = calDaysInMonth("indian", year, month);
+        if (day_of_year < dim) break;
+        day_of_year -= dim;
+        month += 1;
+    }
+    return .{ .y = year, .m = month, .d = @intCast(day_of_year + 1) };
+}
+
+fn isIslamicCalendar(cal: []const u8) bool {
+    return std.mem.eql(u8, cal, "islamic") or
+        std.mem.eql(u8, cal, "islamic-civil") or
+        std.mem.eql(u8, cal, "islamic-tbla") or
+        std.mem.eql(u8, cal, "islamic-rgsa") or
+        std.mem.eql(u8, cal, "islamic-umalqura");
+}
+
+fn islamicRawDay(cal: []const u8, year: i64, month: u8, day: u8) i64 {
+    var days = (year - 1) * 354 + @divFloor(3 + 11 * year, 30) + @as(i64, day);
+    var m: u8 = 1;
+    while (m < month) : (m += 1) days += calDaysInMonth(cal, year, m);
+    return days;
+}
+
+fn islamicEpochOffset(cal: []const u8) i64 {
+    const anchor_day: u8 = if (std.mem.eql(u8, cal, "islamic-tbla")) 25 else 24;
+    return tDaysFromCivil(2000, 1, 1) - islamicRawDay(cal, 1420, 9, anchor_day);
+}
+
+fn islamicToEpochDay(cal: []const u8, year: i64, month: u8, day: u8) i64 {
+    return islamicRawDay(cal, year, month, day) + islamicEpochOffset(cal);
+}
+
+fn islamicFromEpochDay(cal: []const u8, epoch_day: i64) Civil {
+    var year = tCivilFromDays(epoch_day).y - 579;
+    while (epoch_day < islamicToEpochDay(cal, year, 1, 1)) : (year -= 1) {}
+    while (epoch_day >= islamicToEpochDay(cal, year + 1, 1, 1)) : (year += 1) {}
+
+    var month: u8 = 1;
+    var day_of_year = epoch_day - islamicToEpochDay(cal, year, 1, 1);
+    while (true) {
+        const dim = calDaysInMonth(cal, year, month);
+        if (day_of_year < dim) break;
+        day_of_year -= dim;
+        month += 1;
+    }
+    return .{ .y = year, .m = month, .d = @intCast(day_of_year + 1) };
+}
+
 fn persianFromEpochDay(epoch_day: i64) Civil {
     var year = tCivilFromDays(epoch_day).y - 621;
     while (epoch_day < persianToEpochDay(year, 1, 1)) : (year -= 1) {}
@@ -25064,12 +25190,28 @@ fn persianFromEpochDay(epoch_day: i64) Civil {
 fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u8) Civil {
     if (std.mem.eql(u8, cal, "persian"))
         return persianFromEpochDay(tDaysFromCivil(iso_year, iso_month, iso_day));
+    if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
+        return fixed13FromEpochDay(cal, tDaysFromCivil(iso_year, iso_month, iso_day));
+    if (std.mem.eql(u8, cal, "hebrew"))
+        return hebrewFromEpochDay(tDaysFromCivil(iso_year, iso_month, iso_day));
+    if (std.mem.eql(u8, cal, "indian"))
+        return indianFromEpochDay(tDaysFromCivil(iso_year, iso_month, iso_day));
+    if (isIslamicCalendar(cal))
+        return islamicFromEpochDay(cal, tDaysFromCivil(iso_year, iso_month, iso_day));
     return .{ .y = iso_year, .m = iso_month, .d = iso_day };
 }
 
 fn calendarDateToIso(cal: []const u8, year: i64, month: u8, day: u8) Civil {
     if (std.mem.eql(u8, cal, "persian"))
         return tCivilFromDays(persianToEpochDay(year, month, day));
+    if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
+        return tCivilFromDays(fixed13ToEpochDay(cal, year, month, day));
+    if (std.mem.eql(u8, cal, "hebrew"))
+        return tCivilFromDays(hebrewToEpochDay(year, month, day));
+    if (std.mem.eql(u8, cal, "indian"))
+        return tCivilFromDays(indianToEpochDay(year, month, day));
+    if (isIslamicCalendar(cal))
+        return tCivilFromDays(islamicToEpochDay(cal, year, month, day));
     return .{ .y = year, .m = month, .d = day };
 }
 
@@ -25091,6 +25233,10 @@ fn umalquraLeapYear(year: i64) bool {
     return intIn(i64, year, &leap_years);
 }
 
+fn islamicTabularLeapYear(year: i64) bool {
+    return @mod(11 * year + 14, 30) < 11;
+}
+
 fn calInLeapYear(cal: []const u8, year: i64) bool {
     if (std.mem.eql(u8, cal, "buddhist") or std.mem.eql(u8, cal, "roc") or std.mem.eql(u8, cal, "japanese") or std.mem.eql(u8, cal, "gregory"))
         return isoLeap(calIsoFromDisplayYear(cal, year));
@@ -25099,7 +25245,7 @@ fn calInLeapYear(cal: []const u8, year: i64) bool {
     if (std.mem.eql(u8, cal, "hebrew")) return @mod(7 * year + 1, 19) < 7;
     if (std.mem.eql(u8, cal, "indian")) return isoLeap(year + 78);
     if (std.mem.eql(u8, cal, "islamic") or std.mem.eql(u8, cal, "islamic-civil") or std.mem.eql(u8, cal, "islamic-tbla") or std.mem.eql(u8, cal, "islamic-rgsa"))
-        return @mod(11 * year + 14, 30) < 11;
+        return islamicTabularLeapYear(year);
     if (std.mem.eql(u8, cal, "islamic-umalqura")) return umalquraLeapYear(year);
     if (std.mem.eql(u8, cal, "persian")) return persianLeapYear(year);
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) return chineseLikeLeapYear(year);
@@ -25193,7 +25339,8 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
     if (std.mem.eql(u8, cal, "islamic-umalqura")) {
         const y1390 = [_]u8{ 29, 30, 29, 30, 30, 30, 29, 30, 29, 30, 29, 30 };
         const y1391 = [_]u8{ 29, 29, 30, 29, 30, 30, 29, 30, 30, 29, 30, 29 };
-        return tableMonthDays(year, month, 1390, &y1390, 1391, &y1391) orelse 0;
+        return tableMonthDays(year, month, 1390, &y1390, 1391, &y1391) orelse
+            (if (month == 12 and islamicTabularLeapYear(year)) 30 else if (month >= 1 and month <= 12) (if ((month % 2) == 1) 30 else 29) else 0);
     }
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         const y1971 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, 30, 29 };
@@ -27774,6 +27921,7 @@ fn temporalDateTimeToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Val
     o.temporal.?.year = t.year;
     o.temporal.?.month = t.month;
     o.temporal.?.day = t.day;
+    o.temporal.?.calendar = t.calendar;
     return Value.obj(o);
 }
 
@@ -27823,6 +27971,7 @@ fn temporalDateTimeWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const V
     o.temporal.?.millisecond = tm.millisecond;
     o.temporal.?.microsecond = tm.microsecond;
     o.temporal.?.nanosecond = tm.nanosecond;
+    o.temporal.?.calendar = t.calendar;
     return Value.obj(o);
 }
 
@@ -27841,6 +27990,7 @@ fn temporalDateTimeWithPlainDateFn(ctx: *anyopaque, this: Value, args: []const V
     o.temporal.?.millisecond = t.millisecond;
     o.temporal.?.microsecond = t.microsecond;
     o.temporal.?.nanosecond = t.nanosecond;
+    o.temporal.?.calendar = f.cal;
     return Value.obj(o);
 }
 
@@ -27901,6 +28051,7 @@ fn temporalDateToPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     o.temporal.?.millisecond = tm.millisecond;
     o.temporal.?.microsecond = tm.microsecond;
     o.temporal.?.nanosecond = tm.nanosecond;
+    o.temporal.?.calendar = t.calendar;
     return Value.obj(o);
 }
 
@@ -28021,7 +28172,13 @@ fn temporalDateTimeToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const
         _ = try dtfGetStr(self, args[1], "disambiguation", &.{ "compatible", "earlier", "later", "reject" }, "compatible");
     }
     const local = dtLocalNs(this.asObj().temporal.?);
-    return zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
+    const o = try zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
+    o.asObj().temporal.?.* = this.asObj().temporal.?.*;
+    o.asObj().temporal.?.kind = .zoned_date_time;
+    o.asObj().temporal.?.epoch_ns = local - @as(i128, tz.offset_ns);
+    o.asObj().temporal.?.tz_name = tz.name;
+    o.asObj().temporal.?.tz_offset_ns = tz.offset_ns;
+    return o;
 }
 
 /// `Temporal.PlainDate.prototype.toZonedDateTime(item)` — `item` is a time-zone
@@ -28055,7 +28212,19 @@ fn temporalDateToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     combined.microsecond = time.microsecond;
     combined.nanosecond = time.nanosecond;
     const local = dtLocalNs(&combined);
-    return zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
+    const o = try zdtMake(self, local - @as(i128, tz.offset_ns), tz.name, tz.offset_ns);
+    const out = o.asObj().temporal.?;
+    out.year = d.year;
+    out.month = d.month;
+    out.day = d.day;
+    out.hour = time.hour;
+    out.minute = time.minute;
+    out.second = time.second;
+    out.millisecond = time.millisecond;
+    out.microsecond = time.microsecond;
+    out.nanosecond = time.nanosecond;
+    out.calendar = d.calendar;
+    return o;
 }
 
 /// `Temporal.Instant.prototype.toZonedDateTimeISO(timeZone)`.
