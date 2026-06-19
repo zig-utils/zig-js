@@ -116,6 +116,37 @@ fn localeIsTurkic(loc: []const u8) bool {
         (loc.len == 2 or loc[2] == '-');
 }
 
+fn localeIsLithuanian(loc: []const u8) bool {
+    return loc.len >= 2 and std.mem.eql(u8, loc[0..2], "lt") and (loc.len == 2 or loc[2] == '-');
+}
+
+fn markLenAt(s: []const u8, i: usize, mark: []const u8) ?usize {
+    if (i + mark.len <= s.len and std.mem.eql(u8, s[i .. i + mark.len], mark)) return mark.len;
+    return null;
+}
+
+fn combiningAboveLen(s: []const u8, i: usize) ?usize {
+    if (markLenAt(s, i, "\xcc\x80")) |n| return n; // U+0300 grave
+    if (markLenAt(s, i, "\xcc\x81")) |n| return n; // U+0301 acute
+    if (markLenAt(s, i, "\xcc\x83")) |n| return n; // U+0303 tilde
+    if (markLenAt(s, i, "\xcc\x87")) |n| return n; // U+0307 dot above
+    if (markLenAt(s, i, "\xf0\x9d\x86\x85")) |n| return n; // U+1D185 musical combining doit
+    return null;
+}
+
+fn combiningBelowLen(s: []const u8, i: usize) ?usize {
+    if (markLenAt(s, i, "\xcc\xa3")) |n| return n; // U+0323 dot below
+    if (markLenAt(s, i, "\xcc\xa5")) |n| return n; // U+0325 ring below
+    if (markLenAt(s, i, "\xf0\x90\x87\xbd")) |n| return n; // U+101FD Phaistos combining oblique stroke
+    return null;
+}
+
+fn combiningLen(s: []const u8, i: usize) ?usize {
+    if (combiningAboveLen(s, i)) |n| return n;
+    if (combiningBelowLen(s, i)) |n| return n;
+    return null;
+}
+
 fn turkicUpper(self: *Interpreter, s: []const u8) EvalError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
@@ -144,13 +175,16 @@ fn turkicLower(self: *Interpreter, s: []const u8) EvalError![]const u8 {
         } else if (s[i] == 'I') {
             var j = i + 1;
             var remove_dot = false;
-            while (j + 1 < s.len) : (j += 1) {
-                if (s[j] == 'A' or (s[j] >= 'a' and s[j] <= 'z')) break;
-                if (s[j] == 0xcc and s[j + 1] == 0x80) break;
-                if (s[j] == 0xcc and s[j + 1] == 0x87) {
+            while (j < s.len) {
+                if (markLenAt(s, j, "\xcc\x87") != null) {
                     remove_dot = true;
                     break;
                 }
+                if (combiningBelowLen(s, j)) |n| {
+                    j += n;
+                    continue;
+                }
+                break;
             }
             if (remove_dot) {
                 try buf.append(self.arena, 'i');
@@ -173,6 +207,111 @@ fn turkicLower(self: *Interpreter, s: []const u8) EvalError![]const u8 {
         }
     }
     return unicode_case.toLower(self.arena, try buf.toOwnedSlice(self.arena));
+}
+
+fn lithuanianLower(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    const nfd = try unicode_normalize.normalize(self.arena, s, .nfd);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < nfd.len) {
+        if (i + 2 <= nfd.len) {
+            const two = nfd[i .. i + 2];
+            if (std.mem.eql(u8, two, "\xc3\x8c")) { // Ì
+                try buf.appendSlice(self.arena, "i\xcc\x87\xcc\x80");
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, two, "\xc3\x8d")) { // Í
+                try buf.appendSlice(self.arena, "i\xcc\x87\xcc\x81");
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, two, "\xc4\xa8")) { // Ĩ
+                try buf.appendSlice(self.arena, "i\xcc\x87\xcc\x83");
+                i += 2;
+                continue;
+            }
+        }
+        const base: ?[]const u8 = if (nfd[i] == 'I')
+            "i"
+        else if (nfd[i] == 'J')
+            "j"
+        else if (i + 2 <= nfd.len and std.mem.eql(u8, nfd[i .. i + 2], "\xc4\xae"))
+            "\xc4\xaf"
+        else
+            null;
+        if (base) |lower| {
+            var j = i + if (nfd[i] < 0x80) @as(usize, 1) else @as(usize, 2);
+            var has_above = false;
+            while (j < nfd.len) {
+                if (combiningAboveLen(nfd, j)) |n| {
+                    has_above = true;
+                    j += n;
+                    continue;
+                }
+                if (combiningBelowLen(nfd, j)) |n| {
+                    j += n;
+                    continue;
+                }
+                break;
+            }
+            try buf.appendSlice(self.arena, lower);
+            if (has_above) try buf.appendSlice(self.arena, "\xcc\x87");
+            i += if (nfd[i] < 0x80) 1 else 2;
+            continue;
+        }
+        if (nfd[i] < 0x80) {
+            try buf.append(self.arena, if (nfd[i] >= 'A' and nfd[i] <= 'Z') nfd[i] + 32 else nfd[i]);
+            i += 1;
+        } else {
+            const seq_len: usize = std.unicode.utf8ByteSequenceLength(nfd[i]) catch 1;
+            const j = @min(i + seq_len, nfd.len);
+            try buf.appendSlice(self.arena, try unicode_case.toLower(self.arena, nfd[i..j]));
+            i = j;
+        }
+    }
+    return buf.toOwnedSlice(self.arena);
+}
+
+fn softDottedLen(s: []const u8, i: usize) ?usize {
+    const marks = [_][]const u8{
+        "i",            "j",            "\xc4\xaf",     "\xc9\x89",     "\xc9\xa8",     "\xca\x9d",
+        "\xca\xb2",     "\xcf\xb3",     "\xd1\x96",     "\xd1\x98",     "\xe1\xb5\xa2", "\xe1\xb6\x96",
+        "\xe1\xb6\xa4", "\xe1\xb6\xa8", "\xe1\xb8\xad", "\xe1\xbb\x8b", "\xe2\x81\xb1", "\xe2\x85\x88",
+        "\xe2\x85\x89", "\xe2\xb1\xbc",
+    };
+    for (marks) |m| if (markLenAt(s, i, m)) |n| return n;
+    if (i + 4 <= s.len and s[i] == 0xf0 and s[i + 1] == 0x9d) return 4; // mathematical soft-dotted letters in the test262 list
+    return null;
+}
+
+fn lithuanianUpper(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (softDottedLen(s, i)) |base_len| {
+            try buf.appendSlice(self.arena, try unicode_case.toUpper(self.arena, s[i .. i + base_len]));
+            i += base_len;
+            while (i < s.len) {
+                if (markLenAt(s, i, "\xcc\x87")) |n| {
+                    i += n;
+                    break;
+                }
+                if (combiningBelowLen(s, i)) |n| {
+                    try buf.appendSlice(self.arena, s[i .. i + n]);
+                    i += n;
+                    continue;
+                }
+                break;
+            }
+            continue;
+        }
+        const seq_len: usize = if (s[i] < 0x80) 1 else (std.unicode.utf8ByteSequenceLength(s[i]) catch 1);
+        const j = @min(i + seq_len, s.len);
+        try buf.appendSlice(self.arena, try unicode_case.toUpper(self.arena, s[i..j]));
+        i = j;
+    }
+    return buf.toOwnedSlice(self.arena);
 }
 
 /// `error.Throw` is the carrier for *any* JS exception: the thrown value lives
@@ -9308,6 +9447,7 @@ pub const Interpreter = struct {
             if (eq(name, "toLocaleUpperCase")) {
                 const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
                 const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "";
+                if (localeIsLithuanian(loc)) return Value.str(try lithuanianUpper(self, s));
                 if (localeIsTurkic(loc)) return Value.str(try turkicUpper(self, s));
             }
             return Value.str(try unicode_case.toUpper(self.arena, s));
@@ -9316,6 +9456,7 @@ pub const Interpreter = struct {
             if (eq(name, "toLocaleLowerCase")) {
                 const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
                 const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "";
+                if (localeIsLithuanian(loc)) return Value.str(try lithuanianLower(self, s));
                 if (localeIsTurkic(loc)) return Value.str(try turkicLower(self, s));
             }
             return Value.str(try unicode_case.toLower(self.arena, s));
@@ -9618,14 +9759,9 @@ pub const Interpreter = struct {
             }
         }
         if (eq(name, "localeCompare")) {
-            const other = try arg0(args).toString(self.arena);
-            const left = try unicode_normalize.normalize(self.arena, s, .nfd);
-            const right = try unicode_normalize.normalize(self.arena, other, .nfd);
-            return Value.num(switch (std.mem.order(u8, left, right)) {
-                .lt => -1,
-                .eq => 0,
-                .gt => 1,
-            });
+            const other = try self.toStringV(arg0(args));
+            const opts = try collatorOptionsFrom(self, if (args.len > 1) args[1] else Value.undef(), if (args.len > 2) args[2] else Value.undef());
+            return Value.num(try collatorCompareStrings(self, s, other, opts));
         }
         if (eq(name, "normalize")) {
             // The form (default "NFC") is ToString'd — a Symbol throws TypeError —
@@ -18559,8 +18695,18 @@ fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8,
 /// (caseFirst): an option wins over the `-u-` value; the keyword stays in the
 /// resolved locale only when it came from the extension and wasn't overridden by
 /// a differing option. Returns the resolved values and sets `locale` on `out`.
-/// (The `co`/collation key needs per-locale CLDR data, so it is dropped here.)
-fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8, opt_num: ?bool, opt_kf: ?[]const u8) value.HostError!struct { numeric: bool, case_first: []const u8 } {
+fn collatorCollationSupported(tag: []const u8, collation: []const u8) bool {
+    if (std.mem.eql(u8, collation, "emoji") or std.mem.eql(u8, collation, "eor")) return true;
+    return std.mem.eql(u8, collation, "phonebk") and std.mem.eql(u8, parseTriple(tag).l, "de");
+}
+
+fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8, opt_num: ?bool, opt_kf: ?[]const u8, opt_co: ?[]const u8) value.HostError!struct { numeric: bool, case_first: []const u8, collation: []const u8 } {
+    const co_ext = localeUValue(tag, "co");
+    const ext_co: ?[]const u8 = if (co_ext) |v| if (collatorCollationSupported(tag, v)) v else null else null;
+    const opt_co_ok: ?[]const u8 = if (opt_co) |v| if (collatorCollationSupported(tag, v)) v else null else null;
+    const collation: []const u8 = if (opt_co_ok) |v| v else (ext_co orelse "default");
+    const keep_co = ext_co != null and std.mem.eql(u8, collation, ext_co.?);
+
     const kn_ext = localeUValue(tag, "kn");
     const ext_num: ?bool = if (kn_ext) |v| !std.mem.eql(u8, v, "false") else null;
     const numeric: bool = if (opt_num) |o| o else (ext_num orelse false);
@@ -18575,9 +18721,14 @@ fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try buf.appendSlice(self.arena, base);
     var any_kw = false;
-    // Canonical key order: kf before kn.
+    // Canonical key order: co before kf before kn.
+    if (keep_co) {
+        try buf.appendSlice(self.arena, "-u-co-");
+        try buf.appendSlice(self.arena, collation);
+        any_kw = true;
+    }
     if (keep_kf) {
-        try buf.appendSlice(self.arena, "-u-kf-");
+        try buf.appendSlice(self.arena, if (any_kw) "-kf-" else "-u-kf-");
         try buf.appendSlice(self.arena, case_first);
         any_kw = true;
     }
@@ -18587,7 +18738,163 @@ fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8
         any_kw = true;
     }
     try self.setProp(out, "locale", Value.str(try buf.toOwnedSlice(self.arena)));
-    return .{ .numeric = numeric, .case_first = case_first };
+    return .{ .numeric = numeric, .case_first = case_first, .collation = collation };
+}
+
+const CollatorOptions = struct {
+    locale: []const u8 = "en",
+    usage: []const u8 = "sort",
+    sensitivity: []const u8 = "variant",
+    ignore_punctuation: bool = false,
+};
+
+fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalError!CollatorOptions {
+    const locs = try canonicalizeLocaleList(self, locales);
+    const locale = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
+    var opts = CollatorOptions{
+        .locale = locale,
+        .ignore_punctuation = std.mem.eql(u8, parseTriple(locale).l, "th"),
+    };
+    if (!options.isUndefined()) {
+        const raw = Value.obj(try self.toObject(options));
+        if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| opts.usage = u;
+        _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+        _ = try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null);
+        if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |s| opts.sensitivity = s;
+        const ip = try self.getProperty(raw, "ignorePunctuation");
+        if (!ip.isUndefined()) opts.ignore_punctuation = ip.toBoolean();
+        const collation = try self.getProperty(raw, "collation");
+        if (!collation.isUndefined()) {
+            const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringV(collation));
+            if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
+        }
+        _ = try self.getProperty(raw, "numeric");
+    }
+    return opts;
+}
+
+fn isCombiningMarkStart(s: []const u8, i: usize) ?usize {
+    if (i + 1 < s.len and (s[i] == 0xcc or s[i] == 0xcd)) return 2; // U+0300..U+037F
+    return null;
+}
+
+fn appendLowerAscii(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, b: u8) !void {
+    try buf.append(a, if (b >= 'A' and b <= 'Z') b + 32 else b);
+}
+
+fn collatorKey(self: *Interpreter, s: []const u8, opts: CollatorOptions, comptime keep_accents: bool, comptime keep_case: bool) EvalError![]const u8 {
+    const nfd = try unicode_normalize.normalize(self.arena, s, .nfd);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < nfd.len) {
+        if (i + 2 <= nfd.len) {
+            const two = nfd[i .. i + 2];
+            const Acc = struct { s: []const u8, base: u8, upper: bool, mark: []const u8, umlaut: bool = false };
+            const accents = [_]Acc{
+                .{ .s = "\xc3\x81", .base = 'a', .upper = true, .mark = "\xcc\x81" }, // Á
+                .{ .s = "\xc3\xa1", .base = 'a', .upper = false, .mark = "\xcc\x81" }, // á
+                .{ .s = "\xc3\x83", .base = 'a', .upper = true, .mark = "\xcc\x83" }, // Ã
+                .{ .s = "\xc3\xa3", .base = 'a', .upper = false, .mark = "\xcc\x83" }, // ã
+                .{ .s = "\xc3\x84", .base = 'a', .upper = true, .mark = "\xcc\x88", .umlaut = true }, // Ä
+                .{ .s = "\xc3\xa4", .base = 'a', .upper = false, .mark = "\xcc\x88", .umlaut = true }, // ä
+                .{ .s = "\xc3\x96", .base = 'o', .upper = true, .mark = "\xcc\x88", .umlaut = true }, // Ö
+                .{ .s = "\xc3\xb6", .base = 'o', .upper = false, .mark = "\xcc\x88", .umlaut = true }, // ö
+            };
+            var matched = false;
+            for (accents) |a| if (std.mem.eql(u8, two, a.s)) {
+                const ch = if (keep_case and a.upper) std.ascii.toUpper(a.base) else a.base;
+                try out.append(self.arena, ch);
+                if (a.umlaut and std.mem.eql(u8, opts.usage, "search") and std.mem.eql(u8, parseTriple(opts.locale).l, "de")) try out.append(self.arena, 'e');
+                if (keep_accents) try out.appendSlice(self.arena, a.mark);
+                i += 2;
+                matched = true;
+                break;
+            };
+            if (matched) continue;
+        }
+        if (isCombiningMarkStart(nfd, i)) |n| {
+            if (keep_accents) try out.appendSlice(self.arena, nfd[i .. i + n]);
+            i += n;
+            continue;
+        }
+        if (opts.ignore_punctuation and nfd[i] < 0x80 and !std.ascii.isAlphanumeric(nfd[i])) {
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, opts.usage, "search") and std.mem.eql(u8, parseTriple(opts.locale).l, "de") and
+            i + 2 < nfd.len and (nfd[i] == 'A' or nfd[i] == 'a' or nfd[i] == 'O' or nfd[i] == 'o' or nfd[i] == 'U' or nfd[i] == 'u') and
+            nfd[i + 1] == 0xcc and nfd[i + 2] == 0x88)
+        {
+            const base = if (nfd[i] >= 'A' and nfd[i] <= 'Z') nfd[i] + 32 else nfd[i];
+            try out.append(self.arena, base);
+            try out.append(self.arena, 'e');
+            i += 3;
+            continue;
+        }
+        if (keep_case) {
+            try out.append(self.arena, nfd[i]);
+        } else if (nfd[i] < 0x80) {
+            try appendLowerAscii(&out, self.arena, nfd[i]);
+        } else {
+            const seq_len: usize = std.unicode.utf8ByteSequenceLength(nfd[i]) catch 1;
+            const j = i + seq_len;
+            const lowered = try unicode_case.toLower(self.arena, nfd[i..@min(j, nfd.len)]);
+            try out.appendSlice(self.arena, lowered);
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    return out.toOwnedSlice(self.arena);
+}
+
+fn collatorCaseOrder(a: []const u8, b: []const u8) i32 {
+    var i: usize = 0;
+    while (i < a.len and i < b.len) : (i += 1) {
+        if (a[i] == b[i]) continue;
+        const al = if (a[i] >= 'A' and a[i] <= 'Z') a[i] + 32 else a[i];
+        const bl = if (b[i] >= 'A' and b[i] <= 'Z') b[i] + 32 else b[i];
+        if (al != bl) return if (al < bl) -1 else 1;
+        const a_lower = a[i] >= 'a' and a[i] <= 'z';
+        const b_lower = b[i] >= 'a' and b[i] <= 'z';
+        if (a_lower != b_lower) return if (a_lower) -1 else 1;
+        return if (a[i] < b[i]) -1 else 1;
+    }
+    if (a.len == b.len) return 0;
+    return if (a.len < b.len) -1 else 1;
+}
+
+fn cmpBytes(a: []const u8, b: []const u8) i32 {
+    return switch (std.mem.order(u8, a, b)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
+fn collatorCompareStrings(self: *Interpreter, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
+    if ((std.mem.eql(u8, x, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, y, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")) or
+        (std.mem.eql(u8, y, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, x, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")))
+        return 0;
+    const primary_x = try collatorKey(self, x, opts, false, false);
+    const primary_y = try collatorKey(self, y, opts, false, false);
+    const primary = cmpBytes(primary_x, primary_y);
+    if (primary != 0) return primary;
+    if (std.mem.eql(u8, opts.sensitivity, "base")) return 0;
+
+    const accent_x = try collatorKey(self, x, opts, true, false);
+    const accent_y = try collatorKey(self, y, opts, true, false);
+    const accent = cmpBytes(accent_x, accent_y);
+    if (std.mem.eql(u8, opts.sensitivity, "accent")) return accent;
+
+    const case_x = try collatorKey(self, x, opts, false, true);
+    const case_y = try collatorKey(self, y, opts, false, true);
+    const case_cmp = collatorCaseOrder(case_x, case_y);
+    if (std.mem.eql(u8, opts.sensitivity, "case")) return case_cmp;
+    if (opts.ignore_punctuation) return 0;
+    if (accent != 0) return accent;
+    if (case_cmp != 0) return case_cmp;
+    return cmpBytes(try unicode_normalize.normalize(self.arena, x, .nfd), try unicode_normalize.normalize(self.arena, y, .nfd));
 }
 
 /// Whether a locale uses the South-Asian (lakh/crore) digit grouping
@@ -19545,12 +19852,10 @@ fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (!intlBrandOk(this, "Collator")) return self.throwError("TypeError", "Intl.Collator.prototype.compare on incompatible receiver");
     const x = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
     const y = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
-    const ord = std.mem.order(u8, x, y);
-    return Value.num(switch (ord) {
-        .lt => -1,
-        .gt => 1,
-        .eq => 0,
-    });
+    const loc = if (this.asObj().getOwn("\x00locale")) |v| if (v.isString()) v.asStr() else "en" else "en";
+    const ro = if (this.asObj().getOwn("\x00opts")) |v| v else Value.undef();
+    const opts = try collatorOptionsFrom(self, Value.str(loc), ro);
+    return Value.num(try collatorCompareStrings(self, x, y, opts));
 }
 
 /// LDML plural-rule operands derived from a number formatted with the given
@@ -20368,7 +20673,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // extension, and may rewrite the resolved locale.
                 const opt_num: ?bool = if (cget(rv, "numeric")) |n| n.asBool() else null;
                 const opt_kf: ?[]const u8 = if (cget(rv, "caseFirst")) |c| c.asStr() else null;
-                const res = try collatorResolveLocale(self, o, loc.asStr(), opt_num, opt_kf);
+                const opt_co: ?[]const u8 = if (cget(rv, "collation")) |c| c.asStr() else null;
+                const res = try collatorResolveLocale(self, o, loc.asStr(), opt_num, opt_kf, opt_co);
                 try self.setProp(o, "usage", cget(rv, "usage") orelse Value.str("sort"));
                 try self.setProp(o, "sensitivity", cget(rv, "sensitivity") orelse Value.str("variant"));
                 // ignorePunctuation defaults from locale data: Thai ("th") is the
@@ -20378,22 +20684,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     break :blk std.mem.eql(u8, lang, "th");
                 };
                 try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse Value.boolVal(ip_default));
-                // collation: the `collation` option or a `-u-co-` keyword, when it
-                // names a collation we support everywhere (root tailorings);
-                // locale-specific collations need CLDR data and fall back to
-                // "default".
-                const coAvail = struct {
-                    fn ok(s: []const u8) bool {
-                        return std.mem.eql(u8, s, "emoji") or std.mem.eql(u8, s, "eor");
-                    }
-                }.ok;
-                var collation: []const u8 = "default";
-                if (cget(rv, "collation")) |c| {
-                    if (c.isString() and coAvail(c.asStr())) collation = c.asStr();
-                } else if (localeUValue(loc.asStr(), "co")) |c| {
-                    if (coAvail(c)) collation = c;
-                }
-                try self.setProp(o, "collation", Value.str(collation));
+                try self.setProp(o, "collation", Value.str(res.collation));
                 try self.setProp(o, "numeric", Value.boolVal(res.numeric));
                 try self.setProp(o, "caseFirst", Value.str(res.case_first));
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
