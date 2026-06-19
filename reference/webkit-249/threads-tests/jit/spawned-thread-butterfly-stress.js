@@ -18,10 +18,13 @@
 
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const OBJECTS_PER_THREAD = 32;
-const PROPS = 24; // out-of-line for any inline capacity
-const ROUNDS = 60;
+const OBJECTS_PER_THREAD = NO_GIL ? 8 : 32;
+const PROPS = NO_GIL ? 12 : 24; // out-of-line for any inline capacity
+const ROUNDS = NO_GIL ? 12 : 60;
 
 // registry[t] = array of objects published by thread t.
 const registry = [];

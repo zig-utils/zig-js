@@ -205,15 +205,13 @@ broad promoted probe also reaches through
 keeps the original 3-worker, 512-element, 160-round stress size, while
 `parallel_js` runs the same indexed-prototype bad-time invariants with a smaller
 interpreter stress budget so the oracle remains semantic rather than a pure
-throughput test. The first JIT-audit chunk now also has focused-green
-`parallel_js` coverage through
-`jit/construction-shared-constructor.js`, `jit/fires-per-sec.js`,
-`jit/ftl-direct-tailcall-dataic-arg-clobber.js`,
-`jit/ftl-osr-entry-catch-loop-amplifier.js`, `jit/golden-disasm-corpus.js`,
-`jit/int-gate-epoch-reclaim.js`, `jit/int-gate-fire-vs-execute.js`, and
-`jit/int-gate-direct-call-relink.js`. The normal GIL-mode files keep their
-original JIT-audit sizes; `parallel_js` uses smaller loop counts in the
-tailcall, OSR/catch-loop, and golden-disasm files so the exploratory probe
+throughput test. The promoted JIT-audit subset now has focused-green
+`parallel_js` coverage from constructor/fire benchmark checksums through the
+tailcall, OSR/catch-loop, golden-disasm, int-gate, shared-ArrayStorage,
+spawned-thread butterfly, tag-discipline, and TID-tag witnesses. The normal
+GIL-mode JIT files keep their original audit sizes; `parallel_js` uses smaller
+loop counts in the tailcall, OSR/catch-loop, golden-disasm, stop-budget,
+spawned-thread butterfly, and tag-discipline files so the exploratory probe
 remains a semantic witness rather than a serial-performance gate. The broad
 probe now times out later in the cumulative safe/teardown/value stress region.
 

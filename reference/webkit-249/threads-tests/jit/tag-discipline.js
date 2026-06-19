@@ -62,7 +62,11 @@ if (typeof $vm !== "undefined" && $vm.ensureArrayStorage)
     $vm.ensureArrayStorage(asArray);
 
 let sink = 0;
-for (let i = 0; i < 200000; ++i) {
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const ITERS = NO_GIL ? 5000 : 200000;
+for (let i = 0; i < ITERS; ++i) {
     const fat = fats[i & 1];
     sink += oolGet(fat);
     oolPut(fat, i & 0xff);

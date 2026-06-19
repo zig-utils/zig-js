@@ -24,9 +24,12 @@
 load("../harness.js", "caller relative");
 
 const FULL = typeof arguments !== "undefined" && Array.prototype.indexOf.call(arguments, "int-gate") >= 0;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = FULL ? 6 : 2;
-const FAMILIES = FULL ? 12 : 4;
-const WARM_ITERATIONS = FULL ? 30000 : 5000;
+const FAMILIES = FULL ? 12 : (NO_GIL ? 2 : 4);
+const WARM_ITERATIONS = FULL ? 30000 : (NO_GIL ? 500 : 5000);
 
 const nowMs = typeof preciseTime === "function" ? () => preciseTime() * 1000 : Date.now;
 

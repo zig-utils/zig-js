@@ -384,12 +384,14 @@ under `parallel_js` after two changes: prototype-chain indexed-store guards now
 consult a conservative per-object "indexed own ever seen" marker instead of a
 per-key own-property lookup on every hot indexed store, and the no-GIL run uses a
 smaller stress budget while keeping the same bad-time flip and trap-index
-oracles as the full GIL-mode file. The first JIT-audit chunk is focused-green
-under `parallel_js` through constructor/fire benchmarks, tailcall argument
-preservation, OSR/catch-loop locals, golden-disasm workload execution, and the
-epoch/fire/direct-call int-gate smoke files. The normal GIL-mode JIT files keep
-their original stress sizes; `parallel_js` trims the tailcall, OSR/catch-loop,
-and golden-disasm loop counts so those files remain correctness witnesses rather
+oracles as the full GIL-mode file. The promoted JIT-audit subset is now
+focused-green under `parallel_js` through constructor/fire benchmarks, tailcall
+argument preservation, OSR/catch-loop locals, golden-disasm workload execution,
+int-gate smoke files, shared-ArrayStorage stress, spawned-thread butterfly
+stress, tag-discipline, and TID-tag witnesses. The normal GIL-mode JIT files
+keep their original stress sizes; `parallel_js` trims the tailcall,
+OSR/catch-loop, golden-disasm, stop-budget, spawned-thread butterfly, and
+tag-discipline loop counts so those files remain correctness witnesses rather
 than serial-performance gates. A broad promoted probe now reaches past those
 files and times out later in cumulative safe/teardown/value stress. (6)
 Whole-corpus TSan campaign +
