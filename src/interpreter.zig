@@ -20628,6 +20628,10 @@ const RtfResult = struct {
     frac_str: []const u8 = "",
     suffix: []const u8 = "",
     unit: []const u8 = "",
+    group: []const u8 = ",",
+    decimal: []const u8 = ".",
+    numbering: []const u8 = "latn",
+    min_group_digits: usize = 4,
 };
 
 /// en short/narrow relative-time unit names (singular/plural). Most units don't
@@ -20641,6 +20645,56 @@ fn rtfShortName(unit: []const u8, plural: bool) ?[]const u8 {
         .{ .k = "quarter", .s = "qtr.", .p = "qtrs." }, .{ .k = "year", .s = "yr.", .p = "yr." },
     };
     for (table) |t| if (std.mem.eql(u8, unit, t.k)) return if (plural) t.p else t.s;
+    return null;
+}
+
+fn rtfPolishCategory(mag: f64) []const u8 {
+    if (mag != @trunc(mag)) return "other";
+    const n: u64 = @intFromFloat(@abs(mag));
+    if (n == 1) return "one";
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 >= 2 and mod10 <= 4 and !(mod100 >= 12 and mod100 <= 14)) return "few";
+    return "many";
+}
+
+fn rtfPolishUnitName(unit: []const u8, style: []const u8, category: []const u8) ?[]const u8 {
+    const short = std.mem.eql(u8, style, "short");
+    const narrow = std.mem.eql(u8, style, "narrow");
+    const C = struct { many: []const u8, few: []const u8, one: []const u8, other: []const u8 };
+    const pick = struct {
+        fn p(c: C, cat: []const u8) []const u8 {
+            if (std.mem.eql(u8, cat, "one")) return c.one;
+            if (std.mem.eql(u8, cat, "few")) return c.few;
+            if (std.mem.eql(u8, cat, "other")) return c.other;
+            return c.many;
+        }
+    }.p;
+    if (short or narrow) {
+        const table = [_]struct { u: []const u8, sh: C, na: C }{
+            .{ .u = "second", .sh = .{ .many = "sek.", .few = "sek.", .one = "sek.", .other = "sek." }, .na = .{ .many = "s", .few = "s", .one = "s", .other = "s" } },
+            .{ .u = "minute", .sh = .{ .many = "min", .few = "min", .one = "min", .other = "min" }, .na = .{ .many = "min", .few = "min", .one = "min", .other = "min" } },
+            .{ .u = "hour", .sh = .{ .many = "godz.", .few = "godz.", .one = "godz.", .other = "godz." }, .na = .{ .many = "g.", .few = "g.", .one = "g.", .other = "g." } },
+            .{ .u = "day", .sh = .{ .many = "dni", .few = "dni", .one = "dzień", .other = "dnia" }, .na = .{ .many = "dni", .few = "dni", .one = "dzień", .other = "dnia" } },
+            .{ .u = "week", .sh = .{ .many = "tyg.", .few = "tyg.", .one = "tydz.", .other = "tyg." }, .na = .{ .many = "tyg.", .few = "tyg.", .one = "tydz.", .other = "tyg." } },
+            .{ .u = "month", .sh = .{ .many = "mies.", .few = "mies.", .one = "mies.", .other = "mies." }, .na = .{ .many = "mies.", .few = "mies.", .one = "mies.", .other = "mies." } },
+            .{ .u = "quarter", .sh = .{ .many = "kw.", .few = "kw.", .one = "kw.", .other = "kw." }, .na = .{ .many = "kw.", .few = "kw.", .one = "kw.", .other = "kw." } },
+            .{ .u = "year", .sh = .{ .many = "lat", .few = "lata", .one = "rok", .other = "roku" }, .na = .{ .many = "lat", .few = "lata", .one = "rok", .other = "roku" } },
+        };
+        for (table) |t| if (std.mem.eql(u8, unit, t.u)) return pick(if (narrow) t.na else t.sh, category);
+    } else {
+        const table = [_]struct { u: []const u8, c: C }{
+            .{ .u = "second", .c = .{ .many = "sekund", .few = "sekundy", .one = "sekundę", .other = "sekundy" } },
+            .{ .u = "minute", .c = .{ .many = "minut", .few = "minuty", .one = "minutę", .other = "minuty" } },
+            .{ .u = "hour", .c = .{ .many = "godzin", .few = "godziny", .one = "godzinę", .other = "godziny" } },
+            .{ .u = "day", .c = .{ .many = "dni", .few = "dni", .one = "dzień", .other = "dnia" } },
+            .{ .u = "week", .c = .{ .many = "tygodni", .few = "tygodnie", .one = "tydzień", .other = "tygodnia" } },
+            .{ .u = "month", .c = .{ .many = "miesięcy", .few = "miesiące", .one = "miesiąc", .other = "miesiąca" } },
+            .{ .u = "quarter", .c = .{ .many = "kwartałów", .few = "kwartały", .one = "kwartał", .other = "kwartału" } },
+            .{ .u = "year", .c = .{ .many = "lat", .few = "lata", .one = "rok", .other = "roku" } },
+        };
+        for (table) |t| if (std.mem.eql(u8, unit, t.u)) return pick(t.c, category);
+    }
     return null;
 }
 
@@ -20675,20 +20729,34 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
     const mag = @abs(valnum);
     const r = try nfRound(self, mag, false, 1, 0, 3, null, null, false, "auto", 1, "halfExpand");
     const plural = mag != 1;
-    const short = std.mem.eql(u8, style, "short") or std.mem.eql(u8, style, "narrow");
-    const unit_name = if (short and rtfShortName(info.singular, plural) != null)
-        rtfShortName(info.singular, plural).?
-    else if (plural)
-        try std.fmt.allocPrint(self.arena, "{s}s", .{info.singular})
-    else
-        info.singular;
+    const locale = if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) lv.asStr() else "en" else "en";
+    const syms = localeNumberSymbols(locale);
+    const lang = localeLanguage(locale);
+    const unit_name = if (std.mem.eql(u8, lang, "pl"))
+        rtfPolishUnitName(info.singular, style, rtfPolishCategory(mag)) orelse info.singular
+    else blk: {
+        const short = std.mem.eql(u8, style, "short") or std.mem.eql(u8, style, "narrow");
+        break :blk if (short and rtfShortName(info.singular, plural) != null)
+            rtfShortName(info.singular, plural).?
+        else if (plural)
+            try std.fmt.allocPrint(self.arena, "{s}s", .{info.singular})
+        else
+            info.singular;
+    };
     // en long patterns: future "in {0} <unit>", past "{0} <unit> ago".
     return .{
         .int_str = r.int_str,
         .frac_str = r.frac_str,
         .unit = info.singular,
-        .prefix = if (neg) "" else "in ",
-        .suffix = if (neg) try std.fmt.allocPrint(self.arena, " {s} ago", .{unit_name}) else try std.fmt.allocPrint(self.arena, " {s}", .{unit_name}),
+        .prefix = if (std.mem.eql(u8, lang, "pl")) (if (neg) "" else "za ") else (if (neg) "" else "in "),
+        .suffix = if (std.mem.eql(u8, lang, "pl"))
+            (if (neg) try std.fmt.allocPrint(self.arena, " {s} temu", .{unit_name}) else try std.fmt.allocPrint(self.arena, " {s}", .{unit_name}))
+        else
+            (if (neg) try std.fmt.allocPrint(self.arena, " {s} ago", .{unit_name}) else try std.fmt.allocPrint(self.arena, " {s}", .{unit_name})),
+        .group = syms.group,
+        .decimal = syms.decimal,
+        .numbering = resolveNumberingSystem(this),
+        .min_group_digits = if (std.mem.eql(u8, lang, "pl")) 5 else 4,
     };
 }
 
@@ -20699,24 +20767,30 @@ fn intlRelativeTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (r.term) |t| return Value.str(t);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try buf.appendSlice(self.arena, r.prefix);
-    try buf.appendSlice(self.arena, try rtfGroup(self, r.int_str));
+    try buf.appendSlice(self.arena, try rtfTranslateNumber(self, try rtfGroup(self, r.int_str, r.group, r.min_group_digits), r.numbering));
     if (r.frac_str.len > 0) {
-        try buf.append(self.arena, '.');
-        try buf.appendSlice(self.arena, r.frac_str);
+        try buf.appendSlice(self.arena, r.decimal);
+        try buf.appendSlice(self.arena, try rtfTranslateNumber(self, r.frac_str, r.numbering));
     }
     try buf.appendSlice(self.arena, r.suffix);
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
-/// Group an integer digit string with "," every three digits (en).
-fn rtfGroup(self: *Interpreter, int_str: []const u8) EvalError![]const u8 {
+/// Group an integer digit string every three digits.
+fn rtfGroup(self: *Interpreter, int_str: []const u8, group: []const u8, min_group_digits: usize) EvalError![]const u8 {
+    if (int_str.len < min_group_digits) return int_str;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const first_group = int_str.len % 3;
     for (int_str, 0..) |c, i| {
-        if (i != 0 and (i % 3) == first_group) try buf.append(self.arena, ',');
+        if (i != 0 and (i % 3) == first_group) try buf.appendSlice(self.arena, group);
         try buf.append(self.arena, c);
     }
     return buf.toOwnedSlice(self.arena);
+}
+
+fn rtfTranslateNumber(self: *Interpreter, s: []const u8, numbering: []const u8) EvalError![]const u8 {
+    if (std.mem.eql(u8, numbering, "latn")) return s;
+    return if (numbering_systems.digits(numbering)) |ds| try translateDigits(self, s, ds) else s;
 }
 
 fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -20742,17 +20816,17 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
     const first_group = r.int_str.len % 3;
     var run: std.ArrayListUnmanaged(u8) = .empty;
     for (r.int_str, 0..) |c, i| {
-        if (i != 0 and (i % 3) == first_group) {
-            try addPart(self, arr, "integer", try run.toOwnedSlice(self.arena), r.unit);
-            try addPart(self, arr, "group", ",", r.unit);
+        if (r.int_str.len >= r.min_group_digits and i != 0 and (i % 3) == first_group) {
+            try addPart(self, arr, "integer", try rtfTranslateNumber(self, try run.toOwnedSlice(self.arena), r.numbering), r.unit);
+            try addPart(self, arr, "group", r.group, r.unit);
             run = .empty;
         }
         try run.append(self.arena, c);
     }
-    try addPart(self, arr, "integer", try run.toOwnedSlice(self.arena), r.unit);
+    try addPart(self, arr, "integer", try rtfTranslateNumber(self, try run.toOwnedSlice(self.arena), r.numbering), r.unit);
     if (r.frac_str.len > 0) {
-        try addPart(self, arr, "decimal", ".", r.unit);
-        try addPart(self, arr, "fraction", r.frac_str, r.unit);
+        try addPart(self, arr, "decimal", r.decimal, r.unit);
+        try addPart(self, arr, "fraction", try rtfTranslateNumber(self, r.frac_str, r.numbering), r.unit);
     }
     if (r.suffix.len > 0) try addPart(self, arr, "literal", r.suffix, null);
     return Value.obj(arr);
