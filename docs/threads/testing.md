@@ -236,13 +236,14 @@ constructor/fire benchmark checksums through the tailcall, OSR/catch-loop,
 golden-disasm, int-gate, shared-ArrayStorage, spawned-thread butterfly,
 tag-discipline, and TID-tag witnesses. The normal GIL-mode JIT files keep their
 original audit sizes; `parallel_js` uses smaller loop counts in the tailcall,
-OSR/catch-loop, golden-disasm, stop-budget, spawned-thread butterfly, and
-tag-discipline files so the exploratory probe remains a semantic witness rather
-than a serial-performance gate. The monolithic full promoted-allowlist probe is
-still a cumulative budget probe rather than a required green gate; with a
-30-minute cap it now clears the CVE tail and GC-stress inside the single run
-and times out later in the promoted JIT-audit block around
-`jit/golden-disasm-corpus.js` / the int-gate smoke files.
+OSR/catch-loop, golden-disasm, stop-budget, shared-ArrayStorage,
+spawned-thread butterfly, tag-discipline, and TID-tag files so the exploratory
+probe remains a semantic witness rather than a serial-performance gate. The
+monolithic full promoted-allowlist probe is still a cumulative budget probe
+rather than a required green gate; with a 30-minute cap it now clears the bench
+block, the CVE tail, and GC-stress inside the single run, enters the
+JIT-audit block, passes through `jit/ftl-direct-tailcall-dataic-arg-clobber.js`,
+and times out before the next JIT PASS line.
 
 ## Sweep Runs
 

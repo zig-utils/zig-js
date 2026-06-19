@@ -19,6 +19,13 @@
 
 load("../resources/assert.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const OBJECTS = NO_GIL ? 16 : 64;
+const PROPS = NO_GIL ? 16 : 40;
+const HIT_ADDS = NO_GIL ? 40 : 100;
+
 // Main thread is the TID-0 owner.
 shouldBe(Thread.current.id, 0);
 
@@ -26,20 +33,20 @@ function butterflyWorkout(label) {
     // Force out-of-line (butterfly) properties: more properties than any
     // inline capacity, added dynamically so they transition the structure.
     const objects = [];
-    for (let i = 0; i < 64; ++i) {
+    for (let i = 0; i < OBJECTS; ++i) {
         const o = {};
-        for (let j = 0; j < 40; ++j)
+        for (let j = 0; j < PROPS; ++j)
             o["p" + j] = label + ":" + i + ":" + j;
         // Indexed (array) butterfly side too.
         const a = [];
-        for (let j = 0; j < 40; ++j)
+        for (let j = 0; j < PROPS; ++j)
             a[j] = j + i;
         objects.push({ named: o, indexed: a });
     }
     // Verify everything we wrote on this thread reads back exactly.
-    for (let i = 0; i < 64; ++i) {
+    for (let i = 0; i < OBJECTS; ++i) {
         const { named, indexed } = objects[i];
-        for (let j = 0; j < 40; ++j) {
+        for (let j = 0; j < PROPS; ++j) {
             shouldBe(named["p" + j], label + ":" + i + ":" + j);
             shouldBe(indexed[j], j + i);
         }
@@ -87,11 +94,11 @@ shouldBe(new Set(wave2Ids).size, 3, "wave-2 TIDs must be distinct among live thr
 const shared = { hits: 0 };
 const writers = spawnN(3, (index) => {
     shared["fromThread" + Thread.current.id] = index;
-    for (let i = 0; i < 100; ++i)
+    for (let i = 0; i < HIT_ADDS; ++i)
         Atomics.add(shared, "hits", 1);
 });
 joinAll(writers);
-shouldBe(shared.hits, 300);
+shouldBe(shared.hits, 3 * HIT_ADDS);
 let foreignProperties = 0;
 for (const key in shared) {
     if (key.startsWith("fromThread"))

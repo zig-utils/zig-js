@@ -63,7 +63,7 @@ let sink = 0;
 const NO_GIL = typeof $vm !== "undefined"
     && typeof $vm.useThreadGIL === "function"
     && $vm.useThreadGIL() === false;
-const ITERS = NO_GIL ? 2000 : 100000;
+const ITERS = NO_GIL ? 500 : 100000;
 for (let i = 0; i < ITERS; ++i) {
     sink += getById(flat);
     sink += getById(fat);

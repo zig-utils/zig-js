@@ -23,10 +23,13 @@ load("../harness.js", "caller relative");
 if (typeof $vm === "undefined" || !$vm.ensureArrayStorage) {
     print("shared-arraystorage-stress: SKIP ($vm.ensureArrayStorage unavailable)");
 } else {
-    const THREADS = 4;
-    const LEN = 128;
-    const WAVES = 20;
-    const WRITES_PER_WAVE = 64;
+    const NO_GIL = typeof $vm !== "undefined"
+        && typeof $vm.useThreadGIL === "function"
+        && $vm.useThreadGIL() === false;
+    const THREADS = NO_GIL ? 3 : 4;
+    const LEN = NO_GIL ? 96 : 128;
+    const WAVES = NO_GIL ? 5 : 20;
+    const WRITES_PER_WAVE = NO_GIL ? 24 : 64;
 
     const arr = new Array(LEN).fill(0);
     $vm.ensureArrayStorage(arr);

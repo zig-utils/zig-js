@@ -390,9 +390,10 @@ argument preservation, OSR/catch-loop locals, golden-disasm workload execution,
 int-gate smoke files, shared-ArrayStorage stress, spawned-thread butterfly
 stress, tag-discipline, and TID-tag witnesses. The normal GIL-mode JIT files
 keep their original stress sizes; `parallel_js` trims the tailcall,
-OSR/catch-loop, golden-disasm, stop-budget, spawned-thread butterfly, and
-tag-discipline loop counts so those files remain correctness witnesses rather
-than serial-performance gates. `races/counter-atomics.js` is also
+OSR/catch-loop, golden-disasm, stop-budget, shared-ArrayStorage,
+spawned-thread butterfly, tag-discipline, and TID-tag loop counts so those
+files remain correctness witnesses rather than serial-performance gates.
+`races/counter-atomics.js` is also
 focused-green under `parallel_js`; the GIL-mode file keeps its original
 100,000-add/1,000-CAS amplifier, while no-GIL keeps the same 8-worker
 lost-update/CAS oracle at a smaller interpreter budget. `races/counter-lock.js`
@@ -418,9 +419,10 @@ is focused-green 4/4, the promoted Atomics block is focused-green 15/15, and
 the promoted JIT-audit subset is focused-green in verified slices through
 `jit/tid-tag-3-threads.js`. Broader promoted-allowlist `parallel_js` remains
 exploratory until the monolithic cumulative budget probe is cleared; with a
-30-minute cap the single run now clears the CVE tail and GC-stress and times
-out later in the promoted JIT-audit block around `jit/golden-disasm-corpus.js`
-/ the int-gate smoke files. (6)
+30-minute cap the single run now clears the bench block, the CVE tail, and
+GC-stress, enters the promoted JIT-audit block, passes through
+`jit/ftl-direct-tailcall-dataic-arg-clobber.js`, and times out before the next
+JIT PASS line. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

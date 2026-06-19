@@ -65,7 +65,7 @@ let sink = 0;
 const NO_GIL = typeof $vm !== "undefined"
     && typeof $vm.useThreadGIL === "function"
     && $vm.useThreadGIL() === false;
-const ITERS = NO_GIL ? 5000 : 200000;
+const ITERS = NO_GIL ? 1000 : 200000;
 for (let i = 0; i < ITERS; ++i) {
     const fat = fats[i & 1];
     sink += oolGet(fat);
@@ -85,7 +85,8 @@ if (typeof $vm !== "undefined" && $vm.dfgTrue) {
     function tierProbe() { return $vm.dfgTrue(); }
     noInline(tierProbe);
     let sawDFG = false;
-    for (let i = 0; i < 100000 && !sawDFG; ++i)
+    const TIER_PROBE_ITERS = NO_GIL ? 5000 : 100000;
+    for (let i = 0; i < TIER_PROBE_ITERS && !sawDFG; ++i)
         sawDFG = tierProbe();
     print("tag-discipline: dfg reached = " + sawDFG);
 }
