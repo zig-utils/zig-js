@@ -23348,10 +23348,11 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         const nsv = try self.getProperty(rv, "nanosecond");
         if (!nsv.isUndefined()) vals[5] = try relativeTimeField(self, nsv, "nanosecond", 999);
         const offv = try self.getProperty(rv, "offset");
-        if (!offv.isUndefined()) _ = try self.toStringV(offv);
+        if (!offv.isUndefined()) try validateRelativeOffset(self, offv);
         const sv = try self.getProperty(rv, "second");
         if (!sv.isUndefined()) vals[2] = try relativeTimeField(self, sv, "second", 59);
-        _ = try self.getProperty(rv, "timeZone");
+        const tzv = try self.getProperty(rv, "timeZone");
+        if (!tzv.isUndefined()) _ = try relativeTimeZoneField(self, tzv);
         const yv = try self.getProperty(rv, "year");
         if (!yv.isUndefined()) y = try temporalIntArg(self, yv, "year");
 
@@ -23377,6 +23378,19 @@ fn relativeTimeField(self: *Interpreter, v: Value, name: []const u8, max: f64) E
     const n = try temporalIntArg(self, v, name);
     if (n < 0 or n > max) return self.throwError("RangeError", "time component out of range");
     return n;
+}
+
+fn relativeTimeZoneField(self: *Interpreter, v: Value) EvalError!TimeZone {
+    if (!v.isString()) return self.throwError("TypeError", "invalid timeZone");
+    return parseTimeZone(self, v.asStr());
+}
+
+fn validateRelativeOffset(self: *Interpreter, v: Value) EvalError!void {
+    if (!v.isString()) return self.throwError("TypeError", "invalid offset");
+    var body: TBody = .{ .y = 1970, .mo = 1, .d = 1 };
+    var i: usize = 0;
+    try parseOffset(self, v.asStr(), &i, &body);
+    if (!body.has_offset or i != v.asStr().len) return self.throwError("RangeError", "invalid offset");
 }
 
 const DAY_NS: i128 = 86_400_000_000_000;
@@ -24493,6 +24507,7 @@ const TBody = struct {
     frac_ns: u32 = 0,
     z: bool = false,
     has_offset: bool = false,
+    offset_has_seconds: bool = false,
     off_ns: i128 = 0,
 };
 
@@ -24621,6 +24636,7 @@ fn parseOffset(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalEr
             parse_seconds = true;
         }
         if (parse_seconds and twoDigits(s, i.*) != null) {
+            out.offset_has_seconds = true;
             i.* += 2;
             if (i.* < s.len and (s[i.*] == '.' or s[i.*] == ',')) {
                 i.* += 1;
@@ -26895,6 +26911,7 @@ fn parseTimeZone(self: *Interpreter, s: []const u8) EvalError!TimeZone {
         const ann = try stripTemporalAnnotations(self, s);
         const b = try parseTemporalBody(self, ann.body);
         if (b.has_offset) {
+            if (b.offset_has_seconds) return self.throwError("RangeError", "sub-minute time zone offsets are not valid");
             const off: i64 = @intCast(b.off_ns);
             return .{ .name = offsetNsToString(self, off) catch "+00:00", .offset_ns = off };
         }
@@ -26914,18 +26931,20 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
         const oh = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch return self.throwError("RangeError", "invalid offset");
         i += 2;
         var om: u8 = 0;
-        var os: u8 = 0;
-        if (i < s.len and s[i] == ':') i += 1;
-        if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
+        var minute_had_colon = false;
+        if (i < s.len and s[i] == ':') {
+            minute_had_colon = true;
+            i += 1;
+        }
+        if (i + 2 <= s.len and std.ascii.isDigit(s[i]) and std.ascii.isDigit(s[i + 1])) {
             om = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch 0;
             i += 2;
-            if (i < s.len and s[i] == ':') i += 1;
-            if (i + 2 <= s.len and std.ascii.isDigit(s[i])) {
-                os = std.fmt.parseInt(u8, s[i .. i + 2], 10) catch 0;
-            }
+            if (i < s.len and (s[i] == ':' or (!minute_had_colon and std.ascii.isDigit(s[i]))))
+                return self.throwError("RangeError", "sub-minute time zone offsets are not valid");
         }
+        if (i != s.len) return self.throwError("RangeError", "invalid offset time zone");
         if (oh > 23 or om > 59) return self.throwError("RangeError", "offset out of range");
-        var off: i64 = @as(i64, oh) * 3_600_000_000_000 + @as(i64, om) * 60_000_000_000 + @as(i64, os) * 1_000_000_000;
+        var off: i64 = @as(i64, oh) * 3_600_000_000_000 + @as(i64, om) * 60_000_000_000;
         if (neg) off = -off;
         const name = offsetNsToString(self, off) catch "+00:00";
         return .{ .name = name, .offset_ns = off };
