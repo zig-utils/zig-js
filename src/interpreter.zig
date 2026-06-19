@@ -18289,6 +18289,8 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (req and !kept) return self.throwError("TypeError", "Intl.DateTimeFormat: options do not overlap the Temporal value's fields");
     }
 
+    const numbering_system = resolveNumberingSystem(this);
+
     var parts: std.ArrayListUnmanaged(DtfPart) = .empty;
     const P = struct {
         fn lit(s: *Interpreter, p: *std.ArrayListUnmanaged(DtfPart), v: []const u8) EvalError!void {
@@ -18372,7 +18374,8 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (o_frac > 0 and o_second.len > 0) {
             var mbuf: [3]u8 = .{ '0', '0', '0' };
             _ = std.fmt.bufPrint(&mbuf, "{d:0>3}", .{frac_ms}) catch {};
-            try P.lit(self, &parts, ".");
+            const frac_sep = if (std.mem.eql(u8, numbering_system, "arab") or std.mem.eql(u8, numbering_system, "arabext")) "\xd9\xab" else ".";
+            try P.lit(self, &parts, frac_sep);
             try parts.append(self.arena, .{ .typ = "fractionalSecond", .value = try self.arena.dupe(u8, mbuf[0..o_frac]) });
         }
         if (ap.len > 0) {
@@ -18391,6 +18394,18 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 "UTC"; // "short", "shortGeneric"
             if (have_clock or ap.len > 0) try P.lit(self, &parts, " ");
             try parts.append(self.arena, .{ .typ = "timeZoneName", .value = tzn });
+        }
+    }
+    if (!std.mem.eql(u8, numbering_system, "latn")) {
+        if (numbering_systems.digits(numbering_system)) |ds| {
+            for (parts.items) |*p| {
+                if (eq(p.typ, "year") or eq(p.typ, "month") or eq(p.typ, "day") or
+                    eq(p.typ, "hour") or eq(p.typ, "minute") or eq(p.typ, "second") or
+                    eq(p.typ, "fractionalSecond"))
+                {
+                    p.value = try translateDigits(self, p.value, ds);
+                }
+            }
         }
     }
     return parts;
@@ -18968,15 +18983,13 @@ fn nfIndicGrouping(locale: []const u8) bool {
 /// option wins, else the locale's `-u-nu-` extension, else "latn" — but only a
 /// system we have digit data for (unknown ones fall back to "latn").
 fn resolveNumberingSystem(this: Value) []const u8 {
-    // Resolve from the explicit `numberingSystem` option only. The locale's
-    // `-u-nu-` extension is intentionally NOT honored: the testIntl rounding
-    // suites drive it via `-u-nu-<sys>` and build their expected output by
-    // code-unit-indexing the digit string, which this byte-indexed string model
-    // mishandles — so honoring it would make correct output mismatch the test's
-    // own (broken-here) expected. An explicit option is safe (tests that use it
-    // compare against literal digit strings).
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.asObj().getOwn("numberingSystem")) |ns| if (ns.isString()) {
         if (numbering_systems.digits(ns.asStr()) != null) return ns.asStr();
+    };
+    if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
+        if (localeUValue(lv.asStr(), "nu")) |ns| {
+            if (numbering_systems.digits(ns) != null) return ns;
+        }
     };
     return "latn";
 }
