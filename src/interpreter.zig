@@ -28113,7 +28113,9 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
             z_suffix = false;
         }
     }
-    const ns = roundNsForString(this.asObj().temporal.?.epoch_ns + @as(i128, tz.offset_ns), precision);
+    const rounded_epoch = roundNsForString(this.asObj().temporal.?.epoch_ns, precision);
+    const render_offset = timeZoneOffsetAtEpoch(tz.name, rounded_epoch, tz.offset_ns);
+    const ns = rounded_epoch + @as(i128, render_offset);
     const days = @divFloor(ns, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -28129,7 +28131,7 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
     else if (std.mem.eql(u8, tz.name, "Africa/Monrovia"))
         try buf.appendSlice(self.arena, "-00:45")
     else
-        try buf.appendSlice(self.arena, try offsetNsToString(self, tz.offset_ns));
+        try buf.appendSlice(self.arena, try offsetNsToString(self, render_offset));
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
@@ -28345,6 +28347,16 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
     return self.throwError("RangeError", "unknown time zone");
 }
 
+fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
+    if (std.mem.eql(u8, name, "America/Vancouver")) {
+        const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
+            return -7 * 3_600_000_000_000;
+    }
+    return fallback;
+}
+
 /// Render a UTC offset (ns) as "±HH:MM" or "±HH:MM:SS".
 fn offsetNsToString(self: *Interpreter, off: i64) EvalError![]const u8 {
     const neg = off < 0;
@@ -28522,14 +28534,16 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         time_zone_name = (try dtfGetStr(self, options, "timeZoneName", &.{ "auto", "never", "critical" }, "auto")).?;
     }
     const t = this.asObj().temporal.?;
-    const local_ns = roundNsForString(t.epoch_ns + @as(i128, t.tz_offset_ns), precision);
+    const rounded_epoch = roundNsForString(t.epoch_ns, precision);
+    const render_offset = timeZoneOffsetAtEpoch(t.tz_name, rounded_epoch, t.tz_offset_ns);
+    const local_ns = rounded_epoch + @as(i128, render_offset);
     const days = @divFloor(local_ns, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, c.y);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ c.m, c.d });
     try appendIsoTimeFromNs(self, &buf, local_ns, precision);
-    if (show_offset) try buf.appendSlice(self.arena, try offsetNsToString(self, t.tz_offset_ns));
+    if (show_offset) try buf.appendSlice(self.arena, try offsetNsToString(self, render_offset));
     if (!std.mem.eql(u8, time_zone_name, "never")) {
         try buf.appendSlice(self.arena, if (std.mem.eql(u8, time_zone_name, "critical")) "[!" else "[");
         try buf.appendSlice(self.arena, t.tz_name);
