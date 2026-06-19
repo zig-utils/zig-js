@@ -22366,92 +22366,94 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         .object => {
             const so = src.asObj();
             if (so.is_arguments) {
-            const len = toLen(try self.toNumberV(try self.getProperty(src, "length")));
-            if (i < len) {
-                val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
-                done = false;
-            }
-        } else if (so.is_array) {
-            // Arrays iterate the *logical* length, reading via [[Get]] so a hole
-            // (or the sparse tail) yields `undefined` and accessor indices run.
-            if (i < @max(so.elements.items.len, so.array_len)) {
-                val = try arrayIteratorValue(self, kind, i, try self.arrIndexGet(so, i));
-                done = false;
-            }
-        } else if (so.proxy_handler != null or so.proxy_revoked) {
-            const len = toLen((try self.toPrimitive(try self.getProperty(src, "length"), .number)).toNumber());
-            if (i < len) {
-                val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
-                done = false;
-            }
-        } else if (so.typed_array) |ta| {
-            const len = ta.currentLength() orelse
-                return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
-            if (i < len) {
-                val = switch (kind) {
-                    1 => Value.num(@floatFromInt(i)), // keys
-                    2 => blk: {
-                        const pair = (try self.newArray()).asObj();
-                        try pair.elements.append(pair.elementsAllocator(self.arena), Value.num(@floatFromInt(i)));
-                        try pair.elements.append(pair.elementsAllocator(self.arena), try self.taLoad(ta, i));
-                        break :blk Value.obj(pair);
-                    },
-                    else => try self.taLoad(ta, i), // values
+                const len = toLen(try self.toNumberV(try self.getProperty(src, "length")));
+                if (i < len) {
+                    val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
+                    done = false;
+                }
+            } else if (so.is_array) {
+                // Arrays iterate the *logical* length, reading via [[Get]] so a hole
+                // (or the sparse tail) yields `undefined` and accessor indices run.
+                if (i < @max(so.elements.items.len, so.array_len)) {
+                    val = try arrayIteratorValue(self, kind, i, try self.arrIndexGet(so, i));
+                    done = false;
+                }
+            } else if (so.proxy_handler != null or so.proxy_revoked) {
+                const len = toLen((try self.toPrimitive(try self.getProperty(src, "length"), .number)).toNumber());
+                if (i < len) {
+                    val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
+                    done = false;
+                }
+            } else if (so.typed_array) |ta| {
+                const len = ta.currentLength() orelse
+                    return self.throwError("TypeError", "Cannot operate on a TypedArray whose buffer is detached or out of bounds");
+                if (i < len) {
+                    val = switch (kind) {
+                        1 => Value.num(@floatFromInt(i)), // keys
+                        2 => blk: {
+                            const pair = (try self.newArray()).asObj();
+                            try pair.elements.append(pair.elementsAllocator(self.arena), Value.num(@floatFromInt(i)));
+                            try pair.elements.append(pair.elementsAllocator(self.arena), try self.taLoad(ta, i));
+                            break :blk Value.obj(pair);
+                        },
+                        else => try self.taLoad(ta, i), // values
+                    };
+                    done = false;
+                }
+            } else if (so.is_map) {
+                var j = i;
+                so.lockElements();
+                while (j < so.elements.items.len) : (j += 1) {
+                    const entry = liveMapEntry(so.elements.items[j]) orelse continue;
+                    val = switch (kind) {
+                        1 => entry.elementAt(0) orelse Value.undef(), // keys
+                        2 => Value.obj(entry), // entries: the stored [key, value] pair
+                        else => mapEntryValue(entry), // values
+                    };
+                    done = false;
+                    advance = j + 1 - i;
+                    break;
+                }
+                so.unlockElements();
+            } else if (so.is_set) {
+                var j = i;
+                var entry_value: ?Value = null;
+                so.lockElements();
+                while (j < so.elements.items.len) : (j += 1) {
+                    const e = liveSetEntry(so.elements.items[j]) orelse continue;
+                    entry_value = e;
+                    done = false;
+                    advance = j + 1 - i;
+                    break;
+                }
+                so.unlockElements();
+                if (entry_value) |e| if (kind == 2) {
+                    const pair = (try self.newArray()).asObj();
+                    try pair.appendElement(self.arena, e);
+                    try pair.appendElement(self.arena, e);
+                    val = Value.obj(pair);
+                } else {
+                    val = e;
                 };
-                done = false;
-            }
-        } else if (so.is_map) {
-            var j = i;
-            so.lockElements();
-            while (j < so.elements.items.len) : (j += 1) {
-                const entry = liveMapEntry(so.elements.items[j]) orelse continue;
-                val = switch (kind) {
-                    1 => entry.elementAt(0) orelse Value.undef(), // keys
-                    2 => Value.obj(entry), // entries: the stored [key, value] pair
-                    else => mapEntryValue(entry), // values
-                };
-                done = false;
-                advance = j + 1 - i;
-                break;
-            }
-            so.unlockElements();
-        } else if (so.is_set) {
-            var j = i;
-            var entry_value: ?Value = null;
-            so.lockElements();
-            while (j < so.elements.items.len) : (j += 1) {
-                const e = liveSetEntry(so.elements.items[j]) orelse continue;
-                entry_value = e;
-                done = false;
-                advance = j + 1 - i;
-                break;
-            }
-            so.unlockElements();
-            if (entry_value) |e| if (kind == 2) {
-                const pair = (try self.newArray()).asObj();
-                try pair.appendElement(self.arena, e);
-                try pair.appendElement(self.arena, e);
-                val = Value.obj(pair);
             } else {
-                val = e;
-            };
-        } else {
-            const len = toLen((try self.toPrimitive(try self.getProperty(src, "length"), .number)).toNumber());
-            if (i < len) {
-                val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
-                done = false;
+                const len = toLen((try self.toPrimitive(try self.getProperty(src, "length"), .number)).toNumber());
+                if (i < len) {
+                    val = try arrayIteratorValue(self, kind, i, try self.getProperty(src, try std.fmt.allocPrint(self.arena, "{d}", .{i})));
+                    done = false;
+                }
             }
-        } },
+        },
         .string => {
             const s = src.asStr();
             if (i < s.len) {
-            // A String iterator yields one JS code point, not one byte. That is
-            // normally one UTF-8 scalar, but can also be a WTF-8 surrogate pair
-            // when two UTF-16 code units were concatenated at runtime.
-            advance = stringIteratorSeqLen(s, i);
-            val = Value.str(try self.arena.dupe(u8, s[i .. i + advance]));
-            done = false;
-        } },
+                // A String iterator yields one JS code point, not one byte. That is
+                // normally one UTF-8 scalar, but can also be a WTF-8 surrogate pair
+                // when two UTF-16 code units were concatenated at runtime.
+                advance = stringIteratorSeqLen(s, i);
+                val = Value.str(try self.arena.dupe(u8, s[i .. i + advance]));
+                done = false;
+            }
+        },
         else => {},
     }
     if (done) {
