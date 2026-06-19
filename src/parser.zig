@@ -160,6 +160,7 @@ pub const Parser = struct {
 
     /// A label after `break`/`continue` on the same logical line.
     fn optionalLabel(self: *Parser) ?[]const u8 {
+        if (self.hasLineTerminatorBefore(0)) return null;
         if (self.check(.identifier) and !self.isForbiddenLabelName(self.cur().text)) {
             return self.advance().text;
         }
@@ -1314,7 +1315,7 @@ pub const Parser = struct {
         if (self.fn_depth == 0) return ParseError.UnexpectedToken;
         _ = self.advance(); // return
         var arg: ?*Node = null;
-        if (!self.check(.semicolon) and !self.check(.rbrace) and !self.check(.eof)) {
+        if (!self.hasLineTerminatorBefore(0) and !self.check(.semicolon) and !self.check(.rbrace) and !self.check(.eof)) {
             arg = try self.parseExpression();
         }
         _ = self.match(.semicolon);
@@ -1323,6 +1324,7 @@ pub const Parser = struct {
 
     fn parseThrow(self: *Parser) ParseError!*Node {
         _ = self.advance(); // throw
+        if (self.hasLineTerminatorBefore(0)) return ParseError.UnexpectedToken;
         const arg = try self.parseExpression();
         _ = self.match(.semicolon);
         return self.alloc(.{ .throw_stmt = arg });
@@ -2815,6 +2817,25 @@ test "parser accepts ASI line terminators between statements" {
     var assign_then_inc = try Parser.init(arena.allocator(), "var a=1,b=2,c=3; a=b\n++c");
     const assign_then_inc_prog = try assign_then_inc.parseProgram();
     try std.testing.expectEqual(@as(usize, 3), assign_then_inc_prog.program.len);
+
+    var return_newline = try Parser.init(arena.allocator(), "function f(){ return\n1; }");
+    const return_newline_prog = try return_newline.parseProgram();
+    const return_body = return_newline_prog.program[0].func_decl.body.block;
+    try std.testing.expect(return_body[0].return_stmt == null);
+    try std.testing.expect(return_body[1].* == .expr_stmt);
+
+    var break_newline = try Parser.init(arena.allocator(), "label: while (true) { break\nlabel; }");
+    const break_newline_prog = try break_newline.parseProgram();
+    const break_stmt = break_newline_prog.program[0].labeled_stmt.body.while_stmt.body.block[0];
+    try std.testing.expect(break_stmt.break_stmt == null);
+
+    var continue_newline = try Parser.init(arena.allocator(), "label: while (true) { continue\nlabel; }");
+    const continue_newline_prog = try continue_newline.parseProgram();
+    const continue_stmt = continue_newline_prog.program[0].labeled_stmt.body.while_stmt.body.block[0];
+    try std.testing.expect(continue_stmt.continue_stmt == null);
+
+    var throw_newline = try Parser.init(arena.allocator(), "throw\n1;");
+    try std.testing.expectError(ParseError.UnexpectedToken, throw_newline.parseProgram());
 }
 
 test "parser requires module import export statement boundaries" {
