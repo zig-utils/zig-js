@@ -25345,7 +25345,8 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         const y1971 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, 30, 29 };
         const y1972 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, if (std.mem.eql(u8, cal, "chinese")) 29 else 30, if (std.mem.eql(u8, cal, "chinese")) 30 else 29 };
-        return tableMonthDays(year, month, 1971, &y1971, 1972, &y1972) orelse 0;
+        return tableMonthDays(year, month, 1971, &y1971, 1972, &y1972) orelse
+            (if (month >= 1 and month <= calMonthsInYear(cal, year)) (if ((month % 2) == 1) 30 else 29) else 0);
     }
     return isoDaysInMonth(calIsoFromDisplayYear(cal, year), month);
 }
@@ -25433,6 +25434,18 @@ const japanese_eras = [_]JapaneseEra{
 /// family depends on the year alone.
 fn calEraOf(cal: []const u8, iso_year: i64, month: u8, day: u8) CalEra {
     if (std.mem.eql(u8, cal, "persian")) return .{ .era = "ap", .era_year = iso_year };
+    if (std.mem.eql(u8, cal, "coptic")) return .{ .era = "am", .era_year = iso_year };
+    if (std.mem.eql(u8, cal, "ethioaa")) return .{ .era = "aa", .era_year = iso_year };
+    if (std.mem.eql(u8, cal, "ethiopic")) return if (iso_year >= 1)
+        .{ .era = "am", .era_year = iso_year }
+    else
+        .{ .era = "aa", .era_year = iso_year + 5500 };
+    if (std.mem.eql(u8, cal, "hebrew")) return .{ .era = "am", .era_year = iso_year };
+    if (std.mem.eql(u8, cal, "indian")) return .{ .era = "shaka", .era_year = iso_year };
+    if (isIslamicCalendar(cal)) return if (iso_year >= 1)
+        .{ .era = "ah", .era_year = iso_year }
+    else
+        .{ .era = "bh", .era_year = 1 - iso_year };
     if (std.mem.eql(u8, cal, "buddhist")) return .{ .era = "be", .era_year = iso_year + 543 };
     if (std.mem.eql(u8, cal, "roc")) {
         const y = iso_year - 1911; // displayed ROC year
@@ -25494,6 +25507,20 @@ fn bagIsoYear(self: *Interpreter, bag: Value, cal: []const u8) EvalError!?i64 {
 /// boundary (e.g. roc 0 == broc 1), matching the displayed-year inverse.
 fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
     if (std.mem.eql(u8, cal, "persian")) return if (asciiEqlIgnoreCase(era, "ap")) era_year else null;
+    if (std.mem.eql(u8, cal, "coptic")) return if (asciiEqlIgnoreCase(era, "am")) era_year else null;
+    if (std.mem.eql(u8, cal, "ethioaa")) return if (asciiEqlIgnoreCase(era, "aa")) era_year else null;
+    if (std.mem.eql(u8, cal, "ethiopic")) {
+        if (asciiEqlIgnoreCase(era, "am")) return era_year;
+        if (asciiEqlIgnoreCase(era, "aa")) return era_year - 5500;
+        return null;
+    }
+    if (std.mem.eql(u8, cal, "hebrew")) return if (asciiEqlIgnoreCase(era, "am")) era_year else null;
+    if (std.mem.eql(u8, cal, "indian")) return if (asciiEqlIgnoreCase(era, "shaka")) era_year else null;
+    if (isIslamicCalendar(cal)) {
+        if (asciiEqlIgnoreCase(era, "ah")) return era_year;
+        if (asciiEqlIgnoreCase(era, "bh")) return 1 - era_year;
+        return null;
+    }
     const be = asciiEqlIgnoreCase(era, "be");
     if (std.mem.eql(u8, cal, "buddhist")) return if (be) era_year - 543 else null;
     if (std.mem.eql(u8, cal, "roc")) {
