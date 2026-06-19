@@ -6545,6 +6545,49 @@ test "parallel_js (M3 GIL-removal slice): Lock.asyncHold grants serialize withou
     try std.testing.expectEqual(@as(f64, 200), result.asNum());
 }
 
+test "parallel_js (M3 GIL-removal slice): property Atomics waiters notify without context GIL" {
+    // Property-mode Atomics wait/notify owns an independent waiter-table mutex.
+    // With the execution-path GIL dropped, several real JS threads park on the
+    // same ordinary-object property while the main thread repeatedly notifies
+    // until every waiter has been counted.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const cell = { lane: 0, sleep: 0 };
+        \\const threads = [];
+        \\for (let i = 0; i < 4; i++) {
+        \\  threads.push(new Thread(() => {
+        \\    if ($vm.useThreadGIL() !== false) throw new Error("worker still holds the thread GIL");
+        \\    return Atomics.wait(cell, "lane", 0, 5000);
+        \\  }));
+        \\}
+        \\let woken = 0;
+        \\const deadline = Date.now() + 5000;
+        \\while (woken < threads.length) {
+        \\  woken += Atomics.notify(cell, "lane", threads.length - woken);
+        \\  if (woken < threads.length) {
+        \\    if (Date.now() > deadline) throw new Error("property waiters never parked");
+        \\    Atomics.wait(cell, "sleep", 0, 1);
+        \\  }
+        \\}
+        \\let ok = 0;
+        \\for (const t of threads) {
+        \\  const r = t.join();
+        \\  if (r !== "ok") throw new Error("bad wait result: " + r);
+        \\  ok++;
+        \\}
+        \\ok;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "enable_gc incremental: long-lived collections mutated under marking stay intact" {
     // Phase 7 / M2 end-to-end: with incremental marking driven at the engine
     // safepoints (collectMidScript), a long-lived structure that keeps growing

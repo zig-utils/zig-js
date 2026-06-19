@@ -1115,8 +1115,9 @@ fn jsInt32(n: f64) i32 {
 }
 
 // One FIFO of property waiters per threaded realm, stored on `Gil`.
-// The context GIL serializes the list; tickets live on waiting thread stacks
-// and are unlinked before wait returns.
+// `Gil.prop_mutex` serializes the lists independently from the context GIL;
+// sync tickets live on waiting thread stacks and are unlinked before wait
+// returns, while async tickets are page-allocator owned until settlement.
 const PropTicket = struct {
     obj: *value.Object,
     key: []const u8,
@@ -1134,6 +1135,12 @@ pub const PropAsyncTicket = struct {
     /// The realm's gil pointer — the abandon token at Context.destroy.
     owner: *const anyopaque,
 };
+
+fn appendPropAsync(g: *gil_mod.Gil, t: *PropAsyncTicket) !void {
+    g.lockPropWaiters();
+    defer g.unlockPropWaiters();
+    try g.prop_async.append(prop_alloc, @ptrCast(t));
+}
 
 /// `Atomics.waitAsync(obj, key, expected, timeout)` — the property path.
 /// Settlement: a notify resolves "ok" on the notifying thread; expiry
@@ -1156,18 +1163,22 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
     const microtasks = self.microtasks orelse
         return self.throwError("Error", "Atomics.waitAsync requires a microtask queue");
     const p_obj = try promise.newPromise(self);
-    const t = prop_alloc.create(PropAsyncTicket) catch return error.OutOfMemory;
+    const key = prop_alloc.dupe(u8, key_tmp) catch return error.OutOfMemory;
+    const t = prop_alloc.create(PropAsyncTicket) catch {
+        prop_alloc.free(key);
+        return error.OutOfMemory;
+    };
     const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
     t.* = .{
         .obj = o,
-        .key = try self.arena.dupe(u8, key_tmp),
+        .key = key,
         .deadline_ns = if (timeout_ns) |ns| now + ns else null,
         .promise = p_obj,
         .microtasks = microtasks,
         .owner = @ptrCast(self.gil.?),
     };
-    const g = self.gil.?;
-    g.prop_async.append(self.arena, @ptrCast(t)) catch {
+    appendPropAsync(self.gil.?, t) catch {
+        prop_alloc.free(key);
         prop_alloc.destroy(t);
         return error.OutOfMemory;
     };
@@ -1183,10 +1194,13 @@ fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8)
         defer self.microtasks = saved_microtasks;
         promise.resolve(self, pp, Value.str(outcome)) catch {};
     }
+    prop_alloc.free(t.key);
     prop_alloc.destroy(t);
 }
 
 fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *std.ArrayListUnmanaged(promise.Microtask), to: *std.ArrayListUnmanaged(promise.Microtask)) void {
+    g.lockPropWaiters();
+    defer g.unlockPropWaiters();
     for (g.prop_async.items) |raw| {
         const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
         if (t.microtasks == from) t.microtasks = to;
@@ -1205,17 +1219,25 @@ fn transferPendingJoinQueue(ctx: *Context, from: *std.ArrayListUnmanaged(promise
 /// poll points (awaitValue's GIL-handover loop, the drain tail).
 pub fn pollPropAsync(self: *Interpreter) void {
     const g = self.gil orelse return;
-    if (g.prop_async.items.len == 0) return;
-    const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
-    var i: usize = 0;
-    while (i < g.prop_async.items.len) {
-        const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
-        if (t.deadline_ns != null and t.deadline_ns.? <= now) {
-            _ = g.prop_async.orderedRemove(i);
+    while (true) {
+        const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+        var expired: ?*PropAsyncTicket = null;
+        g.lockPropWaiters();
+        var i: usize = 0;
+        while (i < g.prop_async.items.len) : (i += 1) {
+            const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
+            if (t.deadline_ns != null and t.deadline_ns.? <= now) {
+                expired = t;
+                _ = g.prop_async.orderedRemove(i);
+                break;
+            }
+        }
+        g.unlockPropWaiters();
+        if (expired) |t| {
             settlePropAsync(self, t, "timed-out");
             continue;
         }
-        i += 1;
+        break;
     }
 }
 
@@ -1224,6 +1246,8 @@ pub fn pollPropAsync(self: *Interpreter) void {
 pub fn nextPropAsyncDeadline(self: *Interpreter) ?i96 {
     const g = self.gil orelse return null;
     var nearest: ?i96 = null;
+    g.lockPropWaiters();
+    defer g.unlockPropWaiters();
     for (g.prop_async.items) |raw| {
         const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
         if (t.deadline_ns) |d| nearest = if (nearest) |m| @min(m, d) else d;
@@ -1234,15 +1258,58 @@ pub fn nextPropAsyncDeadline(self: *Interpreter) ?i96 {
 /// Drop tickets of a dying realm (their promises die with the arena).
 pub fn abandonPropAsync(g: *gil_mod.Gil) void {
     const owner: *const anyopaque = @ptrCast(g);
+    g.lockPropWaiters();
     var i: usize = 0;
     while (i < g.prop_async.items.len) {
         const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
         if (t.owner == owner) {
+            prop_alloc.free(t.key);
             prop_alloc.destroy(t);
             _ = g.prop_async.orderedRemove(i);
             continue;
         }
         i += 1;
+    }
+    g.prop_async.deinit(prop_alloc);
+    g.prop_waiters.deinit(prop_alloc);
+    g.unlockPropWaiters();
+}
+
+fn removePropTicketLocked(g: *gil_mod.Gil, ticket: *PropTicket) void {
+    for (g.prop_waiters.items, 0..) |raw, i| {
+        const t: *PropTicket = @ptrCast(@alignCast(raw));
+        if (t == ticket) {
+            _ = g.prop_waiters.orderedRemove(i);
+            return;
+        }
+    }
+}
+
+fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicket, timeout: std.Io.Timeout) error{Timeout}!void {
+    const io = agent.engineIo();
+    if (self.use_thread_gil) {
+        var timed_out = false;
+        stack_scan.beginPark();
+        g.release();
+        ticket.cond.waitTimeout(io, &g.prop_mutex, timeout) catch |err| {
+            switch (err) {
+                error.Timeout => timed_out = true,
+                error.Canceled => {},
+            }
+        };
+        // Avoid lock-order inversion with notifiers: a woken/timed-out waiter
+        // must not hold prop_mutex while trying to reacquire the GIL, because a
+        // GIL holder may be entering Atomics.notify and need prop_mutex.
+        g.unlockPropWaiters();
+        g.acquire();
+        stack_scan.endPark();
+        g.lockPropWaiters();
+        if (timed_out) return error.Timeout;
+    } else {
+        ticket.cond.waitTimeout(io, &g.prop_mutex, timeout) catch |err| switch (err) {
+            error.Timeout => return error.Timeout,
+            error.Canceled => {},
+        };
     }
 }
 
@@ -1254,25 +1321,28 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
     if (timeout_ns != null and timeout_ns.? == 0) return Value.str("timed-out");
     if (!self.main_can_block)
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
-    const key = try self.arena.dupe(u8, key_tmp);
+    const key = prop_alloc.dupe(u8, key_tmp) catch return error.OutOfMemory;
+    defer prop_alloc.free(key);
     var ticket = PropTicket{ .obj = o, .key = key };
     const g = self.gil.?;
-    g.prop_waiters.append(self.arena, @ptrCast(&ticket)) catch return error.OutOfMemory;
-    defer for (g.prop_waiters.items, 0..) |raw, i| {
-        const t: *PropTicket = @ptrCast(@alignCast(raw));
-        if (t == &ticket) {
-            _ = g.prop_waiters.orderedRemove(i);
-            break;
-        }
-    };
+    g.lockPropWaiters();
+    var linked = false;
+    defer {
+        if (linked) removePropTicketLocked(g, &ticket);
+        g.unlockPropWaiters();
+    }
+    g.prop_waiters.append(prop_alloc, @ptrCast(&ticket)) catch return error.OutOfMemory;
+    linked = true;
     const deadline_ns: ?i96 = if (timeout_ns) |ns|
         std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + ns
     else
         null;
     while (!ticket.woken) {
+        g.unlockPropWaiters();
         pumpTasks(self);
-        if (self.stop_flag) |sf| if (sf.load(.monotonic))
-            return self.throwError("Error", "worker terminated");
+        const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
+        g.lockPropWaiters();
+        if (stopped) return self.throwError("Error", "worker terminated");
         if (ticket.woken) break;
         var tick_ns: u64 = 5 * std.time.ns_per_ms;
         if (deadline_ns) |d| {
@@ -1280,7 +1350,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
             if (d <= now) return Value.str("timed-out");
             tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
         }
-        g.waitTimeout(&ticket.cond, .{ .duration = .{
+        waitPropTicketTimeout(self, g, &ticket, .{ .duration = .{
             .raw = .fromNanoseconds(tick_ns),
             .clock = .awake,
         } }) catch {};
@@ -1299,6 +1369,11 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
     const io = agent.engineIo();
     var n: usize = 0;
     const g = self.gil.?;
+    var settle: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
+    defer settle.deinit(prop_alloc);
+    g.lockPropWaiters();
+    var locked = true;
+    defer if (locked) g.unlockPropWaiters();
     for (g.prop_waiters.items) |raw| {
         const t: *PropTicket = @ptrCast(@alignCast(raw));
         if (n >= count) break;
@@ -1312,13 +1387,16 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
     while (i < g.prop_async.items.len and n < count) {
         const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
         if (t.obj == o and std.mem.eql(u8, t.key, key)) {
+            try settle.append(prop_alloc, t);
             _ = g.prop_async.orderedRemove(i);
-            settlePropAsync(self, t, "ok"); // settling-thread rule
             n += 1;
             continue;
         }
         i += 1;
     }
+    g.unlockPropWaiters();
+    locked = false;
+    for (settle.items) |t| settlePropAsync(self, t, "ok"); // settling-thread rule
     return Value.num(@floatFromInt(n));
 }
 

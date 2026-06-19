@@ -65,7 +65,7 @@ before acting on one.
 |---|---|---|---|---|
 | `t_current` | `src/jsthread.zig:47` | Threadlocal pointer to the current shared-realm `ThreadRecord`. | **per-thread** | Drives `Thread.current`, self-join detection, and per-thread identity. |
 | `Gil.tasks` | `src/gil.zig:28` | Per-realm run-loop task queue for `Lock.asyncHold` grant delivery. | **locked** | Enqueue, dequeue, and quiescence checks are protected by `Gil.api_lock`; backing is realm-arena owned. |
-| `Gil.prop_waiters` / `Gil.prop_async` | `src/gil.zig:31-34` | Per-realm property-mode `Atomics.wait` and `waitAsync` waiter queues. | **locked** | Protected by the owning context GIL and intentionally not process-global; independent `enable_threads` contexts cannot race or cross-notify each other. |
+| `Gil.prop_waiters` / `Gil.prop_async` / `Gil.prop_mutex` | `src/gil.zig:31-40` | Per-realm property-mode `Atomics.wait` and `waitAsync` waiter queues plus their table mutex. | **locked** | Protected by `Gil.prop_mutex`, not process-global; independent `enable_threads` contexts cannot race or cross-notify each other. Sync wait uses this mutex with its condition variable; async ticket settlement collects under the mutex and resolves promises after releasing it. |
 
 ## Engine: `src/c_api.zig`
 
@@ -160,7 +160,8 @@ RegExp is backed by the sibling zig-regex repo. Full scan of its `src/*.zig`:
 - `$262.agent` and typed-array waiter state are explicitly locked in
   `src/agent.zig`.
 - Shared-realm `Thread` state is either per-thread (`t_current`) or per-context
-  GIL-owned (`Gil.tasks`, `Gil.prop_waiters`, `Gil.prop_async`).
+  locked (`Gil.tasks` via `Gil.api_lock`; `Gil.prop_waiters` / `Gil.prop_async`
+  via `Gil.prop_mutex`).
 - Conformance-host and zig-regex entries remain documented so the audit can be
   rerun from one place.
 

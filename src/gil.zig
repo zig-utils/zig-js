@@ -33,6 +33,11 @@ pub const Gil = struct {
     /// Property-mode `Atomics.waitAsync` tickets for this realm. Entries are
     /// type-erased `*jsthread.PropAsyncTicket` and are page-allocator owned.
     prop_async: std.ArrayListUnmanaged(*anyopaque) = .empty,
+    /// Serializes the property-mode `Atomics.wait` / `notify` / `waitAsync`
+    /// waiter tables independently from the context GIL. Sync waits use this as
+    /// the condition-variable mutex, so notify cannot race enqueue/unlink once
+    /// `parallel_js` drops the execution-path GIL.
+    prop_mutex: std.Io.Mutex = .init,
     /// Per-realm Thread-id allocator: ids in [1, 0x7ffe], monotonically
     /// fresh (no reuse before a rebias lands), main = 0.
     next_thread_id: u32 = 1,
@@ -97,6 +102,15 @@ pub const Gil = struct {
     }
     pub fn unlockApi(g: *Gil) void {
         g.api_lock.unlock();
+    }
+
+    /// Lock/unlock the property-mode Atomics waiter table. No JS or promise
+    /// settlement runs while this mutex is held.
+    pub fn lockPropWaiters(g: *Gil) void {
+        g.prop_mutex.lockUncancelable(agent.engineIo());
+    }
+    pub fn unlockPropWaiters(g: *Gil) void {
+        g.prop_mutex.unlock(agent.engineIo());
     }
 
     fn spinLock(m: *std.atomic.Mutex) void {

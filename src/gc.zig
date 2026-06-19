@@ -509,6 +509,8 @@ pub const Binding = struct {
         for (ctx.active_interpreters.items) |machine| traceInterpreterRoots(machine, v);
         ctx.unlockActiveInterpreters();
         if (ctx.gil) |g| {
+            g.lockPropWaiters();
+            defer g.unlockPropWaiters();
             for (g.prop_async.items) |raw| {
                 const t: *jsthread.PropAsyncTicket = @ptrCast(@alignCast(raw));
                 v.mark(t.obj);

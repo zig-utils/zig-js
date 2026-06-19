@@ -101,7 +101,8 @@ the shared-realm GIL path. The narrower
 test-only execution-path GIL-removal slice: real shared-realm `Thread` workers
 running without the context GIL while contending one production
 `Atomics.Mutex` and while registering/delivering `Lock.asyncHold` grants through
-the realm task queue.
+the realm task queue, plus property-mode `Atomics.wait`/`notify` waiter-table
+contention guarded by `Gil.prop_mutex`.
 
 The runner models PR-249 command-line options with
 `Context.createWithTestingOptions` and `Context.TestingOptions`:
