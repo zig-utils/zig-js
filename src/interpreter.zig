@@ -18247,6 +18247,13 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 minute = @intCast(@divFloor(@mod(local_ns, 3_600_000_000_000), 60_000_000_000));
                 second = @intCast(@divFloor(@mod(local_ns, 60_000_000_000), 1_000_000_000));
                 frac_ms = @intCast(@divFloor(@mod(local_ns, 1_000_000_000), 1_000_000));
+            } else if (t.kind == .plain_month_day) {
+                const cal = calendarDateFromIso(t.calendar, t.year, t.month, t.day);
+                civ = .{ .y = cal.y, .m = cal.m, .d = cal.d };
+                hour24 = t.hour;
+                minute = t.minute;
+                second = t.second;
+                frac_ms = t.millisecond;
             } else {
                 civ = .{ .y = @as(i64, t.year), .m = t.month, .d = t.day };
                 hour24 = t.hour;
@@ -28379,7 +28386,7 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
         const dtf = (try self.newObject()).asObj();
         try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
         const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-        const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en-US";
+        const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
         try self.setProp(dtf, "\x00locale", Value.str(loc));
         if (t.kind == .zoned_date_time and args.len > 1 and !args[1].isUndefined()) {
             const raw = Value.obj(try self.toObject(args[1]));
@@ -28387,11 +28394,17 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
                 return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.toLocaleString does not accept a timeZone option");
         }
         var r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else Value.undef(), .any, .all);
+        const effective_calendar = blk: {
+            const ext = try dtfResolveLocaleExt(self, loc, r.calendar, r.hour_cycle, r.hour12, r.numbering_system);
+            break :blk ext.calendar;
+        };
+        if (t.kind == .plain_month_day or t.kind == .plain_year_month) {
+            if (r.time_style.len > 0)
+                return self.throwError("TypeError", "Temporal toLocaleString does not accept timeStyle");
+            if (!std.mem.eql(u8, t.calendar, effective_calendar))
+                return self.throwError("RangeError", "Temporal calendar does not match locale calendar");
+        }
         if (t.kind == .zoned_date_time) {
-            const effective_calendar = blk: {
-                const ext = try dtfResolveLocaleExt(self, loc, r.calendar, r.hour_cycle, r.hour12, r.numbering_system);
-                break :blk ext.calendar;
-            };
             if (!std.mem.eql(u8, t.calendar, "iso8601") and !std.mem.eql(u8, t.calendar, effective_calendar))
                 return self.throwError("RangeError", "Temporal.ZonedDateTime calendar does not match locale calendar");
             if (r.defaults_applied and r.time_zone_name.len == 0) r.time_zone_name = "short";
