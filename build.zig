@@ -126,7 +126,6 @@ pub fn build(b: *std.Build) void {
     });
     test262.root_module.addOptions("build_options", t262_options);
     const run_test262 = b.addRunArtifact(test262);
-    if (b.args) |args| run_test262.addArgs(args);
     const test262_step = b.step("test262", "Run the real test262 corpus and report pass rate");
     test262_step.dependOn(&run_test262.step);
 
@@ -142,7 +141,6 @@ pub fn build(b: *std.Build) void {
     });
     diag.root_module.addOptions("build_options", t262_options);
     const run_diag = b.addRunArtifact(diag);
-    if (b.args) |args| run_diag.addArgs(args);
     const diag_step = b.step("diag", "Throwaway parse-failure diagnostic");
     diag_step.dependOn(&run_diag.step);
 
