@@ -23802,12 +23802,12 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const a0 = if (args.len > 0) args[0] else Value.undef();
     // From an existing Duration: copy. From a property bag: read each component.
-    if (a0.isObject() and a0.asObj().temporal != null and a0.asObj().temporal.?.kind == .duration) {
+    if (a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint and a0.asObj().temporal != null and a0.asObj().temporal.?.kind == .duration) {
         const o = try makeTemporal(self, .duration, "\x00T.Duration");
         o.temporal.?.dur = a0.asObj().temporal.?.dur;
         return Value.obj(o);
     }
-    if (a0.isObject()) {
+    if (a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint) {
         const o = try makeTemporal(self, .duration, "\x00T.Duration");
         var any = false;
         var any_sign: f64 = 0;
@@ -23826,8 +23826,7 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
         if (!any) return self.throwError("TypeError", "Temporal.Duration.from: object has no duration properties");
         return Value.obj(o);
     }
-    // Any non-object argument is coerced to a string and parsed (a Symbol throws
-    // in ToString); undefined/null/number/etc. simply fail to parse → RangeError.
+    if (!a0.isString()) return self.throwError("TypeError", "Temporal.Duration.from requires a string or object");
     const s = try self.toStringV(a0);
     const o = try makeTemporal(self, .duration, "\x00T.Duration");
     o.temporal.?.dur = try parseDurationString(self, s);
@@ -24775,7 +24774,7 @@ fn parseDurationString(self: *Interpreter, s: []const u8) EvalError![10]f64 {
     if (!any) return self.throwError("RangeError", "duration must have at least one component");
     if (i != s.len) return self.throwError("RangeError", "trailing characters in duration");
     if (sign < 0) for (&out) |*v| {
-        v.* = -v.*;
+        if (v.* != 0) v.* = -v.*;
     };
     return out;
 }
