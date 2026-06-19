@@ -305,7 +305,9 @@ campaign:
   register under the condition mutex before releasing the associated `Lock`, so
   `notify` cannot miss the release+park transition.
 - property-mode `Atomics.wait` / `notify` use `Gil.prop_waiters` /
-  `Gil.prop_async` guarded by `Gil.prop_mutex`.
+  `Gil.prop_async` guarded by `Gil.prop_mutex`; wait and waitAsync revalidate
+  the property value under that mutex immediately before enqueueing, so a
+  racing store+notify cannot strand a waiter after the value already differs.
 - named property-mode Atomics load/store/exchange/compare-exchange/RMW hold
   `Object.property_lock` for the whole property step, so no-GIL RMW counters no
   longer lose updates.
@@ -364,9 +366,9 @@ mutex: **landed and TSan-clean for the focused real-`Thread` condition-waiter
 test**. (5) Broaden the execution-path GIL drop in `threadMain`/`evaluate` under
 `parallel_js`; the corpus runner now has `-Dthreads-parallel-js=true` so PR-249
 files can be probed under the same GIL-free mode instead of only via unit
-witnesses. The first full-allowlist probe is intentionally not a gate yet: it
-now gets past the named property-Atomics lost-increment blocker but still
-exposes a `smoke.js` liveness timeout plus GIL-specific async-condition timing in
+witnesses. The first full-allowlist probe is intentionally not a gate yet:
+`smoke.js` now passes under `parallel_js`, and the remaining known promoted-file
+blocker is the GIL-specific async-condition ordering/counting expectation in
 `api/condition-async-wait.js`. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged

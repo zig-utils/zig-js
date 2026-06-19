@@ -176,11 +176,11 @@ zig build threads-test -Dthreads-parallel-js=true
 ```
 
 It currently exposes real Layer-C blockers rather than serving as a required
-green gate. Named property-mode Atomics RMW/CAS/load/store and typed-array
-`Atomics.wait` now have focused green `parallel_js` probes; full `smoke.js`
-still exposes a liveness blocker, and `api/condition-async-wait.js` still pins
-GIL-specific async-condition timing. Keep those visible until the corresponding
-engine semantics are fixed.
+green gate. Named property-mode Atomics RMW/CAS/load/store, typed-array
+`Atomics.wait`, property wait lost-wakeup coverage, and `smoke.js` now have
+focused green `parallel_js` probes; `api/condition-async-wait.js` still pins a
+GIL-specific async-condition ordering/counting assumption. Keep it visible until
+the corresponding engine semantics are fixed.
 
 ## Sweep Runs
 
