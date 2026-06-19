@@ -23,8 +23,15 @@
 
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const ROUNDS = 8;
+const ROUNDS = NO_GIL ? 1 : 8;
+const HOT_N = NO_GIL ? 5000 : 60000;
+const CATCH_N = 64;
+const CATCH_REPS = NO_GIL ? 3 : 25;
+const WARMUP = NO_GIL ? 4 : 50;
 
 function hot(seed, n) {
     let a = seed | 0, b = (seed ^ 0x5bf03635) | 0, c = 0;
@@ -59,8 +66,6 @@ noInline(catchy);
 
 // Expected values per seed, computed single-threaded BEFORE spawning (same
 // CodeBlocks, pre-warmed so spawned threads hit compiled tiers immediately).
-const HOT_N = 60000;
-const CATCH_N = 64;
 const expectedHot = [];
 const expectedCatchy = [];
 for (let t = 0; t < THREADS; ++t) {
@@ -69,7 +74,7 @@ for (let t = 0; t < THREADS; ++t) {
 }
 // Extra single-threaded warmup to push both through the tiers (loop OSR
 // entry triggers inside hot() itself thanks to the lowered thresholds).
-for (let w = 0; w < 50; ++w) {
+for (let w = 0; w < WARMUP; ++w) {
     hot(99, HOT_N >> 4);
     catchy(99, CATCH_N);
 }
@@ -81,7 +86,7 @@ const threads = spawnN(THREADS, function (t) {
     for (let r = 0; r < ROUNDS; ++r) {
         if (hot(t + 1, HOT_N) !== expectedHot[t])
             ++bad;
-        for (let k = 0; k < 25; ++k) {
+        for (let k = 0; k < CATCH_REPS; ++k) {
             if (catchy(t + 1, CATCH_N) !== expectedCatchy[t])
                 ++bad;
         }

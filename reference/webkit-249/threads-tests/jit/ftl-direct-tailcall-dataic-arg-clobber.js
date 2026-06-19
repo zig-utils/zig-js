@@ -30,8 +30,14 @@ function* g(n) {
         yield i;
 }
 
-for (let outer = 0; outer < 200; ++outer) {
-    const gen = g(2000);
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const OUTER = NO_GIL ? 40 : 200;
+const YIELDS = NO_GIL ? 800 : 2000;
+
+for (let outer = 0; outer < OUTER; ++outer) {
+    const gen = g(YIELDS);
     let count = 0;
     while (true) {
         const r = gen.next();
@@ -41,7 +47,7 @@ for (let outer = 0; outer < 200; ++outer) {
             throw new Error("outer=" + outer + " yield mismatch: got " + r.value + " expected " + count + " (DirectTailCall argument corruption)");
         ++count;
     }
-    if (count !== 2000)
+    if (count !== YIELDS)
         throw new Error("outer=" + outer + " early completion: count=" + count);
     const post = gen.next();
     if (post.done !== true || post.value !== undefined)

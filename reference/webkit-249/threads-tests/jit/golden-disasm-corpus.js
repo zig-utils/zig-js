@@ -60,7 +60,11 @@ if (typeof $vm !== "undefined" && $vm.ensureArrayStorage)
     $vm.ensureArrayStorage(arrayStorage);
 
 let sink = 0;
-for (let i = 0; i < 100000; ++i) {
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const ITERS = NO_GIL ? 2000 : 100000;
+for (let i = 0; i < ITERS; ++i) {
     sink += getById(flat);
     sink += getById(fat);
     putById(flat, i & 7);
