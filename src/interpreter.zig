@@ -24921,7 +24921,7 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
                 .day_of_week => Value.num(@floatFromInt(isoDayOfWeek(y, t.month, t.day))),
                 .day_of_year => Value.num(@floatFromInt(tDaysFromCivil(y, t.month, t.day) - tDaysFromCivil(y, 1, 1) + 1)),
                 .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, t.month))),
-                .days_in_year => Value.num(@floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365))),
+                .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .days_in_week => Value.num(7),
                 .week_of_year => Value.num(@floatFromInt(isoWeekOfYear(y, t.month, t.day).week)),
@@ -25035,6 +25035,44 @@ fn calMonthsInYear(cal: []const u8, year: i64) u8 {
     if (std.mem.eql(u8, cal, "hebrew") or std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
         return if (calInLeapYear(cal, year)) 13 else 12;
     return 12;
+}
+
+fn hebrewElapsedDays(year: i64) i64 {
+    const y = year - 1;
+    const cycle = @divFloor(y, 19);
+    const cycle_year = @mod(y, 19);
+    const months = 235 * cycle + 12 * cycle_year + @divFloor(7 * cycle_year + 1, 19);
+    const parts_elapsed = 204 + 793 * @mod(months, 1080);
+    const hours_elapsed = 5 + 12 * months + 793 * @divFloor(months, 1080) + @divFloor(parts_elapsed, 1080);
+    var day = 1 + 29 * months + @divFloor(hours_elapsed, 24);
+    const parts = 1080 * @mod(hours_elapsed, 24) + @mod(parts_elapsed, 1080);
+    if (parts >= 19440 or (!calInLeapYear("hebrew", year) and @mod(day, 7) == 2 and parts >= 9924) or (calInLeapYear("hebrew", year - 1) and @mod(day, 7) == 1 and parts >= 16789))
+        day += 1;
+    const dow = @mod(day, 7);
+    if (dow == 0 or dow == 3 or dow == 5) day += 1;
+    return day;
+}
+
+fn chineseLikeDaysInYear(cal: []const u8, year: i64) u16 {
+    const common_355_chinese = [_]i64{ 1970, 1978, 1980, 1988, 1989, 1994, 1997, 2003, 2013, 2016, 2022, 2029, 2032, 2040, 2041 };
+    const common_355_dangi = [_]i64{ 1970, 1978, 1980, 1989, 1994, 1996, 2003, 2013, 2016, 2022, 2026, 2029, 2032, 2040, 2041 };
+    const leap_383_chinese = [_]i64{1993};
+    const leap_383_dangi = [_]i64{ 1993, 2028 };
+    const leap_385_chinese = [_]i64{2006};
+    const leap_385_dangi = [_]i64{ 1987, 2006 };
+    const dangi = std.mem.eql(u8, cal, "dangi");
+    if (intIn(i64, year, if (dangi) &leap_383_dangi else &leap_383_chinese)) return 383;
+    if (intIn(i64, year, if (dangi) &leap_385_dangi else &leap_385_chinese)) return 385;
+    if (intIn(i64, year, if (dangi) &common_355_dangi else &common_355_chinese)) return 355;
+    return if (calInLeapYear(cal, year)) 384 else 354;
+}
+
+fn calDaysInYear(cal: []const u8, year: i64) u16 {
+    if (std.mem.eql(u8, cal, "hebrew")) return @intCast(hebrewElapsedDays(year + 1) - hebrewElapsedDays(year));
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) return chineseLikeDaysInYear(cal, year);
+    if (std.mem.eql(u8, cal, "islamic") or std.mem.eql(u8, cal, "islamic-civil") or std.mem.eql(u8, cal, "islamic-tbla") or std.mem.eql(u8, cal, "islamic-rgsa") or std.mem.eql(u8, cal, "islamic-umalqura"))
+        return if (calInLeapYear(cal, year)) 355 else 354;
+    return if (calInLeapYear(cal, year)) 366 else 365;
 }
 
 /// Whether a date-bearing Temporal value uses the Gregorian calendar (which, for
@@ -26072,7 +26110,7 @@ fn temporalYearMonthGetter(comptime f: YearMonthField) value.NativeFn {
                 .year => Value.num(@floatFromInt(calDisplayYear(t.calendar, t.year))),
                 .month => Value.num(@floatFromInt(t.month)),
                 .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, t.month))),
-                .days_in_year => Value.num(@floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365))),
+                .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, calDisplayYear(t.calendar, y))),
             };
@@ -28195,7 +28233,7 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
                 .day_of_week => Value.num(@floatFromInt(isoDayOfWeek(y, l.month, l.day))),
                 .day_of_year => Value.num(@floatFromInt(tDaysFromCivil(y, l.month, l.day) - tDaysFromCivil(y, 1, 1) + 1)),
                 .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, l.month))),
-                .days_in_year => Value.num(@floatFromInt(@as(u16, if (isoLeap(y)) 366 else 365))),
+                .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .days_in_week => Value.num(7),
                 .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, calDisplayYear(t.calendar, y))),
