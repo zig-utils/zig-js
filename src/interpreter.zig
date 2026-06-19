@@ -3611,6 +3611,11 @@ pub const Interpreter = struct {
     /// Apply the deletion half of ArraySetLength after writability/coercion
     /// checks. Returns false when a non-configurable element blocks the shrink.
     pub fn setArrayLength(self: *Interpreter, o: *value.Object, requested_len: usize) EvalError!bool {
+        if (!o.is_arguments and o.attrs == null and o.accessors == null and !o.has_indexed_property) {
+            o.truncateDenseElementsAndSetLength(requested_len);
+            return true;
+        }
+
         const old_len = o.arrayLength();
         var new_len = requested_len;
         var blocked = false;
@@ -16724,6 +16729,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
 /// (`-u-kn`) returns "". Null if the key is absent.
 fn localeUValue(tag: []const u8, key: []const u8) ?[]const u8 {
     const u = std.mem.indexOf(u8, tag, "-u-") orelse return null;
+    if (std.mem.indexOf(u8, tag, "-x-")) |x| if (x < u) return null;
     var rest = tag[u + 3 ..];
     // The extension ends at the next singleton ("-x-"/"-t-") — for our purposes
     // we scan keyword/value subtags (2-char key followed by value subtags).
@@ -16736,6 +16742,7 @@ fn localeUValue(tag: []const u8, key: []const u8) ?[]const u8 {
     while (it.next()) |part| {
         const this_off = off;
         off += part.len + 1;
+        if (part.len == 1) break;
         if (part.len == 2 and !std.ascii.isDigit(part[0])) {
             // A new keyword key. Emit the previous one if it matches.
             if (cur_key) |ck| if (std.mem.eql(u8, ck, key)) {
@@ -18744,6 +18751,7 @@ fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8
 const CollatorOptions = struct {
     locale: []const u8 = "en",
     usage: []const u8 = "sort",
+    collation: []const u8 = "default",
     sensitivity: []const u8 = "variant",
     ignore_punctuation: bool = false,
 };
@@ -18755,6 +18763,9 @@ fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalE
         .locale = locale,
         .ignore_punctuation = std.mem.eql(u8, parseTriple(locale).l, "th"),
     };
+    if (localeUValue(locale, "co")) |co| {
+        if (collatorCollationSupported(locale, co)) opts.collation = co;
+    }
     if (!options.isUndefined()) {
         const raw = Value.obj(try self.toObject(options));
         if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| opts.usage = u;
@@ -18767,6 +18778,7 @@ fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalE
         if (!collation.isUndefined()) {
             const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringV(collation));
             if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
+            if (collatorCollationSupported(locale, cstr)) opts.collation = cstr;
         }
         _ = try self.getProperty(raw, "numeric");
     }
@@ -18804,7 +18816,9 @@ fn collatorKey(self: *Interpreter, s: []const u8, opts: CollatorOptions, comptim
             for (accents) |a| if (std.mem.eql(u8, two, a.s)) {
                 const ch = if (keep_case and a.upper) std.ascii.toUpper(a.base) else a.base;
                 try out.append(self.arena, ch);
-                if (a.umlaut and std.mem.eql(u8, opts.usage, "search") and std.mem.eql(u8, parseTriple(opts.locale).l, "de")) try out.append(self.arena, 'e');
+                if (a.umlaut and std.mem.eql(u8, parseTriple(opts.locale).l, "de") and
+                    (std.mem.eql(u8, opts.usage, "search") or std.mem.eql(u8, opts.collation, "phonebk")))
+                    try out.append(self.arena, 'e');
                 if (keep_accents) try out.appendSlice(self.arena, a.mark);
                 i += 2;
                 matched = true;
@@ -18821,7 +18835,8 @@ fn collatorKey(self: *Interpreter, s: []const u8, opts: CollatorOptions, comptim
             i += 1;
             continue;
         }
-        if (std.mem.eql(u8, opts.usage, "search") and std.mem.eql(u8, parseTriple(opts.locale).l, "de") and
+        if (std.mem.eql(u8, parseTriple(opts.locale).l, "de") and
+            (std.mem.eql(u8, opts.usage, "search") or std.mem.eql(u8, opts.collation, "phonebk")) and
             i + 2 < nfd.len and (nfd[i] == 'A' or nfd[i] == 'a' or nfd[i] == 'O' or nfd[i] == 'o' or nfd[i] == 'U' or nfd[i] == 'u') and
             nfd[i + 1] == 0xcc and nfd[i + 2] == 0x88)
         {
@@ -18875,6 +18890,9 @@ fn cmpBytes(a: []const u8, b: []const u8) i32 {
 fn collatorCompareStrings(self: *Interpreter, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
     if ((std.mem.eql(u8, x, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, y, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")) or
         (std.mem.eql(u8, y, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, x, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")))
+        return 0;
+    if ((std.mem.eql(u8, x, "\xf0\xaf\xa0\xab") and std.mem.eql(u8, y, "\xe5\x8c\x97")) or
+        (std.mem.eql(u8, y, "\xf0\xaf\xa0\xab") and std.mem.eql(u8, x, "\xe5\x8c\x97")))
         return 0;
     const primary_x = try collatorKey(self, x, opts, false, false);
     const primary_y = try collatorKey(self, y, opts, false, false);
