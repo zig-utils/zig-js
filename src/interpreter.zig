@@ -25584,8 +25584,12 @@ fn bagIsoYear(self: *Interpreter, bag: Value, cal: []const u8) EvalError!?i64 {
     // fields; for iso8601 (and ids that collapse to it) era/eraYear are ignored,
     // exactly as the spec's iso8601 field list omits them.
     const has_era = calEraOf(cal, 0, 1, 1).era != null;
-    const ev = if (has_era) try self.getProperty(bag, "era") else Value.undef();
-    const eyv = if (has_era) try self.getProperty(bag, "eraYear") else Value.undef();
+    const raw_ev = try self.getProperty(bag, "era");
+    const raw_eyv = try self.getProperty(bag, "eraYear");
+    if (!has_era and !std.mem.eql(u8, cal, "iso8601") and (!raw_ev.isUndefined() or !raw_eyv.isUndefined()))
+        return self.throwError("TypeError", "era fields are invalid for this calendar");
+    const ev = if (has_era) raw_ev else Value.undef();
+    const eyv = if (has_era) raw_eyv else Value.undef();
     var from_era: ?i64 = null;
     if (!ev.isUndefined() or !eyv.isUndefined()) {
         if (ev.isUndefined() or eyv.isUndefined())
