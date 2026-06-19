@@ -18263,6 +18263,17 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             // No explicit hour12/hourCycle: honor the locale's -u-hc keyword.
             if (localeUValue(lv.asStr(), "hc")) |lhc| hour12 = std.mem.eql(u8, lhc, "h11") or std.mem.eql(u8, lhc, "h12");
         };
+        if (ov.asObj().getOwn("\x00temporalDefaultHour12")) |tdh| {
+            if (tdh.toBoolean()) hour12 = true;
+        }
+        if (temporal_kind != null) if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
+            const ls = lv.asStr();
+            if ((ls.len == 2 and asciiEqlIgnoreCase(ls, "en")) or
+                (ls.len > 3 and asciiEqlIgnoreCase(ls[0..2], "en") and ls[2] == '-'))
+            {
+                hour12 = true;
+            }
+        };
         // dateStyle/timeStyle expand to a representative set of components (an
         // en approximation; the localized patterns/time-zone parts are not
         // modeled). Both can't combine with explicit components (enforced at
@@ -25230,6 +25241,11 @@ fn calendarDateToIso(cal: []const u8, year: i64, month: u8, day: u8) Civil {
     return .{ .y = year, .m = month, .d = day };
 }
 
+fn calendarEpochDay(cal: []const u8, year: i64, month: u8, day: u8) i64 {
+    const iso = calendarDateToIso(cal, year, month, day);
+    return tDaysFromCivil(iso.y, iso.m, iso.d);
+}
+
 fn chineseLikeLeapYear(year: i64) bool {
     const leap_years = [_]i64{
         1971, 1974, 1976, 1979, 1982, 1984, 1987, 1990, 1993, 1995,
@@ -27789,7 +27805,7 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
 /// PlainDateTime as nanoseconds since the ISO epoch (treating it as UTC), for
 /// exact (day-or-smaller) differences and rounding.
 fn dateTimeToNs(t: *const value.TemporalData) i128 {
-    return @as(i128, tDaysFromCivil(t.year, t.month, t.day)) * 86_400_000_000_000 + timeToNs(t);
+    return @as(i128, calendarEpochDay(t.calendar, t.year, t.month, t.day)) * 86_400_000_000_000 + timeToNs(t);
 }
 
 fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
@@ -27810,7 +27826,7 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             // Calendar largestUnit: diff the dates (years/months), then the time.
             const earlier = if (dateTimeToNs(a) <= dateTimeToNs(b)) a else b;
             const later = if (dateTimeToNs(a) <= dateTimeToNs(b)) b else a;
-            var dd = calendarDateDiff(earlier.year, earlier.month, earlier.day, later.year, later.month, later.day, opts.largest);
+            var dd = calendarDateDiff(earlier.calendar, earlier.year, earlier.month, earlier.day, later.year, later.month, later.day, opts.largest);
             // Time component (may borrow a day).
             var time_diff = timeToNs(later) - timeToNs(earlier);
             if (time_diff < 0) {
@@ -27836,10 +27852,10 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
 
 /// Difference between two ISO dates (earlier→later) as a [10]f64 duration using
 /// units up to `largest` (year/month/week/day).
-fn calendarDateDiff(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: TUnit) [10]f64 {
+fn calendarDateDiff(cal: []const u8, y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: TUnit) [10]f64 {
     var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     if (largest == .day or largest == .week) {
-        var days = tDaysFromCivil(y2, m2, d2) - tDaysFromCivil(y1, m1, d1);
+        var days = calendarEpochDay(cal, y2, m2, d2) - calendarEpochDay(cal, y1, m1, d1);
         if (largest == .week) {
             out[2] = @floatFromInt(@divTrunc(days, 7));
             days = @rem(days, 7);
@@ -27848,19 +27864,23 @@ fn calendarDateDiff(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: T
         return out;
     }
     // year/month: the largest whole-month span that doesn't overshoot, then days.
-    const years0: i64 = y2 - y1;
-    const months0: i64 = @as(i64, m2) - @as(i64, m1);
-    var total_months = years0 * 12 + months0;
+    var total_months: i64 = 0;
     while (true) {
-        const inter = addMonthsClamp(y1, m1, d1, total_months);
-        if (tDaysFromCivil(inter.y, inter.m, inter.d) > tDaysFromCivil(y2, m2, d2)) {
-            total_months -= 1;
+        const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months + 1);
+        if (calendarEpochDay(cal, inter.y, inter.m, inter.d) <= calendarEpochDay(cal, y2, m2, d2)) {
+            total_months += 1;
         } else break;
     }
-    const inter = addMonthsClamp(y1, m1, d1, total_months);
-    const day_rem = tDaysFromCivil(y2, m2, d2) - tDaysFromCivil(inter.y, inter.m, inter.d);
-    const years = @divTrunc(total_months, 12);
-    const months = @rem(total_months, 12);
+    const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months);
+    const day_rem = calendarEpochDay(cal, y2, m2, d2) - calendarEpochDay(cal, inter.y, inter.m, inter.d);
+    var years: i64 = 0;
+    var months = total_months;
+    var split_year = y1;
+    while (months >= calMonthsInYear(cal, calDisplayYear(cal, split_year))) {
+        months -= calMonthsInYear(cal, calDisplayYear(cal, split_year));
+        years += 1;
+        split_year += 1;
+    }
     if (largest == .month) {
         out[1] = @floatFromInt(total_months);
     } else {
@@ -27871,15 +27891,12 @@ fn calendarDateDiff(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: T
     return out;
 }
 
-fn addMonthsClamp(y0: i64, m0: u8, d0: u8, add_months: i64) Civil {
-    var total = (y0 * 12 + (@as(i64, m0) - 1)) + add_months;
-    const ny = @divFloor(total, 12);
-    total = @mod(total, 12);
-    const nm: u8 = @intCast(total + 1);
+fn addCalendarMonthsClamp(cal: []const u8, y0: i64, m0: u8, d0: u8, add_months: i64) Civil {
+    const ym = balanceCalendarYearMonth(cal, y0, m0, add_months);
     var nd: u8 = d0;
-    const dim = isoDaysInMonth(ny, nm);
+    const dim = calDaysInMonth(cal, calDisplayYear(cal, ym.y), ym.m);
     if (nd > dim) nd = dim;
-    return .{ .y = ny, .m = nm, .d = nd };
+    return .{ .y = ym.y, .m = ym.m, .d = nd };
 }
 
 fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -28065,10 +28082,10 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             const b = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), true);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 }, false);
             const lg = if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.day)) TUnit.day else opts.largest;
-            const fwd = tDaysFromCivil(t.year, t.month, t.day) <= tDaysFromCivil(b.y, b.m, b.d);
+            const fwd = calendarEpochDay(t.calendar, t.year, t.month, t.day) <= calendarEpochDay(t.calendar, b.y, b.m, b.d);
             const e = if (fwd) IsoYMD{ .y = t.year, .m = t.month, .d = t.day } else b;
             const l = if (fwd) b else IsoYMD{ .y = t.year, .m = t.month, .d = t.day };
-            var dd = calendarDateDiff(e.y, e.m, e.d, l.y, l.m, l.d, lg);
+            var dd = calendarDateDiff(t.calendar, e.y, e.m, e.d, l.y, l.m, l.d, lg);
             const s2 = sign * (if (fwd) @as(f64, 1) else -1);
             // Round the (positive) magnitude to smallestUnit relative to the
             // earlier date when a calendar smallestUnit / increment is requested;
@@ -28122,25 +28139,42 @@ fn temporalValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     return self.throwError("TypeError", "Called valueOf on a Temporal type; use compare() / equals() / a string conversion instead");
 }
 
-/// `Temporal.<Type>.prototype.toLocaleString(locales, options)` — without an Intl
-/// Temporal data table this falls back to the default ISO `toString`. The
-/// locale/options arguments are deliberately ignored (not forwarded to
-/// `toString`, whose option set differs), and the receiver is brand-checked.
+/// `Temporal.<Type>.prototype.toLocaleString(locales, options)` via the local
+/// Intl.DateTimeFormat implementation for Temporal date/time-like values.
 fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "toLocaleString called on a non-Temporal value");
+    if (this.asObj().temporal.?.kind != .duration) {
+        const dtf = (try self.newObject()).asObj();
+        try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
+        const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+        const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en-US";
+        try self.setProp(dtf, "\x00locale", Value.str(loc));
+        var r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else Value.undef(), .any, .all);
+        var explicit_hour_cycle = false;
+        if (args.len > 1 and !args[1].isUndefined()) {
+            const raw = Value.obj(try self.toObject(args[1]));
+            explicit_hour_cycle = !(try self.getProperty(raw, "hour12")).isUndefined() or !(try self.getProperty(raw, "hourCycle")).isUndefined();
+        }
+        const requested_english = args.len > 0 and args[0].isString() and (asciiEqlIgnoreCase(args[0].asStr(), "en") or
+            (args[0].asStr().len > 3 and asciiEqlIgnoreCase(args[0].asStr()[0..2], "en") and args[0].asStr()[2] == '-'));
+        const english_locale = requested_english or (loc.len == 2 and asciiEqlIgnoreCase(loc, "en")) or
+            (loc.len > 3 and asciiEqlIgnoreCase(loc[0..2], "en") and loc[2] == '-');
+        const temporal_default_time = !explicit_hour_cycle and english_locale and (r.hour.len > 0 or r.time_style.len > 0);
+        if (temporal_default_time) {
+            r.hour12 = true;
+            r.hour_cycle = "h12";
+        }
+        try dtfStoreOptions(self, dtf, r);
+        if (temporal_default_time) if (dtf.getOwn("\x00opts")) |ov| if (ov.isObject()) {
+            try self.setProp(ov.asObj(), "hour12", Value.boolVal(true));
+            try self.setProp(ov.asObj(), "hourCycle", Value.str("h12"));
+            try self.setProp(ov.asObj(), "\x00temporalDefaultHour12", Value.boolVal(true));
+        };
+        return try intlDateTimeFormatFn(@ptrCast(self), Value.obj(dtf), &.{this});
+    }
     const none: []const Value = &.{};
-    return switch (this.asObj().temporal.?.kind) {
-        .plain_date => temporalPlainDateToStringFn(ctx, this, none),
-        .plain_time => temporalPlainTimeToStringFn(ctx, this, none),
-        .plain_date_time => temporalPlainDateTimeToStringFn(ctx, this, none),
-        .plain_year_month => temporalYearMonthToStringFn(ctx, this, none),
-        .plain_month_day => temporalMonthDayToStringFn(ctx, this, none),
-        .instant => temporalInstantToStringFn(ctx, this, none),
-        .zoned_date_time => temporalZdtToStringFn(ctx, this, none),
-        .duration => temporalDurationToStringFn(ctx, this, none),
-    };
+    return temporalDurationToStringFn(ctx, this, none);
 }
 
 /// ToTemporalCalendarSlotValue, restricted to the only supported calendar
@@ -28779,6 +28813,21 @@ fn zdtMake(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i
     return Value.obj(o);
 }
 
+fn zdtMakeWithCalendar(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i64, calendar: []const u8) EvalError!Value {
+    const v = try zdtMake(self, epoch_ns, tz_name, tz_offset);
+    const t = v.asObj().temporal.?;
+    const local = epoch_ns + tz_offset;
+    const days = @divFloor(local, 86_400_000_000_000);
+    const iso = tCivilFromDays(@intCast(days));
+    const cd = calendarDateFromIso(calendar, iso.y, iso.m, iso.d);
+    t.year = @intCast(cd.y);
+    t.month = cd.m;
+    t.day = cd.d;
+    t.calendar = calendar;
+    nsToTime(t, local);
+    return v;
+}
+
 fn temporalZdtToInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -28800,6 +28849,7 @@ fn zdtLocalToTemporal(self: *Interpreter, this: Value, kind: value.TemporalData.
     o.temporal.?.millisecond = l.millisecond;
     o.temporal.?.microsecond = l.microsecond;
     o.temporal.?.nanosecond = l.nanosecond;
+    o.temporal.?.calendar = l.calendar;
     return Value.obj(o);
 }
 
@@ -28861,7 +28911,7 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
             } else {
                 epoch += @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
             }
-            return zdtMake(self, epoch, t.tz_name, t.tz_offset_ns);
+            return zdtMakeWithCalendar(self, epoch, t.tz_name, t.tz_offset_ns, t.calendar);
         }
     }.call;
 }
@@ -28884,7 +28934,7 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             const fwd = dateTimeToNs(&a) <= dateTimeToNs(&b);
             const e = if (fwd) a else b;
             const l = if (fwd) b else a;
-            var dd = calendarDateDiff(e.year, e.month, e.day, l.year, l.month, l.day, opts.largest);
+            var dd = calendarDateDiff(e.calendar, e.year, e.month, e.day, l.year, l.month, l.day, opts.largest);
             var time_diff = timeToNs(&l) - timeToNs(&e);
             if (time_diff < 0) {
                 time_diff += 86_400_000_000_000;
