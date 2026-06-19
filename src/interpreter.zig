@@ -23322,7 +23322,8 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod };
     }
     if (rv.isObject()) {
-        _ = try self.getProperty(rv, "calendar");
+        const cv = try self.getProperty(rv, "calendar");
+        if (!cv.isUndefined()) try validateRelativeCalendar(self, cv);
         var y: ?f64 = null;
         var m: ?f64 = null;
         var d: ?f64 = null;
@@ -23394,6 +23395,15 @@ fn relativeTimeField(self: *Interpreter, v: Value, name: []const u8, max: f64) E
 fn relativeTimeZoneField(self: *Interpreter, v: Value) EvalError!TimeZone {
     if (!v.isString()) return self.throwError("TypeError", "invalid timeZone");
     return parseTimeZone(self, v.asStr());
+}
+
+fn validateRelativeCalendar(self: *Interpreter, v: Value) EvalError!void {
+    if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint and v.asObj().temporal != null) {
+        _ = v.asObj().temporal.?.calendar;
+        return;
+    }
+    if (!v.isString()) return self.throwError("TypeError", "calendar is not a valid calendar");
+    _ = try toCalendarId(self, v);
 }
 
 fn isFixedTimeZone(tz: TimeZone) bool {
