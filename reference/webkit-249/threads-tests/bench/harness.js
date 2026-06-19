@@ -14,12 +14,29 @@
 // which is validated on every iteration, per JSTests/microbenchmarks
 // convention (throw on bad result).
 
+function benchNoThreadGIL()
+{
+    return typeof $vm !== "undefined"
+        && typeof $vm.useThreadGIL === "function"
+        && $vm.useThreadGIL() === false;
+}
+
+function benchIterations(normalIterations, noThreadGILIterations)
+{
+    return benchNoThreadGIL() ? noThreadGILIterations : normalIterations;
+}
+
 function reportBench(name, fn, expected, warmupIterations, measuredIterations)
 {
     if (warmupIterations === undefined)
         warmupIterations = 20;
     if (measuredIterations === undefined)
         measuredIterations = 50;
+
+    if (benchNoThreadGIL()) {
+        warmupIterations = Math.min(warmupIterations, 2);
+        measuredIterations = Math.min(measuredIterations, 2);
+    }
 
     // Warm up: let the LLInt -> Baseline -> DFG -> FTL pipeline settle.
     for (var i = 0; i < warmupIterations; ++i) {

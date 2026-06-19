@@ -23,7 +23,7 @@
 // bench-gates.sh records both configs; the {flag-on post-share} /
 // {flag-on pre-share} ratio is the §4.3/L6 revival trigger input.
 
-const PER_ITERATION = 20000;
+const PER_ITERATION = benchIterations(20000, 1000);
 
 function Point(i) {
     // 8 transitions per construction: enough to leave inline capacity and

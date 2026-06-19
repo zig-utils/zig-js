@@ -6,6 +6,7 @@
 // no DCAS). This bench regresses if the store fast path grows.
 
 (function() {
+    var iterations = benchIterations(1000000, 25000);
     function make(seed) {
         var o = {};
         o.p00 = seed + 0;
@@ -31,7 +32,7 @@
     noInline(make);
 
     function run() {
-        for (var i = 0; i < 1000000; ++i) {
+        for (var i = 0; i < iterations; ++i) {
             o.p08 = i;
             o.p09 = i + 1;
             o.p10 = i + 2;
@@ -46,5 +47,5 @@
     noInline(run);
 
     // After the last iteration (i = 999999): sum = 8*999999 + (0+1+...+7).
-    reportBench("flat-butterfly-write", run, 8 * 999999 + 28);
+    reportBench("flat-butterfly-write", run, 8 * (iterations - 1) + 28);
 })();

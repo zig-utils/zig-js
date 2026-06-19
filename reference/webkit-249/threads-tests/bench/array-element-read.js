@@ -6,13 +6,14 @@
 // no unmasking arithmetic when watchpoints hold).
 
 (function() {
+    var iterations = benchIterations(2000000, 50000);
     var array = new Array(1024);
     for (var i = 0; i < array.length; ++i)
         array[i] = i & 7;
 
     function run() {
         var sum = 0;
-        for (var i = 0; i < 2000000; ++i)
+        for (var i = 0; i < iterations; ++i)
             sum += array[i & 1023];
         return sum;
     }
@@ -20,7 +21,7 @@
 
     // i & 1023 sweeps 0..1023 uniformly: 2000000/1024 = 1953.125 sweeps.
     var expected = 0;
-    for (var i = 0; i < 2000000; ++i)
+    for (var i = 0; i < iterations; ++i)
         expected += i & 7;
 
     reportBench("array-element-read", run, expected);

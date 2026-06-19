@@ -7,6 +7,7 @@
 // loads pick up extra masking/branching.
 
 (function() {
+    var iterations = benchIterations(1000000, 25000);
     // Force properties out of line: more named properties than inline
     // capacity (object literals get 6 inline slots by default; transitions
     // beyond capacity spill to the butterfly).
@@ -36,12 +37,12 @@
 
     function run() {
         var sum = 0;
-        for (var i = 0; i < 1000000; ++i)
+        for (var i = 0; i < iterations; ++i)
             sum += o.p08 + o.p09 + o.p10 + o.p11 + o.p12 + o.p13 + o.p14 + o.p15;
         return sum;
     }
     noInline(run);
 
     // p08..p15 hold seed+8 .. seed+15 with seed=1 => 9..16, sum per iteration = 100.
-    reportBench("flat-butterfly-read", run, 100000000);
+    reportBench("flat-butterfly-read", run, iterations * 100);
 })();

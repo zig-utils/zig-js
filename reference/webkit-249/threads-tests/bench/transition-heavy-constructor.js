@@ -9,6 +9,7 @@
 // ~7x; the gate holds it to <=1%.
 
 (function() {
+    var iterations = benchIterations(100000, 5000);
     function make(seed) {
         var o = {};
         o.a = seed;
@@ -29,7 +30,7 @@
 
     function run() {
         var sum = 0;
-        for (var i = 0; i < 100000; ++i) {
+        for (var i = 0; i < iterations; ++i) {
             var o = make(i & 0xff);
             sum += o.a + o.l;
         }
@@ -39,7 +40,7 @@
 
     // Per iteration: seed + (seed + 11) where seed = i & 0xff.
     var expected = 0;
-    for (var i = 0; i < 100000; ++i)
+    for (var i = 0; i < iterations; ++i)
         expected += 2 * (i & 0xff) + 11;
 
     // Protocol must match Tools/threads/baseline.json: the 54.918ms baseline

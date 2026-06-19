@@ -6,6 +6,7 @@
 // into the cell access path itself.
 
 (function() {
+    var iterations = benchIterations(2000000, 50000);
     function Point(x, y, z) {
         this.x = x;
         this.y = y;
@@ -16,11 +17,11 @@
 
     function run() {
         var sum = 0;
-        for (var i = 0; i < 2000000; ++i)
+        for (var i = 0; i < iterations; ++i)
             sum += p.x + p.y + p.z;
         return sum;
     }
     noInline(run);
 
-    reportBench("inline-property-read", run, 2000000 * 15);
+    reportBench("inline-property-read", run, iterations * 15);
 })();

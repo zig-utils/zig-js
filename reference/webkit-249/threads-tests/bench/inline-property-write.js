@@ -5,6 +5,7 @@
 // under the threads object model.
 
 (function() {
+    var iterations = benchIterations(2000000, 50000);
     function Point(x, y, z) {
         this.x = x;
         this.y = y;
@@ -14,7 +15,7 @@
     var p = new Point(0, 0, 0);
 
     function run() {
-        for (var i = 0; i < 2000000; ++i) {
+        for (var i = 0; i < iterations; ++i) {
             p.x = i;
             p.y = i + 1;
             p.z = i + 2;
@@ -24,5 +25,5 @@
     noInline(run);
 
     // After the last iteration (i = 1999999): 3*1999999 + 3.
-    reportBench("inline-property-write", run, 3 * 1999999 + 3);
+    reportBench("inline-property-write", run, 3 * (iterations - 1) + 3);
 })();

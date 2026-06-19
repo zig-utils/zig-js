@@ -30,8 +30,13 @@
 // SPINNERS siblings burn JS.
 load("../harness.js", "caller relative");
 
-const SPINNERS = 3;
-const ROUNDS = 20;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const SPINNERS = NO_GIL ? 2 : 3;
+const ROUNDS = NO_GIL ? 4 : 20;
+const SPIN_LOOP = NO_GIL ? 20000 : 100000;
+const WARM_CALLS = NO_GIL ? 500 : 2000;
 const gate = { started: 0, stop: 0 };
 
 const spinners = spawnN(SPINNERS, () => {
@@ -41,7 +46,7 @@ const spinners = spawnN(SPINNERS, () => {
     // per-back-edge OpCheckTraps. The Atomics.load is itself a native call,
     // so keep it infrequent — the inner loop is poll-via-loop-hint only.
     while (Atomics.load(gate, "stop") === 0) {
-        for (let i = 0; i < 100000; ++i)
+        for (let i = 0; i < SPIN_LOOP; ++i)
             acc = (acc + i) | 0;
     }
     return acc | 1;
@@ -55,7 +60,7 @@ function buildVictim(round) {
     const proto = { y: 1 };
     const o = Object.create(proto);
     const f = Function("o", "/* round " + round + " */ return o.y + 1;");
-    for (let i = 0; i < 2000; ++i)
+    for (let i = 0; i < WARM_CALLS; ++i)
         f(o); // Tier up; the DFG load of proto.y installs the watchpoint.
     return { proto, o, f };
 }

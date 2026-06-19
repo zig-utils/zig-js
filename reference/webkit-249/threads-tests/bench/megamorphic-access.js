@@ -9,6 +9,7 @@
 // Modeled on JSTests/microbenchmarks/megamorphic-load.js.
 
 (function() {
+    var iterations = benchIterations(1000000, 50000);
     var array = [];
     for (var i = 0; i < 1000; ++i) {
         var o = {};
@@ -20,7 +21,7 @@
 
     function run() {
         var sum = 0;
-        for (var i = 0; i < 1000000; ++i) {
+        for (var i = 0; i < iterations; ++i) {
             var o = array[i % 1000];
             sum += o.f + o.g;
         }
@@ -29,7 +30,7 @@
     noInline(run);
 
     // Each sweep of 1000 objects contributes 1000*42 + (0+1+...+999).
-    var expected = 1000 * (1000 * 42 + (999 * 1000 / 2));
+    var expected = (iterations / 1000) * (1000 * 42 + (999 * 1000 / 2));
 
     reportBench("megamorphic-access", run, expected);
 })();

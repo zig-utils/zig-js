@@ -5,12 +5,13 @@
 // design, but in-bounds stores to a TTL array must not.
 
 (function() {
+    var iterations = benchIterations(2000000, 50000);
     var array = new Array(1024);
     for (var i = 0; i < array.length; ++i)
         array[i] = 0;
 
     function run() {
-        for (var i = 0; i < 2000000; ++i)
+        for (var i = 0; i < iterations; ++i)
             array[i & 1023] = i;
         var sum = 0;
         for (var i = 0; i < 1024; ++i)
@@ -22,7 +23,7 @@
     // Final value of slot k is the last i with (i & 1023) == k:
     // i = 1998848 + k for k < 1152-1024... compute directly instead.
     var final = new Array(1024);
-    for (var i = 0; i < 2000000; ++i)
+    for (var i = 0; i < iterations; ++i)
         final[i & 1023] = i;
     var expected = 0;
     for (var i = 0; i < 1024; ++i)

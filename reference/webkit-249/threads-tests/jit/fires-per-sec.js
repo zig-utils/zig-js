@@ -15,8 +15,8 @@
 // Deterministic: fixed counts, fresh functions via the Function constructor
 // (same source text each time), no wall-clock dependence in the workload.
 
-const FIRES_PER_ITERATION = 50;
-const WARM_CALLS = 200; // enough for Baseline + IC installation; DFG optional
+const FIRES_PER_ITERATION = benchIterations(50, 5);
+const WARM_CALLS = benchIterations(200, 40); // enough for Baseline + IC installation; DFG optional
 
 function oneFireCycle(cycleIndex) {
     const proto = { f: 1 };
