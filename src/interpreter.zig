@@ -23136,7 +23136,7 @@ fn isoDaysInMonth(y: i64, m: u8) u8 {
 fn tDaysFromCivil(y_in: i64, m: u8, d: u8) i64 {
     var y = y_in;
     if (m <= 2) y -= 1;
-    const era = @divFloor(if (y >= 0) y else y - 399, 400);
+    const era = @divTrunc(if (y >= 0) y else y - 399, 400);
     const yoe = y - era * 400;
     const mp: i64 = (@as(i64, m) + (if (m > 2) @as(i64, -3) else @as(i64, 9)));
     const doy = @divTrunc(153 * mp + 2, 5) + @as(i64, d) - 1;
@@ -23146,7 +23146,7 @@ fn tDaysFromCivil(y_in: i64, m: u8, d: u8) i64 {
 const Civil = struct { y: i64, m: u8, d: u8 };
 fn tCivilFromDays(z_in: i64) Civil {
     const z = z_in + 719468;
-    const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
+    const era = @divTrunc(if (z >= 0) z else z - 146096, 146097);
     const doe = z - era * 146097;
     const yoe = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365);
     const y = yoe + era * 400;
@@ -23155,6 +23155,22 @@ fn tCivilFromDays(z_in: i64) Civil {
     const d: u8 = @intCast(doy - @divTrunc(153 * mp + 2, 5) + 1);
     const m: u8 = @intCast(if (mp < 10) mp + 3 else mp - 9);
     return .{ .y = if (m <= 2) y + 1 else y, .m = m, .d = d };
+}
+
+test "Temporal civil-date conversion preserves BCE round trips" {
+    const cases = [_]Civil{
+        .{ .y = -271821, .m = 4, .d = 19 },
+        .{ .y = -400, .m = 2, .d = 29 },
+        .{ .y = -1, .m = 8, .d = 7 },
+        .{ .y = 0, .m = 1, .d = 1 },
+        .{ .y = 1970, .m = 1, .d = 1 },
+        .{ .y = 275760, .m = 9, .d = 13 },
+    };
+    for (cases) |case| {
+        const got = tCivilFromDays(tDaysFromCivil(case.y, case.m, case.d));
+        try std.testing.expectEqual(case, got);
+    }
+    try std.testing.expectEqual(@as(i64, 0), tDaysFromCivil(1970, 1, 1));
 }
 fn isoDayOfWeek(y: i64, m: u8, d: u8) u8 {
     const dow = @mod(tDaysFromCivil(y, m, d) + 4, 7); // 1970-01-01 was Thursday(4)
