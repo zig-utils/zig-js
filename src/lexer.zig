@@ -135,19 +135,7 @@ pub const Lexer = struct {
                 self.i += 1;
             } else if (c == '/' and self.peek2() == '/') {
                 self.i += 2;
-                while (self.i < self.src.len) {
-                    const ch = self.src[self.i];
-                    if (ch == '\n' or ch == '\r') break;
-                    if (ch >= 0x80) {
-                        const len = std.unicode.utf8ByteSequenceLength(ch) catch break;
-                        if (self.i + len > self.src.len) break;
-                        const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
-                        if (isLineTermCp(cp)) break;
-                        self.i += len;
-                    } else {
-                        self.i += 1;
-                    }
-                }
+                self.skipSingleLineCommentBody();
             } else if (c == '/' and self.peek2() == '*') {
                 self.i += 2;
                 while (self.i + 1 < self.src.len and !(self.src[self.i] == '*' and self.src[self.i + 1] == '/')) self.i += 1;
@@ -163,6 +151,22 @@ pub const Lexer = struct {
                     self.i += len;
                 } else break;
             } else break;
+        }
+    }
+
+    fn skipSingleLineCommentBody(self: *Lexer) void {
+        while (self.i < self.src.len) {
+            const ch = self.src[self.i];
+            if (ch == '\n' or ch == '\r') break;
+            if (ch >= 0x80) {
+                const len = std.unicode.utf8ByteSequenceLength(ch) catch break;
+                if (self.i + len > self.src.len) break;
+                const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
+                if (isLineTermCp(cp)) break;
+                self.i += len;
+            } else {
+                self.i += 1;
+            }
         }
     }
 
@@ -367,7 +371,8 @@ pub const Lexer = struct {
 
         // HashbangComment (`#!...`) — only valid at the very start of the source.
         if (c == '#' and self.peek2() == '!' and start == 0) {
-            while (self.i < self.src.len and self.src[self.i] != '\n') self.i += 1;
+            self.i += 2;
+            self.skipSingleLineCommentBody();
             return self.nextRaw();
         }
         // Numbers
@@ -1133,4 +1138,21 @@ test "lexer handles multi-char operators and comments" {
     try std.testing.expectEqual(TokenKind.identifier, (try lx.next()).kind);
     try std.testing.expectEqual(TokenKind.neq_strict, (try lx.next()).kind);
     try std.testing.expectEqual(TokenKind.identifier, (try lx.next()).kind);
+}
+
+test "lexer hashbang comments stop at all line terminators" {
+    const cases = [_][]const u8{
+        "#! hashbang\n{}",
+        "#! hashbang\r{}",
+        "#! hashbang\xe2\x80\xa8{}",
+        "#! hashbang\xe2\x80\xa9{}",
+    };
+    for (cases) |src| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), src);
+        try std.testing.expectEqual(TokenKind.lbrace, (try lx.next()).kind);
+        try std.testing.expectEqual(TokenKind.rbrace, (try lx.next()).kind);
+        try std.testing.expectEqual(TokenKind.eof, (try lx.next()).kind);
+    }
 }
