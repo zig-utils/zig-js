@@ -840,6 +840,85 @@ pub const Object = struct {
         try self.elements.append(self.elementsAllocator(arena), v);
     }
 
+    /// Atomic fast path for `Array.prototype.push` on a packed dense Array.
+    /// Returns the new logical length, or null when holes/sparse tail require
+    /// the full observable `[[Set]]` path.
+    pub fn appendPackedDenseElements(self: *Object, arena: std.mem.Allocator, values: []const Value) std.mem.Allocator.Error!?usize {
+        self.lockElements();
+        defer self.unlockElements();
+        if (self.holes != null or self.array_len > self.elements.items.len) return null;
+        const new_len = self.elements.items.len + values.len;
+        if (new_len > 4294967295) return null;
+        for (values) |v| gcBarrier(v);
+        try self.elements.appendSlice(self.elementsAllocator(arena), values);
+        self.array_len = new_len;
+        return new_len;
+    }
+
+    pub fn atomicDenseElementLoad(self: *Object, i: usize) ?Value {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
+        return self.elements.items[i];
+    }
+
+    pub fn atomicDenseElementStore(self: *Object, i: usize, v: Value) ?Value {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
+        gcBarrier(v);
+        self.elements.items[i] = v;
+        return v;
+    }
+
+    pub fn atomicDenseElementExchange(self: *Object, i: usize, v: Value) ?Value {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
+        const old = self.elements.items[i];
+        gcBarrier(v);
+        self.elements.items[i] = v;
+        return old;
+    }
+
+    pub fn atomicDenseElementCompareExchange(self: *Object, i: usize, expected: Value, replacement: Value) ?Value {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
+        const old = self.elements.items[i];
+        if (sameValueZero(old, expected)) {
+            gcBarrier(replacement);
+            self.elements.items[i] = replacement;
+        }
+        return old;
+    }
+
+    pub const DenseElementRmwOp = enum { add, sub, and_, or_, xor };
+
+    pub fn atomicDenseElementRmwNumber(self: *Object, i: usize, operand: f64, op: DenseElementRmwOp) ?Value {
+        self.lockElements();
+        defer self.unlockElements();
+        if (i >= self.elements.items.len or self.isHoleUnlocked(i)) return null;
+        const old = self.elements.items[i];
+        if (!old.isNumber()) return null;
+        const result: f64 = switch (op) {
+            .add => old.asNum() + operand,
+            .sub => old.asNum() - operand,
+            .and_ => @floatFromInt(jsInt32(old.asNum()) & jsInt32(operand)),
+            .or_ => @floatFromInt(jsInt32(old.asNum()) | jsInt32(operand)),
+            .xor => @floatFromInt(jsInt32(old.asNum()) ^ jsInt32(operand)),
+        };
+        self.elements.items[i] = Value.num(result);
+        return old;
+    }
+
+    fn jsInt32(n: f64) i32 {
+        if (std.math.isNan(n) or std.math.isInf(n)) return 0;
+        const wrapped = @mod(@trunc(n), 4294967296.0);
+        const u: u32 = @intFromFloat(if (wrapped < 0) wrapped + 4294967296.0 else wrapped);
+        return @bitCast(u);
+    }
+
     pub fn clearElementsRetainingCapacity(self: *Object) void {
         self.lockElements();
         defer self.unlockElements();

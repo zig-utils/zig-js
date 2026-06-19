@@ -3398,6 +3398,16 @@ pub const Interpreter = struct {
         return true;
     }
 
+    fn arrayProtoChainCleanForDenseAppend(self: *Interpreter, o: *value.Object) bool {
+        var cur = self.effectiveProto(o);
+        while (cur) |c| {
+            if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property)
+                return false;
+            cur = self.effectiveProto(c);
+        }
+        return true;
+    }
+
     fn setFastArrayNumericIndex(self: *Interpreter, recv: Value, index: usize, v: Value) EvalError!bool {
         if (!recv.isObject()) return false;
         const o = recv.asObj();
@@ -8296,6 +8306,12 @@ pub const Interpreter = struct {
             // the limit) BEFORE any element is set.
             if (@as(f64, @floatFromInt(len)) + @as(f64, @floatFromInt(args.len)) > 9007199254740991.0)
                 return self.throwError("TypeError", "push would exceed the maximum array length 2**53-1");
+            if (o.is_array and !o.is_arguments and o.accessors == null and o.attrs == null and
+                !o.has_indexed_property and o.extensible and self.arrayProtoChainCleanForDenseAppend(o))
+            {
+                if (try o.appendPackedDenseElements(self.arena, args)) |new_len|
+                    return Value.num(@floatFromInt(new_len));
+            }
             // Set(O, ToString(len+k), E, true) for each argument (fires an
             // inherited index setter; a non-extensible array throws), then
             // Set(O, "length", newLen, true).

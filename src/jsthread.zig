@@ -1134,6 +1134,12 @@ fn isLockedNamedAtomicsKey(key: []const u8) bool {
     return value.canonicalIndex(key) == null;
 }
 
+fn denseAtomicsIndex(o: *value.Object, key: []const u8) ?usize {
+    const i = value.canonicalIndex(key) orelse return null;
+    if (!o.is_array or o.is_arguments or o.accessors != null or o.attrs != null) return null;
+    return i;
+}
+
 fn attrUnlocked(o: *const value.Object, key: []const u8) value.PropAttr {
     if (o.attrs) |m| {
         if (m.get(key)) |a| return a;
@@ -1179,6 +1185,9 @@ fn argAt(args: []const Value, i: usize) Value {
 pub fn propLoad(self: *Interpreter, args: []const Value) value.HostError!Value {
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
+    if (denseAtomicsIndex(o, key)) |i| {
+        if (o.atomicDenseElementLoad(i)) |v| return v;
+    }
     return ownDataOrThrow(self, o, key, "Atomics.load: object has no own property");
 }
 
@@ -1186,6 +1195,9 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const v = argAt(args, 2);
+    if (denseAtomicsIndex(o, key)) |i| {
+        if (o.atomicDenseElementStore(i, v)) |stored| return stored;
+    }
     if (isLockedNamedAtomicsKey(key)) {
         o.lockProperties();
         defer o.unlockProperties();
@@ -1213,6 +1225,9 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
 pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
+    if (denseAtomicsIndex(o, key)) |i| {
+        if (o.atomicDenseElementExchange(i, argAt(args, 2))) |old| return old;
+    }
     if (isLockedNamedAtomicsKey(key)) {
         o.lockProperties();
         defer o.unlockProperties();
@@ -1233,6 +1248,9 @@ pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Val
 pub fn propCompareExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
+    if (denseAtomicsIndex(o, key)) |i| {
+        if (o.atomicDenseElementCompareExchange(i, argAt(args, 2), argAt(args, 3))) |old| return old;
+    }
     if (isLockedNamedAtomicsKey(key)) {
         o.lockProperties();
         defer o.unlockProperties();
@@ -1262,6 +1280,16 @@ pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.Hos
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const operand = try self.toNumberV(argAt(args, 2));
+    if (denseAtomicsIndex(o, key)) |i| {
+        const dense_op: value.Object.DenseElementRmwOp = switch (op) {
+            .add => .add,
+            .sub => .sub,
+            .and_ => .and_,
+            .or_ => .or_,
+            .xor => .xor,
+        };
+        if (o.atomicDenseElementRmwNumber(i, operand, dense_op)) |old| return old;
+    }
     if (isLockedNamedAtomicsKey(key)) {
         o.lockProperties();
         defer o.unlockProperties();

@@ -368,11 +368,11 @@ test**. (5) Broaden the execution-path GIL drop in `threadMain`/`evaluate` under
 files can be probed under the same GIL-free mode instead of only via unit
 witnesses. The first full-allowlist probe is intentionally not a gate yet:
 `smoke.js`, `api/condition-async-wait.js`, and the lifecycle join/exception
-cluster now pass under `parallel_js`. The current promoted-file blockers are
-ordinary array element mutation cases: `arrays/push-resize-multithread.js`
-loses contended pushes, and prior broad probes have also exposed lost shared
-element updates in `arrays/shared-element-read-write.js`, when JS mutators truly
-run in parallel. (6)
+cluster now pass under `parallel_js`; so do the promoted ordinary-array
+mutation probes `arrays/push-resize-multithread.js` and
+`arrays/shared-element-read-write.js`. A broad exploratory run now reaches past
+the lifecycle and array sections before timing out in the later bench/frontier
+discovery region. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
