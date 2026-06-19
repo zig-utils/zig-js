@@ -585,7 +585,7 @@ pub const Binding = struct {
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
-                const released = finalizeObjectBacking(o, self.context.gpa);
+                const released = finalizeObjectBacking(o, o.backing_allocator orelse self.context.gpa);
                 if (released > 0) {
                     _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
                 }

@@ -453,7 +453,7 @@ pub const Context = struct {
             .use_thread_gil = self.gil != null and !self.parallel_js,
             .gil = self.gil,
             .gc = self.gc,
-            .gc_backing = if (self.gc != null) self.gpa else null,
+            .gc_backing = if (self.gc) |h| h.backing else null,
             .gc_array_buffer_bytes_live = if (self.gc != null) &self.gc_array_buffer_bytes_live else null,
             .gc_promise_reactions_live = if (self.gc != null) &self.gc_promise_reactions_live else null,
             .gc_environment_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
@@ -498,10 +498,6 @@ pub const Context = struct {
         } else {
             self.assertOwnerThread();
         }
-        if (self.locked_arena) |la| {
-            self.gpa.destroy(la);
-            self.locked_arena = null;
-        }
         self.js_threads.deinit(self.gpa);
         self.active_interpreters.deinit(self.gpa);
         self.finalization_cleanup_jobs.deinit(self.gpa);
@@ -524,6 +520,10 @@ pub const Context = struct {
         if (self.gc_binding) |b| {
             self.gpa.destroy(b);
             self.gc_binding = null;
+        }
+        if (self.locked_arena) |la| {
+            self.gpa.destroy(la);
+            self.locked_arena = null;
         }
         self.sab_retains.deinit();
         self.arena_state.deinit();
@@ -7352,6 +7352,49 @@ test "enable_gc: Object named-property backing stores release when collected" {
     try std.testing.expectEqual(true, cleared.asBool());
 
     _ = try ctx.evaluate("globalThis.ref = undefined; 0");
+    ctx.collectGarbage();
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
+}
+
+test "enable_gc parallel_gc: Object accessor backing stores release when collected" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
+    defer ctx.destroy();
+
+    ctx.collectGarbage(); // stabilize post-intrinsics backing-store baseline
+    const baseline = ctx.gc_object_backing_stores_live;
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  const keep = [];
+        \\  for (let i = 0; i < 128; i++) {
+        \\    const o = {};
+        \\    Object.defineProperty(o, "x", {
+        \\      get: function () { return i; },
+        \\      configurable: true,
+        \\      enumerable: true
+        \\    });
+        \\    Object.defineProperty(o, "y", {
+        \\      set: function (v) { this.z = v; },
+        \\      configurable: true
+        \\    });
+        \\    keep.push(o);
+        \\  }
+        \\  const churn = {};
+        \\  for (let i = 0; i < 128; i++) {
+        \\    delete churn.m;
+        \\    Object.defineProperty(churn, "m", {
+        \\      get: function () { return 42; },
+        \\      configurable: true
+        \\    });
+        \\  }
+        \\  keep.push(churn);
+        \\  globalThis.keep = keep;
+        \\})();
+        \\0
+    );
+    try std.testing.expect(ctx.gc_object_backing_stores_live > baseline);
+
+    _ = try ctx.evaluate("globalThis.keep = undefined; 0");
     ctx.collectGarbage();
     ctx.collectGarbage();
     try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);

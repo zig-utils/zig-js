@@ -1594,7 +1594,9 @@ pub const Object = struct {
         const m = self.accessors orelse return .absent;
         if (m.getPtr(key) == null) return .absent;
         if (!self.getAttrUnlocked(key).configurable) return .blocked;
-        _ = m.remove(key);
+        if (m.fetchRemove(key)) |removed| {
+            if (self.backing_flags.accessors) self.backing_allocator.?.free(removed.key);
+        }
         if (self.is_array) {
             if (canonicalIndex(key)) |i| {
                 self.lockElements();
