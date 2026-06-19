@@ -1438,7 +1438,10 @@ fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *std.ArrayListUnmanaged(promise
 }
 
 fn transferPendingJoinQueue(ctx: *Context, from: *std.ArrayListUnmanaged(promise.Microtask), to: *std.ArrayListUnmanaged(promise.Microtask)) void {
+    const g = ctx.gil orelse return;
     const io = agent.engineIo();
+    g.lockApi();
+    defer g.unlockApi();
     for (ctx.js_threads.items) |rec| {
         rec.join_mutex.lockUncancelable(io);
         for (rec.pending_joins.items) |*pending| {
