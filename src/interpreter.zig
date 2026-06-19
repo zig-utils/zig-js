@@ -3014,7 +3014,10 @@ pub const Interpreter = struct {
         for (cooked) |s| try strings.elements.append(strings.elementsAllocator(self.arena), Value.str(s));
         const raw_arr = (try self.newArray()).asObj();
         for (raw) |s| try raw_arr.elements.append(raw_arr.elementsAllocator(self.arena), Value.str(s));
-        try self.setProp(strings, "raw", Value.obj(raw_arr));
+        try freezeTemplateArray(self, raw_arr);
+        try strings.setOwn(self.arena, self.root_shape, "raw", Value.obj(raw_arr));
+        try strings.setAttr(self.arena, "raw", .{ .writable = false, .enumerable = false, .configurable = false });
+        try freezeTemplateArray(self, strings);
 
         // Build the argument list: strings, then each substitution value.
         var args: std.ArrayListUnmanaged(Value) = .empty;
@@ -3029,6 +3032,16 @@ pub const Interpreter = struct {
             return self.callMethod(recv, key, args.items);
         }
         return self.callValue(try self.eval(tag_node), args.items);
+    }
+
+    fn freezeTemplateArray(self: *Interpreter, obj: *value.Object) EvalError!void {
+        var i: usize = 0;
+        while (i < obj.elementsLen()) : (i += 1) {
+            const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+            try obj.setAttr(self.arena, key, .{ .writable = false, .enumerable = true, .configurable = false });
+        }
+        try obj.setAttr(self.arena, "length", .{ .writable = false, .enumerable = false, .configurable = false });
+        obj.extensible = false;
     }
 
     /// Invoke a callable value with `this = undefined`.
@@ -31570,6 +31583,21 @@ test "interpreter template literals" {
     try std.testing.expectEqualStrings("v=7", (try evalSource(a, "let o = { n: 7 }; `v=${o.n}`")).asStr());
     // empty + leading substitution still yields a string
     try std.testing.expectEqualStrings("42", (try evalSource(a, "`${42}`")).asStr());
+    try std.testing.expect((try evalSource(a,
+        \\let t;
+        \\function tag(x) { t = x; }
+        \\tag`a${1}b`;
+        \\let rawDesc = Object.getOwnPropertyDescriptor(t, "raw");
+        \\let elemDesc = Object.getOwnPropertyDescriptor(t, "0");
+        \\let lenDesc = Object.getOwnPropertyDescriptor(t, "length");
+        \\t.extra = 1;
+        \\t.raw.extra = 1;
+        \\Array.isArray(t) && Array.isArray(t.raw) &&
+        \\rawDesc.enumerable === false && rawDesc.writable === false && rawDesc.configurable === false &&
+        \\elemDesc.enumerable === true && elemDesc.writable === false && elemDesc.configurable === false &&
+        \\lenDesc.enumerable === false && lenDesc.writable === false && lenDesc.configurable === false &&
+        \\t.extra === undefined && t.raw.extra === undefined
+    )).asBool());
 }
 
 test "interpreter switch (match, fall-through, default, break)" {
