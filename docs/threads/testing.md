@@ -177,10 +177,11 @@ zig build threads-test -Dthreads-parallel-js=true
 
 It currently exposes real Layer-C blockers rather than serving as a required
 green gate. Named property-mode Atomics RMW/CAS/load/store, typed-array
-`Atomics.wait`, property wait lost-wakeup coverage, and `smoke.js` now have
-focused green `parallel_js` probes; `api/condition-async-wait.js` still pins a
-GIL-specific async-condition ordering/counting assumption. Keep it visible until
-the corresponding engine semantics are fixed.
+`Atomics.wait`, property wait lost-wakeup coverage, `smoke.js`, and
+`api/condition-async-wait.js` now have focused green `parallel_js` probes. The
+next broad-corpus blocker is the lifecycle join/GC-lifetime area: the full
+probe reaches `lifecycle/join-semantics.js`, where the focused file currently
+hangs and the full run has exposed GC finalization double-free evidence.
 
 ## Sweep Runs
 

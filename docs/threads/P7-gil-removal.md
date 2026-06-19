@@ -367,9 +367,9 @@ test**. (5) Broaden the execution-path GIL drop in `threadMain`/`evaluate` under
 `parallel_js`; the corpus runner now has `-Dthreads-parallel-js=true` so PR-249
 files can be probed under the same GIL-free mode instead of only via unit
 witnesses. The first full-allowlist probe is intentionally not a gate yet:
-`smoke.js` now passes under `parallel_js`, and the remaining known promoted-file
-blocker is the GIL-specific async-condition ordering/counting expectation in
-`api/condition-async-wait.js`. (6)
+`smoke.js` and `api/condition-async-wait.js` now pass under `parallel_js`; the
+current promoted-file blocker has moved to lifecycle join/GC-lifetime behavior
+around `lifecycle/join-semantics.js`. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

@@ -136,23 +136,25 @@ const cond = new Condition();
 // ---- asyncWait waiters and sync waiters share one FIFO notify domain
 // (4.3: notify wakes sync+async uniformly) ----
 {
+    const fifoLock = new Lock();
+    const fifoCond = new Condition();
     const box = { waiting: 0, go: 0 };
-    const t = new Thread(() => lock.hold(() => {
+    const t = new Thread(() => fifoLock.hold(() => {
         box.waiting = 1;
         while (!box.go)
-            cond.wait(lock);
+            fifoCond.wait(fifoLock);
         return "sync-woken";
     }));
     waitUntil(() => box.waiting === 1);
 
     let asyncWaitPromise;
-    lock.hold(() => { asyncWaitPromise = cond.asyncWait(lock); });
+    fifoLock.hold(() => { asyncWaitPromise = fifoCond.asyncWait(fifoLock); });
 
     // Two waiters (one sync, one async): notifyAll reports both.
     let woken = 0;
-    lock.hold(() => {
+    fifoLock.hold(() => {
         box.go = 1;
-        woken = cond.notifyAll();
+        woken = fifoCond.notifyAll();
     });
     // The async waiter can never wake spuriously, so it is always counted;
     // the sync waiter is counted unless a spurious wakeup transiently
@@ -162,7 +164,7 @@ const cond = new Condition();
     shouldBe(t.join(), "sync-woken");
     asyncWaitPromise.then(release => {
         release();
-        shouldBeFalse(lock.locked);
+        shouldBeFalse(fifoLock.locked);
         asyncTestPassed();
     });
 }
