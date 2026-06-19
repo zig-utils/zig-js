@@ -16736,7 +16736,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
             "Etc/GMT-9",  "UTC",
         }
     else if (std.mem.eql(u8, key, "collation"))
-        &.{ "emoji", "eor" }
+        &.{ "emoji", "eor", "phonebk" }
     else if (std.mem.eql(u8, key, "unit"))
         &sanctioned_units
     else
