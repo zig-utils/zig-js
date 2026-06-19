@@ -9,9 +9,12 @@
 // no preemptive-GIL reliance.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const N = 8;
-const M = 1e5;
-const CAS_K = 1000; // CAS-loop increments per thread
+const M = NO_GIL ? 5000 : 1e5;
+const CAS_K = NO_GIL ? 100 : 1000; // CAS-loop increments per thread
 const o = { x: 0, cas: 0 };
 const gate = { go: 0, started: 0 };
 

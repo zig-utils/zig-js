@@ -205,7 +205,12 @@ broad promoted probe also reaches through
 keeps the original 3-worker, 512-element, 160-round stress size, while
 `parallel_js` runs the same indexed-prototype bad-time invariants with a smaller
 interpreter stress budget so the oracle remains semantic rather than a pure
-throughput test. The promoted JIT-audit subset now has focused-green
+throughput test. `races/counter-atomics.js` is likewise focused-green under
+`parallel_js`: it keeps the 8-worker lost-update and CAS-loop oracle, preserves
+the original 100,000-add/1,000-CAS amplifier in GIL mode, and uses a smaller
+no-GIL budget so the file remains a correctness witness instead of a serial
+throughput cliff. The next local promoted race frontier is
+`races/counter-lock.js`. The promoted JIT-audit subset now has focused-green
 `parallel_js` coverage from constructor/fire benchmark checksums through the
 tailcall, OSR/catch-loop, golden-disasm, int-gate, shared-ArrayStorage,
 spawned-thread butterfly, tag-discipline, and TID-tag witnesses. The normal

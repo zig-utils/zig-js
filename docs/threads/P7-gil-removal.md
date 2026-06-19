@@ -392,8 +392,12 @@ stress, tag-discipline, and TID-tag witnesses. The normal GIL-mode JIT files
 keep their original stress sizes; `parallel_js` trims the tailcall,
 OSR/catch-loop, golden-disasm, stop-budget, spawned-thread butterfly, and
 tag-discipline loop counts so those files remain correctness witnesses rather
-than serial-performance gates. A broad promoted probe now reaches past those
-files and times out later in cumulative safe/teardown/value stress. (6)
+than serial-performance gates. `races/counter-atomics.js` is also
+focused-green under `parallel_js`; the GIL-mode file keeps its original
+100,000-add/1,000-CAS amplifier, while no-GIL keeps the same 8-worker
+lost-update/CAS oracle at a smaller interpreter budget. The next local promoted
+race frontier is `races/counter-lock.js`; broader promoted-allowlist
+`parallel_js` remains exploratory until the race block is cleared. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
