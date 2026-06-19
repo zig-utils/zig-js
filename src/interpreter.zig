@@ -25345,6 +25345,7 @@ fn temporalPlainMonthDayConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
     const dim = isoDaysInMonth(@intFromFloat(refy), @intFromFloat(m));
     if (d < 1 or d > @as(f64, @floatFromInt(dim))) return self.throwError("RangeError", "day out of range");
+    try checkIsoDate(self, refy, m, d);
     const o = try makeTemporal(self, .plain_month_day, "\x00T.PlainMonthDay");
     o.temporal.?.year = @intFromFloat(refy);
     o.temporal.?.month = @intFromFloat(m);
@@ -25387,7 +25388,7 @@ fn temporalMonthDayToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
-const IsoMD = struct { m: u8, d: u8 };
+const IsoMD = struct { y: i64, m: u8, d: u8 };
 
 fn regulateMonthDay(self: *Interpreter, ref_year: i64, mf: i64, df: i64, constrain: bool) EvalError!IsoMD {
     var m = mf;
@@ -25401,7 +25402,7 @@ fn regulateMonthDay(self: *Interpreter, ref_year: i64, mf: i64, df: i64, constra
         const dim = isoDaysInMonth(ref_year, @intCast(m));
         if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
     }
-    return .{ .m = @intCast(m), .d = @intCast(d) };
+    return .{ .y = 1972, .m = @intCast(m), .d = @intCast(d) };
 }
 
 fn readMonthCode(self: *Interpreter, v: Value) EvalError!u8 {
@@ -25417,7 +25418,7 @@ fn readMonthCode(self: *Interpreter, v: Value) EvalError!u8 {
 fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoMD {
     if (tIsTemporal(v, .plain_month_day)) {
         const t = v.asObj().temporal.?;
-        return .{ .m = t.month, .d = t.day };
+        return .{ .y = t.year, .m = t.month, .d = t.day };
     }
     if (v.isObject()) {
         _ = try readCalendarField(self, v);
@@ -25454,18 +25455,18 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             const dim = isoDaysInMonth(1972, m);
             if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
-            return .{ .m = m, .d = d };
+            return .{ .y = 1972, .m = m, .d = d };
         }
         const b = try parseTemporalBody(self, ann.body);
         if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainMonthDay");
-        return .{ .m = b.mo, .d = b.d };
+        return .{ .y = 1972, .m = b.mo, .d = b.d };
     }
     return self.throwError("TypeError", "cannot convert to a PlainMonthDay");
 }
 
-fn makeMonthDay(self: *Interpreter, m: u8, d: u8) EvalError!Value {
+fn makeMonthDay(self: *Interpreter, y: i64, m: u8, d: u8) EvalError!Value {
     const o = try makeTemporal(self, .plain_month_day, "\x00T.PlainMonthDay");
-    o.temporal.?.year = 1972;
+    o.temporal.?.year = @intCast(y);
     o.temporal.?.month = m;
     o.temporal.?.day = d;
     return Value.obj(o);
@@ -25474,9 +25475,24 @@ fn makeMonthDay(self: *Interpreter, m: u8, d: u8) EvalError!Value {
 fn temporalMonthDayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
-    const f = try toMonthDayFields(self, if (args.len > 0) args[0] else Value.undef(), !reject);
-    return makeMonthDay(self, f.m, f.d);
+    const input = if (args.len > 0) args[0] else Value.undef();
+    const options = if (args.len > 1) args[1] else Value.undef();
+    if (input.isString()) {
+        const f = try toMonthDayFields(self, input, true);
+        _ = try readOverflowReject(self, options);
+        return makeMonthDay(self, f.y, f.m, f.d);
+    }
+    const reject = try readOverflowReject(self, options);
+    const f = try toMonthDayFields(self, input, !reject);
+    return makeMonthDay(self, f.y, f.m, f.d);
+}
+
+fn prevalidateMonthDayPartial(self: *Interpreter, bag: Value, ref_year: i64, cur_month: u8, cur_day: u8) EvalError!void {
+    const m = try withMonthField(self, bag, cur_month);
+    const d = try withIntField(self, bag, "day", cur_day);
+    if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
+    const dim = isoDaysInMonth(ref_year, m);
+    if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
 }
 
 fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25485,15 +25501,29 @@ fn temporalMonthDayWithFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with: argument must be an object");
+    if (bag.asObj().temporal != null) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with requires a partial object");
+    if (!(try self.getProperty(bag, "calendar")).isUndefined()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with does not accept calendar");
+    if (!(try self.getProperty(bag, "timeZone")).isUndefined()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with does not accept timeZone");
+    const has_known_field =
+        !(try self.getProperty(bag, "day")).isUndefined() or
+        !(try self.getProperty(bag, "month")).isUndefined() or
+        !(try self.getProperty(bag, "monthCode")).isUndefined() or
+        !(try self.getProperty(bag, "year")).isUndefined();
+    if (!has_known_field) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.with requires a recognized field");
+    const ref_year = (try bagIsoYear(self, bag, t.calendar)) orelse t.year;
+    const options = if (args.len > 1) args[1] else Value.undef();
+    if (!options.isUndefined() and (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)) {
+        try prevalidateMonthDayPartial(self, bag, ref_year, t.month, t.day);
+    }
+    const reject = try readOverflowReject(self, options);
     const m = try withMonthField(self, bag, t.month);
     const draw = try withIntField(self, bag, "day", t.day);
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
     if (reject and (m < 1 or m > 12)) return self.throwError("RangeError", "month out of range");
     const mc: u8 = @max(1, @min(12, m)); // constrain
-    const dim = isoDaysInMonth(1972, mc);
+    const dim = isoDaysInMonth(ref_year, mc);
     if (reject and (draw < 1 or draw > dim)) return self.throwError("RangeError", "day out of range");
     const dc: u8 = @intCast(@max(1, @min(@as(i64, dim), draw))); // constrain
-    return makeMonthDay(self, mc, dc);
+    return makeMonthDay(self, t.year, mc, dc);
 }
 
 fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -25501,7 +25531,7 @@ fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
     const t = this.asObj().temporal.?;
     const b = try toMonthDayFields(self, if (args.len > 0) args[0] else Value.undef(), true);
-    return Value.boolVal(t.month == b.m and t.day == b.d);
+    return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d);
 }
 
 fn temporalMonthDayToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -26472,7 +26502,7 @@ fn temporalDateTimeToPlainMonthDayFn(ctx: *anyopaque, this: Value, args: []const
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const t = this.asObj().temporal.?;
-    return makeMonthDay(self, t.month, t.day);
+    return makeMonthDay(self, 1972, t.month, t.day);
 }
 
 fn temporalDateTimeWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -26732,7 +26762,7 @@ fn temporalDateToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const t = this.asObj().temporal.?;
-    return makeMonthDay(self, t.month, t.day);
+    return makeMonthDay(self, 1972, t.month, t.day);
 }
 
 fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -27229,7 +27259,7 @@ fn temporalZdtToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const l = zdtLocal(this.asObj().temporal.?);
-    return makeMonthDay(self, l.month, l.day);
+    return makeMonthDay(self, 1972, l.month, l.day);
 }
 
 /// ZDT add/subtract: time units shift the epoch; calendar units shift the local
