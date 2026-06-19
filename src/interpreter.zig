@@ -23774,6 +23774,8 @@ fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
     const dur = this.asObj().temporal.?.dur;
     const a0 = if (args.len > 0) args[0] else Value.undef();
+    if (!a0.isString() and !(a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint))
+        return self.throwError("TypeError", "Temporal.Duration.prototype.total requires a string or options object");
     const rel = try resolveRelativeTo(self, a0);
     const unit = (try readUnitOption(self, a0, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
     // With a relativeTo anchor, compute the calendar-aware (fractional) total.
