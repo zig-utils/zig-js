@@ -23523,6 +23523,24 @@ fn temporalIntegralArg(self: *Interpreter, v: Value, name: []const u8) EvalError
 
 const dur_names = [_][]const u8{ "years", "months", "weeks", "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds" };
 
+const DurField = struct {
+    name: []const u8,
+    idx: usize,
+};
+
+const dur_read_fields = [_]DurField{
+    .{ .name = "days", .idx = 3 },
+    .{ .name = "hours", .idx = 4 },
+    .{ .name = "microseconds", .idx = 8 },
+    .{ .name = "milliseconds", .idx = 7 },
+    .{ .name = "minutes", .idx = 5 },
+    .{ .name = "months", .idx = 1 },
+    .{ .name = "nanoseconds", .idx = 9 },
+    .{ .name = "seconds", .idx = 6 },
+    .{ .name = "weeks", .idx = 2 },
+    .{ .name = "years", .idx = 0 },
+};
+
 fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -23646,11 +23664,11 @@ fn temporalDurationWithFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.Duration.prototype.with: argument must be an object");
     var out = this.asObj().temporal.?.dur;
     var any = false;
-    for (dur_names, 0..) |nm, i| {
-        const pv = try self.getProperty(bag, nm);
+    for (dur_read_fields) |field| {
+        const pv = try self.getProperty(bag, field.name);
         if (pv.isUndefined()) continue;
         any = true;
-        out[i] = try temporalIntegralArg(self, pv, nm);
+        out[field.idx] = try temporalIntegralArg(self, pv, field.name);
     }
     if (!any) return self.throwError("TypeError", "Temporal.Duration.prototype.with: no recognized fields");
     if (!durSignOk(out)) return self.throwError("RangeError", "mixed-sign duration");
@@ -23827,12 +23845,12 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
         const o = try makeTemporal(self, .duration, "\x00T.Duration");
         var any = false;
         var any_sign: f64 = 0;
-        for (dur_names, 0..) |nm, i| {
-            const pv = try self.getProperty(a0, nm);
+        for (dur_read_fields) |field| {
+            const pv = try self.getProperty(a0, field.name);
             if (pv.isUndefined()) continue;
             any = true;
             const n = try temporalIntegralArg(self, pv, "Duration component must be an integer");
-            o.temporal.?.dur[i] = n;
+            o.temporal.?.dur[field.idx] = n;
             if (n != 0) {
                 const s: f64 = if (n > 0) 1 else -1;
                 if (any_sign != 0 and any_sign != s) return self.throwError("RangeError", "mixed-sign Duration");
@@ -24802,11 +24820,11 @@ fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
     if (v.isObject()) {
         var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
         var any = false;
-        for (dur_names, 0..) |nm, i| {
-            const pv = try self.getProperty(v, nm);
+        for (dur_read_fields) |field| {
+            const pv = try self.getProperty(v, field.name);
             if (pv.isUndefined()) continue;
             any = true;
-            out[i] = try temporalIntegralArg(self, pv, "duration component");
+            out[field.idx] = try temporalIntegralArg(self, pv, "duration component");
         }
         if (!any) return self.throwError("TypeError", "invalid duration");
         // All non-zero components must share one sign and stay in range.
