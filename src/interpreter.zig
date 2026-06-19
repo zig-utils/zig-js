@@ -25026,6 +25026,53 @@ fn persianLeapYear(year: i64) bool {
     return @mod((ep_year + 38) * 682, 2816) < 682;
 }
 
+fn persianRawDay(year: i64, month: u8, day: u8) i64 {
+    const ep_base = year - if (year >= 0) @as(i64, 474) else @as(i64, 473);
+    const ep_year = 474 + @mod(ep_base, 2820);
+    const month_days: i64 = if (month <= 7)
+        (@as(i64, month) - 1) * 31
+    else
+        (@as(i64, month) - 1) * 30 + 6;
+    return @as(i64, day) + month_days +
+        @divFloor(ep_year * 682 - 110, 2816) +
+        (ep_year - 1) * 365 +
+        @divFloor(ep_base, 2820) * 1_029_983;
+}
+
+fn persianEpochOffset() i64 {
+    return tDaysFromCivil(2016, 3, 20) - persianRawDay(1395, 1, 1);
+}
+
+fn persianToEpochDay(year: i64, month: u8, day: u8) i64 {
+    return persianRawDay(year, month, day) + persianEpochOffset();
+}
+
+fn persianFromEpochDay(epoch_day: i64) Civil {
+    var year = tCivilFromDays(epoch_day).y - 621;
+    while (epoch_day < persianToEpochDay(year, 1, 1)) : (year -= 1) {}
+    while (epoch_day >= persianToEpochDay(year + 1, 1, 1)) : (year += 1) {}
+
+    const day_of_year = epoch_day - persianToEpochDay(year, 1, 1) + 1;
+    if (day_of_year <= 186) {
+        const zero = day_of_year - 1;
+        return .{ .y = year, .m = @intCast(@divFloor(zero, 31) + 1), .d = @intCast(@mod(zero, 31) + 1) };
+    }
+    const zero = day_of_year - 187;
+    return .{ .y = year, .m = @intCast(@divFloor(zero, 30) + 7), .d = @intCast(@mod(zero, 30) + 1) };
+}
+
+fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u8) Civil {
+    if (std.mem.eql(u8, cal, "persian"))
+        return persianFromEpochDay(tDaysFromCivil(iso_year, iso_month, iso_day));
+    return .{ .y = iso_year, .m = iso_month, .d = iso_day };
+}
+
+fn calendarDateToIso(cal: []const u8, year: i64, month: u8, day: u8) Civil {
+    if (std.mem.eql(u8, cal, "persian"))
+        return tCivilFromDays(persianToEpochDay(year, month, day));
+    return .{ .y = year, .m = month, .d = day };
+}
+
 fn chineseLikeLeapYear(year: i64) bool {
     const leap_years = [_]i64{
         1971, 1974, 1976, 1979, 1982, 1984, 1987, 1990, 1993, 1995,
@@ -25238,6 +25285,7 @@ const japanese_eras = [_]JapaneseEra{
 /// consults the month/day (its era boundaries fall mid-year); the solar-Gregorian
 /// family depends on the year alone.
 fn calEraOf(cal: []const u8, iso_year: i64, month: u8, day: u8) CalEra {
+    if (std.mem.eql(u8, cal, "persian")) return .{ .era = "ap", .era_year = iso_year };
     if (std.mem.eql(u8, cal, "buddhist")) return .{ .era = "be", .era_year = iso_year + 543 };
     if (std.mem.eql(u8, cal, "roc")) {
         const y = iso_year - 1911; // displayed ROC year
@@ -25298,6 +25346,7 @@ fn bagIsoYear(self: *Interpreter, bag: Value, cal: []const u8) EvalError!?i64 {
 /// not valid for that calendar. Non-positive era years remap across the epoch
 /// boundary (e.g. roc 0 == broc 1), matching the displayed-year inverse.
 fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
+    if (std.mem.eql(u8, cal, "persian")) return if (asciiEqlIgnoreCase(era, "ap")) era_year else null;
     const be = asciiEqlIgnoreCase(era, "be");
     if (std.mem.eql(u8, cal, "buddhist")) return if (be) era_year - 543 else null;
     if (std.mem.eql(u8, cal, "roc")) {
@@ -25412,9 +25461,10 @@ fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else Value.undef());
     const t = this.asObj().temporal.?;
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try isoYearStr(self, &buf, t.year);
-    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ t.month, t.day });
+    try isoYearStr(self, &buf, iso.y);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ iso.m, iso.d });
     try appendCalAnnotation(self, &buf, cal, t.calendar);
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
@@ -25774,11 +25824,12 @@ fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
     const b = try parseTemporalBody(self, ann.body);
     if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainDate");
     const cal = if (ann.cal) |c| canonCalendarId(self, c) else "iso8601";
-    return .{ .y = b.y, .m = b.mo, .d = b.d, .cal = cal };
+    const cd = calendarDateFromIso(cal, b.y, b.mo, b.d);
+    return .{ .y = cd.y, .m = cd.m, .d = cd.d, .cal = cal };
 }
 
 /// Parsed ISO date-time with its epoch nanoseconds (offset/`Z` applied).
-const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_offset: bool = false, offset_ns: i128 = 0 };
+const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_offset: bool = false, offset_ns: i128 = 0, cal: []const u8 = "iso8601" };
 
 /// Parse "YYYY-MM-DD[T ]HH:MM[:SS[.fraction]][Z|±HH:MM]" (annotations stripped,
 /// time optional). The epoch is the local fields minus any UTC offset; callers
@@ -25786,14 +25837,16 @@ const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, 
 fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
     const ann = try stripTemporalAnnotations(self, s_in);
     const b = try parseTemporalBody(self, ann.body);
+    const cal = if (ann.cal) |c| canonCalendarId(self, c) else "iso8601";
+    const cd = calendarDateFromIso(cal, b.y, b.mo, b.d);
     const epoch_days = tDaysFromCivil(b.y, b.mo, b.d);
     const local_ns = @as(i128, epoch_days) * 86_400_000_000_000 +
         @as(i128, b.h) * nsPerUnit(.hour) + @as(i128, b.mi) * nsPerUnit(.minute) +
         @as(i128, b.s) * nsPerUnit(.second) + @as(i128, b.frac_ns);
     return .{
-        .y = b.y,
-        .mo = b.mo,
-        .d = b.d,
+        .y = cd.y,
+        .mo = cd.m,
+        .d = cd.d,
         .h = b.h,
         .mi = b.mi,
         .s = b.s,
@@ -25804,6 +25857,7 @@ fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
         .z = b.z,
         .has_offset = b.has_offset,
         .offset_ns = b.off_ns,
+        .cal = cal,
     };
 }
 
@@ -26091,7 +26145,8 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     const t = this.asObj().temporal.?;
     const rounded_time = roundNsForString(timeToNs(t), precision);
     const day_delta = @divFloor(rounded_time, 86_400_000_000_000);
-    const c = tCivilFromDays(tDaysFromCivil(t.year, t.month, t.day) + @as(i64, @intCast(day_delta)));
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
+    const c = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + @as(i64, @intCast(day_delta)));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try isoYearStr(self, &buf, c.y);
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ c.m, c.d });
@@ -27681,6 +27736,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
         t.year = @intCast(p.y);
         t.month = p.mo;
         t.day = p.d;
+        t.calendar = p.cal;
         t.hour = p.h;
         t.minute = p.mi;
         t.second = p.s;
@@ -27906,10 +27962,12 @@ fn temporalPlainDateWithCalendarFn(ctx: *anyopaque, this: Value, args: []const V
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef());
     const t = this.asObj().temporal.?;
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
+    const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = t.year;
-    o.temporal.?.month = t.month;
-    o.temporal.?.day = t.day;
+    o.temporal.?.year = @intCast(cd.y);
+    o.temporal.?.month = cd.m;
+    o.temporal.?.day = cd.d;
     o.temporal.?.calendar = cal;
     return Value.obj(o);
 }
@@ -27919,8 +27977,13 @@ fn temporalDateTimeWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Va
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef());
     const t = this.asObj().temporal.?;
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
+    const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.* = t.*;
+    o.temporal.?.year = @intCast(cd.y);
+    o.temporal.?.month = cd.m;
+    o.temporal.?.day = cd.d;
     o.temporal.?.calendar = cal;
     return Value.obj(o);
 }
