@@ -3744,6 +3744,7 @@ pub const Interpreter = struct {
     /// abandoned pending, the host's prerogative). Called after the main
     /// microtask drain in Context.evaluate/evaluateModule and agent realms.
     pub fn settleAsyncWaiters(self: *Interpreter) void {
+        const park_with_gil = self.use_thread_gil and self.gil != null;
         if (self.gil) |g| {
             // Quiescence loop: pumped tasks queue microtasks which can queue
             // further tasks — keep going until both are empty.
@@ -3759,9 +3760,9 @@ pub const Interpreter = struct {
                     if (jsthread.nextPropAsyncDeadline(self)) |deadline| {
                         const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
                         if (deadline > now) {
-                            g.release();
+                            if (park_with_gil) g.release();
                             std.Io.sleep(agent.engineIo(), .fromNanoseconds(@intCast(deadline - now)), .awake) catch {};
-                            g.acquire();
+                            if (park_with_gil) g.acquire();
                         }
                         continue;
                     }
@@ -3775,9 +3776,9 @@ pub const Interpreter = struct {
         var buf: [16]agent.Settled = undefined;
         while (listp.items.len > 0) {
             // harvestAsync blocks; under a GIL the notifier needs the VM lock.
-            if (self.gil) |g| g.release();
+            if (park_with_gil) self.gil.?.release();
             const n = agent.harvestAsync(owner, &buf);
-            if (self.gil) |g| g.acquire();
+            if (park_with_gil) self.gil.?.acquire();
             if (n == 0) break;
             for (buf[0..n]) |s| {
                 var i: usize = 0;
@@ -20959,10 +20960,11 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // it to run. Publish a conservative scan range first so a mid-script
     // collection on another thread can root this parked stack (defers run LIFO:
     // reacquire the GIL, then mark unparked).
-    if (self.gil != null) stack_scan.beginPark();
-    defer if (self.gil != null) stack_scan.endPark();
-    if (self.gil) |g| g.release();
-    defer if (self.gil) |g| g.acquire();
+    const park_with_gil = self.use_thread_gil and self.gil != null;
+    if (park_with_gil) stack_scan.beginPark();
+    defer if (park_with_gil) stack_scan.endPark();
+    if (park_with_gil) self.gil.?.release();
+    defer if (park_with_gil) self.gil.?.acquire();
     const outcome = if (vd.ta.kind == .i64)
         agent.wait(storage, offset, i64, @bitCast(expected_raw), timeout_ns)
     else

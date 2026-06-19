@@ -187,7 +187,10 @@ The main thread's `value` and each spawned thread's `value` are independent.
 
 In an `enable_threads` context, `Atomics.*` also accepts ordinary objects when
 the first argument is an object that is not a typed array. This path is scoped to
-own data properties and is serialized by the GIL.
+own data properties and is serialized by the GIL in the supported Layer-B model.
+Named own data properties also take the object's property lock for each
+load/store/exchange/compare-exchange/RMW step, which is the Layer-C bring-up path
+used by the test-only `parallel_js` probes.
 
 Supported operations:
 

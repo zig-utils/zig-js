@@ -306,6 +306,11 @@ campaign:
   `notify` cannot miss the release+park transition.
 - property-mode `Atomics.wait` / `notify` use `Gil.prop_waiters` /
   `Gil.prop_async` guarded by `Gil.prop_mutex`.
+- named property-mode Atomics load/store/exchange/compare-exchange/RMW hold
+  `Object.property_lock` for the whole property step, so no-GIL RMW counters no
+  longer lose updates.
+- typed-array `Atomics.wait` only releases/reacquires the context GIL in the
+  shipped GIL mode; `parallel_js` parks directly on the agent waiter table.
 
 The remaining work is no longer a single coordination queue; it is broadening the
 GIL-free execution campaign across the full PR-249 corpus and continuing to
@@ -360,8 +365,9 @@ test**. (5) Broaden the execution-path GIL drop in `threadMain`/`evaluate` under
 `parallel_js`; the corpus runner now has `-Dthreads-parallel-js=true` so PR-249
 files can be probed under the same GIL-free mode instead of only via unit
 witnesses. The first full-allowlist probe is intentionally not a gate yet: it
-exposes ordinary-object unlocked mutation in `smoke.js` (lost increment) and
-GIL-specific async-condition timing in `api/condition-async-wait.js`. (6)
+now gets past the named property-Atomics lost-increment blocker but still
+exposes a `smoke.js` liveness timeout plus GIL-specific async-condition timing in
+`api/condition-async-wait.js`. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

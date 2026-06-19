@@ -1101,12 +1101,40 @@ fn isAccessor(o: *value.Object, key: []const u8) bool {
     return false;
 }
 
+fn isLockedNamedAtomicsKey(key: []const u8) bool {
+    return value.canonicalIndex(key) == null;
+}
+
+fn attrUnlocked(o: *const value.Object, key: []const u8) value.PropAttr {
+    if (o.attrs) |m| {
+        if (m.get(key)) |a| return a;
+    }
+    return .{};
+}
+
+fn accessorUnlocked(o: *const value.Object, key: []const u8) bool {
+    if (o.accessors) |m| return m.get(key) != null;
+    return false;
+}
+
+fn namedSlotUnlocked(o: *const value.Object, key: []const u8) ?usize {
+    const sh = o.shape orelse return null;
+    return @intCast(sh.lookup(key) orelse return null);
+}
+
 fn ownDataOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: []const u8) value.HostError!Value {
+    if (isLockedNamedAtomicsKey(key)) {
+        o.lockProperties();
+        defer o.unlockProperties();
+        if (accessorUnlocked(o, key)) return self.throwError("TypeError", what);
+        if (namedSlotUnlocked(o, key)) |slot| return o.slots.items[slot];
+        return self.throwError("TypeError", what);
+    }
     if (isAccessor(o, key)) return self.throwError("TypeError", what);
     if (o.getOwn(key)) |v| return v;
     // Array dense elements (and other index-shaped own data) live outside the
     // shape slots; the generic own check + [[Get]] covers them (one step
-    // under the GIL either way).
+    // under the GIL in the supported Layer-B mode).
     if (interp.objectHasOwn(o, key)) return self.getProperty(Value.obj(o), key);
     return self.throwError("TypeError", what);
 }
@@ -1129,6 +1157,18 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const v = argAt(args, 2);
+    if (isLockedNamedAtomicsKey(key)) {
+        o.lockProperties();
+        defer o.unlockProperties();
+        if (accessorUnlocked(o, key)) return self.throwError("TypeError", "Atomics.store: property is an accessor");
+        if (namedSlotUnlocked(o, key) != null) {
+            if (!attrUnlocked(o, key).writable) return self.throwError("TypeError", "Atomics.store: property is not writable");
+        } else if (!o.extensible) {
+            return self.throwError("TypeError", "Atomics.store: cannot add a property to a non-extensible object");
+        }
+        try o.setOwnUnlocked(self.arena, self.root_shape, key, v);
+        return v;
+    }
     if (isAccessor(o, key)) return self.throwError("TypeError", "Atomics.store: property is an accessor");
     if (interp.objectHasOwn(o, key)) {
         try writableOrThrow(self, o, key, "Atomics.store: property is not writable");
@@ -1144,6 +1184,17 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
 pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
+    if (isLockedNamedAtomicsKey(key)) {
+        o.lockProperties();
+        defer o.unlockProperties();
+        if (accessorUnlocked(o, key)) return self.throwError("TypeError", "Atomics.exchange: object has no own data property");
+        const slot = namedSlotUnlocked(o, key) orelse
+            return self.throwError("TypeError", "Atomics.exchange: object has no own data property");
+        const old = o.slots.items[slot];
+        if (!attrUnlocked(o, key).writable) return self.throwError("TypeError", "Atomics.exchange: property is not writable");
+        try o.setOwnUnlocked(self.arena, self.root_shape, key, argAt(args, 2));
+        return old;
+    }
     const old = try ownDataOrThrow(self, o, key, "Atomics.exchange: object has no own data property");
     try writableOrThrow(self, o, key, "Atomics.exchange: property is not writable");
     try self.setMember(Value.obj(o), key, argAt(args, 2));
@@ -1153,6 +1204,20 @@ pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Val
 pub fn propCompareExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
+    if (isLockedNamedAtomicsKey(key)) {
+        o.lockProperties();
+        defer o.unlockProperties();
+        if (accessorUnlocked(o, key)) return self.throwError("TypeError", "Atomics.compareExchange: object has no own data property");
+        const slot = namedSlotUnlocked(o, key) orelse
+            return self.throwError("TypeError", "Atomics.compareExchange: object has no own data property");
+        const old = o.slots.items[slot];
+        // The writability rule throws unconditionally — even when the compare
+        // would fail.
+        if (!attrUnlocked(o, key).writable) return self.throwError("TypeError", "Atomics.compareExchange: property is not writable");
+        if (sameValueZero(old, argAt(args, 2)))
+            try o.setOwnUnlocked(self.arena, self.root_shape, key, argAt(args, 3));
+        return old;
+    }
     const old = try ownDataOrThrow(self, o, key, "Atomics.compareExchange: object has no own data property");
     // The writability rule throws unconditionally — even when the compare
     // would fail.
@@ -1168,6 +1233,25 @@ pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.Hos
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const operand = try self.toNumberV(argAt(args, 2));
+    if (isLockedNamedAtomicsKey(key)) {
+        o.lockProperties();
+        defer o.unlockProperties();
+        if (accessorUnlocked(o, key)) return self.throwError("TypeError", "Atomics RMW: object has no own data property");
+        const slot = namedSlotUnlocked(o, key) orelse
+            return self.throwError("TypeError", "Atomics RMW: object has no own data property");
+        const old = o.slots.items[slot];
+        if (!attrUnlocked(o, key).writable) return self.throwError("TypeError", "Atomics RMW: property is not writable");
+        if (!old.isNumber()) return self.throwError("TypeError", "Atomics RMW: stored value is not a number");
+        const result: f64 = switch (op) {
+            .add => old.asNum() + operand,
+            .sub => old.asNum() - operand,
+            .and_ => @floatFromInt(jsInt32(old.asNum()) & jsInt32(operand)),
+            .or_ => @floatFromInt(jsInt32(old.asNum()) | jsInt32(operand)),
+            .xor => @floatFromInt(jsInt32(old.asNum()) ^ jsInt32(operand)),
+        };
+        try o.setOwnUnlocked(self.arena, self.root_shape, key, Value.num(result));
+        return old;
+    }
     const old = try ownDataOrThrow(self, o, key, "Atomics RMW: object has no own data property");
     try writableOrThrow(self, o, key, "Atomics RMW: property is not writable");
     if (!old.isNumber()) return self.throwError("TypeError", "Atomics RMW: stored value is not a number");
