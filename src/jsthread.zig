@@ -1070,14 +1070,13 @@ fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
 // ---- Atomics on plain object properties (Phase 6 step 4) -------------------
 // PR-249 SPEC-api 4.5, spec'd line-by-line by
 // reference/webkit-249/threads-tests/atomics/property-*.js: each op is one
-// SeqCst step on an OWN DATA property (trivially so under the GIL). Values
-// are NOT coerced (any JS value round-trips by identity); load and the RMW
-// family require an existing own data property (absent/accessor/inherited
-// throw); store writes through preserving attributes and may create a fresh
-// default-attribute property on an extensible object; compareExchange is
-// SameValueZero; wait/notify key on (object, property). Property mode only
-// exists in enable_threads Contexts, so the test262-visible TypedArray path
-// is untouched.
+// SeqCst step on an OWN DATA property. Values are NOT coerced (any JS value
+// round-trips by identity); load and the RMW family require an existing own
+// data property (absent/accessor/inherited throw); store writes through
+// preserving attributes and may create a fresh default-attribute property on
+// an extensible object; compareExchange is SameValueZero; wait/notify key on
+// (object, property). Property mode only exists in enable_threads Contexts,
+// so the test262-visible TypedArray path is untouched.
 
 /// Whether an Atomics call should take the property path.
 pub fn isPropertyMode(self: *Interpreter, v: Value) bool {
@@ -1296,21 +1295,16 @@ pub const PropAsyncTicket = struct {
     owner: *const anyopaque,
 };
 
-fn appendPropAsync(g: *gil_mod.Gil, t: *PropAsyncTicket) !void {
-    g.lockPropWaiters();
-    defer g.unlockPropWaiters();
-    try g.prop_async.append(prop_alloc, @ptrCast(t));
-}
-
 /// `Atomics.waitAsync(obj, key, expected, timeout)` — the property path.
 /// Settlement: a notify resolves "ok" on the notifying thread; expiry
 /// resolves "timed-out" from the awaiters' poll points.
 pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value.HostError!Value {
     const o = args[0].asObj();
     const key_tmp = try self.keyOf(argAt(args, 1));
+    const expected = argAt(args, 2);
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.waitAsync: object has no own data property");
     const res = (try self.newObject()).asObj();
-    if (!sameValueZero(cur, argAt(args, 2))) {
+    if (!sameValueZero(cur, expected)) {
         try self.setProp(res, "async", Value.boolVal(false));
         try self.setProp(res, "value", Value.str("not-equal"));
         return Value.obj(res);
@@ -1328,6 +1322,11 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         prop_alloc.free(key);
         return error.OutOfMemory;
     };
+    var queued = false;
+    errdefer if (!queued) {
+        prop_alloc.free(key);
+        prop_alloc.destroy(t);
+    };
     const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
     t.* = .{
         .obj = o,
@@ -1337,11 +1336,24 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         .microtasks = microtasks,
         .owner = @ptrCast(self.gil.?),
     };
-    appendPropAsync(self.gil.?, t) catch {
-        prop_alloc.free(key);
-        prop_alloc.destroy(t);
+    const g = self.gil.?;
+    g.lockPropWaiters();
+    var locked = true;
+    defer if (locked) g.unlockPropWaiters();
+    const cur_locked = try ownDataOrThrow(self, o, key_tmp, "Atomics.waitAsync: object has no own data property");
+    if (!sameValueZero(cur_locked, expected)) {
+        g.unlockPropWaiters();
+        locked = false;
+        try self.setProp(res, "async", Value.boolVal(false));
+        try self.setProp(res, "value", Value.str("not-equal"));
+        return Value.obj(res);
+    }
+    g.prop_async.append(prop_alloc, @ptrCast(t)) catch {
+        g.unlockPropWaiters();
+        locked = false;
         return error.OutOfMemory;
     };
+    queued = true;
     try self.setProp(res, "async", Value.boolVal(true));
     try self.setProp(res, "value", Value.obj(p_obj));
     return Value.obj(res);
@@ -1476,8 +1488,9 @@ fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicke
 pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value.HostError!Value {
     const o = args[0].asObj();
     const key_tmp = try self.keyOf(argAt(args, 1));
+    const expected = argAt(args, 2);
     const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
-    if (!sameValueZero(cur, argAt(args, 2))) return Value.str("not-equal");
+    if (!sameValueZero(cur, expected)) return Value.str("not-equal");
     if (timeout_ns != null and timeout_ns.? == 0) return Value.str("timed-out");
     if (!self.main_can_block)
         return self.throwError("TypeError", "Atomics.wait cannot be called from the current thread.");
@@ -1491,6 +1504,8 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
         if (linked) removePropTicketLocked(g, &ticket);
         g.unlockPropWaiters();
     }
+    const cur_locked = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
+    if (!sameValueZero(cur_locked, expected)) return Value.str("not-equal");
     g.prop_waiters.append(prop_alloc, @ptrCast(&ticket)) catch return error.OutOfMemory;
     linked = true;
     const deadline_ns: ?i96 = if (timeout_ns) |ns|
