@@ -17375,6 +17375,7 @@ const DtfOptions = struct {
     hour12: ?bool = null,
     hour_cycle: []const u8 = "",
     time_zone: []const u8 = "UTC",
+    defaults_applied: bool = false,
 };
 
 /// Process and validate the options bag for Intl.DateTimeFormat per
@@ -17448,6 +17449,7 @@ fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequire
     if ((required == .any or required == .date) and has_date_comp) need_defaults = false;
     if ((required == .any or required == .time) and has_time_comp) need_defaults = false;
     if (need_defaults and r.date_style.len == 0 and r.time_style.len == 0) {
+        r.defaults_applied = true;
         if (defaults == .date or defaults == .all) {
             r.year = "numeric";
             r.month = "numeric";
@@ -17592,6 +17594,10 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalE
     try S.put(self, ro, "hourCycle", r.hour_cycle);
     try S.put(self, ro, "timeZone", r.time_zone);
     if (r.hour12) |h| try self.setProp(ro, "hour12", Value.boolVal(h));
+    if (r.defaults_applied) {
+        try self.setProp(ro, "\x00defaultsApplied", Value.boolVal(true));
+        try ro.setAttr(self.arena, "\x00defaultsApplied", .{ .writable = false, .enumerable = false, .configurable = false });
+    }
     try self.setProp(o, "\x00opts", Value.obj(ro));
     try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
 }
@@ -18197,6 +18203,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var o_tzname: []const u8 = ""; // timeZoneName width (long/short/...)
     var hour12 = true;
     var any_comp = false;
+    var defaults_applied = false;
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         const get = struct {
             fn s(slf: *Interpreter, obj: Value, k: []const u8) EvalError![]const u8 {
@@ -18216,6 +18223,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (ov.asObj().getOwn("fractionalSecondDigits")) |f| if (f.isNumber()) {
             o_frac = @intFromFloat(f.asNum());
         };
+        if (ov.asObj().getOwn("\x00defaultsApplied")) |d| defaults_applied = d.toBoolean();
         any_comp = o_weekday.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
         const hc = try get(self, ov, "hourCycle");
         const h12 = try self.getProperty(ov, "hour12");
@@ -18253,6 +18261,48 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         o_month = "numeric";
         o_day = "numeric";
     }
+    if (defaults_applied) if (temporal_kind) |tk| {
+        o_weekday = "";
+        o_year = "";
+        o_month = "";
+        o_day = "";
+        o_hour = "";
+        o_minute = "";
+        o_second = "";
+        o_frac = 0;
+        o_day_period = "";
+        o_tzname = "";
+        switch (tk) {
+            .plain_date => {
+                o_year = "numeric";
+                o_month = "numeric";
+                o_day = "numeric";
+            },
+            .plain_date_time, .instant => {
+                o_year = "numeric";
+                o_month = "numeric";
+                o_day = "numeric";
+                o_hour = "numeric";
+                o_minute = "numeric";
+                o_second = "numeric";
+            },
+            .plain_time => {
+                o_hour = "numeric";
+                o_minute = "numeric";
+                o_second = "numeric";
+            },
+            .plain_year_month => {
+                o_year = "numeric";
+                o_month = "numeric";
+            },
+            .plain_month_day => {
+                o_month = "numeric";
+                o_day = "numeric";
+            },
+            else => {},
+        }
+        any_comp = true;
+    };
 
     // Restrict the components to those the Temporal value's type can provide; a
     // requested component the type lacks is dropped, and if NOTHING the formatter
