@@ -24920,7 +24920,7 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
                 .day => Value.num(@floatFromInt(t.day)),
                 .day_of_week => Value.num(@floatFromInt(isoDayOfWeek(y, t.month, t.day))),
                 .day_of_year => Value.num(@floatFromInt(tDaysFromCivil(y, t.month, t.day) - tDaysFromCivil(y, 1, 1) + 1)),
-                .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, t.month))),
+                .days_in_month => Value.num(@floatFromInt(calDaysInMonth(t.calendar, calDisplayYear(t.calendar, y), t.month))),
                 .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .days_in_week => Value.num(7),
@@ -25073,6 +25073,57 @@ fn calDaysInYear(cal: []const u8, year: i64) u16 {
     if (std.mem.eql(u8, cal, "islamic") or std.mem.eql(u8, cal, "islamic-civil") or std.mem.eql(u8, cal, "islamic-tbla") or std.mem.eql(u8, cal, "islamic-rgsa") or std.mem.eql(u8, cal, "islamic-umalqura"))
         return if (calInLeapYear(cal, year)) 355 else 354;
     return if (calInLeapYear(cal, year)) 366 else 365;
+}
+
+fn tableMonthDays(year: i64, month: u8, y0: i64, y0_days: []const u8, y1: i64, y1_days: []const u8) ?u8 {
+    if (month == 0) return null;
+    if (year == y0 and month <= y0_days.len) return y0_days[month - 1];
+    if (year == y1 and month <= y1_days.len) return y1_days[month - 1];
+    return null;
+}
+
+fn hebrewDaysInMonth(year: i64, month: u8) u8 {
+    const leap = calInLeapYear("hebrew", year);
+    const year_days = calDaysInYear("hebrew", year);
+    return switch (month) {
+        1 => 30,
+        2 => if (@mod(year_days, 10) == 5) 30 else 29,
+        3 => if (@mod(year_days, 10) == 3) 29 else 30,
+        4 => 29,
+        5 => 30,
+        6 => if (leap) 30 else 29,
+        7 => if (leap) 29 else 30,
+        8 => if (leap) 30 else 29,
+        9 => if (leap) 29 else 30,
+        10 => if (leap) 30 else 29,
+        11 => if (leap) 29 else 30,
+        12 => if (leap) 30 else 29,
+        13 => if (leap) 29 else 0,
+        else => 0,
+    };
+}
+
+fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
+    if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
+        return if (month <= 12) 30 else if (month == 13) (if (calInLeapYear(cal, year)) 6 else 5) else 0;
+    if (std.mem.eql(u8, cal, "indian"))
+        return if (month == 1) (if (calInLeapYear(cal, year)) 31 else 30) else if (month >= 2 and month <= 6) 31 else if (month <= 12) 30 else 0;
+    if (std.mem.eql(u8, cal, "persian"))
+        return if (month <= 6) 31 else if (month <= 11) 30 else if (month == 12) (if (calInLeapYear(cal, year)) 30 else 29) else 0;
+    if (std.mem.eql(u8, cal, "hebrew")) return hebrewDaysInMonth(year, month);
+    if (std.mem.eql(u8, cal, "islamic") or std.mem.eql(u8, cal, "islamic-civil") or std.mem.eql(u8, cal, "islamic-tbla") or std.mem.eql(u8, cal, "islamic-rgsa"))
+        return if (month == 12 and calInLeapYear(cal, year)) 30 else if (month >= 1 and month <= 12) (if ((month % 2) == 1) 30 else 29) else 0;
+    if (std.mem.eql(u8, cal, "islamic-umalqura")) {
+        const y1390 = [_]u8{ 29, 30, 29, 30, 30, 30, 29, 30, 29, 30, 29, 30 };
+        const y1391 = [_]u8{ 29, 29, 30, 29, 30, 30, 29, 30, 30, 29, 30, 29 };
+        return tableMonthDays(year, month, 1390, &y1390, 1391, &y1391) orelse 0;
+    }
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
+        const y1971 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, 30, 29 };
+        const y1972 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, if (std.mem.eql(u8, cal, "chinese")) 29 else 30, if (std.mem.eql(u8, cal, "chinese")) 30 else 29 };
+        return tableMonthDays(year, month, 1971, &y1971, 1972, &y1972) orelse 0;
+    }
+    return isoDaysInMonth(calIsoFromDisplayYear(cal, year), month);
 }
 
 /// Whether a date-bearing Temporal value uses the Gregorian calendar (which, for
@@ -26109,7 +26160,7 @@ fn temporalYearMonthGetter(comptime f: YearMonthField) value.NativeFn {
             return switch (f) {
                 .year => Value.num(@floatFromInt(calDisplayYear(t.calendar, t.year))),
                 .month => Value.num(@floatFromInt(t.month)),
-                .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, t.month))),
+                .days_in_month => Value.num(@floatFromInt(calDaysInMonth(t.calendar, calDisplayYear(t.calendar, y), t.month))),
                 .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, calDisplayYear(t.calendar, y))),
@@ -28232,7 +28283,7 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
                 .nanosecond => Value.num(@floatFromInt(l.nanosecond)),
                 .day_of_week => Value.num(@floatFromInt(isoDayOfWeek(y, l.month, l.day))),
                 .day_of_year => Value.num(@floatFromInt(tDaysFromCivil(y, l.month, l.day) - tDaysFromCivil(y, 1, 1) + 1)),
-                .days_in_month => Value.num(@floatFromInt(isoDaysInMonth(y, l.month))),
+                .days_in_month => Value.num(@floatFromInt(calDaysInMonth(t.calendar, calDisplayYear(t.calendar, y), l.month))),
                 .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, calDisplayYear(t.calendar, y)))),
                 .days_in_week => Value.num(7),
