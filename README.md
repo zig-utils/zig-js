@@ -74,11 +74,11 @@ Of the valid corpus: **45 parse failures**, **4,499 runtime failures**, **0 host
 | `parseFloat` | 54 / 54 (100%) | `parseInt` | 55 / 55 (100%) |
 | `decodeURI` | 55 / 55 (100%) | `decodeURIComponent` | 56 / 56 (100%) |
 | `encodeURI` | 31 / 31 (100%) | `encodeURIComponent` | 31 / 31 (100%) |
-
-Latest focused `test/intl402` worker checkpoint: **2,120 / 3,341 (63.5%)**, up **+140** from the previous focused checkpoint of 1,980 / 3,341 after the Temporal calendar arithmetic-year fixes.
 | `AsyncIteratorPrototype` | 13 / 13 (100%) | `eval` | 10 / 10 (100%) |
 | `global` | 29 / 29 (100%) | `Function` | 509 / 509 (100%) |
 | `Proxy` | 310 / 310 (100%) | `Reflect` | 153 / 153 (100%) |
+
+Latest focused `test/intl402` worker checkpoint: **2,120 / 3,341 (63.5%)**, up **+140** from the previous focused checkpoint of 1,980 / 3,341 after the Temporal calendar arithmetic-year fixes.
 
 > `zig build test262` prints each subtree's pass rate plus `parse-fail` / `runtime-fail` / `host-fail` counts, so the work stays data-driven. `zig build conformance` keeps a separate 33/33 always-green smoke suite for fast iteration. Refresh the corpus with `git submodule update --remote test262`.
 
