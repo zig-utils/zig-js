@@ -159,9 +159,18 @@ pub const Lexer = struct {
             const ch = self.src[self.i];
             if (ch == '\n' or ch == '\r') break;
             if (ch >= 0x80) {
-                const len = std.unicode.utf8ByteSequenceLength(ch) catch break;
-                if (self.i + len > self.src.len) break;
-                const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
+                const len = std.unicode.utf8ByteSequenceLength(ch) catch {
+                    self.i += 1;
+                    continue;
+                };
+                if (self.i + len > self.src.len) {
+                    self.i += 1;
+                    continue;
+                }
+                const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch {
+                    self.i += len;
+                    continue;
+                };
                 if (isLineTermCp(cp)) break;
                 self.i += len;
             } else {
@@ -1155,4 +1164,13 @@ test "lexer hashbang comments stop at all line terminators" {
         try std.testing.expectEqual(TokenKind.rbrace, (try lx.next()).kind);
         try std.testing.expectEqual(TokenKind.eof, (try lx.next()).kind);
     }
+}
+
+test "lexer single-line comments allow WTF-8 surrogate bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lx = Lexer.init(arena.allocator(), "// comment \xed\xa0\x80 text\n{}");
+    try std.testing.expectEqual(TokenKind.lbrace, (try lx.next()).kind);
+    try std.testing.expectEqual(TokenKind.rbrace, (try lx.next()).kind);
+    try std.testing.expectEqual(TokenKind.eof, (try lx.next()).kind);
 }
