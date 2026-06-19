@@ -23457,8 +23457,10 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
     // Case 2: smallestUnit is year/month/week — round the fractional calendar total.
     const total = totalDurationRel(self, dur, rel, smallest);
     const inc = opts.increment;
-    const scaled: i128 = applyRounding(@intFromFloat(@round(total * 1e9)), @intFromFloat(@round(inc * 1e9)), opts.mode);
-    const rounded_units: i64 = @intFromFloat(@as(f64, @floatFromInt(scaled)) * inc);
+    const scale: i128 = 1_000_000_000;
+    const inc_scaled: i128 = @intFromFloat(@round(inc * @as(f64, @floatFromInt(scale))));
+    const rounded_scaled = applyRounding(@intFromFloat(@round(total * @as(f64, @floatFromInt(scale)))), inc_scaled, opts.mode) * inc_scaled;
+    const rounded_units: i64 = @intFromFloat(@as(f64, @floatFromInt(rounded_scaled)) / @as(f64, @floatFromInt(scale)));
     // Place `rounded_units` of smallestUnit at `rel`, then express to largestUnit.
     const placed = switch (smallest) {
         .year => isoDateAdd(rel.y, rel.m, rel.d, rounded_units, 0, 0, 0),
@@ -23524,8 +23526,7 @@ fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Val
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Temporal.Duration requires 'new'");
-    const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    var dur: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     var any_sign: f64 = 0;
     for (0..10) |i| {
         // Each Duration component defaults to 0 when missing OR explicitly
@@ -23533,14 +23534,16 @@ fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Val
         // rejects NaN, ±∞, and non-integral values with a RangeError).
         const v = if (args.len > i) args[i] else Value.undef();
         const n = if (v.isUndefined()) 0 else try temporalIntegralArg(self, v, "Duration component must be an integer");
-        o.temporal.?.dur[i] = n;
+        dur[i] = n;
         if (n != 0) {
             const s: f64 = if (n > 0) 1 else -1;
             if (any_sign != 0 and any_sign != s) return self.throwError("RangeError", "Temporal.Duration components must all have the same sign");
             any_sign = s;
         }
     }
-    return Value.obj(o);
+    const out = try makeDuration(self, dur);
+    if (self.new_target.isObject()) out.asObj().proto = try self.protoObject(self.new_target.asObj());
+    return out;
 }
 
 fn durationSign(t: *const value.TemporalData) f64 {
@@ -23618,9 +23621,21 @@ fn durSignOk(dur: [10]f64) bool {
 fn durInRange(dur: [10]f64) bool {
     for (dur) |c| if (!std.math.isFinite(c)) return false;
     if (@abs(dur[0]) >= 4294967296.0 or @abs(dur[1]) >= 4294967296.0 or @abs(dur[2]) >= 4294967296.0) return false;
-    const total_s = dur[3] * 86400.0 + dur[4] * 3600.0 + dur[5] * 60.0 + dur[6] +
-        dur[7] / 1000.0 + dur[8] / 1_000_000.0 + dur[9] / 1_000_000_000.0;
-    return @abs(total_s) < 9007199254740992.0; // 2^53
+    const limit_ns = @as(i128, 9007199254740992) * nsPerUnit(.second); // 2^53 seconds
+    inline for (.{
+        .{ 3, TUnit.day },
+        .{ 4, TUnit.hour },
+        .{ 5, TUnit.minute },
+        .{ 6, TUnit.second },
+        .{ 7, TUnit.millisecond },
+        .{ 8, TUnit.microsecond },
+        .{ 9, TUnit.nanosecond },
+    }) |field| {
+        const max_component: f64 = @floatFromInt(@divTrunc(limit_ns, nsPerUnit(field[1])));
+        if (@abs(dur[field[0]]) > max_component) return false;
+    }
+    const total_ns = durationDayTimeNs(dur);
+    return total_ns > -limit_ns and total_ns < limit_ns;
 }
 
 fn temporalDurationWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
