@@ -14,6 +14,7 @@ const shared_buffer = @import("shared_buffer.zig");
 const gil_mod = @import("gil.zig");
 const jsthread = @import("jsthread.zig");
 const stack_scan = @import("stack_scan.zig");
+const agent = @import("agent.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -472,11 +473,20 @@ pub const Context = struct {
             self.teardown_stop.store(true, .release);
             // Spawned threads need the lock to finish: park until each is
             // done, then OS-join the handles.
-            g.acquire();
-            for (self.js_threads.items) |rec| {
-                while (!rec.done) g.wait(&rec.done_cond);
+            if (self.parallel_js) {
+                const io = agent.engineIo();
+                for (self.js_threads.items) |rec| {
+                    rec.join_mutex.lockUncancelable(io);
+                    while (!rec.exited) rec.done_cond.wait(io, &rec.join_mutex) catch {};
+                    rec.join_mutex.unlock(io);
+                }
+            } else {
+                g.acquire();
+                for (self.js_threads.items) |rec| {
+                    while (!rec.done) g.wait(&rec.done_cond);
+                }
+                g.release();
             }
-            g.release();
             for (self.js_threads.items) |rec| {
                 if (rec.thread) |t| t.join();
             }
@@ -557,8 +567,12 @@ pub const Context = struct {
     }
 
     fn hasRunningJsThreads(self: *const Context) bool {
+        const io = agent.engineIo();
         for (self.js_threads.items) |rec| {
-            if (!rec.done) return true;
+            rec.join_mutex.lockUncancelable(io);
+            const exited = rec.exited;
+            rec.join_mutex.unlock(io);
+            if (!exited) return true;
         }
         return false;
     }
@@ -793,21 +807,39 @@ pub const Context = struct {
         // thread finishes (each drains its own queue and settles its
         // asyncJoins), then drains whatever those settlements queued here.
         if (self.gil) |g| {
-            if (self.parallel_js) g.acquire();
-            defer if (self.parallel_js) g.release();
             if (top_level_failed) self.teardown_stop.store(true, .release);
             var i: usize = 0;
             while (i < self.js_threads.items.len) : (i += 1) {
                 const rec = self.js_threads.items[i];
-                while (!rec.done) {
-                    // Parked keepalive still serves run-loop tasks: a waiting
-                    // thread may need a grant delivery pumped to finish.
-                    jsthread.pumpTasks(&machine);
-                    if (rec.done) break;
-                    g.waitTimeout(&rec.done_cond, .{ .duration = .{
-                        .raw = .fromMilliseconds(5),
-                        .clock = .awake,
-                    } }) catch {};
+                if (self.parallel_js) {
+                    const io = agent.engineIo();
+                    rec.join_mutex.lockUncancelable(io);
+                    while (!rec.done) {
+                        // Parked keepalive still serves run-loop tasks: a waiting
+                        // thread may need a grant delivery pumped to finish.
+                        rec.join_mutex.unlock(io);
+                        jsthread.pumpTasks(&machine);
+                        rec.join_mutex.lockUncancelable(io);
+                        if (rec.done) break;
+                        stack_scan.beginPark();
+                        rec.done_cond.waitTimeout(io, &rec.join_mutex, .{ .duration = .{
+                            .raw = .fromMilliseconds(5),
+                            .clock = .awake,
+                        } }) catch {};
+                        stack_scan.endPark();
+                    }
+                    rec.join_mutex.unlock(io);
+                } else {
+                    while (!rec.done) {
+                        // Parked keepalive still serves run-loop tasks: a waiting
+                        // thread may need a grant delivery pumped to finish.
+                        jsthread.pumpTasks(&machine);
+                        if (rec.done) break;
+                        g.waitTimeout(&rec.done_cond, .{ .duration = .{
+                            .raw = .fromMilliseconds(5),
+                            .clock = .awake,
+                        } }) catch {};
+                    }
                 }
             }
             machine.drainMicrotasks() catch {};

@@ -24,6 +24,7 @@ const ContextMod = @import("context.zig");
 const jsthread = @import("jsthread.zig");
 const gc_runtime = @import("gc_runtime.zig");
 const stack_scan = @import("stack_scan.zig");
+const agent = @import("agent.zig");
 
 const Value = value.Value;
 const Object = value.Object;
@@ -499,6 +500,9 @@ pub const Binding = struct {
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
         for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
         for (ctx.js_threads.items) |rec| {
+            const io = agent.engineIo();
+            rec.join_mutex.lockUncancelable(io);
+            defer rec.join_mutex.unlock(io);
             markValue(v, rec.result);
             if (rec.js_obj) |o| v.mark(o);
             for (rec.pending_joins.items) |pending| v.mark(pending.promise);

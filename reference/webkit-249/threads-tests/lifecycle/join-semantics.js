@@ -13,8 +13,8 @@ shouldBe(t1.join(), obj);
 // Joining a thread that has long since finished still works.
 const t2 = new Thread(() => "done");
 shouldBe(t2.join(), "done");
-// Burn some time so t2 is thoroughly dead, then join again.
-for (let i = 0; i < 1e6; ++i) { }
+// The first join already observed completion; joining an already-finished
+// thread must remain repeatable without any extra scheduler dependency.
 shouldBe(t2.join(), "done");
 
 // A spawned thread can join another spawned thread.

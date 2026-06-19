@@ -3238,12 +3238,14 @@ pub const Interpreter = struct {
     /// wrapper [[…Data]]/etc. — plus any maintained own properties (e.g. a Set's
     /// `size`). `dst`'s prototype (its derived `.prototype`) is preserved; `dst`
     /// is otherwise pristine (a derived constructor cannot touch `this` before
-    /// `super()` returns). `src` is discarded, so sharing its arena-backed
-    /// stores is safe.
+    /// `super()` returns). `src` is discarded, so transfer ownership of any
+    /// GC-owned backing stores to `dst`; otherwise both cells would finalize the
+    /// same slots/elements/accessor storage.
     fn adoptInternalSlots(dst: *value.Object, src: *value.Object) void {
         const keep_proto = dst.proto;
         dst.* = src.*;
         dst.proto = keep_proto;
+        src.* = .{};
     }
 
     pub fn construct(self: *Interpreter, callee: Value, args: []const Value) EvalError!Value {

@@ -36,9 +36,15 @@ pub const ThreadRecord = struct {
     gil: *gil_mod.Gil,
     ctx: *Context,
     thread: ?std.Thread = null,
-    /// GIL-protected; `done_cond` is waited through `Gil.wait`, so joiners
-    /// release the lock while parked.
+    /// Guards completion state independently from the context GIL. Shipping
+    /// GIL-mode joiners still release the GIL while parked, but `parallel_js`
+    /// joiners wait only on this mutex/condition pair.
+    join_mutex: std.Io.Mutex = .init,
     done: bool = false,
+    /// True only after the OS thread has run all cleanup defers and is about
+    /// to return. GC quiescence uses this, not `done`: `done` only means the JS
+    /// result is published for joiners.
+    exited: bool = false,
     threw: bool = false,
     result: Value = Value.undef(),
     done_cond: std.Io.Condition = .init,
@@ -90,7 +96,7 @@ pub fn installThreadAPI(ctx: *Context) !void {
     // The main thread's record: id 0, never "joinable-blocking" (done from
     // birth, so a stray main.join() returns undefined instead of hanging).
     const main_rec = try a.create(ThreadRecord);
-    main_rec.* = .{ .id = 0, .gil = ctx.gil.?, .ctx = ctx, .done = true, .microtasks = &ctx.microtasks };
+    main_rec.* = .{ .id = 0, .gil = ctx.gil.?, .ctx = ctx, .done = true, .exited = true, .microtasks = &ctx.microtasks };
     main_rec.js_obj = try makeWrapper(ctx, main_rec);
     t_current = main_rec;
     try ctx.js_threads.append(ctx.gpa, main_rec);
@@ -200,6 +206,7 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
 
     rec.thread = std.Thread.spawn(.{}, threadMain, .{ rec, fn_v, call_args }) catch {
         rec.done = true;
+        rec.exited = true;
         return self.throwError("Error", "Thread: could not spawn OS thread");
     };
     return Value.obj(rec.js_obj.?);
@@ -207,6 +214,7 @@ fn threadCtorFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
 
 fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     const g = rec.gil;
+    defer markThreadExited(rec);
     if (!rec.ctx.parallel_js) g.acquire();
     defer if (!rec.ctx.parallel_js) g.release();
     const gc_saved = gc_mod.setActiveHeap(rec.ctx.gc);
@@ -242,10 +250,8 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     rec.microtasks = &microtasks;
     var machine = rec.ctx.interpreter();
     rec.ctx.pushActiveInterpreter(&machine) catch {
-        rec.threw = true;
-        rec.result = Value.undef();
-        rec.done = true;
-        rec.done_cond.broadcast(agent.engineIo());
+        var pending_joins = publishThreadCompletion(rec, true, Value.undef());
+        pending_joins.deinit(rec.ctx.arena());
         return;
     };
     defer rec.ctx.popActiveInterpreter(&machine);
@@ -264,29 +270,48 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         result = machine.exception;
     }
     // Settle asyncJoin promises on this (the settling) thread, then drain
-    // the reactions it just queued.
+    // the reactions it just queued. `publishThreadCompletion` snapshots the
+    // pending join list under `join_mutex`; JS/promise work runs after release.
     if (rec.ctx.parallel_js) g.acquire();
     defer if (rec.ctx.parallel_js) g.release();
-    rec.threw = threw;
-    rec.result = result;
+    var pending_joins = publishThreadCompletion(rec, threw, result);
+    defer pending_joins.deinit(rec.ctx.arena());
     const saved_microtasks = machine.microtasks;
-    for (rec.pending_joins.items) |pending| {
+    for (pending_joins.items) |pending| {
         machine.microtasks = pending.microtasks;
         if (promise.promiseOf(Value.obj(pending.promise))) |pp| {
-            if (rec.threw)
-                promise.reject(&machine, pp, rec.result) catch {}
+            if (threw)
+                promise.reject(&machine, pp, result) catch {}
             else
-                promise.resolve(&machine, pp, rec.result) catch {};
+                promise.resolve(&machine, pp, result) catch {};
         }
     }
     machine.microtasks = saved_microtasks;
-    rec.pending_joins.clearRetainingCapacity();
     machine.drainMicrotasks() catch {};
     transferPendingJoinQueue(rec.ctx, &microtasks, &rec.ctx.microtasks);
     transferPropAsyncQueue(g, &microtasks, &rec.ctx.microtasks);
     rec.microtasks = null;
+}
+
+fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.ArrayListUnmanaged(PendingJoin) {
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
+    defer rec.join_mutex.unlock(io);
+    rec.threw = threw;
+    rec.result = result;
+    const pending = rec.pending_joins;
+    rec.pending_joins = .empty;
     rec.done = true;
-    rec.done_cond.broadcast(agent.engineIo());
+    rec.done_cond.broadcast(io);
+    return pending;
+}
+
+fn markThreadExited(rec: *ThreadRecord) void {
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
+    rec.exited = true;
+    rec.done_cond.broadcast(io);
+    rec.join_mutex.unlock(io);
 }
 
 /// `Thread.prototype.join()` — park (GIL released) until the thread's fn has
@@ -297,19 +322,24 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.join called on incompatible receiver");
     if (rec == t_current) return self.throwError("Error", "Thread cannot join itself");
-    if (!self.use_thread_gil) rec.gil.acquire();
-    defer if (!self.use_thread_gil) rec.gil.release();
     // The gate guards the BLOCK, not the call: joining a finished thread is
     // always allowed.
-    if (!rec.done and !self.main_can_block)
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
+    if (!rec.done and !self.main_can_block) {
+        rec.join_mutex.unlock(io);
         return self.throwError("TypeError", "Thread.prototype.join cannot block the current thread");
-    while (!rec.done) try parkPump(self, rec.gil, &rec.done_cond);
+    }
+    while (!rec.done) try parkPumpThreadJoin(self, rec);
+    const threw = rec.threw;
+    const result = rec.result;
+    rec.join_mutex.unlock(io);
     self.drainMicrotasks() catch {};
-    if (rec.threw) {
-        self.exception = rec.result;
+    if (threw) {
+        self.exception = result;
         return error.Throw;
     }
-    return rec.result;
+    return result;
 }
 
 fn threadIdGetter(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -1585,12 +1615,23 @@ fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
     const rec = recordOf(self, this) orelse return self.throwError("TypeError", "Thread.prototype.asyncJoin called on incompatible receiver");
     const p_obj = try promise.newPromise(self);
     const pp = promise.promiseOf(Value.obj(p_obj)).?;
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
     if (rec.done) {
-        if (rec.threw) try promise.reject(self, pp, rec.result) else try promise.resolve(self, pp, rec.result);
+        const threw = rec.threw;
+        const result = rec.result;
+        rec.join_mutex.unlock(io);
+        if (threw) try promise.reject(self, pp, result) else try promise.resolve(self, pp, result);
     } else {
-        const microtasks = self.microtasks orelse
+        const microtasks = self.microtasks orelse {
+            rec.join_mutex.unlock(io);
             return self.throwError("Error", "Thread.prototype.asyncJoin requires a microtask queue");
-        try rec.pending_joins.append(self.arena, .{ .promise = p_obj, .microtasks = microtasks });
+        };
+        rec.pending_joins.append(self.arena, .{ .promise = p_obj, .microtasks = microtasks }) catch |err| {
+            rec.join_mutex.unlock(io);
+            return err;
+        };
+        rec.join_mutex.unlock(io);
     }
     return Value.obj(p_obj);
 }
@@ -1732,6 +1773,35 @@ fn parkPump(self: *Interpreter, g: *gil_mod.Gil, cond: *std.Io.Condition) value.
         .raw = .fromMilliseconds(5),
         .clock = .awake,
     } }) catch {};
+}
+
+/// Like `parkPump`, but waits on a `ThreadRecord`'s completion mutex instead
+/// of the context GIL. In shipped GIL mode the caller enters with the GIL held;
+/// release it only for the actual park, and never wait for it again while still
+/// holding `join_mutex` (that would invert against another thread entering
+/// `asyncJoin` while it holds the GIL).
+fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!void {
+    const io = agent.engineIo();
+    rec.join_mutex.unlock(io);
+    pumpTasks(self);
+    if (self.stop_flag) |sf| if (sf.load(.monotonic))
+        return self.throwError("Error", "worker terminated");
+    rec.join_mutex.lockUncancelable(io);
+    if (rec.done) return;
+
+    stack_scan.beginPark();
+    const released_gil = self.use_thread_gil;
+    if (released_gil) rec.gil.release();
+    rec.done_cond.waitTimeout(io, &rec.join_mutex, .{ .duration = .{
+        .raw = .fromMilliseconds(5),
+        .clock = .awake,
+    } }) catch {};
+    if (released_gil) {
+        rec.join_mutex.unlock(io);
+        rec.gil.acquire();
+        rec.join_mutex.lockUncancelable(io);
+    }
+    stack_scan.endPark();
 }
 
 fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
