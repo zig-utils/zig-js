@@ -23604,17 +23604,17 @@ fn temporalDurationNegatedFn(ctx: *anyopaque, this: Value, args: []const Value) 
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    for (0..10) |i| o.temporal.?.dur[i] = -this.asObj().temporal.?.dur[i];
-    return Value.obj(o);
+    var dur: [10]f64 = undefined;
+    for (0..10) |i| dur[i] = -this.asObj().temporal.?.dur[i];
+    return makeDuration(self, dur);
 }
 fn temporalDurationAbsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().temporal == null or this.asObj().temporal.?.kind != .duration) return self.throwError("TypeError", "non-Duration");
-    const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    for (0..10) |i| o.temporal.?.dur[i] = @abs(this.asObj().temporal.?.dur[i]);
-    return Value.obj(o);
+    var dur: [10]f64 = undefined;
+    for (0..10) |i| dur[i] = @abs(this.asObj().temporal.?.dur[i]);
+    return makeDuration(self, dur);
 }
 
 /// True if the duration uses any calendar unit (years/months/weeks), which
@@ -23844,7 +23844,7 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
         return Value.obj(o);
     }
     if (a0.isObject() and !a0.asObj().is_symbol and !a0.asObj().is_bigint) {
-        const o = try makeTemporal(self, .duration, "\x00T.Duration");
+        var dur: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
         var any = false;
         var any_sign: f64 = 0;
         for (dur_read_fields) |field| {
@@ -23852,7 +23852,7 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
             if (pv.isUndefined()) continue;
             any = true;
             const n = try temporalIntegralArg(self, pv, "Duration component must be an integer");
-            o.temporal.?.dur[field.idx] = n;
+            dur[field.idx] = n;
             if (n != 0) {
                 const s: f64 = if (n > 0) 1 else -1;
                 if (any_sign != 0 and any_sign != s) return self.throwError("RangeError", "mixed-sign Duration");
@@ -23860,7 +23860,7 @@ fn temporalDurationFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
             }
         }
         if (!any) return self.throwError("TypeError", "Temporal.Duration.from: object has no duration properties");
-        return Value.obj(o);
+        return makeDuration(self, dur);
     }
     if (!a0.isString()) return self.throwError("TypeError", "Temporal.Duration.from requires a string or object");
     const s = try self.toStringV(a0);
@@ -25873,9 +25873,13 @@ fn validateDurationRoundingIncrement(self: *Interpreter, unit: TUnit, increment:
 /// Build a Temporal.Duration object from raw components (CreateTemporalDuration,
 /// which rejects an out-of-range duration).
 fn makeDuration(self: *Interpreter, dur: [10]f64) EvalError!Value {
-    if (!durInRange(dur)) return self.throwError("RangeError", "duration out of range");
+    var normalized = dur;
+    for (&normalized) |*field| {
+        if (field.* == 0) field.* = 0;
+    }
+    if (!durInRange(normalized)) return self.throwError("RangeError", "duration out of range");
     const o = try makeTemporal(self, .duration, "\x00T.Duration");
-    o.temporal.?.dur = dur;
+    o.temporal.?.dur = normalized;
     return Value.obj(o);
 }
 
