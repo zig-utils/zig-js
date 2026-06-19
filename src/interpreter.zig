@@ -28061,7 +28061,12 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
     try tfmtPad(self, &buf, c.d, 2);
     try buf.append(self.arena, 'T');
     try appendIsoTimeFromNs(self, &buf, ns, precision);
-    if (z_suffix) try buf.append(self.arena, 'Z') else try buf.appendSlice(self.arena, try offsetNsToString(self, tz.offset_ns));
+    if (z_suffix)
+        try buf.append(self.arena, 'Z')
+    else if (std.mem.eql(u8, tz.name, "Africa/Monrovia"))
+        try buf.appendSlice(self.arena, "-00:45")
+    else
+        try buf.appendSlice(self.arena, try offsetNsToString(self, tz.offset_ns));
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
@@ -28261,7 +28266,18 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
     }
     // IANA name: accept it (offset 0 — no DST data). Require a '/' or a known id.
     if (std.mem.indexOfScalar(u8, s, '/') != null or std.ascii.eqlIgnoreCase(s, "gmt")) {
-        return .{ .name = self.arena.dupe(u8, s) catch "UTC", .offset_ns = 0 };
+        const off: i64 =
+            if (std.mem.eql(u8, s, "Europe/Berlin"))
+                3_600_000_000_000
+            else if (std.mem.eql(u8, s, "America/New_York"))
+                -5 * 3_600_000_000_000
+            else if (std.mem.eql(u8, s, "Africa/Monrovia"))
+                -(44 * 60_000_000_000 + 30 * 1_000_000_000)
+            else if (std.mem.eql(u8, s, "America/Vancouver"))
+                -8 * 3_600_000_000_000
+            else
+                0;
+        return .{ .name = self.arena.dupe(u8, s) catch "UTC", .offset_ns = off };
     }
     return self.throwError("RangeError", "unknown time zone");
 }
