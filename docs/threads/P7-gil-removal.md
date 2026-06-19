@@ -376,9 +376,11 @@ mutation probes `arrays/push-resize-multithread.js` and
 still too slow under no-GIL dense-array shrink/regrow contention. Targeted
 `-Dthreads-case=cve/mc-df-segmented-length.js` remains the repro for that
 frontier. The CVE tail now gets past resizable ArrayBuffer resize churn and SAB
-retain-list churn under `parallel_js`; the next focused semantic blocker is
-`cve/mc-lock-cow-materialize-race.js` (copy-on-write materialization/lost-count
-oracle). (6)
+retain-list churn under `parallel_js`; `cve/mc-lock-cow-materialize-race.js`
+and `cve/mc-val-llint-cache-storm.js` are also focused-green after test-harness
+repairs that preserve their real oracles while removing no-GIL shutdown/budget
+artifacts. A broad promoted probe now reaches past those files and times out
+later in cumulative safe/teardown/value stress. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

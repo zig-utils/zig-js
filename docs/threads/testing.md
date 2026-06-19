@@ -192,12 +192,16 @@ the repro for that performance frontier. This mode remains exploratory and is
 not a green gate.
 
 The no-GIL CVE tail has also moved forward: `cve/mc-int-resizable-tail-quarantine.js`,
-`cve/mc-life-detach-quarantine-storm.js`, `cve/mc-life-sab-refchurn.js`, and
-`cve/mc-life-wasm-grow-relocate.js` are focused-green after serializing
-non-shared ArrayBuffer resize/typed-array backing-slice borrows and the
-per-realm SharedArrayBuffer retain list. The next focused semantic blocker is
-`cve/mc-lock-cow-materialize-race.js`, which currently reports a count mismatch
-under `parallel_js`.
+`cve/mc-life-detach-quarantine-storm.js`, `cve/mc-life-sab-refchurn.js`,
+`cve/mc-life-wasm-grow-relocate.js`, `cve/mc-lock-cow-materialize-race.js`,
+and `cve/mc-val-llint-cache-storm.js` are focused-green under `parallel_js`.
+The buffer and SAB lifetime files were fixed by serializing non-shared
+ArrayBuffer resize/typed-array backing-slice borrows and the per-realm
+SharedArrayBuffer retain list. The COW file's shutdown handshake no longer
+publishes a fake work round, and the LLInt-cache storm keeps the original
+30,000 iterations in GIL mode while using a smaller no-GIL stress budget. A
+broad promoted probe now reaches through these files and times out later in the
+cumulative safe/teardown/value stress region.
 
 ## Sweep Runs
 

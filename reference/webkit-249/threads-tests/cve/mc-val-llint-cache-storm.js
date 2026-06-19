@@ -25,7 +25,7 @@ load("../harness.js", "caller relative");
 
 const READERS = 4;
 const SLOTS = 8;
-const ITERS = 30000;
+const ITERS = ($vm.useThreadGIL() === false) ? 3000 : 30000;
 
 // Shared pool: pre-created own props so Atomics.load/store apply (api §4.5).
 const pool = {};

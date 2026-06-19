@@ -89,6 +89,5 @@ for (let r = 1; r <= ROUNDS; ++r) {
 }
 
 Atomics.store(gate, "stop", 1);
-Atomics.store(gate, "round", ROUNDS + 1); // unblock a waiter mid-park
 Atomics.notify(gate, "round");
 shouldBe(foreign.join(), ROUNDS);
