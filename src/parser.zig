@@ -230,6 +230,7 @@ pub const Parser = struct {
 
     fn isForbiddenBindingName(self: *Parser, text: []const u8) bool {
         return isAlwaysReservedBinding(text) or
+            ((self.module or self.in_async) and std.mem.eql(u8, text, "await")) or
             (self.strict and (isStrictReservedBinding(text) or isEvalOrArguments(text)));
     }
 
@@ -2123,6 +2124,8 @@ pub const Parser = struct {
                 val = try self.parseAssignment();
                 nameAnon(val, key); // `{ m: function(){} }` ⇒ name "m"
             } else if (key_tok.kind == .identifier) {
+                if (isAlwaysReservedBinding(key) or (self.strict and isStrictReservedBinding(key)))
+                    return ParseError.UnexpectedToken;
                 const ident = try self.alloc(.{ .identifier = key });
                 // Shorthand `{ a }`, or `{ a = default }` (a destructuring
                 // default surfaced via the cover grammar).
@@ -2788,6 +2791,31 @@ test "parser requires statement boundary between same-line tokens" {
 
     var adjacent_expr = try Parser.init(arena.allocator(), "a b");
     try std.testing.expectError(ParseError.UnexpectedToken, adjacent_expr.parseProgram());
+}
+
+test "parser enforces reserved words in identifier positions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var shorthand_true = try Parser.init(arena.allocator(), "({ true });");
+    try std.testing.expectError(ParseError.UnexpectedToken, shorthand_true.parseProgram());
+
+    var shorthand_false = try Parser.init(arena.allocator(), "({ false });");
+    try std.testing.expectError(ParseError.UnexpectedToken, shorthand_false.parseProgram());
+
+    var shorthand_null = try Parser.init(arena.allocator(), "({ null });");
+    try std.testing.expectError(ParseError.UnexpectedToken, shorthand_null.parseProgram());
+
+    var property_name = try Parser.init(arena.allocator(), "({ true: 1, false() {}, get null() { return 1; } });");
+    const property_prog = try property_name.parseProgram();
+    try std.testing.expectEqual(@as(usize, 1), property_prog.program.len);
+
+    var module_await = try Parser.init(arena.allocator(), "var await;");
+    try std.testing.expectError(ParseError.UnexpectedToken, module_await.parseModule());
+
+    var script_await = try Parser.init(arena.allocator(), "var await;");
+    const script_prog = try script_await.parseProgram();
+    try std.testing.expectEqual(@as(usize, 1), script_prog.program.len);
 }
 
 test "parser accepts ASI line terminators between statements" {
