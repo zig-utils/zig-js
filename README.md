@@ -65,7 +65,7 @@ Of the valid corpus: **45 parse failures**, **4,499 runtime failures**, **0 host
 | `DataView` | 561 / 561 (100%) | `Number` | 340 / 340 (100%) |
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 29 / 29 (100%) | `FinalizationRegistry` | 47 / 47 (100%) |
-| `Temporal` | 3,622 / 4,603 (78.7%) | `intl402` | 1,645 / 3,341 (49.2%) |
+| `Temporal` | 3,622 / 4,603 (78.7%) | `intl402` | 2,120 / 3,341 (63.5%) |
 | `annexB` | 965 / 1,071 (90.1%) | `staging` | 742 / 1,028 (72.2%) |
 | `SharedArrayBuffer` | 104 / 104 (100%) | `ArrayBuffer` | 221 / 221 (100%) |
 | `Atomics` | 390 / 390 (100%) | — | — |
@@ -74,6 +74,8 @@ Of the valid corpus: **45 parse failures**, **4,499 runtime failures**, **0 host
 | `parseFloat` | 54 / 54 (100%) | `parseInt` | 55 / 55 (100%) |
 | `decodeURI` | 55 / 55 (100%) | `decodeURIComponent` | 56 / 56 (100%) |
 | `encodeURI` | 31 / 31 (100%) | `encodeURIComponent` | 31 / 31 (100%) |
+
+Latest focused `test/intl402` worker checkpoint: **2,120 / 3,341 (63.5%)**, up **+140** from the previous focused checkpoint of 1,980 / 3,341 after the Temporal calendar arithmetic-year fixes.
 | `AsyncIteratorPrototype` | 13 / 13 (100%) | `eval` | 10 / 10 (100%) |
 | `global` | 29 / 29 (100%) | `Function` | 509 / 509 (100%) |
 | `Proxy` | 310 / 310 (100%) | `Reflect` | 153 / 153 (100%) |
