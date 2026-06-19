@@ -9,6 +9,7 @@ Thread support is verified with Zig `0.17-dev`. The package declares this in
 zig build test
 zig build threads-test
 zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
+zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
 zig build test -Dtsan=true
 zig build test -Dtsan=true -Dtest-filter=parallel_js
 bun run docs:build
@@ -153,6 +154,33 @@ zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
 Use this when developing one behavior or debugging a regression. The path is
 relative to `reference/webkit-249/threads-tests`.
 
+Add `-Dthreads-parallel-js=true` to run threaded corpus files through the
+test-only Layer-C execution mode. Threaded files get
+`Context.TestingOptions.parallel_js = true` together with the required
+`enable_gc` / `parallel_gc` pair; the few corpus files that intentionally
+exercise `Thread`-off behavior still run without a `Thread` global:
+
+```sh
+zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
+zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=api/lock-basic.js,atomics/property-wait-notify.js
+```
+
+This is the bridge between focused unit witnesses and the future whole-corpus
+GIL-free campaign. Promote a file to the regular allowlist only when both the
+normal mode and the relevant `parallel_js` probe are green.
+
+Full promoted-allowlist `parallel_js` mode is intentionally exploratory today:
+
+```sh
+zig build threads-test -Dthreads-parallel-js=true
+```
+
+It currently exposes real Layer-C blockers rather than serving as a required
+green gate. The first broad probe found ordinary-object unlocked mutation in
+`smoke.js` and GIL-specific async-condition timing in
+`api/condition-async-wait.js`; keep those visible until the corresponding
+engine semantics are fixed.
+
 ## Sweep Runs
 
 Use `-Dthreads-sweep=true` to run every vendored file in the original
@@ -163,6 +191,7 @@ needed and are skipped as standalone sweep entries:
 
 ```sh
 zig build threads-test -Dthreads-sweep=true
+zig build threads-test -Dthreads-sweep=true -Dthreads-parallel-js=true
 ```
 
 Sweep mode is exploratory and intentionally narrower than the promoted

@@ -93,6 +93,10 @@ pub fn build(b: *std.Build) void {
     const run_threads_test = b.addRunArtifact(threads_test);
     const threads_case = b.option([]const u8, "threads-case", "Run one vendored thread test path") orelse null;
     const threads_sweep = b.option(bool, "threads-sweep", "Run every vendored default-gate thread test") orelse false;
+    const threads_parallel_js = b.option(bool, "threads-parallel-js", "Run threaded PR-249 cases with the test-only parallel_js GIL-removal mode") orelse false;
+    if (threads_parallel_js) {
+        run_threads_test.addArg("parallel-js");
+    }
     if (threads_sweep) {
         run_threads_test.addArg("sweep");
     } else if (threads_case) |case| {

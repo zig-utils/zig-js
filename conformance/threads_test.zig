@@ -247,11 +247,16 @@ pub fn main(init: std.process.Init) !void {
     // `zig build threads-test -Dthreads-sweep=true` runs every default-gate
     // directory file instead of the green allowlist (a panicking file kills the run — use
     // `-Dthreads-case=<path>` to probe a single file safely).
+    var parallel_js = false;
     var sweep = false;
     var one: ?[]const u8 = null;
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
-    if (args.next()) |a| {
+    while (args.next()) |a| {
+        if (std.mem.eql(u8, a, "parallel-js")) {
+            parallel_js = true;
+            continue;
+        }
         if (std.mem.eql(u8, a, "sweep")) sweep = true;
         if (std.mem.eql(u8, a, "one")) one = args.next();
     }
@@ -366,7 +371,9 @@ pub fn main(init: std.process.Init) !void {
             const enable_threads = !runsWithoutThreadGlobal(name);
             const options = js.Context.TestingOptions{
                 .enable_threads = enable_threads,
-                .enable_gc = std.mem.indexOf(u8, test_src, "gc()") != null,
+                .enable_gc = parallel_js or std.mem.indexOf(u8, test_src, "gc()") != null,
+                .parallel_gc = parallel_js and enable_threads,
+                .parallel_js = parallel_js and enable_threads,
                 .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),
                 .max_js_threads = if (std.mem.endsWith(u8, name, "thread-id-bounds.js")) 4 else null,
             };

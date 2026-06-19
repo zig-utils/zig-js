@@ -357,7 +357,12 @@ TSan-clean for the focused real-`Thread` async-grant test**. (3) Property
 focused real-`Thread` property-waiter test**. (4) `Condition` waiter queue
 mutex: **landed and TSan-clean for the focused real-`Thread` condition-waiter
 test**. (5) Broaden the execution-path GIL drop in `threadMain`/`evaluate` under
-`parallel_js`; enable the per-structure-lock flags for that mode. (6) Whole-corpus TSan campaign +
+`parallel_js`; the corpus runner now has `-Dthreads-parallel-js=true` so PR-249
+files can be probed under the same GIL-free mode instead of only via unit
+witnesses. The first full-allowlist probe is intentionally not a gate yet: it
+exposes ordinary-object unlocked mutation in `smoke.js` (lost increment) and
+GIL-specific async-condition timing in `api/condition-async-wait.js`. (6)
+Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
 pause-time optimization, not on this critical path (quiescent collection is
