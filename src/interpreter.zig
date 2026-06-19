@@ -18651,15 +18651,16 @@ fn currencyInfo(code: []const u8) CurrencyInfo {
 fn roundMag(m: f64, neg: bool, mode: []const u8) f64 {
     const low = @floor(m);
     const frac = m - low;
-    if (frac == 0) return low;
+    const eps = 1e-12 * @max(@as(f64, 1), @abs(m));
+    if (frac <= eps) return low;
     const eqs = std.mem.eql;
     const up = blk: {
         if (eqs(u8, mode, "ceil")) break :blk !neg;
         if (eqs(u8, mode, "floor")) break :blk neg;
         if (eqs(u8, mode, "expand")) break :blk true;
         if (eqs(u8, mode, "trunc")) break :blk false;
-        if (frac < 0.5) break :blk false;
-        if (frac > 0.5) break :blk true;
+        if (frac < 0.5 - eps) break :blk false;
+        if (frac > 0.5 + eps) break :blk true;
         if (eqs(u8, mode, "halfCeil")) break :blk !neg;
         if (eqs(u8, mode, "halfFloor")) break :blk neg;
         if (eqs(u8, mode, "halfTrunc")) break :blk false;
