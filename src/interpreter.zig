@@ -23401,7 +23401,7 @@ fn isFixedTimeZone(tz: TimeZone) bool {
 }
 
 fn validateRelativeOffset(self: *Interpreter, v: Value) EvalError!i128 {
-    const s = if (v.isString()) v.asStr() else if (v.isObject()) try self.toStringV(v) else return self.throwError("TypeError", "invalid offset");
+    const s = if (v.isString()) v.asStr() else if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint) try self.toStringV(v) else return self.throwError("TypeError", "invalid offset");
     var body: TBody = .{ .y = 1970, .mo = 1, .d = 1 };
     var i: usize = 0;
     try parseOffset(self, s, &i, &body);
