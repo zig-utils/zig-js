@@ -26936,7 +26936,7 @@ fn temporalMonthDayString(self: *Interpreter, t: *const value.TemporalData, cal:
     return buf.toOwnedSlice(self.arena);
 }
 
-const IsoMD = struct { y: i64, m: u8, d: u8 };
+const IsoMD = struct { y: i64, m: u8, d: u8, cal: []const u8 = "iso8601" };
 const RawMD = struct {
     validation_year: i64,
     m: i64,
@@ -27004,6 +27004,15 @@ fn monthDayReferenceIso(self: *Interpreter, cal: []const u8, mc: ?MonthCodeInfo,
     return self.throwError("RangeError", "PlainMonthDay reference date out of range");
 }
 
+fn monthDayFromIsoStringDate(self: *Interpreter, cal: []const u8, y: i64, m: u8, d: u8) EvalError!IsoMD {
+    if (std.mem.eql(u8, cal, "iso8601")) return .{ .y = 1972, .m = m, .d = d, .cal = cal };
+    const cd = calendarDateFromIso(cal, y, m, d);
+    const mc = try readMonthCodeInfo(self, Value.str(try calMonthCode(self, cal, cd.y, cd.m)));
+    var out = (try monthDayReferenceIso(self, cal, mc, cd.m, cd.d)).iso;
+    out.cal = cal;
+    return out;
+}
+
 fn validateMonthDayRaw(self: *Interpreter, raw: RawMD, constrain: bool) EvalError!IsoMD {
     if (raw.month_code) |mc| {
         const code_month = try calMonthFromCode(self, raw.cal, raw.validation_year, mc);
@@ -27045,36 +27054,40 @@ fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
 fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoMD {
     if (tIsTemporal(v, .plain_month_day)) {
         const t = v.asObj().temporal.?;
-        return .{ .y = t.year, .m = t.month, .d = t.day };
+        return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
     if (v.isObject()) {
-        return validateMonthDayRaw(self, try readMonthDayBagRaw(self, v), constrain);
+        const raw = try readMonthDayBagRaw(self, v);
+        var out = try validateMonthDayRaw(self, raw, constrain);
+        out.cal = raw.cal;
+        return out;
     }
     if (v.isString()) {
         // Accept "MM-DD" and "--MM-DD" (annotations allowed) as well as a full
         // ISO date string; a UTC designator is rejected.
         const ann = try stripTemporalAnnotations(self, v.asStr());
-        // A PlainMonthDay string only accepts the iso8601 calendar (a non-ISO
-        // `[u-ca=…]` annotation, e.g. gregory/hebrew, is rejected).
-        if (ann.cal) |c| if (!asciiEqlIgnoreCase(c, "iso8601"))
-            return self.throwError("RangeError", "PlainMonthDay supports only the iso8601 calendar from a string");
+        const cal = if (ann.cal) |c| canonCalendarId(self, c) else "iso8601";
         var s = ann.body;
         if (std.mem.startsWith(u8, s, "--")) s = s[2..];
         if (s.len == 5 and s[2] == '-' and std.ascii.isDigit(s[0])) {
+            if (!std.mem.eql(u8, cal, "iso8601"))
+                return self.throwError("RangeError", "bare PlainMonthDay strings require the iso8601 calendar");
             const m = std.fmt.parseInt(u8, s[0..2], 10) catch return self.throwError("RangeError", "invalid ISO month");
             const d = std.fmt.parseInt(u8, s[3..5], 10) catch return self.throwError("RangeError", "invalid ISO day");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             const dim = isoDaysInMonth(1972, m);
             if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
-            return .{ .y = 1972, .m = m, .d = d };
+            return .{ .y = 1972, .m = m, .d = d, .cal = cal };
         }
         if (s.len == 4 and std.ascii.isDigit(s[0]) and std.ascii.isDigit(s[1]) and std.ascii.isDigit(s[2]) and std.ascii.isDigit(s[3])) {
+            if (!std.mem.eql(u8, cal, "iso8601"))
+                return self.throwError("RangeError", "bare PlainMonthDay strings require the iso8601 calendar");
             const m = std.fmt.parseInt(u8, s[0..2], 10) catch return self.throwError("RangeError", "invalid ISO month");
             const d = std.fmt.parseInt(u8, s[2..4], 10) catch return self.throwError("RangeError", "invalid ISO day");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             const dim = isoDaysInMonth(1972, m);
             if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
-            return .{ .y = 1972, .m = m, .d = d };
+            return .{ .y = 1972, .m = m, .d = d, .cal = cal };
         }
         if (s.len == 13 and (s[0] == '+' or s[0] == '-') and s[7] == '-' and s[10] == '-') {
             const yraw = std.fmt.parseInt(i64, s[1..7], 10) catch return self.throwError("RangeError", "invalid ISO year");
@@ -27085,11 +27098,13 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             const dim = isoDaysInMonth(y, m);
             if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
-            return .{ .y = 1972, .m = m, .d = d };
+            if (!std.mem.eql(u8, cal, "iso8601"))
+                try checkIsoDate(self, @floatFromInt(y), @floatFromInt(m), @floatFromInt(d));
+            return monthDayFromIsoStringDate(self, cal, y, m, d);
         }
         const b = try parseTemporalBody(self, ann.body);
         if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainMonthDay");
-        return .{ .y = 1972, .m = b.mo, .d = b.d };
+        return monthDayFromIsoStringDate(self, cal, b.y, b.mo, b.d);
     }
     return self.throwError("TypeError", "cannot convert to a PlainMonthDay");
 }
@@ -27116,7 +27131,7 @@ fn temporalMonthDayFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (input.isString()) {
         const f = try toMonthDayFields(self, input, true);
         _ = try readOverflowReject(self, options);
-        return makeMonthDay(self, f.y, f.m, f.d, "iso8601");
+        return makeMonthDay(self, f.y, f.m, f.d, f.cal);
     }
     if (!input.isObject()) return self.throwError("TypeError", "cannot convert to a PlainMonthDay");
     const raw = try readMonthDayBagRaw(self, input);
@@ -27184,7 +27199,7 @@ fn temporalMonthDayEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (!tIsTemporal(this, .plain_month_day)) return self.throwError("TypeError", "non-PlainMonthDay");
     const t = this.asObj().temporal.?;
     const b = try toMonthDayFields(self, if (args.len > 0) args[0] else Value.undef(), true);
-    return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d);
+    return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d and temporalCalendarIdsEqual(t.calendar, b.cal));
 }
 
 fn temporalMonthDayToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -27193,14 +27208,12 @@ fn temporalMonthDayToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Val
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainMonthDay.prototype.toPlainDate: argument must be an object");
-    const yv = try self.getProperty(bag, "year");
-    if (yv.isUndefined()) return self.throwError("TypeError", "toPlainDate requires a year");
-    const y = try temporalIntArg(self, yv, "year");
-    const dim = isoDaysInMonth(@intFromFloat(y), t.month);
+    const y = (try bagIsoYear(self, bag, t.calendar)) orelse return self.throwError("TypeError", "toPlainDate requires a year");
+    const dim = isoDaysInMonth(y, t.month);
     const day: u8 = @intCast(@min(@as(i64, t.day), @as(i64, dim)));
-    try checkIsoDate(self, y, @floatFromInt(t.month), @floatFromInt(day));
+    try checkIsoDate(self, @floatFromInt(y), @floatFromInt(t.month), @floatFromInt(day));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
-    o.temporal.?.year = @intFromFloat(y);
+    o.temporal.?.year = @intCast(y);
     o.temporal.?.month = t.month;
     o.temporal.?.day = day;
     return Value.obj(o);
