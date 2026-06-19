@@ -398,8 +398,11 @@ focused-green under `parallel_js`; the GIL-mode file keeps its original
 lost-update/CAS oracle at a smaller interpreter budget. `races/counter-lock.js`
 uses the same split for contended `Lock.hold`, and the promoted race block now
 passes under `parallel_js` through `races/wait-notify-storm.js`. The next local
-promoted frontier is `heap-access-blocking.js`; broader promoted-allowlist
-`parallel_js` remains exploratory until the heap block is cleared. (6)
+promoted heap block is also focused-green under `parallel_js`, from
+`heap-access-blocking.js` through `heap-stop-interleavings.js`. The next local
+frontier is `invariants/delete-quarantine-dictionary.js`; broader
+promoted-allowlist `parallel_js` remains exploratory until the invariants block
+is cleared. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
