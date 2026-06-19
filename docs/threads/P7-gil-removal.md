@@ -395,9 +395,11 @@ tag-discipline loop counts so those files remain correctness witnesses rather
 than serial-performance gates. `races/counter-atomics.js` is also
 focused-green under `parallel_js`; the GIL-mode file keeps its original
 100,000-add/1,000-CAS amplifier, while no-GIL keeps the same 8-worker
-lost-update/CAS oracle at a smaller interpreter budget. The next local promoted
-race frontier is `races/counter-lock.js`; broader promoted-allowlist
-`parallel_js` remains exploratory until the race block is cleared. (6)
+lost-update/CAS oracle at a smaller interpreter budget. `races/counter-lock.js`
+uses the same split for contended `Lock.hold`, and the promoted race block now
+passes under `parallel_js` through `races/wait-notify-storm.js`. The next local
+promoted frontier is `heap-access-blocking.js`; broader promoted-allowlist
+`parallel_js` remains exploratory until the heap block is cleared. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

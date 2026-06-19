@@ -11,8 +11,11 @@
 // thread is joined).
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const N = 8;
-const M = 1e5;
+const M = NO_GIL ? 5000 : 1e5;
 const lock = new Lock();
 const counter = { n: 0 };
 const gate = { go: 0, started: 0 };

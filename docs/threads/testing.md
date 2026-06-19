@@ -209,8 +209,12 @@ throughput test. `races/counter-atomics.js` is likewise focused-green under
 `parallel_js`: it keeps the 8-worker lost-update and CAS-loop oracle, preserves
 the original 100,000-add/1,000-CAS amplifier in GIL mode, and uses a smaller
 no-GIL budget so the file remains a correctness witness instead of a serial
-throughput cliff. The next local promoted race frontier is
-`races/counter-lock.js`. The promoted JIT-audit subset now has focused-green
+throughput cliff. `races/counter-lock.js` follows the same pattern for
+contended `Lock.hold`: the GIL-mode file keeps its 100,000-hold amplifier,
+while no-GIL keeps the 8-worker lost-increment oracle at a smaller budget. The
+promoted race block is now focused-green under `parallel_js` through
+`races/wait-notify-storm.js`; the next local promoted frontier is
+`heap-access-blocking.js`. The promoted JIT-audit subset now has focused-green
 `parallel_js` coverage from constructor/fire benchmark checksums through the
 tailcall, OSR/catch-loop, golden-disasm, int-gate, shared-ArrayStorage,
 spawned-thread butterfly, tag-discipline, and TID-tag witnesses. The normal
