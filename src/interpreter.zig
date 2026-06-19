@@ -26174,8 +26174,8 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
             const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
-            _ = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef()); // validates the overflow option
-            const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign);
+            const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+            const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign, reject) orelse return self.throwError("RangeError", "date overflow");
             const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
             try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
             const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
@@ -27828,16 +27828,20 @@ fn balanceCalendarYearMonth(cal: []const u8, y0: i64, m0: u8, month_delta: i64) 
     return .{ .y = y, .m = @intCast(m) };
 }
 
-/// Add a calendar date duration (years/months/weeks/days) with the standard
-/// `constrain` overflow, returning fields in the receiver's calendar.
-fn addCalendarDate(cal: []const u8, y0: i64, m0: u8, d0: u8, years: f64, months: f64, weeks: f64, days: f64, sign: f64) Civil {
+/// Add a calendar date duration (years/months/weeks/days), returning fields in
+/// the receiver's calendar. `reject` reports year/month moves that would need
+/// to constrain the original day into the target month.
+fn addCalendarDate(cal: []const u8, y0: i64, m0: u8, d0: u8, years: f64, months: f64, weeks: f64, days: f64, sign: f64, reject: bool) ?Civil {
     var y: i64 = y0 + @as(i64, @intFromFloat(sign * years));
     const ym = balanceCalendarYearMonth(cal, y, m0, @as(i64, @intFromFloat(sign * months)));
     y = ym.y;
     const m = ym.m;
     var d: i64 = d0;
     const dim = calDaysInMonth(cal, calDisplayYear(cal, y), m);
-    if (d > dim) d = dim;
+    if (d > dim) {
+        if (reject) return null;
+        d = dim;
+    }
     const iso = calendarDateToIso(cal, y, m, @intCast(d));
     const c = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + @as(i64, @intFromFloat(sign * (weeks * 7 + days))));
     return calendarDateFromIso(cal, c.y, c.m, c.d);
@@ -27850,9 +27854,9 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
             const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
-            _ = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef()); // validates the overflow option
+            const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
             // Date part with constrain, then time part carrying whole days.
-            const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign);
+            const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign, reject) orelse return self.throwError("RangeError", "date overflow");
             const time_ns = timeToNs(t) + @as(i128, @intFromFloat(sign)) * (durationTimeNs(dur) - (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day));
             const day_carry = @divFloor(time_ns, 86_400_000_000_000);
             const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
@@ -29014,12 +29018,12 @@ fn temporalZdtAddFn(comptime sign: f64) value.NativeFn {
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
             const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
-            _ = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef()); // validates the overflow option
+            const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
             var epoch = t.epoch_ns;
             if (durHasCalendar(dur) or dur[3] != 0) {
                 // Apply date units to the local date.
                 const l = zdtLocal(t);
-                const c = addCalendarDate(t.calendar, l.year, l.month, l.day, dur[0], dur[1], dur[2], dur[3], sign);
+                const c = addCalendarDate(t.calendar, l.year, l.month, l.day, dur[0], dur[1], dur[2], dur[3], sign, reject) orelse return self.throwError("RangeError", "date overflow");
                 const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
                 const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
                 epoch = local_ns - t.tz_offset_ns;
