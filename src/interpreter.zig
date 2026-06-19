@@ -26918,25 +26918,14 @@ fn temporalZdtGetTimeZoneTransitionFn(ctx: *anyopaque, this: Value, args: []cons
 /// numeric offset / `Z`.
 fn parseTimeZone(self: *Interpreter, s: []const u8) EvalError!TimeZone {
     if (s.len == 0) return self.throwError("RangeError", "invalid time zone");
-    // (1) A bracketed time-zone annotation wins (skipping key=value annotations
-    //     such as `[u-ca=iso8601]`; a leading `!` marks a critical annotation).
-    {
-        var i: usize = 0;
-        while (i < s.len) : (i += 1) {
-            if (s[i] != '[') continue;
-            const rb = std.mem.indexOfScalarPos(u8, s, i, ']') orelse break;
-            var content = s[i + 1 .. rb];
-            if (content.len > 0 and content[0] == '!') content = content[1..];
-            if (std.mem.indexOfScalar(u8, content, '=') == null)
-                return parseTimeZoneBare(self, content);
-            i = rb;
-        }
-    }
-    // (2) A date-time string (begins with a digit, possibly a sign): take its
-    //     offset / Z as the time zone.
+    // A date-time string must be validated before its bracketed time-zone
+    // annotation is used; e.g. "-000000-..." is invalid even with "[UTC]".
     if (std.ascii.isDigit(s[0]) or ((s[0] == '+' or s[0] == '-') and std.mem.indexOfScalar(u8, s, 'T') != null)) {
         const ann = try stripTemporalAnnotations(self, s);
         const b = try parseTemporalBody(self, ann.body);
+        if (ann.has_tz) {
+            if (try timeZoneAnnotation(self, s)) |tz| return tz;
+        }
         if (b.has_offset) {
             if (b.offset_has_seconds) return self.throwError("RangeError", "sub-minute time zone offsets are not valid");
             const off: i64 = @intCast(b.off_ns);
@@ -26945,7 +26934,24 @@ fn parseTimeZone(self: *Interpreter, s: []const u8) EvalError!TimeZone {
         if (b.z) return .{ .name = "UTC", .offset_ns = 0 };
         return self.throwError("RangeError", "date-time string carries no time zone");
     }
+    // (1) A bracketed time-zone annotation wins (skipping key=value annotations
+    //     such as `[u-ca=iso8601]`; a leading `!` marks a critical annotation).
+    if (try timeZoneAnnotation(self, s)) |tz| return tz;
     return parseTimeZoneBare(self, s);
+}
+
+fn timeZoneAnnotation(self: *Interpreter, s: []const u8) EvalError!?TimeZone {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] != '[') continue;
+        const rb = std.mem.indexOfScalarPos(u8, s, i, ']') orelse break;
+        var content = s[i + 1 .. rb];
+        if (content.len > 0 and content[0] == '!') content = content[1..];
+        if (std.mem.indexOfScalar(u8, content, '=') == null)
+            return try parseTimeZoneBare(self, content);
+        i = rb;
+    }
+    return null;
 }
 
 fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
