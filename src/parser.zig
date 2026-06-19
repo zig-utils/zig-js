@@ -1998,6 +1998,7 @@ pub const Parser = struct {
         while (i < raw.len) {
             const c = raw[i];
             if (c == '\\' and i + 1 < raw.len) {
+                try validateTemplateEscape(raw, i + 1);
                 i = try lex.appendEscape(self.arena, &lit, raw, i + 1);
             } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
                 // Flush the literal run so far, then parse the substitution.
@@ -2050,6 +2051,46 @@ pub const Parser = struct {
         try cooked.append(self.arena, try buf.toOwnedSlice(self.arena));
         try raws.append(self.arena, raw[raw_start..]);
         return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked.items, .raw = raws.items, .exprs = exprs.items } });
+    }
+
+    fn validateTemplateEscape(raw: []const u8, i: usize) ParseError!void {
+        if (lex.lineTerminatorLen(raw, i) != null) return;
+        if (i >= raw.len) return ParseError.UnexpectedToken;
+        switch (raw[i]) {
+            'x' => {
+                if (i + 2 >= raw.len or templateHexVal(raw[i + 1]) == null or templateHexVal(raw[i + 2]) == null)
+                    return ParseError.UnexpectedToken;
+            },
+            'u' => {
+                if (i + 1 < raw.len and raw[i + 1] == '{') {
+                    var j = i + 2;
+                    var cp: u32 = 0;
+                    var any = false;
+                    while (j < raw.len and raw[j] != '}') : (j += 1) {
+                        const h = templateHexVal(raw[j]) orelse return ParseError.UnexpectedToken;
+                        cp = cp * 16 + h;
+                        if (cp > 0x10FFFF) return ParseError.UnexpectedToken;
+                        any = true;
+                    }
+                    if (!any or j >= raw.len or raw[j] != '}') return ParseError.UnexpectedToken;
+                } else {
+                    if (i + 4 >= raw.len) return ParseError.UnexpectedToken;
+                    for (raw[i + 1 .. i + 5]) |c| if (templateHexVal(c) == null) return ParseError.UnexpectedToken;
+                }
+            },
+            '0' => if (i + 1 < raw.len and std.ascii.isDigit(raw[i + 1])) return ParseError.UnexpectedToken,
+            '1'...'9' => return ParseError.UnexpectedToken,
+            else => {},
+        }
+    }
+
+    fn templateHexVal(c: u8) ?u32 {
+        return switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            'A'...'F' => c - 'A' + 10,
+            else => null,
+        };
     }
 
     fn concatStr(self: *Parser, node: ?*Node, bytes: []const u8) ParseError!*Node {
@@ -2791,6 +2832,37 @@ test "parser requires statement boundary between same-line tokens" {
 
     var adjacent_expr = try Parser.init(arena.allocator(), "a b");
     try std.testing.expectError(ParseError.UnexpectedToken, adjacent_expr.parseProgram());
+}
+
+test "parser rejects malformed untagged template escapes" {
+    const invalid = [_][]const u8{
+        "`\\x0`",
+        "`\\x0G`",
+        "`\\xG`",
+        "`\\u0`",
+        "`\\u0g`",
+        "`\\u00g`",
+        "`\\u000g`",
+        "`\\u{g`",
+        "`\\u{0`",
+        "`\\u{10FFFFF}`",
+        "`\\u{1F_639}`",
+        "`\\u`",
+        "`\\00`",
+        "`\\8`",
+        "`\\9`",
+    };
+    for (invalid) |src| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var p = try Parser.init(arena.allocator(), src);
+        try std.testing.expectError(ParseError.UnexpectedToken, p.parseProgram());
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ok = try Parser.init(arena.allocator(), "`\\n${1}\\u{41}`");
+    _ = try ok.parseProgram();
 }
 
 test "parser enforces reserved words in identifier positions" {

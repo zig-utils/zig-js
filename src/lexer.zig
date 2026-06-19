@@ -871,7 +871,7 @@ fn tok(kind: TokenKind, text: []const u8, pos: usize) Token {
     return .{ .kind = kind, .text = text, .pos = pos };
 }
 
-fn lineTerminatorLen(src: []const u8, idx: usize) ?usize {
+pub fn lineTerminatorLen(src: []const u8, idx: usize) ?usize {
     if (idx >= src.len) return null;
     return switch (src[idx]) {
         '\n' => 1,
