@@ -23294,7 +23294,8 @@ const RelTo = struct { y: i64, m: u8, d: u8, time_ns: i128 };
 fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
     if (!opts.isObject()) return null;
     const rv = try self.getProperty(opts, "relativeTo");
-    if (rv.isUndefined() or rv.isNull()) return null;
+    if (rv.isUndefined()) return null;
+    if (rv.isNull()) return self.throwError("TypeError", "invalid relativeTo");
     if (rv.isObject() and rv.asObj().temporal != null) {
         const t = rv.asObj().temporal.?;
         switch (t.kind) {
