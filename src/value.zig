@@ -585,6 +585,10 @@ pub const Object = struct {
     /// array-index data/accessor property, prototype-chain writes must use the
     /// ordinary path so inherited setters/non-writable data stay observable.
     has_indexed_property: bool = false,
+    /// Conservative cross-thread guard for prototype-chain indexed writes. Unlike
+    /// `has_indexed_property`, this also records dense element creation and is
+    /// used only when another object is consulting this object as a prototype.
+    indexed_own_seen: std.atomic.Value(bool) = .init(false),
     /// For arrays, a *logical* length floor used when it exceeds the physically
     /// stored `elements` — so `new Array(4294967295)` / `arr.length = big` track a
     /// length without materializing (and OOM-ing on) that many holes. The array's
@@ -866,6 +870,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         gcBarrier(v);
+        self.indexed_own_seen.store(true, .release);
         try self.elements.append(self.elementsAllocator(arena), v);
     }
 
@@ -879,6 +884,7 @@ pub const Object = struct {
         const new_len = self.elements.items.len + values.len;
         if (new_len > 4294967295) return null;
         for (values) |v| gcBarrier(v);
+        if (values.len != 0) self.indexed_own_seen.store(true, .release);
         try self.elements.appendSlice(self.elementsAllocator(arena), values);
         self.array_len = new_len;
         return new_len;
@@ -1112,6 +1118,7 @@ pub const Object = struct {
         defer self.unlockElements();
         if (i >= self.elements.items.len) return false;
         gcBarrier(v);
+        self.indexed_own_seen.store(true, .release);
         self.elements.items[i] = v;
         self.clearHoleUnlocked(i);
         return true;
@@ -1121,6 +1128,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         gcBarrier(v);
+        self.indexed_own_seen.store(true, .release);
         const gap_start = self.elements.items.len;
         while (self.elements.items.len <= i) try self.elements.append(self.elementsAllocator(arena), Value.undef());
         self.elements.items[i] = v;
@@ -1140,6 +1148,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         gcBarrier(v);
+        self.indexed_own_seen.store(true, .release);
         if (i < self.elements.items.len) {
             self.elements.items[i] = v;
             self.clearHoleUnlocked(i);
@@ -1193,6 +1202,7 @@ pub const Object = struct {
     ) std.mem.Allocator.Error!void {
         self.lockElements();
         defer self.unlockElements();
+        self.indexed_own_seen.store(true, .release);
         for (values) |v| gcBarrier(v);
         self.elements.clearRetainingCapacity();
         try self.elements.appendSlice(self.elementsAllocator(arena), values);
@@ -1211,6 +1221,7 @@ pub const Object = struct {
         defer self.unlockElements();
         if (self.holes != null or self.array_len > self.elements.items.len) return false;
         for (inserts) |v| gcBarrier(v);
+        if (inserts.len != 0) self.indexed_own_seen.store(true, .release);
         var i: usize = 0;
         while (i < delete_count) : (i += 1) {
             if (start < self.elements.items.len) {
@@ -1464,7 +1475,10 @@ pub const Object = struct {
         if (!gop.found_existing) {
             gop.key_ptr.* = try alloc.dupe(u8, name);
             gop.value_ptr.* = .{};
-            if (canonicalIndex(name) != null) self.has_indexed_property = true;
+            if (canonicalIndex(name) != null) {
+                self.has_indexed_property = true;
+                self.indexed_own_seen.store(true, .release);
+            }
             // First accessor on this object: start key_order by snapshotting the
             // existing data keys (shape-chain insertion order), so the new
             // accessor interleaves correctly with them.
@@ -1557,7 +1571,10 @@ pub const Object = struct {
         const child = try base.transition(name);
         try self.slots.append(self.slotsAllocator(arena), v); // new slot index == base.count == child.slot
         self.shape = child;
-        if (canonicalIndex(name) != null) self.has_indexed_property = true;
+        if (canonicalIndex(name) != null) {
+            self.has_indexed_property = true;
+            self.indexed_own_seen.store(true, .release);
+        }
         // A new data key on an accessor-bearing object records its creation order
         // (a data↔accessor conversion keeps its position; deleteOwn drops stale
         // entries so a genuinely re-added key lands at the end).

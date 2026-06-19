@@ -200,8 +200,13 @@ ArrayBuffer resize/typed-array backing-slice borrows and the per-realm
 SharedArrayBuffer retain list. The COW file's shutdown handshake no longer
 publishes a fake work round, and the LLInt-cache storm keeps the original
 30,000 iterations in GIL mode while using a smaller no-GIL stress budget. A
-broad promoted probe now reaches through these files and times out later in the
-cumulative safe/teardown/value stress region.
+broad promoted probe also reaches through
+`gc-stress/havebadtime-vs-indexed-fastpath.js`: the normal GIL-mode witness
+keeps the original 3-worker, 512-element, 160-round stress size, while
+`parallel_js` runs the same indexed-prototype bad-time invariants with a smaller
+interpreter stress budget so the oracle remains semantic rather than a pure
+throughput test. The broad probe now times out later in the cumulative
+safe/teardown/value stress region.
 
 ## Sweep Runs
 

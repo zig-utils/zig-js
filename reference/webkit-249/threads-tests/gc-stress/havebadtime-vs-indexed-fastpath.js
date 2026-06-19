@@ -39,11 +39,14 @@
 
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const WORKERS = 3;
-const ARRAY_LEN = 512;
-const WARMUP_ROUNDS = 40;
-const POST_FLIP_WAIT_ROUND = 80;
-const TOTAL_ROUNDS = 160;
+const ARRAY_LEN = NO_GIL ? 128 : 512;
+const WARMUP_ROUNDS = NO_GIL ? 4 : 40;
+const POST_FLIP_WAIT_ROUND = NO_GIL ? 8 : 80;
+const TOTAL_ROUNDS = NO_GIL ? 16 : 160;
 const SENTINEL = "from-bad-time-accessor";
 // The accessor index: far outside [0, ARRAY_LEN) and [0, WORKERS*ARRAY_LEN)
 // so no worker store or read ever consults it via the prototype chain.

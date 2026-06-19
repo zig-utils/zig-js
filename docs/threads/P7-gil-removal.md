@@ -379,8 +379,13 @@ frontier. The CVE tail now gets past resizable ArrayBuffer resize churn and SAB
 retain-list churn under `parallel_js`; `cve/mc-lock-cow-materialize-race.js`
 and `cve/mc-val-llint-cache-storm.js` are also focused-green after test-harness
 repairs that preserve their real oracles while removing no-GIL shutdown/budget
-artifacts. A broad promoted probe now reaches past those files and times out
-later in cumulative safe/teardown/value stress. (6)
+artifacts. `gc-stress/havebadtime-vs-indexed-fastpath.js` is also focused-green
+under `parallel_js` after two changes: prototype-chain indexed-store guards now
+consult a conservative per-object "indexed own ever seen" marker instead of a
+per-key own-property lookup on every hot indexed store, and the no-GIL run uses a
+smaller stress budget while keeping the same bad-time flip and trap-index
+oracles as the full GIL-mode file. A broad promoted probe now reaches past those
+files and times out later in cumulative safe/teardown/value stress. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

@@ -3526,12 +3526,12 @@ pub const Interpreter = struct {
         return @intFromFloat(n);
     }
 
-    fn arrayProtoChainCleanForIndexedSet(self: *Interpreter, o: *value.Object, key: []const u8) bool {
+    fn arrayProtoChainCleanForIndexedSet(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
             if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property)
                 return false;
-            if (objectHasOwn(c, key)) return false;
+            if (c.indexed_own_seen.load(.acquire)) return false;
             cur = self.effectiveProto(c);
         }
         return true;
@@ -3542,6 +3542,7 @@ pub const Interpreter = struct {
         while (cur) |c| {
             if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property)
                 return false;
+            if (c.indexed_own_seen.load(.acquire)) return false;
             cur = self.effectiveProto(c);
         }
         return true;
@@ -3551,10 +3552,8 @@ pub const Interpreter = struct {
         if (!recv.isObject()) return false;
         const o = recv.asObj();
         try self.checkRestricted(o);
-        var key_buf: [24]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{d}", .{index}) catch unreachable;
         if (!o.is_array or o.is_arguments or o.accessors != null or o.attrs != null or
-            o.has_indexed_property or !o.extensible or !self.arrayProtoChainCleanForIndexedSet(o, key))
+            o.has_indexed_property or !o.extensible or !self.arrayProtoChainCleanForIndexedSet(o))
             return false;
         const dense_cap: usize = 1 << 24;
         return try o.setOrGrowDenseElement(self.arena, index, v, dense_cap);
@@ -3797,7 +3796,7 @@ pub const Interpreter = struct {
     /// use the NewTarget realm's intrinsic prototype when that realm is known.
     pub fn ctorRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!*value.Object {
         const p = try self.getProperty(Value.obj(ctor), "prototype");
-        if (p.isObject() and !p.asObj().is_symbol) return p.asObj();
+        if (p.isObject() and !p.asObj().is_symbol) return self.preparePrototypeUse(p.asObj());
         if (try self.functionRealmIntrinsicProto(ctor, intrinsic)) |proto| return proto;
         if (envIntrinsicProto(self.env, intrinsic)) |proto| return proto;
         return try self.protoObject(ctor);
@@ -3816,7 +3815,7 @@ pub const Interpreter = struct {
 
     pub fn protoObject(self: *Interpreter, ctor: *value.Object) EvalError!*value.Object {
         if (ctor.getOwn("prototype")) |p| {
-            if (p.isObject()) return p.asObj();
+            if (p.isObject()) return self.preparePrototypeUse(p.asObj());
         }
         // Lazy install is a check-then-act over shared object storage: with the
         // GIL dropped, two threads `new`-ing (or reading `.prototype` of) the same
@@ -3829,11 +3828,17 @@ pub const Interpreter = struct {
             g.lockLazyInit();
             defer g.unlockLazyInit();
             if (ctor.getOwn("prototype")) |p| {
-                if (p.isObject()) return p.asObj();
+                if (p.isObject()) return self.preparePrototypeUse(p.asObj());
             }
             return try self.installProtoObject(ctor);
         }
         return try self.installProtoObject(ctor);
+    }
+
+    fn preparePrototypeUse(self: *Interpreter, proto: *value.Object) *value.Object {
+        _ = self;
+        if (proto.elementsLen() != 0) proto.indexed_own_seen.store(true, .release);
+        return proto;
     }
 
     fn installProtoObject(self: *Interpreter, ctor: *value.Object) EvalError!*value.Object {
@@ -6052,7 +6057,10 @@ pub const Interpreter = struct {
             if (c.proxy_handler != null or c.proxy_revoked) break;
             cur = self.effectiveProto(c);
         }
-        if (new_proto) |np| gc_mod.barrierCell(@ptrCast(np)); // proto reparent on a live object
+        if (new_proto) |np| {
+            _ = self.preparePrototypeUse(np);
+            gc_mod.barrierCell(@ptrCast(np)); // proto reparent on a live object
+        }
         o.proto = new_proto;
         return true;
     }

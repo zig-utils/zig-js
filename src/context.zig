@@ -1739,6 +1739,14 @@ test "array instances inherit from Array.prototype (incl. holes)" {
         \\  delete Array.prototype[0];
         \\}
     );
+    try expectEvalStr("seed|1|true|local",
+        \\var proto = ["seed"];
+        \\var a = [];
+        \\Object.setPrototypeOf(a, proto);
+        \\var before = a[0];
+        \\a[0] = "local";
+        \\before + "|" + a.length + "|" + Object.prototype.hasOwnProperty.call(a, "0") + "|" + a[0];
+    );
 }
 
 test "Array / Object constructors" {
