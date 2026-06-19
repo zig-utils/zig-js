@@ -686,7 +686,7 @@ pub const Lexer = struct {
             if (ch == '\\') {
                 if (self.i + 1 >= self.src.len) return LexError.UnterminatedString;
                 self.i = try appendEscape(self.arena, &buf, self.src, self.i + 1);
-            } else if (self.lineTerminatorLenAt(self.i) != null) {
+            } else if (ch == '\n' or ch == '\r') {
                 return LexError.UnterminatedString;
             } else {
                 try buf.append(self.arena, ch);
@@ -1154,8 +1154,6 @@ test "lexer rejects raw line terminators in literals" {
     const strings = [_][]const u8{
         "'\n'",
         "'\r'",
-        "'\xe2\x80\xa8'",
-        "'\xe2\x80\xa9'",
     };
     for (strings) |src| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1177,6 +1175,21 @@ test "lexer rejects raw line terminators in literals" {
         defer arena.deinit();
         var lx = Lexer.init(arena.allocator(), src);
         try std.testing.expectError(LexError.UnterminatedString, lx.next());
+    }
+}
+
+test "lexer permits json-superset string separators" {
+    const strings = [_]struct { src: []const u8, expected: []const u8 }{
+        .{ .src = "'\xe2\x80\xa8'", .expected = "\xe2\x80\xa8" },
+        .{ .src = "'\xe2\x80\xa9'", .expected = "\xe2\x80\xa9" },
+    };
+    for (strings) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lx = Lexer.init(arena.allocator(), case.src);
+        const t = try lx.next();
+        try std.testing.expectEqual(TokenKind.string, t.kind);
+        try std.testing.expectEqualStrings(case.expected, t.text);
     }
 }
 
