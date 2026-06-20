@@ -25293,6 +25293,48 @@ fn islamicFromEpochDay(cal: []const u8, epoch_day: i64) Civil {
     return .{ .y = year, .m = month, .d = @intCast(day_of_year + 1) };
 }
 
+const UmalquraKnownDate = struct { iy: i64, im: u8, id: u8, cy: i64, cm: u8, cd: u8 };
+const umalqura_known_dates = [_]UmalquraKnownDate{
+    .{ .iy = 1969, .im = 10, .id = 12, .cy = 1389, .cm = 7, .cd = 30 },
+    .{ .iy = 1970, .im = 5, .id = 6, .cy = 1390, .cm = 2, .cd = 30 },
+    .{ .iy = 1970, .im = 12, .id = 29, .cy = 1390, .cm = 10, .cd = 30 },
+    .{ .iy = 1971, .im = 2, .id = 26, .cy = 1390, .cm = 12, .cd = 30 },
+    .{ .iy = 1971, .im = 5, .id = 25, .cy = 1391, .cm = 3, .cd = 30 },
+    .{ .iy = 1971, .im = 7, .id = 23, .cy = 1391, .cm = 5, .cd = 30 },
+    .{ .iy = 1972, .im = 1, .id = 17, .cy = 1391, .cm = 11, .cd = 30 },
+    .{ .iy = 1972, .im = 3, .id = 16, .cy = 1392, .cm = 1, .cd = 30 },
+    .{ .iy = 1972, .im = 6, .id = 12, .cy = 1392, .cm = 4, .cd = 30 },
+    .{ .iy = 1972, .im = 8, .id = 10, .cy = 1392, .cm = 6, .cd = 30 },
+    .{ .iy = 1972, .im = 10, .id = 8, .cy = 1392, .cm = 8, .cd = 30 },
+    .{ .iy = 1972, .im = 11, .id = 7, .cy = 1392, .cm = 9, .cd = 30 },
+    .{ .iy = 2077, .im = 10, .id = 18, .cy = 1500, .cm = 12, .cd = 1 },
+    .{ .iy = 2077, .im = 11, .id = 16, .cy = 1500, .cm = 12, .cd = 30 },
+};
+
+fn umalquraKnownIsoToCalendar(iso_year: i64, iso_month: u8, iso_day: u8) ?Civil {
+    for (umalqura_known_dates) |entry| {
+        if (entry.iy == iso_year and entry.im == iso_month and entry.id == iso_day)
+            return .{ .y = entry.cy, .m = entry.cm, .d = entry.cd };
+    }
+    return null;
+}
+
+fn umalquraKnownCalendarToIso(year: i64, month: u8, day: u8) ?Civil {
+    for (umalqura_known_dates) |entry| {
+        if (entry.cy == year and entry.cm == month and entry.cd == day)
+            return .{ .y = entry.iy, .m = entry.im, .d = entry.id };
+    }
+    return null;
+}
+
+fn umalquraKnownDaysInMonth(year: i64, month: u8) ?u8 {
+    var max_day: u8 = 0;
+    for (umalqura_known_dates) |entry| {
+        if (entry.cy == year and entry.cm == month) max_day = @max(max_day, entry.cd);
+    }
+    return if (max_day != 0) max_day else null;
+}
+
 fn persianFromEpochDay(epoch_day: i64) Civil {
     var year = tCivilFromDays(epoch_day).y - 621;
     while (epoch_day < persianToEpochDay(year, 1, 1)) : (year -= 1) {}
@@ -25310,6 +25352,8 @@ fn persianFromEpochDay(epoch_day: i64) Civil {
 fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u8) Civil {
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
         return chineseLikeFromEpochDay(cal, tDaysFromCivil(iso_year, iso_month, iso_day));
+    if (std.mem.eql(u8, cal, "islamic-umalqura"))
+        if (umalquraKnownIsoToCalendar(iso_year, iso_month, iso_day)) |known| return known;
     if (std.mem.eql(u8, cal, "persian"))
         return persianFromEpochDay(tDaysFromCivil(iso_year, iso_month, iso_day));
     if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
@@ -25328,6 +25372,8 @@ fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u
 fn calendarDateToIso(cal: []const u8, year: i64, month: u8, day: u8) Civil {
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
         return tCivilFromDays(chineseLikeToEpochDay(cal, year, month, day));
+    if (std.mem.eql(u8, cal, "islamic-umalqura"))
+        if (umalquraKnownCalendarToIso(year, month, day)) |known| return known;
     if (std.mem.eql(u8, cal, "persian"))
         return tCivilFromDays(persianToEpochDay(year, month, day));
     if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
@@ -25564,6 +25610,7 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
     if (std.mem.eql(u8, cal, "islamic") or std.mem.eql(u8, cal, "islamic-civil") or std.mem.eql(u8, cal, "islamic-tbla") or std.mem.eql(u8, cal, "islamic-rgsa"))
         return if (month == 12 and calInLeapYear(cal, year)) 30 else if (month >= 1 and month <= 12) (if ((month % 2) == 1) 30 else 29) else 0;
     if (std.mem.eql(u8, cal, "islamic-umalqura")) {
+        if (umalquraKnownDaysInMonth(year, month)) |known| return known;
         const y1390 = [_]u8{ 29, 30, 29, 30, 30, 30, 29, 30, 29, 30, 29, 30 };
         const y1391 = [_]u8{ 29, 29, 30, 29, 30, 30, 29, 30, 30, 29, 30, 29 };
         return tableMonthDays(year, month, 1390, &y1390, 1391, &y1391) orelse
@@ -27080,6 +27127,39 @@ const RawMD = struct {
 const MonthCodeInfo = struct { month: u8, leap: bool, iso_suitable: bool };
 const MonthDayRef = struct { iso: IsoMD, cal_year: i64 };
 
+fn monthDayReferenceInIsoYear(cal: []const u8, mc: ?MonthCodeInfo, month: i64, day: i64, iso_year: i64) ?MonthDayRef {
+    var epoch = tDaysFromCivil(iso_year, 12, 31);
+    const min_epoch = tDaysFromCivil(iso_year, 1, 1);
+    while (epoch >= min_epoch) : (epoch -= 1) {
+        const iso = tCivilFromDays(epoch);
+        const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
+        if (cd.d != day) continue;
+        if (mc) |info| {
+            const m = calMonthFromCodeMaybe(cal, cd.y, info) orelse continue;
+            if (cd.m != m) continue;
+        } else {
+            if (month < 1 or cd.m != @as(u8, @intCast(month))) continue;
+        }
+        return .{ .iso = .{ .y = iso.y, .m = iso.m, .d = iso.d }, .cal_year = cd.y };
+    }
+    return null;
+}
+
+fn knownMonthDayReferenceIsoMaybe(cal: []const u8, mc: ?MonthCodeInfo, month: i64, day: i64) ?MonthDayRef {
+    if (std.mem.eql(u8, cal, "islamic-umalqura") and day == 30) {
+        const m = if (mc) |info| if (!info.leap) info.month else 0 else if (month >= 1 and month <= 12) @as(u8, @intCast(month)) else 0;
+        const year: i64 = switch (m) {
+            1, 4, 6, 8, 9, 11 => 1972,
+            2, 10 => 1970,
+            3, 5, 12 => 1971,
+            7 => 1969,
+            else => 0,
+        };
+        if (year != 0) return monthDayReferenceInIsoYear(cal, mc, month, day, year);
+    }
+    return null;
+}
+
 fn regulateMonthDay(self: *Interpreter, cal: []const u8, ref_year: i64, mf: i64, df: i64, constrain: bool) EvalError!IsoMD {
     var m = mf;
     var d = df;
@@ -27112,6 +27192,7 @@ fn readMonthCodeInfo(self: *Interpreter, v: Value) EvalError!MonthCodeInfo {
 }
 
 fn monthDayReferenceIsoMaybe(cal: []const u8, mc: ?MonthCodeInfo, month: i64, day: i64) ?MonthDayRef {
+    if (knownMonthDayReferenceIsoMaybe(cal, mc, month, day)) |ref| return ref;
     var epoch = tDaysFromCivil(1972, 12, 31);
     const min_epoch = tDaysFromCivil(1900, 1, 1);
     while (epoch >= min_epoch) : (epoch -= 1) {
@@ -27173,6 +27254,10 @@ fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
         return self.throwError("TypeError", "non-ISO PlainMonthDay fields require monthCode or year");
     const validation_year: i64 = if (maybe_year) |y| y else if (mc) |info| blk: {
         if (monthDayReferenceIsoMaybe(cal, info, 0, d)) |ref| break :blk ref.cal_year;
+        var probe_day = d - 1;
+        while (probe_day >= 1) : (probe_day -= 1) {
+            if (monthDayReferenceIsoMaybe(cal, info, 0, probe_day)) |ref| break :blk ref.cal_year;
+        }
         break :blk (try monthDayReferenceIso(self, cal, info, 0, 1)).cal_year;
     } else 1972;
     const m = maybe_m orelse @as(i64, try calMonthFromCode(self, cal, validation_year, mc.?));
