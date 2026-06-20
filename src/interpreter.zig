@@ -25178,12 +25178,31 @@ fn persianRawDay(year: i64, month: u8, day: u8) i64 {
         @divFloor(ep_base, 2820) * 1_029_983;
 }
 
+fn persianMonthDayOffset(month: u8, day: u8) i64 {
+    const month_days: i64 = if (month <= 7)
+        (@as(i64, month) - 1) * 31
+    else
+        (@as(i64, month) - 1) * 30 + 6;
+    return month_days + @as(i64, day) - 1;
+}
+
+fn persianKnownYearStartEpochDay(year: i64) ?i64 {
+    if (year < 1206 or year > 1499) return null;
+    var epoch_day = tDaysFromCivil(1827, 3, 22);
+    var y: i64 = 1206;
+    while (y < year) : (y += 1) epoch_day += 365 + @as(i64, if (persianLeapYear(y)) 1 else 0);
+    return epoch_day;
+}
+
 fn persianEpochOffset() i64 {
     return tDaysFromCivil(2016, 3, 20) - persianRawDay(1395, 1, 1);
 }
 
 fn persianToEpochDay(year: i64, month: u8, day: u8) i64 {
-    return persianRawDay(year, month, day) + persianEpochOffset();
+    if (persianKnownYearStartEpochDay(year)) |start|
+        return start + persianMonthDayOffset(month, day);
+    const raw_year = if (year <= 0) year - 1 else year;
+    return persianRawDay(raw_year, month, day) + persianEpochOffset();
 }
 
 fn fixed13RawDay(year: i64, month: u8, day: u8) i64 {
@@ -25326,6 +25345,7 @@ const umalqura_known_dates = [_]UmalquraKnownDate{
     .{ .iy = 1972, .im = 8, .id = 10, .cy = 1392, .cm = 6, .cd = 30 },
     .{ .iy = 1972, .im = 10, .id = 8, .cy = 1392, .cm = 8, .cd = 30 },
     .{ .iy = 1972, .im = 11, .id = 7, .cy = 1392, .cm = 9, .cd = 30 },
+    .{ .iy = 2006, .im = 7, .id = 25, .cy = 1427, .cm = 6, .cd = 29 },
     .{ .iy = 2077, .im = 10, .id = 18, .cy = 1500, .cm = 12, .cd = 1 },
     .{ .iy = 2077, .im = 11, .id = 16, .cy = 1500, .cm = 12, .cd = 30 },
 };
@@ -25355,6 +25375,28 @@ fn umalquraKnownDaysInMonth(year: i64, month: u8) ?u8 {
 }
 
 fn persianFromEpochDay(epoch_day: i64) Civil {
+    if (persianKnownYearStartEpochDay(1206)) |min_start| {
+        if (persianKnownYearStartEpochDay(1499)) |max_start| {
+            if (epoch_day >= min_start and epoch_day < max_start) {
+                var year = tCivilFromDays(epoch_day).y - 621;
+                while (persianKnownYearStartEpochDay(year)) |start| {
+                    if (epoch_day >= start) break;
+                    year -= 1;
+                }
+                while (persianKnownYearStartEpochDay(year + 1)) |next_start| {
+                    if (epoch_day < next_start) break;
+                    year += 1;
+                }
+                const day_of_year = epoch_day - (persianKnownYearStartEpochDay(year) orelse min_start) + 1;
+                if (day_of_year <= 186) {
+                    const zero = day_of_year - 1;
+                    return .{ .y = year, .m = @intCast(@divFloor(zero, 31) + 1), .d = @intCast(@mod(zero, 31) + 1) };
+                }
+                const zero = day_of_year - 187;
+                return .{ .y = year, .m = @intCast(@divFloor(zero, 30) + 7), .d = @intCast(@mod(zero, 30) + 1) };
+            }
+        }
+    }
     var year = tCivilFromDays(epoch_day).y - 621;
     while (epoch_day < persianToEpochDay(year, 1, 1)) : (year -= 1) {}
     while (epoch_day >= persianToEpochDay(year + 1, 1, 1)) : (year += 1) {}
