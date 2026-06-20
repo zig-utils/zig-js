@@ -65,7 +65,7 @@ Of the valid corpus: **45 parse failures**, **4,499 runtime failures**, **0 host
 | `DataView` | 561 / 561 (100%) | `Number` | 340 / 340 (100%) |
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 29 / 29 (100%) | `FinalizationRegistry` | 47 / 47 (100%) |
-| `Temporal` | 3,622 / 4,603 (78.7%) | `intl402` | 2,636 / 3,341 (78.9%) |
+| `Temporal` | 3,622 / 4,603 (78.7%) | `intl402` | 2,646 / 3,341 (79.2%) |
 | `annexB` | 965 / 1,071 (90.1%) | `staging` | 742 / 1,028 (72.2%) |
 | `SharedArrayBuffer` | 104 / 104 (100%) | `ArrayBuffer` | 221 / 221 (100%) |
 | `Atomics` | 390 / 390 (100%) | — | — |
@@ -78,7 +78,7 @@ Of the valid corpus: **45 parse failures**, **4,499 runtime failures**, **0 host
 | `global` | 29 / 29 (100%) | `Function` | 509 / 509 (100%) |
 | `Proxy` | 310 / 310 (100%) | `Reflect` | 153 / 153 (100%) |
 
-Latest focused `test/intl402` worker checkpoint: **2,636 / 3,341 (78.9%)**, up **+11** from the previous focused checkpoint of 2,625 / 3,341 after improving PlainMonthDay reference-year selection and observed Um Al-Qura date handling.
+Latest focused `test/intl402` worker checkpoint: **2,646 / 3,341 (79.2%)**, up **+10** from the previous focused checkpoint of 2,636 / 3,341 after tightening Chinese/Dangi month-day reference years, Hebrew leap month-code rejection, and explicit PlainMonthDay year bounds.
 
 > `zig build test262` prints each subtree's pass rate plus `parse-fail` / `runtime-fail` / `host-fail` counts, so the work stays data-driven. `zig build conformance` keeps a separate 33/33 always-green smoke suite for fast iteration. Refresh the corpus with `git submodule update --remote test262`.
 
