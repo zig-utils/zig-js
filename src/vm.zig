@@ -120,6 +120,7 @@ pub const Generator = struct {
     started: bool = false,
     done: bool = false,
     suspended: bool = false,
+    resume_mutex: std.Io.Mutex = .init,
     running: bool = false,
     /// An async function activation (vs a `function*`). It is driven by promise
     /// settlement rather than `.next()`: each `await` suspends like a `yield`,
@@ -741,6 +742,8 @@ fn resumeKindNum(kind: ResumeKind) Value {
 /// next `yield` (or completion), then restores the caller's context.
 fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Value) EvalError!Value {
     const g: *Generator = @ptrCast(@alignCast(gen_obj.gen.?));
+    if (!g.resume_mutex.tryLock()) return vm.throwError("TypeError", "generator is already running");
+    defer g.resume_mutex.unlock(agent.engineIo());
     if (g.running) return vm.throwError("TypeError", "generator is already running");
 
     // A completed (or not-yet-started) generator handles each kind without
