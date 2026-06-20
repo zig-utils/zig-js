@@ -25095,14 +25095,14 @@ fn temporalCalendarIdGetter(ctx: *anyopaque, this: Value, args: []const Value) v
     return Value.str(this.asObj().temporal.?.calendar);
 }
 
-/// Whether `id` is a recognized BCP-47 calendar identifier (case-insensitive),
-/// including the aliases that canonicalize elsewhere. Unknown ids (e.g. "notexist")
-/// are rejected by callers; recognized-but-unimplemented ones behave as iso8601.
+/// Whether `id` is a Temporal-supported BCP-47 calendar identifier
+/// (case-insensitive), including aliases that canonicalize in Temporal.
+/// DateTimeFormat has its own fallback path for deprecated/locale calendars.
 fn isKnownCalendar(id: []const u8) bool {
     const known = [_][]const u8{
-        "iso8601", "gregory",  "gregorian",     "japanese",            "buddhist",     "roc",              "persian",
-        "indian",  "islamic",  "islamic-civil", "islamicc",            "islamic-tbla", "islamic-umalqura", "islamic-rgsa",
-        "hebrew",  "ethiopic", "ethioaa",       "ethiopic-amete-alem", "coptic",       "chinese",          "dangi",
+        "iso8601", "gregory",             "gregorian", "japanese",     "buddhist",         "roc",    "persian",
+        "indian",  "islamic-civil",       "islamicc",  "islamic-tbla", "islamic-umalqura", "hebrew", "ethiopic",
+        "ethioaa", "ethiopic-amete-alem", "coptic",    "chinese",      "dangi",
     };
     for (known) |k| if (asciiEqlIgnoreCase(id, k)) return true;
     return false;
@@ -29360,6 +29360,7 @@ fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
     if (v.isString()) return parseZdtString(self, v.asStr());
     if (v.isObject()) {
         // A fields bag with timeZone.
+        if (!(try self.getProperty(v, "calendar")).isUndefined()) _ = try readCalendarField(self, v);
         const tzv = try self.getProperty(v, "timeZone");
         if (tzv.isString()) {
             const tz = try parseTimeZone(self, tzv.asStr());
