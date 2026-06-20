@@ -414,15 +414,25 @@ under `parallel_js`. The promoted CVE tail after
 `cve/mc-int-resizable-tail-quarantine.js` is focused-green in slices through
 `cve/mc-wait-property-wait-lost-wakeup.js`, including the async-generator
 resume-head claim case `cve/mc-prim-async-generator-resume-claim.js`; that
-case is also TSan-clean as a focused `threads-test` probe. The GC-stress block
-is focused-green 4/4, the promoted Atomics block is focused-green 15/15, and
-the promoted JIT-audit subset is focused-green in verified slices through
-`jit/tid-tag-3-threads.js`. Broader promoted-allowlist `parallel_js` remains
-exploratory until the monolithic cumulative budget probe is cleared; with a
-30-minute cap the single run now clears the bench block, the CVE tail, and
-GC-stress, enters the promoted JIT-audit block, passes through
-`jit/ftl-direct-tailcall-dataic-arg-clobber.js`, and times out before the next
-JIT PASS line. (6)
+case is also TSan-clean as a focused `threads-test` probe. The sync generator
+resume-claim case `cve/mc-prim-generator-resume-claim.js` is focused-green and
+TSan-clean under `parallel_js` after the sync generator resume path gained a
+per-generator claim mutex. The thread teardown/settlement tail is focused-green
+through `cve/mc-tdwn-vm-teardown-unjoined.js`; pending `asyncJoin` queue
+rebasing now takes the thread registry API lock and each target record's join
+mutex before rewriting queue pointers, so it cannot race nested `Thread`
+creation or completion publication. The GC-stress block is focused-green 4/4,
+the promoted Atomics block is focused-green 15/15, and the promoted JIT-audit
+subset is focused-green in verified slices through `jit/tid-tag-3-threads.js`.
+The bench checksum files also keep their normal serial-performance protocol
+counts while `parallel_js` uses capped harness and inner-loop counts so the
+broad probe remains a correctness witness. Broader promoted-allowlist
+`parallel_js` remains exploratory until the monolithic cumulative budget probe
+is cleared; with a 30-minute cap the single run now clears the bench block, the
+CVE tail, GC-stress, JIT, Atomics, sync, shared-objects, races, heap,
+invariants, and the objectmodel block through
+`objectmodel/i03-stale-spine-reader-vs-grow.js`, then times out before the next
+objectmodel PASS line. (6)
 Whole-corpus TSan campaign +
 serial-perf gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC

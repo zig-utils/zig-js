@@ -229,7 +229,15 @@ under `parallel_js`. The promoted CVE tail after
 `cve/mc-int-resizable-tail-quarantine.js` is now focused-green in slices through
 `cve/mc-wait-property-wait-lost-wakeup.js`; this includes the async-generator
 resume-head claim case `cve/mc-prim-async-generator-resume-claim.js`, which is
-also TSan-clean as a focused `threads-test` probe. The GC-stress block is
+also TSan-clean as a focused `threads-test` probe. The sync generator
+resume-claim case `cve/mc-prim-generator-resume-claim.js` is also
+focused-green and TSan-clean under `parallel_js`: the generator resume path now
+uses a per-generator claim mutex so racing `.next()` calls cannot both drive
+the same suspended execution frame. The thread teardown/settlement tail is
+focused-green through `cve/mc-tdwn-vm-teardown-unjoined.js`; pending
+`asyncJoin` queue rebasing is guarded by the thread registry API lock and each
+target record's join mutex, so exiting thread inbox handoff does not race
+nested `Thread` creation or completion publication. The GC-stress block is
 focused-green 4/4, the promoted Atomics block is focused-green 15/15, and the
 promoted JIT-audit subset is focused-green in verified slices from
 constructor/fire benchmark checksums through the tailcall, OSR/catch-loop,
@@ -239,11 +247,15 @@ original audit sizes; `parallel_js` uses smaller loop counts in the tailcall,
 OSR/catch-loop, golden-disasm, stop-budget, shared-ArrayStorage,
 spawned-thread butterfly, tag-discipline, and TID-tag files so the exploratory
 probe remains a semantic witness rather than a serial-performance gate. The
-monolithic full promoted-allowlist probe is still a cumulative budget probe
-rather than a required green gate; with a 30-minute cap it now clears the bench
-block, the CVE tail, and GC-stress inside the single run, enters the
-JIT-audit block, passes through `jit/ftl-direct-tailcall-dataic-arg-clobber.js`,
-and times out before the next JIT PASS line.
+bench checksum files use the same split: normal mode keeps the serial
+performance protocol counts, while `parallel_js` caps harness and inner-loop
+iterations so the broad probe remains a correctness pass instead of a timing
+gate. The monolithic full promoted-allowlist probe is still a cumulative budget
+probe rather than a required green gate; with a 30-minute cap it now clears the
+bench block, the CVE tail, GC-stress, JIT, Atomics, sync, shared-objects,
+races, heap, invariants, and the objectmodel block through
+`objectmodel/i03-stale-spine-reader-vs-grow.js`, then times out before the next
+objectmodel PASS line.
 
 ## Sweep Runs
 
