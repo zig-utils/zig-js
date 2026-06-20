@@ -26990,7 +26990,7 @@ fn temporalYearMonthEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) 
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
     const t = this.asObj().temporal.?;
     const b = try toYearMonthFields(self, if (args.len > 0) args[0] else Value.undef(), true);
-    return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d);
+    return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d and temporalCalendarIdsEqual(t.calendar, b.cal));
 }
 
 fn temporalYearMonthCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
