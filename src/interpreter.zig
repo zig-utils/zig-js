@@ -25308,6 +25308,8 @@ fn persianFromEpochDay(epoch_day: i64) Civil {
 }
 
 fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u8) Civil {
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
+        return chineseLikeFromEpochDay(cal, tDaysFromCivil(iso_year, iso_month, iso_day));
     if (std.mem.eql(u8, cal, "persian"))
         return persianFromEpochDay(tDaysFromCivil(iso_year, iso_month, iso_day));
     if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
@@ -25324,6 +25326,8 @@ fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u
 }
 
 fn calendarDateToIso(cal: []const u8, year: i64, month: u8, day: u8) Civil {
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
+        return tCivilFromDays(chineseLikeToEpochDay(cal, year, month, day));
     if (std.mem.eql(u8, cal, "persian"))
         return tCivilFromDays(persianToEpochDay(year, month, day));
     if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
@@ -25348,9 +25352,103 @@ fn chineseLikeLeapYear(year: i64) bool {
     const leap_years = [_]i64{
         1971, 1974, 1976, 1979, 1982, 1984, 1987, 1990, 1993, 1995,
         1998, 2001, 2004, 2006, 2009, 2012, 2014, 2017, 2020, 2023,
-        2025, 2028, 2031, 2033, 2036, 2039, 2042, 2044, 2047,
+        2025, 2028, 2031, 2033, 2036, 2039, 2042, 2044, 2047, 2050,
     };
     return intIn(i64, year, &leap_years);
+}
+
+fn chineseLikeSupportedYear(cal: []const u8, year: i64) bool {
+    const max_year: i64 = if (std.mem.eql(u8, cal, "dangi")) 2050 else 2100;
+    return year >= 1900 and year <= max_year;
+}
+
+fn chineseLikeYearStartEpochDay(cal: []const u8, year: i64) ?i64 {
+    if (!chineseLikeSupportedYear(cal, year)) return null;
+    if (year == 1900) return tDaysFromCivil(1900, 1, 31);
+    if (year < 1970) return null;
+
+    var epoch_day = tDaysFromCivil(2022, 2, 1);
+    if (year >= 2022) {
+        var y: i64 = 2022;
+        while (y < year) : (y += 1) epoch_day += chineseLikeDaysInYear(cal, y);
+    } else {
+        var y: i64 = 2021;
+        while (y >= year) : (y -= 1) epoch_day -= chineseLikeDaysInYear(cal, y);
+    }
+    return epoch_day;
+}
+
+fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i64 {
+    const MonthStart = struct { y: i64, m: u8, iy: i64, im: u8, id: u8 };
+    const chinese = [_]MonthStart{
+        .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 1984, .m = 11, .iy = 1984, .im = 11, .id = 23 },
+        .{ .y = 1993, .m = 4, .iy = 1993, .im = 4, .id = 22 },
+        .{ .y = 1995, .m = 9, .iy = 1995, .im = 9, .id = 25 },
+        .{ .y = 2006, .m = 8, .iy = 2006, .im = 8, .id = 24 },
+        .{ .y = 2009, .m = 6, .iy = 2009, .im = 6, .id = 23 },
+        .{ .y = 2014, .m = 10, .iy = 2014, .im = 10, .id = 24 },
+        .{ .y = 2017, .m = 7, .iy = 2017, .im = 7, .id = 23 },
+        .{ .y = 2020, .m = 5, .iy = 2020, .im = 5, .id = 23 },
+        .{ .y = 2022, .m = 1, .iy = 2022, .im = 2, .id = 1 },
+        .{ .y = 2022, .m = 2, .iy = 2022, .im = 3, .id = 3 },
+        .{ .y = 2022, .m = 3, .iy = 2022, .im = 4, .id = 1 },
+        .{ .y = 2022, .m = 4, .iy = 2022, .im = 5, .id = 1 },
+        .{ .y = 2022, .m = 5, .iy = 2022, .im = 5, .id = 30 },
+        .{ .y = 2022, .m = 6, .iy = 2022, .im = 6, .id = 29 },
+        .{ .y = 2022, .m = 7, .iy = 2022, .im = 7, .id = 29 },
+        .{ .y = 2022, .m = 8, .iy = 2022, .im = 8, .id = 27 },
+        .{ .y = 2022, .m = 9, .iy = 2022, .im = 9, .id = 26 },
+        .{ .y = 2022, .m = 10, .iy = 2022, .im = 10, .id = 25 },
+        .{ .y = 2022, .m = 11, .iy = 2022, .im = 11, .id = 24 },
+        .{ .y = 2022, .m = 12, .iy = 2022, .im = 12, .id = 23 },
+        .{ .y = 2023, .m = 3, .iy = 2023, .im = 3, .id = 22 },
+        .{ .y = 2033, .m = 12, .iy = 2033, .im = 12, .id = 22 },
+        .{ .y = 2100, .m = 12, .iy = 2100, .im = 12, .id = 31 },
+    };
+    const dangi = [_]MonthStart{
+        .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 2050, .m = 13, .iy = 2050, .im = 12, .id = 13 },
+    };
+    for (if (std.mem.eql(u8, cal, "dangi")) &dangi else &chinese) |entry| {
+        if (entry.y == year and entry.m == month)
+            return tDaysFromCivil(entry.iy, entry.im, entry.id);
+    }
+    return null;
+}
+
+fn chineseLikeToEpochDay(cal: []const u8, year: i64, month: u8, day: u8) i64 {
+    if (chineseLikeKnownMonthStartEpochDay(cal, year, month)) |start|
+        return start + @as(i64, day) - 1;
+    var epoch_day = chineseLikeYearStartEpochDay(cal, year) orelse return tDaysFromCivil(year, month, day);
+    var m: u8 = 1;
+    while (m < month) : (m += 1) epoch_day += calDaysInMonth(cal, year, m);
+    return epoch_day + @as(i64, day) - 1;
+}
+
+fn chineseLikeFromEpochDay(cal: []const u8, epoch_day: i64) Civil {
+    var year = tCivilFromDays(epoch_day).y;
+    if (year < 1900 or year > (if (std.mem.eql(u8, cal, "dangi")) @as(i64, 2051) else @as(i64, 2101)))
+        return tCivilFromDays(epoch_day);
+    while (chineseLikeYearStartEpochDay(cal, year)) |start| {
+        if (epoch_day >= start) break;
+        year -= 1;
+        if (year < 1900) return tCivilFromDays(epoch_day);
+    }
+    while (chineseLikeYearStartEpochDay(cal, year + 1)) |next_start| {
+        if (epoch_day < next_start) break;
+        year += 1;
+    }
+
+    var month: u8 = 1;
+    var day_of_year = epoch_day - (chineseLikeYearStartEpochDay(cal, year) orelse return tCivilFromDays(epoch_day));
+    while (true) {
+        const dim = calDaysInMonth(cal, year, month);
+        if (dim == 0 or day_of_year < dim) break;
+        day_of_year -= dim;
+        month += 1;
+    }
+    return .{ .y = year, .m = month, .d = @intCast(day_of_year + 1) };
 }
 
 fn umalquraLeapYear(year: i64) bool {
@@ -25474,6 +25572,10 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         const y1971 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, 30, 29 };
         const y1972 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, if (std.mem.eql(u8, cal, "chinese")) 29 else 30, if (std.mem.eql(u8, cal, "chinese")) 30 else 29 };
+        const y2020 = [_]u8{ 30, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29 };
+        const y2022 = [_]u8{ 30, 29, 30, 29, 30, 30, 29, 30, 29, 30, 29, 30 };
+        if (year == 2020 and month <= y2020.len) return y2020[month - 1];
+        if (year == 2022 and month <= y2022.len) return y2022[month - 1];
         return tableMonthDays(year, month, 1971, &y1971, 1972, &y1972) orelse
             (if (month >= 1 and month <= calMonthsInYear(cal, year)) (if ((month % 2) == 1) 30 else 29) else 0);
     }
@@ -25486,11 +25588,12 @@ fn calLeapMonth(cal: []const u8, year: i64) u8 {
         const LeapMonth = struct { y: i64, m: u8 };
         const chinese = [_]LeapMonth{
             .{ .y = 1971, .m = 6 }, .{ .y = 1974, .m = 5 }, .{ .y = 1976, .m = 9 }, .{ .y = 1979, .m = 7 }, .{ .y = 1982, .m = 5 },
+            .{ .y = 1984, .m = 11 },
             .{ .y = 1987, .m = 7 }, .{ .y = 1990, .m = 6 }, .{ .y = 1993, .m = 4 }, .{ .y = 1995, .m = 9 }, .{ .y = 1998, .m = 6 },
             .{ .y = 2001, .m = 5 }, .{ .y = 2004, .m = 3 }, .{ .y = 2006, .m = 8 }, .{ .y = 2009, .m = 6 }, .{ .y = 2012, .m = 5 },
-            .{ .y = 2017, .m = 7 }, .{ .y = 2020, .m = 5 }, .{ .y = 2023, .m = 3 }, .{ .y = 2025, .m = 7 }, .{ .y = 2028, .m = 6 },
-            .{ .y = 2031, .m = 4 }, .{ .y = 2036, .m = 7 }, .{ .y = 2039, .m = 6 }, .{ .y = 2042, .m = 3 }, .{ .y = 2044, .m = 8 },
-            .{ .y = 2047, .m = 6 },
+            .{ .y = 2014, .m = 10 }, .{ .y = 2017, .m = 7 }, .{ .y = 2020, .m = 5 }, .{ .y = 2023, .m = 3 }, .{ .y = 2025, .m = 7 }, .{ .y = 2028, .m = 6 },
+            .{ .y = 2031, .m = 4 }, .{ .y = 2033, .m = 12 }, .{ .y = 2036, .m = 7 }, .{ .y = 2039, .m = 6 }, .{ .y = 2042, .m = 3 }, .{ .y = 2044, .m = 8 },
+            .{ .y = 2047, .m = 6 }, .{ .y = 2050, .m = 6 },
         };
         const dangi = [_]LeapMonth{
             .{ .y = 1971, .m = 6 }, .{ .y = 1974, .m = 5 }, .{ .y = 1976, .m = 9 }, .{ .y = 1979, .m = 7 }, .{ .y = 1982, .m = 5 },
@@ -25498,7 +25601,7 @@ fn calLeapMonth(cal: []const u8, year: i64) u8 {
             .{ .y = 2001, .m = 5 }, .{ .y = 2004, .m = 3 }, .{ .y = 2006, .m = 8 }, .{ .y = 2009, .m = 6 }, .{ .y = 2012, .m = 4 },
             .{ .y = 2017, .m = 6 }, .{ .y = 2020, .m = 5 }, .{ .y = 2023, .m = 3 }, .{ .y = 2025, .m = 7 }, .{ .y = 2028, .m = 6 },
             .{ .y = 2031, .m = 4 }, .{ .y = 2036, .m = 7 }, .{ .y = 2039, .m = 6 }, .{ .y = 2042, .m = 3 }, .{ .y = 2044, .m = 8 },
-            .{ .y = 2047, .m = 6 },
+            .{ .y = 2047, .m = 6 }, .{ .y = 2050, .m = 6 },
         };
         for (if (std.mem.eql(u8, cal, "dangi")) &dangi else &chinese) |entry| if (entry.y == year) return entry.m;
     }
@@ -25527,6 +25630,11 @@ fn calMonthFromCodeMaybe(cal: []const u8, year: i64, mc: MonthCodeInfo) ?u8 {
 
 fn calMonthFromCode(self: *Interpreter, cal: []const u8, year: i64, mc: MonthCodeInfo) EvalError!u8 {
     return calMonthFromCodeMaybe(cal, year, mc) orelse self.throwError("RangeError", "bad monthCode");
+}
+
+fn constrainInvalidLeapMonthCode(cal: []const u8, max_month: u8, mc: MonthCodeInfo) u8 {
+    if (std.mem.eql(u8, cal, "hebrew") and mc.month < max_month) return mc.month + 1;
+    return @min(mc.month, max_month);
 }
 
 /// Whether a date-bearing Temporal value uses the Gregorian calendar (which, for
@@ -25615,8 +25723,6 @@ fn bagIsoYear(self: *Interpreter, bag: Value, cal: []const u8) EvalError!?i64 {
     const has_era = calEraOf(cal, 0, 1, 1).era != null;
     const raw_ev = try self.getProperty(bag, "era");
     const raw_eyv = try self.getProperty(bag, "eraYear");
-    if (!has_era and !std.mem.eql(u8, cal, "iso8601") and (!raw_ev.isUndefined() or !raw_eyv.isUndefined()))
-        return self.throwError("TypeError", "era fields are invalid for this calendar");
     const ev = if (has_era) raw_ev else Value.undef();
     const eyv = if (has_era) raw_eyv else Value.undef();
     var from_era: ?i64 = null;
@@ -25894,13 +26000,19 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
         const dv = try self.getProperty(v, "day");
         if (cal_year == null or dv.isUndefined()) return self.throwError("TypeError", "PlainDate fields require year and day");
         const mv = try self.getProperty(v, "month");
+        const mcv = try self.getProperty(v, "monthCode");
         var m: f64 = undefined;
         if (!mv.isUndefined()) {
             m = try temporalIntArg(self, mv, "month");
+            if (!mcv.isUndefined()) {
+                const info = try readMonthCodeInfo(self, mcv);
+                const month_code = try calMonthFromCode(self, bag_cal, cal_year.?, info);
+                if (@as(i64, @intFromFloat(m)) != @as(i64, month_code))
+                    return self.throwError("RangeError", "month and monthCode mismatch");
+            }
         } else {
-            const mc = try self.getProperty(v, "monthCode");
-            if (mc.isUndefined()) return self.throwError("TypeError", "month or monthCode required");
-            const info = try readMonthCodeInfo(self, mc);
+            if (mcv.isUndefined()) return self.throwError("TypeError", "month or monthCode required");
+            const info = try readMonthCodeInfo(self, mcv);
             m = @floatFromInt(try calMonthFromCode(self, bag_cal, cal_year.?, info));
         }
         const d = try temporalIntArg(self, dv, "day");
@@ -26616,12 +26728,13 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
     const cal = try readCalendarName(self, if (args.len > 0) args[0] else Value.undef());
     const t = this.asObj().temporal.?;
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try isoYearStr(self, &buf, t.year);
-    try tfmt(self, &buf, "-{d:0>2}", .{t.month});
+    try isoYearStr(self, &buf, iso.y);
+    try tfmt(self, &buf, "-{d:0>2}", .{iso.m});
     // When the calendar annotation is shown the reference day completes the
     // ISO string ("YYYY-MM-DD[u-ca=iso8601]").
-    if (!std.mem.eql(u8, t.calendar, "iso8601") or calShowsAnnotation(cal, t.calendar)) try tfmt(self, &buf, "-{d:0>2}", .{t.day});
+    if (!std.mem.eql(u8, t.calendar, "iso8601") or calShowsAnnotation(cal, t.calendar)) try tfmt(self, &buf, "-{d:0>2}", .{iso.d});
     try appendCalAnnotation(self, &buf, cal, t.calendar);
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
@@ -26653,12 +26766,16 @@ fn readYearMonthBagRaw(self: *Interpreter, v: Value) EvalError!RawYM {
 
 fn validateYearMonthRaw(self: *Interpreter, raw: RawYM, constrain: bool) EvalError!IsoYM {
     const y = raw.y orelse return self.throwError("TypeError", "PlainYearMonth fields require year");
-    var m = raw.m orelse if (raw.month_code) |mc| @as(i64, try calMonthFromCode(self, raw.cal, y, mc)) else return self.throwError("TypeError", "PlainYearMonth fields require month or monthCode");
+    const max_month = calMonthsInYear(raw.cal, y);
+    var m = raw.m orelse if (raw.month_code) |mc| blk: {
+        if (calMonthFromCodeMaybe(raw.cal, y, mc)) |resolved| break :blk @as(i64, resolved);
+        if (constrain and mc.leap) break :blk @as(i64, constrainInvalidLeapMonthCode(raw.cal, max_month, mc));
+        return self.throwError("RangeError", "bad monthCode");
+    } else return self.throwError("TypeError", "PlainYearMonth fields require month or monthCode");
     if (raw.month_code) |mc| {
-        const code_month = try calMonthFromCode(self, raw.cal, y, mc);
+        const code_month = calMonthFromCodeMaybe(raw.cal, y, mc) orelse if (constrain and mc.leap) constrainInvalidLeapMonthCode(raw.cal, max_month, mc) else return self.throwError("RangeError", "bad monthCode");
         if (m != @as(i64, code_month)) return self.throwError("RangeError", "month and monthCode mismatch");
     }
-    const max_month = calMonthsInYear(raw.cal, y);
     if (constrain) {
         if (m < 1) return self.throwError("RangeError", "month out of range");
         m = @min(@as(i64, max_month), m);
@@ -26868,11 +26985,16 @@ fn temporalYearMonthToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Va
     const dv = try self.getProperty(bag, "day");
     if (dv.isUndefined()) return self.throwError("TypeError", "toPlainDate requires a day");
     const d = try temporalIntArg(self, dv, "day");
-    try checkIsoDate(self, @floatFromInt(t.year), @floatFromInt(t.month), d);
+    if (d < 1 or d > @as(f64, @floatFromInt(calDaysInMonth(t.calendar, t.year, t.month))))
+        return self.throwError("RangeError", "day out of range");
+    const di: u8 = @intFromFloat(d);
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, di);
+    try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = t.year;
     o.temporal.?.month = t.month;
-    o.temporal.?.day = @intFromFloat(d);
+    o.temporal.?.day = di;
+    o.temporal.?.calendar = t.calendar;
     return Value.obj(o);
 }
 
@@ -27047,7 +27169,7 @@ fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
         return self.throwError("TypeError", "PlainMonthDay fields require month or monthCode");
     const maybe_year = try bagCalendarYear(self, v, cal);
     const has_year = maybe_year != null;
-    if (!std.mem.eql(u8, cal, "iso8601") and !has_year and maybe_m != null and mc == null)
+    if (!std.mem.eql(u8, cal, "iso8601") and !has_year and maybe_m != null)
         return self.throwError("TypeError", "non-ISO PlainMonthDay fields require monthCode or year");
     const validation_year: i64 = if (maybe_year) |y| y else if (mc) |info| blk: {
         if (monthDayReferenceIsoMaybe(cal, info, 0, d)) |ref| break :blk ref.cal_year;
@@ -29233,7 +29355,7 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-            const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef());
+            const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             const t = this.asObj().temporal.?;
             if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
@@ -29284,7 +29406,7 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 fn temporalZdtEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef());
+    const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true);
     const t = this.asObj().temporal.?;
     return Value.boolVal(t.epoch_ns == other.epoch_ns and std.mem.eql(u8, t.tz_name, other.tz_name));
 }
@@ -29292,8 +29414,8 @@ fn temporalZdtEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn temporalZdtCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const a = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef());
-    const b = try toZdtArg(self, if (args.len > 1) args[1] else Value.undef());
+    const a = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true);
+    const b = try toZdtArg(self, if (args.len > 1) args[1] else Value.undef(), true);
     return Value.num(if (a.epoch_ns < b.epoch_ns) -1 else if (a.epoch_ns > b.epoch_ns) 1 else 0);
 }
 
@@ -29370,7 +29492,7 @@ fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
 }
 
 /// Coerce to ZonedDateTime data (an instance or a "…[TimeZone]" string).
-fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
+fn toZdtArg(self: *Interpreter, v: Value, constrain: bool) EvalError!value.TemporalData {
     if (tIsZdt(v)) return v.asObj().temporal.?.*;
     if (v.isString()) return parseZdtString(self, v.asStr());
     if (v.isObject()) {
@@ -29379,7 +29501,7 @@ fn toZdtArg(self: *Interpreter, v: Value) EvalError!value.TemporalData {
         const tzv = try self.getProperty(v, "timeZone");
         if (tzv.isString()) {
             const tz = try parseTimeZone(self, tzv.asStr());
-            const f = try toPlainDateFields(self, v, true);
+            const f = try toPlainDateFields(self, v, constrain);
             const tm = try toPlainTimeDataOpt(self, v, false, false);
             var l: value.TemporalData = .{ .kind = .plain_date_time };
             l.year = @intCast(f.y);
@@ -29436,7 +29558,8 @@ fn parseZdtString(self: *Interpreter, s: []const u8) EvalError!value.TemporalDat
 fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const d = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef());
+    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    const d = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), !reject);
     const o = try zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
     const t = o.asObj().temporal.?;
     t.year = d.year;
