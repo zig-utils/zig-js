@@ -26874,6 +26874,7 @@ fn validateYearMonthRaw(self: *Interpreter, raw: RawYM, constrain: bool) EvalErr
     } else if (m < 1 or m > @as(i64, max_month)) return self.throwError("RangeError", "month out of range");
     const month: u8 = @intCast(m);
     const iso = calendarDateToIso(raw.cal, y, month, 1);
+    try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
     try checkIsoYearMonth(self, iso.y, iso.m);
     return .{ .y = y, .m = month, .cal = raw.cal };
 }
@@ -26890,24 +26891,21 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
         // Accept a bare "YYYY-MM" (annotations allowed) as well as a full ISO
         // date string. A UTC designator makes it an exact-time string → reject.
         const ann = try stripTemporalAnnotations(self, v.asStr());
-        // A PlainYearMonth string only accepts the iso8601 calendar (a non-ISO
-        // `[u-ca=…]` annotation, e.g. gregory/hebrew, is rejected).
-        if (ann.cal) |c| if (!asciiEqlIgnoreCase(c, "iso8601"))
-            return self.throwError("RangeError", "PlainYearMonth supports only the iso8601 calendar from a string");
+        const cal = if (ann.cal) |c| canonCalendarId(self, c) else "iso8601";
         const s = ann.body;
         if (s.len == 7 and s[4] == '-' and std.ascii.isDigit(s[0])) {
             const y = std.fmt.parseInt(i64, s[0..4], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
             const m = std.fmt.parseInt(u8, s[5..7], 10) catch return self.throwError("RangeError", "invalid ISO month");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             try checkIsoYearMonth(self, y, m);
-            return .{ .y = y, .m = m };
+            return .{ .y = y, .m = m, .cal = cal };
         }
         if (s.len == 6 and std.ascii.isDigit(s[0]) and std.ascii.isDigit(s[1]) and std.ascii.isDigit(s[2]) and std.ascii.isDigit(s[3]) and std.ascii.isDigit(s[4]) and std.ascii.isDigit(s[5])) {
             const y = std.fmt.parseInt(i64, s[0..4], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
             const m = std.fmt.parseInt(u8, s[4..6], 10) catch return self.throwError("RangeError", "invalid ISO month");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             try checkIsoYearMonth(self, y, m);
-            return .{ .y = y, .m = m };
+            return .{ .y = y, .m = m, .cal = cal };
         }
         if (s.len == 9 and (s[0] == '+' or s[0] == '-') and std.ascii.isDigit(s[1]) and std.ascii.isDigit(s[2]) and std.ascii.isDigit(s[3]) and std.ascii.isDigit(s[4]) and std.ascii.isDigit(s[5]) and std.ascii.isDigit(s[6]) and std.ascii.isDigit(s[7]) and std.ascii.isDigit(s[8])) {
             const yraw = std.fmt.parseInt(i64, s[1..7], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
@@ -26916,7 +26914,7 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             const m = std.fmt.parseInt(u8, s[7..9], 10) catch return self.throwError("RangeError", "invalid ISO month");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             try checkIsoYearMonth(self, y, m);
-            return .{ .y = y, .m = m };
+            return .{ .y = y, .m = m, .cal = cal };
         }
         if (s.len == 10 and (s[0] == '+' or s[0] == '-') and s[7] == '-') {
             const yraw = std.fmt.parseInt(i64, s[1..7], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
@@ -26925,12 +26923,16 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             const m = std.fmt.parseInt(u8, s[8..10], 10) catch return self.throwError("RangeError", "invalid ISO month");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
             try checkIsoYearMonth(self, y, m);
-            return .{ .y = y, .m = m };
+            return .{ .y = y, .m = m, .cal = cal };
         }
         const b = try parseTemporalBody(self, s);
         if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainYearMonth");
         try checkIsoYearMonth(self, b.y, b.mo);
-        return .{ .y = b.y, .m = b.mo, .d = b.d };
+        if (!std.mem.eql(u8, cal, "iso8601")) {
+            const cd = calendarDateFromIso(cal, b.y, b.mo, b.d);
+            return .{ .y = cd.y, .m = cd.m, .d = cd.d, .cal = cal };
+        }
+        return .{ .y = b.y, .m = b.mo, .d = b.d, .cal = cal };
     }
     return self.throwError("TypeError", "cannot convert to a PlainYearMonth");
 }
