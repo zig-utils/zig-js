@@ -25686,9 +25686,9 @@ fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
 }
 
 /// ToTemporalCalendarIdentifier for constructor/withCalendar arguments: a
-/// date-bearing Temporal instance contributes its own calendar, and a string
-/// must be a bare calendar id. Other values are TypeError; malformed or unknown
-/// ids are RangeError.
+/// date-bearing Temporal instance contributes its own calendar, and a string is
+/// either a bare calendar id or a Temporal ISO string carrying `[u-ca=...]`.
+/// Other values are TypeError; malformed or unknown ids are RangeError.
 fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
     if (v.isObject() and v.asObj().temporal != null) {
         const t = v.asObj().temporal.?;
@@ -25700,6 +25700,10 @@ fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
     if (isCalendarId(s)) {
         if (isKnownCalendar(s)) return canonCalendarId(self, s);
         return self.throwError("RangeError", "unknown calendar");
+    }
+    if (isTemporalIsoString(self, s)) {
+        const ann = stripTemporalAnnotations(self, s) catch return self.throwError("RangeError", "invalid calendar string");
+        return if (ann.cal) |cal| canonCalendarId(self, cal) else "iso8601";
     }
     return self.throwError("RangeError", "invalid calendar string");
 }
@@ -25839,7 +25843,8 @@ fn isTemporalIsoString(self: *Interpreter, s: []const u8) bool {
     if (b.len == 0) return false;
     if (parseTemporalBody(self, b)) |_| return true else |_| {}
     // Bare time (leading 'T' designator or "HH:MM").
-    if (b[0] == 'T' or b[0] == 't') return true;
+    if (b[0] == 'T' or b[0] == 't')
+        return b.len >= 3 and std.ascii.isDigit(b[1]) and std.ascii.isDigit(b[2]);
     if (b.len >= 2 and std.ascii.isDigit(b[0]) and std.ascii.isDigit(b[1])) {
         if (b.len == 2 or b[2] == ':') return true; // "HH" / "HH:MM…"
         if (b.len == 5 and b[2] == '-') return true; // "MM-DD" month-day
