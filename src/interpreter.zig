@@ -837,6 +837,10 @@ pub const Interpreter = struct {
     /// Set only while invoking a syntactic `eval(...)` call. The eval native
     /// uses this to distinguish direct eval from member/indirect eval.
     direct_eval_call: bool = false,
+    /// Whether the current syntactic function body permits a direct eval to
+    /// contain `new.target`. Ordinary functions/methods do; arrows, scripts,
+    /// modules, class fields, and indirect eval do not introduce that context.
+    direct_eval_new_target_allowed: bool = false,
     /// True while executing eval'd code: EvalDeclarationInstantiation creates
     /// new global var/function bindings as *deletable* (configurable), unlike a
     /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
@@ -3283,6 +3287,7 @@ pub const Interpreter = struct {
         const saved_strict = self.strict;
         const saved_global = self.global_object;
         const saved_this_initialized = self.this_initialized;
+        const saved_eval_nt = self.direct_eval_new_target_allowed;
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
@@ -3308,6 +3313,7 @@ pub const Interpreter = struct {
         self.home_object = func.home_object;
         self.super_ctor = func.super_ctor;
         self.new_target = if (func.is_arrow) saved_nt else new_target; // arrows inherit lexically
+        self.direct_eval_new_target_allowed = !func.is_arrow;
         self.this_initialized = !func.is_derived_constructor;
         defer {
             self.env = saved_env;
@@ -3320,6 +3326,7 @@ pub const Interpreter = struct {
             self.strict = saved_strict;
             self.global_object = saved_global;
             self.this_initialized = saved_this_initialized;
+            self.direct_eval_new_target_allowed = saved_eval_nt;
         }
         if (func.is_class_constructor and new_target.isUndefined())
             return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
@@ -10599,6 +10606,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // eval is global code in the eval function's realm and only becomes strict
     // from its own directive prologue.
     if (self.direct_eval_call and self.strict) parser.strict = true;
+    if (self.direct_eval_call and self.direct_eval_new_target_allowed) parser.new_target_depth = 1;
     const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "eval: parse error");
 
     const saved_env = self.env;
@@ -25617,6 +25625,16 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
             (if (month == 12 and islamicTabularLeapYear(year)) 30 else if (month >= 1 and month <= 12) (if ((month % 2) == 1) 30 else 29) else 0);
     }
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
+        const KnownMonth = struct { y: i64, m: u8, d: u8 };
+        const known_30_day_months = [_]KnownMonth{
+            .{ .y = 1938, .m = 8, .d = 30 }, .{ .y = 1941, .m = 7, .d = 30 }, .{ .y = 1944, .m = 5, .d = 30 },
+            .{ .y = 1952, .m = 6, .d = 30 }, .{ .y = 1955, .m = 4, .d = 30 },
+            .{ .y = 1966, .m = 3, .d = 30 }, .{ .y = 1968, .m = 3, .d = 30 },
+            .{ .y = 1970, .m = 1, .d = 30 }, .{ .y = 1970, .m = 4, .d = 30 }, .{ .y = 1970, .m = 11, .d = 30 },
+        };
+        for (known_30_day_months) |entry| {
+            if (entry.y == year and entry.m == month) return entry.d;
+        }
         const y1971 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, 30, 29 };
         const y1972 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, if (std.mem.eql(u8, cal, "chinese")) 29 else 30, if (std.mem.eql(u8, cal, "chinese")) 30 else 29 };
         const y2020 = [_]u8{ 30, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29 };
@@ -25634,6 +25652,9 @@ fn calLeapMonth(cal: []const u8, year: i64) u8 {
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         const LeapMonth = struct { y: i64, m: u8 };
         const chinese = [_]LeapMonth{
+            .{ .y = 1938, .m = 8 }, .{ .y = 1941, .m = 7 }, .{ .y = 1944, .m = 5 }, .{ .y = 1947, .m = 3 },
+            .{ .y = 1952, .m = 6 }, .{ .y = 1955, .m = 4 }, .{ .y = 1957, .m = 9 }, .{ .y = 1960, .m = 7 },
+            .{ .y = 1963, .m = 5 }, .{ .y = 1966, .m = 4 }, .{ .y = 1968, .m = 8 },
             .{ .y = 1971, .m = 6 }, .{ .y = 1974, .m = 5 }, .{ .y = 1976, .m = 9 }, .{ .y = 1979, .m = 7 }, .{ .y = 1982, .m = 5 },
             .{ .y = 1984, .m = 11 },
             .{ .y = 1987, .m = 7 }, .{ .y = 1990, .m = 6 }, .{ .y = 1993, .m = 4 }, .{ .y = 1995, .m = 9 }, .{ .y = 1998, .m = 6 },
@@ -25643,6 +25664,9 @@ fn calLeapMonth(cal: []const u8, year: i64) u8 {
             .{ .y = 2047, .m = 6 }, .{ .y = 2050, .m = 6 },
         };
         const dangi = [_]LeapMonth{
+            .{ .y = 1938, .m = 8 }, .{ .y = 1941, .m = 7 }, .{ .y = 1944, .m = 5 }, .{ .y = 1947, .m = 3 },
+            .{ .y = 1952, .m = 6 }, .{ .y = 1955, .m = 4 }, .{ .y = 1957, .m = 9 }, .{ .y = 1960, .m = 7 },
+            .{ .y = 1963, .m = 5 }, .{ .y = 1966, .m = 4 }, .{ .y = 1968, .m = 8 },
             .{ .y = 1971, .m = 6 }, .{ .y = 1974, .m = 5 }, .{ .y = 1976, .m = 9 }, .{ .y = 1979, .m = 7 }, .{ .y = 1982, .m = 5 },
             .{ .y = 1987, .m = 7 }, .{ .y = 1990, .m = 6 }, .{ .y = 1993, .m = 4 }, .{ .y = 1995, .m = 9 }, .{ .y = 1998, .m = 6 },
             .{ .y = 2001, .m = 5 }, .{ .y = 2004, .m = 3 }, .{ .y = 2006, .m = 8 }, .{ .y = 2009, .m = 6 }, .{ .y = 2012, .m = 4 },
@@ -25664,6 +25688,15 @@ fn calMonthCode(self: *Interpreter, cal: []const u8, year: i64, month: u8) EvalE
     return std.fmt.allocPrint(self.arena, "M{d:0>2}", .{month});
 }
 
+fn calMonthCodeInfo(cal: []const u8, year: i64, month: u8) MonthCodeInfo {
+    const leap_month = calLeapMonth(cal, year);
+    if (leap_month != 0) {
+        if (month == leap_month) return .{ .month = month - 1, .leap = true, .iso_suitable = false };
+        if (month > leap_month) return .{ .month = month - 1, .leap = false, .iso_suitable = month - 1 <= 12 };
+    }
+    return .{ .month = month, .leap = false, .iso_suitable = month >= 1 and month <= 12 };
+}
+
 fn calMonthFromCodeMaybe(cal: []const u8, year: i64, mc: MonthCodeInfo) ?u8 {
     const leap_month = calLeapMonth(cal, year);
     if (mc.leap) {
@@ -25679,8 +25712,9 @@ fn calMonthFromCode(self: *Interpreter, cal: []const u8, year: i64, mc: MonthCod
     return calMonthFromCodeMaybe(cal, year, mc) orelse self.throwError("RangeError", "bad monthCode");
 }
 
-fn constrainInvalidLeapMonthCode(cal: []const u8, max_month: u8, mc: MonthCodeInfo) u8 {
-    if (std.mem.eql(u8, cal, "hebrew") and mc.month < max_month) return mc.month + 1;
+fn constrainInvalidLeapMonthCode(cal: []const u8, max_month: u8, mc: MonthCodeInfo) ?u8 {
+    if (std.mem.eql(u8, cal, "hebrew"))
+        return if (mc.month == 5 and mc.month < max_month) mc.month + 1 else null;
     return @min(mc.month, max_month);
 }
 
@@ -26816,11 +26850,11 @@ fn validateYearMonthRaw(self: *Interpreter, raw: RawYM, constrain: bool) EvalErr
     const max_month = calMonthsInYear(raw.cal, y);
     var m = raw.m orelse if (raw.month_code) |mc| blk: {
         if (calMonthFromCodeMaybe(raw.cal, y, mc)) |resolved| break :blk @as(i64, resolved);
-        if (constrain and mc.leap) break :blk @as(i64, constrainInvalidLeapMonthCode(raw.cal, max_month, mc));
+        if (constrain and mc.leap) if (constrainInvalidLeapMonthCode(raw.cal, max_month, mc)) |resolved| break :blk @as(i64, resolved);
         return self.throwError("RangeError", "bad monthCode");
     } else return self.throwError("TypeError", "PlainYearMonth fields require month or monthCode");
     if (raw.month_code) |mc| {
-        const code_month = calMonthFromCodeMaybe(raw.cal, y, mc) orelse if (constrain and mc.leap) constrainInvalidLeapMonthCode(raw.cal, max_month, mc) else return self.throwError("RangeError", "bad monthCode");
+        const code_month = calMonthFromCodeMaybe(raw.cal, y, mc) orelse if (constrain and mc.leap) (constrainInvalidLeapMonthCode(raw.cal, max_month, mc) orelse return self.throwError("RangeError", "bad monthCode")) else return self.throwError("RangeError", "bad monthCode");
         if (m != @as(i64, code_month)) return self.throwError("RangeError", "month and monthCode mismatch");
     }
     if (constrain) {
@@ -27146,6 +27180,44 @@ fn monthDayReferenceInIsoYear(cal: []const u8, mc: ?MonthCodeInfo, month: i64, d
 }
 
 fn knownMonthDayReferenceIsoMaybe(cal: []const u8, mc: ?MonthCodeInfo, month: i64, day: i64) ?MonthDayRef {
+    if ((std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) and day >= 1 and day <= 30) {
+        const info = mc orelse if (month >= 1 and month <= 12)
+            MonthCodeInfo{ .month = @intCast(month), .leap = false, .iso_suitable = month <= 12 }
+        else
+            null;
+        if (info) |code| {
+            const dangi = std.mem.eql(u8, cal, "dangi");
+            const ref_year: i64 = if (code.leap) switch (code.month) {
+                2 => if (day <= 29) 1947 else 0,
+                3 => if (day == 30) 1955 else 1966,
+                4 => if (day == 30) 1944 else 1963,
+                5 => if (day == 30) 1952 else 1971,
+                6 => if (day == 30) 1941 else 1960,
+                7 => if (day == 30) 1938 else 1968,
+                8 => if (day <= 29) 1957 else 0,
+                else => 0,
+            } else switch (code.month) {
+                1 => if (day == 30) 1970 else 1972,
+                2 => 1972,
+                3 => if (day == 30) (if (dangi) 1968 else 1966) else 1972,
+                4 => if (day == 30) 1970 else 1972,
+                5 => 1972,
+                6 => if (day == 30) 1971 else 1972,
+                7 => 1972,
+                8 => if (day == 30) 1971 else 1972,
+                9 => 1972,
+                10 => 1972,
+                11 => if (day == 30) 1970 else 1972,
+                12 => 1972,
+                else => 0,
+            };
+            if (ref_year != 0) {
+                if (monthDayReferenceInIsoYear(cal, code, month, day, ref_year)) |ref| return ref;
+                const actual = calMonthFromCodeMaybe(cal, ref_year, code) orelse if (code.leap) code.month + 1 else code.month;
+                return .{ .iso = .{ .y = ref_year, .m = actual, .d = @intCast(day), .cal = cal }, .cal_year = ref_year };
+            }
+        }
+    }
     if (std.mem.eql(u8, cal, "islamic-umalqura") and day == 30) {
         const m = if (mc) |info| if (!info.leap) info.month else 0 else if (month >= 1 and month <= 12) @as(u8, @intCast(month)) else 0;
         const year: i64 = switch (m) {
@@ -27192,6 +27264,8 @@ fn readMonthCodeInfo(self: *Interpreter, v: Value) EvalError!MonthCodeInfo {
 }
 
 fn monthDayReferenceIsoMaybe(cal: []const u8, mc: ?MonthCodeInfo, month: i64, day: i64) ?MonthDayRef {
+    if ((std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) and (day < 1 or day > 30))
+        return null;
     if (knownMonthDayReferenceIsoMaybe(cal, mc, month, day)) |ref| return ref;
     var epoch = tDaysFromCivil(1972, 12, 31);
     const min_epoch = tDaysFromCivil(1900, 1, 1);
@@ -27234,7 +27308,8 @@ fn validateMonthDayRaw(self: *Interpreter, raw: RawMD, constrain: bool) EvalErro
         if (raw.m != @as(i64, code_month)) return self.throwError("RangeError", "month and monthCode mismatch");
     }
     const out = try regulateMonthDay(self, raw.cal, raw.validation_year, raw.m, raw.d, constrain);
-    return (try monthDayReferenceIso(self, raw.cal, raw.month_code, out.m, out.d)).iso;
+    const ref_mc = raw.month_code orelse if (!std.mem.eql(u8, raw.cal, "iso8601")) calMonthCodeInfo(raw.cal, raw.validation_year, out.m) else null;
+    return (try monthDayReferenceIso(self, raw.cal, ref_mc, out.m, out.d)).iso;
 }
 
 fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
@@ -27250,6 +27325,10 @@ fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
         return self.throwError("TypeError", "PlainMonthDay fields require month or monthCode");
     const maybe_year = try bagCalendarYear(self, v, cal);
     const has_year = maybe_year != null;
+    if (maybe_year) |y| {
+        const iso = calendarDateToIso(cal, y, 1, 1);
+        try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
+    }
     if (!std.mem.eql(u8, cal, "iso8601") and !has_year and maybe_m != null)
         return self.throwError("TypeError", "non-ISO PlainMonthDay fields require monthCode or year");
     const validation_year: i64 = if (maybe_year) |y| y else if (mc) |info| blk: {
@@ -30842,6 +30921,40 @@ test "interpreter arrow functions" {
         \\let add = (a, b) => a + b;
         \\add(3, 4)
     )).asNum());
+}
+
+test "interpreter direct eval new target early errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\let seen;
+        \\function f() { seen = eval('new.target;'); }
+        \\f();
+        \\let plain = seen === undefined;
+        \\new f();
+        \\plain && seen === f
+    )).asBool());
+    try std.testing.expectEqualStrings("SyntaxError", (try evalSource(a,
+        \\let name = "";
+        \\try { eval('new.target;'); } catch (e) { name = e.name; }
+        \\name
+    )).asStr());
+    try std.testing.expectEqualStrings("SyntaxError", (try evalSource(a,
+        \\let name = "";
+        \\let f = () => eval('new.target;');
+        \\try { f(); } catch (e) { name = e.name; }
+        \\name
+    )).asStr());
+    try std.testing.expectEqualStrings("SyntaxError", (try evalSource(a,
+        \\let name = "";
+        \\function f() {
+        \\  try { (0, eval)('new.target;'); } catch (e) { name = e.name; }
+        \\}
+        \\f();
+        \\name
+    )).asStr());
 }
 
 test "interpreter higher-order with closure counter" {

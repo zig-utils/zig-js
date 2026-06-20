@@ -41,6 +41,9 @@ pub const Parser = struct {
     fn_depth: u32 = 0,
     iter_depth: u32 = 0,
     switch_depth: u32 = 0,
+    /// Depth of syntax contexts where `new.target` is allowed. Ordinary
+    /// functions/methods introduce one; arrows only inherit an outer one.
+    new_target_depth: u32 = 0,
     /// True when parsing a Module (via `parseModule`): top-level `import` and
     /// `export` declarations are recognized, and the body is implicitly strict.
     module: bool = false,
@@ -1479,6 +1482,7 @@ pub const Parser = struct {
         // A function body opens a fresh control-flow context: `return` is now
         // legal and `break`/`continue` can't target an outer loop/switch.
         self.fn_depth += 1;
+        self.new_target_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
         self.active_labels.items.len = 0;
@@ -1494,6 +1498,7 @@ pub const Parser = struct {
             self.in_async = saved_async;
             self.strict = saved_strict;
             self.fn_depth -= 1;
+            self.new_target_depth -= 1;
             self.iter_depth = saved_iter;
             self.switch_depth = saved_switch;
             self.active_labels.items.len = saved_active_labels;
@@ -1938,7 +1943,7 @@ pub const Parser = struct {
         if (self.match(.dot)) {
             const m = self.advance();
             if (m.kind != .identifier or !std.mem.eql(u8, m.text, "target")) return ParseError.UnexpectedToken;
-            if (self.module and self.fn_depth == 0) return ParseError.UnexpectedToken;
+            if (self.new_target_depth == 0) return ParseError.UnexpectedToken;
             return self.alloc(.new_target_expr);
         }
         const parenthesized_callee = self.check(.lparen);
@@ -2322,7 +2327,9 @@ pub const Parser = struct {
             }
             // `static { ... }` initialization block.
             if (is_static and self.check(.lbrace)) {
+                self.new_target_depth += 1;
                 const block = try self.parseBlock();
+                self.new_target_depth -= 1;
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
                 continue;
             }
@@ -3078,16 +3085,30 @@ test "parser validates module label early errors" {
     try std.testing.expectError(ParseError.UnexpectedToken, labeled_block_continue.parseModule());
 }
 
-test "parser rejects module top-level new target" {
+test "parser rejects top-level new target" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     var top_level = try Parser.init(arena.allocator(), "new.target;");
     try std.testing.expectError(ParseError.UnexpectedToken, top_level.parseModule());
 
+    var script_top_level = try Parser.init(arena.allocator(), "new.target;");
+    try std.testing.expectError(ParseError.UnexpectedToken, script_top_level.parseProgram());
+
     var nested = try Parser.init(arena.allocator(), "function f() { new.target; }");
     const prog = try nested.parseModule();
     try std.testing.expectEqual(@as(usize, 1), prog.program.len);
+
+    var nested_arrow = try Parser.init(arena.allocator(), "function f() { return () => new.target; }");
+    const arrow_prog = try nested_arrow.parseProgram();
+    try std.testing.expectEqual(@as(usize, 1), arrow_prog.program.len);
+
+    var top_level_arrow = try Parser.init(arena.allocator(), "() => new.target;");
+    try std.testing.expectError(ParseError.UnexpectedToken, top_level_arrow.parseProgram());
+
+    var static_block = try Parser.init(arena.allocator(), "class C { static { new.target; } }");
+    const static_prog = try static_block.parseProgram();
+    try std.testing.expectEqual(@as(usize, 1), static_prog.program.len);
 }
 
 test "parser validates module string export names" {

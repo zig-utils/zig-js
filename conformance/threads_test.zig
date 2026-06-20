@@ -240,7 +240,8 @@ fn usesBenchHarness(name: []const u8) bool {
 }
 
 fn parallelJsBudgetSkip(name: []const u8) bool {
-    return std.mem.eql(u8, name, "cve/mc-df-segmented-length.js");
+    _ = name;
+    return false;
 }
 
 pub fn main(init: std.process.Init) !void {

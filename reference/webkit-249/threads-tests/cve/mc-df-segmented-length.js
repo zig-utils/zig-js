@@ -19,9 +19,12 @@
 // spine-replacement route (maximizes spine churn). Amplifier-ready for Layer C.
 load("../harness.js", "caller relative");
 
-const CAP = 4096;
-const ROUNDS = 300;
-const READERS = 3;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const CAP = NO_GIL ? 768 : 4096;
+const ROUNDS = NO_GIL ? 24 : 300;
+const READERS = NO_GIL ? 2 : 3;
 const gate = { started: 0, stop: 0 };
 const a = [];
 

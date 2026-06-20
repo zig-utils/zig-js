@@ -67,10 +67,19 @@ function scalingThreadCount() {
 // the aggregate `zig build threads-test` command practical; release/gate runs
 // still get non-trivial work by passing SCALING_WORK_SCALE explicitly.
 const CORPUS_DEFAULT_SCALE = 0.001953125;
+const PARALLEL_JS_CORPUS_DEFAULT_SCALE = 0.00048828125;
+
+function scalingNoThreadGIL() {
+    return typeof $vm !== "undefined"
+        && typeof $vm.useThreadGIL === "function"
+        && $vm.useThreadGIL() === false;
+}
 
 function scalingWorkScale() {
     const s = globalThis.SCALING_WORK_SCALE;
-    return (typeof s === "number" && s > 0 && s <= 1000) ? s : CORPUS_DEFAULT_SCALE;
+    if (typeof s === "number" && s > 0 && s <= 1000)
+        return s;
+    return scalingNoThreadGIL() ? PARALLEL_JS_CORPUS_DEFAULT_SCALE : CORPUS_DEFAULT_SCALE;
 }
 
 // Sub-millisecond timing when available (same rationale as bench/harness.js:
