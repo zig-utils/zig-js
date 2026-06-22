@@ -28326,6 +28326,52 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
 
 /// Difference between two ISO dates (earlier→later) as a [10]f64 duration using
 /// units up to `largest` (year/month/week/day).
+/// The largest whole-month count (signed, in the start->end direction) whose
+/// clamped intermediate date does not overshoot `end_day`. `calendarEpochDay ∘
+/// addCalendarMonthsClamp` is monotonic in the month count — every added month
+/// moves the date strictly forward even after end-of-month day clamping — so an
+/// exponential gallop followed by a binary search returns exactly what a
+/// one-month-at-a-time scan would, but in O(log n) calendar evaluations. That
+/// keeps `since`/`until` bounded: a one-at-a-time scan spins for millions of
+/// iterations across Temporal's full ±271821-year range, and never terminates
+/// at all where an out-of-table (e.g. far-future umalqura) date makes the epoch
+/// day plateau. The magnitude can never exceed the day difference (each month
+/// spans at least one day), which bounds the search.
+fn calendarMonthsBetween(cal: []const u8, y1: i64, m1: u8, d1: u8, start_day: i64, end_day: i64) i64 {
+    if (end_day == start_day) return 0;
+    const forward = end_day > start_day;
+    const cap: i64 = (if (forward) end_day - start_day else start_day - end_day) + 1;
+
+    const overshoots = struct {
+        fn f(c: []const u8, yy: i64, mm: u8, dd: u8, ed: i64, fwd: bool, k: i64) bool {
+            const inter = addCalendarMonthsClamp(c, yy, mm, dd, if (fwd) k else -k);
+            const e = calendarEpochDay(c, inter.y, inter.m, inter.d);
+            return if (fwd) e > ed else e < ed;
+        }
+    }.f;
+
+    // Gallop: k = 0 never overshoots (it is the start date itself); double until
+    // an overshoot is bracketed or the cap is reached.
+    var lo: i64 = 0;
+    var hi: i64 = 1;
+    while (hi < cap and !overshoots(cal, y1, m1, d1, end_day, forward, hi)) {
+        lo = hi;
+        hi *= 2;
+    }
+    if (hi > cap) hi = cap;
+
+    // Binary search the largest non-overshooting k in (lo, hi].
+    while (lo + 1 < hi) {
+        const mid = lo + @divTrunc(hi - lo, 2);
+        if (overshoots(cal, y1, m1, d1, end_day, forward, mid)) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    return if (forward) lo else -lo;
+}
+
 fn calendarDateDiff(cal: []const u8, y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: TUnit) [10]f64 {
     var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     if (largest == .day or largest == .week) {
@@ -28338,25 +28384,13 @@ fn calendarDateDiff(cal: []const u8, y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d
         return out;
     }
     // year/month: the largest whole-month span in the direction of travel that
-    // doesn't overshoot, then the signed remaining days.
-    var total_months: i64 = 0;
+    // doesn't overshoot, then the signed remaining days. Found by galloping +
+    // binary search (calendarMonthsBetween) rather than one-month-at-a-time, so
+    // extreme spans (Temporal's ±271821-year limits) and any out-of-table
+    // calendar plateau terminate instead of stepping for millions of iterations.
     const start_day = calendarEpochDay(cal, y1, m1, d1);
     const end_day = calendarEpochDay(cal, y2, m2, d2);
-    if (end_day >= start_day) {
-        while (true) {
-            const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months + 1);
-            if (calendarEpochDay(cal, inter.y, inter.m, inter.d) <= end_day) {
-                total_months += 1;
-            } else break;
-        }
-    } else {
-        while (true) {
-            const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months - 1);
-            if (calendarEpochDay(cal, inter.y, inter.m, inter.d) >= end_day) {
-                total_months -= 1;
-            } else break;
-        }
-    }
+    const total_months: i64 = calendarMonthsBetween(cal, y1, m1, d1, start_day, end_day);
     const inter = addCalendarMonthsClamp(cal, y1, m1, d1, total_months);
     const day_rem = calendarEpochDay(cal, y2, m2, d2) - calendarEpochDay(cal, inter.y, inter.m, inter.d);
     var years: i64 = 0;
