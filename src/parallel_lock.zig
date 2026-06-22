@@ -20,6 +20,7 @@
 //! rather than self-deadlocking), and bounded `lockIfAvailable`-style timeouts.
 
 const std = @import("std");
+const io_compat = @import("io_compat.zig");
 const builtin = @import("builtin");
 const agent = @import("agent.zig");
 
@@ -60,7 +61,7 @@ pub const ParallelLock = struct {
                 const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
                 if (now >= deadline) return .timed_out;
                 const remaining: u64 = @intCast(deadline - now);
-                self.cond.waitTimeout(io, &self.mutex, .{ .duration = .{
+                io_compat.conditionWaitTimeout(&self.cond, io, &self.mutex, .{ .duration = .{
                     .raw = .fromNanoseconds(remaining),
                     .clock = .awake,
                 } }) catch {};

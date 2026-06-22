@@ -12,6 +12,7 @@
 //!   waiter table; neither is ever held while running JS.
 
 const std = @import("std");
+const io_compat = @import("io_compat.zig");
 const shared_buffer = @import("shared_buffer.zig");
 const SharedBufferStorage = shared_buffer.SharedBufferStorage;
 
@@ -166,7 +167,7 @@ pub fn broadcast(storage: *SharedBufferStorage) void {
             if (!a.done and a.acked_gen < group.bcast_gen) pending += 1;
         }
         if (pending == 0) break;
-        group.cond.waitTimeout(io, &group.mutex, .{ .duration = .{
+        io_compat.conditionWaitTimeout(&group.cond, io, &group.mutex, .{ .duration = .{
             .raw = .fromSeconds(10),
             .clock = .awake,
         } }) catch {
@@ -345,7 +346,7 @@ pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expe
             outcome = .timed_out;
             break;
         }
-        ticket.cond.waitTimeout(io, &waiters_mutex, deadline) catch |err| switch (err) {
+        io_compat.conditionWaitTimeout(&ticket.cond, io, &waiters_mutex, deadline) catch |err| switch (err) {
             error.Timeout => {
                 if (!ticket.woken) outcome = .timed_out;
                 break;
@@ -465,7 +466,7 @@ pub fn harvestAsync(owner: *const anyopaque, out: []Settled) usize {
         if (n > 0 or outstanding == 0) return n;
         if (!group.stopping and nearest == null and live_agents.load(.monotonic) == 0) return 0;
         const wait_ns: u64 = if (nearest) |d| @intCast(@max(1, d - now)) else 100 * std.time.ns_per_ms;
-        waiters_cond.waitTimeout(io, &waiters_mutex, .{ .duration = .{
+        io_compat.conditionWaitTimeout(&waiters_cond, io, &waiters_mutex, .{ .duration = .{
             .raw = .fromNanoseconds(wait_ns),
             .clock = .awake,
         } }) catch {};

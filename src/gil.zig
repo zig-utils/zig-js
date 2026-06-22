@@ -9,6 +9,7 @@
 //! Atomics.wait, Lock contention), which release the lock while parked.
 
 const std = @import("std");
+const io_compat = @import("io_compat.zig");
 const agent = @import("agent.zig");
 const stack_scan = @import("stack_scan.zig");
 
@@ -215,7 +216,7 @@ pub const Gil = struct {
         defer stack_scan.endPark();
         g.holder.store(0, .monotonic);
         defer g.holder.store(currentId(), .monotonic);
-        cond.waitTimeout(io, &g.mutex, timeout) catch |err| switch (err) {
+        io_compat.conditionWaitTimeout(cond, io, &g.mutex, timeout) catch |err| switch (err) {
             error.Timeout => return error.Timeout,
             error.Canceled => {},
         };

@@ -11,6 +11,7 @@
 //! Installed only on `enable_threads` Contexts.
 
 const std = @import("std");
+const io_compat = @import("io_compat.zig");
 const gc_mod = @import("gc.zig");
 const stack_scan = @import("stack_scan.zig");
 const value = @import("value.zig");
@@ -606,13 +607,13 @@ fn waitOnLockCond(self: *Interpreter, rec: *LockRecord, timeout: std.Io.Timeout)
         const g = rec.gil;
         stack_scan.beginPark();
         g.release();
-        rec.cond.waitTimeout(io, &rec.mutex, timeout) catch {};
+        io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
         rec.mutex.unlock(io);
         g.acquire();
         stack_scan.endPark();
         rec.mutex.lockUncancelable(io);
     } else {
-        rec.cond.waitTimeout(io, &rec.mutex, timeout) catch {};
+        io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
     }
 }
 
@@ -839,13 +840,13 @@ fn waitOnCondRecord(self: *Interpreter, rec: *CondRecord, timeout: std.Io.Timeou
         const g = rec.gil;
         stack_scan.beginPark();
         g.release();
-        rec.cond.waitTimeout(io, &rec.mutex, timeout) catch {};
+        io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
         rec.mutex.unlock(io);
         g.acquire();
         stack_scan.endPark();
         rec.mutex.lockUncancelable(io);
     } else {
-        rec.cond.waitTimeout(io, &rec.mutex, timeout) catch {};
+        io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
     }
 }
 
@@ -1527,7 +1528,7 @@ fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicke
         var timed_out = false;
         stack_scan.beginPark();
         g.release();
-        ticket.cond.waitTimeout(io, &g.prop_mutex, timeout) catch |err| {
+        io_compat.conditionWaitTimeout(&ticket.cond, io, &g.prop_mutex, timeout) catch |err| {
             switch (err) {
                 error.Timeout => timed_out = true,
                 error.Canceled => {},
@@ -1542,7 +1543,7 @@ fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicke
         g.lockPropWaiters();
         if (timed_out) return error.Timeout;
     } else {
-        ticket.cond.waitTimeout(io, &g.prop_mutex, timeout) catch |err| switch (err) {
+        io_compat.conditionWaitTimeout(&ticket.cond, io, &g.prop_mutex, timeout) catch |err| switch (err) {
             error.Timeout => return error.Timeout,
             error.Canceled => {},
         };
@@ -1826,7 +1827,7 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     stack_scan.beginPark();
     const released_gil = self.use_thread_gil;
     if (released_gil) rec.gil.release();
-    rec.done_cond.waitTimeout(io, &rec.join_mutex, .{ .duration = .{
+    io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
         .raw = .fromMilliseconds(5),
         .clock = .awake,
     } }) catch {};

@@ -1,4 +1,5 @@
 const std = @import("std");
+const io_compat = @import("io_compat.zig");
 const gc_mod = @import("gc.zig");
 const builtin = @import("builtin");
 const interp = @import("interpreter.zig");
@@ -822,7 +823,7 @@ pub const Context = struct {
                         rec.join_mutex.lockUncancelable(io);
                         if (rec.done) break;
                         stack_scan.beginPark();
-                        rec.done_cond.waitTimeout(io, &rec.join_mutex, .{ .duration = .{
+                        io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
                             .raw = .fromMilliseconds(5),
                             .clock = .awake,
                         } }) catch {};

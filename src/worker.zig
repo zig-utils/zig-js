@@ -12,6 +12,7 @@
 //! serialized bytes (process-allocator-owned) and retained SAB storage.
 
 const std = @import("std");
+const io_compat = @import("io_compat.zig");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
@@ -62,7 +63,7 @@ const Channel = struct {
                 .raw = .fromMilliseconds(@intCast(ms)),
                 .clock = .awake,
             } } else .none;
-            ch.cond.waitTimeout(io, &ch.mutex, tmo) catch |err| switch (err) {
+            io_compat.conditionWaitTimeout(&ch.cond, io, &ch.mutex, tmo) catch |err| switch (err) {
                 error.Timeout => if (ch.queue.items.len == 0) return null else break,
                 error.Canceled => continue,
             };
