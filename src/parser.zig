@@ -1444,6 +1444,21 @@ pub const Parser = struct {
         }
     }
 
+    /// UniqueFormalParameters: duplicate simple parameter names are an early
+    /// error for arrow functions and method definitions in EVERY mode (unlike
+    /// ordinary functions, which permit them in sloppy mode with a simple param
+    /// list). Mirrors the duplicate-name scan in validateStrictParams; pattern
+    /// params are not simple names and are skipped (their own binding-dup rule is
+    /// separate), so no valid parameter list is rejected.
+    fn checkDuplicateParams(params: []const ast.Param) ParseError!void {
+        for (params, 0..) |p, i| {
+            if (p.pattern != null) continue;
+            for (params[0..i]) |q| {
+                if (q.pattern == null and std.mem.eql(u8, q.name, p.name)) return ParseError.UnexpectedToken;
+            }
+        }
+    }
+
     fn parseFunctionDecl(self: *Parser, is_async: bool) ParseError!*Node {
         const start = self.pos;
         if (is_async) _ = self.advance(); // async
@@ -1727,6 +1742,8 @@ pub const Parser = struct {
 
     fn parseArrowBody(self: *Parser, params: []const ast.Param, is_async: bool, start: usize) ParseError!*Node {
         try self.expect(.arrow);
+        try checkDuplicateParams(params); // arrows forbid duplicate params in all modes
+
         const fnode = try self.arena.create(ast.FunctionNode);
         // An arrow's body opens its own async context (so `await` inside an
         // `async () => …` is recognized), restored on exit.
@@ -2622,6 +2639,7 @@ pub const Parser = struct {
     /// `is_gen` marks a generator method (`*m() {}`).
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
         const params = try self.parseParamList();
+        try checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const body = try self.parseFnBody(is_gen, is_async);
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
