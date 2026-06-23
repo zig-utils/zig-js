@@ -911,9 +911,12 @@ pub const Interpreter = struct {
         try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
     }
 
-    /// Like `globalDefine` but a new global property is *configurable* (deletable)
-    /// — CreateGlobalVarBinding(F, true), used for the Annex B B.3.3 legacy
-    /// function bindings (and not for ordinary top-level declarations).
+    /// Create the global var binding for an Annex B B.3.3 legacy block-level
+    /// function. Per CreateGlobalVarBinding(F, D), the new property's
+    /// deletability D follows the surrounding instantiation: a Script's
+    /// GlobalDeclarationInstantiation uses D = false (non-configurable, like an
+    /// ordinary global `var`), whereas a direct eval's EvalDeclarationInstantiation
+    /// uses D = true. An already-existing property keeps its attributes.
     fn globalDefineDeletable(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
         const vs = self.env.varScope();
         try vs.put(name, v);
@@ -921,7 +924,7 @@ pub const Interpreter = struct {
             if (self.global_object) |g| {
                 const existed = g.getOwn(name) != null;
                 try self.setProp(g, name, v);
-                if (!existed) try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = true });
+                if (!existed) try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
             }
         }
     }
@@ -22862,10 +22865,16 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         .{ "setMonth", 2 },           .{ "setUTCMonth", 2 },        .{ "setDate", 1 },            .{ "setUTCDate", 1 },
         .{ "setHours", 4 },           .{ "setUTCHours", 4 },        .{ "setMinutes", 3 },         .{ "setUTCMinutes", 3 },
         .{ "setSeconds", 2 },         .{ "setUTCSeconds", 2 },      .{ "setMilliseconds", 1 },    .{ "setUTCMilliseconds", 1 },
-        .{ "toString", 0 },           .{ "toDateString", 0 },       .{ "toTimeString", 0 },       .{ "toGMTString", 0 },
+        .{ "toString", 0 },           .{ "toDateString", 0 },       .{ "toTimeString", 0 },
         .{ "toLocaleString", 0 },     .{ "toLocaleDateString", 0 }, .{ "toLocaleTimeString", 0 },
         .{ "getYear", 0 }, .{ "setYear", 1 }, // Annex B B.2.4
     });
+    // Date.prototype.toGMTString (Annex B B.2.4.3) is the *same function object*
+    // as toUTCString — not merely an equivalent method — so alias it.
+    if (date_proto.getOwn("toUTCString")) |utc| {
+        try date_proto.setOwn(a, root_shape, "toGMTString", utc);
+        try date_proto.setAttr(a, "toGMTString", .{ .enumerable = false, .configurable = true, .writable = true });
+    }
     // Date.prototype.toJSON is intentionally *generic* (works on any object),
     // not brand-checked: ToObject(this), ToPrimitive(number); a non-finite value
     // returns null, otherwise Invoke(O, "toISOString").
