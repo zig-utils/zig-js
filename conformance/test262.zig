@@ -42,19 +42,18 @@ const worker_timeout: std.Io.Timeout = .{ .duration = .{
     .clock = .awake,
 } };
 const verbose_failures = false;
+// SpiderMonkey-ported staging subtrees that still HANG or CRASH the engine, so
+// they stay skipped until the underlying bug is fixed (re-measured 2026-06-23
+// per category). The rest of the sm/ tree — Array, Iterator, generators,
+// destructuring, async-functions, AsyncGenerators, Atomics — runs cleanly and is
+// now scored; it had been bulk-skipped as a stale time decision, not a real
+// capability gap.
 const unsupported_staging_prefixes = [_][]const u8{
-    "sm/async-functions/",
-    "sm/AsyncGenerators/",
-    "sm/Atomics/",
-    "sm/BigInt/",
-    "sm/Array/",
-    "sm/Date/",
-    "sm/destructuring/",
-    "sm/generators/",
-    "sm/Iterator/",
-    "sm/regress/regress-1507322-deep-weakmap.js",
-    "sm/String/replace-math.js",
-    "sm/TypedArray/",
+    "sm/Date/", // Zig-level infinite loop in Date handling (worker hangs ~#21)
+    "sm/TypedArray/", // Zig-level infinite loop (worker hangs ~#15)
+    "sm/BigInt/", // worker crash / host-fail
+    "sm/regress/regress-1507322-deep-weakmap.js", // quarantined deep-WeakMap test
+    "sm/String/replace-math.js", // quarantined
 };
 const unsupported_subtrees = [_][]const u8{};
 const UnsupportedPathPrefix = struct { sub: []const u8, prefix: []const u8 };
