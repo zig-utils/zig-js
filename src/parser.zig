@@ -831,7 +831,7 @@ pub const Parser = struct {
                 try self.expect(.lparen);
                 const obj = try self.parseExpression();
                 try self.expect(.rparen);
-                const body = try self.parseStatement();
+                const body = try self.parseSubStatement();
                 return self.alloc(.{ .with_stmt = .{ .obj = obj, .body = body } });
             }
             if (std.mem.eql(u8, t.text, "function")) return self.parseFunctionDecl(false);
@@ -891,7 +891,7 @@ pub const Parser = struct {
                     self.pending_labels.items.len = saved_pending;
                 }
                 defer self.pending_labels.items.len = saved_pending;
-                const body = try self.parseStatement();
+                const body = try self.parseSubStatement();
                 return self.alloc(.{ .labeled_stmt = .{ .label = t.text, .body = body } });
             }
         }
@@ -900,6 +900,26 @@ pub const Parser = struct {
         const expr = try self.parseExpression();
         try self.consumeStatementTerminator();
         return self.alloc(.{ .expr_stmt = expr });
+    }
+
+    /// Parse the single-statement body of an `if`/`else`, loop, `with`, or
+    /// labeled statement. The grammar allows a Statement there, NOT a
+    /// Declaration: a lexical declaration (`let`/`const`/`using`), a class
+    /// declaration, or a generator/async function declaration in that position
+    /// is an early SyntaxError in every mode. (Plain `var` is allowed, and a
+    /// sloppy plain `function` body keeps its Annex B allowance — neither is
+    /// rejected here.) The check inspects what `parseStatement` actually
+    /// produced, so `let`/`using` used as an identifier — which `parseStatement`
+    /// parses as an expression — is never mistaken for a declaration.
+    fn parseSubStatement(self: *Parser) ParseError!*Node {
+        const stmt = try self.parseStatement();
+        switch (stmt.*) {
+            .var_decl => |d| if (d.kind != .@"var") return ParseError.UnexpectedToken,
+            .destructure_decl => |d| if (d.kind != .@"var") return ParseError.UnexpectedToken,
+            .func_decl => |f| if (f.is_generator or f.is_async) return ParseError.UnexpectedToken,
+            else => {},
+        }
+        return stmt;
     }
 
     /// Convert an array/object *literal* on the LHS of `=` into a destructuring
@@ -1095,11 +1115,11 @@ pub const Parser = struct {
         try self.expect(.lparen);
         const cond = try self.parseExpression();
         try self.expect(.rparen);
-        const cons = try self.parseStatement();
+        const cons = try self.parseSubStatement();
         var alt: ?*Node = null;
         if (isKeyword(self.cur(), "else")) {
             _ = self.advance();
-            alt = try self.parseStatement();
+            alt = try self.parseSubStatement();
         }
         return self.alloc(.{ .if_stmt = .{ .cond = cond, .consequent = cons, .alternate = alt } });
     }
@@ -1117,7 +1137,7 @@ pub const Parser = struct {
             self.pending_labels.items.len = saved_pending;
             self.continue_labels.items.len = saved_continue;
         }
-        return self.parseStatement();
+        return self.parseSubStatement();
     }
 
     fn parseWhile(self: *Parser) ParseError!*Node {
