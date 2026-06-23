@@ -10407,6 +10407,18 @@ pub const Interpreter = struct {
             },
             else => {},
         }
+        // ToNumeric throws on a Symbol operand. Every arithmetic / bitwise /
+        // relational op needs ToNumeric (relational only when not both strings),
+        // so a Symbol operand is a TypeError — even opposite a BigInt, which the
+        // BigInt fast paths below would otherwise compare without coercing. (`+`
+        // and equality handle their own operand coercion / string concatenation.)
+        switch (op) {
+            .sub, .mul, .div, .mod, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr, .lt, .le, .gt, .ge => {
+                if ((l.isObject() and l.asObj().is_symbol) or (r.isObject() and r.asObj().is_symbol))
+                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+            },
+            else => {},
+        }
         // BigInt operands. Arithmetic/bitwise require both to be BigInt (mixing
         // with a Number is a TypeError); relational ops compare mathematically;
         // `+` with a string still concatenates.
