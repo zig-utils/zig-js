@@ -1459,6 +1459,17 @@ pub const Parser = struct {
         }
     }
 
+    /// A "simple parameter list" contains only single BindingIdentifiers — no
+    /// defaults, rest, or destructuring. A function whose body opens with its
+    /// OWN "use strict" directive must have a simple parameter list, an early
+    /// error in every mode; this reports whether the list is non-simple.
+    fn hasNonSimpleParams(params: []const ast.Param) bool {
+        for (params) |p| {
+            if (p.pattern != null or p.is_rest or p.default != null) return true;
+        }
+        return false;
+    }
+
     fn parseFunctionDecl(self: *Parser, is_async: bool) ParseError!*Node {
         const start = self.pos;
         if (is_async) _ = self.advance(); // async
@@ -1468,7 +1479,9 @@ pub const Parser = struct {
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
         if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
         const params = try self.parseFunctionParamList();
+        const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
+        if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
         if (self.last_fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
@@ -1491,7 +1504,9 @@ pub const Parser = struct {
             }
         }
         const params = try self.parseFunctionParamList();
+        const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
+        if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
         if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
@@ -1763,7 +1778,9 @@ pub const Parser = struct {
             self.switch_depth = saved_switch;
         }
         if (self.check(.lbrace)) {
-            self.strict = saved_strict or self.peekUseStrict();
+            const own_use_strict = self.peekUseStrict();
+            if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
+            self.strict = saved_strict or own_use_strict;
             fnode.* = .{ .params = params, .body = try self.parseBlock(), .is_expr_body = false, .is_arrow = true, .is_async = is_async, .is_strict = self.strict };
         } else {
             fnode.* = .{ .params = params, .body = try self.parseAssignment(), .is_expr_body = true, .is_arrow = true, .is_async = is_async, .is_strict = saved_strict };
@@ -2640,7 +2657,9 @@ pub const Parser = struct {
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
         const params = try self.parseParamList();
         try checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
+        const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
+        if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict, .is_method = true };
