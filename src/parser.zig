@@ -239,11 +239,15 @@ pub const Parser = struct {
     fn isForbiddenBindingName(self: *Parser, text: []const u8) bool {
         return isAlwaysReservedBinding(text) or
             ((self.module or self.in_async) and std.mem.eql(u8, text, "await")) or
+            (self.in_generator and std.mem.eql(u8, text, "yield")) or
             (self.strict and (isStrictReservedBinding(text) or isEvalOrArguments(text)));
     }
 
     fn isForbiddenLabelName(self: *Parser, text: []const u8) bool {
-        return isAlwaysReservedBinding(text) or (self.strict and isStrictReservedBinding(text));
+        return isAlwaysReservedBinding(text) or
+            ((self.module or self.in_async) and std.mem.eql(u8, text, "await")) or
+            (self.in_generator and std.mem.eql(u8, text, "yield")) or
+            (self.strict and isStrictReservedBinding(text));
     }
 
     fn isEscapedReservedWord(self: *Parser, t: Token) bool {
@@ -1607,7 +1611,18 @@ pub const Parser = struct {
         if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "")) {
             // Optional name (anything that isn't the opening paren).
             if (!self.check(.lparen)) {
-                if (self.isForbiddenBindingName(self.cur().text)) return ParseError.UnexpectedToken;
+                // A FunctionExpression's name is a BindingIdentifier scoped to the
+                // function's OWN [Yield, Await] (a generator expr uses [+Yield],
+                // a plain function expr [~Yield]), not the surrounding context —
+                // so `function* g(){ (function yield(){}) }` is valid.
+                const saved_gen = self.in_generator;
+                const saved_async = self.in_async;
+                self.in_generator = is_gen;
+                self.in_async = is_async;
+                const forbidden = self.isForbiddenBindingName(self.cur().text);
+                self.in_generator = saved_gen;
+                self.in_async = saved_async;
+                if (forbidden) return ParseError.UnexpectedToken;
                 name = self.advance().text;
             }
         }
