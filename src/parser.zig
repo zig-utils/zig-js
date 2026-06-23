@@ -416,6 +416,18 @@ pub const Parser = struct {
         for (names.items) |n| if (n.len > 0) try out.put(self.arena, n, {});
     }
 
+    /// A lexical binding target's BoundNames must be unique (`let [x, x]` etc.).
+    fn checkNoDuplicateBindings(self: *Parser, target: *Node) ParseError!void {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&names, target);
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        for (names.items) |n| {
+            if (n.len == 0) continue;
+            if (seen.contains(n)) return ParseError.UnexpectedToken;
+            try seen.put(self.arena, n, {});
+        }
+    }
+
     fn addDecl(self: *Parser, seen: *std.StringHashMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
         if (seen.get(name)) |existing_rigid| {
             // A collision is an early error unless BOTH are plain functions.
@@ -1321,6 +1333,9 @@ pub const Parser = struct {
         // rewind to `save` and parse a classic `for(;;)`.
         if (!classic_using_of_decl and !classic_async_of_arrow) if (self.tryForTarget(decl_kind) catch null) |target| {
             if (isKeyword(self.cur(), "in") or isKeyword(self.cur(), "of")) {
+                // A lexical (`let`/`const`) for-in/of head binds the target's names
+                // and must have no duplicates: `for (let [x, x] of …)` is an error.
+                if (decl_kind) |k| if (k != .@"var") try self.checkNoDuplicateBindings(target);
                 const is_of = isKeyword(self.advance(), "of"); // consume in/of
                 // `for-in` takes an Expression, `for-of` an AssignmentExpression.
                 const iterable = if (is_of) try self.parseAssignment() else try self.parseExpression();
