@@ -25230,7 +25230,7 @@ fn hebrewFromEpochDay(epoch_day: i64) Civil {
     var day_of_year = epoch_day - hebrewToEpochDay(year, 1, 1);
     while (true) {
         const dim = hebrewDaysInMonth(year, month);
-        if (day_of_year < dim) break;
+        if (dim == 0 or day_of_year < dim) break;
         day_of_year -= dim;
         month += 1;
     }
@@ -25254,7 +25254,7 @@ fn indianFromEpochDay(epoch_day: i64) Civil {
     var day_of_year = epoch_day - indianToEpochDay(year, 1, 1);
     while (true) {
         const dim = calDaysInMonth("indian", year, month);
-        if (day_of_year < dim) break;
+        if (dim == 0 or day_of_year < dim) break;
         day_of_year -= dim;
         month += 1;
     }
@@ -25294,7 +25294,7 @@ fn islamicFromEpochDay(cal: []const u8, epoch_day: i64) Civil {
     var day_of_year = epoch_day - islamicToEpochDay(cal, year, 1, 1);
     while (true) {
         const dim = calDaysInMonth(cal, year, month);
-        if (day_of_year < dim) break;
+        if (dim == 0 or day_of_year < dim) break;
         day_of_year -= dim;
         month += 1;
     }
