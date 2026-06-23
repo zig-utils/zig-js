@@ -3103,6 +3103,24 @@ pub fn decodeURIComponentFn(ctx: *anyopaque, this: Value, args: []const Value) H
 
 /// `escape` (Annex B B.2.1): legacy escape — `%XX` for a code unit < 256, else
 /// `%uXXXX`; the unreserved set is `A–Za–z0–9@*_+-./`.
+/// Escape a single UTF-16 code unit per Annex B `escape`: keep unreserved ASCII,
+/// `%XX` for code units < 0x100, `%uXXXX` otherwise.
+fn escapeCodeUnit(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), keep: []const u8, cu: u16) !void {
+    if (cu < 0x80 and std.mem.indexOfScalar(u8, keep, @intCast(cu)) != null) {
+        try buf.append(arena, @intCast(cu));
+    } else if (cu < 0x100) {
+        try buf.append(arena, '%');
+        try buf.append(arena, hexDigit(@intCast(cu >> 4)));
+        try buf.append(arena, hexDigit(@intCast(cu & 0xF)));
+    } else {
+        try buf.appendSlice(arena, "%u");
+        try buf.append(arena, hexDigit(@intCast((cu >> 12) & 0xF)));
+        try buf.append(arena, hexDigit(@intCast((cu >> 8) & 0xF)));
+        try buf.append(arena, hexDigit(@intCast((cu >> 4) & 0xF)));
+        try buf.append(arena, hexDigit(@intCast(cu & 0xF)));
+    }
+}
+
 pub fn escapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
@@ -3111,18 +3129,17 @@ pub fn escapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var it = std.unicode.Utf8Iterator{ .bytes = s, .i = 0 };
     while (it.nextCodepoint()) |cp| {
-        if (cp < 0x80 and std.mem.indexOfScalar(u8, keep, @intCast(cp)) != null) {
-            try buf.append(self.arena, @intCast(cp));
-        } else if (cp < 0x100) {
-            try buf.append(self.arena, '%');
-            try buf.append(self.arena, hexDigit(@intCast(cp >> 4)));
-            try buf.append(self.arena, hexDigit(@intCast(cp & 0xF)));
+        // `escape` is defined over UTF-16 code units, not code points: an astral
+        // scalar (>= U+10000) is two code units (a surrogate pair) and each is
+        // escaped separately, e.g. U+1D306 -> "%uD834%uDF06".
+        if (cp >= 0x10000) {
+            const v = cp - 0x10000;
+            const high: u16 = @intCast(0xD800 + (v >> 10));
+            const low: u16 = @intCast(0xDC00 + (v & 0x3FF));
+            escapeCodeUnit(self.arena, &buf, keep, high) catch return error.OutOfMemory;
+            escapeCodeUnit(self.arena, &buf, keep, low) catch return error.OutOfMemory;
         } else {
-            try buf.appendSlice(self.arena, "%u");
-            try buf.append(self.arena, hexDigit(@intCast((cp >> 12) & 0xF)));
-            try buf.append(self.arena, hexDigit(@intCast((cp >> 8) & 0xF)));
-            try buf.append(self.arena, hexDigit(@intCast((cp >> 4) & 0xF)));
-            try buf.append(self.arena, hexDigit(@intCast(cp & 0xF)));
+            escapeCodeUnit(self.arena, &buf, keep, @intCast(cp)) catch return error.OutOfMemory;
         }
     }
     return Value.str(try buf.toOwnedSlice(self.arena));
