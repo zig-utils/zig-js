@@ -1547,11 +1547,17 @@ pub const Parser = struct {
     /// list). Mirrors the duplicate-name scan in validateStrictParams; pattern
     /// params are not simple names and are skipped (their own binding-dup rule is
     /// separate), so no valid parameter list is rejected.
-    fn checkDuplicateParams(params: []const ast.Param) ParseError!void {
-        for (params, 0..) |p, i| {
-            if (p.pattern != null) continue;
-            for (params[0..i]) |q| {
-                if (q.pattern == null and std.mem.eql(u8, q.name, p.name)) return ParseError.UnexpectedToken;
+    fn checkDuplicateParams(self: *Parser, params: []const ast.Param) ParseError!void {
+        // BoundNames of the parameter list must contain no duplicates — including
+        // names bound inside destructuring patterns, so `([a], {a}) => {}` and
+        // `({a, a}) => {}` are early errors.
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        for (params) |p| {
+            var names: std.ArrayListUnmanaged([]const u8) = .empty;
+            if (p.pattern) |pat| try self.addPatternNames(&names, pat) else if (p.name.len > 0) try names.append(self.arena, p.name);
+            for (names.items) |n| {
+                if (seen.contains(n)) return ParseError.UnexpectedToken;
+                try seen.put(self.arena, n, {});
             }
         }
     }
@@ -1856,7 +1862,7 @@ pub const Parser = struct {
 
     fn parseArrowBody(self: *Parser, params: []const ast.Param, is_async: bool, start: usize) ParseError!*Node {
         try self.expect(.arrow);
-        try checkDuplicateParams(params); // arrows forbid duplicate params in all modes
+        try self.checkDuplicateParams(params); // arrows forbid duplicate params in all modes
 
         const fnode = try self.arena.create(ast.FunctionNode);
         // An arrow's body opens its own async context (so `await` inside an
@@ -2758,7 +2764,7 @@ pub const Parser = struct {
     /// `is_gen` marks a generator method (`*m() {}`).
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
         const params = try self.parseParamList();
-        try checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
+        try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
