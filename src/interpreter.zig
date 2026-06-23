@@ -27851,35 +27851,60 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
     if (!opts.isObject() or opts.asObj().is_symbol or opts.asObj().is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
     // Each unit/mode option is coerced to a string (GetOption) and validated
     // against its allowed set; a wrong-typed value is therefore a RangeError.
+    // round() and since/until are DIFFERENT abstract operations with different
+    // observable Get orders. round() (allow_string) reads roundingIncrement,
+    // roundingMode, smallestUnit and never touches largestUnit;
+    // GetDifferenceSettings (since/until) reads largestUnit, roundingIncrement,
+    // roundingMode, smallestUnit. Each unit/mode option is coerced to a string
+    // (GetOption) and validated against its set; a wrong value is a RangeError.
     var largest_set = false;
     var smallest_set = false;
-    const lu = try self.getProperty(opts, "largestUnit");
-    if (!lu.isUndefined()) {
-        const s = try self.toStringV(lu);
-        if (std.mem.eql(u8, s, "auto")) {} else {
-            r.largest = tUnitFromStr(s) orelse return self.throwError("RangeError", "invalid largestUnit");
-            largest_set = true;
+    if (allow_string) {
+        const ri = try self.getProperty(opts, "roundingIncrement");
+        if (!ri.isUndefined()) {
+            // ToTemporalRoundingIncrement: non-finite is a RangeError, else it is
+            // TRUNCATED to an integer (so 2.5 → 2) and range-checked.
+            const n = try self.toNumberV(ri);
+            if (std.math.isNan(n) or std.math.isInf(n)) return self.throwError("RangeError", "roundingIncrement must be finite");
+            const inc = @trunc(n);
+            if (inc < 1 or inc > 1e9) return self.throwError("RangeError", "invalid roundingIncrement");
+            r.increment = inc;
         }
-    }
-    const su = try self.getProperty(opts, "smallestUnit");
-    if (!su.isUndefined()) {
-        r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
-        smallest_set = true;
-    }
-    const rm = try self.getProperty(opts, "roundingMode");
-    if (!rm.isUndefined()) r.mode = roundModeFromStr(try self.toStringV(rm)) orelse return self.throwError("RangeError", "invalid roundingMode");
-    const ri = try self.getProperty(opts, "roundingIncrement");
-    if (!ri.isUndefined()) {
-        // ToTemporalRoundingIncrement: a non-finite increment is a RangeError,
-        // otherwise it is TRUNCATED to an integer (so 2.5 → 2) and range-checked.
-        const n = try self.toNumberV(ri);
-        if (std.math.isNan(n) or std.math.isInf(n)) return self.throwError("RangeError", "roundingIncrement must be finite");
-        const inc = @trunc(n);
-        if (inc < 1 or inc > 1e9) return self.throwError("RangeError", "invalid roundingIncrement");
-        r.increment = inc;
+        const rm = try self.getProperty(opts, "roundingMode");
+        if (!rm.isUndefined()) r.mode = roundModeFromStr(try self.toStringV(rm)) orelse return self.throwError("RangeError", "invalid roundingMode");
+        const su = try self.getProperty(opts, "smallestUnit");
+        if (!su.isUndefined()) {
+            r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
+            smallest_set = true;
+        }
+    } else {
+        const lu = try self.getProperty(opts, "largestUnit");
+        if (!lu.isUndefined()) {
+            const s = try self.toStringV(lu);
+            if (std.mem.eql(u8, s, "auto")) {} else {
+                r.largest = tUnitFromStr(s) orelse return self.throwError("RangeError", "invalid largestUnit");
+                largest_set = true;
+            }
+        }
+        const ri = try self.getProperty(opts, "roundingIncrement");
+        if (!ri.isUndefined()) {
+            const n = try self.toNumberV(ri);
+            if (std.math.isNan(n) or std.math.isInf(n)) return self.throwError("RangeError", "roundingIncrement must be finite");
+            const inc = @trunc(n);
+            if (inc < 1 or inc > 1e9) return self.throwError("RangeError", "invalid roundingIncrement");
+            r.increment = inc;
+        }
+        const rm = try self.getProperty(opts, "roundingMode");
+        if (!rm.isUndefined()) r.mode = roundModeFromStr(try self.toStringV(rm)) orelse return self.throwError("RangeError", "invalid roundingMode");
+        const su = try self.getProperty(opts, "smallestUnit");
+        if (!su.isUndefined()) {
+            r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
+            smallest_set = true;
+        }
     }
     // ValidateTemporalUnitRange: a larger TUnit has a smaller enum value, so an
     // explicit largestUnit smaller than the smallestUnit is a RangeError.
+    // (largest_set is always false on the round path, so this is inert there.)
     if (largest_set and smallest_set and @intFromEnum(r.largest) > @intFromEnum(r.smallest))
         return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
     return r;
@@ -28145,8 +28170,13 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
     }
     var t: value.TemporalData = .{ .kind = .plain_time };
     if (v.isObject()) {
-        const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
-        const maxes = [_]i64{ 23, 59, 59, 999, 999, 999 };
+        // PrepareTemporalFields reads the bag's properties in ALPHABETICAL order;
+        // `slot` maps each alphabetical read back into the semantic vals layout
+        // {hour, minute, second, ms, us, ns} that setTimeFields expects, so only
+        // the observable Get order changes, not the stored values.
+        const names = [_][]const u8{ "hour", "microsecond", "millisecond", "minute", "nanosecond", "second" };
+        const maxes = [_]i64{ 23, 999, 999, 59, 999, 59 };
+        const slot = [_]usize{ 0, 4, 3, 1, 5, 2 };
         var any = false;
         var vals: [6]i64 = .{ 0, 0, 0, 0, 0, 0 };
         for (names, 0..) |nm, i| {
@@ -28157,7 +28187,7 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
             // RegulateTime: overflow "reject" throws on an out-of-range field;
             // "constrain" (the default) clamps it (so `{ second: 60 }` ⇒ 59).
             if (reject and (n < 0 or n > maxes[i])) return self.throwError("RangeError", "time component out of range");
-            vals[i] = @max(0, @min(maxes[i], n));
+            vals[slot[i]] = @max(0, @min(maxes[i], n));
         }
         if (!any and require_any) return self.throwError("TypeError", "invalid PlainTime fields");
         setTimeFields(&t, .{ @floatFromInt(vals[0]), @floatFromInt(vals[1]), @floatFromInt(vals[2]), @floatFromInt(vals[3]), @floatFromInt(vals[4]), @floatFromInt(vals[5]) });
