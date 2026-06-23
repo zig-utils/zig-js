@@ -26916,6 +26916,12 @@ fn validateYearMonthRaw(self: *Interpreter, raw: RawYM, constrain: bool) EvalErr
         m = @min(@as(i64, max_month), m);
     } else if (m < 1 or m > @as(i64, max_month)) return self.throwError("RangeError", "month out of range");
     const month: u8 = @intCast(m);
+    if (std.mem.eql(u8, raw.cal, "persian")) {
+        if (y < -272443 or (y == -272443 and month <= 12))
+            return self.throwError("RangeError", "year-month out of range");
+        if (y > 275139 or (y == 275139 and month >= 8))
+            return self.throwError("RangeError", "year-month out of range");
+    }
     const iso = calendarDateToIso(raw.cal, y, month, 1);
     try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
     try checkIsoYearMonth(self, iso.y, iso.m);
