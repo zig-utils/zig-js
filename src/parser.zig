@@ -1811,6 +1811,8 @@ pub const Parser = struct {
     /// `async *gen(...)`, or `async [computed](...)`. A bare `async` property
     /// (`{ async }`, `{ async: 1 }`, `{ async() {} }`) is *not* a modifier.
     fn asyncMethodAhead(self: *Parser) bool {
+        // An escaped `async` (`async`) is never the contextual keyword.
+        if (self.cur().escaped_identifier) return false;
         if (!isKeyword(self.cur(), "async")) return false;
         return switch (self.peekKind(1)) {
             .identifier, .string, .number, .private_name, .lbracket, .star => true,
@@ -2292,7 +2294,8 @@ pub const Parser = struct {
                 continue;
             }
             // Accessor: `get x() {}` / `set x(v) {}` (get/set followed by a key).
-            if (!async_method and !gen_method and (isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
+            // An escaped `get`/`set` (`get`) is never the contextual keyword.
+            if (!async_method and !gen_method and !self.cur().escaped_identifier and (isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
                 const pn = try self.parsePropertyName();
@@ -2467,7 +2470,8 @@ pub const Parser = struct {
             // discarded; decorators precede `static`).
             if (self.check(.at)) try self.parseDecorators();
             var is_static = false;
-            if (isKeyword(self.cur(), "static") and self.peekKind(1) != .semicolon and self.peekKind(1) != .lparen and self.peekKind(1) != .assign) {
+            // An escaped `static` (`static`) is never the contextual keyword.
+            if (isKeyword(self.cur(), "static") and !self.cur().escaped_identifier and self.peekKind(1) != .semicolon and self.peekKind(1) != .lparen and self.peekKind(1) != .assign) {
                 is_static = true;
                 _ = self.advance();
             }
@@ -2488,8 +2492,9 @@ pub const Parser = struct {
             if (async_method) _ = self.advance(); // async
             // Generator method: `*m() {}` / `static *m() {}` / `async *m() {}`.
             const gen_method = self.match(.star);
-            // Accessor: `get x() {}` / `set x(v) {}`.
-            if (!async_method and !gen_method and (isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
+            // Accessor: `get x() {}` / `set x(v) {}`. An escaped `get`/`set`
+            // (`get`) is never the contextual keyword.
+            if (!async_method and !gen_method and !self.cur().escaped_identifier and (isKeyword(self.cur(), "get") or isKeyword(self.cur(), "set")) and self.propNameAhead()) {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
                 const apn = try self.parsePropertyName();
