@@ -129,6 +129,12 @@ pub fn build(b: *std.Build) void {
     const test262_step = b.step("test262", "Run the real test262 corpus and report pass rate");
     test262_step.dependOn(&run_test262.step);
 
+    // Compile-only: build the test262 runner exe without running the corpus, so
+    // the `--worker`/`--diag` binary can be rebuilt fast during development.
+    const test262_install = b.addInstallArtifact(test262, .{});
+    const test262_bin_step = b.step("test262-bin", "Build the test262 runner exe only (no run)");
+    test262_bin_step.dependOn(&test262_install.step);
+
     // THROWAWAY parse-failure diagnostic.
     const diag = b.addExecutable(.{
         .name = "diag",

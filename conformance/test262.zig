@@ -325,6 +325,13 @@ const Harness = struct {
 };
 
 fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8) Outcome {
+    return runOneDetail(gpa, io, harness, abs_path, src, null);
+}
+
+/// Like `runOne`, but when `detail` is non-null it captures a short human-readable
+/// reason for a valid-test failure (the thrown error's `Name: message`, or the
+/// parse error name) so the `--diag` mode can cluster failures by cause.
+fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, detail: ?*std.ArrayListUnmanaged(u8)) Outcome {
     const meta = parseMeta(src);
     if (meta.unsupported_flag) return .skip;
     if (meta.is_module) return runModule(gpa, io, harness, abs_path, src, meta);
@@ -399,12 +406,118 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []con
         if (meta.negative) {
             return if (negativeMatched(meta, err)) .pass_negative else .fail_negative;
         }
+        if (detail) |d| captureDetail(gpa, ctx, err, d);
         return switch (err) {
             error.Throw => .fail_runtime,
             error.OutOfMemory => .fail_other,
             else => .fail_parse, // lex/parse errors (UnexpectedToken, …)
         };
     }
+}
+
+/// Write a short failure reason into `d`: the thrown error stringified, or the
+/// Zig parse-error name. Best-effort — used only by `--diag`.
+fn captureDetail(gpa: std.mem.Allocator, ctx: *js.Context, err: anyerror, d: *std.ArrayListUnmanaged(u8)) void {
+    if (err == error.Throw) {
+        if (ctx.exception) |ex| {
+            // For a thrown *object* (Test262Error, native errors, …), render its
+            // `name: message` directly so assertion failures show their message
+            // rather than the bare `[object Object]` that ToString gives a
+            // non-native-error object.
+            if (ex.isObject()) {
+                const o = ex.asObj();
+                const name = if (o.getOwn("name")) |v| (if (v.isString()) v.asStr() else o.error_name) else o.error_name;
+                const msg = if (o.getOwn("message")) |v| (if (v.isString()) v.asStr() else "") else "";
+                if (name.len != 0 or msg.len != 0) {
+                    d.appendSlice(gpa, name) catch {};
+                    if (msg.len != 0) {
+                        d.appendSlice(gpa, ": ") catch {};
+                        d.appendSlice(gpa, msg) catch {};
+                    }
+                    return;
+                }
+            }
+            const s = ex.toString(gpa) catch "<throw>";
+            d.appendSlice(gpa, s) catch {};
+            return;
+        }
+        d.appendSlice(gpa, "<throw>") catch {};
+        return;
+    }
+    d.appendSlice(gpa, @errorName(err)) catch {};
+}
+
+/// `--eval <file>`: evaluate a raw JS file (no harness) and print `OK <value>`
+/// or `<ErrName>: <message>` / `<ParseError>` — a quick probe during development.
+fn runEval(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    const out = std.Io.File.stdout();
+    const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return;
+    const ctx = js.Context.create(gpa) catch return;
+    defer ctx.destroy();
+    var buf: [4096]u8 = undefined;
+    if (ctx.evaluate(src)) |v| {
+        const s = v.toString(gpa) catch "?";
+        const line = std.fmt.bufPrint(&buf, "OK {s}\n", .{s}) catch "OK\n";
+        out.writeStreamingAll(io, line) catch {};
+    } else |err| {
+        var d: std.ArrayListUnmanaged(u8) = .empty;
+        captureDetail(gpa, ctx, err, &d);
+        const line = std.fmt.bufPrint(&buf, "ERR {s}\n", .{d.items}) catch "ERR\n";
+        out.writeStreamingAll(io, line) catch {};
+    }
+}
+
+/// `--diag <subtree> [substr]`: run every test in a subtree (optionally filtered
+/// to paths containing `substr`) and print one `outcome<TAB>path<TAB>detail` line
+/// per *valid* failure, so failures can be clustered by cause during development.
+fn runDiag(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, filter: ?[]const u8) !void {
+    const out = std.Io.File.stdout();
+    const path = std.fs.path.join(gpa, &.{ root, sub }) catch return;
+    defer gpa.free(path);
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return;
+    defer gpa.free(harness_path);
+    var harness = Harness{ .io = io, .gpa = gpa, .dir = std.Io.Dir.cwd().openDir(io, harness_path, .{}) catch null };
+    defer harness.deinit();
+
+    var walker = dir.walk(gpa) catch return;
+    defer walker.deinit();
+
+    var n_fail: usize = 0;
+    var n_pass: usize = 0;
+    while (walker.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
+        if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
+        if (filter) |f| if (std.mem.indexOf(u8, entry.path, f) == null) continue;
+        if (shouldSkipPath(sub, entry.path)) continue;
+        const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(1 << 20)) catch continue;
+        defer gpa.free(src);
+        const maybe_abs = std.fs.path.join(gpa, &.{ path, entry.path }) catch null;
+        defer if (maybe_abs) |a| gpa.free(a);
+        const abs_path = maybe_abs orelse entry.basename;
+        var detail: std.ArrayListUnmanaged(u8) = .empty;
+        defer detail.deinit(gpa);
+        const o = runOneDetail(gpa, io, &harness, abs_path, src, &detail);
+        if (o == .pass or o == .pass_negative) {
+            n_pass += 1;
+            continue;
+        }
+        if (o == .skip) continue;
+        n_fail += 1;
+        // collapse newlines in the detail so each failure is a single line
+        for (detail.items) |*c| {
+            if (c.* == '\n' or c.* == '\r' or c.* == '\t') c.* = ' ';
+        }
+        var lb: [1024]u8 = undefined;
+        const line = std.fmt.bufPrint(&lb, "{s}\t{s}\t{s}\n", .{ @tagName(o), entry.path, detail.items }) catch continue;
+        out.writeStreamingAll(io, line) catch {};
+    }
+    var sb: [128]u8 = undefined;
+    const summary = std.fmt.bufPrint(&sb, "# {s}: {d} fail, {d} pass\n", .{ sub, n_fail, n_pass }) catch return;
+    out.writeStreamingAll(io, summary) catch {};
 }
 
 /// Host state for the module loader: read a fixture relative to the importing
@@ -580,6 +693,15 @@ pub fn main(init: std.process.Init) !void {
             const start = std.fmt.parseInt(usize, args.next() orelse "0", 10) catch 0;
             const limit = std.fmt.parseInt(usize, args.next() orelse "0", 10) catch 0;
             return runWorker(gpa, io, root, sub, start, limit);
+        }
+        if (std.mem.eql(u8, mode, "--diag")) {
+            const sub = args.next() orelse return;
+            const filter = args.next();
+            return runDiag(gpa, io, root, sub, filter);
+        }
+        if (std.mem.eql(u8, mode, "--eval")) {
+            const path = args.next() orelse return;
+            return runEval(gpa, io, path);
         }
     }
     return runParent(gpa, io, root);
