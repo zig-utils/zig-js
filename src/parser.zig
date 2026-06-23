@@ -1113,11 +1113,16 @@ pub const Parser = struct {
                     else => return ParseError.UnexpectedToken,
                 };
             }
-            // `{ key }` shorthand, or `{ key: target }`.
+            // `{ key }` shorthand, or `{ key: target }`. A shorthand binds the
+            // key as a BindingIdentifier, so it must not be a reserved word
+            // (`{ break }`, `{ this }`, …) — including one spelled with a Unicode
+            // escape, since `key` holds the decoded text.
             const target = if (self.match(.colon))
                 try self.parseBindingTarget()
-            else
-                try self.alloc(.{ .identifier = key });
+            else blk: {
+                if (self.isForbiddenBindingName(key)) return ParseError.UnexpectedToken;
+                break :blk try self.alloc(.{ .identifier = key });
+            };
             const default = if (self.match(.assign)) try self.parseAssignment() else null;
             try props.append(self.arena, .{ .key = key, .key_expr = key_expr, .target = target, .default = default });
             if (!self.match(.comma)) break;
