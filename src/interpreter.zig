@@ -12736,8 +12736,19 @@ fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
             const bit_count: usize = std.math.cast(usize, bits_count) orelse
                 return self.throwError("RangeError", "BigInt.asIntN bit count is out of range");
             var input = try managedBigIntFromObject(self.arena, xv.asObj());
+            const sgn: std.builtin.Signedness = if (signed) .signed else .unsigned;
+            const ic = input.toConst();
+            // If the requested width already covers the operand, the result is the
+            // operand unchanged, so skip the truncate — `std.math.big`'s truncate
+            // allocates ~bit_count/64 limbs, which for a near-2^53 width is a
+            // multi-petabyte request that returns error.OutOfMemory. That error is
+            // not JS-catchable (only error.Throw is), so it crashes the host instead
+            // of letting the script's try/catch see a RangeError. For unsigned this
+            // no-op also requires a non-negative operand (a negative always wraps).
+            if ((signed or ic.positive) and bit_count >= ic.bitCountTwosCompForSignedness(sgn))
+                return makeBigIntFromManaged(self, &input);
             var truncated = try std.math.big.int.Managed.init(self.arena);
-            try truncated.truncate(&input, if (signed) .signed else .unsigned, bit_count);
+            try truncated.truncate(&input, sgn, bit_count);
             return makeBigIntFromManaged(self, &truncated);
         }
     }.call;
