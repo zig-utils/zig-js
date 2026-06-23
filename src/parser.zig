@@ -47,6 +47,11 @@ pub const Parser = struct {
     /// True when parsing a Module (via `parseModule`): top-level `import` and
     /// `export` declarations are recognized, and the body is implicitly strict.
     module: bool = false,
+    /// When false (the default), `scanSuperAndArgs` also flags an `arguments`
+    /// reference — used for class field initializers, where `arguments` is an
+    /// early error. Set true to scan only for SuperCall (e.g. a method body,
+    /// where `arguments` is legal).
+    scan_allow_arguments: bool = false,
     /// Active labels in the current function body. A function boundary resets
     /// these because `break`/`continue` cannot target labels outside the
     /// function it appears in.
@@ -2526,13 +2531,49 @@ pub const Parser = struct {
                 _ = self.match(.semicolon);
                 // Early error (15.7.1): a field Initializer may not contain a
                 // SuperCall or an `arguments` reference.
-                if (init_expr) |ie| try self.checkFieldInitializer(ie);
+                if (init_expr) |ie| try self.scanSuperAndArgs(ie);
                 try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .field_init = init_expr, .is_static = is_static, .is_field = true });
             }
         }
         try self.expect(.rbrace);
         try self.checkPrivateNames(members.items);
+        try self.checkClassMemberErrors(members.items, superclass != null);
         return self.alloc(.{ .class_expr = .{ .name = name, .superclass = superclass, .members = members.items, .source = self.sourceFrom(start) } });
+    }
+
+    /// Class element early errors (15.7.1) beyond private-name uniqueness:
+    ///   - a SuperCall (`super()`) is allowed only in a derived class's
+    ///     constructor; any other method/accessor/non-derived constructor body
+    ///     containing one is a SyntaxError;
+    ///   - a static element named `prototype` (non-computed, non-private) is a
+    ///     SyntaxError;
+    ///   - a `constructor` element that is an accessor, generator, or async
+    ///     method is a SyntaxError (the constructor must be a plain method).
+    fn checkClassMemberErrors(self: *Parser, members: []const ast.ClassMember, has_superclass: bool) ParseError!void {
+        for (members) |m| {
+            const named = m.key_expr == null and m.key.len > 0;
+            const not_private = named and m.key[0] != '#';
+            if (m.is_static and not_private and std.mem.eql(u8, m.key, "prototype"))
+                return ParseError.UnexpectedToken;
+            if (m.is_field) continue;
+            const mf = m.func orelse continue;
+            if (mf.* != .function) continue;
+            const fnode = mf.function;
+            if (!m.is_static and not_private and std.mem.eql(u8, m.key, "constructor") and
+                (m.accessor != .none or fnode.is_generator or fnode.is_async))
+                return ParseError.UnexpectedToken;
+            // SuperCall is permitted only in the derived constructor.
+            const is_derived_ctor = m.is_ctor and has_superclass;
+            if (!is_derived_ctor) {
+                const saved = self.scan_allow_arguments;
+                self.scan_allow_arguments = true; // `arguments` is legal in a method body
+                defer self.scan_allow_arguments = saved;
+                try self.scanSuperAndArgs(fnode.body);
+                for (fnode.params) |p| {
+                    if (p.default) |d| try self.scanSuperAndArgs(d);
+                }
+            }
+        }
     }
 
     /// Early error: a class may not declare the same private name twice, except
@@ -2556,120 +2597,121 @@ pub const Parser = struct {
         _ = self;
     }
 
-    /// Early error for a class field Initializer (15.7.1): it may not contain a
-    /// SuperCall (`super()`) or an `arguments` reference. Conservative — recurses
-    /// through expression operators but stops at any nested function/class
-    /// boundary (which has its own `arguments`/`super`), so it never rejects valid
-    /// code; it only flags a `super()`/`arguments` that lives directly in the
-    /// initializer, where it is always an early error.
-    fn checkFieldInitializer(self: *Parser, node: *Node) ParseError!void {
+    /// Scan an expression/statement subtree for a SuperCall (`super()`), and —
+    /// unless `scan_allow_arguments` is set — an `arguments` reference. Used for
+    /// two early errors: a class field Initializer may contain neither (15.7.1),
+    /// and a method body other than a derived constructor may not contain a
+    /// SuperCall. Conservative — recurses through operators and *arrow* bodies
+    /// (which bind neither) but stops at ordinary functions/classes (which have
+    /// their own bindings), so it never rejects valid code.
+    fn scanSuperAndArgs(self: *Parser, node: *Node) ParseError!void {
         switch (node.*) {
-            .identifier => |name| if (std.mem.eql(u8, name, "arguments")) return ParseError.UnexpectedToken,
+            .identifier => |name| if (!self.scan_allow_arguments and std.mem.eql(u8, name, "arguments")) return ParseError.UnexpectedToken,
             .super_call => return ParseError.UnexpectedToken,
-            .unary => |u| try self.checkFieldInitializer(u.operand),
-            .delete_expr => |t| try self.checkFieldInitializer(t),
-            .update => |u| try self.checkFieldInitializer(u.target),
-            .await_expr => |a| try self.checkFieldInitializer(a.argument),
-            .yield_expr => |y| if (y.argument) |arg| try self.checkFieldInitializer(arg),
-            .spread => |v| try self.checkFieldInitializer(v),
-            .optional_chain => |c| try self.checkFieldInitializer(c),
+            .unary => |u| try self.scanSuperAndArgs(u.operand),
+            .delete_expr => |t| try self.scanSuperAndArgs(t),
+            .update => |u| try self.scanSuperAndArgs(u.target),
+            .await_expr => |a| try self.scanSuperAndArgs(a.argument),
+            .yield_expr => |y| if (y.argument) |arg| try self.scanSuperAndArgs(arg),
+            .spread => |v| try self.scanSuperAndArgs(v),
+            .optional_chain => |c| try self.scanSuperAndArgs(c),
             .binary => |b| {
-                try self.checkFieldInitializer(b.left);
-                try self.checkFieldInitializer(b.right);
+                try self.scanSuperAndArgs(b.left);
+                try self.scanSuperAndArgs(b.right);
             },
             .logical => |l| {
-                try self.checkFieldInitializer(l.left);
-                try self.checkFieldInitializer(l.right);
+                try self.scanSuperAndArgs(l.left);
+                try self.scanSuperAndArgs(l.right);
             },
             .sequence => |s| {
-                try self.checkFieldInitializer(s.first);
-                try self.checkFieldInitializer(s.second);
+                try self.scanSuperAndArgs(s.first);
+                try self.scanSuperAndArgs(s.second);
             },
             .assign => |a| {
-                try self.checkFieldInitializer(a.target);
-                try self.checkFieldInitializer(a.value);
+                try self.scanSuperAndArgs(a.target);
+                try self.scanSuperAndArgs(a.value);
             },
             .op_assign => |a| {
-                try self.checkFieldInitializer(a.target);
-                try self.checkFieldInitializer(a.value);
+                try self.scanSuperAndArgs(a.target);
+                try self.scanSuperAndArgs(a.value);
             },
             .conditional => |c| {
-                try self.checkFieldInitializer(c.cond);
-                try self.checkFieldInitializer(c.consequent);
-                try self.checkFieldInitializer(c.alternate);
+                try self.scanSuperAndArgs(c.cond);
+                try self.scanSuperAndArgs(c.consequent);
+                try self.scanSuperAndArgs(c.alternate);
             },
-            .super_member => |m| if (m.computed) |computed| try self.checkFieldInitializer(computed),
+            .super_member => |m| if (m.computed) |computed| try self.scanSuperAndArgs(computed),
             .call => |c| {
-                try self.checkFieldInitializer(c.callee);
-                for (c.args) |arg| try self.checkFieldInitializer(arg);
+                try self.scanSuperAndArgs(c.callee);
+                for (c.args) |arg| try self.scanSuperAndArgs(arg);
             },
             .new_expr => |n| {
-                try self.checkFieldInitializer(n.callee);
-                for (n.args) |arg| try self.checkFieldInitializer(arg);
+                try self.scanSuperAndArgs(n.callee);
+                for (n.args) |arg| try self.scanSuperAndArgs(arg);
             },
             .tagged_template => |t| {
-                try self.checkFieldInitializer(t.tag);
-                for (t.exprs) |expr| try self.checkFieldInitializer(expr);
+                try self.scanSuperAndArgs(t.tag);
+                for (t.exprs) |expr| try self.scanSuperAndArgs(expr);
             },
             .member => |m| {
-                try self.checkFieldInitializer(m.object);
-                if (m.computed) |computed| try self.checkFieldInitializer(computed);
+                try self.scanSuperAndArgs(m.object);
+                if (m.computed) |computed| try self.scanSuperAndArgs(computed);
             },
             .object_lit => |props| for (props) |prop| {
-                if (prop.key_expr) |key_expr| try self.checkFieldInitializer(key_expr);
-                try self.checkFieldInitializer(prop.value);
+                if (prop.key_expr) |key_expr| try self.scanSuperAndArgs(key_expr);
+                try self.scanSuperAndArgs(prop.value);
             },
-            .array_lit => |items| for (items) |item| try self.checkFieldInitializer(item),
+            .array_lit => |items| for (items) |item| try self.scanSuperAndArgs(item),
             // Arrow functions do NOT bind their own `arguments`/`super`, so a
             // `super()`/`arguments` inside one is still the field's — recurse into
             // arrow params' defaults and body. Ordinary functions/classes have
             // their own bindings and are not descended into.
             .function => |f| if (f.is_arrow) {
-                for (f.params) |p| if (p.default) |d| try self.checkFieldInitializer(d);
-                try self.checkFieldInitializer(f.body);
+                for (f.params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
+                try self.scanSuperAndArgs(f.body);
             },
             // Statement nodes (an arrow's block body):
-            .block => |stmts| for (stmts) |s| try self.checkFieldInitializer(s),
-            .expr_stmt => |e| try self.checkFieldInitializer(e),
-            .return_stmt => |r| if (r) |v| try self.checkFieldInitializer(v),
-            .throw_stmt => |t| try self.checkFieldInitializer(t),
-            .var_decl => |d| if (d.init) |ini| try self.checkFieldInitializer(ini),
-            .destructure_decl => |d| try self.checkFieldInitializer(d.init),
-            .decl_group => |g| for (g) |d2| try self.checkFieldInitializer(d2),
+            .block => |stmts| for (stmts) |s| try self.scanSuperAndArgs(s),
+            .expr_stmt => |e| try self.scanSuperAndArgs(e),
+            .return_stmt => |r| if (r) |v| try self.scanSuperAndArgs(v),
+            .throw_stmt => |t| try self.scanSuperAndArgs(t),
+            .var_decl => |d| if (d.init) |ini| try self.scanSuperAndArgs(ini),
+            .destructure_decl => |d| try self.scanSuperAndArgs(d.init),
+            .decl_group => |g| for (g) |d2| try self.scanSuperAndArgs(d2),
             .if_stmt => |i| {
-                try self.checkFieldInitializer(i.cond);
-                try self.checkFieldInitializer(i.consequent);
-                if (i.alternate) |a| try self.checkFieldInitializer(a);
+                try self.scanSuperAndArgs(i.cond);
+                try self.scanSuperAndArgs(i.consequent);
+                if (i.alternate) |a| try self.scanSuperAndArgs(a);
             },
             .while_stmt => |w| {
-                try self.checkFieldInitializer(w.cond);
-                try self.checkFieldInitializer(w.body);
+                try self.scanSuperAndArgs(w.cond);
+                try self.scanSuperAndArgs(w.body);
             },
             .do_while_stmt => |w| {
-                try self.checkFieldInitializer(w.body);
-                try self.checkFieldInitializer(w.cond);
+                try self.scanSuperAndArgs(w.body);
+                try self.scanSuperAndArgs(w.cond);
             },
             .for_stmt => |fo| {
-                if (fo.init) |ini| try self.checkFieldInitializer(ini);
-                if (fo.cond) |c| try self.checkFieldInitializer(c);
-                if (fo.update) |u| try self.checkFieldInitializer(u);
-                try self.checkFieldInitializer(fo.body);
+                if (fo.init) |ini| try self.scanSuperAndArgs(ini);
+                if (fo.cond) |c| try self.scanSuperAndArgs(c);
+                if (fo.update) |u| try self.scanSuperAndArgs(u);
+                try self.scanSuperAndArgs(fo.body);
             },
             .for_in => |fo| {
-                try self.checkFieldInitializer(fo.iterable);
-                try self.checkFieldInitializer(fo.body);
+                try self.scanSuperAndArgs(fo.iterable);
+                try self.scanSuperAndArgs(fo.body);
             },
-            .labeled_stmt => |l| try self.checkFieldInitializer(l.body),
+            .labeled_stmt => |l| try self.scanSuperAndArgs(l.body),
             .try_stmt => |t| {
-                try self.checkFieldInitializer(t.block);
-                if (t.catch_block) |c| try self.checkFieldInitializer(c);
-                if (t.finally_block) |fb| try self.checkFieldInitializer(fb);
+                try self.scanSuperAndArgs(t.block);
+                if (t.catch_block) |c| try self.scanSuperAndArgs(c);
+                if (t.finally_block) |fb| try self.scanSuperAndArgs(fb);
             },
             .switch_stmt => |sw| {
-                try self.checkFieldInitializer(sw.disc);
+                try self.scanSuperAndArgs(sw.disc);
                 for (sw.cases) |cs| {
-                    if (cs.@"test") |t| try self.checkFieldInitializer(t);
-                    for (cs.body) |s| try self.checkFieldInitializer(s);
+                    if (cs.@"test") |t| try self.scanSuperAndArgs(t);
+                    for (cs.body) |s| try self.scanSuperAndArgs(s);
                 }
             },
             // .func_decl/.class_expr and any other node: stop. A nested ordinary
