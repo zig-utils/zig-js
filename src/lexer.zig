@@ -114,9 +114,21 @@ pub const Lexer = struct {
     brace_top: usize = 0,
     last_rbrace_object: bool = false,
     pending_function_expr: bool = false,
+    /// Annex B B.1.3 HTML-like comments (`<!--` … and line-leading `-->` …).
+    /// Allowed in Script source, forbidden in Module source — `parseModule`
+    /// re-tokenizes with this off so a module rejects them as a SyntaxError.
+    html_comments: bool = true,
+    /// Whether only trivia (and possibly a line terminator) has been seen since
+    /// the previous significant token — true at the start of input. A line-
+    /// leading `-->` is an HTML close comment only in this state.
+    at_line_start: bool = true,
 
     pub fn init(arena: std.mem.Allocator, src: []const u8) Lexer {
         return .{ .src = src, .arena = arena };
+    }
+
+    pub fn initOptions(arena: std.mem.Allocator, src: []const u8, html_comments: bool) Lexer {
+        return .{ .src = src, .arena = arena, .html_comments = html_comments };
     }
 
     fn peek(self: *Lexer) u8 {
@@ -131,27 +143,69 @@ pub const Lexer = struct {
         while (self.i < self.src.len) {
             const c = self.src[self.i];
             // ASCII whitespace incl. vertical tab (0x0B) and form feed (0x0C).
-            if (c == ' ' or c == '\t' or c == '\r' or c == '\n' or c == 0x0B or c == 0x0C) {
+            if (c == '\r' or c == '\n') {
+                self.i += 1;
+                self.at_line_start = true; // a `-->` after this is an HTML close comment
+            } else if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
                 self.i += 1;
             } else if (c == '/' and self.peek2() == '/') {
                 self.i += 2;
                 self.skipSingleLineCommentBody();
             } else if (c == '/' and self.peek2() == '*') {
-                self.i += 2;
-                while (self.i + 1 < self.src.len and !(self.src[self.i] == '*' and self.src[self.i + 1] == '/')) self.i += 1;
-                if (self.i + 1 >= self.src.len) return LexError.UnterminatedComment;
-                self.i += 2;
+                const had_nl = self.skipBlockComment() catch return LexError.UnterminatedComment;
+                // A block comment containing a line terminator counts as a
+                // LineTerminatorSequence for the purpose of a following `-->`.
+                if (had_nl) self.at_line_start = true;
+            } else if (self.html_comments and c == '<' and self.peek2() == '!' and
+                self.i + 3 < self.src.len and self.src[self.i + 2] == '-' and self.src[self.i + 3] == '-')
+            {
+                // SingleLineHTMLOpenComment `<!--` — always a line comment.
+                self.i += 4;
+                self.skipSingleLineCommentBody();
+            } else if (self.html_comments and self.at_line_start and c == '-' and self.peek2() == '-' and
+                self.i + 2 < self.src.len and self.src[self.i + 2] == '>')
+            {
+                // SingleLineHTMLCloseComment `-->` — a line comment only when it
+                // is the first non-trivia content of a line (or of the input).
+                self.i += 3;
+                self.skipSingleLineCommentBody();
             } else if (c >= 0x80) {
                 // Unicode whitespace (NBSP, U+2000–200A, …) or line terminators
                 // (U+2028/U+2029) and the BOM are all trivia between tokens.
                 const len = std.unicode.utf8ByteSequenceLength(c) catch break;
                 if (self.i + len > self.src.len) break;
                 const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
-                if (isSpaceCp(cp) or isLineTermCp(cp)) {
+                if (isLineTermCp(cp)) {
+                    self.i += len;
+                    self.at_line_start = true;
+                } else if (isSpaceCp(cp)) {
                     self.i += len;
                 } else break;
             } else break;
         }
+    }
+
+    /// Skip a `/* … */` block comment (cursor at the opening `/`). Returns whether
+    /// the comment body contained a line terminator. Errors if unterminated.
+    fn skipBlockComment(self: *Lexer) error{Unterminated}!bool {
+        self.i += 2; // `/*`
+        var had_nl = false;
+        while (self.i + 1 < self.src.len and !(self.src[self.i] == '*' and self.src[self.i + 1] == '/')) {
+            const ch = self.src[self.i];
+            if (ch == '\n' or ch == '\r') {
+                had_nl = true;
+            } else if (ch >= 0x80) {
+                const len = std.unicode.utf8ByteSequenceLength(ch) catch 1;
+                if (self.i + len <= self.src.len) {
+                    const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch 0;
+                    if (isLineTermCp(cp)) had_nl = true;
+                }
+            }
+            self.i += 1;
+        }
+        if (self.i + 1 >= self.src.len) return error.Unterminated;
+        self.i += 2; // `*/`
+        return had_nl;
     }
 
     fn skipSingleLineCommentBody(self: *Lexer) void {
@@ -339,6 +393,9 @@ pub const Lexer = struct {
         const prev = self.prev_kind;
         const prev_text = self.prev_text;
         var t = try self.nextRaw();
+        // A real token has been scanned: a subsequent `-->` is only an HTML close
+        // comment once a fresh line terminator (set in skipTrivia) precedes it.
+        self.at_line_start = false;
         t.end = self.i;
         if (t.kind == .lbrace) {
             if (self.brace_top < self.brace_obj.len) {

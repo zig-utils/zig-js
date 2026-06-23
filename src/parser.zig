@@ -247,6 +247,9 @@ pub const Parser = struct {
     }
 
     fn letDeclAhead(self: *Parser) bool {
+        // A `let` written with a Unicode escape (`let`) is never the keyword,
+        // so it cannot begin a LexicalDeclaration — it is an ordinary identifier.
+        if (self.cur().escaped_identifier) return false;
         if (!isKeyword(self.cur(), "let")) return false;
         return switch (self.peekKind(1)) {
             .lbrace => self.noNewlineBefore(1),
@@ -322,15 +325,86 @@ pub const Parser = struct {
         for (stmts) |s| {
             switch (s.*) {
                 .var_decl => |d| if (d.kind != .@"var") try self.addDecl(&seen, d.name, true),
+                .destructure_decl => |d| if (d.kind != .@"var") {
+                    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                    try self.addPatternNames(&names, d.pattern);
+                    for (names.items) |n| try self.addDecl(&seen, n, true);
+                },
                 .decl_group => |g| for (g) |d2| {
                     if (d2.* == .var_decl and d2.var_decl.kind != .@"var") try self.addDecl(&seen, d2.var_decl.name, true);
+                    if (d2.* == .destructure_decl and d2.destructure_decl.kind != .@"var") {
+                        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                        try self.addPatternNames(&names, d2.destructure_decl.pattern);
+                        for (names.items) |n| try self.addDecl(&seen, n, true);
+                    }
                 },
                 .func_decl => |fnode| if (funcs_lexical and fnode.name.len > 0)
                     try self.addDecl(&seen, fnode.name, fnode.is_async or fnode.is_generator),
                 else => {},
             }
         }
+        // Early error (Block 14.2.1, Script 16.1.1, FunctionBody 15.2.1): a scope's
+        // LexicallyDeclaredNames must not intersect its VarDeclaredNames — e.g.
+        // `{ var f; const f }` or `let x; { var x; }`. Var names hoist out of nested
+        // blocks/control-flow (but not functions), so collect them across the
+        // subtree. At a function/script scope, top-level function declarations are
+        // themselves var-scoped, so they participate too.
+        if (seen.count() > 0) {
+            var var_names: std.StringHashMapUnmanaged(void) = .empty;
+            for (stmts) |s| try self.collectVarNames(s, &var_names);
+            if (!funcs_lexical) for (stmts) |s| {
+                if (s.* == .func_decl and s.func_decl.name.len > 0)
+                    try var_names.put(self.arena, s.func_decl.name, {});
+            };
+            var it = seen.iterator();
+            while (it.next()) |entry| {
+                if (var_names.contains(entry.key_ptr.*)) return ParseError.UnexpectedToken;
+            }
+        }
         for (stmts) |s| try self.recurseScope(s);
+    }
+
+    /// Collect VarDeclaredNames reachable from `node` without crossing a function
+    /// boundary: `var` declarations (incl. destructuring and `for` heads) hoist out
+    /// of nested blocks and control-flow statements, so recurse through those but
+    /// not into nested functions/classes. Block-level function declarations are
+    /// *not* collected (they are lexical to their block per the static semantics).
+    fn collectVarNames(self: *Parser, node: *Node, out: *std.StringHashMapUnmanaged(void)) ParseError!void {
+        switch (node.*) {
+            .var_decl => |d| if (d.kind == .@"var" and d.name.len > 0) try out.put(self.arena, d.name, {}),
+            .destructure_decl => |d| if (d.kind == .@"var") try self.putPatternVarNames(d.pattern, out),
+            .decl_group => |g| for (g) |d2| try self.collectVarNames(d2, out),
+            .block => |b| for (b) |s| try self.collectVarNames(s, out),
+            .if_stmt => |i| {
+                try self.collectVarNames(i.consequent, out);
+                if (i.alternate) |a| try self.collectVarNames(a, out);
+            },
+            .while_stmt => |w| try self.collectVarNames(w.body, out),
+            .do_while_stmt => |w| try self.collectVarNames(w.body, out),
+            .for_stmt => |f| {
+                if (f.init) |ini| try self.collectVarNames(ini, out);
+                try self.collectVarNames(f.body, out);
+            },
+            .for_in => |f| {
+                if (f.decl_kind) |k| if (k == .@"var") try self.putPatternVarNames(f.target, out);
+                try self.collectVarNames(f.body, out);
+            },
+            .labeled_stmt => |l| try self.collectVarNames(l.body, out),
+            .try_stmt => |t| {
+                try self.collectVarNames(t.block, out);
+                if (t.catch_block) |c| try self.collectVarNames(c, out);
+                if (t.finally_block) |fb| try self.collectVarNames(fb, out);
+            },
+            .switch_stmt => |sw| for (sw.cases) |cs| for (cs.body) |s| try self.collectVarNames(s, out),
+            // func_decl / function / class bodies are separate var scopes.
+            else => {},
+        }
+    }
+
+    fn putPatternVarNames(self: *Parser, pattern: *Node, out: *std.StringHashMapUnmanaged(void)) ParseError!void {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&names, pattern);
+        for (names.items) |n| if (n.len > 0) try out.put(self.arena, n, {});
     }
 
     fn addDecl(self: *Parser, seen: *std.StringHashMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
@@ -579,6 +653,10 @@ pub const Parser = struct {
     pub fn parseModule(self: *Parser) ParseError!*Node {
         self.module = true;
         self.strict = true;
+        // HTML-like comments (Annex B B.1.3) are Script-only; a Module must reject
+        // `<!--` / `-->`. `init` tokenized with them enabled (the Script default),
+        // so re-tokenize the source with them disabled before parsing the module.
+        try self.retokenizeWithoutHtmlComments();
         // A Module is an async context for `await` at the top level (top-level
         // await). Nested non-async functions reset this via `parseFnBody`.
         self.in_async = true;
@@ -588,6 +666,20 @@ pub const Parser = struct {
         }
         try self.checkModuleEarlyErrors(stmts.items);
         return self.alloc(.{ .program = stmts.items });
+    }
+
+    /// Re-tokenize `self.source` with HTML-like comments disabled (Module goal)
+    /// and reset the cursor. Safe to call before any token has been consumed.
+    fn retokenizeWithoutHtmlComments(self: *Parser) ParseError!void {
+        var lx = lex.Lexer.initOptions(self.arena, self.source, false);
+        var list: std.ArrayListUnmanaged(Token) = .empty;
+        while (true) {
+            const t = try lx.next();
+            try list.append(self.arena, t);
+            if (t.kind == .eof) break;
+        }
+        self.tokens = list.items;
+        self.pos = 0;
     }
 
     /// A ModuleItem: an `import`/`export` declaration or an ordinary statement.
