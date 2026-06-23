@@ -10437,7 +10437,9 @@ pub const Interpreter = struct {
             .sub => Value.num(l.toNumber() - r.toNumber()),
             .mul => Value.num(l.toNumber() * r.toNumber()),
             .div => Value.num(l.toNumber() / r.toNumber()),
-            .mod => Value.num(@mod(l.toNumber(), r.toNumber())),
+            // JS `%` is the truncated remainder (result takes the sign of the
+            // dividend), i.e. `@rem`, not the floored `@mod`: `-5 % 3` is `-2`.
+            .mod => Value.num(@rem(l.toNumber(), r.toNumber())),
             .pow => Value.num(std.math.pow(f64, l.toNumber(), r.toNumber())),
             .lt => Value.boolVal(try lessThan(self, l, r)),
             .le => Value.boolVal(!(try lessThan(self, r, l)) and !relationalNaN(l, r)),
