@@ -2524,6 +2524,9 @@ pub const Parser = struct {
                 // Field: `x;` or `x = init;`.
                 const init_expr = if (self.match(.assign)) try self.parseAssignment() else null;
                 _ = self.match(.semicolon);
+                // Early error (15.7.1): a field Initializer may not contain a
+                // SuperCall or an `arguments` reference.
+                if (init_expr) |ie| try self.checkFieldInitializer(ie);
                 try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .field_init = init_expr, .is_static = is_static, .is_field = true });
             }
         }
@@ -2551,6 +2554,129 @@ pub const Parser = struct {
             }
         }
         _ = self;
+    }
+
+    /// Early error for a class field Initializer (15.7.1): it may not contain a
+    /// SuperCall (`super()`) or an `arguments` reference. Conservative — recurses
+    /// through expression operators but stops at any nested function/class
+    /// boundary (which has its own `arguments`/`super`), so it never rejects valid
+    /// code; it only flags a `super()`/`arguments` that lives directly in the
+    /// initializer, where it is always an early error.
+    fn checkFieldInitializer(self: *Parser, node: *Node) ParseError!void {
+        switch (node.*) {
+            .identifier => |name| if (std.mem.eql(u8, name, "arguments")) return ParseError.UnexpectedToken,
+            .super_call => return ParseError.UnexpectedToken,
+            .unary => |u| try self.checkFieldInitializer(u.operand),
+            .delete_expr => |t| try self.checkFieldInitializer(t),
+            .update => |u| try self.checkFieldInitializer(u.target),
+            .await_expr => |a| try self.checkFieldInitializer(a.argument),
+            .yield_expr => |y| if (y.argument) |arg| try self.checkFieldInitializer(arg),
+            .spread => |v| try self.checkFieldInitializer(v),
+            .optional_chain => |c| try self.checkFieldInitializer(c),
+            .binary => |b| {
+                try self.checkFieldInitializer(b.left);
+                try self.checkFieldInitializer(b.right);
+            },
+            .logical => |l| {
+                try self.checkFieldInitializer(l.left);
+                try self.checkFieldInitializer(l.right);
+            },
+            .sequence => |s| {
+                try self.checkFieldInitializer(s.first);
+                try self.checkFieldInitializer(s.second);
+            },
+            .assign => |a| {
+                try self.checkFieldInitializer(a.target);
+                try self.checkFieldInitializer(a.value);
+            },
+            .op_assign => |a| {
+                try self.checkFieldInitializer(a.target);
+                try self.checkFieldInitializer(a.value);
+            },
+            .conditional => |c| {
+                try self.checkFieldInitializer(c.cond);
+                try self.checkFieldInitializer(c.consequent);
+                try self.checkFieldInitializer(c.alternate);
+            },
+            .super_member => |m| if (m.computed) |computed| try self.checkFieldInitializer(computed),
+            .call => |c| {
+                try self.checkFieldInitializer(c.callee);
+                for (c.args) |arg| try self.checkFieldInitializer(arg);
+            },
+            .new_expr => |n| {
+                try self.checkFieldInitializer(n.callee);
+                for (n.args) |arg| try self.checkFieldInitializer(arg);
+            },
+            .tagged_template => |t| {
+                try self.checkFieldInitializer(t.tag);
+                for (t.exprs) |expr| try self.checkFieldInitializer(expr);
+            },
+            .member => |m| {
+                try self.checkFieldInitializer(m.object);
+                if (m.computed) |computed| try self.checkFieldInitializer(computed);
+            },
+            .object_lit => |props| for (props) |prop| {
+                if (prop.key_expr) |key_expr| try self.checkFieldInitializer(key_expr);
+                try self.checkFieldInitializer(prop.value);
+            },
+            .array_lit => |items| for (items) |item| try self.checkFieldInitializer(item),
+            // Arrow functions do NOT bind their own `arguments`/`super`, so a
+            // `super()`/`arguments` inside one is still the field's — recurse into
+            // arrow params' defaults and body. Ordinary functions/classes have
+            // their own bindings and are not descended into.
+            .function => |f| if (f.is_arrow) {
+                for (f.params) |p| if (p.default) |d| try self.checkFieldInitializer(d);
+                try self.checkFieldInitializer(f.body);
+            },
+            // Statement nodes (an arrow's block body):
+            .block => |stmts| for (stmts) |s| try self.checkFieldInitializer(s),
+            .expr_stmt => |e| try self.checkFieldInitializer(e),
+            .return_stmt => |r| if (r) |v| try self.checkFieldInitializer(v),
+            .throw_stmt => |t| try self.checkFieldInitializer(t),
+            .var_decl => |d| if (d.init) |ini| try self.checkFieldInitializer(ini),
+            .destructure_decl => |d| try self.checkFieldInitializer(d.init),
+            .decl_group => |g| for (g) |d2| try self.checkFieldInitializer(d2),
+            .if_stmt => |i| {
+                try self.checkFieldInitializer(i.cond);
+                try self.checkFieldInitializer(i.consequent);
+                if (i.alternate) |a| try self.checkFieldInitializer(a);
+            },
+            .while_stmt => |w| {
+                try self.checkFieldInitializer(w.cond);
+                try self.checkFieldInitializer(w.body);
+            },
+            .do_while_stmt => |w| {
+                try self.checkFieldInitializer(w.body);
+                try self.checkFieldInitializer(w.cond);
+            },
+            .for_stmt => |fo| {
+                if (fo.init) |ini| try self.checkFieldInitializer(ini);
+                if (fo.cond) |c| try self.checkFieldInitializer(c);
+                if (fo.update) |u| try self.checkFieldInitializer(u);
+                try self.checkFieldInitializer(fo.body);
+            },
+            .for_in => |fo| {
+                try self.checkFieldInitializer(fo.iterable);
+                try self.checkFieldInitializer(fo.body);
+            },
+            .labeled_stmt => |l| try self.checkFieldInitializer(l.body),
+            .try_stmt => |t| {
+                try self.checkFieldInitializer(t.block);
+                if (t.catch_block) |c| try self.checkFieldInitializer(c);
+                if (t.finally_block) |fb| try self.checkFieldInitializer(fb);
+            },
+            .switch_stmt => |sw| {
+                try self.checkFieldInitializer(sw.disc);
+                for (sw.cases) |cs| {
+                    if (cs.@"test") |t| try self.checkFieldInitializer(t);
+                    for (cs.body) |s| try self.checkFieldInitializer(s);
+                }
+            },
+            // .func_decl/.class_expr and any other node: stop. A nested ordinary
+            // function/class has its own `arguments`/`super`; descending could
+            // only produce false positives.
+            else => {},
+        }
     }
 
     fn isPrivateNameText(name: []const u8) bool {
