@@ -733,15 +733,26 @@ pub const Lexer = struct {
         const start = self.i;
         const quote = self.src[self.i];
         self.i += 1;
+        // A LegacyOctalEscapeSequence (`\1`..`\7`, `\0` followed by a digit) or a
+        // NonOctalDecimalEscapeSequence (`\8`/`\9`) makes the literal a SyntaxError
+        // in strict-mode code; flag it so the parser can reject it (mirrors the
+        // numeric legacy-octal flag).
+        var legacy = false;
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         while (self.i < self.src.len) {
             const ch = self.src[self.i];
             if (ch == quote) {
                 self.i += 1;
-                return .{ .kind = .string, .text = try buf.toOwnedSlice(self.arena), .pos = start };
+                return .{ .kind = .string, .text = try buf.toOwnedSlice(self.arena), .pos = start, .legacy_octal = legacy };
             }
             if (ch == '\\') {
                 if (self.i + 1 >= self.src.len) return LexError.UnterminatedString;
+                const e = self.src[self.i + 1];
+                if (e >= '1' and e <= '9') {
+                    legacy = true;
+                } else if (e == '0' and self.i + 2 < self.src.len and std.ascii.isDigit(self.src[self.i + 2])) {
+                    legacy = true;
+                }
                 self.i = try appendEscape(self.arena, &buf, self.src, self.i + 1);
             } else if (ch == '\n' or ch == '\r') {
                 return LexError.UnterminatedString;

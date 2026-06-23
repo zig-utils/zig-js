@@ -3001,7 +3001,12 @@ pub const Parser = struct {
                 if (t.is_bigint) return self.alloc(.{ .bigint_lit = .{ .value = t.bigint, .text = t.bigint_text } });
                 return self.alloc(.{ .number = t.number });
             },
-            .string => return self.alloc(.{ .string = t.text }),
+            .string => {
+                // A string with a legacy octal / non-octal-decimal escape is a
+                // SyntaxError in strict mode.
+                if (self.strict and t.legacy_octal) return ParseError.UnexpectedToken;
+                return self.alloc(.{ .string = t.text });
+            },
             .template => return self.parseTemplate(t.text),
             .regex => {
                 // A regex literal's pattern and flags are early errors: validate
