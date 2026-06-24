@@ -30,6 +30,14 @@ const Interpreter = interp.Interpreter;
 pub const PendingJoin = struct {
     promise: *value.Object,
     microtasks: *std.ArrayListUnmanaged(promise.Microtask),
+    /// The thread that registered this `asyncJoin` (the joiner), or null for the
+    /// main/host thread. When the joiner is a spawned thread that has finished
+    /// (`done`), its local `microtasks` queue is being abandoned, so the finishing
+    /// thread routes this settlement's reactions to the realm queue
+    /// (`ctx.microtasks`, which the host keeps draining) instead — otherwise a
+    /// nested `asyncJoin` reaction strands in a dead thread's queue. A still-live
+    /// joiner keeps its reactions (thread affinity preserved).
+    owner: ?*ThreadRecord = null,
 };
 
 pub const ThreadRecord = struct {
@@ -279,7 +287,18 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer pending_joins.deinit(rec.ctx.arena());
     const saved_microtasks = machine.microtasks;
     for (pending_joins.items) |pending| {
-        machine.microtasks = pending.microtasks;
+        // Route the settlement's reactions. When the joiner is a spawned thread
+        // (`owner != null`) we enqueue into the realm queue (`ctx.microtasks`,
+        // which the host drains until every thread is done) rather than the
+        // joiner thread's local queue: that queue can be torn down before — or
+        // concurrently with — this settlement, stranding a nested-`asyncJoin`
+        // reaction (its `.then` continuation may even have been registered by a
+        // third thread via thenable adoption). The main-thread joiner's queue
+        // *is* `ctx.microtasks`, so this is identical for it. (A live joiner
+        // thread loses strict reaction affinity, but the reaction still runs in
+        // the shared realm, which is what asyncJoin's await observers need; no
+        // liveness race remains.)
+        machine.microtasks = if (pending.owner != null) &rec.ctx.microtasks else pending.microtasks;
         if (promise.promiseOf(Value.obj(pending.promise))) |pp| {
             if (threw)
                 promise.reject(&machine, pp, result) catch {}
@@ -291,6 +310,19 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     machine.drainMicrotasks() catch {};
     transferPendingJoinQueue(rec.ctx, &microtasks, &rec.ctx.microtasks);
     transferPropAsyncQueue(g, &microtasks, &rec.ctx.microtasks);
+    // Flush any reactions a peer routed into this thread's local queue after the
+    // final drain above (e.g. a nested-asyncJoin settling here in the teardown
+    // window) into the realm queue, which the host keeps draining — otherwise
+    // they strand when this queue is abandoned below. Serialized with peer
+    // enqueues by `microtask_lock` (no-op when null, i.e. GIL mode).
+    {
+        machine.lockMicrotasks();
+        defer machine.unlockMicrotasks();
+        if (microtasks.items.len > 0) {
+            rec.ctx.microtasks.appendSlice(rec.ctx.arena(), microtasks.items) catch {};
+            microtasks.clearRetainingCapacity();
+        }
+    }
     rec.microtasks = null;
 }
 
@@ -1662,7 +1694,7 @@ fn threadAsyncJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) valu
             rec.join_mutex.unlock(io);
             return self.throwError("Error", "Thread.prototype.asyncJoin requires a microtask queue");
         };
-        rec.pending_joins.append(self.arena, .{ .promise = p_obj, .microtasks = microtasks }) catch |err| {
+        rec.pending_joins.append(self.arena, .{ .promise = p_obj, .microtasks = microtasks, .owner = t_current }) catch |err| {
             rec.join_mutex.unlock(io);
             return err;
         };
