@@ -1456,15 +1456,27 @@ pub const Object = struct {
         return list.items;
     }
 
-    /// Whether this object carries the private brand `name`.
+    /// Whether this object carries the private brand `name`. Guarded by
+    /// `property_lock` like every other named-metadata map: under `parallel_js`
+    /// the same shared object can be branded (e.g. a class object's static
+    /// brand, or `this` during construction) on one thread while another reads
+    /// the brand set — an unsynchronized `StringHashMap` grow vs lookup corrupts
+    /// the table (observed as an infinite grow-recursion). Uncontended in GIL
+    /// mode (one tryLock, like `getOwn`).
     pub fn hasPrivateBrand(self: *const Object, name: []const u8) bool {
+        self.lockProperties();
+        defer self.unlockProperties();
         const m = self.private_brands orelse return false;
         return m.contains(name);
     }
 
     /// Brand this object with the private name `name` (PrivateFieldAdd /
-    /// PrivateMethodOrAccessorAdd record-keeping).
+    /// PrivateMethodOrAccessorAdd record-keeping). Funneled through
+    /// `property_lock` (see `hasPrivateBrand`) so concurrent brand-adds on a
+    /// shared object can't race the lazy-init or the `StringHashMap` grow.
     pub fn addPrivateBrand(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
+        self.lockProperties();
+        defer self.unlockProperties();
         const alloc = self.accessorsAllocator(arena);
         if (self.private_brands == null) {
             self.private_brands = try alloc.create(std.StringHashMapUnmanaged(void));
