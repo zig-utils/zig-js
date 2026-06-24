@@ -1267,6 +1267,10 @@ pub const Parser = struct {
                     if (seen_spread) return ParseError.InvalidAssignmentTarget;
                     if (p.is_spread) {
                         seen_spread = true;
+                        // An object rest target must be a simple assignment target
+                        // (an identifier or member) — `({...import.meta} = x)`,
+                        // `({...(a+b)} = x)`, `({...[a]} = x)` are SyntaxErrors.
+                        if (p.value.* != .identifier and p.value.* != .member) return ParseError.InvalidAssignmentTarget;
                         if (p.value.* == .identifier) {
                             if (self.isForbiddenBindingName(p.value.identifier)) return ParseError.UnexpectedToken;
                             rest_name = p.value.identifier;
