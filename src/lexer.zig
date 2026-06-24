@@ -269,7 +269,7 @@ pub const Lexer = struct {
         if (cp < 0x80) return isIdentStart(@intCast(cp));
         if (isSpaceCp(cp) or isLineTermCp(cp)) return false;
         if (cp == 0x200C or cp == 0x200D) return false; // ZWNJ/ZWJ: continue-only
-        if (cp == 0x2E2F) return false; // VERTICAL TILDE: Pattern_Syntax, not ID
+        if (cp == 0x2E2F or cp == 0x180E) return false; // VERTICAL TILDE / MONGOLIAN VOWEL SEP: not ID
         return true;
     }
 
@@ -278,7 +278,7 @@ pub const Lexer = struct {
     fn isIdContinueCp(cp: u21) bool {
         if (cp < 0x80) return isIdentPart(@intCast(cp));
         if (isSpaceCp(cp) or isLineTermCp(cp)) return false;
-        if (cp == 0x2E2F) return false; // VERTICAL TILDE: Pattern_Syntax, not ID
+        if (cp == 0x2E2F or cp == 0x180E) return false; // VERTICAL TILDE / MONGOLIAN VOWEL SEP: not ID
         return true;
     }
 
@@ -452,7 +452,12 @@ pub const Lexer = struct {
         }
         // Numbers
         if (std.ascii.isDigit(c) or (c == '.' and std.ascii.isDigit(self.peek2()))) {
-            return self.lexNumber();
+            const num = try self.lexNumber();
+            // A numeric literal may not be immediately followed by an
+            // IdentifierStart (a digit is already consumed): `3in`, `3abc`,
+            // `3.toString()` are SyntaxErrors.
+            if (self.i < self.src.len and self.identStartHere()) return LexError.UnexpectedCharacter;
+            return num;
         }
         // Identifiers / keywords — ASCII, Unicode letters, or `\u` escapes.
         if (self.identStartHere()) {
