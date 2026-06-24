@@ -2106,7 +2106,9 @@ pub const Parser = struct {
         // `await expr` — a unary operator, only inside an async function body.
         if (self.in_async and isKeyword(self.cur(), "await")) {
             _ = self.advance();
-            return self.alloc(.{ .await_expr = .{ .argument = try self.parseUnary() } });
+            const operand = try self.parseUnary();
+            try self.rejectExponentAfterUnary();
+            return self.alloc(.{ .await_expr = .{ .argument = operand } });
         }
         if (self.check(.plus_plus) or self.check(.minus_minus)) {
             const inc = self.cur().kind == .plus_plus;
@@ -2129,6 +2131,7 @@ pub const Parser = struct {
             // parenthesized) is always an early SyntaxError.
             if (operand.* == .member and operand.member.property.len > 0 and operand.member.property[0] == '#')
                 return ParseError.UnexpectedToken;
+            try self.rejectExponentAfterUnary();
             return self.alloc(.{ .delete_expr = operand });
         }
         const op: ?ast.UnaryOp = switch (t.kind) {
@@ -2146,9 +2149,20 @@ pub const Parser = struct {
         if (op) |o| {
             _ = self.advance();
             const operand = try self.parseUnary();
+            try self.rejectExponentAfterUnary();
             return self.alloc(.{ .unary = .{ .op = o, .operand = operand } });
         }
         return self.parsePostfix();
+    }
+
+    /// `ExponentiationExpression : UpdateExpression ** ...` — the left operand of
+    /// `**` must be an UpdateExpression, never an unparenthesized UnaryExpression.
+    /// So a `**` immediately following a just-parsed unary operator's operand
+    /// (`-x ** 2`, `typeof x ** 2`, `await x ** 2`) is an early SyntaxError;
+    /// parenthesizing (`(-x) ** 2`) or using an UpdateExpression (`++x ** 2`)
+    /// avoids it. (Prefix `++`/`--` do not call this — they are UpdateExpressions.)
+    fn rejectExponentAfterUnary(self: *Parser) ParseError!void {
+        if (self.check(.star_star)) return ParseError.UnexpectedToken;
     }
 
     fn parsePostfix(self: *Parser) ParseError!*Node {
