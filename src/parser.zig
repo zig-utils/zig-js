@@ -57,6 +57,10 @@ pub const Parser = struct {
     /// `super` at all (a direct eval from a field initializer leaves this false,
     /// since `super.prop` is permitted there).
     scan_forbid_super_property: bool = false,
+    /// When true, `scanSuperAndArgs` flags a YieldExpression — used to enforce
+    /// the early error "FormalParameters of a generator must not contain a
+    /// YieldExpression" (e.g. `function* g(a = yield) {}`).
+    scan_forbid_yield: bool = false,
     /// Active labels in the current function body. A function boundary resets
     /// these because `break`/`continue` cannot target labels outside the
     /// function it appears in.
@@ -1568,11 +1572,36 @@ pub const Parser = struct {
         return params.items;
     }
 
-    fn parseFunctionParamList(self: *Parser) ParseError![]const ast.Param {
+    /// Parse a function/method's formal parameter list in that function's own
+    /// [Yield] context: a generator's parameters are [+Yield], so `yield` is a
+    /// reserved word there (`function* g(yield) {}` is an error) and a
+    /// YieldExpression among the parameter defaults (`function* g(a = yield) {}`)
+    /// is the early error "FormalParameters Contains YieldExpression". A
+    /// non-generator nested in a generator gets [~Yield] (its own context), so
+    /// `yield` is an ordinary identifier in its parameters again. The enclosing
+    /// async context never leaks into a parameter list parsed here.
+    fn parseFunctionParamList(self: *Parser, is_gen: bool) ParseError![]const ast.Param {
         const saved_async = self.in_async;
+        const saved_gen = self.in_generator;
         self.in_async = false;
-        defer self.in_async = saved_async;
-        return self.parseParamList();
+        self.in_generator = is_gen;
+        defer {
+            self.in_async = saved_async;
+            self.in_generator = saved_gen;
+        }
+        const params = try self.parseParamList();
+        if (is_gen) {
+            const saved_allow = self.scan_allow_arguments;
+            const saved_fy = self.scan_forbid_yield;
+            self.scan_allow_arguments = true; // only YieldExpression is the concern here
+            self.scan_forbid_yield = true;
+            defer {
+                self.scan_allow_arguments = saved_allow;
+                self.scan_forbid_yield = saved_fy;
+            }
+            for (params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
+        }
+        return params;
     }
 
     fn isEvalOrArguments(name: []const u8) bool {
@@ -1644,7 +1673,7 @@ pub const Parser = struct {
         const name_tok = self.advance();
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
         if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
-        const params = try self.parseFunctionParamList();
+        const params = try self.parseFunctionParamList(is_gen);
         const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
@@ -1680,7 +1709,7 @@ pub const Parser = struct {
                 name = self.advance().text;
             }
         }
-        const params = try self.parseFunctionParamList();
+        const params = try self.parseFunctionParamList(is_gen);
         const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
@@ -2781,7 +2810,10 @@ pub const Parser = struct {
             .delete_expr => |t| try self.scanSuperAndArgs(t),
             .update => |u| try self.scanSuperAndArgs(u.target),
             .await_expr => |a| try self.scanSuperAndArgs(a.argument),
-            .yield_expr => |y| if (y.argument) |arg| try self.scanSuperAndArgs(arg),
+            .yield_expr => |y| {
+                if (self.scan_forbid_yield) return ParseError.UnexpectedToken;
+                if (y.argument) |arg| try self.scanSuperAndArgs(arg);
+            },
             .spread => |v| try self.scanSuperAndArgs(v),
             .optional_chain => |c| try self.scanSuperAndArgs(c),
             .binary => |b| {
@@ -3103,7 +3135,7 @@ pub const Parser = struct {
     /// Parse `(params) { body }` after a method name, returning a function node.
     /// `is_gen` marks a generator method (`*m() {}`).
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
-        const params = try self.parseParamList();
+        const params = try self.parseFunctionParamList(is_gen);
         try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
