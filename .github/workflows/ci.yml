@@ -89,17 +89,24 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0-dev.131+73c51c142
-      - name: TSan loop over the no-GIL blocking-gate case (pin the emergent race)
+      - name: TSan loop over the no-GIL race-hunt corpus (pin remaining races)
         working-directory: zig-js
         env:
           # Stop at the first detected race so its report is the tail of the log.
           TSAN_OPTIONS: halt_on_error=1
         run: |
-          # The flake is ~1/40 and emergent, so a single run rarely executes the
-          # racy interleaving. Loop until TSan catches it (the build cache-hits
-          # after the first compile, so iterations are just the instrumented run).
-          for i in $(seq 1 80); do
-            echo "=== blocking-gate parallel_js+TSan iter $i ==="
+          # Hunt the one remaining no-GIL data-race candidate — the rare
+          # StringHashMap-grow panic seen once in the semantics batch (~1/160+) —
+          # by looping the batch under TSan. blocking-gate (fixed) is kept as a
+          # cheap regression witness. The build cache-hits after the first
+          # compile, so each iteration is just the instrumented run.
+          SEM="semantics/atom-rope-torture.js,semantics/date-cache-churn.js,semantics/frozen-seal-race.js,semantics/private-fields-shared.js,semantics/proto-cycle-race.js,semantics/regexp-lastindex-shared.js,semantics/symbol-registry-cross-thread.js"
+          for i in $(seq 1 40); do
+            echo "=== race-hunt parallel_js+TSan iter $i ==="
+            zig build threads-test -Dtsan=true -Dthreads-parallel-js=true -Dthreads-case="$SEM"
+          done
+          echo "=== blocking-gate regression witness ==="
+          for i in $(seq 1 20); do
             zig build threads-test -Dtsan=true -Dthreads-parallel-js=true -Dthreads-case=api/blocking-gate.js
           done
           echo "no TSan race observed in 80 iterations"
