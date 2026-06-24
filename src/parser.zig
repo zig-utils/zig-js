@@ -2192,10 +2192,29 @@ pub const Parser = struct {
             try self.alloc(.{ .identifier = self.advance().text })
         else
             try self.parseUnary();
+        // `??` may not be combined with `||`/`&&` without parentheses
+        // (CoalesceExpression and LogicalORExpression are distinct productions):
+        // `a ?? b || c`, `a && b ?? c` are SyntaxErrors. Track, within this single
+        // precedence level, whether a `??` and an `||`/`&&` both appear — a
+        // parenthesized operand parses in a nested call, so it never trips this.
+        var seen_coalesce = false;
+        var seen_logical = false;
         while (self.curBinInfo()) |info| {
             if (info.bp < min_bp) break;
+            if (info.logical) |lop| {
+                if (lop == .nullish) {
+                    if (seen_logical) return ParseError.UnexpectedToken;
+                    seen_coalesce = true;
+                } else {
+                    if (seen_coalesce) return ParseError.UnexpectedToken;
+                    seen_logical = true;
+                }
+            }
             _ = self.advance();
-            const next_min: u8 = if (info.right_assoc) info.bp else info.bp + 1;
+            // A `??` operand is a BitwiseORExpression, so it binds tighter than
+            // `&&`/`||` — parse the right side above the logical level so an
+            // unparenthesized `a ?? b && c` leaves `&& c` for the loop to reject.
+            const next_min: u8 = if (info.logical == .nullish) 3 else if (info.right_assoc) info.bp else info.bp + 1;
             const right = try self.parseBinary(next_min);
             if (info.logical) |lop| {
                 left = try self.alloc(.{ .logical = .{ .op = lop, .left = left, .right = right } });
