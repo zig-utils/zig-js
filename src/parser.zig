@@ -1926,7 +1926,10 @@ pub const Parser = struct {
     /// `yield [expr]` / `yield* expr`. Only reached inside a generator body.
     fn parseYield(self: *Parser) ParseError!*Node {
         _ = self.advance(); // yield
-        const delegate = self.match(.star);
+        // `yield [no LineTerminator here] * AssignmentExpression`: a `*` on the
+        // next line is not part of the yield, so `yield \n * x` is a SyntaxError
+        // (the orphaned `*` fails to parse as the yield's operand below).
+        const delegate = self.noNewlineBefore(0) and self.match(.star);
         var arg: ?*Node = null;
         // A bare `yield` (no operand) is allowed before a terminator; `yield*`
         // always takes an operand.
