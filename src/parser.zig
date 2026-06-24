@@ -93,6 +93,13 @@ pub const Parser = struct {
     /// inside any bracketing construct (parens, `[]`, `{}`, call args, computed
     /// member, conditional branches).
     no_in: bool = false,
+    /// Set for the single statement that is the body of an `if`/loop/`with` or a
+    /// `label:` item — a Statement position, where a LexicalDeclaration is not
+    /// allowed. `let` there must be an ordinary identifier (so `if (x) let\ny=1`
+    /// is `let;` + `y=1` via ASI), not the start of a `let`-declaration. Consumed
+    /// (read and cleared) at the top of parseStatement so it applies only to that
+    /// one statement and never leaks into a nested block's StatementList.
+    suppress_let_decl: bool = false,
     /// True where a `using`/`await using` declaration statement is permitted: the
     /// StatementList of a Block (incl. function bodies, which parse via
     /// parseBlock) and the top level of a Module. It is NOT permitted at the top
@@ -1048,6 +1055,10 @@ pub const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) ParseError!*Node {
+        // Consume the Statement-only marker: it applies to exactly this statement
+        // (suppressing `let`-declaration recognition), never to a nested block.
+        const suppress_let = self.suppress_let_decl;
+        self.suppress_let_decl = false;
         // Empty statement: a bare `;` (also the trailing `;` after a class /
         // function declaration). Evaluates to a no-op (empty block).
         if (self.check(.semicolon)) {
@@ -1067,7 +1078,16 @@ pub const Parser = struct {
         if (t.kind == .identifier) {
             if (self.isEscapedReservedWord(t)) return ParseError.UnexpectedToken;
             if (std.mem.eql(u8, t.text, "var")) return self.parseVarDecl(.@"var");
-            if (std.mem.eql(u8, t.text, "let") and self.letDeclAhead()) return self.parseVarDecl(.let);
+            if (std.mem.eql(u8, t.text, "let") and !t.escaped_identifier) {
+                if (suppress_let) {
+                    // Statement position (body of if/loop/with, label item): a
+                    // LexicalDeclaration is not allowed, so `let` is an ordinary
+                    // identifier — EXCEPT `let [`, the restricted ExpressionStatement
+                    // production, which is a SyntaxError even with an intervening
+                    // LineTerminator (the restriction has no [no LineTerminator]).
+                    if (self.peekKind(1) == .lbracket) return ParseError.UnexpectedToken;
+                } else if (self.letDeclAhead()) return self.parseVarDecl(.let);
+            }
             if (std.mem.eql(u8, t.text, "const")) return self.parseVarDecl(.@"const");
             // `using x = e, …;` (explicit resource management): a block-scoped,
             // initializer-required declaration — parsed like `const` (disposal at
@@ -1208,6 +1228,8 @@ pub const Parser = struct {
     /// used as an identifier — which `parseStatement` parses as an expression —
     /// is never mistaken for a declaration.
     fn parseSubStatement(self: *Parser, ctx: SubStmtCtx) ParseError!*Node {
+        // A Statement position: `let` here is an identifier, not a declaration.
+        self.suppress_let_decl = true;
         const stmt = try self.parseStatement();
         switch (stmt.*) {
             .var_decl => |d| if (d.kind != .@"var") return ParseError.UnexpectedToken,
@@ -1675,12 +1697,16 @@ pub const Parser = struct {
             self.using_allowed = saved_using;
         }
         var cases: std.ArrayListUnmanaged(ast.SwitchCase) = .empty;
+        // A CaseBlock may contain at most one DefaultClause (early error 13.12.1).
+        var seen_default = false;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             var test_expr: ?*Node = null;
             if (isKeyword(self.cur(), "case")) {
                 _ = self.advance();
                 test_expr = try self.parseExpression();
             } else if (isKeyword(self.cur(), "default")) {
+                if (seen_default) return ParseError.UnexpectedToken;
+                seen_default = true;
                 _ = self.advance();
             } else return ParseError.UnexpectedToken;
             try self.expect(.colon);
