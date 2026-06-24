@@ -1477,6 +1477,19 @@ pub const Interpreter = struct {
 
             .unary => |u| try self.evalUnary(u.op, u.operand),
             .delete_expr => |target| blk: {
+                // `delete super.x` / `delete super[expr]` is always a ReferenceError
+                // (the reference is a SuperReference). SuperProperty creation does
+                // GetThisBinding first — a derived constructor before `super()` has
+                // uninitialized `this`, a ReferenceError thrown BEFORE the key is
+                // evaluated — then evaluates the computed key (for its side effects,
+                // but without ToPropertyKey), and finally delete rejects the
+                // SuperReference. So `delete super[{toString(){throw}}]` yields the
+                // ReferenceError, not the toString error.
+                if (target.* == .super_member) {
+                    if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                    if (target.super_member.computed) |c| _ = try self.eval(c);
+                    return self.throwError("ReferenceError", "Cannot delete a super property");
+                }
                 // `delete obj.prop` / `delete obj[expr]`: remove an own property
                 // (honoring [[Configurable]]). `delete <non-reference>` is true.
                 if (target.* == .member) {
