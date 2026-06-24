@@ -2336,6 +2336,10 @@ pub const Parser = struct {
                 const args = try self.parseArgs();
                 e = try self.alloc(.{ .call = .{ .callee = e, .args = args } });
             } else if (self.check(.template)) {
+                // A tagged template may not appear in an optional chain
+                // (`a?.b`tmpl`` is a SyntaxError) — short-circuiting a tag call is
+                // disallowed.
+                if (has_optional) return ParseError.UnexpectedToken;
                 // Tagged template: `tag`...`` — call `tag` with the cooked-string
                 // array (carrying `raw`) and the substitution values.
                 const tmpl = self.advance();
