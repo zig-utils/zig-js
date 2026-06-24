@@ -2536,11 +2536,30 @@ pub const Parser = struct {
                 is_static = true;
                 _ = self.advance();
             }
-            // `static { ... }` initialization block.
+            // `static { ... }` initialization block. It is its own scope with
+            // `new.target` but no `await`/`yield`/`return`/`arguments`, and a
+            // SuperCall is forbidden (SuperProperty is allowed).
             if (is_static and self.check(.lbrace)) {
+                const saved_async = self.in_async;
+                const saved_gen = self.in_generator;
+                const saved_fn = self.fn_depth;
+                self.in_async = false;
+                self.in_generator = false;
+                self.fn_depth = 0; // `return` is a SyntaxError in a static block
                 self.new_target_depth += 1;
-                const block = try self.parseBlock();
+                const block = self.parseBlock() catch |e| {
+                    self.in_async = saved_async;
+                    self.in_generator = saved_gen;
+                    self.fn_depth = saved_fn;
+                    self.new_target_depth -= 1;
+                    return e;
+                };
                 self.new_target_depth -= 1;
+                self.in_async = saved_async;
+                self.in_generator = saved_gen;
+                self.fn_depth = saved_fn;
+                for (block.block) |s| try self.scanSuperAndArgs(s); // no super()/arguments
+                try self.checkLexicalDupes(block.block, true); // own lexical scope
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
                 continue;
             }
