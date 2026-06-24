@@ -1696,6 +1696,25 @@ pub const Parser = struct {
         return false;
     }
 
+    /// An ordinary `function`/`function*`/`async function[*]` has no
+    /// [[HomeObject]] and no `super` binding, so a SuperCall (`super()`) or
+    /// SuperProperty (`super.x`) anywhere in its parameters or body — including
+    /// inside a nested arrow, which inherits the absent binding — is an early
+    /// SyntaxError (`arguments` stays legal). The scan stops at nested ordinary
+    /// functions/classes/methods, which establish their own `super`.
+    fn forbidSuperInFunction(self: *Parser, body: *Node, params: []const ast.Param) ParseError!void {
+        const saved_args = self.scan_allow_arguments;
+        const saved_prop = self.scan_forbid_super_property;
+        self.scan_allow_arguments = true;
+        self.scan_forbid_super_property = true;
+        defer {
+            self.scan_allow_arguments = saved_args;
+            self.scan_forbid_super_property = saved_prop;
+        }
+        for (params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
+        try self.scanSuperAndArgs(body);
+    }
+
     fn parseFunctionDecl(self: *Parser, is_async: bool) ParseError!*Node {
         const start = self.pos;
         if (is_async) _ = self.advance(); // async
@@ -1710,6 +1729,7 @@ pub const Parser = struct {
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
         if (self.last_fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
+        try self.forbidSuperInFunction(body, params);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .func_decl = fnode });
@@ -1746,6 +1766,7 @@ pub const Parser = struct {
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
         if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
+        try self.forbidSuperInFunction(body, params);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
