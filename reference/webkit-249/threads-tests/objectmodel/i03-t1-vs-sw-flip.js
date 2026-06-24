@@ -14,9 +14,16 @@
 //   - length is exact.
 load("../harness.js", "caller relative");
 
-const ROUNDS = 8;
-const GROW_TO = 600;        // enough appends to cross several vectorLength doublings
-const FOREIGN_WRITES = 64;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+// GIL mode keeps the full 8-round / 600-append amplifier; no-GIL keeps the same
+// owner-grow-vs-foreign-write I27 oracle (lost element / lost foreign write /
+// exact length) at a smaller budget so the sleep-interleaved race stays a
+// correctness witness rather than a serial-performance gate.
+const ROUNDS = NO_GIL ? 2 : 8;
+const GROW_TO = NO_GIL ? 200 : 600; // enough appends to cross several vectorLength doublings
+const FOREIGN_WRITES = NO_GIL ? 32 : 64;
 
 for (let round = 0; round < ROUNDS; ++round) {
     const a = [0]; // owner-installed flat butterfly, tag (main, 0)

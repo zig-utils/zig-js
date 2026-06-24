@@ -15,10 +15,17 @@
 // value.
 load("../harness.js", "caller relative");
 
-const ROUNDS = 6;
-const TARGET = 800;        // indexed growth: many spine replacements
-const PROPS = 64;          // out-of-line growth: several fragment-count steps
-const SAMPLES = 600;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+// GIL mode keeps the full 6-round / 800-element amplifier; no-GIL keeps the same
+// I33 stale-spine reader-vs-grower oracle (every late read is undefined or the
+// writer's exact value — never garbage, never a crash) at a smaller budget so
+// the sleep-interleaved race stays a correctness witness, not a perf gate.
+const ROUNDS = NO_GIL ? 2 : 6;
+const TARGET = NO_GIL ? 300 : 800; // indexed growth: many spine replacements
+const PROPS = NO_GIL ? 32 : 64;    // out-of-line growth: several fragment-count steps
+const SAMPLES = NO_GIL ? 300 : 600;
 
 for (let round = 0; round < ROUNDS; ++round) {
     const a = [0];

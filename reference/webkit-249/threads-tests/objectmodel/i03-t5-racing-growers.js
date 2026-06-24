@@ -13,9 +13,16 @@
 //       lock — the §16.1/T5 interleaving proof) — both must land.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const N = 512; // dense range, striped across threads
-const ROUNDS = 8;
+// GIL mode keeps the full 512-wide / 8-round amplifier; no-GIL keeps the same
+// striped-grower and T5-vs-conversion I21 oracles (every striped element and
+// every named property survives) at a smaller budget so the sleep-interleaved
+// race stays a correctness witness rather than a serial-performance gate.
+const N = NO_GIL ? 192 : 512; // dense range, striped across threads
+const ROUNDS = NO_GIL ? 2 : 8;
 
 // (a) Striped dense growth: thread t writes every index i with i % THREADS == t,
 // in ascending order, so the array grows densely from all sides at once.

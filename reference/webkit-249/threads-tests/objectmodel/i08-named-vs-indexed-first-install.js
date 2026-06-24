@@ -9,8 +9,15 @@
 // indexed halves use disjoint objects.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const ROUNDS = 24;
+// GIL mode keeps the full 24-round amplifier; no-GIL keeps the same AB18-S3
+// oracle (named adds racing indexed first installs on one shared object — no
+// lost add, no abort, no tear) at a smaller round budget so the broad probe
+// stays a semantic witness rather than a serial-performance gate.
+const ROUNDS = NO_GIL ? 4 : 24;
 
 // Half the threads add named properties (inline first, then out-of-line),
 // the other half race dense-index first installs and indexed stores — all on

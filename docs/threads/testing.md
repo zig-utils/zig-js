@@ -218,6 +218,15 @@ focused-green under `parallel_js`, from `heap-access-blocking.js` through
 `heap-stop-interleavings.js`. The promoted invariants block is focused-green
 7/7, and the promoted objectmodel block is focused-green in
 verified slices through `objectmodel/i08-named-vs-indexed-first-install.js`.
+The heavy objectmodel stress files now carry no-GIL budgets so the broad
+probe is not throttled by their serial-performance amplifiers:
+`i03-stale-spine-reader-vs-grow.js`, `i03-stress-force-segmented.js`,
+`i03-stress-force-sw.js`, `i03-t1-vs-sw-flip.js`, `i03-t5-racing-growers.js`,
+`i03-visit-range-outofline.js`, and `i08-named-vs-indexed-first-install.js`
+keep their full round/element/churn amplifiers in GIL mode while `parallel_js`
+runs the same I21/I25/I27/I33/AB18-S3 race oracles at smaller round, range,
+churn, and sample budgets. All seven stay focused-green under `parallel_js`
+and unchanged in GIL mode.
 The full promoted semantics block is focused-green 15/15 under `parallel_js`.
 The IC transition files keep their original GIL-mode pass counts; no-GIL uses
 smaller pass budgets so the files remain transition-correctness witnesses

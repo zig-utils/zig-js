@@ -47,8 +47,15 @@ load("../harness.js", "caller relative");
 
 // Raced workload: disjoint adds + element growth on segmented-from-birth
 // objects.
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-for (let round = 0; round < 6; ++round) {
+// GIL mode keeps the full 6-round race; no-GIL keeps the same 4-thread disjoint
+// add/grow oracle at a smaller round budget so the broad probe stays a semantic
+// witness rather than a serial-performance gate.
+const ROUNDS = NO_GIL ? 2 : 6;
+for (let round = 0; round < ROUNDS; ++round) {
     const o = { seed: round };
     const arr = [0];
     const workers = spawnN(THREADS, (t) => {

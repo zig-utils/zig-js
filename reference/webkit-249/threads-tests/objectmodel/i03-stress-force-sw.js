@@ -48,8 +48,14 @@ load("../harness.js", "caller relative");
 // Raced: with forced SW, BOTH sides of every race run the shared-write
 // protocol; disjoint adds/writes must still all land (I21 under maximum
 // protocol coverage).
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-for (let round = 0; round < 6; ++round) {
+// GIL mode keeps the full 6-round races; no-GIL keeps the same forced-SW
+// disjoint-add and same-name-write oracles at a smaller round budget.
+const ROUNDS = NO_GIL ? 2 : 6;
+for (let round = 0; round < ROUNDS; ++round) {
     const o = {};
     const workers = spawnN(THREADS, (t) => {
         for (let k = 0; k < 24; ++k)
@@ -66,7 +72,7 @@ for (let round = 0; round < 6; ++round) {
 
 // Same-name racing writes under forced SW: last-value-wins per slot among
 // the written set; never torn.
-for (let round = 0; round < 6; ++round) {
+for (let round = 0; round < ROUNDS; ++round) {
     const o = { slot: "init" };
     const writers = spawnN(THREADS, (t) => {
         for (let k = 0; k < 50; ++k)

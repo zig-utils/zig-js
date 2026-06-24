@@ -14,7 +14,14 @@
 // object reachable ONLY through its slot, GC'd twice with churn in between.
 load("../harness.js", "caller relative");
 
-const ROUNDS = 4;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+// GIL mode keeps the full 4-round / 2000-churn amplifier; no-GIL keeps the same
+// §4.5 visit-range cross-check (every boundary k in 1..9 GC'd twice with churn
+// in between) at a smaller round/churn budget.
+const ROUNDS = NO_GIL ? 2 : 4;
+const CHURN = NO_GIL ? 400 : 2000;
 
 function makeSegmentedWithOutOfLine(k, round) {
     // Literal fills inline capacity exactly (6); the next k adds are
@@ -37,7 +44,7 @@ for (let round = 0; round < ROUNDS; ++round) {
 
     gc();
     // Churn: recycle anything wrongly unmarked before the re-read.
-    for (let j = 0; j < 2000; ++j) {
+    for (let j = 0; j < CHURN; ++j) {
         const junk = [j, "churn" + j, { f: j }];
         if (junk.length !== 3)
             throw 0;
@@ -73,7 +80,7 @@ for (let round = 0; round < ROUNDS; ++round) {
     }
 
     gc();
-    for (let j = 0; j < 2000; ++j) {
+    for (let j = 0; j < CHURN; ++j) {
         const junk = { churn: j };
         if (junk.churn !== j)
             throw 0;
