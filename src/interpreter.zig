@@ -615,6 +615,10 @@ pub const Function = struct {
     /// `this` through `super()` before completing normally.
     is_class_constructor: bool = false,
     is_derived_constructor: bool = false,
+    /// A derived class constructor's instance field initializers, run when
+    /// `super()` returns (not at the start of the body). Empty for a base class,
+    /// whose field initializers are prepended to the body and run at its start.
+    field_inits: []const *ast.Node = &.{},
     /// `function*`: calling this returns a generator object instead of running
     /// the body. `gen_chunk` is the body compiled for the suspendable VM (null if
     /// the body falls outside the VM's lowered subset — then calling it throws).
@@ -841,6 +845,10 @@ pub const Interpreter = struct {
     /// contain `new.target`. Ordinary functions/methods do; arrows, scripts,
     /// modules, class fields, and indirect eval do not introduce that context.
     direct_eval_new_target_allowed: bool = false,
+    /// A derived constructor's instance field initializers, awaiting the `super()`
+    /// that runs them. Set when entering the constructor; consumed (and cleared)
+    /// by the SuperCall once `this` is initialized.
+    pending_field_inits: []const *ast.Node = &.{},
     /// True while a class field initializer (or static block) is executing, so a
     /// direct eval inside it inherits the field-initializer early errors:
     /// `super()` and `arguments` are forbidden (`super.prop` stays legal).
@@ -1507,6 +1515,12 @@ pub const Interpreter = struct {
                 if (self.this_value.isObject() and sup_ret.isObject() and sup_ret.asObj() != self.this_value.asObj())
                     adoptInternalSlots(self.this_value.asObj(), sup_ret.asObj());
                 self.this_initialized = true;
+                // InitializeInstanceElements: a derived class's field initializers
+                // run now, once `super()` has returned and `this` exists. Clear the
+                // pending set so they run exactly once.
+                const fis = self.pending_field_inits;
+                self.pending_field_inits = &.{};
+                for (fis) |fi| _ = try self.eval(fi);
                 break :blk Value.undef();
             },
             .super_member => |m| blk: {
@@ -2955,7 +2969,13 @@ pub const Interpreter = struct {
             default_params = try self.arena.dupe(ast.Param, &.{.{ .name = "args", .is_rest = true }});
         }
         const orig: []*Node = if (ctor_node) |cf| cf.body.block else default_super;
-        const body_stmts = try std.mem.concat(self.arena, *Node, &.{ field_inits.items, orig });
+        // A base class runs its field initializers at the start of the
+        // constructor (prepend); a derived class runs them when `super()` returns,
+        // so they are stored on the constructor and not prepended here.
+        const body_stmts = if (super_obj != null)
+            orig
+        else
+            try std.mem.concat(self.arena, *Node, &.{ field_inits.items, orig });
         const body = try self.arena.create(Node);
         body.* = .{ .block = body_stmts };
         const fnode = try self.arena.create(ast.FunctionNode);
@@ -2983,6 +3003,7 @@ pub const Interpreter = struct {
             cf.super_ctor = super_obj;
             cf.is_class_constructor = true;
             cf.is_derived_constructor = super_obj != null;
+            if (super_obj != null) cf.field_inits = field_inits.items;
         }
 
         for (members) |m| {
@@ -3432,6 +3453,9 @@ pub const Interpreter = struct {
         const saved_eval_nt = self.direct_eval_new_target_allowed;
         const saved_fi = self.in_field_initializer;
         const saved_pe = self.in_param_expr;
+        const saved_pfi = self.pending_field_inits;
+        // A derived constructor's field initializers wait for its SuperCall.
+        self.pending_field_inits = func.field_inits;
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
@@ -3477,6 +3501,7 @@ pub const Interpreter = struct {
             self.direct_eval_new_target_allowed = saved_eval_nt;
             self.in_field_initializer = saved_fi;
             self.in_param_expr = saved_pe;
+            self.pending_field_inits = saved_pfi;
         }
         if (func.is_class_constructor and new_target.isUndefined())
             return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
