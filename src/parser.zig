@@ -1921,10 +1921,12 @@ pub const Parser = struct {
         if (self.last_fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
-        // A generator or async function has UniqueFormalParameters: duplicate
-        // parameter names are an error in every mode (a plain function permits
-        // them in sloppy mode with a simple list — handled by validateStrictParams).
-        if (is_gen or is_async) try self.checkDuplicateParams(params);
+        // A generator/async function, or ANY function with a non-simple parameter
+        // list (a default/rest/destructuring), has UniqueFormalParameters:
+        // duplicate names are an error in every mode. Only a plain function with a
+        // simple list permits sloppy duplicates (handled by validateStrictParams
+        // in strict mode).
+        if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
@@ -1963,10 +1965,12 @@ pub const Parser = struct {
         if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
-        // A generator or async function has UniqueFormalParameters: duplicate
-        // parameter names are an error in every mode (a plain function permits
-        // them in sloppy mode with a simple list — handled by validateStrictParams).
-        if (is_gen or is_async) try self.checkDuplicateParams(params);
+        // A generator/async function, or ANY function with a non-simple parameter
+        // list (a default/rest/destructuring), has UniqueFormalParameters:
+        // duplicate names are an error in every mode. Only a plain function with a
+        // simple list permits sloppy duplicates (handled by validateStrictParams
+        // in strict mode).
+        if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
@@ -2566,7 +2570,9 @@ pub const Parser = struct {
         // `new.target` meta-property.
         if (self.match(.dot)) {
             const m = self.advance();
-            if (m.kind != .identifier or !std.mem.eql(u8, m.text, "target")) return ParseError.UnexpectedToken;
+            // `target` is a contextual keyword here — it may not be escaped
+            // (`new.target` is a SyntaxError).
+            if (m.kind != .identifier or m.escaped_identifier or !std.mem.eql(u8, m.text, "target")) return ParseError.UnexpectedToken;
             if (self.new_target_depth == 0) return ParseError.UnexpectedToken;
             return self.alloc(.new_target_expr);
         }
