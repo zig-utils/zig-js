@@ -713,6 +713,10 @@ pub const Lexer = struct {
         if (self.peek() == 'n') {
             // `123n` — a decimal BigInt literal (no fraction/exponent allowed).
             if (std.mem.indexOfAny(u8, self.src[start..self.i], ".eE") != null) return LexError.InvalidNumber;
+            // The integer part may not have a leading zero: only `0n` is legal,
+            // `00n`/`01n`/`08n`/`0123n` (legacy-octal-like or non-octal-decimal)
+            // are SyntaxErrors in every mode.
+            if (self.src[start] == '0' and self.i - start > 1) return LexError.InvalidNumber;
             const digits = try stripSeparators(self.arena, self.src[start..self.i]);
             self.i += 1;
             if (std.fmt.parseInt(i128, digits, 10)) |bi| {
