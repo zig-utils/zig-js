@@ -845,6 +845,10 @@ pub const Interpreter = struct {
     /// direct eval inside it inherits the field-initializer early errors:
     /// `super()` and `arguments` are forbidden (`super.prop` stays legal).
     in_field_initializer: bool = false,
+    /// True while a non-arrow function's parameter default expressions are being
+    /// evaluated (the parameter scope, which has an `arguments` binding). A direct
+    /// eval there may not declare `arguments` — an early error.
+    in_param_expr: bool = false,
     /// True while executing eval'd code: EvalDeclarationInstantiation creates
     /// new global var/function bindings as *deletable* (configurable), unlike a
     /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
@@ -3317,6 +3321,7 @@ pub const Interpreter = struct {
         const saved_this_initialized = self.this_initialized;
         const saved_eval_nt = self.direct_eval_new_target_allowed;
         const saved_fi = self.in_field_initializer;
+        const saved_pe = self.in_param_expr;
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
@@ -3361,6 +3366,7 @@ pub const Interpreter = struct {
             self.this_initialized = saved_this_initialized;
             self.direct_eval_new_target_allowed = saved_eval_nt;
             self.in_field_initializer = saved_fi;
+            self.in_param_expr = saved_pe;
         }
         if (func.is_class_constructor and new_target.isUndefined())
             return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
@@ -3425,8 +3431,9 @@ pub const Interpreter = struct {
         }
 
         // Bind parameters in `call_env` (so a default can reference earlier
-        // params).
-        try self.bindParams(func.params, args);
+        // params). A non-arrow parameter scope owns `arguments`, so a direct eval
+        // in a default expression may not redeclare it (checked in evalFn).
+        try self.bindParams2(func.params, args, func.is_arrow);
 
         // Async generator: params have now bound (propagating any side-effect
         // throws). We can't run the body yet, so hand back an inert object
@@ -3472,6 +3479,10 @@ pub const Interpreter = struct {
     /// destructuring pattern is bound via `bindPattern`. Shared by ordinary
     /// calls and generators (which bind into the generator's own environment).
     pub fn bindParams(self: *Interpreter, params: []const ast.Param, args: []const Value) EvalError!void {
+        return self.bindParams2(params, args, false);
+    }
+
+    pub fn bindParams2(self: *Interpreter, params: []const ast.Param, args: []const Value, is_arrow: bool) EvalError!void {
         for (params, 0..) |p, i| {
             if (p.is_rest) {
                 const rest = try self.newArray();
@@ -3483,7 +3494,15 @@ pub const Interpreter = struct {
             var v: Value = if (i < args.len) args[i] else Value.undef();
             if (v.isUndefined()) {
                 if (p.default) |d| {
-                    v = try self.eval(d);
+                    // The default runs in the parameter scope; a non-arrow's owns
+                    // `arguments`, so a direct eval there can't declare it.
+                    const saved_pe = self.in_param_expr;
+                    self.in_param_expr = !is_arrow;
+                    v = self.eval(d) catch |e| {
+                        self.in_param_expr = saved_pe;
+                        return e;
+                    };
+                    self.in_param_expr = saved_pe;
                     if (p.pattern == null) try self.maybeNameAnon(v, d, p.name); // `function f(x = () => {})` ⇒ name "x"
                 }
             }
@@ -10671,6 +10690,13 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         } else if (self.in_field_initializer) {
             parser.scanEvalContext(prog.program, false, false) catch
                 return self.throwError("SyntaxError", "eval: 'super()'/'arguments' not allowed in a field initializer");
+        }
+        // A direct eval in a non-arrow function's parameter scope may not declare
+        // `arguments` (the parameter environment already binds the arguments
+        // object) — an early error before any eval'd code runs.
+        if (self.direct_eval_call and self.in_param_expr) {
+            if (parser.evalDeclaresArguments(prog.program) catch false)
+                return self.throwError("SyntaxError", "eval: cannot declare 'arguments' in a parameter expression");
         }
     }
 

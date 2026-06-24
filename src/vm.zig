@@ -688,7 +688,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     const saved_env = vm.env;
     vm.env = genv;
     defer vm.env = saved_env;
-    try vm.bindParams(func.params, args);
+    try vm.bindParams2(func.params, args, func.is_arrow);
     const bound_this = try bindThisForCall(vm, func, this_val);
 
     const g = try gc_mod.allocGenerator(vm.arena);
@@ -918,8 +918,25 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const saved_env = vm.env;
     vm.env = genv;
     defer vm.env = saved_env;
-    try vm.bindParams(func.params, args);
-    const bound_this = try bindThisForCall(vm, func, this_val);
+    // An error thrown synchronously while evaluating parameter defaults (or
+    // binding `this`) of an async function must settle the result promise as a
+    // rejection, not propagate out of the call.
+    const result = try promise.newPromise(vm);
+    const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    vm.bindParams2(func.params, args, func.is_arrow) catch |err| {
+        if (err != error.Throw) return err;
+        const reason = vm.exception;
+        vm.exception = Value.undef();
+        try promise.reject(vm, rp, reason);
+        return Value.obj(result);
+    };
+    const bound_this = bindThisForCall(vm, func, this_val) catch |err| {
+        if (err != error.Throw) return err;
+        const reason = vm.exception;
+        vm.exception = Value.undef();
+        try promise.reject(vm, rp, reason);
+        return Value.obj(result);
+    };
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
@@ -929,7 +946,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
         .is_async = true,
-        .result = try promise.newPromise(vm),
+        .result = result,
     };
     gc_mod.initGeneratorBacking(g);
     try asyncDrive(vm, g, .send, Value.undef());
@@ -1042,7 +1059,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const saved_env = vm.env;
     vm.env = genv;
     defer vm.env = saved_env;
-    try vm.bindParams(func.params, args);
+    try vm.bindParams2(func.params, args, func.is_arrow);
     const bound_this = try bindThisForCall(vm, func, this_val);
 
     const g = try gc_mod.allocGenerator(vm.arena);

@@ -2632,6 +2632,33 @@ pub const Parser = struct {
         _ = self;
     }
 
+    /// Whether the (eval) program's top-level declarations bind the name
+    /// `arguments` — a `var` (hoisted out of nested blocks/control-flow, but not
+    /// functions) or a top-level lexical / function / class declaration. Used to
+    /// reject a direct eval that declares `arguments` inside a non-arrow
+    /// function's parameter expression scope (an early error).
+    pub fn evalDeclaresArguments(self: *Parser, stmts: []const *Node) ParseError!bool {
+        var vars: std.StringHashMapUnmanaged(void) = .empty;
+        for (stmts) |s| try self.collectVarNames(s, &vars);
+        if (vars.contains("arguments")) return true;
+        // Top-level lexical / function / class named `arguments`.
+        for (stmts) |s| switch (s.*) {
+            .var_decl => |d| if (d.kind != .@"var" and std.mem.eql(u8, d.name, "arguments")) return true,
+            .destructure_decl => |d| if (d.kind != .@"var") {
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                try self.addPatternNames(&names, d.pattern);
+                for (names.items) |n| if (std.mem.eql(u8, n, "arguments")) return true;
+            },
+            .decl_group => |g| for (g) |d2| {
+                if (d2.* == .var_decl and d2.var_decl.kind != .@"var" and std.mem.eql(u8, d2.var_decl.name, "arguments")) return true;
+            },
+            .func_decl => |f| if (std.mem.eql(u8, f.name, "arguments")) return true,
+            .class_expr => |c| if (std.mem.eql(u8, c.name, "arguments")) return true,
+            else => {},
+        };
+        return false;
+    }
+
     /// Validate eval'd code against the syntactic restrictions it inherits:
     /// every top-level statement is scanned for a SuperCall (always forbidden in
     /// these eval contexts), plus an `arguments` reference (when
