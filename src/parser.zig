@@ -3543,7 +3543,15 @@ pub const Parser = struct {
                 try self.checkPrivateUsesInNode(declared, i.specifier);
                 if (i.options) |options| try self.checkPrivateUsesInNode(declared, options);
             },
-            .class_expr => |c| try self.checkPrivateNameUses(declared, c.members),
+            .class_expr => |c| {
+                // The heritage (`extends <expr>`) is evaluated in the ENCLOSING
+                // private environment, not the class's own — so a private name
+                // there must already be in scope (`class C extends class { x =
+                // this.#foo; } { #foo; }` is a SyntaxError). The members,
+                // conversely, see the class's own private names too.
+                if (c.superclass) |sc| try self.checkPrivateUsesInNode(declared, sc);
+                try self.checkPrivateNameUses(declared, c.members);
+            },
             else => {},
         }
     }
