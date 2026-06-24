@@ -2267,6 +2267,9 @@ pub const Parser = struct {
     }
 
     fn parseArrowBody(self: *Parser, params: []const ast.Param, is_async: bool, start: usize) ParseError!*Node {
+        // No LineTerminator is allowed between the parameter list and `=>`
+        // (`() \n => {}` is a SyntaxError).
+        if (!self.noNewlineBefore(0)) return ParseError.UnexpectedToken;
         try self.expect(.arrow);
         try self.checkDuplicateParams(params); // arrows forbid duplicate params in all modes
 
@@ -2404,7 +2407,9 @@ pub const Parser = struct {
 
     fn parseUnary(self: *Parser) ParseError!*Node {
         // `await expr` — a unary operator, only inside an async function body.
-        if (self.in_async and isKeyword(self.cur(), "await")) {
+        // An escaped `await` (`await`) is never the keyword (the leftover
+        // identifier is then rejected as a reserved reference in its context).
+        if (self.in_async and !self.cur().escaped_identifier and isKeyword(self.cur(), "await")) {
             _ = self.advance();
             const operand = try self.parseUnary();
             try self.rejectExponentAfterUnary();
@@ -2837,6 +2842,11 @@ pub const Parser = struct {
             } else if (key_tok.kind == .identifier) {
                 if (isAlwaysReservedBinding(key) or (self.strict and isStrictReservedBinding(key)))
                     return ParseError.UnexpectedToken;
+                // A `{ yield }`/`{ await }` shorthand is an identifier reference/
+                // binding, so `yield` is forbidden in a generator and `await` in
+                // an async function/module/static block.
+                if (self.in_generator and std.mem.eql(u8, key, "yield")) return ParseError.UnexpectedToken;
+                if ((self.in_async or self.module) and std.mem.eql(u8, key, "await")) return ParseError.UnexpectedToken;
                 const ident = try self.alloc(.{ .identifier = key });
                 // Shorthand `{ a }`, or `{ a = default }` (a destructuring
                 // default surfaced via the cover grammar).
