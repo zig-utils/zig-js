@@ -71,6 +71,12 @@ pub const Parser = struct {
     /// Keyed by node pointer; only consulted during pattern conversion, so a
     /// stale entry for an array used as a plain literal is simply never checked.
     rest_trailing_comma_arrays: std.AutoHashMapUnmanaged(*Node, void) = .empty,
+    /// Object literals carrying a CoverInitializedName (`{ a = 1 }`), which is
+    /// valid ONLY when the object is later refined to an assignment pattern.
+    /// `litToPattern` removes an entry on conversion; any left when the
+    /// Script/Module finishes parsing was used as a real object literal — an
+    /// early SyntaxError (`({ a = 1 })`, `f({ a = 1 })`).
+    pending_cover_inits: std.AutoHashMapUnmanaged(*Node, void) = .empty,
     /// True where a `using`/`await using` declaration statement is permitted: the
     /// StatementList of a Block (incl. function bodies, which parse via
     /// parseBlock) and the top level of a Module. It is NOT permitted at the top
@@ -351,6 +357,9 @@ pub const Parser = struct {
         // Early error: no duplicate lexically-declared names in a scope.
         try self.checkLexicalDupes(stmts.items, false);
         try self.checkPrivateUsesInProgram(stmts.items);
+        // A CoverInitializedName (`{ a = 1 }`) never refined to a pattern is an
+        // early error.
+        if (self.pending_cover_inits.count() > 0) return ParseError.UnexpectedToken;
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -805,6 +814,7 @@ pub const Parser = struct {
             try stmts.append(self.arena, try self.parseModuleItem());
         }
         try self.checkModuleEarlyErrors(stmts.items);
+        if (self.pending_cover_inits.count() > 0) return ParseError.UnexpectedToken;
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -1222,6 +1232,9 @@ pub const Parser = struct {
                 return self.alloc(.{ .arr_pattern = .{ .elems = out.items, .rest = rest } });
             },
             .object_lit => |props| {
+                // This object is being refined to a pattern, so any
+                // CoverInitializedName it carries is legal (it becomes a default).
+                _ = self.pending_cover_inits.remove(node);
                 var out: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
                 var rest_name: ?[]const u8 = null;
                 var seen_spread = false;
@@ -2710,6 +2723,7 @@ pub const Parser = struct {
 
     fn parseObjectLiteral(self: *Parser) ParseError!*Node {
         try self.expect(.lbrace);
+        var has_cover_init = false;
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             // Spread property `{ ...expr }`.
@@ -2781,6 +2795,9 @@ pub const Parser = struct {
                 // Shorthand `{ a }`, or `{ a = default }` (a destructuring
                 // default surfaced via the cover grammar).
                 if (self.match(.assign)) {
+                    // `{ a = default }` — a CoverInitializedName, valid only if
+                    // this object is refined to an assignment pattern.
+                    has_cover_init = true;
                     val = try self.alloc(.{ .assign = .{ .target = ident, .value = try self.parseAssignment() } });
                 } else {
                     val = ident;
@@ -2791,7 +2808,9 @@ pub const Parser = struct {
         }
         try self.expect(.rbrace);
         for (props.items) |p| try self.checkMethodNoSuperCall(p.value);
-        return self.alloc(.{ .object_lit = props.items });
+        const node = try self.alloc(.{ .object_lit = props.items });
+        if (has_cover_init) try self.pending_cover_inits.put(self.arena, node, {});
+        return node;
     }
 
     /// `super(args)` or `super.prop` / `super[expr]`. (`super.m(args)` is a
