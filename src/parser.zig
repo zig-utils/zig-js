@@ -2290,6 +2290,10 @@ pub const Parser = struct {
             // `++1` are early SyntaxErrors.
             if (operand.* != .identifier and operand.* != .member and operand.* != .super_member)
                 return ParseError.InvalidAssignmentTarget;
+            // Strict mode forbids updating `eval`/`arguments` (they are not valid
+            // assignment targets): `"use strict"; ++eval;` is a SyntaxError.
+            if (self.strict and operand.* == .identifier and isEvalOrArguments(operand.identifier))
+                return ParseError.UnexpectedToken;
             return self.alloc(.{ .update = .{ .inc = inc, .prefix = true, .target = operand } });
         }
         const t = self.cur();
@@ -2344,6 +2348,10 @@ pub const Parser = struct {
             // `import(x)++`, `f()++`, `1++` are early SyntaxErrors.
             if (m.* != .identifier and m.* != .member and m.* != .super_member)
                 return ParseError.InvalidAssignmentTarget;
+            // Strict mode forbids updating `eval`/`arguments`: `"use strict";
+            // eval++;` is a SyntaxError.
+            if (self.strict and m.* == .identifier and isEvalOrArguments(m.identifier))
+                return ParseError.UnexpectedToken;
             const inc = self.cur().kind == .plus_plus;
             _ = self.advance();
             return self.alloc(.{ .update = .{ .inc = inc, .prefix = false, .target = m } });
