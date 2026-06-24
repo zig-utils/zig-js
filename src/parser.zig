@@ -2648,6 +2648,8 @@ pub const Parser = struct {
     fn checkPrivateNames(self: *Parser, members: []const ast.ClassMember) ParseError!void {
         for (members, 0..) |m, i| {
             if (m.key_expr != null or m.key.len == 0 or m.key[0] != '#') continue;
+            // A private name may not be `#constructor` (in any element form).
+            if (std.mem.eql(u8, m.key, "#constructor")) return ParseError.UnexpectedToken;
             for (members[0..i]) |prev| {
                 if (prev.key_expr != null or !std.mem.eql(u8, prev.key, m.key)) continue;
                 // A complementary get/set pair at the same placement is the only
