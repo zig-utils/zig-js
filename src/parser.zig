@@ -82,6 +82,12 @@ pub const Parser = struct {
     /// (`({}) = 1`, `([a]) = b`), so `litToPattern` rejects one; a parenthesized
     /// identifier/member stays a valid target and is routed around litToPattern.
     paren_wrapped: std.AutoHashMapUnmanaged(*Node, void) = .empty,
+    /// The `[~In]` grammar parameter: true while parsing a classic `for (init;…)`
+    /// init expression, where a top-level `in` (binary or `#x in obj`) is
+    /// forbidden so it can't be confused with a for-in head. Reset to `[+In]`
+    /// inside any bracketing construct (parens, `[]`, `{}`, call args, computed
+    /// member, conditional branches).
+    no_in: bool = false,
     /// True where a `using`/`await using` declaration statement is permitted: the
     /// StatementList of a Block (incl. function bodies, which parse via
     /// parseBlock) and the top level of a Module. It is NOT permitted at the top
@@ -1581,7 +1587,10 @@ pub const Parser = struct {
             _ = self.advance(); // await
             init_node = try self.parseVarDeclDispose(.@"const", 2);
         } else {
+            // A classic for-init is `[~In]`: a top-level `in` is forbidden here.
+            self.no_in = true;
             init_node = try self.parseExpression();
+            self.no_in = false;
             try self.expect(.semicolon);
         }
         var cond: ?*Node = null;
@@ -1993,6 +2002,9 @@ pub const Parser = struct {
         // front so nested functions parsed within inherit correctly.
         self.strict = saved_strict or self.peekUseStrict();
         self.last_fn_strict = self.strict;
+        // A function body is `[+In]`, even nested in a for-init's `[~In]` context.
+        const saved_no_in = self.no_in;
+        self.no_in = false;
         defer {
             self.in_generator = saved_gen;
             self.in_async = saved_async;
@@ -2004,6 +2016,7 @@ pub const Parser = struct {
             self.active_labels.items.len = saved_active_labels;
             self.pending_labels.items.len = saved_pending_labels;
             self.continue_labels.items.len = saved_continue_labels;
+            self.no_in = saved_no_in;
         }
         return self.parseBlock();
     }
@@ -2260,16 +2273,19 @@ pub const Parser = struct {
         const saved_strict = self.strict;
         const saved_iter = self.iter_depth;
         const saved_switch = self.switch_depth;
+        const saved_no_in = self.no_in; // an arrow body is `[+In]`
         self.in_async = is_async;
         self.fn_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
+        self.no_in = false;
         defer {
             self.in_async = saved_async;
             self.strict = saved_strict;
             self.fn_depth -= 1;
             self.iter_depth = saved_iter;
             self.switch_depth = saved_switch;
+            self.no_in = saved_no_in;
         }
         if (self.check(.lbrace)) {
             const own_use_strict = self.peekUseStrict();
@@ -2287,6 +2303,10 @@ pub const Parser = struct {
     fn parseConditional(self: *Parser) ParseError!*Node {
         const cond = try self.parseBinary(0);
         if (self.match(.question)) {
+            // The branches of `?:` are `[+In]` even when the condition is `[~In]`.
+            const saved_no_in = self.no_in;
+            self.no_in = false;
+            defer self.no_in = saved_no_in;
             const cons = try self.parseAssignment();
             try self.expect(.colon);
             const alt = try self.parseAssignment();
@@ -2303,7 +2323,8 @@ pub const Parser = struct {
     /// relational < shift < additive < multiplicative < `**`.
     fn curBinInfo(self: *Parser) ?BinInfo {
         if (isKeyword(self.cur(), "instanceof")) return .{ .bp = 7, .binary = .instanceof };
-        if (isKeyword(self.cur(), "in")) return .{ .bp = 7, .binary = .in_op };
+        // `[~In]` (classic for-init): a top-level `in` is not a binary operator.
+        if (!self.no_in and isKeyword(self.cur(), "in")) return .{ .bp = 7, .binary = .in_op };
         return binInfo(self.cur().kind);
     }
 
@@ -2340,7 +2361,7 @@ pub const Parser = struct {
         // `#field in obj`: a private name is a valid primary only as the LHS of
         // `in` (a private brand check). Represent it as an identifier whose text
         // keeps the leading `#` so the interpreter can recognize it.
-        var left = if (self.in_class and self.check(.private_name) and self.peekIsKeyword(1, "in"))
+        var left = if (self.in_class and !self.no_in and self.check(.private_name) and self.peekIsKeyword(1, "in"))
             try self.alloc(.{ .identifier = self.advance().text })
         else
             try self.parseUnary();
@@ -2479,7 +2500,10 @@ pub const Parser = struct {
                     const args = try self.parseArgs();
                     e = try self.alloc(.{ .call = .{ .callee = e, .args = args, .optional = true } });
                 } else if (self.match(.lbracket)) {
+                    const saved_no_in = self.no_in; // a computed key is `[+In]`
+                    self.no_in = false;
                     const idx = try self.parseExpression();
+                    self.no_in = saved_no_in;
                     try self.expect(.rbracket);
                     e = try self.alloc(.{ .member = .{ .object = e, .computed = idx, .optional = true } });
                 } else {
@@ -2489,7 +2513,10 @@ pub const Parser = struct {
                     e = try self.alloc(.{ .member = .{ .object = e, .property = name.text, .optional = true } });
                 }
             } else if (self.match(.lbracket)) {
+                const saved_no_in = self.no_in; // a computed key is `[+In]`
+                self.no_in = false;
                 const idx = try self.parseExpression();
+                self.no_in = saved_no_in;
                 try self.expect(.rbracket);
                 e = try self.alloc(.{ .member = .{ .object = e, .computed = idx } });
             } else if (self.check(.lparen)) {
@@ -2512,6 +2539,9 @@ pub const Parser = struct {
 
     fn parseArgs(self: *Parser) ParseError![]*Node {
         try self.expect(.lparen);
+        const saved_no_in = self.no_in; // arguments are `[+In]`
+        self.no_in = false;
+        defer self.no_in = saved_no_in;
         var args: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.rparen) and !self.check(.eof)) {
             try args.append(self.arena, try self.parseSpreadable());
@@ -2730,6 +2760,9 @@ pub const Parser = struct {
 
     fn parseObjectLiteral(self: *Parser) ParseError!*Node {
         try self.expect(.lbrace);
+        const saved_no_in = self.no_in; // object property values are `[+In]`
+        self.no_in = false;
+        defer self.no_in = saved_no_in;
         var has_cover_init = false;
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
@@ -2846,6 +2879,10 @@ pub const Parser = struct {
     /// not consumed.
     fn parseImportExpr(self: *Parser) ParseError!*Node {
         _ = self.advance(); // `import`
+        // `import(spec, options)` arguments are `[+In]` (the `( … )` resets it).
+        const saved_no_in = self.no_in;
+        self.no_in = false;
+        defer self.no_in = saved_no_in;
         if (self.match(.dot)) {
             const m = self.advance();
             if (m.kind != .identifier) return ParseError.UnexpectedToken;
@@ -2936,6 +2973,11 @@ pub const Parser = struct {
     fn parseClassExpr(self: *Parser) ParseError!*Node {
         const start = self.pos;
         _ = self.advance(); // class
+        // A class body (computed names, field initializers, method bodies) is
+        // `[+In]`, even when the class expression appears in a for-init's `[~In]`.
+        const saved_no_in = self.no_in;
+        self.no_in = false;
+        defer self.no_in = saved_no_in;
         var name: []const u8 = "";
         if (self.check(.identifier) and !isKeyword(self.cur(), "extends")) {
             // A class's BindingIdentifier is always strict-mode code (`class let {}`,
@@ -3548,6 +3590,9 @@ pub const Parser = struct {
 
     fn parseArrayLiteral(self: *Parser) ParseError!*Node {
         try self.expect(.lbracket);
+        const saved_no_in = self.no_in; // array elements are `[+In]`
+        self.no_in = false;
+        defer self.no_in = saved_no_in;
         var elems: std.ArrayListUnmanaged(*Node) = .empty;
         var rest_trailing_comma = false;
         while (!self.check(.rbracket) and !self.check(.eof)) {
@@ -3613,7 +3658,10 @@ pub const Parser = struct {
                 return self.alloc(.{ .regex_literal = .{ .pattern = t.text, .flags = t.flags } });
             },
             .lparen => {
+                const saved_no_in = self.no_in; // a parenthesized expr is `[+In]`
+                self.no_in = false;
                 const e = try self.parseExpression();
+                self.no_in = saved_no_in;
                 try self.expect(.rparen);
                 // Record the parenthesization: a parenthesized array/object
                 // literal is not a valid destructuring assignment target
