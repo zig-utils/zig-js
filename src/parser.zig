@@ -1944,7 +1944,14 @@ pub const Parser = struct {
         // Arrow functions: `x => ...` and `(a, b) => ...`.
         if (self.check(.identifier) and self.peekKind(1) == .arrow) {
             const start = self.pos;
+            // No LineTerminator is allowed between the parameter and `=>`
+            // (the `[no LineTerminator here]` ASI restriction): `x \n => x` is a
+            // SyntaxError. The single binding must also be a legal name (not
+            // `eval`/`arguments`/a reserved word in the current strict/[Yield,
+            // Await] context).
+            if (!self.noNewlineBefore(1)) return ParseError.UnexpectedToken;
             const param = self.advance().text;
+            if (self.isForbiddenBindingName(param)) return ParseError.UnexpectedToken;
             const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
             return self.parseArrowBody(params, false, start);
         }
