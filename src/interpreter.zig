@@ -619,6 +619,10 @@ pub const Function = struct {
     /// `super()` returns (not at the start of the body). Empty for a base class,
     /// whose field initializers are prepended to the body and run at its start.
     field_inits: []const *ast.Node = &.{},
+    /// The private instance member names (fields/methods/accessors) this class's
+    /// constructor brands each instance with: a base class at the start of the
+    /// constructor, a derived class when `super()` returns.
+    private_brand_names: []const []const u8 = &.{},
     /// `function*`: calling this returns a generator object instead of running
     /// the body. `gen_chunk` is the body compiled for the suspendable VM (null if
     /// the body falls outside the VM's lowered subset — then calling it throws).
@@ -849,6 +853,9 @@ pub const Interpreter = struct {
     /// that runs them. Set when entering the constructor; consumed (and cleared)
     /// by the SuperCall once `this` is initialized.
     pending_field_inits: []const *ast.Node = &.{},
+    /// A derived constructor's private brand names, awaiting the `super()` that
+    /// brands `this` with them.
+    pending_brand_names: []const []const u8 = &.{},
     /// True while a class field initializer (or static block) is executing, so a
     /// direct eval inside it inherits the field-initializer early errors:
     /// `super()` and `arguments` are forbidden (`super.prop` stays legal).
@@ -1515,9 +1522,14 @@ pub const Interpreter = struct {
                 if (self.this_value.isObject() and sup_ret.isObject() and sup_ret.asObj() != self.this_value.asObj())
                     adoptInternalSlots(self.this_value.asObj(), sup_ret.asObj());
                 self.this_initialized = true;
-                // InitializeInstanceElements: a derived class's field initializers
-                // run now, once `super()` has returned and `this` exists. Clear the
-                // pending set so they run exactly once.
+                // InitializeInstanceElements: a derived class brands `this` with
+                // its private names and runs its field initializers now, once
+                // `super()` has returned and `this` exists. Clear the pending sets
+                // so they apply exactly once.
+                const bns = self.pending_brand_names;
+                self.pending_brand_names = &.{};
+                if (self.this_value.isObject())
+                    for (bns) |bn| try self.this_value.asObj().addPrivateBrand(self.arena, bn);
                 const fis = self.pending_field_inits;
                 self.pending_field_inits = &.{};
                 for (fis) |fi| _ = try self.eval(fi);
@@ -1569,8 +1581,12 @@ pub const Interpreter = struct {
                 break :blk try self.eval(inner);
             },
             .private_field_def => |d| blk: {
-                // PrivateFieldAdd: define the field as an own, writable,
-                // non-enumerable, non-configurable property of `this`.
+                // PrivateFieldAdd: brand `this` with this field's name (in
+                // declaration order, so a field read before its own definition
+                // throws) and define it as an own, writable, non-enumerable,
+                // non-configurable property. The value is evaluated *after* the
+                // brand exists, so the initializer may reference the field.
+                if (self.this_value.isObject()) try self.this_value.asObj().addPrivateBrand(self.arena, d.name);
                 const fv = try self.eval(d.value);
                 if (self.this_value.isObject()) {
                     const o = self.this_value.asObj();
@@ -3004,6 +3020,22 @@ pub const Interpreter = struct {
             cf.is_class_constructor = true;
             cf.is_derived_constructor = super_obj != null;
             if (super_obj != null) cf.field_inits = field_inits.items;
+            // Private brands. Methods/accessors are added all at once before field
+            // initializers run, so they brand the instance up front; *fields* are
+            // added in declaration order, so each field brands the instance at its
+            // own initializer (`private_field_def`) — a field referenced before its
+            // declaration must still throw. Static members brand the class object.
+            var brand_names: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (members) |m| {
+                if (m.key_expr != null or m.static_block != null or m.key.len == 0 or m.key[0] != '#') continue;
+                if (m.is_field) continue; // fields brand at their initializer
+                if (m.is_static) {
+                    try class_obj.addPrivateBrand(self.arena, m.key);
+                } else {
+                    try brand_names.append(self.arena, m.key);
+                }
+            }
+            cf.private_brand_names = brand_names.items;
         }
 
         for (members) |m| {
@@ -3036,6 +3068,8 @@ pub const Interpreter = struct {
                     self.this_value = class_val;
                     self.home_object = class_obj;
                     self.in_field_initializer = true;
+                    // A static private field brands the class object (in order).
+                    if (value.isPrivateKey(key)) try class_obj.addPrivateBrand(self.arena, key);
                     const fv2 = if (m.field_init) |init_node| self.eval(init_node) catch |e| {
                         self.this_value = saved_this;
                         self.home_object = saved_home;
@@ -3454,8 +3488,11 @@ pub const Interpreter = struct {
         const saved_fi = self.in_field_initializer;
         const saved_pe = self.in_param_expr;
         const saved_pfi = self.pending_field_inits;
-        // A derived constructor's field initializers wait for its SuperCall.
+        const saved_pbn = self.pending_brand_names;
+        // A derived constructor's field initializers + private brands wait for its
+        // SuperCall.
         self.pending_field_inits = func.field_inits;
+        self.pending_brand_names = if (func.is_derived_constructor) func.private_brand_names else &.{};
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
@@ -3502,6 +3539,7 @@ pub const Interpreter = struct {
             self.in_field_initializer = saved_fi;
             self.in_param_expr = saved_pe;
             self.pending_field_inits = saved_pfi;
+            self.pending_brand_names = saved_pbn;
         }
         if (func.is_class_constructor and new_target.isUndefined())
             return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
@@ -3569,6 +3607,12 @@ pub const Interpreter = struct {
         // params). A non-arrow parameter scope owns `arguments`, so a direct eval
         // in a default expression may not redeclare it (checked in evalFn).
         try self.bindParams2(func.params, args, func.is_arrow);
+
+        // A base class brands `this` with its private names at the start of the
+        // constructor (a derived class does so when `super()` returns).
+        if (func.is_class_constructor and !func.is_derived_constructor and self.this_value.isObject()) {
+            for (func.private_brand_names) |bn| try self.this_value.asObj().addPrivateBrand(self.arena, bn);
+        }
 
         // Async generator: params have now bound (propagating any side-effect
         // throws). We can't run the body yet, so hand back an inert object
@@ -6686,8 +6730,11 @@ pub const Interpreter = struct {
     /// with the name is a TypeError ("did not declare it"). Private fields are own
     /// properties of an instance; methods/accessors live on the home object.
     fn privateGet(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
-        if (!recv.isObject())
-            return self.throwError("TypeError", "Cannot read private member from a non-object");
+        // Brand check: the receiver must carry this private name (it is a proper
+        // instance of the declaring class evaluation, and — for a derived `this` —
+        // `super()` has already returned).
+        if (!recv.isObject() or !recv.asObj().hasPrivateBrand(key))
+            return self.throwError("TypeError", "Cannot read private member from an object whose class did not declare it");
         var cur: ?*value.Object = recv.asObj();
         while (cur) |c| {
             if (c.getAccessor(key)) |acc| {
@@ -6697,15 +6744,15 @@ pub const Interpreter = struct {
             if (c.getOwn(key)) |v| return v; // private field (own) or method (on home)
             cur = c.proto;
         }
-        return self.throwError("TypeError", "Cannot read private member from an object whose class did not declare it");
+        return Value.undef(); // branded but value not yet present (TDZ-like); rare
     }
 
     /// PrivateSet (`this.#x = v`). Resolves the PrivateElement: a field is written;
     /// a method is non-writable (TypeError); an accessor invokes its setter, or is
     /// a TypeError if it has only a getter; an unbranded object is a TypeError.
     fn privateSet(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
-        if (!recv.isObject())
-            return self.throwError("TypeError", "Cannot write private member to a non-object");
+        if (!recv.isObject() or !recv.asObj().hasPrivateBrand(key))
+            return self.throwError("TypeError", "Cannot write private member to an object whose class did not declare it");
         const o = recv.asObj();
         var cur: ?*value.Object = o;
         while (cur) |c| {
@@ -6728,7 +6775,11 @@ pub const Interpreter = struct {
             }
             cur = c.proto;
         }
-        return self.throwError("TypeError", "Cannot write private member to an object whose class did not declare it");
+        // Branded, but the field's own slot has not been materialized yet (a field
+        // written before its own initializer ran, e.g. `#a = (this.#b = 1)`).
+        // Define it now.
+        try o.setOwn(self.arena, self.root_shape, key, v);
+        try o.setAttr(self.arena, key, .{ .writable = true, .enumerable = false, .configurable = false });
     }
 
     /// Ordinary [[Get]] with the receiver kept separate from the object where

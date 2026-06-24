@@ -531,6 +531,13 @@ pub const Object = struct {
     /// Accessor (get/set) properties, lazily allocated. Checked before the data
     /// slot at each level of the prototype walk.
     accessors: ?*std.StringHashMapUnmanaged(Accessor) = null,
+    /// The set of private names this object was *branded* with at construction
+    /// (its class's private fields/methods/accessors). PrivateGet/PrivateSet check
+    /// brand membership here rather than via prototype inheritance, so an object
+    /// missing the brand (a non-instance, a derived `this` before `super()`
+    /// returns, an instance of a different evaluation of the class) is rejected.
+    /// Lazily allocated. Keyed by the (evaluation-unique) private storage name.
+    private_brands: ?*std.StringHashMapUnmanaged(void) = null,
     /// All own named keys (data AND accessor) in creation order — allocated
     /// lazily only when an accessor is first added, since data slots otherwise
     /// keep insertion order via the shape chain. `ownKeys` uses this to interleave
@@ -1447,6 +1454,23 @@ pub const Object = struct {
             if (self.getAttr(k).enumerable) try list.append(arena, k);
         }
         return list.items;
+    }
+
+    /// Whether this object carries the private brand `name`.
+    pub fn hasPrivateBrand(self: *const Object, name: []const u8) bool {
+        const m = self.private_brands orelse return false;
+        return m.contains(name);
+    }
+
+    /// Brand this object with the private name `name` (PrivateFieldAdd /
+    /// PrivateMethodOrAccessorAdd record-keeping).
+    pub fn addPrivateBrand(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
+        const alloc = self.accessorsAllocator(arena);
+        if (self.private_brands == null) {
+            self.private_brands = try alloc.create(std.StringHashMapUnmanaged(void));
+            self.private_brands.?.* = .{};
+        }
+        try self.private_brands.?.put(alloc, name, {});
     }
 
     /// An own accessor (get/set) property, if present.
