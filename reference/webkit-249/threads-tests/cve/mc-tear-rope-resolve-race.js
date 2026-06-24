@@ -47,9 +47,10 @@ const threads = spawnN(THREADS, (id) => {
     let last = -1;
     while (Atomics.load(box, "stop") === 0) {
         const r = Atomics.load(box, "round");
-        if (r === last) {
+        if (r === last || r < 0) {
             // Bounded yield; all threads wake on the round publication and
             // hit resolution of the same fresh rope near-simultaneously.
+            // r < 0 is the publisher's in-progress sentinel (see below).
             Atomics.wait(gate, "go", 0, 2);
             continue;
         }
@@ -59,6 +60,17 @@ const threads = spawnN(THREADS, (id) => {
         const expected = box.expected;
         const expectedSub = box.expectedSub;
         if (rope === null)
+            continue;
+        // Publication re-validation (seqlock read side): the four fields above
+        // are plain (non-atomic) property writes that the publisher mutates
+        // every round, and the GIL can yield at a step checkpoint mid-write, so
+        // a slow reader could snapshot `rope` from round r+1 but `expected`
+        // from round r. The publisher brackets each round's writes with
+        // round = -1, so if `round` still reads `r` after we snapshot all four,
+        // they are consistently round r; otherwise discard and retry. (This
+        // guards the harness's cross-thread publication, not the resolution
+        // oracle below — equal-content strings are immutable once read.)
+        if (Atomics.load(box, "round") !== r)
             continue;
 
         // Force resolution through several distinct entry points:
@@ -109,6 +121,10 @@ for (let r = 0; r < ROUNDS; ++r) {
     // Expected values, built piecewise via join so main does not resolve
     // the SAME rope cell the threads race on.
     const expected = pieces.join("");
+    // Seqlock write side: mark the round in-progress before mutating the shared
+    // fields so a worker that snapshots mid-update re-validates and retries
+    // (it observes round = -1 or the next r, never a half-updated round r).
+    Atomics.store(box, "round", -1);
     box.expected = expected;
     box.expectedSub = expected.substring(lo, hi);
     box.rope = rope;
