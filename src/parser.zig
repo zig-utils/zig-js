@@ -426,15 +426,33 @@ pub const Parser = struct {
     }
 
     /// A lexical binding target's BoundNames must be unique (`let [x, x]` etc.).
+    /// The BoundNames of a *lexical* (`let`/`const`/`using`) for-in/of head must
+    /// be unique and must not contain `let` — `for (let [x, x] of …)` and
+    /// `for (const let of …)` are both early errors. Called only for lexical
+    /// heads (plain `var` permits both).
     fn checkNoDuplicateBindings(self: *Parser, target: *Node) ParseError!void {
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
         try self.addPatternNames(&names, target);
         var seen: std.StringHashMapUnmanaged(void) = .empty;
         for (names.items) |n| {
             if (n.len == 0) continue;
+            if (std.mem.eql(u8, n, "let")) return ParseError.UnexpectedToken;
             if (seen.contains(n)) return ParseError.UnexpectedToken;
             try seen.put(self.arena, n, {});
         }
+    }
+
+    /// A lexical for-in/of head's BoundNames must not also appear among the
+    /// VarDeclaredNames of the loop body — `for (const x of []) { var x; }` is an
+    /// early error (the body's `var` would redeclare the per-iteration lexical
+    /// binding). Called only for lexical heads.
+    fn checkForHeadVarConflict(self: *Parser, target: *Node, body: *Node) ParseError!void {
+        var head: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&head, target);
+        if (head.items.len == 0) return;
+        var vars: std.StringHashMapUnmanaged(void) = .empty;
+        try self.collectVarNames(body, &vars);
+        for (head.items) |n| if (n.len > 0 and vars.contains(n)) return ParseError.UnexpectedToken;
     }
 
     fn addDecl(self: *Parser, seen: *std.StringHashMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
@@ -1384,6 +1402,7 @@ pub const Parser = struct {
                 const iterable = if (is_of) try self.parseAssignment() else try self.parseExpression();
                 try self.expect(.rparen);
                 const body = try self.parseLoopBody();
+                if (decl_kind) |k| if (k != .@"var") try self.checkForHeadVarConflict(target, body);
                 return self.alloc(.{ .for_in = .{
                     .decl_kind = decl_kind,
                     .target = target,
