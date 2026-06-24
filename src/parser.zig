@@ -65,6 +65,12 @@ pub const Parser = struct {
     /// the early error "FormalParameters of an async function/arrow must not
     /// contain an AwaitExpression" (e.g. `async function f(a = await x) {}`).
     scan_forbid_await: bool = false,
+    /// True where a `using`/`await using` declaration statement is permitted: the
+    /// StatementList of a Block (incl. function bodies, which parse via
+    /// parseBlock) and the top level of a Module. It is NOT permitted at the top
+    /// level of a Script or directly in a switch CaseClause/DefaultClause (a
+    /// nested Block there re-enables it). The for-of head is a separate path.
+    using_allowed: bool = false,
     /// Active labels in the current function body. A function boundary resets
     /// these because `break`/`continue` cannot target labels outside the
     /// function it appears in.
@@ -786,6 +792,8 @@ pub const Parser = struct {
         // A Module is an async context for `await` at the top level (top-level
         // await). Nested non-async functions reset this via `parseFnBody`.
         self.in_async = true;
+        // Module top level permits `using`/`await using` (unlike a Script's).
+        self.using_allowed = true;
         var stmts: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.eof)) {
             try stmts.append(self.arena, try self.parseModuleItem());
@@ -1031,10 +1039,17 @@ pub const Parser = struct {
             // same line) by a binding identifier is an ordinary expression.
             if (std.mem.eql(u8, t.text, "using") and self.peekKind(1) == .identifier and
                 self.noNewlineBefore(1) and !isReservedWord(self.tokens[self.pos + 1].text))
+            {
+                // A `using` declaration is only valid in a Block/function body or
+                // at Module top level — not at Script top level or in a switch
+                // CaseClause/DefaultClause.
+                if (!self.using_allowed) return ParseError.UnexpectedToken;
                 return self.parseVarDeclDispose(.@"const", 1);
+            }
             if (std.mem.eql(u8, t.text, "await") and self.peekIsKeyword(1, "using") and
                 self.peekKind(2) == .identifier and self.noNewlineBefore(2))
             {
+                if (!self.using_allowed) return ParseError.UnexpectedToken;
                 _ = self.advance(); // await
                 return self.parseVarDeclDispose(.@"const", 2);
             }
@@ -1362,6 +1377,10 @@ pub const Parser = struct {
 
     fn parseBlock(self: *Parser) ParseError!*Node {
         try self.expect(.lbrace);
+        // A Block's StatementList permits `using`/`await using` declarations.
+        const saved_using = self.using_allowed;
+        self.using_allowed = true;
+        defer self.using_allowed = saved_using;
         var stmts: std.ArrayListUnmanaged(*Node) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             try stmts.append(self.arena, try self.parseStatement());
@@ -1435,6 +1454,7 @@ pub const Parser = struct {
         // classic `for (init; cond; update)` if it isn't an iteration form.
         const save = self.pos;
         var decl_kind: ?ast.DeclKind = null;
+        var is_using = false;
         if (isKeyword(self.cur(), "var")) {
             decl_kind = .@"var";
             _ = self.advance();
@@ -1449,6 +1469,7 @@ pub const Parser = struct {
         {
             // `for (using x of …)` (but `for (using of …)` has `using` as the var).
             decl_kind = .@"const";
+            is_using = true;
             _ = self.advance();
         } else if (isKeyword(self.cur(), "await") and self.peekIsKeyword(1, "using") and
             self.peekKind(2) == .identifier and self.noNewlineBefore(1) and self.noNewlineBefore(2))
@@ -1456,6 +1477,7 @@ pub const Parser = struct {
             // `for (await using x of …)`; `x` may itself be the contextual name
             // `of`, so consume both declaration keywords before parsing target.
             decl_kind = .@"const";
+            is_using = true;
             _ = self.advance(); // await
             _ = self.advance(); // using
         }
@@ -1491,6 +1513,9 @@ pub const Parser = struct {
                 // and must have no duplicates: `for (let [x, x] of …)` is an error.
                 if (decl_kind) |k| if (k != .@"var") try self.checkNoDuplicateBindings(target);
                 const is_of = isKeyword(self.advance(), "of"); // consume in/of
+                // A `using`/`await using` head is valid only in a for-of/-await-of,
+                // never a for-in: `for (using x in obj)` is a SyntaxError.
+                if (is_using and !is_of) return ParseError.UnexpectedToken;
                 // `for-in` takes an Expression, `for-of` an AssignmentExpression.
                 const iterable = if (is_of) try self.parseAssignment() else try self.parseExpression();
                 try self.expect(.rparen);
@@ -1587,7 +1612,15 @@ pub const Parser = struct {
         try self.expect(.lbrace);
         // Inside a switch, unlabeled `break` is legal (but not `continue`).
         self.switch_depth += 1;
-        defer self.switch_depth -= 1;
+        // A CaseClause/DefaultClause StatementList forbids `using`/`await using`
+        // (only a nested Block re-enables it); the discriminant/case tests are
+        // expressions, so resetting here is safe.
+        const saved_using = self.using_allowed;
+        self.using_allowed = false;
+        defer {
+            self.switch_depth -= 1;
+            self.using_allowed = saved_using;
+        }
         var cases: std.ArrayListUnmanaged(ast.SwitchCase) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             var test_expr: ?*Node = null;
