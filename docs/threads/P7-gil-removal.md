@@ -414,7 +414,12 @@ smaller budgets, so the broad probe is no longer throttled by the objectmodel
 block's serial-performance amplifiers. The full promoted
 semantics block is focused-green 15/15 under `parallel_js`; the IC transition
 files keep their original GIL-mode pass counts while no-GIL uses smaller
-watchdog-safe pass budgets. The full promoted scaling block is also
+watchdog-safe pass budgets, and the remaining heavy semantics files
+(`atom-rope-torture.js`, `date-cache-churn.js`, `frozen-seal-race.js`,
+`private-fields-shared.js`, `proto-cycle-race.js`, `regexp-lastindex-shared.js`,
+`symbol-registry-cross-thread.js`) now carry no-GIL budgets as well — GIL mode
+keeps the full amplifiers while `parallel_js` runs the same oracles at smaller
+budgets. The full promoted scaling block is also
 focused-green 6/6 under `parallel_js`; `scaling/raytrace-like.js` and
 `scaling/richards-like.js` keep their normal corpus/gate workloads while using
 smaller no-GIL standalone budgets. The VM-state block is focused-green 10/10

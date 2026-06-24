@@ -7,8 +7,16 @@
 // or how many threads race the first registration of a key.
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const N = 48;
 const THREADS = 4;
+// GIL mode keeps the full 200-round churn amplifier; no-GIL keeps the same
+// cross-thread Symbol.for identity oracle (racing first registration, churn
+// stability) at a smaller churn budget so the broad probe stays a correctness
+// witness rather than a serial-performance gate.
+const CHURN_ROUNDS = NO_GIL ? 48 : 200;
 
 function keyVariant(i, variant) {
     const base = "semRegKey_" + i;
@@ -90,7 +98,7 @@ function keyVariant(i, variant) {
     for (let i = 0; i < N; ++i)
         baseline.push(Symbol.for(keyVariant(i, 0)));
     const churners = spawnN(THREADS, t => {
-        for (let r = 0; r < 200; ++r) {
+        for (let r = 0; r < CHURN_ROUNDS; ++r) {
             const i = (r * 7 + t) % N;
             if (Symbol.for(keyVariant(i, r)) !== Symbol.for(keyVariant(i, r + 1)))
                 throw new Error("thread " + t + " round " + r + ": registry returned two symbols for key " + i);

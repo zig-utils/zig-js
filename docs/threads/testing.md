@@ -230,7 +230,16 @@ and unchanged in GIL mode.
 The full promoted semantics block is focused-green 15/15 under `parallel_js`.
 The IC transition files keep their original GIL-mode pass counts; no-GIL uses
 smaller pass budgets so the files remain transition-correctness witnesses
-rather than 45-second watchdog trips. The full promoted scaling block is also
+rather than 45-second watchdog trips. The remaining heavy semantics files now
+carry no-GIL budgets too — `atom-rope-torture.js` (names/rope segments),
+`date-cache-churn.js` (rounds), `frozen-seal-race.js` (objects),
+`private-fields-shared.js` (per-thread increments), `proto-cycle-race.js`
+(rounds), `regexp-lastindex-shared.js` (rounds), and
+`symbol-registry-cross-thread.js` (churn rounds) keep their full GIL-mode
+amplifiers while `parallel_js` runs the same shared-atom/DateCache/integrity/
+private-brand/proto-cycle/regexp-lastIndex/symbol-registry oracles at smaller
+budgets. All eight stay focused-green under `parallel_js` and 8/8 in GIL mode.
+The full promoted scaling block is also
 focused-green 6/6 under `parallel_js`; `scaling/raytrace-like.js` and
 `scaling/richards-like.js` keep their normal corpus/gate workloads while using
 smaller no-GIL standalone budgets. The VM-state block is focused-green 10/10

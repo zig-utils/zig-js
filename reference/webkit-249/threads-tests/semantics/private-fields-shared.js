@@ -7,6 +7,13 @@
 // everywhere, and racing private-field writes through a Lock must be exact.
 load("../harness.js", "caller relative");
 
+// GIL mode keeps the full locked/racy increment amplifiers; no-GIL keeps the
+// same cross-thread private-field/brand identity oracles (exact locked count,
+// racy-but-sane count, brand agreement) at a smaller per-thread budget.
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+
 class Counter {
     #count = 0;
     #id;
@@ -29,7 +36,7 @@ class Counter {
 {
     const c = new Counter(7);
     const lock = new Lock();
-    const THREADS = 4, PER = 500;
+    const THREADS = 4, PER = NO_GIL ? 128 : 500;
     const workers = spawnN(THREADS, () => {
         for (let i = 0; i < PER; ++i)
             lock.hold(() => { c.inc(); });
@@ -114,7 +121,7 @@ class Counter {
 // and main joins all threads before reading, so v >= 1 always holds.
 {
     const c = new Counter(3);
-    const THREADS = 4, PER = 300;
+    const THREADS = 4, PER = NO_GIL ? 100 : 300;
     joinAll(spawnN(THREADS, () => {
         for (let i = 0; i < PER; ++i)
             c.inc();

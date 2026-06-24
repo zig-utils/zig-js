@@ -949,7 +949,7 @@ pub const Parser = struct {
                 try self.expect(.lparen);
                 const obj = try self.parseExpression();
                 try self.expect(.rparen);
-                const body = try self.parseSubStatement();
+                const body = try self.parseSubStatement(.loop_with);
                 return self.alloc(.{ .with_stmt = .{ .obj = obj, .body = body } });
             }
             if (std.mem.eql(u8, t.text, "function")) return self.parseFunctionDecl(false);
@@ -1009,7 +1009,7 @@ pub const Parser = struct {
                     self.pending_labels.items.len = saved_pending;
                 }
                 defer self.pending_labels.items.len = saved_pending;
-                const body = try self.parseSubStatement();
+                const body = try self.parseSubStatement(.label_item);
                 return self.alloc(.{ .labeled_stmt = .{ .label = t.text, .body = body } });
             }
         }
@@ -1020,21 +1020,55 @@ pub const Parser = struct {
         return self.alloc(.{ .expr_stmt = expr });
     }
 
+    /// The position a single-statement body occupies, which governs whether a
+    /// plain `function` declaration is allowed there (Annex B.3.2/B.3.4).
+    const SubStmtCtx = enum {
+        /// The consequent/alternate of an `if`. Annex B.3.4 permits a *direct*
+        /// (unlabeled) sloppy `function` declaration here, but not a labeled one.
+        if_clause,
+        /// The body of a loop or `with`. No `function` declaration is allowed.
+        loop_with,
+        /// The item of a `label:`. Annex B.3.2 permits a sloppy `function`
+        /// declaration (and nested labels ending in one).
+        label_item,
+    };
+
+    /// A labeled statement, after peeling any number of labels, whose innermost
+    /// item is a plain `function` declaration — the LabelledItem-is-a-function
+    /// case from Annex B.3.2.
+    fn labeledEndsInFunc(node: *Node) bool {
+        var n = node;
+        while (n.* == .labeled_stmt) n = n.labeled_stmt.body;
+        return n.* == .func_decl;
+    }
+
     /// Parse the single-statement body of an `if`/`else`, loop, `with`, or
     /// labeled statement. The grammar allows a Statement there, NOT a
-    /// Declaration: a lexical declaration (`let`/`const`/`using`), a class
-    /// declaration, or a generator/async function declaration in that position
-    /// is an early SyntaxError in every mode. (Plain `var` is allowed, and a
-    /// sloppy plain `function` body keeps its Annex B allowance — neither is
-    /// rejected here.) The check inspects what `parseStatement` actually
-    /// produced, so `let`/`using` used as an identifier — which `parseStatement`
-    /// parses as an expression — is never mistaken for a declaration.
-    fn parseSubStatement(self: *Parser) ParseError!*Node {
+    /// Declaration: a lexical declaration (`let`/`const`/`using`) or a class
+    /// declaration in that position is an early SyntaxError in every mode.
+    ///
+    /// A plain `function` declaration is special. In strict mode it is always a
+    /// SyntaxError. In sloppy mode Annex B permits it as the *direct* body of an
+    /// `if`/`else` clause (B.3.4) or as a `label:` item (B.3.2) — but never as a
+    /// loop/`with` body, and a *labeled* function is never permitted as an
+    /// `if`/loop/`with` body. Generator/async function declarations are never
+    /// allowed in any single-statement position. (Plain `var` is allowed.) The
+    /// check inspects what `parseStatement` actually produced, so `let`/`using`
+    /// used as an identifier — which `parseStatement` parses as an expression —
+    /// is never mistaken for a declaration.
+    fn parseSubStatement(self: *Parser, ctx: SubStmtCtx) ParseError!*Node {
         const stmt = try self.parseStatement();
         switch (stmt.*) {
             .var_decl => |d| if (d.kind != .@"var") return ParseError.UnexpectedToken,
             .destructure_decl => |d| if (d.kind != .@"var") return ParseError.UnexpectedToken,
-            .func_decl => |f| if (f.is_generator or f.is_async) return ParseError.UnexpectedToken,
+            .func_decl => |f| {
+                if (f.is_generator or f.is_async) return ParseError.UnexpectedToken;
+                if (self.strict) return ParseError.UnexpectedToken;
+                if (ctx == .loop_with) return ParseError.UnexpectedToken;
+            },
+            // A labeled function is only legal as a `label:` item (B.3.2), not as
+            // the body of an `if`/loop/`with` (`if (x) lbl: function f(){}`).
+            .labeled_stmt => if (ctx != .label_item and labeledEndsInFunc(stmt)) return ParseError.UnexpectedToken,
             else => {},
         }
         return stmt;
@@ -1238,11 +1272,11 @@ pub const Parser = struct {
         try self.expect(.lparen);
         const cond = try self.parseExpression();
         try self.expect(.rparen);
-        const cons = try self.parseSubStatement();
+        const cons = try self.parseSubStatement(.if_clause);
         var alt: ?*Node = null;
         if (isKeyword(self.cur(), "else")) {
             _ = self.advance();
-            alt = try self.parseSubStatement();
+            alt = try self.parseSubStatement(.if_clause);
         }
         return self.alloc(.{ .if_stmt = .{ .cond = cond, .consequent = cons, .alternate = alt } });
     }
@@ -1260,7 +1294,7 @@ pub const Parser = struct {
             self.pending_labels.items.len = saved_pending;
             self.continue_labels.items.len = saved_continue;
         }
-        return self.parseSubStatement();
+        return self.parseSubStatement(.loop_with);
     }
 
     fn parseWhile(self: *Parser) ParseError!*Node {

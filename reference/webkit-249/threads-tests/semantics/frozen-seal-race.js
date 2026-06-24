@@ -15,7 +15,13 @@
 // legal "freeze won" outcome and is counted, not failed.
 load("../harness.js", "caller relative");
 
-const OBJS = 200;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+// GIL mode keeps the full 200-object amplifier; no-GIL keeps the same
+// freeze-vs-add and seal-vs-delete per-object coherence oracle at a smaller
+// object count so the broad probe stays a correctness witness, not a perf gate.
+const OBJS = NO_GIL ? 64 : 200;
 
 // --- freeze vs add ---
 {

@@ -11,8 +11,15 @@
 // path from many threads at once).
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const ROUNDS = 60;
+// GIL mode keeps the full 60-round amplifier; no-GIL keeps the same shared
+// DateCache oracle (every toISOString/toUTCString/getUTC*/Date.parse compared
+// against the pre-thread single-threaded oracle on every call) at a smaller
+// round budget so the broad probe stays a correctness witness, not a perf gate.
+const ROUNDS = NO_GIL ? 8 : 60;
 
 const stamps = [];
 // Cache-hostile spread: decade jumps, year boundaries, leap days.

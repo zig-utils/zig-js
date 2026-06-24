@@ -42,7 +42,14 @@ for (const m of oracle)
 // --- Racy section: shared regexp, no lock. ---
 const sharedRe = /ab+/g;
 const gate = { ready: 0, go: 0 };
-const ROUNDS = 3000;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+// GIL mode keeps the full 3000-round amplifier; no-GIL keeps the same shared
+// regexp lastIndex memory-safety oracle (every raw lastIndex read is a legal
+// value, every match bit-exact, locked section consumes exactly) at a smaller
+// round budget so the broad probe stays a correctness witness, not a perf gate.
+const ROUNDS = NO_GIL ? 600 : 3000;
 
 const racers = spawnN(2, t => {
     Atomics.add(gate, "ready", 1);

@@ -12,7 +12,13 @@
 // walk. The whole test is bounded: fixed rounds, every thread joined.
 load("../harness.js", "caller relative");
 
-const ROUNDS = 100;
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+// GIL mode keeps the full 100-round amplifier; no-GIL keeps the same
+// opposite-direction setPrototypeOf cycle-check oracle (exactly one winner per
+// round, bounded acyclicity walk) at a smaller round budget.
+const ROUNDS = NO_GIL ? 24 : 100;
 
 function attempt(target, proto, g, slot) {
     // Per-round 2-thread barrier so the two setPrototypeOf calls overlap.

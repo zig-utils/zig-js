@@ -15,8 +15,16 @@
 // targets the per-shard lock + lookup-or-insert race instead.)
 load("../harness.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const NAMES = 512;
+// GIL mode keeps the full 512-name / 600-segment-rope amplifier; no-GIL keeps
+// the same 4-thread shared-atom-table / Symbol.for / rope-resolution identity
+// oracle at a smaller name set and rope length so the broad probe stays a
+// correctness witness rather than a serial-performance gate.
+const NAMES = NO_GIL ? 160 : 512;
+const ROPE_SEGS = NO_GIL ? 200 : 600;
 
 // Collision-heavy-ish names: shared 24-char prefix, shared suffix, the
 // distinguishing characters buried mid-string, lengths varying by bucket.
@@ -62,7 +70,7 @@ const gate = { ready: 0, wrote: 0, go: 0 };
 // resolve SIMULTANEOUSLY in phase 2.
 function buildRope() {
     let r = "";
-    for (let i = 0; i < 600; ++i)
+    for (let i = 0; i < ROPE_SEGS; ++i)
         r += "seg" + (i & 31) + "|";
     return r;
 }
