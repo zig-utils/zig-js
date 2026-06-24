@@ -458,8 +458,12 @@ What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate — drive the remaining rare no-GIL races (this blocking-gate
 drain flake and the `StringHashMap`-grow panic occasionally seen in the
-semantics batch) to zero under TSan, which needs `-Dtsan` wired through to the
-corpus binary on a TSan-capable toolchain. Mid-script concurrent-parallel GC (the ragged
+semantics batch) to zero under TSan. `-Dtsan` is now wired through to the corpus
+binary (`zig build threads-test -Dtsan=true` builds the corpus and the engine it
+links under ThreadSanitizer, via a dedicated TSan-instrumented `js` module;
+default-off so other targets are byte-identical), but it requires a TSan-capable
+toolchain — the bundled libcxx on this Zig 0.17-dev/darwin build fails the TSan
+runtime sub-compilation for both `test` and `threads-test`, so it is a CI gate. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
 pause-time optimization, not on this critical path (quiescent collection is
 already correct under parallel mutation).

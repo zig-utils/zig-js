@@ -81,13 +81,28 @@ pub fn build(b: *std.Build) void {
 
     // Threads corpus: `zig build threads-test` runs the vendored WebKit
     // PR-249 thread tests (the green allowlist) against the Phase-6 API.
+    // `-Dtsan` builds the corpus *and the engine it links* under
+    // ThreadSanitizer — the issue #1 "whole-corpus TSan run" gate. It uses a
+    // dedicated TSan-instrumented copy of the `js` module so the other
+    // consumers of the shared `mod` are unaffected; off by default it is `mod`.
+    const threads_js_mod = if (tsan) b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = true,
+        .imports = &.{
+            .{ .name = "regex", .module = regex_mod },
+            .{ .name = "gc", .module = gc_mod },
+        },
+    }) else mod;
     const threads_test = b.addExecutable(.{
         .name = "threads-test",
         .root_module = b.createModule(.{
             .root_source_file = b.path("conformance/threads_test.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "js", .module = mod }},
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "js", .module = threads_js_mod }},
         }),
     });
     const run_threads_test = b.addRunArtifact(threads_test);

@@ -284,10 +284,13 @@ non-deterministic `api/blocking-gate.js: async completions not reached` (it
 passes 6/6 standalone under `parallel_js` and in GIL mode, so it is a rare
 no-GIL event-loop-drain timing flake, not a deterministic break). That flake and
 the rare `StringHashMap`-grow panic seen in the semantics batch are the remaining
-no-GIL races to drive out under the whole-corpus TSan campaign (the gate that
-needs `-Dtsan` wired through to the corpus binary on a TSan-capable toolchain;
-the bundled libcxx on this Zig 0.17-dev/darwin build fails the TSan runtime
-sub-compilation for both `test` and `threads-test`).
+no-GIL races to drive out under the whole-corpus TSan campaign. That gate is now
+wired: `zig build threads-test -Dtsan=true` builds the corpus *and the engine it
+links* under ThreadSanitizer (via a dedicated TSan-instrumented copy of the `js`
+module, so default `threads-test` is byte-identical). It is a CI gate on this
+checkout, though, because the bundled libcxx on this Zig 0.17-dev/darwin build
+fails the TSan runtime sub-compilation (`use of undeclared identifier
+'INFINITY'`) for both `test` and `threads-test`.
 
 ## Sweep Runs
 
