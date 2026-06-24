@@ -3386,6 +3386,13 @@ pub const Parser = struct {
                 if (std.mem.eql(u8, t.text, "null")) return self.alloc(.null_lit);
                 if (std.mem.eql(u8, t.text, "this")) return self.alloc(.this_expr);
                 if (isAlwaysReservedBinding(t.text) or (self.strict and isStrictReservedBinding(t.text))) return ParseError.UnexpectedToken;
+                // `yield`/`await` are reserved words in their contexts, so neither
+                // may appear here as an IdentifierReference — `void yield` inside a
+                // generator, `void await` inside an async function/module — even
+                // though a YieldExpression/AwaitExpression (handled higher up) is
+                // fine. (Outside those contexts they are ordinary identifiers.)
+                if (self.in_generator and std.mem.eql(u8, t.text, "yield")) return ParseError.UnexpectedToken;
+                if ((self.in_async or self.module) and std.mem.eql(u8, t.text, "await")) return ParseError.UnexpectedToken;
                 return self.alloc(.{ .identifier = t.text });
             },
             else => return ParseError.UnexpectedToken,
