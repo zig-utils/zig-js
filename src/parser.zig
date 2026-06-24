@@ -2400,9 +2400,12 @@ pub const Parser = struct {
 
     fn parseBinary(self: *Parser, min_bp: u8) ParseError!*Node {
         // `#field in obj`: a private name is a valid primary only as the LHS of
-        // `in` (a private brand check). Represent it as an identifier whose text
-        // keeps the leading `#` so the interpreter can recognize it.
-        var left = if (self.in_class and !self.no_in and self.check(.private_name) and self.peekIsKeyword(1, "in"))
+        // `in` (a private brand check) — a RelationalExpression (bp 7). It can't
+        // be the right operand of another relational op (`#a in #b in c` has the
+        // middle `#b` in RHS position), so only recognize it when a relational
+        // expression may start here (min_bp <= 7). Represent it as an identifier
+        // whose text keeps the leading `#` so the interpreter can recognize it.
+        var left = if (min_bp <= 7 and self.in_class and !self.no_in and self.check(.private_name) and self.peekIsKeyword(1, "in"))
             try self.alloc(.{ .identifier = self.advance().text })
         else
             try self.parseUnary();
