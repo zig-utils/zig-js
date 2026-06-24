@@ -59,7 +59,8 @@ the tracer reading per-object storage under the same `property_lock`/
 `elements_lock` the mutator takes (validated TSan-clean against real `Object`
 graphs; see `P7-gc-design.md` M3). This is the GC half of GIL removal. The
 remaining ungil work is: funnel the still-GIL-coupled paths (WeakMap/WeakSet
-entries, FinalizationRegistry records, microtask queues), drive the production
+entries, FinalizationRegistry records, async waiter arrays; the microtask queue
+is now serialized by `Context.microtask_lock` under `parallel_js`), drive the production
 collector to mark concurrently rather than only while peers are parked, make
 cell allocation thread-safe for multiple parallel mutators, then drop the GIL
 and run the TSan campaign + serial-perf gate.
@@ -76,7 +77,7 @@ and run the TSan campaign + serial-perf gate.
 | 6 | Accessor / attribute maps | `value.zig` `Object.property_lock`, `setAccessor`/`setAttr` `StringHashMapUnmanaged` puts, `deleteAccessorOwn` removes | **Closed for ordinary named properties:** accessor and attribute map lookup/mutation/removal through `Object` helpers is serialized by `property_lock`. | Keep accessor/attribute state behind `property_lock`; add tests for any future descriptor side door before ungil. |
 | 7 | **Value width** | `value.zig` `Value = union(enum)` — ~24 bytes (slice payload + tag), **not pointer-width** | A 24-byte slot cannot be read/written atomically; readers tear against writers | NaN-box `Value` to 8 bytes so a slot is a single atomic word. **Codec landed** in `src/nanbox.zig` (8-byte `NanBox`: number / object-ptr / string-ptr / bool / null / undefined in the negative-qNaN boxed space, NaN-canonicalized; exhaustive round-trip tests incl. the `0xFFF8…` collision case and a pointer sweep). Standalone — not yet swapped into the engine; that integration also needs strings to become a single-pointer cell (#8), since a `[]const u8` slice is two words. |
 | 8 | Strings | `value.zig` `string: []const u8` (uninterned arena slices); `jsstring.zig` atomic `retain`/`release` refcount | No shared intern table exists to race on (good). FFI `JSStringRef` retain/release is now atomic; arena slices still have context lifetime. A `[]const u8` is two words, so it also blocks the 8-byte NaN-box (#7). | **Mechanism landed** in `src/strcell.zig`: a single-pointer `StringCell` {bytes, cached hash} (the NaN-box string payload target) + an opt-in **sharded, thread-safe `InternTable`** (the Layer-C shared-string story — equal bytes → one canonical cell across threads; per-shard atomic spinlock; TSan-clean under 8-thread convergence). Standalone/uninterned-by-default; the engine wires `Value`'s string payload to `*StringCell` as part of the mechanical `Value` swap. |
-| 9 | Promise settlement and reactions | `promise.zig` `Promise.lock`, `state`, `value`, `on_fulfill`, `on_reject`; `gc.zig` `tracePromise`; `interpreter.zig` `awaitValue` | **Closed for per-promise state:** resolve/reject/then registration, snapshot reads, async thenable job guards, and GC tracing lock the Promise before reading or moving settlement/reaction state. Microtask queues and async waiter arrays remain separate GIL-protected host state. | Keep all Promise state reads through `promise.snapshot`/`isPending` or under `Promise.lock`; do not treat microtask queue mutation as ungil-ready until the per-thread event-loop story is explicit. |
+| 9 | Promise settlement and reactions | `promise.zig` `Promise.lock`, `state`, `value`, `on_fulfill`, `on_reject`; `gc.zig` `tracePromise`; `interpreter.zig` `awaitValue` | **Closed for per-promise state:** resolve/reject/then registration, snapshot reads, async thenable job guards, and GC tracing lock the Promise before reading or moving settlement/reaction state. The microtask queue's cross-thread content mutation is now serialized by `Context.microtask_lock` under `parallel_js` (the one interleaving case is an `asyncJoin` settlement enqueuing into the joiner's queue); async waiter arrays remain separate GIL-protected host state. | Keep all Promise state reads through `promise.snapshot`/`isPending` or under `Promise.lock`; route microtask enqueue/dequeue through `enqueue`/`drainMicrotasks` so the `parallel_js` lock covers them. |
 
 ## Design inputs to lock in now (so earlier phases don't foreclose them)
 
@@ -452,8 +453,14 @@ the whole 209-file allowlist to completion within a 32-minute cap (208 PASS /
 cumulative-budget walls, so the run reaches the final
 `vmstate/vmlite-single-thread-identity.js` PASS line instead of timing out. The
 single failure is a non-deterministic `api/blocking-gate.js: async completions
-not reached` (6/6 standalone under `parallel_js` and in GIL mode), i.e. a rare
-no-GIL event-loop-drain flake. (6)
+not reached`, a rare no-GIL event-loop race. One contributor is now closed — a
+cross-thread microtask-queue race (a thread settling an `asyncJoin` enqueued a
+reaction into the joiner's queue while the joiner drained it) is serialized by
+`Context.microtask_lock` — but the symptom persists at a reduced rate: each of
+the file's async sections (`asyncHold`/`asyncWait`/`asyncJoin`) is clean in
+isolation, only their full combination flakes (~1/40), so it is an *emergent*
+multi-section settlement race with at least one more unsynchronized path to find
+under TSan. (6)
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate — drive the remaining rare no-GIL races (this blocking-gate

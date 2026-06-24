@@ -280,11 +280,17 @@ completion** within a 32-minute cap (it no longer times out): a single run
 reaches the final `vmstate/vmlite-single-thread-identity.js` PASS line after the
 objectmodel/semantics/vmstate no-GIL budgets removed the last cumulative-budget
 walls. The latest full run scored **208 PASS / 1 FAIL**, the one failure being a
-non-deterministic `api/blocking-gate.js: async completions not reached` (it
-passes 6/6 standalone under `parallel_js` and in GIL mode, so it is a rare
-no-GIL event-loop-drain timing flake, not a deterministic break). That flake and
-the rare `StringHashMap`-grow panic seen in the semantics batch are the remaining
-no-GIL races to drive out under the whole-corpus TSan campaign. That gate is now
+non-deterministic `api/blocking-gate.js: async completions not reached`, a rare
+no-GIL event-loop race. One contributor was fixed — a cross-thread
+microtask-queue race (a thread settling `asyncJoin` enqueued a `.then` reaction
+into the joiner's queue while the joiner drained it) is now serialized by
+`Context.microtask_lock` under `parallel_js` — but the symptom persists at a
+reduced rate: each async section (`asyncHold`/`asyncWait`/`asyncJoin`) is 50/50
+clean in isolation; only the full combination flakes (~1/40), so it is an
+*emergent* multi-section settlement race with at least one more unsynchronized
+path to pin. That residual race and the rare `StringHashMap`-grow panic seen in
+the semantics batch are the remaining no-GIL races to drive out under the
+whole-corpus TSan campaign. That gate is now
 wired: `zig build threads-test -Dtsan=true` builds the corpus *and the engine it
 links* under ThreadSanitizer (via a dedicated TSan-instrumented copy of the `js`
 module, so default `threads-test` is byte-identical). It is a CI gate on this
