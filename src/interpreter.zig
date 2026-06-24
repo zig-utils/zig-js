@@ -4029,8 +4029,9 @@ pub const Interpreter = struct {
         }
         if (obj.js_func) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
-            // Arrow / async / generator functions are not constructors.
-            if (func.is_arrow or func.is_async or func.is_generator)
+            // Arrow / async / generator functions and concise methods / accessors
+            // are not constructors (a class constructor is not flagged is_method).
+            if (func.is_arrow or func.is_async or func.is_generator or func.is_method)
                 return self.throwError("TypeError", "value is not a constructor");
             // OrdinaryCreateFromConstructor: the instance proto comes from NewTarget.
             const inst = try gc_mod.allocObj(self.arena);
