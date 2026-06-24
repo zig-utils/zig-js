@@ -10876,8 +10876,18 @@ pub const Interpreter = struct {
                 r = try self.toPrimitive(r, .default);
             },
             .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
+                // ApplyStringOrNumericBinaryOperator evaluates ToNumeric(lhs)
+                // *completely* — ToPrimitive(number) then the Symbol → TypeError
+                // of ToNumber — before ToNumeric(rhs). So coerce and Symbol-check
+                // each operand in order: a throwing lhs conversion must abort
+                // before the rhs operand is coerced at all (its `valueOf` must not
+                // run). (BigInt mixing is diagnosed later, after both ToNumerics.)
                 l = try self.toPrimitive(l, .number);
+                if (l.isObject() and l.asObj().is_symbol)
+                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
                 r = try self.toPrimitive(r, .number);
+                if (r.isObject() and r.asObj().is_symbol)
+                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
             },
             .eq, .neq => {
                 // Abstract equality (IsLooselyEqual): when one operand is an
@@ -10894,18 +10904,8 @@ pub const Interpreter = struct {
             },
             else => {},
         }
-        // ToNumeric throws on a Symbol operand. Every arithmetic / bitwise /
-        // relational op needs ToNumeric (relational only when not both strings),
-        // so a Symbol operand is a TypeError — even opposite a BigInt, which the
-        // BigInt fast paths below would otherwise compare without coercing. (`+`
-        // and equality handle their own operand coercion / string concatenation.)
-        switch (op) {
-            .sub, .mul, .div, .mod, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr, .lt, .le, .gt, .ge => {
-                if ((l.isObject() and l.asObj().is_symbol) or (r.isObject() and r.asObj().is_symbol))
-                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
-            },
-            else => {},
-        }
+        // (Symbol operands for the number-hint ops above were already rejected
+        // in-order during their ToNumeric coercion.)
         // BigInt operands. Arithmetic/bitwise require both to be BigInt (mixing
         // with a Number is a TypeError); relational ops compare mathematically;
         // `+` with a string still concatenates.
