@@ -269,6 +269,7 @@ pub const Lexer = struct {
         if (cp < 0x80) return isIdentStart(@intCast(cp));
         if (isSpaceCp(cp) or isLineTermCp(cp)) return false;
         if (cp == 0x200C or cp == 0x200D) return false; // ZWNJ/ZWJ: continue-only
+        if (cp == 0x2E2F) return false; // VERTICAL TILDE: Pattern_Syntax, not ID
         return true;
     }
 
@@ -277,6 +278,7 @@ pub const Lexer = struct {
     fn isIdContinueCp(cp: u21) bool {
         if (cp < 0x80) return isIdentPart(@intCast(cp));
         if (isSpaceCp(cp) or isLineTermCp(cp)) return false;
+        if (cp == 0x2E2F) return false; // VERTICAL TILDE: Pattern_Syntax, not ID
         return true;
     }
 
@@ -344,6 +346,9 @@ pub const Lexer = struct {
             const ds = self.i;
             while (self.i < self.src.len and self.src[self.i] != '}') self.i += 1;
             if (self.i >= self.src.len or self.i == ds) return LexError.UnexpectedCharacter;
+            // Only hex digits are allowed — `std.fmt.parseInt` would otherwise
+            // silently accept a `_` separator (`\u{0_0}`), which JS forbids.
+            for (self.src[ds..self.i]) |d| if (!std.ascii.isHex(d)) return LexError.UnexpectedCharacter;
             const cp = std.fmt.parseInt(u21, self.src[ds..self.i], 16) catch return LexError.UnexpectedCharacter;
             if (cp > 0x10FFFF) return LexError.UnexpectedCharacter;
             self.i += 1; // '}'
