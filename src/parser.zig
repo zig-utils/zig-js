@@ -498,6 +498,29 @@ pub const Parser = struct {
         for (head.items) |n| if (n.len > 0 and vars.contains(n)) return ParseError.UnexpectedToken;
     }
 
+    /// Collect the BoundNames of a *lexical* (`let`/`const`/`using`) declaration
+    /// node (single binding, destructuring, or `decl_group` of several). A `var`
+    /// declaration contributes nothing (its names are VarDeclaredNames).
+    fn collectLexicalDeclNames(self: *Parser, decl: *Node, out: *std.ArrayListUnmanaged([]const u8)) ParseError!void {
+        switch (decl.*) {
+            .var_decl => |d| if (d.kind != .@"var" and d.name.len > 0) try out.append(self.arena, d.name),
+            .destructure_decl => |d| if (d.kind != .@"var") try self.addPatternNames(out, d.pattern),
+            .decl_group => |g| for (g) |d2| try self.collectLexicalDeclNames(d2, out),
+            else => {},
+        }
+    }
+
+    /// A classic `for (lexical-decl; …) Statement`'s BoundNames must not also be
+    /// VarDeclaredNames of the body: `for (let x; …) { var x; }` is an early error.
+    fn checkForHeadDeclVarConflict(self: *Parser, decl: *Node, body: *Node) ParseError!void {
+        var head: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.collectLexicalDeclNames(decl, &head);
+        if (head.items.len == 0) return;
+        var vars: std.StringHashMapUnmanaged(void) = .empty;
+        try self.collectVarNames(body, &vars);
+        for (head.items) |n| if (n.len > 0 and vars.contains(n)) return ParseError.UnexpectedToken;
+    }
+
     fn addDecl(self: *Parser, seen: *std.StringHashMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
         if (seen.get(name)) |existing_rigid| {
             // A collision is an early error unless BOTH are plain functions.
@@ -1499,6 +1522,7 @@ pub const Parser = struct {
         if (!self.check(.rparen)) update = try self.parseExpression();
         try self.expect(.rparen);
         const body = try self.parseLoopBody();
+        if (init_node) |ini| try self.checkForHeadDeclVarConflict(ini, body);
         return self.alloc(.{ .for_stmt = .{ .init = init_node, .cond = cond, .update = update, .body = body } });
     }
 
