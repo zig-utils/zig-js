@@ -2124,6 +2124,24 @@ pub const Parser = struct {
         if (self.check(.lparen) and self.arrowAhead()) {
             const start = self.pos;
             const params = try self.parseParamList();
+            // An arrow inherits [Yield]/[Await], so a YieldExpression (in a
+            // generator) or AwaitExpression (in an async function/module) among
+            // its parameter defaults is an early error: `function* g(){ (x =
+            // yield) => {}; }`.
+            if (self.in_generator or self.in_async or self.module) {
+                const sa = self.scan_allow_arguments;
+                const sy = self.scan_forbid_yield;
+                const sfa = self.scan_forbid_await;
+                self.scan_allow_arguments = true;
+                self.scan_forbid_yield = self.in_generator;
+                self.scan_forbid_await = self.in_async or self.module;
+                defer {
+                    self.scan_allow_arguments = sa;
+                    self.scan_forbid_yield = sy;
+                    self.scan_forbid_await = sfa;
+                }
+                for (params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
+            }
             return self.parseArrowBody(params, false, start);
         }
 
@@ -2310,11 +2328,12 @@ pub const Parser = struct {
     fn parseConditional(self: *Parser) ParseError!*Node {
         const cond = try self.parseBinary(0);
         if (self.match(.question)) {
-            // The branches of `?:` are `[+In]` even when the condition is `[~In]`.
+            // The consequent of `?:` is always `[+In]`; the alternate inherits the
+            // outer `[?In]` (so in a for-init `true ? 0 : 0 in {}` is an error).
             const saved_no_in = self.no_in;
             self.no_in = false;
-            defer self.no_in = saved_no_in;
             const cons = try self.parseAssignment();
+            self.no_in = saved_no_in;
             try self.expect(.colon);
             const alt = try self.parseAssignment();
             return self.alloc(.{ .conditional = .{ .cond = cond, .consequent = cons, .alternate = alt } });
