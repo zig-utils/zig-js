@@ -287,14 +287,19 @@ into the joiner's queue while the joiner drained it) is now serialized by
 `Context.microtask_lock` under `parallel_js` — but the symptom persists at a
 reduced rate: each async section (`asyncHold`/`asyncWait`/`asyncJoin`) is 50/50
 clean in isolation; only the full combination flakes (~1/40), so it is an
-*emergent* multi-section settlement race. **Dominant cause fixed** (see
-P7-gil-removal.md): the nested `asyncJoin` settled the inner thread's join
-promise's reaction into the *outer* joiner thread's local microtask queue, which
-that thread abandons on exit. asyncJoin settlement reactions whose joiner is a
-spawned thread are now routed to the realm queue (`ctx.microtasks`, host-drained)
-instead, taking the flake from ~1/30 to ~1/150. A separate, much rarer (~1/150)
-no-GIL path remains (likely `asyncHold`/`asyncWait` grant delivery under
-contention), tracked for the nightly stress probe. The
+*emergent* multi-section settlement race. **A real stranding path was closed but
+is NOT the dominant cause** (see P7-gil-removal.md): the nested `asyncJoin`
+settled the inner thread's join promise's reaction into the *outer* joiner
+thread's local microtask queue, which that thread abandons on exit; asyncJoin
+settlement reactions whose joiner is a spawned thread are now routed to the realm
+queue (`ctx.microtasks`, host-drained). That is a correct, safe robustness fix
+(406/406, no regression), but a clean stress measurement (**11/300, ~1/27**) shows
+the flake rate is unchanged — an earlier "~1/150" reading was a single-sample
+fluke, and flag/print instrumentation suppresses the race, so it cannot be
+localized by adding observation. The dominant cause remains an unidentified
+heisenbug-class no-GIL ordering race (reproducible only in the unmodified test
+through the runner's cross-`evaluate` drain; TSan-clean), tracked for the nightly
+stress probe. The
 GIL-mode rope-resolve publication flake (`cve/mc-tear-rope-resolve-race.js`) is
 fixed (seqlock). The remaining genuine *data-race* candidate for the whole-corpus
 TSan campaign is the rare `StringHashMap`-grow panic seen once in the semantics
