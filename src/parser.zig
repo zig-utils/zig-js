@@ -3029,16 +3029,18 @@ pub const Parser = struct {
         const saved_no_in = self.no_in;
         self.no_in = false;
         defer self.no_in = saved_no_in;
+        // All parts of a class — its name, heritage, and body — are strict mode
+        // code, so `class C extends (function(){ with({}); })() {}` is a
+        // SyntaxError (a `with` in the heritage). Set strict before parsing them.
+        const saved_strict = self.strict;
+        self.strict = true;
+        defer self.strict = saved_strict;
         var name: []const u8 = "";
         if (self.check(.identifier) and !isKeyword(self.cur(), "extends")) {
-            // A class's BindingIdentifier is always strict-mode code (`class let {}`,
-            // `class yield {}`, `class await {}` in a module, … are SyntaxErrors),
-            // so validate the name with strict reserved-word rules.
-            const saved_strict = self.strict;
-            self.strict = true;
-            const forbidden = self.isForbiddenBindingName(self.cur().text);
-            self.strict = saved_strict;
-            if (forbidden) return ParseError.UnexpectedToken;
+            // A class's BindingIdentifier is strict-mode code (`class let {}`,
+            // `class yield {}`, `class await {}` in a module, … are SyntaxErrors);
+            // `self.strict` is already forced true above.
+            if (self.isForbiddenBindingName(self.cur().text)) return ParseError.UnexpectedToken;
             name = self.advance().text;
         }
         var superclass: ?*Node = null;
@@ -3048,10 +3050,6 @@ pub const Parser = struct {
             superclass = try self.parseUnary();
         }
         try self.expect(.lbrace);
-        // Class bodies are always strict mode; members inherit it via `self.strict`.
-        const saved_strict = self.strict;
-        self.strict = true;
-        defer self.strict = saved_strict;
         const saved_in_class = self.in_class;
         self.in_class = true;
         defer self.in_class = saved_in_class;
