@@ -2766,13 +2766,15 @@ pub const Parser = struct {
                 _ = self.advance();
             }
             // `static { ... }` initialization block. It is its own scope with
-            // `new.target` but no `await`/`yield`/`return`/`arguments`, and a
-            // SuperCall is forbidden (SuperProperty is allowed).
+            // `new.target` but no `yield`/`return`/`arguments`, and a SuperCall is
+            // forbidden (SuperProperty is allowed). The body is [+Await], so
+            // `await` is reserved (no `let await`, `class await {}`, `await;`) and
+            // an AwaitExpression is the ContainsAwait early error.
             if (is_static and self.check(.lbrace)) {
                 const saved_async = self.in_async;
                 const saved_gen = self.in_generator;
                 const saved_fn = self.fn_depth;
-                self.in_async = false;
+                self.in_async = true; // [+Await]: `await` reserved in a static block
                 self.in_generator = false;
                 self.fn_depth = 0; // `return` is a SyntaxError in a static block
                 self.new_target_depth += 1;
@@ -2787,7 +2789,14 @@ pub const Parser = struct {
                 self.in_async = saved_async;
                 self.in_generator = saved_gen;
                 self.fn_depth = saved_fn;
-                for (block.block) |s| try self.scanSuperAndArgs(s); // no super()/arguments
+                // No super()/arguments, and no AwaitExpression (ContainsAwait).
+                const saved_fa = self.scan_forbid_await;
+                self.scan_forbid_await = true;
+                for (block.block) |s| self.scanSuperAndArgs(s) catch |e| {
+                    self.scan_forbid_await = saved_fa;
+                    return e;
+                };
+                self.scan_forbid_await = saved_fa;
                 try self.checkLexicalDupes(block.block, true); // own lexical scope
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
                 continue;
