@@ -287,13 +287,14 @@ into the joiner's queue while the joiner drained it) is now serialized by
 `Context.microtask_lock` under `parallel_js` — but the symptom persists at a
 reduced rate: each async section (`asyncHold`/`asyncWait`/`asyncJoin`) is 50/50
 clean in isolation; only the full combination flakes (~1/40), so it is an
-*emergent* multi-section settlement race. **Root cause now diagnosed** (see
-P7-gil-removal.md): the nested `asyncJoin` settles the inner thread's join
-promise into the *outer* joiner thread's local microtask queue, captured under
-`join_mutex` before that thread tears down — so an in-flight settle can route a
-reaction into a queue that the exiting thread abandons. It is a teardown
-*ordering* bug (TSan-clean, not a data race), with a recorded fix direction;
-split out as its own focused step since it is verifiable only by stress. The
+*emergent* multi-section settlement race. **Dominant cause fixed** (see
+P7-gil-removal.md): the nested `asyncJoin` settled the inner thread's join
+promise's reaction into the *outer* joiner thread's local microtask queue, which
+that thread abandons on exit. asyncJoin settlement reactions whose joiner is a
+spawned thread are now routed to the realm queue (`ctx.microtasks`, host-drained)
+instead, taking the flake from ~1/30 to ~1/150. A separate, much rarer (~1/150)
+no-GIL path remains (likely `asyncHold`/`asyncWait` grant delivery under
+contention), tracked for the nightly stress probe. The
 GIL-mode rope-resolve publication flake (`cve/mc-tear-rope-resolve-race.js`) is
 fixed (seqlock). The remaining genuine *data-race* candidate for the whole-corpus
 TSan campaign is the rare `StringHashMap`-grow panic seen once in the semantics

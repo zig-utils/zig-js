@@ -458,22 +458,23 @@ cross-thread microtask-queue race (a thread settling an `asyncJoin` enqueued a
 reaction into the joiner's queue while the joiner drained it) is serialized by
 `Context.microtask_lock` — but the symptom persists at a reduced rate (~1/20–1/40,
 no-GIL only; TSan-clean over 80 corpus runs, so it is an *ordering* bug, not a
-data race). **Root cause (diagnosed, fix pending):** the nested `asyncJoin`
-(`t.asyncJoin().then(ip => ip)`) makes the inner thread's join promise `ip` be
-created on thread `t`, so `t`'s local microtask queue is captured as `ip`'s
-settlement queue. When `inner` finishes it settles `ip` using the
-`pending_joins` snapshot taken under `inner.join_mutex` in
-`publishThreadCompletion` — the *old* pointer to `t`'s queue. `t`'s teardown
-`transferPendingJoinQueue` rebinds the *live* pending-join pointer to
-`ctx.microtasks`, but it can't fix an in-flight settle that already snapshotted
-the old pointer, so if `inner` settles before `t`'s rebind the `.then` reaction
-lands in `t`'s queue, which `t` abandons on exit → lost completion. Fix
-direction: route cross-thread join-settlement reactions to a queue guaranteed to
-be drained (e.g. resolve the captured queue to `ctx.microtasks` at settle time
-when the joiner thread has exited, and/or flush an exiting thread's residual
-queue contents — not just rebind the pointer — into `ctx.microtasks` under
-`microtask_lock`). It is a delicate teardown-ordering change, verifiable only by
-stress (the nightly probe), so it is split out as its own focused step. (6)
+data race). **Dominant cause fixed (`fix(threads): route asyncJoin settlement
+reactions to the realm queue`):** the nested `asyncJoin`
+(`t.asyncJoin().then(ip => ip)`, where `t`'s fn returns `inner.asyncJoin()`)
+makes the inner join promise `ip` be created on thread `t`, so `t`'s local
+microtask queue was captured as `ip`'s settlement queue. When `inner` settled
+`ip` it enqueued the `.then` reaction (here the internal resolve continuation
+registered by *main* via thenable adoption) into `t`'s queue, which `t` abandons
+on exit → lost completion. Fix: asyncJoin settlement reactions whose joiner is a
+spawned thread are now routed to the realm queue (`ctx.microtasks`, drained by
+the host until every thread is done) instead of the joiner thread's local queue;
+`PendingJoin` records the joiner; and an exiting thread flushes its residual
+local queue into `ctx.microtasks`. The main-thread joiner is unchanged (its queue
+*is* `ctx.microtasks`). This took the flake from ~1/30 to ~1/150 (`zig build
+test` 406/406, async/lifecycle corpus green). A **separate, much rarer (~1/150)
+no-GIL path remains** — not the nested-join routing; likely the run-loop
+grant/settlement of `asyncHold`/`asyncWait` under contention from the section-5
+threads — tracked for the nightly stress probe. (6)
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate — drive the remaining rare no-GIL races (this blocking-gate
