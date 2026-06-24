@@ -61,6 +61,10 @@ pub const Parser = struct {
     /// the early error "FormalParameters of a generator must not contain a
     /// YieldExpression" (e.g. `function* g(a = yield) {}`).
     scan_forbid_yield: bool = false,
+    /// When true, `scanSuperAndArgs` flags an AwaitExpression — used to enforce
+    /// the early error "FormalParameters of an async function/arrow must not
+    /// contain an AwaitExpression" (e.g. `async function f(a = await x) {}`).
+    scan_forbid_await: bool = false,
     /// Active labels in the current function body. A function boundary resets
     /// these because `break`/`continue` cannot target labels outside the
     /// function it appears in.
@@ -1643,31 +1647,36 @@ pub const Parser = struct {
     }
 
     /// Parse a function/method's formal parameter list in that function's own
-    /// [Yield] context: a generator's parameters are [+Yield], so `yield` is a
-    /// reserved word there (`function* g(yield) {}` is an error) and a
-    /// YieldExpression among the parameter defaults (`function* g(a = yield) {}`)
-    /// is the early error "FormalParameters Contains YieldExpression". A
-    /// non-generator nested in a generator gets [~Yield] (its own context), so
-    /// `yield` is an ordinary identifier in its parameters again. The enclosing
-    /// async context never leaks into a parameter list parsed here.
-    fn parseFunctionParamList(self: *Parser, is_gen: bool) ParseError![]const ast.Param {
+    /// [Yield, Await] context: a generator's parameters are [+Yield] and an async
+    /// function's are [+Await], so `yield`/`await` is a reserved word there
+    /// (`function* g(yield) {}`, `async function f(await) {}` are errors) and a
+    /// YieldExpression/AwaitExpression among the parameter defaults
+    /// (`function* g(a = yield) {}`, `async function f(a = await x) {}`) is the
+    /// early error "FormalParameters Contains Yield/AwaitExpression". A function
+    /// nested in a generator/async function gets its OWN context (it does not
+    /// inherit), so `yield`/`await` is an ordinary identifier in its parameters
+    /// again. (Arrows, which DO inherit, use parseParamList directly instead.)
+    fn parseFunctionParamList(self: *Parser, is_gen: bool, is_async: bool) ParseError![]const ast.Param {
         const saved_async = self.in_async;
         const saved_gen = self.in_generator;
-        self.in_async = false;
+        self.in_async = is_async;
         self.in_generator = is_gen;
         defer {
             self.in_async = saved_async;
             self.in_generator = saved_gen;
         }
         const params = try self.parseParamList();
-        if (is_gen) {
+        if (is_gen or is_async) {
             const saved_allow = self.scan_allow_arguments;
             const saved_fy = self.scan_forbid_yield;
-            self.scan_allow_arguments = true; // only YieldExpression is the concern here
-            self.scan_forbid_yield = true;
+            const saved_fa = self.scan_forbid_await;
+            self.scan_allow_arguments = true; // only Yield/AwaitExpression is the concern here
+            self.scan_forbid_yield = is_gen;
+            self.scan_forbid_await = is_async;
             defer {
                 self.scan_allow_arguments = saved_allow;
                 self.scan_forbid_yield = saved_fy;
+                self.scan_forbid_await = saved_fa;
             }
             for (params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
         }
@@ -1762,7 +1771,7 @@ pub const Parser = struct {
         const name_tok = self.advance();
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
         if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
-        const params = try self.parseFunctionParamList(is_gen);
+        const params = try self.parseFunctionParamList(is_gen, is_async);
         const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
@@ -1800,7 +1809,7 @@ pub const Parser = struct {
                 name = self.advance().text;
             }
         }
-        const params = try self.parseFunctionParamList(is_gen);
+        const params = try self.parseFunctionParamList(is_gen, is_async);
         const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
@@ -1921,12 +1930,14 @@ pub const Parser = struct {
             {
                 _ = self.advance(); // async
                 const param = self.advance().text;
+                // An async arrow's parameter is [+Await]: `await` is reserved.
+                if (std.mem.eql(u8, param, "await")) return ParseError.UnexpectedToken;
                 const params = try self.arena.dupe(ast.Param, &.{.{ .name = param }});
                 return self.parseArrowBody(params, true, start);
             }
             if (self.peekKind(1) == .lparen and self.arrowAheadAt(self.pos + 1)) {
                 _ = self.advance(); // async
-                const params = try self.parseParamList();
+                const params = try self.parseAsyncArrowParams();
                 return self.parseArrowBody(params, true, start);
             }
         }
@@ -2054,6 +2065,27 @@ pub const Parser = struct {
             }
         }
         return false;
+    }
+
+    /// Parse an async arrow's `( params )` as [+Await] — `await` is reserved as a
+    /// binding and an AwaitExpression among the defaults is the early error
+    /// "FormalParameters Contains AwaitExpression" — while leaving the enclosing
+    /// [Yield] context intact (an arrow inherits it, unlike an ordinary function).
+    fn parseAsyncArrowParams(self: *Parser) ParseError![]const ast.Param {
+        const saved_async = self.in_async;
+        self.in_async = true;
+        defer self.in_async = saved_async;
+        const params = try self.parseParamList();
+        const saved_allow = self.scan_allow_arguments;
+        const saved_fa = self.scan_forbid_await;
+        self.scan_allow_arguments = true;
+        self.scan_forbid_await = true;
+        defer {
+            self.scan_allow_arguments = saved_allow;
+            self.scan_forbid_await = saved_fa;
+        }
+        for (params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
+        return params;
     }
 
     fn parseArrowBody(self: *Parser, params: []const ast.Param, is_async: bool, start: usize) ParseError!*Node {
@@ -2925,7 +2957,10 @@ pub const Parser = struct {
             .unary => |u| try self.scanSuperAndArgs(u.operand),
             .delete_expr => |t| try self.scanSuperAndArgs(t),
             .update => |u| try self.scanSuperAndArgs(u.target),
-            .await_expr => |a| try self.scanSuperAndArgs(a.argument),
+            .await_expr => |a| {
+                if (self.scan_forbid_await) return ParseError.UnexpectedToken;
+                try self.scanSuperAndArgs(a.argument);
+            },
             .yield_expr => |y| {
                 if (self.scan_forbid_yield) return ParseError.UnexpectedToken;
                 if (y.argument) |arg| try self.scanSuperAndArgs(arg);
@@ -3251,7 +3286,7 @@ pub const Parser = struct {
     /// Parse `(params) { body }` after a method name, returning a function node.
     /// `is_gen` marks a generator method (`*m() {}`).
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
-        const params = try self.parseFunctionParamList(is_gen);
+        const params = try self.parseFunctionParamList(is_gen, is_async);
         try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const own_use_strict = self.peekUseStrict();
         const body = try self.parseFnBody(is_gen, is_async);
