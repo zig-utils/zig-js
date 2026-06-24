@@ -932,7 +932,7 @@ pub const Parser = struct {
         if (self.isContextual("default")) {
             _ = self.advance(); // `default`
             // `export default function/class …` binds a (possibly anonymous) name.
-            if (self.isContextual("function") or (self.isContextual("async") and self.peekIsKeyword(1, "function"))) {
+            if (self.isContextual("function") or (self.isContextual("async") and !self.cur().escaped_identifier and self.peekIsKeyword(1, "function"))) {
                 // `export default function …` may be anonymous, so parse it as a
                 // function *expression* (which permits no name).
                 const is_async = self.isContextual("async");
@@ -1021,7 +1021,7 @@ pub const Parser = struct {
             // `async function …` declaration (contextual keyword: `async`
             // immediately followed by `function`). `async` followed by anything
             // else is an ordinary expression statement (async arrow / identifier).
-            if (std.mem.eql(u8, t.text, "async") and self.peekIsKeyword(1, "function")) return self.parseFunctionDecl(true);
+            if (std.mem.eql(u8, t.text, "async") and !t.escaped_identifier and self.peekIsKeyword(1, "function")) return self.parseFunctionDecl(true);
             if (std.mem.eql(u8, t.text, "return")) return self.parseReturn();
             if (std.mem.eql(u8, t.text, "throw")) return self.parseThrow();
             if (std.mem.eql(u8, t.text, "try")) return self.parseTry();
@@ -1966,7 +1966,11 @@ pub const Parser = struct {
         if (self.in_generator and isKeyword(self.cur(), "yield")) return self.parseYield();
         // Async arrows: `async x => ...` and `async (a, b) => ...`. (`async` here
         // is a contextual keyword; a `=>` must follow its parameter list.)
-        if (isKeyword(self.cur(), "async")) {
+        // An escaped `async` (`async`) is never the contextual keyword, so it
+        // cannot begin an async arrow; a LineTerminator after `async` also breaks
+        // the `async [no LineTerminator here] ArrowParameters` form (`async\n(x)=>`
+        // is a call, not an arrow).
+        if (isKeyword(self.cur(), "async") and !self.cur().escaped_identifier and self.noNewlineBefore(1)) {
             const start = self.pos;
             if (self.peekKind(1) == .identifier and self.peekKind(2) == .arrow and
                 !isAlwaysReservedBinding(self.tokens[self.pos + 1].text) and
@@ -3426,7 +3430,7 @@ pub const Parser = struct {
             if (self.isEscapedReservedWord(self.cur())) return ParseError.UnexpectedToken;
             const w = self.cur().text;
             if (std.mem.eql(u8, w, "function")) return self.parseFunctionExpr(false);
-            if (std.mem.eql(u8, w, "async") and self.peekIsKeyword(1, "function")) return self.parseFunctionExpr(true);
+            if (std.mem.eql(u8, w, "async") and !self.cur().escaped_identifier and self.peekIsKeyword(1, "function")) return self.parseFunctionExpr(true);
             if (std.mem.eql(u8, w, "new")) return self.parseNew();
             if (std.mem.eql(u8, w, "class")) return self.parseClassExpr();
             if (std.mem.eql(u8, w, "super")) return self.parseSuper();
