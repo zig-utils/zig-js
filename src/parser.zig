@@ -409,8 +409,12 @@ pub const Parser = struct {
                         for (names.items) |n| try self.addDecl(&seen, n, true);
                     }
                 },
+                // A block-level function declaration is "rigid" (no duplicate
+                // allowed) when it is a generator/async — or in strict mode, which
+                // has no Annex B.3.3 plain-function duplicate allowance, so
+                // `{ function f(){} function f(){} }` is a strict SyntaxError.
                 .func_decl => |fnode| if (funcs_lexical and fnode.name.len > 0)
-                    try self.addDecl(&seen, fnode.name, fnode.is_async or fnode.is_generator),
+                    try self.addDecl(&seen, fnode.name, fnode.is_async or fnode.is_generator or self.strict),
                 else => {},
             }
         }
