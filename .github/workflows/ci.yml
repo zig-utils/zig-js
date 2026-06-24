@@ -84,9 +84,20 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0-dev.131+73c51c142
-      - name: TSan over the no-GIL blocking-gate case
+      - name: TSan loop over the no-GIL blocking-gate case (pin the emergent race)
         working-directory: zig-js
-        run: zig build threads-test -Dtsan=true -Dthreads-parallel-js=true -Dthreads-case=api/blocking-gate.js
+        env:
+          # Stop at the first detected race so its report is the tail of the log.
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          # The flake is ~1/40 and emergent, so a single run rarely executes the
+          # racy interleaving. Loop until TSan catches it (the build cache-hits
+          # after the first compile, so iterations are just the instrumented run).
+          for i in $(seq 1 80); do
+            echo "=== blocking-gate parallel_js+TSan iter $i ==="
+            zig build threads-test -Dtsan=true -Dthreads-parallel-js=true -Dthreads-case=api/blocking-gate.js
+          done
+          echo "no TSan race observed in 80 iterations"
 
   docs:
     runs-on: ubuntu-latest
