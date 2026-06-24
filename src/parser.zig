@@ -1811,6 +1811,10 @@ pub const Parser = struct {
         if (self.last_fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
+        // A generator or async function has UniqueFormalParameters: duplicate
+        // parameter names are an error in every mode (a plain function permits
+        // them in sloppy mode with a simple list — handled by validateStrictParams).
+        if (is_gen or is_async) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
@@ -1849,6 +1853,10 @@ pub const Parser = struct {
         if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
+        // A generator or async function has UniqueFormalParameters: duplicate
+        // parameter names are an error in every mode (a plain function permits
+        // them in sloppy mode with a simple list — handled by validateStrictParams).
+        if (is_gen or is_async) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
