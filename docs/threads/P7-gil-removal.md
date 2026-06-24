@@ -452,47 +452,34 @@ the whole 209-file allowlist to completion within a 32-minute cap (208 PASS /
 1 FAIL) — the objectmodel/semantics/vmstate no-GIL budgets removed the last
 cumulative-budget walls, so the run reaches the final
 `vmstate/vmlite-single-thread-identity.js` PASS line instead of timing out. The
-single failure is a non-deterministic `api/blocking-gate.js: async completions
-not reached`, a rare no-GIL event-loop race. One contributor is now closed — a
-cross-thread microtask-queue race (a thread settling an `asyncJoin` enqueued a
-reaction into the joiner's queue while the joiner drained it) is serialized by
-`Context.microtask_lock` — but the symptom persists at a reduced rate (~1/20–1/40,
-no-GIL only; TSan-clean over 80 corpus runs, so it is an *ordering* bug, not a
-data race). **A real stranding path was closed, but it is NOT the dominant
-cause** (`fix(threads): route asyncJoin settlement reactions to the realm
-queue`): the nested `asyncJoin` (`t.asyncJoin().then(ip => ip)`, where `t`'s fn
-returns `inner.asyncJoin()`) makes the inner join promise `ip` be created on
-thread `t`, so `t`'s local microtask queue was captured as `ip`'s settlement
-queue; if `inner` settled `ip` after a `.then` continuation had been registered
-on it (by *main* via thenable adoption), that reaction was enqueued into `t`'s
-queue, which `t` abandons on exit → lost completion. Fix: asyncJoin settlement
-reactions whose joiner is a spawned thread are now routed to the realm queue
-(`ctx.microtasks`, drained by the host until every thread is done) instead of
-the joiner thread's local queue; `PendingJoin` records the joiner; and an exiting
-thread flushes its residual local queue into `ctx.microtasks`. This is a correct,
-safe robustness fix (`zig build test` 406/406, async/lifecycle corpus green, no
-regression), but a clean **11/300 (~1/27)** stress measurement of the unmodified
-test shows it did **not** reduce the flake — the strand path is real but rarely
-the trigger (an earlier "~1/150" reading was a single-sample fluke; flag/print
-instrumentation suppresses the race entirely, so it cannot be localized by
-adding observation). The **dominant `blocking-gate` cause is still unidentified**:
-a heisenbug-class no-GIL ordering race, ~1/27, reproducible only in the exact
-unmodified test through the runner's cross-`evaluate` drain (an in-script drain
-loop does not reproduce it), and TSan-clean so not a data race. **Mechanism
-narrowed by a non-perturbing engine-state dump** (added temporarily to the
-runner's timeout branch — fires only on the failure, after the test has run, so
-it doesn't shift the JS timing): every captured failure shows `passed=2` (exactly
-one of the three completions stuck) with **all realm queues empty**
-(`ctx.microtasks`, `Gil.tasks`, `prop_async`, `prop_waiters` all 0). So it is
-*not* a realm-queue drain/routing bug (the category the microtask-lock and
-asyncJoin-routing fixes addressed — which is why they didn't move the rate): the
-stuck completion's reaction was never enqueued onto a realm queue. That leaves
-two candidates the dump can't yet separate — a promise whose settlement is lost,
-or a reaction stranded in a *spawned thread's local* queue (abandoned at
-teardown, not covered by the dump). Pinning which of the three async ops and
-which of those two requires per-promise non-perturbing observation (a `$vm`
-settled-state peek or engine-side promise tagging), since any JS-side flag/arg
-suppresses the race. That is the focused next step / nightly-probe target. (6)
+single failure was a non-deterministic `api/blocking-gate.js: async completions
+not reached` (~1/27, no-GIL only, TSan-clean), now **fixed** — and it was a
+GIL-specific corpus assumption, not an engine bug. The test asserts
+`shouldThrow(() => inner.join())` / `shouldThrow(() => t.join())`, expecting the
+joinee to still be *Running* so the `can-block-is-false` gate makes `join()`
+throw. Under the GIL that is guaranteed (the joining thread holds the lock, so
+the target cannot run); under `parallel_js` the target runs concurrently and
+~1/27 finishes first, so `join()` takes the *allowed* finished-thread fast path,
+returns, doesn't throw, and the `shouldThrow` failure cascades into a rejected
+`asyncJoin` chain → completion #3 never fires. Pinned with non-perturbing
+engine-side per-path settlement counters (the heisenbug suppressed every JS-side
+probe): on failure `reg=1` not 2, and the throwing thread's captured message was
+`"expected an exception but none was thrown"` — the `inner.join()` assertion.
+Fix (`test(threads): re-derive blocking-gate's GIL-specific join-gating
+assertion`): `assertJoinGated()` keeps the strict throw under the GIL and accepts
+*either* outcome under no-GIL (gated `TypeError` if Running, or the allowed fast
+path if finished). No wait primitive (every blocking wait is itself gated under
+`can-block-is-false`) and no busy-spin (which starves the GIL-free runner).
+Verified GIL PASS + `parallel_js` 0/250.
+
+Two genuine no-GIL correctness fixes were made along the way (both correct, both
+406/406 and regression-free, though neither was this flake's cause): the
+cross-thread **microtask-queue** data race is now serialized by
+`Context.microtask_lock` (TSan-validated), and asyncJoin settlement reactions
+whose joiner is a spawned thread are routed to the realm queue rather than the
+joiner's abandoned local queue (`PendingJoin` records the joiner; exiting threads
+flush their residual queue). With the budget-cleared corpus and these fixes, the
+promoted `parallel_js` allowlist now runs clean. (6)
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate — drive the remaining rare no-GIL races (this blocking-gate

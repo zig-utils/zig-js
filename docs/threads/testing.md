@@ -279,31 +279,27 @@ than a required green gate, but it now **runs the whole 209-file allowlist to
 completion** within a 32-minute cap (it no longer times out): a single run
 reaches the final `vmstate/vmlite-single-thread-identity.js` PASS line after the
 objectmodel/semantics/vmstate no-GIL budgets removed the last cumulative-budget
-walls. The latest full run scored **208 PASS / 1 FAIL**, the one failure being a
-non-deterministic `api/blocking-gate.js: async completions not reached`, a rare
-no-GIL event-loop race. One contributor was fixed — a cross-thread
-microtask-queue race (a thread settling `asyncJoin` enqueued a `.then` reaction
-into the joiner's queue while the joiner drained it) is now serialized by
-`Context.microtask_lock` under `parallel_js` — but the symptom persists at a
-reduced rate: each async section (`asyncHold`/`asyncWait`/`asyncJoin`) is 50/50
-clean in isolation; only the full combination flakes (~1/40), so it is an
-*emergent* multi-section settlement race. **A real stranding path was closed but
-is NOT the dominant cause** (see P7-gil-removal.md): the nested `asyncJoin`
-settled the inner thread's join promise's reaction into the *outer* joiner
-thread's local microtask queue, which that thread abandons on exit; asyncJoin
-settlement reactions whose joiner is a spawned thread are now routed to the realm
-queue (`ctx.microtasks`, host-drained). That is a correct, safe robustness fix
-(406/406, no regression), but a clean stress measurement (**11/300, ~1/27**) shows
-the flake rate is unchanged — an earlier "~1/150" reading was a single-sample
-fluke, and flag/print instrumentation suppresses the race, so it cannot be
-localized by adding observation. The dominant cause remains an unidentified
-heisenbug-class no-GIL ordering race (reproducible only in the unmodified test
-through the runner's cross-`evaluate` drain; TSan-clean), tracked for the nightly
-stress probe. The
-GIL-mode rope-resolve publication flake (`cve/mc-tear-rope-resolve-race.js`) is
-fixed (seqlock). The remaining genuine *data-race* candidate for the whole-corpus
-TSan campaign is the rare `StringHashMap`-grow panic seen once in the semantics
-batch. That gate is now
+walls. An earlier full run scored **208 PASS / 1 FAIL** — the one failure,
+`api/blocking-gate.js: async completions not reached` (~1/27, no-GIL only), is
+now **fixed**, and it was a GIL-specific corpus assumption rather than an engine
+bug: the test asserted `shouldThrow(() => inner.join())` / `t.join()`, expecting
+the joinee to still be Running so the `can-block-is-false` gate throws — true
+under the GIL (joining thread holds the lock), but under `parallel_js` the joinee
+can finish first (~1/27) so `join()` takes the allowed finished-thread fast path
+and doesn't throw, cascading into a rejected `asyncJoin` chain. Pinned with a
+non-perturbing engine-side per-path counter (`reg=1` not 2; thread threw
+"expected an exception but none was thrown"). `assertJoinGated()` keeps the
+strict throw under the GIL and accepts either outcome under no-GIL — no wait
+primitive (all blocking waits are gated here) and no busy-spin (which starves the
+GIL-free runner). Verified GIL PASS, `parallel_js` 0/250. Two genuine no-GIL
+correctness fixes were made en route (neither was this flake's cause but both are
+correct, 406/406, regression-free): the cross-thread microtask-queue data race is
+serialized by `Context.microtask_lock` (TSan-validated), and asyncJoin settlement
+reactions for a spawned-thread joiner route to the realm queue instead of the
+joiner's abandoned local queue. The GIL-mode rope-resolve publication flake
+(`cve/mc-tear-rope-resolve-race.js`) is fixed (seqlock). The remaining genuine
+*data-race* candidate for the whole-corpus TSan campaign is the rare
+`StringHashMap`-grow panic seen once in the semantics batch. That gate is now
 wired: `zig build threads-test -Dtsan=true` builds the corpus *and the engine it
 links* under ThreadSanitizer (via a dedicated TSan-instrumented copy of the `js`
 module, so default `threads-test` is byte-identical). It is a CI gate on this
