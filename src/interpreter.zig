@@ -4822,6 +4822,7 @@ pub const Interpreter = struct {
             // (enables `\u{...}` and code-point-aware classes in the engine).
             .unicode = unicode,
             .unicode_sets = std.mem.indexOfScalar(u8, flags, 'v') != null,
+            .ecmascript = true,
         };
         const compiled = try self.arena.create(regex.Regex);
         compiled.* = regex.Regex.compileWithFlags(self.arena, src, cf) catch

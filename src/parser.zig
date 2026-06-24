@@ -3774,6 +3774,7 @@ fn validateRegexLiteral(arena: std.mem.Allocator, pattern: []const u8, flags: []
         .dot_all = seen['s'],
         .unicode = seen['u'] or seen['v'],
         .unicode_sets = seen['v'],
+        .ecmascript = true,
     };
     _ = regex.Regex.compileWithFlags(arena, pattern, cf) catch return ParseError.UnexpectedToken;
 }
