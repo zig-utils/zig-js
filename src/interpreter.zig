@@ -3824,6 +3824,12 @@ pub const Interpreter = struct {
             var v: Value = if (i < args.len) args[i] else Value.undef();
             if (v.isUndefined()) {
                 if (p.default) |d| {
+                    // A parameter is in scope (in its TDZ) across its own
+                    // Initializer, so a self-reference `function f(x = x)` reads
+                    // the still-uninitialized parameter — a ReferenceError — not
+                    // an outer binding of the same name. Pre-bind it to the TDZ
+                    // sentinel; the real value overwrites it below.
+                    if (p.pattern == null and self.tdz_marker != null) try self.env.put(p.name, self.tdzVal());
                     // The default runs in the parameter scope; a non-arrow's owns
                     // `arguments`, so a direct eval there can't declare it.
                     const saved_pe = self.in_param_expr;
@@ -10931,6 +10937,13 @@ pub const Interpreter = struct {
                     const rs = try self.toStringV(r);
                     break :blk Value.str(try std.mem.concat(self.arena, u8, &.{ ls, rs }));
                 }
+                // Numeric `+`: both operands were already ToPrimitive'd (default
+                // hint) above; ToNumeric(lhs) then ToNumeric(rhs) follow in order,
+                // each throwing on a Symbol operand.
+                if (l.isObject() and l.asObj().is_symbol)
+                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+                if (r.isObject() and r.asObj().is_symbol)
+                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
                 break :blk Value.num(l.toNumber() + r.toNumber());
             },
             .sub => Value.num(l.toNumber() - r.toNumber()),
