@@ -253,6 +253,17 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         }
         released += 1;
     }
+    // `private_brands` reuses the "accessors" backing (see Object.addPrivateBrand)
+    // but is a separate map pointer the finalizer must also release, or a GC-
+    // collected branded object leaks its table + struct. Its keys are borrowed
+    // private-name slices (put without copying), so unlike attrs/accessors we do
+    // not free the keys.
+    if (o.private_brands) |pb| {
+        pb.deinit(a);
+        a.destroy(pb);
+        o.private_brands = null;
+        released += 1;
+    }
     if (flags.key_order) {
         if (o.key_order) |ord| {
             for (ord.items) |key| a.free(key);
