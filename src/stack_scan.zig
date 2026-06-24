@@ -145,16 +145,42 @@ inline fn spillRegisters(buf: *[spill_count]usize) void {
             :
             : [b] "r" (buf),
             : .{ .memory = true }),
-        .x86_64 => asm volatile (
-            \\movq %%rbx, 0(%[b])
-            \\movq %%rbp, 8(%[b])
-            \\movq %%r12, 16(%[b])
-            \\movq %%r13, 24(%[b])
-            \\movq %%r14, 32(%[b])
-            \\movq %%r15, 40(%[b])
-            :
-            : [b] "r" (buf),
-            : .{ .memory = true }),
+        // Spill each callee-saved register to a memory output (a per-register
+        // `=m` slot, so the source registers are never clobbered mid-sequence),
+        // then copy into `buf`. Zig's inline-asm output grammar only accepts a
+        // plain identifier, and LLVM rejects the `off(%[b])` displacement-from-a-
+        // `"r"`-operand form, so a stack scalar per register is the portable way.
+        // This branch never compiled before (the engine had only been built on
+        // aarch64, where the comptime switch picks the branch above).
+        .x86_64 => {
+            var r0: usize = undefined;
+            var r1: usize = undefined;
+            var r2: usize = undefined;
+            var r3: usize = undefined;
+            var r4: usize = undefined;
+            var r5: usize = undefined;
+            asm volatile (
+                \\movq %%rbx, %[r0]
+                \\movq %%rbp, %[r1]
+                \\movq %%r12, %[r2]
+                \\movq %%r13, %[r3]
+                \\movq %%r14, %[r4]
+                \\movq %%r15, %[r5]
+                : [r0] "=m" (r0),
+                  [r1] "=m" (r1),
+                  [r2] "=m" (r2),
+                  [r3] "=m" (r3),
+                  [r4] "=m" (r4),
+                  [r5] "=m" (r5),
+                :
+                : .{ .memory = true });
+            buf[0] = r0;
+            buf[1] = r1;
+            buf[2] = r2;
+            buf[3] = r3;
+            buf[4] = r4;
+            buf[5] = r5;
+        },
         else => buf[0] = 0,
     }
 }
