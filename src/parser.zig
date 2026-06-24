@@ -1592,6 +1592,38 @@ pub const Parser = struct {
         return self.alloc(.{ .throw_stmt = arg });
     }
 
+    /// Catch-clause early errors (14.15.1): the CatchParameter's BoundNames must
+    /// be unique (`catch ([x, x]) {}`) and must not also appear in the catch
+    /// block's LexicallyDeclaredNames — a `let`/`const`/`class` or a block-level
+    /// function declaration that reuses a catch-bound name (`catch (e) { let e; }`,
+    /// `catch (e) { function e(){} }`) is a SyntaxError. (Annex B.3.5 still lets a
+    /// body `var` match a simple catch parameter, so `var` is not checked here.)
+    fn checkCatchClause(self: *Parser, param: *Node, block: *Node) ParseError!void {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.addPatternNames(&names, param);
+        var bound: std.StringHashMapUnmanaged(void) = .empty;
+        for (names.items) |n| {
+            if (n.len == 0) continue;
+            if (bound.contains(n)) return ParseError.UnexpectedToken;
+            try bound.put(self.arena, n, {});
+        }
+        if (bound.count() == 0 or block.* != .block) return;
+        for (block.block) |s| switch (s.*) {
+            .var_decl => |d| if (d.kind != .@"var" and bound.contains(d.name)) return ParseError.UnexpectedToken,
+            .destructure_decl => |d| if (d.kind != .@"var") {
+                var bn: std.ArrayListUnmanaged([]const u8) = .empty;
+                try self.addPatternNames(&bn, d.pattern);
+                for (bn.items) |n| if (bound.contains(n)) return ParseError.UnexpectedToken;
+            },
+            .decl_group => |g| for (g) |d2| {
+                if (d2.* == .var_decl and d2.var_decl.kind != .@"var" and bound.contains(d2.var_decl.name)) return ParseError.UnexpectedToken;
+            },
+            .func_decl => |fnode| if (fnode.name.len > 0 and bound.contains(fnode.name)) return ParseError.UnexpectedToken,
+            .class_expr => |c| if (c.name.len > 0 and bound.contains(c.name)) return ParseError.UnexpectedToken,
+            else => {},
+        };
+    }
+
     fn parseTry(self: *Parser) ParseError!*Node {
         _ = self.advance(); // try
         const block = try self.parseBlock();
@@ -1605,6 +1637,7 @@ pub const Parser = struct {
                 try self.expect(.rparen);
             }
             catch_block = try self.parseBlock();
+            if (catch_param) |p| try self.checkCatchClause(p, catch_block.?);
         }
         if (isKeyword(self.cur(), "finally")) {
             _ = self.advance();
