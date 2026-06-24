@@ -784,6 +784,12 @@ pub const Context = struct {
         const owned_source = try a.dupe(u8, source);
         var parser = try Parser.init(a, owned_source);
         const prog = try parser.parseProgram();
+        // Global (Script) code has no `super` binding, so a top-level SuperCall or
+        // SuperProperty — including inside a top-level arrow — is an early
+        // SyntaxError. (Direct/indirect `eval` runs its own context-aware scan
+        // via the interpreter, so this entry is genuine global code only.) The
+        // scan descends into arrows but stops at nested functions/classes/methods.
+        if (prog.* == .program) try parser.scanEvalContext(prog.program, true, true);
         var machine = self.interpreter();
         try self.pushActiveInterpreter(&machine);
         defer self.popActiveInterpreter(&machine);
