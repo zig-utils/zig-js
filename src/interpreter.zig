@@ -879,6 +879,10 @@ pub const Interpreter = struct {
         if (vs.parent == null) {
             if (self.global_object) |g| {
                 const existed = g.getOwn(name) != null;
+                // CanDeclareGlobalVar: a new global var binding requires the global
+                // object to be extensible (an existing property may be reused).
+                if (!existed and !g.extensible)
+                    return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
                 try self.setProp(g, name, v);
                 // EvalDeclarationInstantiation makes new global bindings deletable
                 // (configurable); a script's GlobalDeclarationInstantiation does not.
@@ -893,6 +897,94 @@ pub const Interpreter = struct {
     /// `{ writable, enumerable, configurable: D }` descriptor (D = deletable for
     /// eval); a non-configurable existing property must already be a writable,
     /// enumerable data property or the declaration is a TypeError.
+    /// CanDeclareGlobalFunction: whether a global function binding `name` may be
+    /// (re)declared on the global object `g`.
+    fn canDeclareGlobalFunction(g: *value.Object, name: []const u8) bool {
+        if (g.getOwn(name) != null or g.getAccessor(name) != null) {
+            const a = g.getAttr(name);
+            if (a.configurable) return true;
+            // A non-configurable existing property is only redefinable as a
+            // function if it is a writable, enumerable data property.
+            if (g.getAccessor(name) != null or !a.writable or !a.enumerable) return false;
+            return true;
+        }
+        return g.extensible;
+    }
+
+    /// EvalDeclarationInstantiation does all the CanDeclareGlobalFunction /
+    /// CanDeclareGlobalVar checks *before* declaring anything, so a conflict
+    /// throws without leaving earlier declarations behind. Run that pre-check when
+    /// a (sloppy) eval's variable environment is the global object.
+    fn checkGlobalEvalDeclarable(self: *Interpreter, stmts: []const *Node) EvalError!void {
+        if (self.env.varScope().parent != null) return; // not declaring to global
+        const g = self.global_object orelse return;
+        for (stmts) |s| if (s.* == .func_decl) {
+            const nm = s.func_decl.name;
+            if (nm.len != 0 and !canDeclareGlobalFunction(g, nm))
+                return self.throwError("TypeError", "cannot declare global function (existing property is not configurable)");
+        };
+        if (!g.extensible) {
+            var vars: std.ArrayListUnmanaged([]const u8) = .empty;
+            try self.collectEvalVarNames(stmts, &vars);
+            for (vars.items) |nm| {
+                if (g.getOwn(nm) == null and self.env.varScope().vars.get(nm) == null)
+                    return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
+            }
+        }
+    }
+
+    /// Collect top-level + block-nested `var` names of an eval program (does not
+    /// cross function boundaries).
+    fn collectEvalVarNames(self: *Interpreter, stmts: []const *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
+        for (stmts) |s| try self.collectEvalVarNamesNode(s, out);
+    }
+
+    fn collectEvalVarNamesNode(self: *Interpreter, node: *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
+        switch (node.*) {
+            .var_decl => |d| if (d.kind == .@"var" and d.name.len > 0) try out.append(self.arena, d.name),
+            .destructure_decl => |d| if (d.kind == .@"var") try self.evalPatternVarNames(d.pattern, out),
+            .decl_group => |g| for (g) |d2| try self.collectEvalVarNamesNode(d2, out),
+            .block => |b| for (b) |s| try self.collectEvalVarNamesNode(s, out),
+            .if_stmt => |i| {
+                try self.collectEvalVarNamesNode(i.consequent, out);
+                if (i.alternate) |a| try self.collectEvalVarNamesNode(a, out);
+            },
+            .while_stmt => |w| try self.collectEvalVarNamesNode(w.body, out),
+            .do_while_stmt => |w| try self.collectEvalVarNamesNode(w.body, out),
+            .for_stmt => |f| {
+                if (f.init) |ini| try self.collectEvalVarNamesNode(ini, out);
+                try self.collectEvalVarNamesNode(f.body, out);
+            },
+            .for_in => |f| {
+                if (f.decl_kind) |k| if (k == .@"var") try self.evalPatternVarNames(f.target, out);
+                try self.collectEvalVarNamesNode(f.body, out);
+            },
+            .labeled_stmt => |l| try self.collectEvalVarNamesNode(l.body, out),
+            .try_stmt => |t| {
+                try self.collectEvalVarNamesNode(t.block, out);
+                if (t.catch_block) |c| try self.collectEvalVarNamesNode(c, out);
+                if (t.finally_block) |fb| try self.collectEvalVarNamesNode(fb, out);
+            },
+            .switch_stmt => |sw| for (sw.cases) |cs| for (cs.body) |s| try self.collectEvalVarNamesNode(s, out),
+            else => {},
+        }
+    }
+
+    fn evalPatternVarNames(self: *Interpreter, node: *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
+        switch (node.*) {
+            .identifier => |n| try out.append(self.arena, n),
+            .obj_pattern => |p| {
+                for (p.props) |prop| try self.evalPatternVarNames(prop.target, out);
+                if (p.rest) |r| try out.append(self.arena, r);
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| if (elem.target) |t| try self.evalPatternVarNames(t, out);
+                if (p.rest) |r| try self.evalPatternVarNames(r, out);
+            },
+            else => {},
+        }
+    }
+
     pub fn globalDefineFunc(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
         const vs = self.env.varScope();
         if (vs.parent != null or self.global_object == null) {
@@ -10772,7 +10864,12 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // Eval creates a fresh lexical environment for let/const/class declarations,
     // while var/function declarations target the surrounding variable
     // environment (the caller for direct eval, the realm global for indirect).
-    if (prog.* == .program) try self.hoistVarNames(prog.program);
+    if (prog.* == .program) {
+        // EvalDeclarationInstantiation: reject undeclarable global var/function
+        // bindings up front, before any declaration runs.
+        try self.checkGlobalEvalDeclarable(prog.program);
+        try self.hoistVarNames(prog.program);
+    }
     return self.eval(prog);
 }
 
