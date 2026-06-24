@@ -445,14 +445,21 @@ subset is focused-green in verified slices through `jit/tid-tag-3-threads.js`.
 The bench checksum files also keep their normal serial-performance protocol
 counts while `parallel_js` uses capped harness and inner-loop counts so the
 broad probe remains a correctness witness. Broader promoted-allowlist
-`parallel_js` remains exploratory until the monolithic cumulative budget probe
-is cleared; with a 30-minute cap the single run now clears the bench block, the
-CVE tail, GC-stress, JIT, Atomics, sync, shared-objects, races, heap,
-invariants, and the objectmodel block through
-`objectmodel/i03-stale-spine-reader-vs-grow.js`, then times out before the next
-objectmodel PASS line. (6)
-Whole-corpus TSan campaign +
-serial-perf gate. Mid-script concurrent-parallel GC (the ragged
+`parallel_js` is still exploratory, but the cumulative budget probe is now
+**cleared**: a single `zig build threads-test -Dthreads-parallel-js=true` runs
+the whole 209-file allowlist to completion within a 32-minute cap (208 PASS /
+1 FAIL) — the objectmodel/semantics/vmstate no-GIL budgets removed the last
+cumulative-budget walls, so the run reaches the final
+`vmstate/vmlite-single-thread-identity.js` PASS line instead of timing out. The
+single failure is a non-deterministic `api/blocking-gate.js: async completions
+not reached` (6/6 standalone under `parallel_js` and in GIL mode), i.e. a rare
+no-GIL event-loop-drain flake. (6)
+What now gates the GIL drop is the
+whole-corpus TSan campaign +
+serial-perf gate — drive the remaining rare no-GIL races (this blocking-gate
+drain flake and the `StringHashMap`-grow panic occasionally seen in the
+semantics batch) to zero under TSan, which needs `-Dtsan` wired through to the
+corpus binary on a TSan-capable toolchain. Mid-script concurrent-parallel GC (the ragged
 `root_handshake` → concurrent marker) is independent of this and is a GC
 pause-time optimization, not on this critical path (quiescent collection is
 already correct under parallel mutation).

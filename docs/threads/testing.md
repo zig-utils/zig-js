@@ -274,12 +274,20 @@ probe remains a semantic witness rather than a serial-performance gate. The
 bench checksum files use the same split: normal mode keeps the serial
 performance protocol counts, while `parallel_js` caps harness and inner-loop
 iterations so the broad probe remains a correctness pass instead of a timing
-gate. The monolithic full promoted-allowlist probe is still a cumulative budget
-probe rather than a required green gate; with a 30-minute cap it now clears the
-bench block, the CVE tail, GC-stress, JIT, Atomics, sync, shared-objects,
-races, heap, invariants, and the objectmodel block through
-`objectmodel/i03-stale-spine-reader-vs-grow.js`, then times out before the next
-objectmodel PASS line.
+gate. The monolithic full promoted-allowlist probe is still exploratory rather
+than a required green gate, but it now **runs the whole 209-file allowlist to
+completion** within a 32-minute cap (it no longer times out): a single run
+reaches the final `vmstate/vmlite-single-thread-identity.js` PASS line after the
+objectmodel/semantics/vmstate no-GIL budgets removed the last cumulative-budget
+walls. The latest full run scored **208 PASS / 1 FAIL**, the one failure being a
+non-deterministic `api/blocking-gate.js: async completions not reached` (it
+passes 6/6 standalone under `parallel_js` and in GIL mode, so it is a rare
+no-GIL event-loop-drain timing flake, not a deterministic break). That flake and
+the rare `StringHashMap`-grow panic seen in the semantics batch are the remaining
+no-GIL races to drive out under the whole-corpus TSan campaign (the gate that
+needs `-Dtsan` wired through to the corpus binary on a TSan-capable toolchain;
+the bundled libcxx on this Zig 0.17-dev/darwin build fails the TSan runtime
+sub-compilation for both `test` and `threads-test`).
 
 ## Sweep Runs
 
