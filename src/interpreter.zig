@@ -953,6 +953,70 @@ pub const Interpreter = struct {
         }
     }
 
+    /// GlobalDeclarationInstantiation early errors (16.1.7 steps 3–12). Run at the
+    /// top of a Script's GlobalDeclarationInstantiation, *before* any binding is
+    /// created, so a conflict throws SyntaxError without leaving partial state.
+    ///
+    /// In our model a global `var`/function binding lives in BOTH the root
+    /// environment's `vars` and as an own property of the global object, while a
+    /// global lexical (`let`/`const`/`class`) lives ONLY in the root `vars`. That
+    /// lets us reconstruct the global environment record's predicates:
+    ///   HasLexicalDeclaration(n) := root.vars has n AND global has no own n
+    ///   HasVarDeclaration(n)     := root.vars has n AND global has own n
+    ///   HasRestrictedGlobalProperty(n) := global has own non-configurable n
+    fn checkGlobalDeclConflicts(self: *Interpreter, stmts: []*Node) EvalError!void {
+        if (self.env.parent != null) return; // only a Script's global scope
+        const g = self.global_object orelse return;
+        const root = self.env;
+
+        // lexNames: the script's top-level LexicallyDeclaredNames (let/const/class).
+        // Each must not collide with an existing var or lexical binding, nor name a
+        // restricted (non-configurable) global property.
+        var lex_names: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.collectTopLexNames(stmts, &lex_names);
+        for (lex_names.items) |n| {
+            // HasLexicalDeclaration(n): in root `vars` but not an own global
+            // property (a global `var`/function lives in both).
+            if (root.vars.contains(n) and !objectHasOwn(g, n))
+                return self.throwError("SyntaxError", "redeclaration of global lexical binding");
+            // HasRestrictedGlobalProperty(n): an own non-configurable property.
+            // (A `var` introduced by non-strict direct eval is configurable, so it
+            // is NOT restricted — a later `let` may legally shadow it.)
+            if (objectHasOwn(g, n) and !g.getAttr(n).configurable)
+                return self.throwError("SyntaxError", "cannot declare restricted global property");
+        }
+
+        // declaredVarNames: the script's VarDeclaredNames (nested `var` + top-level
+        // function declarations). None may collide with an existing lexical binding.
+        var vars: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.collectEvalVarNames(stmts, &vars);
+        for (stmts) |s| if (s.* == .func_decl and s.func_decl.name.len > 0)
+            try vars.append(self.arena, s.func_decl.name);
+        for (vars.items) |n| {
+            // HasLexicalDeclaration(n): in root `vars` but not an own global property.
+            if (root.vars.contains(n) and !objectHasOwn(g, n))
+                return self.throwError("SyntaxError", "var declaration conflicts with global lexical binding");
+        }
+    }
+
+    /// The top-level (statement-list-level) lexical names of a program: `let`/
+    /// `const`/`class` declarations, including those wrapped in a `decl_group` or
+    /// `export`. Block-nested lexicals are not part of LexicallyDeclaredNames.
+    fn collectTopLexNames(self: *Interpreter, stmts: []const *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
+        for (stmts) |s| try self.collectTopLexNamesNode(s, out);
+    }
+
+    fn collectTopLexNamesNode(self: *Interpreter, node: *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
+        switch (node.*) {
+            .var_decl => |d| if (d.kind != .@"var" and d.name.len > 0) try out.append(self.arena, d.name),
+            .destructure_decl => |d| if (d.kind != .@"var") try self.evalPatternVarNames(d.pattern, out),
+            .class_expr => |c| if (c.name.len > 0) try out.append(self.arena, c.name),
+            .decl_group => |g| for (g) |d2| try self.collectTopLexNamesNode(d2, out),
+            .export_decl => |e| if (e.declaration) |d| try self.collectTopLexNamesNode(d, out),
+            else => {},
+        }
+    }
+
     /// Collect top-level + block-nested `var` names of an eval program (does not
     /// cross function boundaries).
     fn collectEvalVarNames(self: *Interpreter, stmts: []const *Node, out: *std.ArrayListUnmanaged([]const u8)) EvalError!void {
@@ -1750,7 +1814,13 @@ pub const Interpreter = struct {
             .block => |stmts| try self.evalBlockScope(stmts),
             // A multi-declarator group runs in the current scope (no new block).
             .decl_group => |stmts| try self.evalStatements(stmts),
-            .program => |stmts| try self.evalStatements(stmts),
+            .program => |stmts| blk: {
+                // GlobalDeclarationInstantiation early errors run once per Script,
+                // here at the program root — NOT inside evalStatements, which is
+                // re-entered for `decl_group`s (`let a, b`) in the same scope.
+                try self.checkGlobalDeclConflicts(stmts);
+                break :blk try self.evalStatements(stmts);
+            },
 
             .if_stmt => |s| if ((try self.eval(s.cond)).toBoolean())
                 try self.eval(s.consequent)
