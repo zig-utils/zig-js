@@ -2003,6 +2003,8 @@ pub const Parser = struct {
         };
         if (logassign) |op| {
             if (left.* != .identifier and left.* != .member and left.* != .super_member) return ParseError.InvalidAssignmentTarget;
+            if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
+                return ParseError.UnexpectedToken;
             _ = self.advance();
             const rhs = try self.parseAssignment();
             const set = try self.alloc(.{ .assign = .{ .target = left, .value = rhs } });
