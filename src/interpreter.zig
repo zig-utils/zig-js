@@ -3087,10 +3087,15 @@ pub const Interpreter = struct {
         const derived = superclass != null;
         if (superclass) |sc| {
             const sv = try self.eval(sc);
-            if (sv.isObject()) {
+            if (sv.isNull()) {
+                // `extends null`: derived, null parent (handled above via `derived`).
+            } else if (isConstructorValue(sv)) {
                 super_obj = sv.asObj();
                 super_proto = try self.protoObject(sv.asObj());
-            } else if (!sv.isNull()) {
+            } else {
+                // Any non-null heritage that is not a constructor — a non-object, or
+                // a callable that lacks [[Construct]] (arrow / method / generator /
+                // async function) — is a TypeError.
                 return self.throwError("TypeError", "class extends value is not a constructor");
             }
         }
