@@ -12,6 +12,8 @@ name: CI
 on:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '0 7 * * *' # nightly continuous validation (incl. the race-hunt probe)
 
 permissions:
   contents: read
@@ -67,6 +69,9 @@ jobs:
   # StringHashMap-grow panic). Allowed to fail until those are driven to zero —
   # its TSan report is the data for the next fix.
   tsan-corpus-probe:
+    # The 80x race-hunt is expensive; run it nightly + on manual dispatch, not on
+    # every PR. Informational (continue-on-error): its TSan report names a race.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
