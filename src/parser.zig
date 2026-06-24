@@ -77,6 +77,11 @@ pub const Parser = struct {
     /// Script/Module finishes parsing was used as a real object literal — an
     /// early SyntaxError (`({ a = 1 })`, `f({ a = 1 })`).
     pending_cover_inits: std.AutoHashMapUnmanaged(*Node, void) = .empty,
+    /// Expression nodes that were wrapped in parentheses. A parenthesized
+    /// array/object literal is not a valid destructuring assignment target
+    /// (`({}) = 1`, `([a]) = b`), so `litToPattern` rejects one; a parenthesized
+    /// identifier/member stays a valid target and is routed around litToPattern.
+    paren_wrapped: std.AutoHashMapUnmanaged(*Node, void) = .empty,
     /// True where a `using`/`await using` declaration statement is permitted: the
     /// StatementList of a Block (incl. function bodies, which parse via
     /// parseBlock) and the top level of a Module. It is NOT permitted at the top
@@ -1208,6 +1213,8 @@ pub const Parser = struct {
     /// Convert an array/object *literal* on the LHS of `=` into a destructuring
     /// pattern (the cover-grammar reinterpretation).
     fn litToPattern(self: *Parser, node: *Node) ParseError!*Node {
+        // A parenthesized array/object literal can't be a destructuring target.
+        if (self.paren_wrapped.contains(node)) return ParseError.InvalidAssignmentTarget;
         switch (node.*) {
             .array_lit => |elems| {
                 // `[...x,]` — a trailing comma after the rest element is invalid in
@@ -3608,6 +3615,10 @@ pub const Parser = struct {
             .lparen => {
                 const e = try self.parseExpression();
                 try self.expect(.rparen);
+                // Record the parenthesization: a parenthesized array/object
+                // literal is not a valid destructuring assignment target
+                // (`({}) = 1`), even though a parenthesized identifier/member is.
+                try self.paren_wrapped.put(self.arena, e, {});
                 return e;
             },
             .identifier => {
