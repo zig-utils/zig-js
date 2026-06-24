@@ -65,6 +65,12 @@ pub const Parser = struct {
     /// the early error "FormalParameters of an async function/arrow must not
     /// contain an AwaitExpression" (e.g. `async function f(a = await x) {}`).
     scan_forbid_await: bool = false,
+    /// Array literals (parsed as a cover for array patterns) that ended with a
+    /// trailing comma right after a rest element (`[...x,]`). Legal in a literal
+    /// but not in the destructuring refinement, so `litToPattern` rejects them.
+    /// Keyed by node pointer; only consulted during pattern conversion, so a
+    /// stale entry for an array used as a plain literal is simply never checked.
+    rest_trailing_comma_arrays: std.AutoHashMapUnmanaged(*Node, void) = .empty,
     /// True where a `using`/`await using` declaration statement is permitted: the
     /// StatementList of a Block (incl. function bodies, which parse via
     /// parseBlock) and the top level of a Module. It is NOT permitted at the top
@@ -1194,6 +1200,9 @@ pub const Parser = struct {
     fn litToPattern(self: *Parser, node: *Node) ParseError!*Node {
         switch (node.*) {
             .array_lit => |elems| {
+                // `[...x,]` — a trailing comma after the rest element is invalid in
+                // an array assignment pattern.
+                if (self.rest_trailing_comma_arrays.contains(node)) return ParseError.InvalidAssignmentTarget;
                 var out: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
                 var rest: ?*Node = null;
                 for (elems) |e| {
@@ -3514,6 +3523,7 @@ pub const Parser = struct {
     fn parseArrayLiteral(self: *Parser) ParseError!*Node {
         try self.expect(.lbracket);
         var elems: std.ArrayListUnmanaged(*Node) = .empty;
+        var rest_trailing_comma = false;
         while (!self.check(.rbracket) and !self.check(.eof)) {
             // Elision / hole: a bare `,` yields an empty slot (v1: undefined, as
             // arrays are dense). `[ , x ]`, `[1, , 3]`, `[,]`.
@@ -3522,11 +3532,17 @@ pub const Parser = struct {
                 _ = self.advance();
                 continue;
             }
-            try elems.append(self.arena, try self.parseSpreadable());
+            const el = try self.parseSpreadable();
+            try elems.append(self.arena, el);
             if (!self.match(.comma)) break;
+            // A trailing comma right after a rest element (`[...x,]`) is fine in a
+            // literal but invalid in the pattern refinement — flag it.
+            if (el.* == .spread and self.check(.rbracket)) rest_trailing_comma = true;
         }
         try self.expect(.rbracket);
-        return self.alloc(.{ .array_lit = elems.items });
+        const node = try self.alloc(.{ .array_lit = elems.items });
+        if (rest_trailing_comma) try self.rest_trailing_comma_arrays.put(self.arena, node, {});
+        return node;
     }
 
     fn parsePrimary(self: *Parser) ParseError!*Node {
