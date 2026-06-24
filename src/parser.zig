@@ -2345,6 +2345,28 @@ pub const Parser = struct {
         return coerced;
     }
 
+    /// A SuperCall (`super()`) is only legal in a derived class constructor, so
+    /// one inside an object-literal method (concise method, getter, or setter) —
+    /// in its body or a parameter default — is an early SyntaxError. A
+    /// SuperProperty (`super.x`) and an `arguments` reference remain legal in a
+    /// method, so only `super()` is rejected. Non-method property values
+    /// (`{ m: function(){} }`, shorthands, spreads) have their own bindings and
+    /// are not scanned.
+    fn checkMethodNoSuperCall(self: *Parser, value: *Node) ParseError!void {
+        if (value.* != .function or !value.function.is_method) return;
+        const f = value.function;
+        const saved_args = self.scan_allow_arguments;
+        const saved_prop = self.scan_forbid_super_property;
+        self.scan_allow_arguments = true; // `arguments` is legal in a method body
+        self.scan_forbid_super_property = false; // `super.x` is legal in a method
+        defer {
+            self.scan_allow_arguments = saved_args;
+            self.scan_forbid_super_property = saved_prop;
+        }
+        try self.scanSuperAndArgs(f.body);
+        for (f.params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
+    }
+
     fn parseObjectLiteral(self: *Parser) ParseError!*Node {
         try self.expect(.lbrace);
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
@@ -2419,6 +2441,7 @@ pub const Parser = struct {
             if (!self.match(.comma)) break;
         }
         try self.expect(.rbrace);
+        for (props.items) |p| try self.checkMethodNoSuperCall(p.value);
         return self.alloc(.{ .object_lit = props.items });
     }
 
