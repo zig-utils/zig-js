@@ -478,9 +478,21 @@ instrumentation suppresses the race entirely, so it cannot be localized by
 adding observation). The **dominant `blocking-gate` cause is still unidentified**:
 a heisenbug-class no-GIL ordering race, ~1/27, reproducible only in the exact
 unmodified test through the runner's cross-`evaluate` drain (an in-script drain
-loop does not reproduce it), and TSan-clean so not a data race. Pinning it needs
-non-perturbing observation (or the nightly stress probe to accumulate a pattern);
-it is the open no-GIL correctness item. (6)
+loop does not reproduce it), and TSan-clean so not a data race. **Mechanism
+narrowed by a non-perturbing engine-state dump** (added temporarily to the
+runner's timeout branch — fires only on the failure, after the test has run, so
+it doesn't shift the JS timing): every captured failure shows `passed=2` (exactly
+one of the three completions stuck) with **all realm queues empty**
+(`ctx.microtasks`, `Gil.tasks`, `prop_async`, `prop_waiters` all 0). So it is
+*not* a realm-queue drain/routing bug (the category the microtask-lock and
+asyncJoin-routing fixes addressed — which is why they didn't move the rate): the
+stuck completion's reaction was never enqueued onto a realm queue. That leaves
+two candidates the dump can't yet separate — a promise whose settlement is lost,
+or a reaction stranded in a *spawned thread's local* queue (abandoned at
+teardown, not covered by the dump). Pinning which of the three async ops and
+which of those two requires per-promise non-perturbing observation (a `$vm`
+settled-state peek or engine-side promise tagging), since any JS-side flag/arg
+suppresses the race. That is the focused next step / nightly-probe target. (6)
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate — drive the remaining rare no-GIL races (this blocking-gate
