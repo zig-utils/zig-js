@@ -874,6 +874,13 @@ pub const Interpreter = struct {
     /// evaluated (the parameter scope, which has an `arguments` binding). A direct
     /// eval there may not declare `arguments` — an early error.
     in_param_expr: bool = false,
+    /// True while *any* function's parameter default Initializer is being
+    /// evaluated (including arrows, unlike `in_param_expr`). A function with
+    /// parameter expressions keeps its parameters in an environment distinct from
+    /// the body's var environment, so a direct eval in a default that declares a
+    /// `var` shadowing a parameter name is a SyntaxError. Reset to false when
+    /// entering any function body so a nested call's eval doesn't inherit it.
+    in_param_default: bool = false,
     /// True while executing eval'd code: EvalDeclarationInstantiation creates
     /// new global var/function bindings as *deletable* (configurable), unlike a
     /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
@@ -975,6 +982,15 @@ pub const Interpreter = struct {
         try self.collectEvalVarNames(stmts, &vars);
         if (vars.items.len == 0) return;
         const var_env = self.env.varScope();
+        // A direct eval inside a parameter default: the parameter environment is
+        // distinct from the body's variable environment, so a `var` shadowing a
+        // parameter name is a SyntaxError. The parameters live in `var_env` (the
+        // parameter scope); `arguments` has its own separate restriction.
+        if (self.in_param_default) {
+            for (vars.items) |n|
+                if (!eq(n, "arguments") and var_env.vars.contains(n))
+                    return self.throwError("SyntaxError", "eval cannot var-declare a parameter name in a parameter default");
+        }
         var env: *Environment = self.env;
         while (env != var_env) {
             // A simple catch parameter is exempt (Annex B.3.5: a direct eval's
@@ -3624,6 +3640,8 @@ pub const Interpreter = struct {
         const saved_eval_nt = self.direct_eval_new_target_allowed;
         const saved_fi = self.in_field_initializer;
         const saved_pe = self.in_param_expr;
+        const saved_pd = self.in_param_default;
+        self.in_param_default = false; // a function body is not a parameter default
         const saved_pfi = self.pending_field_inits;
         const saved_pbn = self.pending_brand_names;
         // A derived constructor's field initializers + private brands wait for its
@@ -3675,6 +3693,7 @@ pub const Interpreter = struct {
             self.direct_eval_new_target_allowed = saved_eval_nt;
             self.in_field_initializer = saved_fi;
             self.in_param_expr = saved_pe;
+            self.in_param_default = saved_pd;
             self.pending_field_inits = saved_pfi;
             self.pending_brand_names = saved_pbn;
         }
@@ -3850,14 +3869,20 @@ pub const Interpreter = struct {
                     // sentinel; the real value overwrites it below.
                     if (p.pattern == null and self.tdz_marker != null) try self.env.put(p.name, self.tdzVal());
                     // The default runs in the parameter scope; a non-arrow's owns
-                    // `arguments`, so a direct eval there can't declare it.
+                    // `arguments`, so a direct eval there can't declare it. The
+                    // `in_param_default` flag (all functions) marks that a direct
+                    // eval here may not `var`-declare a parameter name.
                     const saved_pe = self.in_param_expr;
+                    const saved_pd = self.in_param_default;
                     self.in_param_expr = param_scope_has_arguments;
+                    self.in_param_default = true;
                     v = self.eval(d) catch |e| {
                         self.in_param_expr = saved_pe;
+                        self.in_param_default = saved_pd;
                         return e;
                     };
                     self.in_param_expr = saved_pe;
+                    self.in_param_default = saved_pd;
                     if (p.pattern == null) try self.maybeNameAnon(v, d, p.name); // `function f(x = () => {})` ⇒ name "x"
                 }
             }
