@@ -753,6 +753,7 @@ pub const Lexer = struct {
                 } else if (e == '0' and self.i + 2 < self.src.len and std.ascii.isDigit(self.src[self.i + 2])) {
                     legacy = true;
                 }
+                try validateStringEscape(self.src, self.i + 1);
                 self.i = try appendEscape(self.arena, &buf, self.src, self.i + 1);
             } else if (ch == '\n' or ch == '\r') {
                 return LexError.UnterminatedString;
@@ -1074,6 +1075,42 @@ pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
             try buf.append(arena, e);
             return i + 1;
         },
+    }
+}
+
+/// Reject the malformed `\x`/`\u` escape sequences that are an early SyntaxError
+/// in a *string* literal (12.9.4.1): `\x` not followed by two hex digits, `\u`
+/// not followed by four hex digits or a `\u{ H+ }` with 1..0x10FFFF. These are
+/// tolerated (yielding an `undefined` cooked value) in template literals, so
+/// this runs only from `lexString`, never from `appendEscape`. Lone surrogates
+/// (`\uD800`) remain valid. `i` indexes the character right after the backslash.
+fn validateStringEscape(src: []const u8, i: usize) LexError!void {
+    if (i >= src.len) return;
+    switch (src[i]) {
+        'x' => {
+            if (i + 2 >= src.len or hexVal(src[i + 1]) == null or hexVal(src[i + 2]) == null)
+                return LexError.UnexpectedCharacter;
+        },
+        'u' => {
+            if (i + 1 < src.len and src[i + 1] == '{') {
+                var j = i + 2;
+                var cp: u32 = 0;
+                var any = false;
+                while (j < src.len and src[j] != '}') : (j += 1) {
+                    const h = hexVal(src[j]) orelse return LexError.UnexpectedCharacter;
+                    cp = cp * 16 + h;
+                    any = true;
+                    if (cp > 0x10FFFF) return LexError.UnexpectedCharacter;
+                }
+                if (!any) return LexError.UnexpectedCharacter; // `\u{}`
+                if (j >= src.len or src[j] != '}') return LexError.UnexpectedCharacter; // unterminated
+            } else if (i + 4 >= src.len or hexVal(src[i + 1]) == null or hexVal(src[i + 2]) == null or
+                hexVal(src[i + 3]) == null or hexVal(src[i + 4]) == null)
+            {
+                return LexError.UnexpectedCharacter;
+            }
+        },
+        else => {},
     }
 }
 
