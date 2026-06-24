@@ -677,6 +677,11 @@ pub const Interpreter = struct {
     /// The Context-owned microtask queue (Promise reactions). Drained after the
     /// main script in `Context.evaluate` and inline by `await`.
     microtasks: ?*std.ArrayListUnmanaged(promise.Microtask) = null,
+    /// When non-null (only under `parallel_js`), serializes content mutation of
+    /// `microtasks` so a cross-thread enqueue (e.g. an `asyncJoin` settlement on
+    /// the finishing thread) can't race the joiner's drain. Points at the
+    /// Context's `microtask_lock`; null on the default GIL-serialized path.
+    microtask_lock: ?*std.atomic.Mutex = null,
     /// Microtask currently popped from the queue and executing. It is no longer
     /// present in `microtasks`, so GC must trace it separately.
     current_microtask: ?promise.Microtask = null,
@@ -4184,9 +4189,15 @@ pub const Interpreter = struct {
     /// Run queued Promise reactions to completion (the event loop's microtask
     /// checkpoint). Each job may enqueue more; the step budget bounds runaways.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
-        const q = self.microtasks orelse return;
-        while (q.items.len > 0) {
-            const job = q.orderedRemove(0);
+        if (self.microtasks == null) return;
+        // Pop one job at a time under `microtask_lock` (when engaged), run it
+        // unlocked (it may enqueue more, re-entering the lock), and repeat until
+        // the queue is empty. The per-pop lock makes the dequeue atomic against
+        // a peer thread's concurrent enqueue under `parallel_js`; the previous
+        // trailing `clearRetainingCapacity()` is gone because it could discard a
+        // task a peer appended after the empties check (and the loop already
+        // leaves the queue empty).
+        while (self.microtaskDequeue()) |job| {
             self.current_microtask = job;
             promise.runJob(self, job) catch |err| {
                 self.current_microtask = null;
@@ -4195,7 +4206,34 @@ pub const Interpreter = struct {
             self.current_microtask = null;
             self.serviceRequestedGcCheckpoint();
         }
-        q.clearRetainingCapacity();
+    }
+
+    /// Atomically pop the next microtask (front of the queue), or null if empty.
+    /// Holds `microtask_lock` only across the queue mutation — never across the
+    /// job's execution — so it stays a brief leaf-lock that can't deadlock with
+    /// the GIL or any per-structure lock.
+    fn microtaskDequeue(self: *Interpreter) ?promise.Microtask {
+        const q = self.microtasks orelse return null;
+        self.lockMicrotasks();
+        defer self.unlockMicrotasks();
+        if (q.items.len == 0) return null;
+        return q.orderedRemove(0);
+    }
+
+    /// Spin-acquire the realm's microtask lock (only engaged under
+    /// `parallel_js`; a single null check otherwise). Mirrors `Object`'s
+    /// `tryLock` spin since the enum mutex has no blocking `lock()`, and the
+    /// critical section is a single queue append/pop, never JS.
+    pub fn lockMicrotasks(self: *Interpreter) void {
+        const m = self.microtask_lock orelse return;
+        var spins: usize = 0;
+        while (!m.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlockMicrotasks(self: *Interpreter) void {
+        if (self.microtask_lock) |m| m.unlock();
     }
 
     fn serviceRequestedGcCheckpoint(self: *Interpreter) void {

@@ -344,6 +344,11 @@ pub fn performThen(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, re
 
 fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
     const q = self.microtasks orelse return; // no queue wired → drop (shouldn't happen)
+    // Under `parallel_js` a peer thread may drain this queue concurrently; the
+    // lock makes the append atomic against the drain's pop. A no-op (single null
+    // check) on the GIL-serialized default path.
+    self.lockMicrotasks();
+    defer self.unlockMicrotasks();
     try q.append(self.arena, task);
 }
 

@@ -105,6 +105,14 @@ pub const Context = struct {
     /// The microtask queue (Promise reactions) and the `print` output buffer —
     /// persistent across `evaluate` calls, shared with each `Interpreter`.
     microtasks: std.ArrayListUnmanaged(@import("promise.zig").Microtask) = .empty,
+    /// Serializes microtask-queue content mutation (enqueue/dequeue) when the
+    /// execution-path GIL is dropped (`parallel_js`). Under the GIL exactly one
+    /// thread touches the queue at a time, so the interpreter's `microtask_lock`
+    /// pointer stays null and the enqueue/drain paths are a single relaxed null
+    /// check. Without it, a thread settling an `asyncJoin` promise enqueues a
+    /// reaction into the joiner's queue while the joiner drains it — a data race
+    /// that loses the reaction (the Layer-C "microtask queue" blocker).
+    microtask_lock: std.atomic.Mutex = .unlocked,
     print_buffer: std.ArrayListUnmanaged(u8) = .empty,
     /// SharedArrayBuffer storage references this realm holds (one per SAB
     /// wrapper created here). Released in `destroy` — shared bytes live in
@@ -444,6 +452,12 @@ pub const Context = struct {
             .this_value = Value.obj(self.global_object),
             .root_shape = self.root_shape,
             .microtasks = &self.microtasks,
+            // Only engage the microtask lock when the execution-path GIL is
+            // dropped; the default GIL-serialized engine leaves it null (no
+            // overhead). Every interpreter (main + each spawned `Thread`, which
+            // also come from `interpreter()`) thus shares one lock for the
+            // realm's queue.
+            .microtask_lock = if (self.parallel_js) &self.microtask_lock else null,
             .print_buffer = &self.print_buffer,
             .tdz_marker = self.tdz_marker,
             .sab_retains = &self.sab_retains,
