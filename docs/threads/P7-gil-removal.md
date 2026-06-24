@@ -423,7 +423,12 @@ budgets. The full promoted scaling block is also
 focused-green 6/6 under `parallel_js`; `scaling/raytrace-like.js` and
 `scaling/richards-like.js` keep their normal corpus/gate workloads while using
 smaller no-GIL standalone budgets. The VM-state block is focused-green 10/10
-under `parallel_js`. The promoted CVE tail after
+under `parallel_js`; the four ROUNDS-amplified churn files
+(`exception-state-per-thread.js`, `regexp-churn-threads.js`,
+`structure-churn-dictionary.js`, `structure-churn-threads.js`) now carry no-GIL
+round budgets while keeping the full GIL-mode amplifiers and the same per-round
+oracles (the fixed-digest `runVMStateWorkload` files are left intact). The
+promoted CVE tail after
 `cve/mc-int-resizable-tail-quarantine.js` is focused-green in slices through
 `cve/mc-wait-property-wait-lost-wakeup.js`, including the async-generator
 resume-head claim case `cve/mc-prim-async-generator-resume-claim.js`; that

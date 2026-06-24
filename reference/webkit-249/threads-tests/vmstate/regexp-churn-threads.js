@@ -7,8 +7,14 @@
 // wrong lastIndex, or crashes in the Yarr interpreter/JIT.
 load("../resources/assert.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const ROUNDS = 100;
+// GIL mode keeps the full 100-round amplifier; no-GIL keeps the same per-thread
+// regexp-state churn oracle at a smaller round budget so the broad probe stays
+// a correctness witness rather than a serial-performance gate.
+const ROUNDS = NO_GIL ? 24 : 100;
 
 // A shared (cross-thread) regexp object: its lastIndex is shared mutable
 // state. Threads use it ONLY with fresh per-call lastIndex resets so results

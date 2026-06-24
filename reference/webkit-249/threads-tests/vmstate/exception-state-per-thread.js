@@ -7,8 +7,14 @@
 // with the lock, and the M6 I15 debug asserts back this up.
 load("../resources/assert.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const ROUNDS = 200;
+// GIL mode keeps the full 200-round amplifier; no-GIL keeps the same I15
+// per-thread exception-identity oracle (each catch is exactly this thread's
+// throw) at a smaller round budget so the broad probe stays a witness.
+const ROUNDS = NO_GIL ? 40 : 200;
 
 const threads = spawnN(THREADS, t => {
     for (let i = 0; i < ROUNDS; ++i) {

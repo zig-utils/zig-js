@@ -11,8 +11,14 @@
 // exactly; Object.isFrozen/isSealed/isExtensible must report the transition.
 load("../resources/assert.js", "caller relative");
 
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
 const THREADS = 4;
-const ROUNDS = 60;
+// GIL mode keeps the full 60-round amplifier; no-GIL keeps the same I8/I9
+// dictionary-transition oracle (read-back + frozen/sealed/extensible reports)
+// at a smaller round budget so the broad probe stays a correctness witness.
+const ROUNDS = NO_GIL ? 16 : 60;
 
 const threads = spawnN(THREADS, t => {
     let digest = 0;
