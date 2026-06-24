@@ -17,6 +17,32 @@
 // make their uncontended holds contended.
 load("../harness.js", "caller relative");
 
+// join() of a *Running* thread blocks, so under --can-block-is-false it is
+// gated (throws TypeError); join() of a *finished* thread never blocks, so it
+// is allowed (F5 fast path). Under the GIL a freshly-spawned, not-yet-joined
+// thread is provably Running (the joining thread holds the lock, so the target
+// cannot run), and the strict throw is asserted. Without the GIL (parallel_js)
+// the target runs concurrently and may have already finished, so join() may
+// legitimately take the allowed fast path — a GIL-specific ordering expectation
+// re-derived per the no-GIL campaign, so accept either outcome there. (There is
+// no cooperative way to pin the target Running under can-block-is-false: every
+// blocking wait is itself gated, and a busy-spin starves the GIL-free runner.)
+// A global so spawned-thread fns can reach it.
+globalThis.assertJoinGated = function (th) {
+    const noGil = typeof $vm !== "undefined" && typeof $vm.useThreadGIL === "function" && $vm.useThreadGIL() === false;
+    if (noGil) {
+        try {
+            th.join(); // Running => gated TypeError; finished => allowed fast path
+        } catch (e) {
+            if (!(e instanceof TypeError || (e && e.name === "TypeError")))
+                throw new Error("join() gated with a non-TypeError: " + describe(e));
+        }
+    } else {
+        shouldThrow(TypeError, () => th.join(),
+            "Thread.prototype.join cannot block the current thread");
+    }
+};
+
 // Probe: with --can-block-is-false, typed-array Atomics.wait throws before
 // even looking at the value; without it, the mismatched expected value
 // returns "not-equal" with no blocking.
@@ -107,15 +133,13 @@ asyncTestStart(3);
         shouldThrow(TypeError, () => Atomics.wait({ k: 0 }, "k", 0),
             "Atomics.wait cannot be called from the current thread.");
         const inner = new Thread(() => 5);
-        // inner has not run (we hold the GIL): Running => join would block
-        // => gated.
-        shouldThrow(TypeError, () => inner.join(),
-            "Thread.prototype.join cannot block the current thread");
+        // inner Running (GIL) or possibly finished (no-GIL): gated-throw or
+        // allowed fast path — see assertJoinGated.
+        assertJoinGated(inner);
         return inner.asyncJoin(); // await it instead (4.6.3 convention)
     });
-    // t has not run yet (main holds the GIL): Running => gated.
-    shouldThrow(TypeError, () => t.join(),
-        "Thread.prototype.join cannot block the current thread");
+    // t Running (GIL) or possibly finished (no-GIL): see assertJoinGated.
+    assertJoinGated(t);
     t.asyncJoin().then(innerPromise => innerPromise).then(v => {
         shouldBe(v, 5);
         // join of a FINISHED thread never blocks: allowed even when
