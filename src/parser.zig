@@ -4030,8 +4030,8 @@ test "parser does not propagate module await into function parameters" {
     defer arena.deinit();
 
     var decl_param = try Parser.init(arena.allocator(), "function fn(x = await 1) {}");
-    try std.testing.expectError(ParseError.ExpectedToken, decl_param.parseModule());
+    try std.testing.expectError(ParseError.UnexpectedToken, decl_param.parseModule());
 
     var expr_param = try Parser.init(arena.allocator(), "0, function (x = await 1) {};");
-    try std.testing.expectError(ParseError.ExpectedToken, expr_param.parseModule());
+    try std.testing.expectError(ParseError.UnexpectedToken, expr_param.parseModule());
 }
