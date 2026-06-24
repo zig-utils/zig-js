@@ -3482,7 +3482,40 @@ pub const Interpreter = struct {
         return self.bindParams2(params, args, false);
     }
 
+    /// Whether any parameter binds the name `arguments` (a simple param, a rest
+    /// param, or a name inside a destructuring pattern).
+    fn paramsBindArguments(params: []const ast.Param) bool {
+        for (params) |p| {
+            if (p.pattern) |pat| {
+                if (patternBindsName(pat, "arguments")) return true;
+            } else if (std.mem.eql(u8, p.name, "arguments")) return true;
+        }
+        return false;
+    }
+
+    fn patternBindsName(node: *Node, name: []const u8) bool {
+        switch (node.*) {
+            .identifier => |n| return std.mem.eql(u8, n, name),
+            .obj_pattern => |p| {
+                for (p.props) |prop| if (patternBindsName(prop.target, name)) return true;
+                if (p.rest) |r| if (std.mem.eql(u8, r, name)) return true;
+            },
+            .arr_pattern => |p| {
+                for (p.elems) |elem| if (elem.target) |t| {
+                    if (patternBindsName(t, name)) return true;
+                };
+                if (p.rest) |r| if (patternBindsName(r, name)) return true;
+            },
+            else => {},
+        }
+        return false;
+    }
+
     pub fn bindParams2(self: *Interpreter, params: []const ast.Param, args: []const Value, is_arrow: bool) EvalError!void {
+        // The parameter scope binds `arguments` when this is a non-arrow function
+        // (the arguments object) or when a parameter is named `arguments`; in
+        // either case a direct eval in a default may not declare `arguments`.
+        const param_scope_has_arguments = !is_arrow or paramsBindArguments(params);
         for (params, 0..) |p, i| {
             if (p.is_rest) {
                 const rest = try self.newArray();
@@ -3497,7 +3530,7 @@ pub const Interpreter = struct {
                     // The default runs in the parameter scope; a non-arrow's owns
                     // `arguments`, so a direct eval there can't declare it.
                     const saved_pe = self.in_param_expr;
-                    self.in_param_expr = !is_arrow;
+                    self.in_param_expr = param_scope_has_arguments;
                     v = self.eval(d) catch |e| {
                         self.in_param_expr = saved_pe;
                         return e;
