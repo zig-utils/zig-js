@@ -2122,9 +2122,12 @@ pub const Parser = struct {
     /// `async *gen(...)`, or `async [computed](...)`. A bare `async` property
     /// (`{ async }`, `{ async: 1 }`, `{ async() {} }`) is *not* a modifier.
     fn asyncMethodAhead(self: *Parser) bool {
-        // An escaped `async` (`async`) is never the contextual keyword.
+        // An escaped `async` (`async`) is never the contextual keyword, and a
+        // LineTerminator after `async` breaks the `async [no LineTerminator here]
+        // MethodName` form (`async` then becomes a property/field name).
         if (self.cur().escaped_identifier) return false;
         if (!isKeyword(self.cur(), "async")) return false;
+        if (!self.noNewlineBefore(1)) return false;
         return switch (self.peekKind(1)) {
             .identifier, .string, .number, .private_name, .lbracket, .star => true,
             else => false,
@@ -2718,6 +2721,11 @@ pub const Parser = struct {
             if (self.check(.lparen)) {
                 // Method shorthand `{ m(args) { ... } }` -> a function value.
                 val = try self.parseMethodTail(key, gen_method, async_method, member_start);
+            } else if (gen_method or async_method) {
+                // A `*`/`async` modifier must introduce a method (a `(params){…}`
+                // must follow the name): `({ *foo })`, `({ async async })` are
+                // SyntaxErrors, not a property/shorthand named `foo`/`async`.
+                return ParseError.UnexpectedToken;
             } else if (self.match(.colon)) {
                 val = try self.parseAssignment();
                 nameAnon(val, key); // `{ m: function(){} }` ⇒ name "m"
