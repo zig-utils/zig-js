@@ -276,7 +276,16 @@ pub const Parser = struct {
         return switch (self.peekKind(1)) {
             .lbrace => self.noNewlineBefore(1),
             .lbracket => true,
-            .identifier => !isReservedWord(self.tokens[self.pos + 1].text),
+            // `let` followed by a BindingIdentifier begins a LexicalDeclaration.
+            // The contextual keywords `let`/`yield`/`await` are BindingIdentifiers
+            // (then rejected as bound names where illegal), so `let let`/`let yield`
+            // is a declaration — not `let` the identifier followed by an operator
+            // keyword (`let in x`, `let instanceof X`), which stays an expression.
+            .identifier => blk: {
+                const t1 = self.tokens[self.pos + 1].text;
+                break :blk !isReservedWord(t1) or std.mem.eql(u8, t1, "let") or
+                    std.mem.eql(u8, t1, "yield") or std.mem.eql(u8, t1, "await");
+            },
             else => false,
         };
     }
@@ -1327,6 +1336,9 @@ pub const Parser = struct {
             // A reserved word may not be a binding name — including when spelled
             // with `\u` escapes (the lexer hands us the decoded text).
             if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
+            // A lexical declaration's (let/const/using) BoundNames may not contain
+            // `let`, in every mode — `let let`, `const x, let`.
+            if (kind != .@"var" and std.mem.eql(u8, name_tok.text, "let")) return ParseError.UnexpectedToken;
             var init_expr: ?*Node = null;
             if (self.match(.assign)) {
                 init_expr = try self.parseAssignment();
