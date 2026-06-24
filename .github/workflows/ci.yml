@@ -3,13 +3,12 @@ name: CI
 # Runs the docs/threads/testing.md "Required Checks" — crucially the
 # ThreadSanitizer gates, which cannot run on a macOS dev box (the bundled libcxx
 # fails the TSan runtime compile with `undeclared identifier 'INFINITY'`) but
-# work on Linux. This is the gate that surfaces the remaining no-GIL races
-# blocking the execution-path GIL drop.
+# work on Linux. This is the gate that surfaces the no-GIL races blocking the
+# execution-path GIL drop.
 #
-# Triggers are pull_request + manual dispatch (not every push to main) so the
-# pinned dev-Zig toolchain can be confirmed via a manual run before this becomes
-# a per-commit gate. Once `mlugg/setup-zig` is confirmed to resolve the pinned
-# version, add `push: { branches: [main] }` here.
+# Triggers are pull_request + manual dispatch (not every push to main). Add
+# `push: { branches: [main] }` once the suite is green on main (the toolchain
+# pin is confirmed to resolve; see the `gate` matrix below).
 on:
   pull_request:
   workflow_dispatch:
@@ -22,14 +21,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gates:
+  # Each Required Check runs as its own matrix leg (fail-fast: false), so an
+  # unrelated failure in one (e.g. the full unit suite) does not mask the
+  # threading / ThreadSanitizer gates.
+  gate:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: zig-js
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: unit
+            cmd: zig build test
+          - name: threads-gil
+            cmd: zig build threads-test
+          - name: threads-nogil-witness
+            cmd: zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
+          - name: tsan-unit
+            cmd: zig build test -Dtsan=true
+          - name: tsan-parallel-js
+            cmd: zig build test -Dtsan=true -Dtest-filter=parallel_js
     steps:
       # build.zig.zon uses local-path deps (`../zig-regex`, `../zig-gc`), so the
-      # sibling repos must be checked out next to this one.
+      # sibling repos are checked out next to this one.
       - uses: actions/checkout@v6
         with:
           path: zig-js
@@ -41,26 +55,12 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-
-      - name: Install Zig (match build.zig.zon dev pin; bump as it moves)
-        uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0-dev.131+73c51c142
-
-      - name: Unit + C-API suite
-        run: zig build test
-
-      - name: Threads corpus — GIL mode (209/209 allowlist)
-        run: zig build threads-test
-
-      - name: Threads corpus — no-GIL focused witness
-        run: zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
-
-      - name: ThreadSanitizer — unit + C-API suite
-        run: zig build test -Dtsan=true
-
-      - name: ThreadSanitizer — parallel_js execution-path slice
-        run: zig build test -Dtsan=true -Dtest-filter=parallel_js
+      - name: ${{ matrix.name }}
+        working-directory: zig-js
+        run: ${{ matrix.cmd }}
 
   # Informational: the whole-corpus TSan probe that surfaces the residual no-GIL
   # races (the emergent api/blocking-gate settlement race, the semantics-batch
@@ -69,9 +69,6 @@ jobs:
   tsan-corpus-probe:
     runs-on: ubuntu-latest
     continue-on-error: true
-    defaults:
-      run:
-        working-directory: zig-js
     steps:
       - uses: actions/checkout@v6
         with:
@@ -88,17 +85,18 @@ jobs:
         with:
           version: 0.17.0-dev.131+73c51c142
       - name: TSan over the no-GIL blocking-gate case
+        working-directory: zig-js
         run: zig build threads-test -Dtsan=true -Dthreads-parallel-js=true -Dthreads-case=api/blocking-gate.js
 
   docs:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: zig-js
     steps:
       - uses: actions/checkout@v6
         with:
           path: zig-js
       - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bun run docs:build
+      - name: docs:build
+        working-directory: zig-js
+        run: |
+          bun install
+          bun run docs:build
