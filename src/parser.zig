@@ -2705,6 +2705,11 @@ pub const Parser = struct {
             const not_private = named and m.key[0] != '#';
             if (m.is_static and not_private and std.mem.eql(u8, m.key, "prototype"))
                 return ParseError.UnexpectedToken;
+            // A field — instance or static — may not be named `constructor`
+            // (15.7.1). A non-computed, non-private `constructor` field, however
+            // its name is spelled (identifier or string literal), is an error.
+            if (m.is_field and not_private and std.mem.eql(u8, m.key, "constructor"))
+                return ParseError.UnexpectedToken;
             if (m.is_field) continue;
             const mf = m.func orelse continue;
             if (mf.* != .function) continue;
