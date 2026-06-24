@@ -3100,7 +3100,17 @@ pub const Interpreter = struct {
                 // `extends null`: derived, null parent (handled above via `derived`).
             } else if (isConstructorValue(sv)) {
                 super_obj = sv.asObj();
-                super_proto = try self.protoObject(sv.asObj());
+                // protoParent = ? Get(superclass, "prototype"); it must be an Object
+                // or null (a bound function has no `prototype`; a `prototype` getter
+                // may return anything), else a TypeError.
+                const proto_v = try self.getProperty(sv, "prototype");
+                if (proto_v.isObject() and !proto_v.asObj().is_symbol and !proto_v.asObj().is_bigint) {
+                    super_proto = proto_v.asObj();
+                } else if (proto_v.isNull()) {
+                    super_proto = null;
+                } else {
+                    return self.throwError("TypeError", "class heritage's 'prototype' is not an object or null");
+                }
             } else {
                 // Any non-null heritage that is not a constructor — a non-object, or
                 // a callable that lacks [[Construct]] (arrow / method / generator /
