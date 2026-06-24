@@ -1554,6 +1554,17 @@ pub const Interpreter = struct {
                 defer self.in_field_initializer = saved_fi;
                 break :blk try self.eval(inner);
             },
+            .private_field_def => |d| blk: {
+                // PrivateFieldAdd: define the field as an own, writable,
+                // non-enumerable, non-configurable property of `this`.
+                const fv = try self.eval(d.value);
+                if (self.this_value.isObject()) {
+                    const o = self.this_value.asObj();
+                    try o.setOwn(self.arena, self.root_shape, d.name, fv);
+                    try o.setAttr(self.arena, d.name, .{ .writable = true, .enumerable = false, .configurable = false });
+                }
+                break :blk Value.undef();
+            },
             .object_lit => |props| try self.evalObjectLit(props),
             .array_lit => |elems| try self.evalArrayLit(elems),
             .regex_literal => |r| try self.makeRegex(r.pattern, r.flags),
@@ -2768,6 +2779,7 @@ pub const Interpreter = struct {
             },
             .optional_chain => |n| try self.rewritePrivateNamesInNode(n, map),
             .field_init_value => |n| try self.rewritePrivateNamesInNode(n, map),
+            .private_field_def => |d| try self.rewritePrivateNamesInNode(d.value, map),
             .object_lit => |props| for (props) |p| {
                 if (p.key_expr) |ke| try self.rewritePrivateNamesInNode(ke, map);
                 try self.rewritePrivateNamesInNode(p.value, map);
@@ -2907,10 +2919,16 @@ pub const Interpreter = struct {
                 w.* = .{ .field_init_value = raw_value };
                 break :vn w;
             } else raw_value;
-            const assign_node = try self.arena.create(Node);
-            assign_node.* = .{ .assign = .{ .target = member_node, .value = value_node } };
             const stmt = try self.arena.create(Node);
-            stmt.* = .{ .expr_stmt = assign_node };
+            // A private field is *defined* (PrivateFieldAdd) on `this`, not
+            // assigned via PrivateSet; a public field is an ordinary assignment.
+            if (m.key_expr == null and value.isPrivateKey(m.key)) {
+                stmt.* = .{ .private_field_def = .{ .name = m.key, .value = value_node } };
+            } else {
+                const assign_node = try self.arena.create(Node);
+                assign_node.* = .{ .assign = .{ .target = member_node, .value = value_node } };
+                stmt.* = .{ .expr_stmt = assign_node };
+            }
             try field_inits.append(self.arena, stmt);
         }
 
@@ -6637,10 +6655,65 @@ pub const Interpreter = struct {
         return self.getPropertyWithReceiver(recv, key, recv);
     }
 
+    /// PrivateGet (`this.#x` read). Resolves the PrivateElement on the receiver's
+    /// chain: a field/method returns its value; an accessor invokes its getter, or
+    /// is a TypeError if it has only a setter; an object that was never branded
+    /// with the name is a TypeError ("did not declare it"). Private fields are own
+    /// properties of an instance; methods/accessors live on the home object.
+    fn privateGet(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
+        if (!recv.isObject())
+            return self.throwError("TypeError", "Cannot read private member from a non-object");
+        var cur: ?*value.Object = recv.asObj();
+        while (cur) |c| {
+            if (c.getAccessor(key)) |acc| {
+                if (acc.get) |g| if (!g.isUndefined()) return self.callValueWithThis(g, &.{}, recv);
+                return self.throwError("TypeError", "Cannot read private member: accessor has no getter");
+            }
+            if (c.getOwn(key)) |v| return v; // private field (own) or method (on home)
+            cur = c.proto;
+        }
+        return self.throwError("TypeError", "Cannot read private member from an object whose class did not declare it");
+    }
+
+    /// PrivateSet (`this.#x = v`). Resolves the PrivateElement: a field is written;
+    /// a method is non-writable (TypeError); an accessor invokes its setter, or is
+    /// a TypeError if it has only a getter; an unbranded object is a TypeError.
+    fn privateSet(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
+        if (!recv.isObject())
+            return self.throwError("TypeError", "Cannot write private member to a non-object");
+        const o = recv.asObj();
+        var cur: ?*value.Object = o;
+        while (cur) |c| {
+            if (c.getAccessor(key)) |acc| {
+                if (acc.set) |s| if (!s.isUndefined()) {
+                    _ = try self.callValueWithThis(s, &.{v}, recv);
+                    return;
+                };
+                return self.throwError("TypeError", "Cannot write private member: accessor has no setter");
+            }
+            if (c.getOwn(key)) |_| {
+                // A private field is an own, writable property of the instance; an
+                // inherited (home-object) private data element is a method, which
+                // is read-only.
+                if (c == o and c.getAttr(key).writable) {
+                    try o.setOwn(self.arena, self.root_shape, key, v);
+                    return;
+                }
+                return self.throwError("TypeError", "Cannot write private method");
+            }
+            cur = c.proto;
+        }
+        return self.throwError("TypeError", "Cannot write private member to an object whose class did not declare it");
+    }
+
     /// Ordinary [[Get]] with the receiver kept separate from the object where
     /// lookup starts. Reflect.get and Proxy forwarding rely on this when an
     /// inherited accessor observes `this`.
     fn getPropertyWithReceiver(self: *Interpreter, recv: Value, key: []const u8, receiver: Value) EvalError!Value {
+        // PrivateGet is not OrdinaryGet: it resolves the PrivateElement directly
+        // (a setter-only accessor read is a TypeError; an absent brand is a
+        // TypeError, never `undefined`).
+        if (value.isPrivateKey(key)) return self.privateGet(recv, key);
         switch (recv.kind()) {
             .object => {
                 const o = recv.asObj();
@@ -7186,6 +7259,13 @@ pub const Interpreter = struct {
     /// the boolean directly.
     pub fn setMemberResult(self: *Interpreter, recv: Value, key: []const u8, v: Value, receiver: Value) EvalError!bool {
         if (recv.isObject()) try self.checkRestricted(recv.asObj());
+        // PrivateSet is not OrdinarySet: it resolves the PrivateElement (writing a
+        // field, invoking a setter, or a TypeError for a method / getter-only
+        // accessor / unbranded object) — never creating a new own property.
+        if (value.isPrivateKey(key)) {
+            try self.privateSet(recv, key, v);
+            return true;
+        }
         if (recv.isObject() and (recv.asObj().is_symbol or recv.asObj().is_bigint))
             return self.setPrimitiveMemberResult(recv, key, v);
         if (!recv.isObject()) {

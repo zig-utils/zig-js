@@ -215,6 +215,10 @@ pub const Node = union(enum) {
     /// can mark `in_field_initializer` while evaluating it (a direct eval inside
     /// inherits the field-initializer early errors). Synthesized, never parsed.
     field_init_value: *Node,
+    /// Define (PrivateFieldAdd) a private instance field as an own property of
+    /// `this` — distinct from a PrivateSet assignment, which requires the field to
+    /// already exist. Synthesized for `#x = init` instance fields, never parsed.
+    private_field_def: struct { name: []const u8, value: *Node },
     object_lit: []Property,
     array_lit: []*Node,
     regex_literal: struct { pattern: []const u8, flags: []const u8 },
