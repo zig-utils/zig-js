@@ -2853,6 +2853,16 @@ pub const Parser = struct {
                 try members.append(self.arena, .{ .key = apn.key, .key_expr = apn.expr, .func = func, .is_static = is_static, .accessor = kind });
                 continue;
             }
+            // `accessor x` auto-accessor field (decorators proposal). `accessor`
+            // is a contextual keyword only when an unescaped `accessor` is
+            // followed, with no LineTerminator, by a property name — otherwise it
+            // is itself the element name (`accessor;`, `accessor = 1`,
+            // `accessor(){}`). Accepted and parsed as a field.
+            if (!async_method and !gen_method and isKeyword(self.cur(), "accessor") and
+                !self.cur().escaped_identifier and self.noNewlineBefore(1) and self.propNameAhead())
+            {
+                _ = self.advance(); // accessor
+            }
             const pn = try self.parsePropertyName();
             if (self.check(.lparen)) {
                 // Method.
@@ -2862,7 +2872,11 @@ pub const Parser = struct {
             } else {
                 // Field: `x;` or `x = init;`.
                 const init_expr = if (self.match(.assign)) try self.parseAssignment() else null;
-                _ = self.match(.semicolon);
+                // A FieldDefinition must be terminated by `;`, the closing `}`, or
+                // ASI (a LineTerminator before the next element): `class C { x y }`
+                // and `class C { #x #y }` are SyntaxErrors.
+                if (!self.match(.semicolon) and !self.check(.rbrace) and self.noNewlineBefore(0))
+                    return ParseError.UnexpectedToken;
                 // Early error (15.7.1): a field Initializer may not contain a
                 // SuperCall or an `arguments` reference.
                 if (init_expr) |ie| try self.scanSuperAndArgs(ie);
@@ -2884,6 +2898,12 @@ pub const Parser = struct {
     ///   - a `constructor` element that is an accessor, generator, or async
     ///     method is a SyntaxError (the constructor must be a plain method).
     fn checkClassMemberErrors(self: *Parser, members: []const ast.ClassMember, has_superclass: bool) ParseError!void {
+        // A class may define at most one constructor.
+        var ctor_count: usize = 0;
+        for (members) |m| if (m.is_ctor) {
+            ctor_count += 1;
+        };
+        if (ctor_count > 1) return ParseError.UnexpectedToken;
         for (members) |m| {
             const named = m.key_expr == null and m.key.len > 0;
             const not_private = named and m.key[0] != '#';
