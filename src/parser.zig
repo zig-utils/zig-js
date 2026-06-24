@@ -382,6 +382,45 @@ pub const Parser = struct {
         for (stmts) |s| try self.recurseScope(s);
     }
 
+    /// Early error (15.2.1 etc.): no element of a function's parameter BoundNames
+    /// may also occur in the LexicallyDeclaredNames of its body —
+    /// `function f(a){ let a; }`, `(a) => { const a = 1; }`, `({ m(a){ class a{} } })`
+    /// are all SyntaxErrors. (A body `var a`/`function a(){}` is VarDeclared, not
+    /// Lexical, so it may legally shadow a parameter, and a `let a` nested in an
+    /// inner block has its own scope.) Applies to every function, method, and
+    /// block-body arrow. The body of an expression-bodied arrow has no
+    /// declarations, so nothing to check.
+    fn checkParamBodyConflict(self: *Parser, params: []const ast.Param, body: *Node) ParseError!void {
+        if (body.* != .block) return;
+        var pnames: std.StringHashMapUnmanaged(void) = .empty;
+        for (params) |p| {
+            if (p.pattern) |pat| {
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                try self.addPatternNames(&names, pat);
+                for (names.items) |n| if (n.len > 0) try pnames.put(self.arena, n, {});
+            } else if (p.name.len > 0) try pnames.put(self.arena, p.name, {});
+        }
+        if (pnames.count() == 0) return;
+        for (body.block) |s| switch (s.*) {
+            .var_decl => |d| if (d.kind != .@"var" and pnames.contains(d.name)) return ParseError.UnexpectedToken,
+            .destructure_decl => |d| if (d.kind != .@"var") {
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                try self.addPatternNames(&names, d.pattern);
+                for (names.items) |n| if (pnames.contains(n)) return ParseError.UnexpectedToken;
+            },
+            .decl_group => |g| for (g) |d2| {
+                if (d2.* == .var_decl and d2.var_decl.kind != .@"var" and pnames.contains(d2.var_decl.name)) return ParseError.UnexpectedToken;
+                if (d2.* == .destructure_decl and d2.destructure_decl.kind != .@"var") {
+                    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                    try self.addPatternNames(&names, d2.destructure_decl.pattern);
+                    for (names.items) |n| if (pnames.contains(n)) return ParseError.UnexpectedToken;
+                }
+            },
+            .class_expr => |c| if (c.name.len > 0 and pnames.contains(c.name)) return ParseError.UnexpectedToken,
+            else => {},
+        };
+    }
+
     /// Collect VarDeclaredNames reachable from `node` without crossing a function
     /// boundary: `var` declarations (incl. destructuring and `for` heads) hoist out
     /// of nested blocks and control-flow statements, so recurse through those but
@@ -1730,6 +1769,7 @@ pub const Parser = struct {
         if (self.last_fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
+        try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .func_decl = fnode });
@@ -1767,6 +1807,7 @@ pub const Parser = struct {
         if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
+        try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
         return self.alloc(.{ .function = fnode });
@@ -2042,6 +2083,7 @@ pub const Parser = struct {
             if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
             self.strict = saved_strict or own_use_strict;
             fnode.* = .{ .params = params, .body = try self.parseBlock(), .is_expr_body = false, .is_arrow = true, .is_async = is_async, .is_strict = self.strict };
+            try self.checkParamBodyConflict(params, fnode.body);
         } else {
             fnode.* = .{ .params = params, .body = try self.parseAssignment(), .is_expr_body = true, .is_arrow = true, .is_async = is_async, .is_strict = saved_strict };
         }
@@ -3212,6 +3254,7 @@ pub const Parser = struct {
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
         if (self.last_fn_strict) try validateStrictParams(params);
+        try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict, .is_method = true };
         return self.alloc(.{ .function = fnode });
