@@ -1519,6 +1519,15 @@ pub const Interpreter = struct {
                 if (target.* == .member) {
                     const m = target.member;
                     const obj = try self.eval(m.object);
+                    if (obj.isNull() or obj.isUndefined()) {
+                        // `delete a?.b` with a nullish base short-circuits to true;
+                        // otherwise `delete null.x` / `delete undefined[e]` performs
+                        // ToObject on the base, which throws a TypeError (the key
+                        // expression is still evaluated first, for its side effects).
+                        if (m.optional) break :blk Value.boolVal(true);
+                        if (m.computed) |ce| _ = try self.eval(ce);
+                        return self.throwError("TypeError", "Cannot convert undefined or null to object");
+                    }
                     if (!obj.isObject()) break :blk Value.boolVal(true);
                     const key = try self.memberKey(m.property, m.computed);
                     const ok = try self.deleteOwn(obj.asObj(), key);
