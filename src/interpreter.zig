@@ -2281,7 +2281,15 @@ pub const Interpreter = struct {
     fn perIterEnv(self: *Interpreter, outer: *Environment, names: []const []const u8, prev: *Environment) EvalError!*Environment {
         const e = try gc_mod.allocEnv(self.arena);
         self.initEnvironment(e, outer, false);
-        for (names) |n| try e.put(n, prev.get(n) orelse Value.undef());
+        for (names) |n| {
+            const v = prev.get(n) orelse Value.undef();
+            // Preserve const-ness across the per-iteration copy so a `const`
+            // loop binding stays immutable — `for (const i = 0; …; i++)` is a
+            // TypeError at the update, not a silent reassignment.
+            if (prev.isConst(n)) |is_const| {
+                if (is_const) try e.putConst(n, v) else try e.put(n, v);
+            } else try e.put(n, v);
+        }
         return e;
     }
 
@@ -7334,7 +7342,15 @@ pub const Interpreter = struct {
                     try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
                 }
             }
-            if (declare) try self.env.put(rest_name, rest_obj) else try self.env.assign(rest_name, rest_obj);
+            if (declare) {
+                try self.env.put(rest_name, rest_obj);
+            } else {
+                // An assignment target (not a declaration): `({...r} = …)` must
+                // honor a `const` binding, like any other assignment.
+                if (self.env.isConst(rest_name)) |is_c| if (is_c)
+                    return self.throwError("TypeError", "Assignment to constant variable.");
+                try self.env.assign(rest_name, rest_obj);
+            }
         }
     }
 
