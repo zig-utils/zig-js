@@ -1388,12 +1388,24 @@ pub const Parser = struct {
             isKeyword(self.cur(), "async") and
             self.peekIsKeyword(1, "of") and
             self.peekKind(2) == .arrow;
+        // `for (async of …)` — a plain for-of forbids a bare, unescaped `async`
+        // token directly before `of` (lookahead restriction). `for await`,
+        // a parenthesized `(async)`, and an escaped `async` are all unaffected,
+        // and `for (async of => …)` is the async-arrow classic form above.
+        if (!is_await and self.pos == save and decl_kind == null and
+            isKeyword(self.cur(), "async") and !self.cur().escaped_identifier and
+            self.peekIsKeyword(1, "of") and self.peekKind(2) != .arrow)
+            return ParseError.UnexpectedToken;
         // Iteration form `for ([decl] target in/of iterable)`, where `target`
         // is an identifier, a destructuring pattern, or (assignment form) a
         // member expression. Parse a target, then require `in`/`of`; otherwise
         // rewind to `save` and parse a classic `for(;;)`.
         if (!classic_using_of_decl and !classic_async_of_arrow) if (self.tryForTarget(decl_kind) catch null) |target| {
-            if (isKeyword(self.cur(), "in") or isKeyword(self.cur(), "of")) {
+            // `in`/`of` written with a Unicode escape (`of`) is never the
+            // contextual keyword, so it cannot introduce an iteration head.
+            const at_iter = !self.cur().escaped_identifier and
+                (isKeyword(self.cur(), "in") or isKeyword(self.cur(), "of"));
+            if (at_iter) {
                 // A lexical (`let`/`const`) for-in/of head binds the target's names
                 // and must have no duplicates: `for (let [x, x] of …)` is an error.
                 if (decl_kind) |k| if (k != .@"var") try self.checkNoDuplicateBindings(target);
