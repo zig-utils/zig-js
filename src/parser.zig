@@ -2773,7 +2773,13 @@ pub const Parser = struct {
             // `import.meta` — meta-property. `import.source(x)` / `import.defer(x)`
             // — the source-phase-import / import-defer proposals; parse them as a
             // phased dynamic import (the phase doesn't change the AST here).
-            if (std.mem.eql(u8, m.text, "meta")) return self.alloc(.import_meta);
+            // `import.meta` is only valid in Module code (a Script — including
+            // eval, which is always Script goal — is a SyntaxError), and `meta`
+            // may not be spelled with a Unicode escape.
+            if (std.mem.eql(u8, m.text, "meta")) {
+                if (!self.module or m.escaped_identifier) return ParseError.UnexpectedToken;
+                return self.alloc(.import_meta);
+            }
             if (std.mem.eql(u8, m.text, "source") or std.mem.eql(u8, m.text, "defer")) {
                 // fall through to the call form below.
             } else return ParseError.UnexpectedToken;
