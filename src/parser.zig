@@ -2499,7 +2499,17 @@ pub const Parser = struct {
         const start = self.pos;
         _ = self.advance(); // class
         var name: []const u8 = "";
-        if (self.check(.identifier) and !isKeyword(self.cur(), "extends")) name = self.advance().text;
+        if (self.check(.identifier) and !isKeyword(self.cur(), "extends")) {
+            // A class's BindingIdentifier is always strict-mode code (`class let {}`,
+            // `class yield {}`, `class await {}` in a module, … are SyntaxErrors),
+            // so validate the name with strict reserved-word rules.
+            const saved_strict = self.strict;
+            self.strict = true;
+            const forbidden = self.isForbiddenBindingName(self.cur().text);
+            self.strict = saved_strict;
+            if (forbidden) return ParseError.UnexpectedToken;
+            name = self.advance().text;
+        }
         var superclass: ?*Node = null;
         if (isKeyword(self.cur(), "extends")) {
             _ = self.advance();
