@@ -881,6 +881,14 @@ pub const Interpreter = struct {
     /// `var` shadowing a parameter name is a SyntaxError. Reset to false when
     /// entering any function body so a nested call's eval doesn't inherit it.
     in_param_default: bool = false,
+    /// True while executing the body of a derived class constructor (extends a
+    /// value OR `extends null`), where a `super()` call is syntactically valid.
+    /// Arrows and direct eval inherit it (a `super()` reachable through them is
+    /// still bound to the enclosing derived constructor); a non-arrow function
+    /// resets it. Distinguishes the SyntaxError of `super()` in a disallowed
+    /// context (global eval, a method, a base constructor) from the runtime
+    /// TypeError of `super()` in an `extends null` constructor.
+    in_derived_ctor: bool = false,
     /// True while executing eval'd code: EvalDeclarationInstantiation creates
     /// new global var/function bindings as *deletable* (configurable), unlike a
     /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
@@ -1646,7 +1654,14 @@ pub const Interpreter = struct {
             .import_call => |ic| try self.evalImportCall(ic.specifier, ic.options),
 
             .super_call => |sc| blk: {
-                const sup = self.super_ctor orelse return self.throwError("SyntaxError", "'super' keyword unexpected here");
+                // `super()` is a SyntaxError outside a derived constructor — the
+                // case the parser can't catch is eval'd code (`eval("super()")` in
+                // global code, a method, or an arrow not enclosed by a derived
+                // constructor). When it IS a derived constructor, a null super
+                // constructor is `class … extends null`: GetSuperConstructor yields
+                // %Function.prototype%, not a constructor → a runtime TypeError.
+                if (!self.in_derived_ctor) return self.throwError("SyntaxError", "'super' keyword unexpected here");
+                const sup = self.super_ctor orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
                 const args = try self.evalArgs(sc);
                 // Run the superclass constructor on the current `this`. A built-in
                 // super (`class extends Set/Map/Array/...`) returns a fresh exotic
@@ -3064,16 +3079,25 @@ pub const Interpreter = struct {
     fn evalClass(self: *Interpreter, name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8) EvalError!Value {
         var super_obj: ?*value.Object = null;
         var super_proto: ?*value.Object = null;
+        // A class with ClassHeritage is a *derived* class even when the heritage
+        // is `null` (`class C extends null`): the constructor is a derived
+        // constructor (its `this` is uninitialized until a — here impossible —
+        // `super()`), its prototype's [[Prototype]] is null, and its constructor's
+        // [[Prototype]] is %Function.prototype% (the makeFunction default).
+        const derived = superclass != null;
         if (superclass) |sc| {
             const sv = try self.eval(sc);
-            if (!sv.isObject()) return self.throwError("TypeError", "class extends value is not a constructor");
-            super_obj = sv.asObj();
-            super_proto = try self.protoObject(sv.asObj());
+            if (sv.isObject()) {
+                super_obj = sv.asObj();
+                super_proto = try self.protoObject(sv.asObj());
+            } else if (!sv.isNull()) {
+                return self.throwError("TypeError", "class extends value is not a constructor");
+            }
         }
-        return self.buildClass(name, members, super_obj, super_proto, source);
+        return self.buildClass(name, members, super_obj, super_proto, source, derived);
     }
 
-    fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8) EvalError!Value {
+    fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool) EvalError!Value {
         try self.rewriteClassPrivateNames(members);
 
         // Instance field initializers, prepended to the constructor body.
@@ -3118,7 +3142,7 @@ pub const Interpreter = struct {
         }
         var default_params: []const ast.Param = &.{};
         var default_super: []*Node = &.{};
-        if (ctor_node == null and super_obj != null) {
+        if (ctor_node == null and derived) {
             const args_id = try self.arena.create(Node);
             args_id.* = .{ .identifier = "args" };
             const spread_node = try self.arena.create(Node);
@@ -3135,7 +3159,7 @@ pub const Interpreter = struct {
         // A base class runs its field initializers at the start of the
         // constructor (prepend); a derived class runs them when `super()` returns,
         // so they are stored on the constructor and not prepended here.
-        const body_stmts = if (super_obj != null)
+        const body_stmts = if (derived)
             orig
         else
             try std.mem.concat(self.arena, *Node, &.{ field_inits.items, orig });
@@ -3159,14 +3183,18 @@ pub const Interpreter = struct {
         if (super_obj) |so| {
             proto.proto = super_proto;
             class_obj.proto = so; // static methods inherit
+        } else if (derived) {
+            // `extends null`: the prototype object's [[Prototype]] is null; the
+            // constructor's [[Prototype]] stays %Function.prototype%.
+            proto.proto = null;
         }
         // The constructor's home object is the prototype; super(...) targets the superclass.
         if (funcOf(class_val)) |cf| {
             cf.home_object = proto;
             cf.super_ctor = super_obj;
             cf.is_class_constructor = true;
-            cf.is_derived_constructor = super_obj != null;
-            if (super_obj != null) cf.field_inits = field_inits.items;
+            cf.is_derived_constructor = derived;
+            if (derived) cf.field_inits = field_inits.items;
             // Private brands. Methods/accessors are added all at once before field
             // initializers run, so they brand the instance up front; *fields* are
             // added in declaration order, so each field brands the instance at its
@@ -3642,6 +3670,7 @@ pub const Interpreter = struct {
         const saved_pe = self.in_param_expr;
         const saved_pd = self.in_param_default;
         self.in_param_default = false; // a function body is not a parameter default
+        const saved_idc = self.in_derived_ctor;
         const saved_pfi = self.pending_field_inits;
         const saved_pbn = self.pending_brand_names;
         // A derived constructor's field initializers + private brands wait for its
@@ -3678,6 +3707,9 @@ pub const Interpreter = struct {
         // initializer; arrows inherit the enclosing one (so `field = () => eval(…)`
         // keeps the field-initializer restrictions).
         if (!func.is_arrow) self.in_field_initializer = false;
+        // Arrows inherit the enclosing super()-call legality; a non-arrow function
+        // establishes it (only a derived constructor permits `super()`).
+        if (!func.is_arrow) self.in_derived_ctor = func.is_derived_constructor;
         self.this_initialized = !func.is_derived_constructor;
         defer {
             self.env = saved_env;
@@ -3694,6 +3726,7 @@ pub const Interpreter = struct {
             self.in_field_initializer = saved_fi;
             self.in_param_expr = saved_pe;
             self.in_param_default = saved_pd;
+            self.in_derived_ctor = saved_idc;
             self.pending_field_inits = saved_pfi;
             self.pending_brand_names = saved_pbn;
         }
