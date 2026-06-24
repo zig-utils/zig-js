@@ -52,6 +52,11 @@ pub const Parser = struct {
     /// early error. Set true to scan only for SuperCall (e.g. a method body,
     /// where `arguments` is legal).
     scan_allow_arguments: bool = false,
+    /// When true, `scanSuperAndArgs` also flags a SuperProperty (`super.x`) —
+    /// used to validate indirect-eval code, which is global and may contain no
+    /// `super` at all (a direct eval from a field initializer leaves this false,
+    /// since `super.prop` is permitted there).
+    scan_forbid_super_property: bool = false,
     /// Active labels in the current function body. A function boundary resets
     /// these because `break`/`continue` cannot target labels outside the
     /// function it appears in.
@@ -2627,6 +2632,25 @@ pub const Parser = struct {
         _ = self;
     }
 
+    /// Validate eval'd code against the syntactic restrictions it inherits:
+    /// every top-level statement is scanned for a SuperCall (always forbidden in
+    /// these eval contexts), plus an `arguments` reference (when
+    /// `!allow_arguments`, e.g. a direct eval inside a class field initializer)
+    /// and/or a SuperProperty (when `forbid_super_property`, e.g. an indirect
+    /// eval, which is global code). Recurses into arrow bodies but stops at
+    /// ordinary functions/classes, matching the static `Contains` semantics.
+    /// Returns error.UnexpectedToken on a violation (the caller maps it to a
+    /// SyntaxError *before* any of the eval'd code runs).
+    pub fn scanEvalContext(self: *Parser, stmts: []const *Node, allow_arguments: bool, forbid_super_property: bool) ParseError!void {
+        self.scan_allow_arguments = allow_arguments;
+        self.scan_forbid_super_property = forbid_super_property;
+        defer {
+            self.scan_allow_arguments = false;
+            self.scan_forbid_super_property = false;
+        }
+        for (stmts) |s| try self.scanSuperAndArgs(s);
+    }
+
     /// Scan an expression/statement subtree for a SuperCall (`super()`), and —
     /// unless `scan_allow_arguments` is set — an `arguments` reference. Used for
     /// two early errors: a class field Initializer may contain neither (15.7.1),
@@ -2670,7 +2694,10 @@ pub const Parser = struct {
                 try self.scanSuperAndArgs(c.consequent);
                 try self.scanSuperAndArgs(c.alternate);
             },
-            .super_member => |m| if (m.computed) |computed| try self.scanSuperAndArgs(computed),
+            .super_member => |m| {
+                if (self.scan_forbid_super_property) return ParseError.UnexpectedToken;
+                if (m.computed) |computed| try self.scanSuperAndArgs(computed);
+            },
             .call => |c| {
                 try self.scanSuperAndArgs(c.callee);
                 for (c.args) |arg| try self.scanSuperAndArgs(arg);

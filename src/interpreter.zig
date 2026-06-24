@@ -841,6 +841,10 @@ pub const Interpreter = struct {
     /// contain `new.target`. Ordinary functions/methods do; arrows, scripts,
     /// modules, class fields, and indirect eval do not introduce that context.
     direct_eval_new_target_allowed: bool = false,
+    /// True while a class field initializer (or static block) is executing, so a
+    /// direct eval inside it inherits the field-initializer early errors:
+    /// `super()` and `arguments` are forbidden (`super.prop` stays legal).
+    in_field_initializer: bool = false,
     /// True while executing eval'd code: EvalDeclarationInstantiation creates
     /// new global var/function bindings as *deletable* (configurable), unlike a
     /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
@@ -1445,6 +1449,15 @@ pub const Interpreter = struct {
             },
             .optional_chain => |inner| self.eval(inner) catch |e|
                 if (e == error.OptShortCircuit) Value.undef() else return e,
+            .field_init_value => |inner| blk: {
+                // Evaluate a class instance field initializer with the
+                // field-initializer context active, so a direct eval inside it
+                // inherits the `super()`/`arguments` early errors.
+                const saved_fi = self.in_field_initializer;
+                self.in_field_initializer = true;
+                defer self.in_field_initializer = saved_fi;
+                break :blk try self.eval(inner);
+            },
             .object_lit => |props| try self.evalObjectLit(props),
             .array_lit => |elems| try self.evalArrayLit(elems),
             .regex_literal => |r| try self.makeRegex(r.pattern, r.flags),
@@ -2658,6 +2671,7 @@ pub const Interpreter = struct {
                 }
             },
             .optional_chain => |n| try self.rewritePrivateNamesInNode(n, map),
+            .field_init_value => |n| try self.rewritePrivateNamesInNode(n, map),
             .object_lit => |props| for (props) |p| {
                 if (p.key_expr) |ke| try self.rewritePrivateNamesInNode(ke, map);
                 try self.rewritePrivateNamesInNode(p.value, map);
@@ -2785,11 +2799,18 @@ pub const Interpreter = struct {
             this_node.* = .this_expr;
             const member_node = try self.arena.create(Node);
             member_node.* = .{ .member = .{ .object = this_node, .property = m.key, .computed = m.key_expr } };
-            const value_node = m.field_init orelse blk: {
+            const raw_value = m.field_init orelse blk: {
                 const u = try self.arena.create(Node);
                 u.* = .undefined_lit;
                 break :blk u;
             };
+            // Wrap the initializer so a direct eval inside it sees the
+            // field-initializer context (no `super()` / `arguments`).
+            const value_node = if (m.field_init != null) vn: {
+                const w = try self.arena.create(Node);
+                w.* = .{ .field_init_value = raw_value };
+                break :vn w;
+            } else raw_value;
             const assign_node = try self.arena.create(Node);
             assign_node.* = .{ .assign = .{ .target = member_node, .value = value_node } };
             const stmt = try self.arena.create(Node);
@@ -2876,15 +2897,19 @@ pub const Interpreter = struct {
                     // initializer captures the class lexically.
                     const saved_this = self.this_value;
                     const saved_home = self.home_object;
+                    const saved_fi = self.in_field_initializer;
                     self.this_value = class_val;
                     self.home_object = class_obj;
+                    self.in_field_initializer = true;
                     const fv2 = if (m.field_init) |init_node| self.eval(init_node) catch |e| {
                         self.this_value = saved_this;
                         self.home_object = saved_home;
+                        self.in_field_initializer = saved_fi;
                         return e;
                     } else Value.undef();
                     self.this_value = saved_this;
                     self.home_object = saved_home;
+                    self.in_field_initializer = saved_fi;
                     if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
                     try self.setProp(class_obj, key, fv2);
                 }
@@ -3291,6 +3316,7 @@ pub const Interpreter = struct {
         const saved_global = self.global_object;
         const saved_this_initialized = self.this_initialized;
         const saved_eval_nt = self.direct_eval_new_target_allowed;
+        const saved_fi = self.in_field_initializer;
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
@@ -3317,6 +3343,10 @@ pub const Interpreter = struct {
         self.super_ctor = func.super_ctor;
         self.new_target = if (func.is_arrow) saved_nt else new_target; // arrows inherit lexically
         self.direct_eval_new_target_allowed = !func.is_arrow;
+        // A non-arrow function call is a fresh context that is not a field
+        // initializer; arrows inherit the enclosing one (so `field = () => eval(…)`
+        // keeps the field-initializer restrictions).
+        if (!func.is_arrow) self.in_field_initializer = false;
         self.this_initialized = !func.is_derived_constructor;
         defer {
             self.env = saved_env;
@@ -3330,6 +3360,7 @@ pub const Interpreter = struct {
             self.global_object = saved_global;
             self.this_initialized = saved_this_initialized;
             self.direct_eval_new_target_allowed = saved_eval_nt;
+            self.in_field_initializer = saved_fi;
         }
         if (func.is_class_constructor and new_target.isUndefined())
             return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
@@ -10625,6 +10656,23 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     if (self.direct_eval_call and self.strict) parser.strict = true;
     if (self.direct_eval_call and self.direct_eval_new_target_allowed) parser.new_target_depth = 1;
     const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "eval: parse error");
+
+    // Eval inherits the caller's syntactic restrictions as *early errors* — they
+    // must reject the code before any of it runs. Indirect eval is global code:
+    // a top-level SuperCall or SuperProperty is a SyntaxError. Direct eval from a
+    // class field initializer forbids a top-level SuperCall and `arguments`
+    // (`super.prop` stays legal). Both scan only the eval program's top level
+    // (descending into arrows but not nested functions/classes), so `super`
+    // legitimately inside a nested class/method is unaffected.
+    if (prog.* == .program) {
+        if (!self.direct_eval_call) {
+            parser.scanEvalContext(prog.program, true, true) catch
+                return self.throwError("SyntaxError", "eval: 'super' is only valid inside a method");
+        } else if (self.in_field_initializer) {
+            parser.scanEvalContext(prog.program, false, false) catch
+                return self.throwError("SyntaxError", "eval: 'super()'/'arguments' not allowed in a field initializer");
+        }
+    }
 
     const saved_env = self.env;
     const saved_this = self.this_value;

@@ -211,6 +211,10 @@ pub const Node = union(enum) {
     /// Root of an optional chain (`a?.b.c`): catches the short-circuit and
     /// yields `undefined`.
     optional_chain: *Node,
+    /// Wraps a class instance field's initializer expression so the interpreter
+    /// can mark `in_field_initializer` while evaluating it (a direct eval inside
+    /// inherits the field-initializer early errors). Synthesized, never parsed.
+    field_init_value: *Node,
     object_lit: []Property,
     array_lit: []*Node,
     regex_literal: struct { pattern: []const u8, flags: []const u8 },
