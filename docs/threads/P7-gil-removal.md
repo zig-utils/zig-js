@@ -456,11 +456,24 @@ single failure is a non-deterministic `api/blocking-gate.js: async completions
 not reached`, a rare no-GIL event-loop race. One contributor is now closed — a
 cross-thread microtask-queue race (a thread settling an `asyncJoin` enqueued a
 reaction into the joiner's queue while the joiner drained it) is serialized by
-`Context.microtask_lock` — but the symptom persists at a reduced rate: each of
-the file's async sections (`asyncHold`/`asyncWait`/`asyncJoin`) is clean in
-isolation, only their full combination flakes (~1/40), so it is an *emergent*
-multi-section settlement race with at least one more unsynchronized path to find
-under TSan. (6)
+`Context.microtask_lock` — but the symptom persists at a reduced rate (~1/20–1/40,
+no-GIL only; TSan-clean over 80 corpus runs, so it is an *ordering* bug, not a
+data race). **Root cause (diagnosed, fix pending):** the nested `asyncJoin`
+(`t.asyncJoin().then(ip => ip)`) makes the inner thread's join promise `ip` be
+created on thread `t`, so `t`'s local microtask queue is captured as `ip`'s
+settlement queue. When `inner` finishes it settles `ip` using the
+`pending_joins` snapshot taken under `inner.join_mutex` in
+`publishThreadCompletion` — the *old* pointer to `t`'s queue. `t`'s teardown
+`transferPendingJoinQueue` rebinds the *live* pending-join pointer to
+`ctx.microtasks`, but it can't fix an in-flight settle that already snapshotted
+the old pointer, so if `inner` settles before `t`'s rebind the `.then` reaction
+lands in `t`'s queue, which `t` abandons on exit → lost completion. Fix
+direction: route cross-thread join-settlement reactions to a queue guaranteed to
+be drained (e.g. resolve the captured queue to `ctx.microtasks` at settle time
+when the joiner thread has exited, and/or flush an exiting thread's residual
+queue contents — not just rebind the pointer — into `ctx.microtasks` under
+`microtask_lock`). It is a delicate teardown-ordering change, verifiable only by
+stress (the nightly probe), so it is split out as its own focused step. (6)
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
 serial-perf gate — drive the remaining rare no-GIL races (this blocking-gate
