@@ -160,8 +160,11 @@ pub const Parser = struct {
     }
 
     /// The current token is the contextual keyword `word` (an identifier token).
+    /// A contextual keyword written with a Unicode escape (`from`) is never
+    /// the keyword — it is an ordinary identifier — so an escaped form never
+    /// matches (e.g. `import {} from "x"` is a SyntaxError).
     fn isContextual(self: *Parser, word: []const u8) bool {
-        return isKeyword(self.cur(), word);
+        return !self.cur().escaped_identifier and isKeyword(self.cur(), word);
     }
     /// Alias of `isContextual` for readability at peek sites.
     fn checkContextual(self: *Parser, word: []const u8) bool {
