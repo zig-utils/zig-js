@@ -2904,29 +2904,39 @@ pub const Parser = struct {
                 const saved_async = self.in_async;
                 const saved_gen = self.in_generator;
                 const saved_fn = self.fn_depth;
+                const saved_iter = self.iter_depth;
+                const saved_switch = self.switch_depth;
+                const saved_active = self.active_labels.items.len;
+                const saved_pending = self.pending_labels.items.len;
+                const saved_continue = self.continue_labels.items.len;
                 self.in_async = true; // [+Await]: `await` reserved in a static block
                 self.in_generator = false;
                 self.fn_depth = 0; // `return` is a SyntaxError in a static block
+                // A static block is a fresh control-flow boundary: `break`/
+                // `continue` may not target a loop/switch/label outside it.
+                self.iter_depth = 0;
+                self.switch_depth = 0;
+                self.active_labels.items.len = 0;
+                self.pending_labels.items.len = 0;
+                self.continue_labels.items.len = 0;
                 self.new_target_depth += 1;
-                const block = self.parseBlock() catch |e| {
+                defer {
                     self.in_async = saved_async;
                     self.in_generator = saved_gen;
                     self.fn_depth = saved_fn;
+                    self.iter_depth = saved_iter;
+                    self.switch_depth = saved_switch;
+                    self.active_labels.items.len = saved_active;
+                    self.pending_labels.items.len = saved_pending;
+                    self.continue_labels.items.len = saved_continue;
                     self.new_target_depth -= 1;
-                    return e;
-                };
-                self.new_target_depth -= 1;
-                self.in_async = saved_async;
-                self.in_generator = saved_gen;
-                self.fn_depth = saved_fn;
+                }
+                const block = try self.parseBlock();
                 // No super()/arguments, and no AwaitExpression (ContainsAwait).
                 const saved_fa = self.scan_forbid_await;
                 self.scan_forbid_await = true;
-                for (block.block) |s| self.scanSuperAndArgs(s) catch |e| {
-                    self.scan_forbid_await = saved_fa;
-                    return e;
-                };
-                self.scan_forbid_await = saved_fa;
+                defer self.scan_forbid_await = saved_fa;
+                for (block.block) |s| try self.scanSuperAndArgs(s);
                 try self.checkLexicalDupes(block.block, true); // own lexical scope
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
                 continue;
