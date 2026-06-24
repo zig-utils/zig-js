@@ -77,6 +77,11 @@ pub const Parser = struct {
     /// Script/Module finishes parsing was used as a real object literal — an
     /// early SyntaxError (`({ a = 1 })`, `f({ a = 1 })`).
     pending_cover_inits: std.AutoHashMapUnmanaged(*Node, void) = .empty,
+    /// Object literals with two or more `__proto__: value` colon properties,
+    /// which is an early error for a real object literal but legal when the object
+    /// is refined to a pattern (where `__proto__` is just a property key).
+    /// Same lifecycle as `pending_cover_inits`.
+    pending_proto_dup: std.AutoHashMapUnmanaged(*Node, void) = .empty,
     /// Expression nodes that were wrapped in parentheses. A parenthesized
     /// array/object literal is not a valid destructuring assignment target
     /// (`({}) = 1`, `([a]) = b`), so `litToPattern` rejects one; a parenthesized
@@ -370,7 +375,7 @@ pub const Parser = struct {
         try self.checkPrivateUsesInProgram(stmts.items);
         // A CoverInitializedName (`{ a = 1 }`) never refined to a pattern is an
         // early error.
-        if (self.pending_cover_inits.count() > 0) return ParseError.UnexpectedToken;
+        if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return ParseError.UnexpectedToken;
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -825,7 +830,7 @@ pub const Parser = struct {
             try stmts.append(self.arena, try self.parseModuleItem());
         }
         try self.checkModuleEarlyErrors(stmts.items);
-        if (self.pending_cover_inits.count() > 0) return ParseError.UnexpectedToken;
+        if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return ParseError.UnexpectedToken;
         return self.alloc(.{ .program = stmts.items });
     }
 
@@ -1245,9 +1250,11 @@ pub const Parser = struct {
                 return self.alloc(.{ .arr_pattern = .{ .elems = out.items, .rest = rest } });
             },
             .object_lit => |props| {
-                // This object is being refined to a pattern, so any
-                // CoverInitializedName it carries is legal (it becomes a default).
+                // This object is being refined to a pattern, so a
+                // CoverInitializedName it carries is legal (it becomes a default),
+                // and duplicate `__proto__` keys are legal (just property names).
                 _ = self.pending_cover_inits.remove(node);
+                _ = self.pending_proto_dup.remove(node);
                 var out: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
                 var rest_name: ?[]const u8 = null;
                 var seen_spread = false;
@@ -2794,6 +2801,7 @@ pub const Parser = struct {
         self.no_in = false;
         defer self.no_in = saved_no_in;
         var has_cover_init = false;
+        var proto_colon_count: u32 = 0;
         var props: std.ArrayListUnmanaged(ast.Property) = .empty;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             // Spread property `{ ...expr }`.
@@ -2856,6 +2864,9 @@ pub const Parser = struct {
                 // SyntaxErrors, not a property/shorthand named `foo`/`async`.
                 return ParseError.UnexpectedToken;
             } else if (self.match(.colon)) {
+                // `__proto__: value` (identifier or string key, not computed) is a
+                // prototype setter; two of them in one literal is an early error.
+                if (std.mem.eql(u8, key, "__proto__")) proto_colon_count += 1;
                 val = try self.parseAssignment();
                 nameAnon(val, key); // `{ m: function(){} }` ⇒ name "m"
             } else if (key_tok.kind == .identifier) {
@@ -2885,6 +2896,7 @@ pub const Parser = struct {
         for (props.items) |p| try self.checkMethodNoSuperCall(p.value);
         const node = try self.alloc(.{ .object_lit = props.items });
         if (has_cover_init) try self.pending_cover_inits.put(self.arena, node, {});
+        if (proto_colon_count >= 2) try self.pending_proto_dup.put(self.arena, node, {});
         return node;
     }
 
