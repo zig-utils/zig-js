@@ -362,6 +362,11 @@ pub const Environment = struct {
     /// function-declaration hoisting and Annex B B.3.3 analysis: a function
     /// declared directly in the body is var-scoped, not block-scoped.
     fn_body: bool = false,
+    /// True for the declarative environment that holds a *simple* (single
+    /// BindingIdentifier) catch parameter. Annex B.3.5 lets a direct eval's `var`
+    /// match such a binding without the lexical-conflict SyntaxError, so
+    /// EvalDeclarationInstantiation skips this environment in its conflict walk.
+    is_catch_param: bool = false,
     /// An object Environment Record for a `with (obj) {…}` block: identifier
     /// resolution at this chain position consults `obj`'s properties (honoring
     /// `Symbol.unscopables`). Because it sits in the lexical chain, a binding
@@ -950,6 +955,44 @@ pub const Interpreter = struct {
                 if (g.getOwn(nm) == null and self.env.varScope().vars.get(nm) == null)
                     return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
             }
+        }
+    }
+
+    /// EvalDeclarationInstantiation lexical-conflict early error (19.2.1.3 step 5,
+    /// sloppy direct eval). Walk the lexical environments from the eval's scope up
+    /// to — but not including — the variable environment; a `var` the eval would
+    /// introduce that collides with an intervening lexical binding (`let`/`const`/
+    /// `class`, a block-scoped function) is a SyntaxError: `let x; eval('var x')`.
+    ///
+    /// In our model var/function declarations hoist past block and function-body
+    /// environments to the nearest `fn_scope`, so those intervening environments
+    /// hold only lexical bindings — any name match there is a genuine conflict.
+    /// `with` (object) environments use Annex B alternate semantics (var hoists
+    /// over them) and are skipped. At the global variable environment, a global
+    /// lexical (in the root bindings but not an own global property) still conflicts.
+    fn checkEvalLexicalConflicts(self: *Interpreter, stmts: []*Node) EvalError!void {
+        var vars: std.ArrayListUnmanaged([]const u8) = .empty;
+        try self.collectEvalVarNames(stmts, &vars);
+        if (vars.items.len == 0) return;
+        const var_env = self.env.varScope();
+        var env: *Environment = self.env;
+        while (env != var_env) {
+            // A simple catch parameter is exempt (Annex B.3.5: a direct eval's
+            // `var` may match it); other declarative records are checked.
+            if (env.with_object == null and !env.is_catch_param) {
+                for (vars.items) |n|
+                    if (env.vars.contains(n))
+                        return self.throwError("SyntaxError", "var declaration in eval conflicts with a lexical binding");
+            }
+            env = env.parent orelse break;
+        }
+        if (var_env.parent == null) {
+            // Global variable environment: a global lexical lives in the root
+            // bindings without a matching own property on the global object.
+            const g = self.global_object orelse return;
+            for (vars.items) |n|
+                if (var_env.vars.contains(n) and !objectHasOwn(g, n))
+                    return self.throwError("SyntaxError", "var declaration in eval conflicts with a global lexical binding");
         }
     }
 
@@ -10582,8 +10625,12 @@ pub const Interpreter = struct {
                 const saved = self.env;
                 self.env = catch_env;
                 // Bind the catch target (identifier or destructuring pattern)
-                // into the catch scope.
-                if (t.catch_param) |p| try self.bindPattern(p, exc, true);
+                // into the catch scope. A simple identifier binding is Annex
+                // B.3.5-exempt from the eval var-conflict check.
+                if (t.catch_param) |p| {
+                    if (p.* == .identifier) catch_env.is_catch_param = true;
+                    try self.bindPattern(p, exc, true);
+                }
                 const catch_result = self.eval(t.catch_block.?);
                 self.env = saved;
                 if (catch_result) |v| {
@@ -11131,8 +11178,9 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // environment (the caller for direct eval, the realm global for indirect).
     if (prog.* == .program) {
         // EvalDeclarationInstantiation: reject undeclarable global var/function
-        // bindings up front, before any declaration runs.
+        // bindings and var/lexical conflicts up front, before any declaration runs.
         try self.checkGlobalEvalDeclarable(prog.program);
+        if (!parser.strict) try self.checkEvalLexicalConflicts(prog.program);
         try self.hoistVarNames(prog.program);
     }
     return self.eval(prog);
