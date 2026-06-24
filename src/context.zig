@@ -681,7 +681,7 @@ pub const Context = struct {
             t.join();
             self.gc_marker = null;
         }
-        if (h.concurrent) {
+        if (h.concurrent.load(.acquire)) {
             self.gc_scan_native_stack = true;
             defer self.gc_scan_native_stack = false;
             h.finishConcurrentMark();
@@ -707,7 +707,7 @@ pub const Context = struct {
         // finish, so the marker never sees a half-built cell); begin/finish
         // snapshot the native stack at the safepoint, and finish re-scans roots.
         if (self.gc_concurrent) {
-            if (h.concurrent) {
+            if (h.concurrent.load(.acquire)) {
                 self.finishConcurrentGCIfActive();
             } else if (h.bytes_live >= h.threshold_bytes) {
                 self.gc_scan_native_stack = true;
@@ -733,7 +733,7 @@ pub const Context = struct {
         }
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
-        if (h.marking) {
+        if (h.marking.load(.acquire)) {
             // Drain a bounded slice of the grey set; when it empties, close the
             // cycle (re-scan roots under the GIL, then sweep).
             if (h.markStep(mark_budget)) h.finishMarking();
@@ -5537,7 +5537,7 @@ test "enable_gc concurrent (M3): the production driver marks on a thread while J
     try std.testing.expect(ctx.gc.?.collections > 2); // multiple concurrent cycles closed
     try std.testing.expect(ctx.gc.?.live_cells < 20000); // heap stayed bounded
     try std.testing.expect(ctx.gc_marker == null); // no marker outlived the run
-    try std.testing.expect(!ctx.gc.?.concurrent);
+    try std.testing.expect(!ctx.gc.?.concurrent.load(.acquire));
 
     // A retained graph built + repeatedly assigned (env writes) under concurrent
     // marking is intact afterward.
@@ -5581,7 +5581,7 @@ test "enable_gc concurrent (M3): generators and iterator helpers are safe under 
     try std.testing.expectEqual(@as(f64, 100000), result.asNum());
     try std.testing.expect(ctx.gc.?.collections > 2); // concurrent cycles ran mid-workload
     try std.testing.expect(ctx.gc_marker == null);
-    try std.testing.expect(!ctx.gc.?.concurrent);
+    try std.testing.expect(!ctx.gc.?.concurrent.load(.acquire));
 }
 
 test "enable_gc concurrent (M3): mixed-workload stress amplifier stays correct + race-free" {
@@ -5635,7 +5635,7 @@ test "enable_gc concurrent (M3): mixed-workload stress amplifier stays correct +
     try std.testing.expectEqual(@as(f64, 19500 * 100000 + 32 * 1000 + 48 * 10 + 1), result.asNum());
     try std.testing.expect(ctx.gc.?.collections > 2);
     try std.testing.expect(ctx.gc_marker == null);
-    try std.testing.expect(!ctx.gc.?.concurrent);
+    try std.testing.expect(!ctx.gc.?.concurrent.load(.acquire));
 }
 
 test "LockedArena: concurrent allocation from many threads is race-free (GIL-removal prereq #1)" {
