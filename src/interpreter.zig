@@ -3188,6 +3188,12 @@ pub const Interpreter = struct {
             const kv: ?Value = if (m.key_expr) |ke| try self.eval(ke) else null;
             const key = if (kv) |k| try self.keyOf(k) else m.key;
             const name_str = if (kv) |k| try self.keyDisplayName(k) else m.key;
+            // A static class element may not have the key "prototype" — the
+            // constructor's `prototype` is a reserved, non-configurable own
+            // property. The non-computed form is a parse SyntaxError; a computed
+            // key resolving to "prototype" is a runtime TypeError.
+            if (m.is_static and !m.is_ctor and !value.isPrivateKey(key) and eq(key, "prototype"))
+                return self.throwError("TypeError", "Classes may not have a static property named 'prototype'");
             if (m.is_field) {
                 if (m.is_static) {
                     // DefineField runs a static initializer with `this` = the class
