@@ -55,7 +55,17 @@ for (let i = 0; i < 20000; ++i) {
 const workers = spawnN(THREADS, function (slot) {
     let maxSeen = 0;
     let reads = 0;
-    while (!stop.value) {
+    // do/while, not while: under the GIL a spawned worker is guaranteed to run
+    // (cooperative scheduling) before the conductor's short NO_GIL loop (ROUNDS=4,
+    // no sleeps) sets stop, so it always made >=1 read. Without the GIL the OS may
+    // not schedule this worker until after stop is already true; a leading
+    // while-test would then exit with reads==0 and fail the "every worker made
+    // progress" liveness assertion. The thread body still always runs before
+    // joinAll, so one guaranteed read keeps the assertion meaningful (worker ran +
+    // observed a valid, monotonic, non-stale value) without asserting a
+    // scheduling guarantee true parallelism cannot give. All correctness checks
+    // live in the body and run at least once.
+    do {
         const floor = published.generation; // published BEFORE the fire-write below
         const v = readThroughProto(instances[reads & 7]);
         if (v < floor)
@@ -66,7 +76,7 @@ const workers = spawnN(THREADS, function (slot) {
         ++reads;
         if (!(reads % 64))
             sleepMs(0);
-    }
+    } while (!stop.value);
     return reads;
 });
 
