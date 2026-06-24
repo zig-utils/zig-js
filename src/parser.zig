@@ -2543,6 +2543,9 @@ pub const Parser = struct {
                 const kind: ast.AccessorKind = if (isKeyword(self.cur(), "get")) .get else .set;
                 _ = self.advance(); // get/set
                 const pn = try self.parsePropertyName();
+                // A private name (`#x`) is only a valid member name in a class
+                // body, never in an object literal accessor (`({ get #x(){} })`).
+                if (pn.key.len > 0 and pn.key[0] == '#') return ParseError.UnexpectedToken;
                 const func = try self.parseMethodTail(pn.key, false, false, member_start);
                 try validateAccessor(func, kind);
                 try props.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .value = func, .accessor = kind });
