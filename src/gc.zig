@@ -468,6 +468,53 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     for (machine.with_stack.items) |o| v.mark(o);
 }
 
+/// A `Visitor`-shaped adapter that routes every root it is handed through the
+/// insertion write barrier (`gc_runtime.barrier` → the active heap's
+/// `writeBarrier`) instead of the marker-private `mark_stack`. This is how a
+/// *running* mutator publishes its own roots into a concurrent parallel mark
+/// (issue #1 M3): the barrier shades each cell grey and hands it to the marker
+/// through the lock-guarded `barrier_buf`, which is the only mutator→marker
+/// channel that is safe to touch off the collector thread. Marking is idempotent
+/// (a re-shaded cell's CAS just fails), so publishing already-marked roots is
+/// cheap. The transitive trace is the marker's job — this only greys the cells
+/// the interpreter holds *directly*.
+const RootPublishVisitor = struct {
+    pub fn mark(_: *RootPublishVisitor, cell: ?*anyopaque) void {
+        gc_runtime.barrier(cell);
+    }
+    // Roots are strong; weak edges are reconciled by the marker at the
+    // world-stopped finish, so a publishing mutator must not shade them.
+    pub fn markWeak(_: *RootPublishVisitor, _: *?*anyopaque) void {}
+    // The interpreter root set is precise; no conservative words to publish.
+    pub fn markConservativeWord(_: *RootPublishVisitor, _: usize) void {}
+    pub fn markConservativeWords(_: *RootPublishVisitor, _: [*]const usize, _: usize) void {}
+    pub fn deferToFinish(_: *RootPublishVisitor, _: *anyopaque) void {}
+    // Always true: publication only happens during a concurrent mark, and this
+    // makes `traceEnv` read binding tables under `binding_lock` for the HB edge.
+    pub fn concurrent(_: *RootPublishVisitor) bool {
+        return true;
+    }
+    // `barrier` validates the cell itself (magic check), so accept any pointer.
+    pub fn isManaged(_: *RootPublishVisitor, cell: ?*anyopaque) bool {
+        return cell != null;
+    }
+    pub fn isMarked(_: *RootPublishVisitor, _: ?*anyopaque) bool {
+        return false;
+    }
+};
+
+/// Publish a running interpreter's precise roots into the active concurrent
+/// marker, **from the thread that owns `machine`, at a GC safepoint** (between
+/// bytecodes, holding no per-structure lock). Each root cell is shaded through
+/// the insertion barrier (`barrier_buf`), so the collector thread can keep
+/// draining without ever reading this thread's live VM/native stack. Only the
+/// owner can scan its own running stack soundly — this is the per-mutator side
+/// of the parallel-GC root handshake (`src/root_handshake.zig`).
+pub fn publishInterpreterRoots(machine: *interp.Interpreter) void {
+    var pv = RootPublishVisitor{};
+    traceInterpreterRoots(machine, &pv);
+}
+
 // ---- The binding the collector instantiates over -------------------------
 
 /// A tiny stateful binding the collector instantiates over: it just wraps the

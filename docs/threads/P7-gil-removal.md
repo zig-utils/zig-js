@@ -194,6 +194,53 @@ per-thread before threads stop holding the GIL):
    handshake re-scans roots at finish; sweep with born-black allocation) is the
    next step — the parked-thread rooting machinery (`active_interpreters` +
    `gc_execs` + park records) is already in place.
+
+   *GC-side primitives now built (the M3 parallel marker's bricks).* The
+   zig-gc collector runs concurrently with parallel mutators: atomic
+   `marking`/`concurrent` flags, atomic born-grey mark-bit init, whiten-under-
+   `alloc_lock` (`beginConcurrentMarkParallel`), and sweep-under-`alloc_lock`,
+   all TSan-validated by a stress test (collector marks+sweeps while 4 mutators
+   allocate, no GIL). On the engine side, `gc.publishInterpreterRoots(machine)`
+   is the per-mutator side of the handshake: it routes a running interpreter's
+   *precise* roots (`traceInterpreterRoots`) through the insertion barrier into
+   `barrier_buf` (the only mutator→marker channel that is safe off the collector
+   thread), so a peer publishes its own roots at a safepoint without the
+   collector ever reading its live VM stack.
+
+   *Abort-safe driver — the spec for the remaining wiring.* `collectMidScript`'s
+   `h.parallel` branch (which today early-returns) becomes a best-effort
+   collector that is sound by construction:
+   - **Election.** A thread at its safepoint CAS-claims a single collector slot;
+     losers `publishInterpreterRoots(self)` and return. No mutator ever blocks
+     for the collector, so no mutator can be stuck holding a per-structure lock
+     (the original STW deadlock).
+   - **Begin.** `beginConcurrentMarkParallel` whitens + arms the barrier under
+     `alloc_lock`, then traces only the *collector-safe* roots: realm-level
+     state, the collector's own interpreter, and **parked** peers' frozen
+     stacks (park records). Running peers' `active_interpreters` are skipped —
+     they self-publish. (Open: a realm-root parallel-safety audit, so the
+     collector's reads of `ctx.microtasks` / `async_waiters` / `js_threads` /
+     `c_api_handles` don't race a peer; several realm globals are already
+     lock-guarded, the rest must be before this drives arbitrary workloads.)
+   - **Dual publication.** Peers with an interpreter publish precise roots
+     (`publishInterpreterRoots`). Peers whose live `Value`s sit only in native
+     frames (no safepoints — e.g. a host loop) need a *conservative* self-scan
+     into `barrier_buf`; this conservative-publish helper is still to be built.
+   - **Terminate or abort.** The collector drives a bounded number of
+     `concurrentMarkRound`s, re-opening the handshake each round until every
+     active interpreter is *published-this-generation-or-parked* and a full
+     round adds zero greys — then `finishConcurrentMark` sweeps under
+     `alloc_lock`. If it can't converge within the bound (heavy contention), it
+     **aborts**: clear `marking`/`concurrent` and the scratch buffers, **do not
+     sweep**. An aborted mark frees nothing, so it can never use-after-free; the
+     next quiescent `collectGarbage` reclaims the garbage. This makes the driver
+     safe to land incrementally — it collects when it can converge cheaply and
+     falls back to quiescent collection otherwise, never trading correctness for
+     pause-time.
+
+   Quiescent collection under parallel mutation is already correct and shipping,
+   so this driver is purely a pause-time optimization; it is **not** on the
+   GIL-drop correctness path.
 2. **Thread-API shared state in `Gil`** (`tasks`, `prop_waiters`, `prop_async`,
    `next_thread_id`, `park_records`) — the old "mutated/read only under the
    GIL" model is being split into dedicated locks. **Spawn done:** the spawn critical section (live-cap check + id
