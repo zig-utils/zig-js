@@ -1957,10 +1957,14 @@ pub const Parser = struct {
         if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
         const params = try self.parseFunctionParamList(is_gen, is_async);
         const own_use_strict = self.peekUseStrict();
+        // This function's strictness: inherited OR its own "use strict" prologue.
+        // Captured BEFORE parseFnBody, which clobbers `last_fn_strict` when it
+        // parses nested functions (so it can't be used to stamp THIS function).
+        const fn_strict = self.strict or own_use_strict;
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
-        if (self.last_fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
-        if (self.last_fn_strict) try validateStrictParams(params);
+        if (fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
+        if (fn_strict) try validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
         // A generator/async function, or ANY function with a non-simple parameter
         // list (a default/rest/destructuring), has UniqueFormalParameters:
@@ -1970,7 +1974,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
+        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict };
         return self.alloc(.{ .func_decl = fnode });
     }
 
@@ -2001,10 +2005,11 @@ pub const Parser = struct {
         }
         const params = try self.parseFunctionParamList(is_gen, is_async);
         const own_use_strict = self.peekUseStrict();
+        const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
-        if (self.last_fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
-        if (self.last_fn_strict) try validateStrictParams(params);
+        if (fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
+        if (fn_strict) try validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
         // A generator/async function, or ANY function with a non-simple parameter
         // list (a default/rest/destructuring), has UniqueFormalParameters:
@@ -2014,7 +2019,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -3669,12 +3674,13 @@ pub const Parser = struct {
         const params = try self.parseFunctionParamList(is_gen, is_async);
         try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const own_use_strict = self.peekUseStrict();
+        const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
-        if (self.last_fn_strict) try validateStrictParams(params);
+        if (fn_strict) try validateStrictParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = self.last_fn_strict, .is_method = true };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true };
         return self.alloc(.{ .function = fnode });
     }
 
