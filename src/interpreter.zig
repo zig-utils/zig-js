@@ -1672,20 +1672,18 @@ pub const Interpreter = struct {
                 if (!self.in_derived_ctor) return self.throwError("SyntaxError", "'super' keyword unexpected here");
                 const sup = self.super_ctor orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
                 const args = try self.evalArgs(sc);
-                // Run the superclass constructor on the current `this`. A built-in
-                // super (`class extends Set/Map/Array/...`) returns a fresh exotic
-                // object carrying the internal slots; per spec that object becomes
-                // the `this` binding, so rebind `this` and record it for construct.
+                // Construct the superclass with the most-derived class as NewTarget,
+                // so the produced object's prototype is the derived class's.
                 const sup_ret = try self.constructNT(Value.obj(sup), args, self.new_target);
-                // A built-in super (`class extends Set/Map/Array/Promise/...`)
-                // returns a fresh exotic object carrying the internal slots the
-                // derived `this` should have. Rather than rebind `this`'s identity
-                // (the derived instance already has the right prototype and may be
-                // mid-chain), copy the super result's internal state onto the
-                // existing `this` in place. A JS super returns undefined (it
-                // initialized `this` directly), so nothing to adopt.
-                if (self.this_value.isObject() and sup_ret.isObject() and sup_ret.asObj() != self.this_value.asObj())
-                    adoptInternalSlots(self.this_value.asObj(), sup_ret.asObj());
+                // BindThisValue: `super()` initializes `this` exactly once — a
+                // second call (after the construct's side effects) is a ReferenceError.
+                if (self.this_initialized) return self.throwError("ReferenceError", "Super constructor may only be called once");
+                // The object the super constructor produces (a built-in exotic from
+                // `extends Map/Array/...`, or an object a JS base explicitly returns)
+                // *becomes* the `this` binding — its prototype was already set from
+                // new_target. Rebind `this` to it (the eagerly-allocated placeholder
+                // is discarded); the field initializers / private brands below target it.
+                self.this_value = sup_ret;
                 self.this_initialized = true;
                 // InitializeInstanceElements: a derived class brands `this` with
                 // its private names and runs its field initializers now, once
@@ -3874,7 +3872,9 @@ pub const Interpreter = struct {
                 self.global_object = saved_global;
                 return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
             }
-            return Value.undef();
+            // The bound `this` (the object `super()` produced) is what `new`
+            // yields — not the discarded eager placeholder.
+            return self.this_value;
         }
         return if (self.signal == .ret) self.ret_value else Value.undef();
     }
@@ -7016,7 +7016,11 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "Cannot read private member: accessor has no getter");
             }
             if (c.getOwn(key)) |v| return v; // private field (own) or method (on home)
-            cur = c.proto;
+            // A private method lives on the declaring class's prototype; when the
+            // instance is a Proxy (a base that `return`ed `new Proxy(this, …)`), the
+            // method is reached through the proxy's target chain, not the proxy's
+            // own [[Prototype]]. (Private access never invokes proxy traps.)
+            cur = if (c.proxy_handler != null) (c.proxy_target orelse c.proto) else c.proto;
         }
         return Value.undef(); // branded but value not yet present (TDZ-like); rare
     }
@@ -7047,7 +7051,9 @@ pub const Interpreter = struct {
                 }
                 return self.throwError("TypeError", "Cannot write private method");
             }
-            cur = c.proto;
+            // See privateGet: reach a Proxy instance's private accessor (on the
+            // declaring class's prototype) through the proxy's target chain.
+            cur = if (c.proxy_handler != null) (c.proxy_target orelse c.proto) else c.proto;
         }
         // Branded, but the field's own slot has not been materialized yet (a field
         // written before its own initializer ran, e.g. `#a = (this.#b = 1)`).
