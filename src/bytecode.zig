@@ -242,6 +242,10 @@ pub const FnTemplate = struct {
     source: []const u8 = "",
     is_generator: bool = false,
     is_async: bool = false,
+    /// Strict-mode function (own `"use strict"` prologue or lexically inherited).
+    /// Threaded to the closure so the VM's this-binding matches the tree-walker:
+    /// a sloppy bare call substitutes the global `this`, a strict one keeps undefined.
+    is_strict: bool = false,
     chunk: *Chunk,
     /// Number of frame slots (params + function-scoped declarations) the VM
     /// allocates per call.

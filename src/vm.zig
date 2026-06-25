@@ -1486,6 +1486,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .source = tmpl.source,
         .is_generator = tmpl.is_generator,
         .is_async = tmpl.is_async,
+        .is_strict = tmpl.is_strict,
         .chunk = if (tmpl.is_generator or tmpl.is_async) null else tmpl.chunk,
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
