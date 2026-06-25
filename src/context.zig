@@ -692,17 +692,14 @@ pub const Context = struct {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const h = self.gc orelse return;
         if (!stack_scan.supported) return;
-        // Parallel-mutator mode (parallel_js, no GIL): parked-world mid-script
-        // collection — runs only when every peer is parked (frozen + published),
-        // with any waking peer gated on `gc_collection_active`. See
-        // `collectMidScriptParallel`.
-        if (h.parallel) {
-            self.collectMidScriptParallel(h);
-            return;
-        }
-        // Threaded non-parallel (GIL, one live mutator) context: mid-script
-        // collection stays quiescent-only (`collectGarbage`) for now.
         if (self.gil != null) return;
+        // Parallel-mutator mode (parallel_gc): mid-script collection is not yet
+        // safe with multiple mutators running without the GIL — it needs the
+        // world-stop/safepoint protocol generalized to parallel threads (a later
+        // step of the execution-path GIL drop). Until then, collection in this
+        // mode is explicit/quiescent only (`collectGarbage`); skip the safepoint
+        // collector so parallel execution never races a marker.
+        if (h.parallel) return;
         // M3 concurrent driver (single-mutator, opt-in): begin a concurrent mark
         // at one safepoint and close it at the next, a dedicated marker thread
         // tracing during the window while the mutator runs. Stores feed the marker
@@ -745,40 +742,6 @@ pub const Context = struct {
             // run between safepoints with the barrier shading its stores.
             h.startMarking();
         }
-    }
-
-    /// Parked-world mid-script collection under `parallel_js` (no GIL). Called at
-    /// this thread's safepoint. We collect only when every peer is parked at a
-    /// blocking primitive (frozen stack + published park record) — common when
-    /// threads contend Locks/Atomics. The collection itself is the proven
-    /// stop-the-world `h.collect()`: while it runs, parked peers can't move and a
-    /// peer that wakes spins in `waitGcCollectionDone` before mutating, so the
-    /// heap is quiescent. CAS-claim + the seq_cst `parked` flag form a two-flag
-    /// mutual exclusion (Dekker): the collector never marks while a peer mutates.
-    /// A peer blocked at a not-yet-wired site simply reads `parked=false`, so
-    /// `allOthersParked` is false and we conservatively skip — never unsafe.
-    fn collectMidScriptParallel(self: *Context, h: *GcHeap) void {
-        const g = self.gil orelse return;
-        // Atomic: a peer's `create` increments `bytes_live` (under alloc_lock); we
-        // read it here without that lock, so pair atomically (the write is an
-        // `@atomicRmw` in zig-gc `create`). A stale value only mis-times the
-        // heuristic, never corrupts.
-        if (@atomicLoad(usize, &h.bytes_live, .monotonic) < h.threshold_bytes) return;
-        // Claim the single collector slot (seq_cst — first half of the Dekker;
-        // `Gil.gc_collection_active`, co-located with the park machinery).
-        if (g.gc_collection_active.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return;
-        defer g.gc_collection_active.store(false, .seq_cst);
-        // With the claim published, confirm every peer is parked. A peer that
-        // already woke shows `parked=false` here (we abort); a peer that wakes
-        // later observes our claim and waits. The seq_cst total order rules out
-        // both proceeding.
-        if (!g.allOthersParked()) return;
-        // Quiescent: this thread is at its safepoint, every peer is frozen, and
-        // wakers wait. Trace this thread's native stack + each parked peer's
-        // published range + precise interpreter roots (stable), then sweep.
-        self.gc_scan_native_stack = true;
-        defer self.gc_scan_native_stack = false;
-        h.collect();
     }
 
     pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
@@ -6491,116 +6454,6 @@ test "parallel_gc (M3 GIL-removal bring-up): quiescent collection after a parall
     }
     const n: f64 = @floatFromInt(nthreads * per);
     try std.testing.expectEqual(n * (n - 1) / 2, sum); // sum_{0..N*M-1}
-}
-
-test "parallel_js (M3): parked-world mid-script collection keeps the live graph, reclaims garbage, no GIL" {
-    // The mid-script parallel collector (`collectMidScriptParallel`): with every
-    // peer parked at a blocking primitive (frozen stack, park record published),
-    // the collecting thread — at its safepoint, holding NO GIL — marks+sweeps the
-    // (quiescent) heap; a waking peer gates on `gc_collection_active`. Driven
-    // deterministically here: workers register + park + block on a flag, then the
-    // main confirms `allOthersParked`, crosses the GC threshold, and invokes the
-    // safepoint callback. The rooted live graph must survive intact and the
-    // garbage must be reclaimed — no live cell swept (DebugAllocator + the exact
-    // element assertion catch a UAF/over-collection). TSan-clean proves the
-    // collection-vs-wake mutual exclusion is race-free.
-    if (builtin.single_threaded) return error.SkipZigTest;
-    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
-        .enable_gc = true,
-        .enable_threads = true,
-        .parallel_gc = true,
-        .parallel_js = true,
-    });
-    defer ctx.destroy();
-    const g = ctx.gil.?;
-
-    const sh0 = gc_mod.setActiveHeap(ctx.gc);
-    defer _ = gc_mod.setActiveHeap(sh0);
-    const sa0 = strcell.setActiveArena(ctx.arena());
-    defer _ = strcell.setActiveArena(sa0);
-    const ss0 = stack_scan.enter(@frameAddress());
-    defer stack_scan.leave(ss0);
-
-    // Rooted live graph: an id-bearing array hung off the (root-traced) global.
-    const live = try gc_mod.allocObj(ctx.arena());
-    live.* = .{ .is_array = true };
-    try ctx.global_object.setOwn(ctx.gpa, ctx.root_shape, "live", Value.obj(live));
-    const live_n = 500;
-    {
-        var i: usize = 0;
-        while (i < live_n) : (i += 1) {
-            const o = try gc_mod.allocObj(ctx.arena());
-            o.* = .{};
-            try o.setOwn(ctx.arena(), ctx.root_shape, "id", Value.num(@floatFromInt(i)));
-            try live.appendElement(ctx.arena(), Value.obj(o));
-        }
-    }
-
-    const nworkers = 3;
-    const Shared = struct {
-        ctx: *Context,
-        ready: std.atomic.Value(u32) = .init(0),
-        release: std.atomic.Value(bool) = .init(false),
-        fn run(s: *@This()) void {
-            const sh = gc_mod.setActiveHeap(s.ctx.gc);
-            defer _ = gc_mod.setActiveHeap(sh);
-            const sa = strcell.setActiveArena(s.ctx.arena());
-            defer _ = strcell.setActiveArena(sa);
-            const ss = stack_scan.enter(@frameAddress());
-            defer stack_scan.leave(ss);
-            const gg = s.ctx.gil.?;
-            // Register this thread's park record (mirrors threadMain: under a brief
-            // GIL acquire so concurrent registrations don't race the list).
-            gg.acquire();
-            gg.registerPark(stack_scan.parkRecord());
-            gg.release();
-            defer {
-                gg.acquire();
-                gg.unregisterPark(stack_scan.parkRecord());
-                gg.release();
-            }
-            // Park (publish frozen stack), announce ready, block until released —
-            // exactly the blocking-primitive shape the engine wires.
-            stack_scan.beginPark();
-            _ = s.ready.fetchAdd(1, .release);
-            while (!s.release.load(.acquire)) std.atomic.spinLoopHint();
-            stack_scan.endPark();
-            gg.waitGcCollectionDone();
-        }
-    };
-    var shared = Shared{ .ctx = ctx };
-    var pool: [nworkers]std.Thread = undefined;
-    for (&pool) |*th| th.* = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-
-    // Every peer parked-and-published.
-    while (shared.ready.load(.acquire) < nworkers) std.atomic.spinLoopHint();
-    while (!g.allOthersParked()) std.atomic.spinLoopHint();
-
-    // Cross the GC threshold with throwaway garbage so the safepoint engages.
-    const h = ctx.gc.?;
-    while (h.bytes_live < h.threshold_bytes + 64 * 1024) {
-        const junk = try gc_mod.allocObj(ctx.arena());
-        junk.* = .{};
-        try junk.setOwn(ctx.arena(), ctx.root_shape, "junk", Value.num(1));
-    }
-    const before = h.collections;
-
-    // Drive the safepoint: all peers parked + over threshold ⇒ parked-world collect.
-    Context.collectMidScript(@ptrCast(ctx));
-    try std.testing.expect(h.collections > before); // the collection actually ran
-
-    // Live graph intact: exactly live_n elements, ids {0..live_n-1} (exact sum).
-    try std.testing.expectEqual(@as(usize, live_n), live.elementsLen());
-    var sum: f64 = 0;
-    for (live.elements.items) |el| {
-        try std.testing.expect(el.isObject());
-        sum += (el.asObj().getOwn("id") orelse return error.TestUnexpectedResult).asNum();
-    }
-    const nn: f64 = @floatFromInt(live_n);
-    try std.testing.expectEqual(nn * (nn - 1) / 2, sum);
-
-    shared.release.store(true, .release);
-    for (&pool) |*th| th.join();
 }
 
 test "parallel_gc (M3 GIL-removal bring-up): GlobalSymbolRegistry get-or-create is atomic" {

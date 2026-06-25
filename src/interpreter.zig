@@ -22604,19 +22604,10 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     defer if (park_with_gil) stack_scan.endPark();
     if (park_with_gil) self.gil.?.release();
     defer if (park_with_gil) self.gil.?.acquire();
-    // parallel_js (no GIL): publish the frozen stack so a parked-world collector
-    // can root it (issue #1 Phase 7 / M3). Done inline (not deferred) so wake
-    // ordering is endPark→gate before the return.
-    const park_parallel = !self.use_thread_gil and self.gil != null;
-    if (park_parallel) stack_scan.beginPark();
     const outcome = if (vd.ta.kind == .i64)
         agent.wait(storage, offset, i64, @bitCast(expected_raw), timeout_ns)
     else
         agent.wait(storage, offset, i32, @bitCast(@as(u32, @truncate(expected_raw))), timeout_ns);
-    if (park_parallel) {
-        stack_scan.endPark();
-        self.gil.?.waitGcCollectionDone();
-    }
     return Value.str(switch (outcome) {
         .ok => "ok",
         .not_equal => "not-equal",

@@ -52,15 +52,6 @@ pub const Gil = struct {
     park_records: std.ArrayListUnmanaged(*stack_scan.ParkScan) = .empty,
     /// Backing allocator for `park_records` (the Context's gpa).
     park_alloc: ?std.mem.Allocator = null,
-    /// Phase 7 / M3 — set while a parked-world mid-script collection runs under
-    /// `parallel_js` (no GIL). The collecting thread CAS-claims it, proves every
-    /// peer is parked (`allOthersParked`), marks+sweeps the quiescent heap, then
-    /// clears it. A peer waking from a blocking primitive calls
-    /// `waitGcCollectionDone` (after `endPark`, before resuming mutation). seq_cst
-    /// so it forms a two-flag mutual exclusion with `stack_scan` `parked` (Dekker):
-    /// the collector never marks while a peer mutates, nor vice-versa. See
-    /// `Context.collectMidScriptParallel`.
-    gc_collection_active: std.atomic.Value(bool) = .init(false),
     /// Serializes the cross-realm GlobalSymbolRegistry get-or-create
     /// (`Symbol.for` / lazy registry creation). The registry is a check-then-act
     /// over shared object storage: without this, two threads calling
@@ -167,15 +158,6 @@ pub const Gil = struct {
             if (!stack_scan.isParked(rec)) return false;
         }
         return true;
-    }
-
-    /// A peer waking from a blocking primitive (under `parallel_js`) calls this
-    /// right after `endPark` and before resuming mutation: if a parked-world
-    /// collection is in progress, spin it out so the collector sees a quiescent
-    /// heap. Bounded (the collector always finishes) and lock-free. The second
-    /// half of the Dekker mutual exclusion with the `parked` flag.
-    pub fn waitGcCollectionDone(g: *const Gil) void {
-        while (g.gc_collection_active.load(.seq_cst)) std.atomic.spinLoopHint();
     }
 
     pub fn acquire(g: *Gil) void {
