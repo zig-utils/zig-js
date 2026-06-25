@@ -1,56 +1,56 @@
 {
   "valid": {
-    "passing": 42771,
-    "total": 47930,
-    "percentage": 89.2,
-    "parseFail": 119,
-    "runtimeFail": 5040,
-    "hostFail": 0
+    "passing": 46040,
+    "total": 48247,
+    "percentage": 95.4,
+    "parseFail": 29,
+    "runtimeFail": 2166,
+    "hostFail": 12
   },
   "negative": {
-    "passing": 3213,
-    "total": 4668,
-    "percentage": 68.8
+    "passing": 4661,
+    "total": 4669,
+    "percentage": 99.8
   },
-  "skipped": 579,
-  "generatedAt": "2026-06-11",
+  "skipped": 261,
+  "generatedAt": "2026-06-25",
   "harness": "real (WebKit JSTests/test262 corpus)",
   "suites": [
     {
       "name": "language",
-      "passing": 17600,
+      "passing": 18492,
       "total": 19070,
-      "percentage": 92.3,
-      "parseFail": 63,
-      "runtimeFail": 1407,
+      "percentage": 97,
+      "parseFail": 8,
+      "runtimeFail": 570,
       "hostFail": 0
     },
     {
       "name": "annexB",
-      "passing": 962,
+      "passing": 984,
       "total": 1071,
-      "percentage": 89.8,
-      "parseFail": 13,
-      "runtimeFail": 96,
+      "percentage": 91.9,
+      "parseFail": 12,
+      "runtimeFail": 75,
       "hostFail": 0
     },
     {
       "name": "intl402",
-      "passing": 1651,
+      "passing": 2675,
       "total": 3341,
-      "percentage": 49.4,
+      "percentage": 80.1,
       "parseFail": 0,
-      "runtimeFail": 1690,
+      "runtimeFail": 666,
       "hostFail": 0
     },
     {
       "name": "staging",
-      "passing": 705,
-      "total": 1028,
-      "percentage": 68.6,
-      "parseFail": 6,
-      "runtimeFail": 317,
-      "hostFail": 0
+      "passing": 1066,
+      "total": 1345,
+      "percentage": 79.3,
+      "parseFail": 9,
+      "runtimeFail": 268,
+      "hostFail": 2
     },
     {
       "name": "AbstractModuleSource",
@@ -72,11 +72,11 @@
     },
     {
       "name": "Array",
-      "passing": 2977,
+      "passing": 3081,
       "total": 3081,
-      "percentage": 96.6,
+      "percentage": 100,
       "parseFail": 0,
-      "runtimeFail": 104,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {
@@ -405,11 +405,11 @@
     },
     {
       "name": "Object",
-      "passing": 3368,
+      "passing": 3411,
       "total": 3411,
-      "percentage": 98.7,
+      "percentage": 100,
       "parseFail": 0,
-      "runtimeFail": 43,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {
@@ -432,11 +432,11 @@
     },
     {
       "name": "Promise",
-      "passing": 617,
+      "passing": 677,
       "total": 677,
-      "percentage": 91.1,
+      "percentage": 100,
       "parseFail": 0,
-      "runtimeFail": 60,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {
@@ -459,11 +459,11 @@
     },
     {
       "name": "RegExp",
-      "passing": 1567,
+      "passing": 1685,
       "total": 1687,
-      "percentage": 92.9,
-      "parseFail": 36,
-      "runtimeFail": 84,
+      "percentage": 99.9,
+      "parseFail": 0,
+      "runtimeFail": 2,
       "hostFail": 0
     },
     {
@@ -495,11 +495,11 @@
     },
     {
       "name": "ShadowRealm",
-      "passing": 60,
+      "passing": 59,
       "total": 60,
-      "percentage": 100,
+      "percentage": 98.3,
       "parseFail": 0,
-      "runtimeFail": 0,
+      "runtimeFail": 1,
       "hostFail": 0
     },
     {
@@ -513,11 +513,11 @@
     },
     {
       "name": "String",
-      "passing": 1122,
+      "passing": 1223,
       "total": 1223,
-      "percentage": 91.7,
-      "parseFail": 1,
-      "runtimeFail": 100,
+      "percentage": 100,
+      "parseFail": 0,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {
@@ -549,12 +549,12 @@
     },
     {
       "name": "Temporal",
-      "passing": 3464,
+      "passing": 4009,
       "total": 4603,
-      "percentage": 75.3,
+      "percentage": 87.1,
       "parseFail": 0,
-      "runtimeFail": 1139,
-      "hostFail": 0
+      "runtimeFail": 584,
+      "hostFail": 10
     },
     {
       "name": "ThrowTypeError",
