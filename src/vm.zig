@@ -380,13 +380,21 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .init_prop => {
                 const v = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
-                try vm.setMember(obj, chunk.names.items[inst.a], v);
+                // Object-literal property init is CreateDataPropertyOrThrow — a
+                // direct own data property, NOT [[Set]] (so an own `__proto__`
+                // shorthand/method/computed key does not trip the prototype setter).
+                try vm.setProp(obj.asObj(), chunk.names.items[inst.a], v);
+            },
+            .init_proto => {
+                const v = stack.pop().?;
+                const obj = stack.items[stack.items.len - 1]; // leave object on stack
+                if (v.isObject()) obj.asObj().proto = v.asObj() else if (v.isNull()) obj.asObj().proto = null;
             },
             .init_prop_computed => {
                 const key = stack.pop().?;
                 const v = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
-                try vm.setMember(obj, try propKey(vm, key), v);
+                try vm.setProp(obj.asObj(), try propKey(vm, key), v); // CreateDataProperty (a computed `__proto__` is a normal own prop)
             },
             .init_spread => {
                 const src = stack.pop().?;

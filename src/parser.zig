@@ -2902,6 +2902,7 @@ pub const Parser = struct {
                 else => return ParseError.UnexpectedToken,
             };
             var val: *Node = undefined;
+            var is_proto_colon = false;
             if (self.check(.lparen)) {
                 // Method shorthand `{ m(args) { ... } }` -> a function value.
                 val = try self.parseMethodTail(key, gen_method, async_method, member_start);
@@ -2913,9 +2914,14 @@ pub const Parser = struct {
             } else if (self.match(.colon)) {
                 // `__proto__: value` (identifier or string key, not computed) is a
                 // prototype setter; two of them in one literal is an early error.
-                if (std.mem.eql(u8, key, "__proto__")) proto_colon_count += 1;
+                if (std.mem.eql(u8, key, "__proto__")) {
+                    proto_colon_count += 1;
+                    is_proto_colon = true;
+                }
                 val = try self.parseAssignment();
-                nameAnon(val, key); // `{ m: function(){} }` ⇒ name "m"
+                // The proto-setter form does NOT NamedEvaluate its value
+                // (`{__proto__: function(){}}` leaves the function unnamed).
+                if (!is_proto_colon) nameAnon(val, key); // `{ m: function(){} }` ⇒ name "m"
             } else if (key_tok.kind == .identifier) {
                 if (isAlwaysReservedBinding(key) or (self.strict and isStrictReservedBinding(key)))
                     return ParseError.UnexpectedToken;
@@ -2936,7 +2942,7 @@ pub const Parser = struct {
                     val = ident;
                 }
             } else return ParseError.ExpectedToken;
-            try props.append(self.arena, .{ .key = key, .value = val });
+            try props.append(self.arena, .{ .key = key, .value = val, .proto_setter = is_proto_colon });
             if (!self.match(.comma)) break;
         }
         try self.expect(.rbrace);

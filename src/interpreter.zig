@@ -5096,7 +5096,7 @@ pub const Interpreter = struct {
             switch (p.accessor) {
                 .none => {
                     const pv = try self.eval(p.value);
-                    if (p.key_expr == null and std.mem.eql(u8, key, "__proto__")) {
+                    if (p.proto_setter) { // only the `__proto__: value` colon form
                         if (pv.isObject()) v.asObj().proto = pv.asObj();
                         if (pv.isNull()) v.asObj().proto = null;
                         continue;

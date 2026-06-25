@@ -129,6 +129,11 @@ pub const Property = struct {
     /// `{ ...expr }` spread property: copy `value`'s own enumerable properties
     /// into the object being built (`key`/`accessor` unused).
     is_spread: bool = false,
+    /// True only for the `__proto__ : AssignmentExpression` colon form (a literal,
+    /// non-computed `__proto__` key) — the one form that sets the object's
+    /// prototype. The shorthand `{__proto__}`, a method `{__proto__(){}}`, and a
+    /// computed `{["__proto__"]: x}` are ordinary own properties.
+    proto_setter: bool = false,
 };
 
 /// One `case <test>:` (or `default:` when `test` is null) clause of a switch.

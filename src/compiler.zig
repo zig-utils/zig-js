@@ -1097,7 +1097,9 @@ pub const Compiler = struct {
                         continue;
                     }
                     try self.compileExpr(p.value);
-                    if (p.key_expr) |ke| {
+                    if (p.proto_setter) {
+                        _ = try self.chunk.emit(.init_proto, 0); // `__proto__: v` colon form
+                    } else if (p.key_expr) |ke| {
                         try self.compileExpr(ke);
                         _ = try self.chunk.emit(.init_prop_computed, 0);
                     } else {
