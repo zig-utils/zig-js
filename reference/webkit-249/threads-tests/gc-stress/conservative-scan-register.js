@@ -63,7 +63,12 @@ const t = new Thread(() => {
     // Tell main we are about to park, then park with the GIL dropped.
     Atomics.store(mailbox, "threadParkedSoon", 1);
     Atomics.notify(mailbox, "threadParkedSoon");
-    const waitResult = Atomics.wait(mailbox, "gcDone", 0, 60000);
+    // Scale the park timeout to the build: under ThreadSanitizer the main
+    // thread's 8-round GC storm runs ~10× slower, so a fixed 60s park can time
+    // out before the storm finishes — the runner publishes __timeScale (10
+    // under TSan, 1 otherwise). The oracle below still requires the park to
+    // overlap the storm, so this only adds patience, not a free pass.
+    const waitResult = Atomics.wait(mailbox, "gcDone", 0, 60000 * ((typeof globalThis !== "undefined" && globalThis.__timeScale) || 1));
     if (waitResult === "timed-out")
         return "park timed out (main never finished GC rounds)";
     // Non-vacuity: the park must actually OVERLAP the GC storm. Main only

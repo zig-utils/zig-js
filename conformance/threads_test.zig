@@ -10,6 +10,7 @@
 //! stress, WebAssembly, and $vm hooks) stay reference-only.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const js = @import("js");
 
 const corpus_root = "reference/webkit-249/threads-tests";
@@ -348,6 +349,17 @@ pub fn main(init: std.process.Init) !void {
                 \\const asyncTestPassed = () => { globalThis.__asyncPassed++; };
                 \\
             );
+            // Time-dilation factor for wall-clock waits (harness `waitUntil`,
+            // stress `Atomics.wait` timeouts). ThreadSanitizer slows execution
+            // ~10×, so a GC-storm-vs-park rendezvous tuned for the native runtime
+            // can blow its fixed timeout under the cumulative load of the whole
+            // corpus in one process. Tests multiply their timeouts by this so the
+            // *oracle* (the park must overlap the storm) is preserved while the
+            // patience scales to the build.
+            try buf.appendSlice(gpa, if (builtin.sanitize_thread)
+                "globalThis.__timeScale = 10;\n"
+            else
+                "globalThis.__timeScale = 1;\n");
             try buf.appendSlice(gpa, assert_src);
             try buf.appendSlice(gpa, "\n");
             try buf.appendSlice(gpa, harness_src);

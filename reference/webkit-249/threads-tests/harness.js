@@ -52,6 +52,9 @@ function sleepMs(ms) {
 // a stuck rendezvous fails loudly instead of hanging).
 function waitUntil(cond, maxMs, stepMs) {
     maxMs = maxMs === undefined ? 30000 : maxMs;
+    // Scale wall-clock patience to the build (10× under ThreadSanitizer); the
+    // runner sets __timeScale, defaulting to 1 outside the harnessed runner.
+    maxMs *= (typeof globalThis !== "undefined" && globalThis.__timeScale) || 1;
     stepMs = stepMs === undefined ? 5 : stepMs;
     const deadline = Date.now() + maxMs;
     while (!cond()) {
