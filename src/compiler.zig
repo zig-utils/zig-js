@@ -1033,6 +1033,12 @@ pub const Compiler = struct {
                 } else if (c.callee.* == .member) {
                     return error.Unsupported; // computed method call → fallback
                 } else {
+                    // A direct `eval(...)` inside a slot-based function must see the
+                    // function's locals (and correct `this`/private names), which
+                    // live in the environment only on the tree-walker — so bail to
+                    // it. Generators/top level (scope == null, env-mode) are fine.
+                    if (self.scope != null and c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval"))
+                        return error.Unsupported;
                     try self.compileExpr(c.callee);
                     if (spread) {
                         try self.compileArgsArray(c.args);

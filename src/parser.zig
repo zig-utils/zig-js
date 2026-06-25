@@ -27,6 +27,11 @@ pub const Parser = struct {
     /// Inside a class body (so a private name `#x` is in scope) — gates the
     /// `#field in obj` brand check, which is a syntax error outside any class.
     in_class: bool = false,
+    /// Set when parsing a direct eval whose caller is inside a class element: the
+    /// eval'd code may reference the enclosing class's private names, so the
+    /// "every used private name must be declared here" check is skipped (the host
+    /// resolves them against the class's private map and the runtime brand-checks).
+    eval_private_allowed: bool = false,
     /// True while parsing strict-mode code: the program (or an enclosing
     /// function) had a `"use strict"` directive prologue, a function body has
     /// its own such directive, or we're inside a class (always strict). Inherited
@@ -379,7 +384,7 @@ pub const Parser = struct {
         }
         // Early error: no duplicate lexically-declared names in a scope.
         try self.checkLexicalDupes(stmts.items, false);
-        try self.checkPrivateUsesInProgram(stmts.items);
+        if (!self.eval_private_allowed) try self.checkPrivateUsesInProgram(stmts.items);
         // A CoverInitializedName (`{ a = 1 }`) never refined to a pattern is an
         // early error.
         if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return ParseError.UnexpectedToken;

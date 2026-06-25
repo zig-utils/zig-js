@@ -610,6 +610,11 @@ pub const Function = struct {
     home_object: ?*value.Object = null,
     /// For a derived class constructor: the superclass object, called by `super(...)`.
     super_ctor: ?*value.Object = null,
+    /// The declaring class evaluation's private-name map (`#x` → its unique storage
+    /// key). A direct eval inside this function's body resolves the private names it
+    /// references through this map (`getWithEval(){ return eval("this.#x") }`).
+    /// Null for non-class functions; arrows inherit the enclosing one at call time.
+    private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
     /// Arrow functions capture `this` lexically at creation (like `home_object`
     /// and `super_ctor`); every call uses this captured value and ignores any
     /// provided `this` (a `.call`/`.apply`/`.bind` thisArg, or the receiver of a
@@ -889,6 +894,10 @@ pub const Interpreter = struct {
     /// context (global eval, a method, a base constructor) from the runtime
     /// TypeError of `super()` in an `extends null` constructor.
     in_derived_ctor: bool = false,
+    /// The private-name map of the class whose method/constructor/static element is
+    /// currently executing (see Function.private_map). A direct eval uses it to
+    /// rewrite the private names in the eval'd code to the right storage keys.
+    current_private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
     /// True while executing eval'd code: EvalDeclarationInstantiation creates
     /// new global var/function bindings as *deletable* (configurable), unlike a
     /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
@@ -3159,24 +3168,29 @@ pub const Interpreter = struct {
         }
     }
 
-    fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!void {
-        var map: std.StringHashMapUnmanaged([]const u8) = .empty;
-        defer map.deinit(self.arena);
+    /// Rewrite this class's private names (`#x` → a unique storage key) in member
+    /// keys and bodies, and return the raw→storage map (persisted in the arena) so
+    /// the class's functions can resolve private names a direct eval references.
+    /// Returns null when the class declares no private names.
+    fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!?*const std.StringHashMapUnmanaged([]const u8) {
+        const map = try self.arena.create(std.StringHashMapUnmanaged([]const u8));
+        map.* = .empty;
         for (members) |m| {
             if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.contains(m.key)) continue;
             try map.put(self.arena, m.key, try self.nextPrivateStorageKey(m.key));
         }
-        if (map.count() == 0) return;
+        if (map.count() == 0) return null;
         for (members) |*m| {
-            m.key = remapPrivateName(&map, m.key);
+            m.key = remapPrivateName(map, m.key);
             // A computed key (`[expr]`) may itself reference a private name —
             // `[self.#f]` — so rewrite it too, else the raw `#f` is mistaken for a
             // public property at runtime.
-            if (m.key_expr) |ke| try self.rewritePrivateNamesInNode(ke, &map);
-            if (m.field_init) |init| try self.rewritePrivateNamesInNode(init, &map);
-            if (m.func) |func| try self.rewritePrivateNamesInNode(func, &map);
-            if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, &map);
+            if (m.key_expr) |ke| try self.rewritePrivateNamesInNode(ke, map);
+            if (m.field_init) |init| try self.rewritePrivateNamesInNode(init, map);
+            if (m.func) |func| try self.rewritePrivateNamesInNode(func, map);
+            if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, map);
         }
+        return map;
     }
 
     /// Evaluate a `class` to a constructor function value: methods go on its
@@ -3221,7 +3235,13 @@ pub const Interpreter = struct {
     }
 
     fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool) EvalError!Value {
-        try self.rewriteClassPrivateNames(members);
+        const private_map = try self.rewriteClassPrivateNames(members);
+        // Execute the class's static elements / field initializers with this
+        // class's private map active, so a direct eval in them resolves the
+        // class's private names.
+        const saved_pm = self.current_private_map;
+        self.current_private_map = private_map;
+        defer self.current_private_map = saved_pm;
 
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
@@ -3315,6 +3335,7 @@ pub const Interpreter = struct {
         if (funcOf(class_val)) |cf| {
             cf.home_object = proto;
             cf.super_ctor = super_obj;
+            cf.private_map = private_map; // a direct eval in a field initializer resolves private names
             cf.is_class_constructor = true;
             cf.is_derived_constructor = derived;
             if (derived) cf.field_inits = field_inits.items;
@@ -3401,6 +3422,7 @@ pub const Interpreter = struct {
             if (funcOf(fv)) |mf| {
                 mf.home_object = home;
                 mf.super_ctor = super_obj;
+                mf.private_map = private_map; // a direct eval in this method resolves the class's private names
             }
             switch (m.accessor) {
                 .none => {
@@ -3801,6 +3823,8 @@ pub const Interpreter = struct {
         const saved_pd = self.in_param_default;
         self.in_param_default = false; // a function body is not a parameter default
         const saved_idc = self.in_derived_ctor;
+        const saved_pm = self.current_private_map;
+        if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
         const saved_pfi = self.pending_field_inits;
         const saved_pbn = self.pending_brand_names;
         // A derived constructor's field initializers + private brands wait for its
@@ -3857,6 +3881,7 @@ pub const Interpreter = struct {
             self.in_param_expr = saved_pe;
             self.in_param_default = saved_pd;
             self.in_derived_ctor = saved_idc;
+            self.current_private_map = saved_pm;
             self.pending_field_inits = saved_pfi;
             self.pending_brand_names = saved_pbn;
         }
@@ -11397,7 +11422,16 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // from its own directive prologue.
     if (self.direct_eval_call and self.strict) parser.strict = true;
     if (self.direct_eval_call and self.direct_eval_new_target_allowed) parser.new_target_depth = 1;
+    // A direct eval inside a class element may reference the class's private names
+    // (`eval("this.#x")`): allow them in the parse (and skip the undeclared-private
+    // check), then rewrite them below to the class's storage keys.
+    if (self.direct_eval_call and self.current_private_map != null) {
+        parser.in_class = true;
+        parser.eval_private_allowed = true;
+    }
     const prog = parser.parseProgram() catch return self.throwError("SyntaxError", "eval: parse error");
+    if (self.direct_eval_call) if (self.current_private_map) |pm|
+        try self.rewritePrivateNamesInNode(prog, @constCast(pm));
 
     // Eval inherits the caller's syntactic restrictions as *early errors* — they
     // must reject the code before any of it runs. Indirect eval is global code:

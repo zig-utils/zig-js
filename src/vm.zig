@@ -1577,6 +1577,8 @@ fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const 
     const saved_this = vm.this_value;
     const saved_strict = vm.strict;
     const saved_env = vm.env;
+    const saved_pm = vm.current_private_map;
+    if (!func.is_arrow) vm.current_private_map = func.private_map; // a direct eval here resolves the class's private names
     vm.strict = func.is_strict;
     // Free variables (globals, and a named function expression's self name)
     // resolve through `vm.env`; install the closure's defining environment so a
@@ -1588,6 +1590,7 @@ fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const 
         vm.this_value = saved_this;
         vm.strict = saved_strict;
         vm.env = saved_env;
+        vm.current_private_map = saved_pm;
     }
     return run(vm, fchunk, frame);
 }
