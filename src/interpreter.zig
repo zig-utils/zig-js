@@ -7501,32 +7501,78 @@ pub const Interpreter = struct {
         // plain object), so destructuring those still fails the right way.
         const iter_obj = try self.iteratorOf(val);
         var done = false;
+        // IteratorClose on an abrupt completion: if any element step (target
+        // reference, default expression, assignment, or pattern) throws while the
+        // iterator is still open, close it (the original throw wins). A throw from
+        // IteratorStep/IteratorValue itself marks the iterator done (no close).
+        errdefer if (!done) self.iteratorCloseKeepingThrow(iter_obj);
         for (elems) |elem| {
+            // Assignment destructuring evaluates a member target's Reference
+            // (its object and computed key) BEFORE IteratorStep, so a throw there
+            // closes the still-open iterator without ever calling `next()`.
+            var member_recv: Value = Value.undef();
+            var member_key: ?[]const u8 = null;
+            if (!declare) if (elem.target) |t| if (t.* == .member) {
+                member_recv = try self.eval(t.member.object);
+                member_key = try self.memberKey(t.member.property, t.member.computed);
+            };
             var v: Value = Value.undef();
             if (!done) {
-                const res = try self.callMethod(iter_obj, "next", &.{});
-                if ((try self.getProperty(res, "done")).toBoolean()) done = true else v = try self.getProperty(res, "value");
+                const res = self.callMethod(iter_obj, "next", &.{}) catch |e| {
+                    done = true;
+                    return e;
+                };
+                const is_done = (self.getProperty(res, "done") catch |e| {
+                    done = true;
+                    return e;
+                }).toBoolean();
+                if (is_done) done = true else v = self.getProperty(res, "value") catch |e| {
+                    done = true;
+                    return e;
+                };
             }
             if (elem.target) |t| {
                 if (v.isUndefined()) {
                     if (elem.default) |d| v = try self.eval(d);
                 }
-                try self.bindPattern(t, v, declare);
+                if (member_key) |k| try self.setMember(member_recv, k, v) else try self.bindPattern(t, v, declare);
             }
         }
         if (rest) |rest_target| {
+            // Like an element, a member rest target's Reference is evaluated BEFORE
+            // the iterator is drained (a throw here closes it, having stepped only
+            // for the preceding elements).
+            var rest_recv: Value = Value.undef();
+            var rest_key: ?[]const u8 = null;
+            if (!declare and rest_target.* == .member) {
+                rest_recv = try self.eval(rest_target.member.object);
+                rest_key = try self.memberKey(rest_target.member.property, rest_target.member.computed);
+            }
             const rest_arr = try self.newArray();
             while (!done) {
-                const res = try self.callMethod(iter_obj, "next", &.{});
-                if ((try self.getProperty(res, "done")).toBoolean()) break;
+                const res = self.callMethod(iter_obj, "next", &.{}) catch |e| {
+                    done = true;
+                    return e;
+                };
+                if ((self.getProperty(res, "done") catch |e| {
+                    done = true;
+                    return e;
+                }).toBoolean()) {
+                    done = true;
+                    break;
+                }
                 try rest_arr.asObj().elements.append(rest_arr.asObj().elementsAllocator(self.arena), try self.getProperty(res, "value"));
             }
-            try self.bindPattern(rest_target, rest_arr, declare);
-            return; // a rest element always exhausts the iterator (no close)
+            if (rest_key) |k| try self.setMember(rest_recv, k, rest_arr) else try self.bindPattern(rest_target, rest_arr, declare); // iterator already exhausted
+            return;
         }
         // IteratorClose: if destructuring finished before the iterator was
-        // exhausted, call its `return()` to let it clean up.
-        if (!done) try self.iteratorClose(iter_obj);
+        // exhausted, call its `return()` to let it clean up. This is a NORMAL
+        // completion close — its own throw must propagate — so disarm the abrupt
+        // errdefer first (set `done`) to avoid a double close.
+        const needs_close = !done;
+        done = true;
+        if (needs_close) try self.iteratorClose(iter_obj);
     }
 
     /// IteratorClose: invoke `iterator.return()` if present (generators are
