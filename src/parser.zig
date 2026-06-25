@@ -2085,7 +2085,13 @@ pub const Parser = struct {
         if (i >= self.tokens.len or self.tokens[i].kind != .lbrace) return false;
         i += 1;
         while (i < self.tokens.len and self.tokens[i].kind == .string) {
-            if (std.mem.eql(u8, self.tokens[i].text, "use strict")) return true;
+            const t = self.tokens[i];
+            // A "use strict" directive must be the EXACT source `'use strict'` /
+            // `"use strict"` — no escapes or line continuations. The decoded text
+            // matching isn't enough (`'use \strict'` decodes to "use strict" but
+            // is not a directive), so require the raw lexeme to be just the quoted
+            // text: end - pos == text.len + 2 (the two quote characters).
+            if (std.mem.eql(u8, t.text, "use strict") and t.end - t.pos == t.text.len + 2) return true;
             i += 1;
             if (i < self.tokens.len and self.tokens[i].kind == .semicolon) i += 1;
         }
