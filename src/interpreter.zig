@@ -939,8 +939,13 @@ pub const Interpreter = struct {
     /// process. Each spawned `Thread` registered its stack bounds on entry
     /// (`stack_scan.enter` → `registerThreadBounds`).
     inline fn stackGuard(self: *Interpreter) EvalError!void {
-        if (self.depth >= max_call_depth or
-            (self.depth >= stack_check_floor and stack_scan.nearLimit(stack_redzone)))
+        // Shallow-call hot path: a single compare, identical to the old guard.
+        // Only once a chain is already deep do we pay the logical-limit check
+        // plus the native stack-pointer probe (the latter matters for
+        // large-frame builds — TSan, deep host callbacks — where the native
+        // stack can overflow before `max_call_depth`).
+        if (self.depth < stack_check_floor) return;
+        if (self.depth >= max_call_depth or stack_scan.nearLimit(stack_redzone))
             return self.throwError("RangeError", "Maximum call stack size exceeded");
     }
 
@@ -11654,7 +11659,24 @@ pub const Interpreter = struct {
     }
 
     pub fn instanceOf(self: *Interpreter, l: Value, r: Value) EvalError!bool {
-        if (!r.isObject() or !r.asObj().isCallableObject())
+        if (!r.isObject())
+            return self.throwError("TypeError", "Right-hand side of 'instanceof' is not an object");
+        // InstanceofOperator: GetMethod(r, @@hasInstance) takes precedence — a
+        // custom `[Symbol.hasInstance]` (even on a non-callable object) decides
+        // membership, with ToBoolean applied to its result.
+        if (self.wellKnownSymbolKey("hasInstance")) |hk| {
+            const handler = try self.getProperty(r, hk);
+            if (!handler.isUndefined() and !handler.isNull()) {
+                if (!handler.isCallable())
+                    return self.throwError("TypeError", "Symbol.hasInstance method is not callable");
+                // Fast path: the default %Function.prototype[@@hasInstance]% just
+                // does OrdinaryHasInstance — skip building a call frame for it.
+                if (handler.isObject() and handler.asObj().native == functionHasInstanceFn)
+                    return if (r.asObj().isCallableObject()) self.ordinaryHasInstance(r.asObj(), l) else false;
+                return (try self.callValueWithThis(handler, &.{l}, r)).toBoolean();
+            }
+        }
+        if (!r.asObj().isCallableObject())
             return self.throwError("TypeError", "Right-hand side of 'instanceof' is not callable");
         return self.ordinaryHasInstance(r.asObj(), l);
     }
