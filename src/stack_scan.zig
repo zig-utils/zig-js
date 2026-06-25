@@ -300,6 +300,29 @@ inline fn currentSp() usize {
     };
 }
 
+/// True when the current native stack pointer is within `margin` bytes of this
+/// thread's registered OS stack limit — i.e. a few more native frames could
+/// run off the end and fault the guard page. The interpreter's call guard uses
+/// this to throw `RangeError: Maximum call stack size exceeded` *before* the
+/// tree-walker's native recursion overflows, turning a process-killing
+/// segfault into a catchable JS error on whichever thread is recursing.
+///
+/// Returns false when bounds are unknown (no `registerThreadBounds` yet) or the
+/// target is unsupported, so the caller's logical depth counter stays the sole
+/// guard there. Because each JS call uses only a handful of small native frames
+/// in a normal build, the depth counter is reached long before the stack nears
+/// its limit; this check only bites when frames are unusually large (e.g. a
+/// ThreadSanitizer build, deep host callbacks), exactly where the fixed depth
+/// limit would otherwise let the native stack overflow first.
+pub fn nearLimit(margin: usize) bool {
+    if (!supported) return false;
+    const limit = os_stack_limit;
+    if (limit == 0) return false;
+    const sp = currentSp();
+    // Downward-growing stack: the closer `sp` is to `limit`, the less headroom.
+    return sp <= limit +| margin;
+}
+
 /// Conservatively mark the current thread's live stack as GC roots, using
 /// `v.markConservativeWords` from the `zig-gc` `Visitor`. Returns false (a
 /// no-op) when no boundary is registered or the target is unsupported — the
