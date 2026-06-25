@@ -38,6 +38,17 @@ pub const AsyncWaiterEntry = struct { id: u64, promise: Value };
 /// crashing the process (stack overflow / runaway loop).
 pub const max_call_depth: u32 = 128;
 pub const max_steps: u64 = 500_000_000;
+
+/// Below this logical call depth, a chain can't have consumed enough native
+/// stack to matter, so the call guard skips the stack-pointer probe and the
+/// hot shallow-call path stays a single depth compare (serial-perf gate).
+const stack_check_floor: u32 = 32;
+/// Native-stack headroom kept free below the thread's real OS stack limit. If a
+/// deeper call would leave less than this, the guard throws `RangeError` rather
+/// than let the tree-walker's native recursion fault the guard page. Sized for
+/// large-frame builds (ThreadSanitizer inflates frames ~10×): a couple of
+/// `eval→call→eval` cycles plus the throw/unwind path fit inside it.
+const stack_redzone: usize = 1 << 20; // 1 MiB
 const max_typed_array_bytes: usize = 1 << 30;
 const max_temporal_instant_ns: i128 = 8_640_000_000_000_000_000_000;
 
@@ -910,6 +921,23 @@ pub const Interpreter = struct {
     depth: u32 = 0,
     steps: u64 = 0,
 
+    /// Guard a function call against native-stack exhaustion: throw a catchable
+    /// `RangeError` when either the logical call-depth limit or the real OS
+    /// stack (probed via `stack_scan.nearLimit`) would be exceeded by recursing
+    /// one level deeper. The stack probe only runs once a call chain is already
+    /// deep (`stack_check_floor`), so the common shallow-call hot path stays a
+    /// single compare. The probe matters for large-frame builds (ThreadSanitizer,
+    /// deep host callbacks) where the fixed depth limit would otherwise let the
+    /// tree-walker's native recursion overflow first — on whichever thread is
+    /// recursing, so a deep-recursing peer throws instead of crashing the
+    /// process. Each spawned `Thread` registered its stack bounds on entry
+    /// (`stack_scan.enter` → `registerThreadBounds`).
+    inline fn stackGuard(self: *Interpreter) EvalError!void {
+        if (self.depth >= max_call_depth or
+            (self.depth >= stack_check_floor and stack_scan.nearLimit(stack_redzone)))
+            return self.throwError("RangeError", "Maximum call stack size exceeded");
+    }
+
     // ---- exception helpers ------------------------------------------------
 
     /// Set a named property on an object via its shape (see `Object.setOwn`).
@@ -1700,6 +1728,51 @@ pub const Interpreter = struct {
                         const new = try self.applyBinary(oa.op, old, rhs);
                         try self.assignTo(oa.target, new);
                         break :blk new;
+                    },
+                }
+            },
+
+            .logical_assign => |la| blk: {
+                // The LeftHandSide reference is resolved ONCE; the short-circuit
+                // predicate then decides whether the RHS runs and the store
+                // happens (so `obj[f()] &&= g()` evaluates `f()` once and skips
+                // `g()` when the held value is falsy/truthy/non-nullish).
+                switch (la.target.*) {
+                    .member => |m| {
+                        const obj = try self.eval(m.object);
+                        var fast_key_buf: [24]u8 = undefined;
+                        const key: []const u8 = if (m.computed) |ce| blk2: {
+                            const kv = try self.eval(ce);
+                            if (obj.isNull() or obj.isUndefined())
+                                return self.throwError("TypeError", "cannot read property of null or undefined");
+                            if (fastNumericIndex(kv)) |idx|
+                                break :blk2 std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
+                            break :blk2 try self.keyOf(kv);
+                        } else m.property;
+                        const old = try self.getProperty(obj, key);
+                        const short = switch (la.op) {
+                            .@"and" => !old.toBoolean(),
+                            .@"or" => old.toBoolean(),
+                            .nullish => !(old.isNull() or old.isUndefined()),
+                        };
+                        if (short) break :blk old;
+                        const rhs = try self.eval(la.value);
+                        try self.setMember(obj, key, rhs);
+                        break :blk rhs;
+                    },
+                    else => {
+                        // super.x &&= …: the base (home object / `this`) is stable,
+                        // so a read followed by assignTo resolves it consistently.
+                        const old = try self.eval(la.target);
+                        const short = switch (la.op) {
+                            .@"and" => !old.toBoolean(),
+                            .@"or" => old.toBoolean(),
+                            .nullish => !(old.isNull() or old.isUndefined()),
+                        };
+                        if (short) break :blk old;
+                        const rhs = try self.eval(la.value);
+                        try self.assignTo(la.target, rhs);
+                        break :blk rhs;
                     },
                 }
             },
@@ -3057,6 +3130,10 @@ pub const Interpreter = struct {
                 try self.rewritePrivateNamesInNode(oa.target, map);
                 try self.rewritePrivateNamesInNode(oa.value, map);
             },
+            .logical_assign => |la| {
+                try self.rewritePrivateNamesInNode(la.target, map);
+                try self.rewritePrivateNamesInNode(la.value, map);
+            },
             .conditional => |c| {
                 try self.rewritePrivateNamesInNode(c.cond, map);
                 try self.rewritePrivateNamesInNode(c.consequent, map);
@@ -3631,7 +3708,7 @@ pub const Interpreter = struct {
         }
         if (obj.error_ctor) |name| return self.makeErrorWithArgs(name, args);
         if (obj.native) |nf| {
-            if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
+            try self.stackGuard();
             self.depth += 1;
             defer self.depth -= 1;
             // Expose the callee object to the native (it isn't a parameter), so
@@ -3827,7 +3904,7 @@ pub const Interpreter = struct {
         // generator; an unlowerable body falls through to the inert stub below.
         if (func.is_generator and func.is_async and func.gen_chunk != null)
             return vm.makeAsyncGenerator(self, func, args, this_val);
-        if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
+        try self.stackGuard();
         self.depth += 1;
         defer self.depth -= 1;
 
@@ -6746,7 +6823,7 @@ pub const Interpreter = struct {
     /// Guard against unbounded proxy→target→proxy forwarding (which recurses
     /// without a JS call frame, so the normal call-depth limit wouldn't catch it).
     fn proxyDepth(self: *Interpreter) EvalError!void {
-        if (self.depth >= max_call_depth) return self.throwError("RangeError", "Maximum call stack size exceeded");
+        try self.stackGuard();
     }
 
     /// [[GetPrototypeOf]] of an (unwrapped) prototype value for a target object,

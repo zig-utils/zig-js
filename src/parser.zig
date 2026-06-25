@@ -2255,6 +2255,12 @@ pub const Parser = struct {
                 return ParseError.UnexpectedToken;
             _ = self.advance();
             const rhs = try self.parseAssignment();
+            // A member target must resolve its reference (base + computed key)
+            // exactly once, so it gets a dedicated node. An identifier target has
+            // no such hazard, so it keeps the `a && (a = b)` desugaring (which
+            // also gives the anonymous-RHS NamedEvaluation for free).
+            if (left.* != .identifier)
+                return self.alloc(.{ .logical_assign = .{ .target = left, .op = op, .value = rhs } });
             const set = try self.alloc(.{ .assign = .{ .target = left, .value = rhs } });
             return self.alloc(.{ .logical = .{ .op = op, .left = left, .right = set } });
         }

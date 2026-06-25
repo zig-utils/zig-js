@@ -69,6 +69,7 @@ fn nodeHasYield(node: *const ast.Node) bool {
         .sequence => |s| nodeHasYield(s.first) or nodeHasYield(s.second),
         .assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
         .op_assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
+        .logical_assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
         .conditional => |c| nodeHasYield(c.cond) or nodeHasYield(c.consequent) or nodeHasYield(c.alternate),
         .await_expr => |a| nodeHasYield(a.argument),
         .optional_chain => |c| nodeHasYield(c),
@@ -973,6 +974,9 @@ pub const Compiler = struct {
                 },
                 else => return error.Unsupported,
             },
+            // Logical assignment on a member target must resolve the reference
+            // once; the tree-walker handles that, so defer to it.
+            .logical_assign => return error.Unsupported,
             .op_assign => |oa| switch (oa.target.*) {
                 // Identifier target: load the old value, apply the op, store back.
                 // (No `with` here — a function using `with` already falls back to

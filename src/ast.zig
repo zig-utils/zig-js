@@ -191,6 +191,12 @@ pub const Node = union(enum) {
     /// resolved ONCE (GetValue then PutValue use the same reference), so a
     /// `with`-bound getter that mutates its scope is observed correctly.
     op_assign: struct { target: *Node, op: BinaryOp, value: *Node },
+    /// Logical assignment `target op= value` (`&&=`/`||=`/`??=`) for a *member*
+    /// target. The LeftHandSide reference (base + computed key) is resolved ONCE,
+    /// then the short-circuit predicate decides whether `value` runs and the
+    /// store happens — so `obj[f()] &&= g()` evaluates `f()` exactly once.
+    /// (Identifier targets keep the `a && (a = b)` desugaring, which is safe.)
+    logical_assign: struct { target: *Node, op: LogicalOp, value: *Node },
     conditional: struct { cond: *Node, consequent: *Node, alternate: *Node },
     function: *FunctionNode, // function/arrow expression -> a function value
     /// `yield [expr]` / `yield* expr` — only valid inside a generator body.
