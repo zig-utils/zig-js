@@ -163,7 +163,8 @@ pub const Op = enum(u8) {
     load_this, // push the current `this`
     new_object, // push a fresh {}
     new_array, // push a fresh []
-    init_prop, // operand a: name index; pop value, set on object at top, leave object
+    init_prop, // operand a: name index; pop value, define own data prop on object at top, leave object
+    init_proto, // pop value; if object/null set it as the [[Prototype]] of object at top (the `__proto__: v` colon form), leave object
     init_prop_computed, // pop key, pop value, set on object at top, leave object
     init_spread, // pop source, CopyDataProperties into object at top, leave object
     init_getter, // pop fn, pop key; install getter on object at top, leave object
