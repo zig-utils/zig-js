@@ -11262,10 +11262,13 @@ pub const Interpreter = struct {
                 .add => if (l.isString() or r.isString()) {} else return self.bigIntBinary(op, l, r, l_big, r_big),
                 .sub, .mul, .div, .mod, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr => return self.bigIntBinary(op, l, r, l_big, r_big),
                 .ushr => return self.throwError("TypeError", "BigInts have no unsigned right shift, use >> instead"),
-                .lt => return Value.boolVal(bigCmp(l, r) < 0),
-                .le => return Value.boolVal(bigCmp(l, r) <= 0),
-                .gt => return Value.boolVal(bigCmp(l, r) > 0),
-                .ge => return Value.boolVal(bigCmp(l, r) >= 0),
+                // A null order is the spec's "undefined" comparison result (a
+                // NaN Number operand or a non-BigInt-shaped String) — every
+                // relational operator then yields false.
+                .lt => return Value.boolVal(if (try self.bigCmp(l, r)) |o| o == .lt else false),
+                .le => return Value.boolVal(if (try self.bigCmp(l, r)) |o| o != .gt else false),
+                .gt => return Value.boolVal(if (try self.bigCmp(l, r)) |o| o == .gt else false),
+                .ge => return Value.boolVal(if (try self.bigCmp(l, r)) |o| o != .lt else false),
                 else => {},
             }
         }
@@ -11351,19 +11354,44 @@ pub const Interpreter = struct {
 
     /// Mathematical comparison of two BigInt/Number operands (for `< <= > >=`),
     /// returning negative/zero/positive. (Lossy for BigInts beyond 2^53.)
-    fn bigCmp(l: Value, r: Value) f64 {
-        // BigInt vs BigInt: compare the i128 values exactly (an f64 round-trip
-        // loses precision past 2^53, e.g. 9007199254740992000n vs ...991999n).
+    /// Abstract relational comparison when at least one operand is a BigInt.
+    /// Returns the order of `(l, r)`, or null for the spec's "undefined" result
+    /// (a NaN Number operand, or a String that is not a valid BigInt). All
+    /// comparisons are exact: BigInts are arbitrary-precision (an f64 round-trip
+    /// loses precision past 2^53, and 300-digit literals overflow i128), and a
+    /// BigInt-vs-Number compare decomposes the f64 into M·2^E, so even
+    /// `Number.MAX_VALUE` against a huge BigInt is exact.
+    fn bigCmp(self: *Interpreter, l: Value, r: Value) EvalError!?std.math.Order {
         const l_big = l.isObject() and l.asObj().is_bigint;
         const r_big = r.isObject() and r.asObj().is_bigint;
         if (l_big and r_big) {
-            const a = l.asObj().bigint;
-            const b = r.asObj().bigint;
-            return if (a < b) -1 else if (a > b) 1 else 0;
+            var a = try managedBigIntFromObject(self.arena, l.asObj());
+            const b = try managedBigIntFromObject(self.arena, r.asObj());
+            return a.toConst().order(b.toConst());
         }
-        const lf: f64 = if (l_big) @floatFromInt(l.asObj().bigint) else l.toNumber();
-        const rf: f64 = if (r_big) @floatFromInt(r.asObj().bigint) else r.toNumber();
-        return lf - rf;
+        if (l_big) {
+            var a = try managedBigIntFromObject(self.arena, l.asObj());
+            return self.bigVsOther(&a, r);
+        }
+        // r is the BigInt; compute order(r, l) and invert it.
+        var b = try managedBigIntFromObject(self.arena, r.asObj());
+        const o = try self.bigVsOther(&b, l);
+        return if (o) |ord| ord.invert() else null;
+    }
+
+    /// Order of `(big, other)`, where `other` is a primitive Number/String/
+    /// Boolean/null/undefined (Symbols were already rejected). A String uses
+    /// StringToBigInt (a non-BigInt-shaped string ⇒ null/"undefined"); any other
+    /// operand goes through ToNumber and an exact BigInt-vs-Number compare.
+    fn bigVsOther(self: *Interpreter, big: *std.math.big.int.Managed, other: Value) EvalError!?std.math.Order {
+        if (other.isString()) {
+            var ny = (try stringToBigIntManaged(self.arena, other.asStr())) orelse return null;
+            return big.toConst().order(ny.toConst());
+        }
+        const n = other.toNumber();
+        if (std.math.isNan(n)) return null;
+        if (std.math.isInf(n)) return if (n > 0) std.math.Order.lt else std.math.Order.gt;
+        return try bigVsFiniteF64(self.arena, big, n);
     }
 
     /// `x instanceof C`: OrdinaryHasInstance walks the live prototype chain.
@@ -13571,6 +13599,64 @@ fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     // A BigInt wrapper object (`Object(1n)`) unwraps to its boxed BigInt.
     if (this.isObject() and this.asObj().prim != null and this.asObj().prim.?.isObject() and this.asObj().prim.?.asObj().is_bigint) return this.asObj().prim.?;
     return self.throwError("TypeError", "BigInt.prototype.valueOf requires that 'this' be a BigInt");
+}
+
+/// StringToBigInt as a bignum, or null when the string is not a valid BigInt
+/// (the relational operators treat that as the "undefined" result rather than
+/// throwing). Mirrors the BigInt() string grammar: trim, then `0x`/`0o`/`0b`
+/// radix literals or an optionally-signed decimal; empty ⇒ 0n.
+fn stringToBigIntManaged(arena: std.mem.Allocator, s: []const u8) error{OutOfMemory}!?std.math.big.int.Managed {
+    const t = std.mem.trim(u8, s, " \t\r\n\x0b\x0c\u{00a0}\u{feff}");
+    var canon: ?[]const u8 = null;
+    if (t.len == 0) {
+        canon = "0";
+    } else if (t.len > 2 and t[0] == '0' and (t[1] == 'x' or t[1] == 'X')) {
+        canon = try canonicalBigIntRadixString(arena, t[2..], 16);
+    } else if (t.len > 2 and t[0] == '0' and (t[1] == 'o' or t[1] == 'O')) {
+        canon = try canonicalBigIntRadixString(arena, t[2..], 8);
+    } else if (t.len > 2 and t[0] == '0' and (t[1] == 'b' or t[1] == 'B')) {
+        canon = try canonicalBigIntRadixString(arena, t[2..], 2);
+    } else {
+        canon = try canonicalBigIntDecimalString(arena, t);
+    }
+    const cs = canon orelse return null;
+    var out = try std.math.big.int.Managed.init(arena);
+    out.setString(10, cs) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    return out;
+}
+
+/// Exact order of `(big, y)` for a finite f64 `y`. Decomposes `y = (±)M·2^E`
+/// with integer significand M and integer exponent E, then compares integers —
+/// shifting whichever side keeps both integral — so no precision is lost
+/// regardless of magnitude (handles `Number.MAX_VALUE`, subnormals, ±0).
+fn bigVsFiniteF64(arena: std.mem.Allocator, big: *std.math.big.int.Managed, y: f64) error{OutOfMemory}!std.math.Order {
+    const bits: u64 = @bitCast(y);
+    const neg = (bits >> 63) != 0;
+    const exp_field: u64 = (bits >> 52) & 0x7FF;
+    const frac: u64 = bits & 0xF_FFFF_FFFF_FFFF;
+    var m: u64 = undefined;
+    var e: i64 = undefined;
+    if (exp_field == 0) {
+        m = frac; // subnormal (also covers ±0, where m = 0)
+        e = -1074;
+    } else {
+        m = frac | (@as(u64, 1) << 52);
+        e = @as(i64, @intCast(exp_field)) - 1075;
+    }
+    var mb = try std.math.big.int.Managed.initSet(arena, m);
+    if (neg) mb.negate();
+    if (e >= 0) {
+        var ms = try std.math.big.int.Managed.init(arena);
+        try ms.shiftLeft(&mb, @intCast(e));
+        return big.toConst().order(ms.toConst());
+    }
+    // E < 0: y may be fractional. Compare big·2^(-E) against M (both integers).
+    var a = try std.math.big.int.Managed.init(arena);
+    try a.shiftLeft(big, @intCast(-e));
+    return a.toConst().order(mb.toConst());
 }
 
 fn managedBigIntFromObject(arena: std.mem.Allocator, big: *value.Object) error{OutOfMemory}!std.math.big.int.Managed {
