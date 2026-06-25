@@ -853,6 +853,12 @@ pub const Interpreter = struct {
     signal_label: ?[]const u8 = null,
     /// Label of the enclosing `labeled_stmt`, handed to the loop it wraps.
     current_label: ?[]const u8 = null,
+    /// GetTemplateObject's per-realm cache: a tagged template's frozen strings
+    /// object is built once per call site (keyed by the template AST node) and
+    /// reused on every later evaluation, so `tag`...`` hands the tag the SAME
+    /// object each time. A child realm re-parses its source, producing distinct
+    /// nodes, so realms never share an entry.
+    template_cache: std.AutoHashMapUnmanaged(*const anyopaque, Value) = .empty,
     /// [[HomeObject]] of the executing method (for `super.x`) and the superclass
     /// constructor of the executing derived constructor (for `super(...)`).
     home_object: ?*value.Object = null,
@@ -1852,7 +1858,7 @@ pub const Interpreter = struct {
             },
 
             .call => |c| try self.evalCall(c.callee, c.args, c.optional),
-            .tagged_template => |t| try self.evalTaggedTemplate(t.tag, t.cooked, t.raw, t.exprs),
+            .tagged_template => |t| try self.evalTaggedTemplate(node, t.tag, t.cooked, t.raw, t.exprs),
             .new_expr => |n| try self.evalNew(n.callee, n.args),
             .member => |m| blk: {
                 const obj = try self.eval(m.object);
@@ -3645,17 +3651,24 @@ pub const Interpreter = struct {
     /// `tag`a${x}b`` → `tag(strings, x)` where `strings` is the frozen cooked
     /// array carrying a frozen `raw` array. The tag's `this` is the member
     /// receiver for `obj.tag`...`` (e.g. `String.raw`...``), else undefined.
-    fn evalTaggedTemplate(self: *Interpreter, tag_node: *Node, cooked: [][]const u8, raw: [][]const u8, expr_nodes: []*Node) EvalError!Value {
-        // The "strings" template object: an array of the cooked strings with an
-        // own `raw` array of the unescaped strings.
-        const strings = (try self.newArray()).asObj();
-        for (cooked) |s| try strings.elements.append(strings.elementsAllocator(self.arena), Value.str(s));
-        const raw_arr = (try self.newArray()).asObj();
-        for (raw) |s| try raw_arr.elements.append(raw_arr.elementsAllocator(self.arena), Value.str(s));
-        try freezeTemplateArray(self, raw_arr);
-        try strings.setOwn(self.arena, self.root_shape, "raw", Value.obj(raw_arr));
-        try strings.setAttr(self.arena, "raw", .{ .writable = false, .enumerable = false, .configurable = false });
-        try freezeTemplateArray(self, strings);
+    fn evalTaggedTemplate(self: *Interpreter, site: *const Node, tag_node: *Node, cooked: [][]const u8, raw: [][]const u8, expr_nodes: []*Node) EvalError!Value {
+        // GetTemplateObject: the frozen "strings" object is cached by call site
+        // (this AST node) and reused on every evaluation, so the tag receives the
+        // same object each time. Build it only on a cache miss.
+        const strings = if (self.template_cache.get(@ptrCast(site))) |cached|
+            cached.asObj()
+        else blk: {
+            const s = (try self.newArray()).asObj();
+            for (cooked) |c| try s.elements.append(s.elementsAllocator(self.arena), Value.str(c));
+            const raw_arr = (try self.newArray()).asObj();
+            for (raw) |c| try raw_arr.elements.append(raw_arr.elementsAllocator(self.arena), Value.str(c));
+            try freezeTemplateArray(self, raw_arr);
+            try s.setOwn(self.arena, self.root_shape, "raw", Value.obj(raw_arr));
+            try s.setAttr(self.arena, "raw", .{ .writable = false, .enumerable = false, .configurable = false });
+            try freezeTemplateArray(self, s);
+            try self.template_cache.put(self.arena, @ptrCast(site), Value.obj(s));
+            break :blk s;
+        };
 
         // Build the argument list: strings, then each substitution value.
         var args: std.ArrayListUnmanaged(Value) = .empty;
