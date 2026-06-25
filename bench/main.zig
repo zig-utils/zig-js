@@ -43,6 +43,16 @@ const cases = [_]Case{
         .hot = "arr(20000)",
         .iters = 200,
     },
+    .{
+        // Linear recursion to depth ~500 — well past `stack_check_floor` (32),
+        // so every call beyond the floor exercises the interpreter's
+        // native-stack-pointer guard. This is the case that would surface any
+        // serial-perf cost of the overflow guard the shallow benchmarks miss.
+        .name = "deep recursion (depth 500)",
+        .setup = "function deep(n) { return n <= 0 ? 0 : n + deep(n - 1); }",
+        .hot = "deep(500)",
+        .iters = 200,
+    },
 };
 
 fn nowNs(io: std.Io) i96 {
