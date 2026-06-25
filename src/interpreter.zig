@@ -1321,6 +1321,21 @@ pub const Interpreter = struct {
     /// binding takes the write (returns true); otherwise the caller assigns to
     /// the lexical/global binding. Stops at the first scope (binding or `with`)
     /// that owns `name`.
+    /// The declarative environment that currently holds `name` (a `var`/`let`/
+    /// `const` binding), searching outward from `start`. Used to capture an
+    /// assignment's target binding BEFORE its right-hand side runs, so a direct
+    /// eval in the RHS that introduces a closer binding can't retarget the write
+    /// (PutValue uses the initially-created Reference). Returns null when no
+    /// declarative binding exists (the target is a `with`/global/new binding).
+    fn bindingEnvOf(start: *Environment, name: []const u8) ?*Environment {
+        var env: ?*Environment = start;
+        while (env) |e| {
+            if (e.vars.getPtr(name) != null or e.aliases.get(name) != null) return e;
+            env = e.parent;
+        }
+        return null;
+    }
+
     fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
         var env: ?*Environment = self.env;
         while (env) |e| {
@@ -1579,6 +1594,29 @@ pub const Interpreter = struct {
             },
 
             .assign => |a| blk: {
+                // Capture the target reference BEFORE the RHS: PutValue uses the
+                // initially-created Reference even if the RHS deletes the `with`
+                // binding or a direct eval introduces a closer one.
+                if (a.target.* == .identifier) {
+                    const name = a.target.identifier;
+                    if (try self.assignWithObject(name)) |wo| {
+                        const v = try self.eval(a.value);
+                        try self.maybeNameAnon(v, a.value, name);
+                        if (self.strict and !(try self.hasPropertyResult(wo, name)))
+                            return self.throwError("ReferenceError", "binding is no longer defined");
+                        try self.setMember(Value.obj(wo), name, v);
+                        break :blk v;
+                    }
+                    if (bindingEnvOf(self.env, name)) |e| if (e.parent != null and
+                        !e.consts.contains(name) and !e.fn_names.contains(name) and e.aliases.get(name) == null and
+                        !self.isTdz(e.vars.get(name) orelse Value.undef()))
+                    {
+                        const v = try self.eval(a.value);
+                        try self.maybeNameAnon(v, a.value, name);
+                        try e.assign(name, v); // write to the captured binding
+                        break :blk v;
+                    };
+                }
                 const v = try self.eval(a.value);
                 // NamedEvaluation: `f = function(){}` names the function "f"
                 // (only a bare identifier target, per spec).
@@ -1605,11 +1643,21 @@ pub const Interpreter = struct {
                             try self.setMember(Value.obj(wo), name, new);
                             break :blk new;
                         }
-                        // Otherwise the lexical/global binding is stable across the
-                        // get/set, so a plain read + assignTo resolve to the same one.
+                        // Capture the target's declarative binding BEFORE the RHS,
+                        // so a direct eval in the RHS that introduces a closer
+                        // binding can't retarget the write (PutValue uses the
+                        // initially-created Reference).
+                        const benv = bindingEnvOf(self.env, name);
                         const old = try self.eval(oa.target);
                         const rhs = try self.eval(oa.value);
                         const new = try self.applyBinary(oa.op, old, rhs);
+                        if (benv) |e| if (e.parent != null and !e.consts.contains(name) and
+                            !e.fn_names.contains(name) and e.aliases.get(name) == null and
+                            !self.isTdz(e.vars.get(name) orelse Value.undef()))
+                        {
+                            try e.assign(name, new); // write to the captured binding
+                            break :blk new;
+                        };
                         try self.assignTo(oa.target, new);
                         break :blk new;
                     },
