@@ -3527,7 +3527,7 @@ pub const Interpreter = struct {
                 _ = try self.eval(block);
                 continue;
             }
-            const kv: ?Value = if (m.key_expr) |ke| try self.eval(ke) else null;
+            const kv: ?Value = if (m.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
             const key = if (kv) |k| try self.keyOf(k) else m.key;
             const name_str = if (kv) |k| try self.keyDisplayName(k) else m.key;
             // A static class element may not have the key "prototype" — the
@@ -4461,6 +4461,17 @@ pub const Interpreter = struct {
 
         o.truncateDenseElementsAndSetLength(new_len);
         return !blocked;
+    }
+
+    /// ToPropertyKey as a primitive Value: ToPrimitive(key, string) keeping a
+    /// Symbol as-is. Unlike `keyOf` it returns the primitive (not a storage
+    /// string), so a caller can derive BOTH a storage key and a display name
+    /// from a single — possibly side-effecting — coercion. (Computing them with
+    /// two `keyOf`/`keyDisplayName` calls would run `valueOf`/`@@toPrimitive`
+    /// twice and, when the result is a Symbol, throw in the ToString half.)
+    pub fn toPropertyKeyValue(self: *Interpreter, k: Value) EvalError!Value {
+        if (!k.isObject() or k.asObj().is_symbol) return k;
+        return self.toPrimitive(k, .string);
     }
 
     pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
