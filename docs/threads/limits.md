@@ -60,11 +60,17 @@ but it is not true parallel JavaScript heap mutation.
 - Depending on shell GC while a spawned shared-realm JS thread is actively
   running or parked inside a native call. Active interpreter fields are traced
   at quiescent checkpoints, including the current environment cell and
-  engine-owned Promise/VM native closure side records, but arbitrary native/Zig
-  stacks are still a Layer-C root-completeness blocker. The `zig-gc`
-  dependency has an optional conservative-word marking helper for stack ranges;
-  zig-js still needs per-thread stack-bound registration before it can rely on
-  that helper for arbitrary parked/running native frames.
+  engine-owned Promise/VM native closure side records. The collecting thread and
+  every parked peer now also have their native stacks rooted conservatively:
+  `stack_scan.registerThreadBounds` records each thread's OS stack bounds
+  (`[limit, base]`) the first time it enters JS, and the `zig-gc`
+  conservative-word marking helper scans `[sp, frame]` for the live thread and
+  each parked peer's published range, both clamped to those bounds so the pass
+  can never read outside the real stack mapping. The remaining root-completeness
+  blocker is narrower: a *running* (non-parked) parallel mutator has no
+  safepoint at which the collector can sample its stack. That non-blocking
+  handshake is M3 (`src/root_handshake.zig`), so mid-script collection still
+  requires every peer to be parked.
 - Treating deep recursive call tests as an implemented VM-stack feature. The
   tree-walker still uses native recursion for calls, so PR-249 stack-overflow
   tests that require thousands of pre-overflow calls remain future work.
