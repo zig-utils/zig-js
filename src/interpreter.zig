@@ -1190,6 +1190,17 @@ pub const Interpreter = struct {
         return v.isObject() and self.tdz_marker != null and v.asObj() == self.tdz_marker.?;
     }
 
+    /// PrivateFieldAdd / PrivateMethodOrAccessorAdd: branding an object that
+    /// already carries the private name `name` is a TypeError — reachable when the
+    /// same object undergoes instance-element initialization twice (a base that
+    /// `return`s an already-constructed instance, so a later `new` re-installs the
+    /// derived class's private members on it).
+    fn addPrivateBrandChecked(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!void {
+        if (o.hasPrivateBrand(name))
+            return self.throwError("TypeError", "Cannot initialize a private member twice on the same object");
+        try o.addPrivateBrand(self.arena, name);
+    }
+
     /// Pre-bind every identifier in a destructuring pattern to the TDZ sentinel.
     fn tdzBindPattern(self: *Interpreter, target: *Node, tdz: Value) void {
         switch (target.*) {
@@ -1692,7 +1703,7 @@ pub const Interpreter = struct {
                 const bns = self.pending_brand_names;
                 self.pending_brand_names = &.{};
                 if (self.this_value.isObject())
-                    for (bns) |bn| try self.this_value.asObj().addPrivateBrand(self.arena, bn);
+                    for (bns) |bn| try self.addPrivateBrandChecked(self.this_value.asObj(), bn);
                 const fis = self.pending_field_inits;
                 self.pending_field_inits = &.{};
                 for (fis) |fi| _ = try self.eval(fi);
@@ -1751,7 +1762,7 @@ pub const Interpreter = struct {
                 // throws) and define it as an own, writable, non-enumerable,
                 // non-configurable property. The value is evaluated *after* the
                 // brand exists, so the initializer may reference the field.
-                if (self.this_value.isObject()) try self.this_value.asObj().addPrivateBrand(self.arena, d.name);
+                if (self.this_value.isObject()) try self.addPrivateBrandChecked(self.this_value.asObj(), d.name);
                 const fv = try self.eval(d.value);
                 if (self.this_value.isObject()) {
                     const o = self.this_value.asObj();
@@ -3243,7 +3254,14 @@ pub const Interpreter = struct {
                 if (m.is_static) {
                     try class_obj.addPrivateBrand(self.arena, m.key);
                 } else {
-                    try brand_names.append(self.arena, m.key);
+                    // A `get #x` / `set #x` pair shares one private name, so the
+                    // instance is branded with it only once.
+                    var dup = false;
+                    for (brand_names.items) |bn| if (eq(bn, m.key)) {
+                        dup = true;
+                        break;
+                    };
+                    if (!dup) try brand_names.append(self.arena, m.key);
                 }
             }
             cf.private_brand_names = brand_names.items;
@@ -3836,7 +3854,7 @@ pub const Interpreter = struct {
         // A base class brands `this` with its private names at the start of the
         // constructor (a derived class does so when `super()` returns).
         if (func.is_class_constructor and !func.is_derived_constructor and self.this_value.isObject()) {
-            for (func.private_brand_names) |bn| try self.this_value.asObj().addPrivateBrand(self.arena, bn);
+            for (func.private_brand_names) |bn| try self.addPrivateBrandChecked(self.this_value.asObj(), bn);
         }
 
         // Async generator: params have now bound (propagating any side-effect
