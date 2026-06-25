@@ -10944,7 +10944,11 @@ pub const Interpreter = struct {
     // ---- try / catch / finally --------------------------------------------
 
     fn evalTry(self: *Interpreter, t: *ast.TryNode) EvalError!Value {
+        // Evaluate the try block (and catch, on a caught throw), capturing its
+        // completion — a value, a pending signal (break/continue/return), or a
+        // held error — so finally can run with a clean slate and override it.
         var result: Value = Value.undef();
+        var held_err: ?EvalError = null;
         if (self.eval(t.block)) |v| {
             result = v;
         } else |err| {
@@ -10967,16 +10971,39 @@ pub const Interpreter = struct {
                 if (catch_result) |v| {
                     result = v;
                 } else |cerr| {
-                    if (t.finally_block) |fb| _ = try self.eval(fb);
-                    return cerr;
+                    held_err = cerr;
                 }
             } else {
-                // No catch (or a non-JS host error): run finally, then rethrow.
-                if (t.finally_block) |fb| _ = try self.eval(fb);
-                return err;
+                held_err = err;
             }
         }
-        if (t.finally_block) |fb| _ = try self.eval(fb);
+        if (t.finally_block) |fb| {
+            // The try/catch completion may have left an abrupt signal pending; a
+            // statement list short-circuits on it, so clear it before running
+            // finally and hold it aside. If finally completes normally the held
+            // completion resumes; if finally is itself abrupt (break/continue/
+            // return/throw) it OVERRIDES the held one (the spec's UpdateEmpty +
+            // "if F is abrupt, return F").
+            const saved_signal = self.signal;
+            const saved_label = self.signal_label;
+            self.signal = .none;
+            self.signal_label = null;
+            if (self.eval(fb)) |fval| {
+                if (self.signal == .none) {
+                    self.signal = saved_signal;
+                    self.signal_label = saved_label;
+                    if (held_err) |e| return e;
+                    return result;
+                }
+                // finally produced its own abrupt completion: it wins, and any
+                // held throw is swallowed.
+                if (held_err != null) self.exception = Value.undef();
+                return fval;
+            } else |ferr| {
+                return ferr;
+            }
+        }
+        if (held_err) |e| return e;
         return result;
     }
 
