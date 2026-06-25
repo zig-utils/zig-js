@@ -2,10 +2,13 @@ name: CI
 
 # Runs the docs/threads/testing.md "Required Checks" — crucially the
 # ThreadSanitizer gates that surface the no-GIL races blocking the execution-path
-# GIL drop. With the pinned toolchain (0.17.0-dev.956+2dca73595) TSan now builds
-# on macOS too; CI keeps running it on Linux as the shared gate. (The older
-# dev.131 pin could not build TSan on darwin — bundled libcxx failed with
-# `undeclared identifier 'INFINITY'` — which is why this was Linux-only before.)
+# GIL drop. The toolchain comes from pantry's own action (`zig@0.17.0-dev`),
+# which resolves the current 0.17.0-dev master (≥0.17.0-dev.956) from
+# ziglang.org/download/index.json — so the pin tracks upstream automatically
+# instead of going stale. At ≥dev.956 TSan now builds on macOS too; CI keeps
+# running it on Linux as the shared gate. (The older dev.131 pin could not build
+# TSan on darwin — bundled libcxx failed with `undeclared identifier 'INFINITY'`
+# — which is why this was Linux-only before.)
 #
 # Triggers are pull_request + manual dispatch (not every push to main). Add
 # `push: { branches: [main] }` once the suite is green on main (the toolchain
@@ -58,9 +61,9 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-      - uses: mlugg/setup-zig@v2
+      - uses: pantry-pm/pantry/packages/action@main
         with:
-          version: 0.17.0-dev.956+2dca73595
+          packages: zig@0.17.0-dev
       - name: ${{ matrix.name }}
         working-directory: zig-js
         run: ${{ matrix.cmd }}
@@ -87,9 +90,9 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-      - uses: mlugg/setup-zig@v2
+      - uses: pantry-pm/pantry/packages/action@main
         with:
-          version: 0.17.0-dev.956+2dca73595
+          packages: zig@0.17.0-dev
       - name: TSan loop over the no-GIL race-hunt corpus (pin remaining races)
         working-directory: zig-js
         env:
