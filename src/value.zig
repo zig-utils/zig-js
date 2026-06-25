@@ -1713,6 +1713,19 @@ pub fn canonicalIndex(k: []const u8) ?u32 {
 /// from all reflection (Object.keys/getOwnPropertyNames/for-in/JSON) and never
 /// enumerable — observable only through `obj.#x` inside the defining class.
 pub fn isPrivateKey(k: []const u8) bool {
+    // A genuine private name is rewritten to `#name\x00<serial>` (see
+    // nextPrivateStorageKey): the embedded NUL — impossible in a source-level
+    // property key — distinguishes it from an ordinary public property whose key
+    // merely starts with '#' (e.g. a computed `["#m"]`), which must NOT be treated
+    // as private. This predicate is for *runtime* storage keys (post-rewrite).
+    return k.len > 0 and k[0] == '#' and std.mem.indexOfScalar(u8, k, 0) != null;
+}
+
+/// A *source-level* private name (`#x`), before the per-class rewrite assigns it
+/// a unique storage key. Used only by the private-name rewriting machinery, which
+/// operates on raw parser keys/identifiers; everything at runtime uses
+/// `isPrivateKey` (which requires the rewritten NUL marker).
+pub fn isRawPrivateName(k: []const u8) bool {
     return k.len > 0 and k[0] == '#';
 }
 

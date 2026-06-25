@@ -2896,7 +2896,7 @@ pub const Interpreter = struct {
     }
 
     fn remapPrivateName(map: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
-        if (!value.isPrivateKey(name)) return name;
+        if (!value.isRawPrivateName(name)) return name;
         return map.get(name) orelse name;
     }
 
@@ -2949,7 +2949,7 @@ pub const Interpreter = struct {
                 var it = map.iterator();
                 while (it.next()) |entry| try nested_map.put(self.arena, entry.key_ptr.*, entry.value_ptr.*);
                 for (c.members) |m| {
-                    if (m.key_expr == null and value.isPrivateKey(m.key)) _ = nested_map.remove(m.key);
+                    if (m.key_expr == null and value.isRawPrivateName(m.key)) _ = nested_map.remove(m.key);
                 }
                 for (c.members) |m| {
                     if (m.key_expr) |key_expr| try self.rewritePrivateNamesInNode(key_expr, map);
@@ -3076,12 +3076,16 @@ pub const Interpreter = struct {
         var map: std.StringHashMapUnmanaged([]const u8) = .empty;
         defer map.deinit(self.arena);
         for (members) |m| {
-            if (m.key_expr != null or !value.isPrivateKey(m.key) or map.contains(m.key)) continue;
+            if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.contains(m.key)) continue;
             try map.put(self.arena, m.key, try self.nextPrivateStorageKey(m.key));
         }
         if (map.count() == 0) return;
         for (members) |*m| {
             m.key = remapPrivateName(&map, m.key);
+            // A computed key (`[expr]`) may itself reference a private name —
+            // `[self.#f]` — so rewrite it too, else the raw `#f` is mistaken for a
+            // public property at runtime.
+            if (m.key_expr) |ke| try self.rewritePrivateNamesInNode(ke, &map);
             if (m.field_init) |init| try self.rewritePrivateNamesInNode(init, &map);
             if (m.func) |func| try self.rewritePrivateNamesInNode(func, &map);
             if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, &map);
