@@ -2457,6 +2457,33 @@ pub const Interpreter = struct {
                 return Value.num(if (prefix) up else o);
             }
         }
+        // A computed member target `base[prop]++` evaluates its reference (base
+        // and the ToPropertyKey of prop) exactly once — read and write go through
+        // the same captured (recv, key). (Non-computed/private members have no
+        // side-effecting key, so they fall through to the eval+assignTo path.)
+        if (target.* == .member and target.member.computed != null and !target.member.optional) {
+            const recv = try self.eval(target.member.object);
+            // Evaluate the key expression (GetValue) but defer ToPropertyKey: a
+            // nullish base is a TypeError BEFORE the key is coerced, so
+            // `++null[{toString(){throw}}]` throws TypeError, not the toString error.
+            const key_val = try self.eval(target.member.computed.?);
+            if (recv.isNull() or recv.isUndefined())
+                return self.throwError("TypeError", "Cannot read properties of null or undefined");
+            const key = try self.keyOf(key_val);
+            var ov = try self.getProperty(recv, key);
+            if (ov.isObject() and !ov.asObj().is_bigint and !ov.asObj().is_symbol)
+                ov = try self.toPrimitive(ov, .number);
+            if (ov.isObject() and ov.asObj().is_bigint) {
+                const b = ov.asObj().bigint;
+                const up = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
+                try self.setMember(recv, key, up);
+                return if (prefix) up else ov;
+            }
+            const o = ov.toNumber();
+            const up = if (inc) o + 1 else o - 1;
+            try self.setMember(recv, key, Value.num(up));
+            return Value.num(if (prefix) up else o);
+        }
         var old_val = try self.eval(target);
         // ToNumeric: an object operand coerces via ToPrimitive(number); a BigInt
         // is incremented/decremented by 1n (not the Number 1), and the result
