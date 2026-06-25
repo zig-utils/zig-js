@@ -10986,25 +10986,40 @@ pub const Interpreter = struct {
         if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null and self.globalProp(operand.identifier) == null)
             return Value.str("undefined");
         const v = try self.eval(operand);
-        // BigInt unary: `-`/`~` stay BigInt; unary `+` is a TypeError; `typeof`/
-        // `!`/`void` work as for any value.
-        if (v.isObject() and v.asObj().is_bigint and (op == .neg or op == .pos or op == .bit_not)) {
+        // `-`/`+`/`~` begin with ToNumeric: reduce a wrapper object to a numeric
+        // primitive (one valueOf) so `~new Boolean(true)`, `~Object(1n)`, etc.
+        // dispatch on the underlying value, not on the object reference. BigInt
+        // unary: `-`/`~` stay BigInt; unary `+` is a TypeError; `typeof`/`!`/`void`
+        // do NOT coerce.
+        const nv = if (op == .neg or op == .pos or op == .bit_not) try self.toNumericPrimitive(v) else v;
+        if (nv.isObject() and nv.asObj().is_bigint and (op == .neg or op == .pos or op == .bit_not)) {
             return switch (op) {
-                .neg => try negateBigIntObject(self, v.asObj()),
-                .bit_not => try bitNotBigIntObject(self, v.asObj()),
+                .neg => try negateBigIntObject(self, nv.asObj()),
+                .bit_not => try bitNotBigIntObject(self, nv.asObj()),
                 .pos => self.throwError("TypeError", "Cannot convert a BigInt value to a number"),
                 else => unreachable,
             };
         }
         return switch (op) {
-            .neg => Value.num(-(try self.toNumberV(v))),
-            .pos => Value.num(try self.toNumberV(v)),
+            .neg => Value.num(-(try self.toNumberV(nv))),
+            .pos => Value.num(try self.toNumberV(nv)),
             .not => Value.boolVal(!v.toBoolean()),
             .typeof => Value.str(v.typeOf()),
-            .bit_not => Value.num(@floatFromInt(~v.toInt32())),
+            .bit_not => Value.num(@floatFromInt(~Value.num(try self.toNumberV(nv)).toInt32())),
             .void_op => Value.undef(),
             .to_string => Value.str(try self.toStringV(v)), // template-substitution ToString
         };
+    }
+
+    /// ToNumeric's reduction step for unary `-`/`+`/`~`: turn a wrapper object
+    /// into a numeric primitive (running valueOf/toString once). A BigInt value
+    /// (`is_bigint`) and a Symbol are already primitives here and pass through;
+    /// a `Object(1n)` BigInt-wrapper reduces to its `1n` so it negates/complements
+    /// as a BigInt rather than throwing in ToNumber.
+    pub fn toNumericPrimitive(self: *Interpreter, v: Value) EvalError!Value {
+        if (v.isObject() and !v.asObj().is_bigint and !v.asObj().is_symbol)
+            return self.toPrimitive(v, .number);
+        return v;
     }
 
     fn evalLogical(self: *Interpreter, op: ast.LogicalOp, left: *Node, right: *Node) EvalError!Value {

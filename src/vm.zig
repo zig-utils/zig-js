@@ -321,14 +321,14 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
 
             .neg => {
-                const v = stack.pop().?;
+                const v = try vm.toNumericPrimitive(stack.pop().?);
                 if (v.isObject() and v.asObj().is_bigint)
                     try stack.append(stack_alloc, try interp.negateBigIntObject(vm, v.asObj()))
                 else
                     try stack.append(stack_alloc, Value.num(-(try vm.toNumberV(v))));
             },
             .pos => {
-                const v = stack.pop().?;
+                const v = try vm.toNumericPrimitive(stack.pop().?);
                 if (v.isObject() and v.asObj().is_bigint)
                     return vm.throwError("TypeError", "Cannot convert a BigInt value to a number");
                 try stack.append(stack_alloc, Value.num(try vm.toNumberV(v)));
@@ -342,11 +342,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try stack.append(stack_alloc, Value.str(v.typeOf()));
             },
             .bit_not => {
-                const v = stack.pop().?;
+                const v = try vm.toNumericPrimitive(stack.pop().?);
                 if (v.isObject() and v.asObj().is_bigint)
                     try stack.append(stack_alloc, try interp.bitNotBigIntObject(vm, v.asObj()))
                 else
-                    try stack.append(stack_alloc, Value.num(@floatFromInt(~v.toInt32())));
+                    try stack.append(stack_alloc, Value.num(@floatFromInt(~Value.num(try vm.toNumberV(v)).toInt32())));
             },
             .void_op => {
                 _ = stack.pop().?;
