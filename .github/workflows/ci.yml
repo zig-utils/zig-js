@@ -1,10 +1,11 @@
 name: CI
 
 # Runs the docs/threads/testing.md "Required Checks" — crucially the
-# ThreadSanitizer gates, which cannot run on a macOS dev box (the bundled libcxx
-# fails the TSan runtime compile with `undeclared identifier 'INFINITY'`) but
-# work on Linux. This is the gate that surfaces the no-GIL races blocking the
-# execution-path GIL drop.
+# ThreadSanitizer gates that surface the no-GIL races blocking the execution-path
+# GIL drop. With the pinned toolchain (0.17.0-dev.956+2dca73595) TSan now builds
+# on macOS too; CI keeps running it on Linux as the shared gate. (The older
+# dev.131 pin could not build TSan on darwin — bundled libcxx failed with
+# `undeclared identifier 'INFINITY'` — which is why this was Linux-only before.)
 #
 # Triggers are pull_request + manual dispatch (not every push to main). Add
 # `push: { branches: [main] }` once the suite is green on main (the toolchain
@@ -56,10 +57,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
+          ref: p7-parallel-marker
           path: zig-gc
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0-dev.131+73c51c142
+          version: 0.17.0-dev.956+2dca73595
       - name: ${{ matrix.name }}
         working-directory: zig-js
         run: ${{ matrix.cmd }}
@@ -85,10 +87,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
+          ref: p7-parallel-marker
           path: zig-gc
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0-dev.131+73c51c142
+          version: 0.17.0-dev.956+2dca73595
       - name: TSan loop over the no-GIL race-hunt corpus (pin remaining races)
         working-directory: zig-js
         env:

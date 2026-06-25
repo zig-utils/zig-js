@@ -300,12 +300,14 @@ joiner's abandoned local queue. The GIL-mode rope-resolve publication flake
 (`cve/mc-tear-rope-resolve-race.js`) is fixed (seqlock). The remaining genuine
 *data-race* candidate for the whole-corpus TSan campaign is the rare
 `StringHashMap`-grow panic seen once in the semantics batch. That gate is now
-wired: `zig build threads-test -Dtsan=true` builds the corpus *and the engine it
-links* under ThreadSanitizer (via a dedicated TSan-instrumented copy of the `js`
-module, so default `threads-test` is byte-identical). It is a CI gate on this
-checkout, though, because the bundled libcxx on this Zig 0.17-dev/darwin build
-fails the TSan runtime sub-compilation (`use of undeclared identifier
-'INFINITY'`) for both `test` and `threads-test`.
+wired: `zig build test -Dtsan=true` / `zig build threads-test -Dtsan=true` build
+the engine (and the corpus it links) under ThreadSanitizer (via a dedicated
+TSan-instrumented copy of the `js` module, so the default build is
+byte-identical). This now runs **locally on macOS** with the pinned toolchain
+`0.17.0-dev.956+2dca73595`. (The older `0.17.0-dev.956+2dca73595` could not:
+its bundled libcxx failed the TSan runtime sub-compilation on darwin with `use
+of undeclared identifier 'INFINITY'`, so TSan was Linux-CI-only. Bumping the
+pin to dev.956 fixed it — TSan is part of the local dev loop again.)
 
 ## Sweep Runs
 
