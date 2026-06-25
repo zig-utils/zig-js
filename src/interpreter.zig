@@ -11327,29 +11327,124 @@ pub const Interpreter = struct {
     /// A BigInt binary op (both operands must be BigInt — mixing is a TypeError).
     fn bigIntBinary(self: *Interpreter, op: ast.BinaryOp, l: Value, r: Value, l_big: bool, r_big: bool) EvalError!Value {
         if (!l_big or !r_big) return self.throwError("TypeError", "Cannot mix BigInt and other types, use explicit conversions");
-        const a = l.asObj().bigint;
-        const b = r.asObj().bigint;
-        const res: i128 = switch (op) {
-            .add => a +% b,
-            .sub => a -% b,
-            .mul => a *% b,
-            .div => if (b == 0) return self.throwError("RangeError", "Division by zero") else @divTrunc(a, b),
-            .mod => if (b == 0) return self.throwError("RangeError", "Division by zero") else @rem(a, b),
-            .pow => blk: {
-                if (b < 0) return self.throwError("RangeError", "Exponent must be non-negative");
-                var acc: i128 = 1;
-                var e = b;
-                while (e > 0) : (e -= 1) acc *%= a;
-                break :blk acc;
+        const lo = l.asObj();
+        const ro = r.asObj();
+        // `**` and the shifts can produce results far past i128, and a
+        // text-backed operand already doesn't fit, so they always take the
+        // arbitrary-precision path. Bitwise ops never overflow and i128's
+        // two's-complement matches BigInt's, so they stay on the fast path
+        // unless an operand is text-backed.
+        if (lo.bigint_text != null or ro.bigint_text != null)
+            return self.bigIntBinaryBig(op, lo, ro);
+        switch (op) {
+            .pow, .shl, .shr => return self.bigIntBinaryBig(op, lo, ro),
+            else => {},
+        }
+        const a = lo.bigint;
+        const b = ro.bigint;
+        switch (op) {
+            // Arithmetic can overflow i128 even when both operands fit; fall back
+            // to the bignum path on overflow so the result is exact.
+            .add => {
+                const res = @addWithOverflow(a, b);
+                return if (res[1] == 0) self.makeBigInt(res[0]) else self.bigIntBinaryBig(op, lo, ro);
             },
-            .bit_and => a & b,
-            .bit_or => a | b,
-            .bit_xor => a ^ b,
-            .shl => if (b >= 128 or b <= -128) 0 else if (b >= 0) a << @intCast(b) else a >> @intCast(-b),
-            .shr => if (b >= 128 or b <= -128) (if (a < 0) -1 else 0) else if (b >= 0) a >> @intCast(b) else a << @intCast(-b),
-            else => 0,
-        };
-        return self.makeBigInt(res);
+            .sub => {
+                const res = @subWithOverflow(a, b);
+                return if (res[1] == 0) self.makeBigInt(res[0]) else self.bigIntBinaryBig(op, lo, ro);
+            },
+            .mul => {
+                const res = @mulWithOverflow(a, b);
+                return if (res[1] == 0) self.makeBigInt(res[0]) else self.bigIntBinaryBig(op, lo, ro);
+            },
+            .div => {
+                if (b == 0) return self.throwError("RangeError", "Division by zero");
+                if (a == std.math.minInt(i128) and b == -1) return self.bigIntBinaryBig(op, lo, ro);
+                return self.makeBigInt(@divTrunc(a, b));
+            },
+            .mod => {
+                if (b == 0) return self.throwError("RangeError", "Division by zero");
+                if (a == std.math.minInt(i128) and b == -1) return self.makeBigInt(0);
+                return self.makeBigInt(@rem(a, b));
+            },
+            .bit_and => return self.makeBigInt(a & b),
+            .bit_or => return self.makeBigInt(a | b),
+            .bit_xor => return self.makeBigInt(a ^ b),
+            else => return self.makeBigInt(0),
+        }
+    }
+
+    /// Arbitrary-precision BigInt binary op via `std.math.big`, used when an
+    /// operand doesn't fit i128 or the i128 result would overflow. `**` and the
+    /// shifts always route here.
+    fn bigIntBinaryBig(self: *Interpreter, op: ast.BinaryOp, lo: *value.Object, ro: *value.Object) EvalError!Value {
+        if (op == .shl or op == .shr) return self.bigIntShift(lo, ro, op == .shr);
+        var a = try managedBigIntFromObject(self.arena, lo);
+        var b = try managedBigIntFromObject(self.arena, ro);
+        var out = try std.math.big.int.Managed.init(self.arena);
+        switch (op) {
+            .add => try out.add(&a, &b),
+            .sub => try out.sub(&a, &b),
+            .mul => try out.mul(&a, &b),
+            .div => {
+                if (b.toConst().eqlZero()) return self.throwError("RangeError", "Division by zero");
+                var rem = try std.math.big.int.Managed.init(self.arena);
+                try out.divTrunc(&rem, &a, &b);
+            },
+            .mod => {
+                if (b.toConst().eqlZero()) return self.throwError("RangeError", "Division by zero");
+                var q = try std.math.big.int.Managed.init(self.arena);
+                try q.divTrunc(&out, &a, &b);
+            },
+            .pow => {
+                const ec = b.toConst();
+                if (!ec.positive and !ec.eqlZero()) return self.throwError("RangeError", "Exponent must be non-negative");
+                const exp = b.toInt(u32) catch return self.throwError("RangeError", "Maximum BigInt size exceeded");
+                try out.pow(&a, exp);
+            },
+            .bit_and => try out.bitAnd(&a, &b),
+            .bit_or => try out.bitOr(&a, &b),
+            .bit_xor => try out.bitXor(&a, &b),
+            else => {},
+        }
+        return makeBigIntFromManaged(self, &out);
+    }
+
+    /// BigInt `<<`/`>>`. `>>` is an arithmetic (floor) shift, so a right shift is
+    /// `floor(a / 2^n)` (via `divFloor`, which rounds toward −∞ like the spec) and
+    /// a left shift is `a · 2^n`. A negative count reverses the direction. A left
+    /// shift past the engine BigInt size cap is a RangeError.
+    fn bigIntShift(self: *Interpreter, lo: *value.Object, ro: *value.Object, is_shr: bool) EvalError!Value {
+        var a = try managedBigIntFromObject(self.arena, lo);
+        var count = try managedBigIntFromObject(self.arena, ro);
+        const count_nonneg = count.toConst().positive; // sign-magnitude (zero is +)
+        const left = (!is_shr and count_nonneg) or (is_shr and !count_nonneg);
+        count.abs();
+        const max_bits: usize = 1 << 30; // arbitrary engine-style BigInt size cap
+        const mag: usize = count.toInt(usize) catch (max_bits + 1);
+        var out = try std.math.big.int.Managed.init(self.arena);
+        if (mag == 0) {
+            try out.copy(a.toConst());
+            return makeBigIntFromManaged(self, &out);
+        }
+        if (left) {
+            if (mag > max_bits) return self.throwError("RangeError", "Maximum BigInt size exceeded");
+            try out.shiftLeft(&a, mag);
+            return makeBigIntFromManaged(self, &out);
+        }
+        // Right shift = floor(a / 2^mag). When 2^mag exceeds |a|, the floor is 0
+        // for a ≥ 0 and −1 for a < 0 (so we never build an enormous divisor).
+        const ac = a.toConst();
+        if (mag > ac.bitCountAbs()) {
+            try out.set(@as(i8, if (!ac.positive and !ac.eqlZero()) -1 else 0));
+            return makeBigIntFromManaged(self, &out);
+        }
+        var one = try std.math.big.int.Managed.initSet(self.arena, 1);
+        var divisor = try std.math.big.int.Managed.init(self.arena);
+        try divisor.shiftLeft(&one, mag);
+        var rem = try std.math.big.int.Managed.init(self.arena);
+        try out.divFloor(&rem, &a, &divisor);
+        return makeBigIntFromManaged(self, &out);
     }
 
     /// Mathematical comparison of two BigInt/Number operands (for `< <= > >=`),
