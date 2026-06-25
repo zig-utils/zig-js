@@ -5187,6 +5187,19 @@ pub const Interpreter = struct {
         switch (src.kind()) {
             .object => {
                 const so = src.asObj();
+                // A Proxy source must go through [[OwnPropertyKeys]] then, per key,
+                // [[GetOwnProperty]] — invoking the `ownKeys` and
+                // `getOwnPropertyDescriptor` traps in order (and reading only
+                // enumerable keys via Get) rather than its empty raw key set.
+                if (so.proxy_handler != null or so.proxy_revoked) {
+                    for (try self.objectOwnKeysList(so)) |k| {
+                        if (value.isPrivateKey(k)) continue;
+                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src, self.keyToValue(k) });
+                        if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
+                        try self.setMember(target, k, try self.getProperty(src, k));
+                    }
+                    return;
+                }
                 if (so.is_array) {
                     for (so.elements.items, 0..) |el, i| {
                         try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), el);
@@ -7628,11 +7641,21 @@ pub const Interpreter = struct {
         if (rest) |rest_name| {
             const rest_obj = try self.newObject();
             if (val.isObject()) {
-                // Object rest copies only the *enumerable* own properties.
-                const keys = try val.asObj().enumerableKeys(self.arena);
+                // Object rest copies only the *enumerable* own properties. A Proxy
+                // source goes through [[OwnPropertyKeys]] + per-key
+                // [[GetOwnProperty]] (the `ownKeys`/`getOwnPropertyDescriptor`
+                // traps), since its raw key set is empty.
+                const vo = val.asObj();
+                const is_proxy = vo.proxy_handler != null or vo.proxy_revoked;
+                const keys = if (is_proxy) try self.objectOwnKeysList(vo) else try vo.enumerableKeys(self.arena);
                 outer: for (keys) |k| {
+                    if (value.isPrivateKey(k)) continue;
                     for (consumed.items) |c| {
                         if (std.mem.eql(u8, c, k)) continue :outer;
+                    }
+                    if (is_proxy) {
+                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ val, self.keyToValue(k) });
+                        if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
                     }
                     // Copy via [[Get]] so an accessor's getter runs (and a data
                     // property's value is read), landing as a plain data prop.
