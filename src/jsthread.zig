@@ -645,7 +645,21 @@ fn waitOnLockCond(self: *Interpreter, rec: *LockRecord, timeout: std.Io.Timeout)
         stack_scan.endPark();
         rec.mutex.lockUncancelable(io);
     } else {
+        // parallel_js (no GIL): publish this thread's frozen stack so a parked-
+        // world collector can root it (issue #1 Phase 7 / M3), block, then on wake
+        // gate on any in-flight collection before resuming mutation — but FIRST
+        // release rec.mutex: the GC traces this LockRecord under rec.mutex, so
+        // spinning here while holding it would deadlock the collector. During a
+        // collection every peer is parked, so the lock state is stable across the
+        // release/reacquire.
+        stack_scan.beginPark();
         io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
+        stack_scan.endPark();
+        if (rec.gil.gc_collection_active.load(.seq_cst)) {
+            rec.mutex.unlock(io);
+            rec.gil.waitGcCollectionDone();
+            rec.mutex.lockUncancelable(io);
+        }
     }
 }
 
@@ -878,7 +892,21 @@ fn waitOnCondRecord(self: *Interpreter, rec: *CondRecord, timeout: std.Io.Timeou
         stack_scan.endPark();
         rec.mutex.lockUncancelable(io);
     } else {
+        // parallel_js (no GIL): publish this thread's frozen stack so a parked-
+        // world collector can root it (issue #1 Phase 7 / M3), block, then on wake
+        // gate on any in-flight collection before resuming mutation — but FIRST
+        // release rec.mutex: the GC traces this LockRecord under rec.mutex, so
+        // spinning here while holding it would deadlock the collector. During a
+        // collection every peer is parked, so the lock state is stable across the
+        // release/reacquire.
+        stack_scan.beginPark();
         io_compat.conditionWaitTimeout(&rec.cond, io, &rec.mutex, timeout) catch {};
+        stack_scan.endPark();
+        if (rec.gil.gc_collection_active.load(.seq_cst)) {
+            rec.mutex.unlock(io);
+            rec.gil.waitGcCollectionDone();
+            rec.mutex.lockUncancelable(io);
+        }
     }
 }
 

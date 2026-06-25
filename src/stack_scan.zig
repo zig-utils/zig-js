@@ -97,17 +97,21 @@ pub fn beginPark() void {
     const sp = currentSp();
     tl_park.lo = sp;
     tl_park.high = stack_high orelse sp;
-    @atomicStore(bool, &tl_park.parked, true, .release);
+    // seq_cst (not just release): under `parallel_js` the parked flag is one half
+    // of a two-flag mutual exclusion with `Context.gc_collection_active` (the
+    // parked-world collector), which needs a single total order. Stronger than
+    // the GIL path needs (release/acquire), but uncontended there — no cost.
+    @atomicStore(bool, &tl_park.parked, true, .seq_cst);
 }
 
 /// Mark this thread no longer parked, immediately after reacquiring the GIL.
 pub fn endPark() void {
-    @atomicStore(bool, &tl_park.parked, false, .release);
+    @atomicStore(bool, &tl_park.parked, false, .seq_cst);
 }
 
 /// Whether the given (other thread's) record is currently parked.
 pub fn isParked(rec: *const ParkScan) bool {
-    return @atomicLoad(bool, &rec.parked, .acquire);
+    return @atomicLoad(bool, &rec.parked, .seq_cst);
 }
 
 /// Conservatively mark a parked thread's published stack range + registers.
