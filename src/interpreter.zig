@@ -2372,6 +2372,34 @@ pub const Interpreter = struct {
     }
 
     fn evalUpdate(self: *Interpreter, inc: bool, prefix: bool, target: *Node) EvalError!Value {
+        // A read-modify-write through a `with` binding resolves the binding object
+        // ONCE: a getter that mutates the scope (e.g. deletes its own property)
+        // must not let the write retarget a different binding. (op_assign does the
+        // same; see its identifier branch.)
+        if (target.* == .identifier) {
+            if (try self.assignWithObject(target.identifier)) |wo| {
+                const name = target.identifier;
+                var ov = try self.getProperty(Value.obj(wo), name);
+                if (ov.isObject() and !ov.asObj().is_bigint and !ov.asObj().is_symbol)
+                    ov = try self.toPrimitive(ov, .number);
+                // Object env record SetMutableBinding: in strict mode, a binding the
+                // getter deleted no longer exists → ReferenceError on write-back.
+                if (ov.isObject() and ov.asObj().is_bigint) {
+                    const b = ov.asObj().bigint;
+                    const up = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
+                    if (self.strict and !(try self.hasPropertyResult(wo, name)))
+                        return self.throwError("ReferenceError", "binding is no longer defined");
+                    try self.setMember(Value.obj(wo), name, up);
+                    return if (prefix) up else ov;
+                }
+                const o = ov.toNumber();
+                const up = if (inc) o + 1 else o - 1;
+                if (self.strict and !(try self.hasPropertyResult(wo, name)))
+                    return self.throwError("ReferenceError", "binding is no longer defined");
+                try self.setMember(Value.obj(wo), name, Value.num(up));
+                return Value.num(if (prefix) up else o);
+            }
+        }
         var old_val = try self.eval(target);
         // ToNumeric: an object operand coerces via ToPrimitive(number); a BigInt
         // is incremented/decremented by 1n (not the Number 1), and the result
