@@ -11434,6 +11434,8 @@ pub const Interpreter = struct {
                 .le => return Value.boolVal(if (try self.bigCmp(l, r)) |o| o != .gt else false),
                 .gt => return Value.boolVal(if (try self.bigCmp(l, r)) |o| o == .gt else false),
                 .ge => return Value.boolVal(if (try self.bigCmp(l, r)) |o| o != .lt else false),
+                .eq => return Value.boolVal(try self.bigLooseEqual(l, r)),
+                .neq => return Value.boolVal(!(try self.bigLooseEqual(l, r))),
                 else => {},
             }
         }
@@ -11659,6 +11661,25 @@ pub const Interpreter = struct {
         if (std.math.isNan(n)) return null;
         if (std.math.isInf(n)) return if (n > 0) std.math.Order.lt else std.math.Order.gt;
         return try bigVsFiniteF64(self.arena, big, n);
+    }
+
+    /// IsLooselyEqual when at least one (already-primitive) operand is a BigInt.
+    /// `bigint == null/undefined/Symbol` is false; otherwise the other side is
+    /// compared exactly — a Boolean/Number through ToNumber (a non-integer or
+    /// NaN/±∞ is unequal), a String through StringToBigInt (an invalid string is
+    /// unequal) — with no precision loss, so `0n == ""` is true and a 300-digit
+    /// BigInt never equals `Number.MAX_VALUE`.
+    fn bigLooseEqual(self: *Interpreter, l: Value, r: Value) EvalError!bool {
+        const l_big = l.isObject() and l.asObj().is_bigint;
+        const r_big = r.isObject() and r.asObj().is_bigint;
+        if (l_big and r_big)
+            return if (try self.bigCmp(l, r)) |o| o == .eq else false;
+        const big = if (l_big) l else r;
+        const other = if (l_big) r else l;
+        if (other.isUndefined() or other.isNull()) return false;
+        if (other.isObject() and other.asObj().is_symbol) return false;
+        var bm = try managedBigIntFromObject(self.arena, big.asObj());
+        return if (try self.bigVsOther(&bm, other)) |o| o == .eq else false;
     }
 
     /// `x instanceof C`: OrdinaryHasInstance walks the live prototype chain.
