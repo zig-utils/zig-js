@@ -1606,17 +1606,18 @@ pub const Interpreter = struct {
                     break :blk Value.boolVal(ok);
                 }
                 // `delete <name>` inside a `with` deletes from the binding object
-                // (an object environment record); elsewhere a bare-name delete is
-                // a no-op that evaluates to true.
+                // (an object environment record); elsewhere a bare-name delete
+                // resolves the reference's base. A property of the global object
+                // (a built-in like `JSON`, a global `var`/`function`, or a sloppy
+                // implicit global) deletes per [[Configurable]] — so configurable
+                // built-ins go, non-configurable global vars stay (false). A name
+                // bound only in a declarative record (`let`/`const`, or a
+                // function-local) is not deletable → false.
                 if (target.* == .identifier) {
                     if (try self.assignWithObject(target.identifier)) |o| {
                         const ok = try self.deleteOwn(o, target.identifier);
                         if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
                         break :blk Value.boolVal(ok);
-                    }
-                    if (self.env.get(target.identifier) != null) {
-                        if (self.strict) return self.throwError("TypeError", "Cannot delete binding");
-                        break :blk Value.boolVal(false);
                     }
                     if (self.global_object) |g| {
                         if (objectHasOwn(g, target.identifier)) {
@@ -1625,7 +1626,16 @@ pub const Interpreter = struct {
                             break :blk Value.boolVal(ok);
                         }
                     }
+                    if (self.env.get(target.identifier) != null) {
+                        if (self.strict) return self.throwError("TypeError", "Cannot delete binding");
+                        break :blk Value.boolVal(false);
+                    }
+                    break :blk Value.boolVal(true);
                 }
+                // Any other operand (a CallExpression, literal, parenthesized
+                // expression, …) is not a Reference: evaluate it for its side
+                // effects, then `delete` is simply true.
+                _ = try self.eval(target);
                 break :blk Value.boolVal(true);
             },
             .update => |u| try self.evalUpdate(u.inc, u.prefix, u.target),
