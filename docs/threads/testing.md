@@ -309,6 +309,29 @@ its bundled libcxx failed the TSan runtime sub-compilation on darwin with `use
 of undeclared identifier 'INFINITY'`, so TSan was Linux-CI-only. Bumping the
 pin to dev.956 fixed it — TSan is part of the local dev loop again.)
 
+Two `threads-test -Dtsan=true` frontiers are **build-shape**, not data races:
+
+- *Deep native recursion (fixed).* The tree-walker recurses natively for JS
+  calls; under TSan, frames are ~10× larger, so the native stack used to
+  overflow before the logical `max_call_depth` (128) and segfault — e.g.
+  `cve/mc-prim-generator-claim-leak-stack-overflow.js`, which requires a
+  *catchable* stack-overflow `RangeError`. `Interpreter.stackGuard` now also
+  probes the native stack pointer against the thread's registered OS stack
+  bound (`stack_scan.nearLimit`, a 1 MiB redzone) once a call chain is deep
+  (`stack_check_floor`), throwing `RangeError` before the guard page faults.
+  The probe is skipped on shallow calls, and in a normal build small frames
+  keep the SP far from the limit so the depth limit is still hit first —
+  behavior and serial throughput are unchanged. A deep-recursing `Thread` now
+  throws on its own thread instead of crashing the process.
+- *GC-storm timeout (TSan-perf frontier).*
+  `gc-stress/conservative-scan-register.js` parks a peer on a 60 s
+  `Atomics.wait` while the main thread runs an 8-round `$vm.gc()` storm; under
+  TSan's ~10× slowdown the 8 full collections exceed 60 s, so the peer reports
+  `park timed out` rather than `checksum wrong`. The conservative parked-frame
+  scan is correct (it passes non-TSan, 209/209); the fixed timeout is simply
+  tuned for the non-TSan runtime. Treat as a known TSan-perf frontier, not a
+  correctness signal.
+
 ## Sweep Runs
 
 Use `-Dthreads-sweep=true` to run every vendored file in the original
