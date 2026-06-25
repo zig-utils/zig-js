@@ -323,6 +323,14 @@ pub fn nearLimit(margin: usize) bool {
     return sp <= limit +| margin;
 }
 
+/// Whether `nearLimit` can actually protect this thread — i.e. the target is
+/// supported and the OS stack bounds were registered. When false, the native
+/// stack-pointer probe is blind, so the caller must fall back to a conservative
+/// logical call-depth cap rather than trusting a large one.
+pub fn boundsKnown() bool {
+    return supported and os_stack_limit != 0;
+}
+
 /// Conservatively mark the current thread's live stack as GC roots, using
 /// `v.markConservativeWords` from the `zig-gc` `Visitor`. Returns false (a
 /// no-op) when no boundary is registered or the target is unsupported — the

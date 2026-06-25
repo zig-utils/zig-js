@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ast = @import("ast.zig");
 const lex = @import("lexer.zig");
 const value = @import("value.zig");
@@ -36,7 +37,22 @@ pub const AsyncWaiterEntry = struct { id: u64, promise: Value };
 
 /// Robustness limits so adversarial input throws a catchable error instead of
 /// crashing the process (stack overflow / runaway loop).
-pub const max_call_depth: u32 = 128;
+///
+/// `max_call_depth` is the *absolute* logical recursion ceiling — a backstop
+/// against a runaway self-call, not the real limiter. On a platform with
+/// registered stack bounds the effective limit is the native stack itself:
+/// `stackGuard` throws as soon as the stack pointer is within `stack_redzone`
+/// of the OS limit (`stack_scan.nearLimit`), which adapts to the actual stack
+/// size and per-frame cost (much larger under ThreadSanitizer). Raising the
+/// ceiling from the old 128 lets ordinary deep recursion *run* — to many
+/// hundreds of frames on a normal stack — instead of throwing far below what
+/// the native stack can hold. When bounds are unavailable the probe is blind,
+/// so a conservative cap (`conservative_call_depth`) still prevents a crash.
+pub const max_call_depth: u32 = 16384;
+/// Fallback recursion cap used only when the native stack-pointer probe can't
+/// protect the thread (`!stack_scan.boundsKnown()`), so an unsupported platform
+/// can't overflow. Matches the old hard limit.
+const conservative_call_depth: u32 = 128;
 pub const max_steps: u64 = 500_000_000;
 
 /// Below this logical call depth, a chain can't have consumed enough native
@@ -45,10 +61,11 @@ pub const max_steps: u64 = 500_000_000;
 const stack_check_floor: u32 = 32;
 /// Native-stack headroom kept free below the thread's real OS stack limit. If a
 /// deeper call would leave less than this, the guard throws `RangeError` rather
-/// than let the tree-walker's native recursion fault the guard page. Sized for
-/// large-frame builds (ThreadSanitizer inflates frames ~10×): a couple of
-/// `eval→call→eval` cycles plus the throw/unwind path fit inside it.
-const stack_redzone: usize = 1 << 20; // 1 MiB
+/// than let the tree-walker's native recursion fault the guard page. It must
+/// cover the deepest the throw/unwind path itself reaches. Under ThreadSanitizer
+/// frames inflate ~10×, so the redzone does too; a normal build keeps it small
+/// so the reserve doesn't needlessly cap recursion depth.
+const stack_redzone: usize = if (builtin.sanitize_thread) 1 << 20 else 1 << 18; // 1 MiB TSan / 256 KiB normal
 const max_typed_array_bytes: usize = 1 << 30;
 const max_temporal_instant_ns: i128 = 8_640_000_000_000_000_000_000;
 
@@ -946,6 +963,11 @@ pub const Interpreter = struct {
         // stack can overflow before `max_call_depth`).
         if (self.depth < stack_check_floor) return;
         if (self.depth >= max_call_depth or stack_scan.nearLimit(stack_redzone))
+            return self.throwError("RangeError", "Maximum call stack size exceeded");
+        // If the native stack-pointer probe can't see this thread's bounds, it
+        // can't catch a real overflow — fall back to the conservative depth cap
+        // so an unsupported platform can't run off the end of the stack.
+        if (!stack_scan.boundsKnown() and self.depth >= conservative_call_depth)
             return self.throwError("RangeError", "Maximum call stack size exceeded");
     }
 
