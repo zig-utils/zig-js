@@ -11295,7 +11295,14 @@ pub const Interpreter = struct {
             // JS `%` is the truncated remainder (result takes the sign of the
             // dividend), i.e. `@rem`, not the floored `@mod`: `-5 % 3` is `-2`.
             .mod => Value.num(@rem(l.toNumber(), r.toNumber())),
-            .pow => Value.num(std.math.pow(f64, l.toNumber(), r.toNumber())),
+            .pow => blk: {
+                const base = l.toNumber();
+                const exp = r.toNumber();
+                // Number::exponentiate diverges from C `pow` here: when the base
+                // is ±1 and the exponent is ±∞ the result is NaN, not 1.
+                if (std.math.isInf(exp) and @abs(base) == 1) break :blk Value.num(std.math.nan(f64));
+                break :blk Value.num(std.math.pow(f64, base, exp));
+            },
             .lt => Value.boolVal(try lessThan(self, l, r)),
             .le => Value.boolVal(!(try lessThan(self, r, l)) and !relationalNaN(l, r)),
             .gt => Value.boolVal(try lessThan(self, r, l)),
