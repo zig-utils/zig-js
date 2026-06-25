@@ -1702,11 +1702,13 @@ pub const Interpreter = struct {
             },
             .super_member => |m| blk: {
                 const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                const key = try self.memberKey(m.property, m.computed);
-                // GetSuperBase + RequireObjectCoercible: a null/absent prototype is
-                // a TypeError. The lookup uses `this` as the receiver so an
-                // inherited accessor observes the current instance.
+                // GetSuperBase is captured BEFORE ToPropertyKey of the computed key,
+                // so a key whose `toString` mutates the home object's prototype
+                // can't change which base the lookup uses (RequireObjectCoercible:
+                // a null/absent prototype is a TypeError). The receiver is `this`,
+                // so an inherited accessor observes the current instance.
                 const parent = home.proto orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+                const key = try self.memberKey(m.property, m.computed);
                 break :blk try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
             },
 
@@ -7589,8 +7591,11 @@ pub const Interpreter = struct {
             // through an inherited setter of) the current instance.
             .super_member => |m| {
                 const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                const key = try self.memberKey(m.property, m.computed);
+                // GetSuperBase before ToPropertyKey of the computed key (see the
+                // read path), so a key `toString` that mutates the home prototype
+                // can't redirect the write.
                 const parent = home.proto orelse return self.throwError("TypeError", "Cannot set property of null (super)");
+                const key = try self.memberKey(m.property, m.computed);
                 if (!try self.setMemberResult(Value.obj(parent), key, v, self.this_value)) {
                     if (self.strict) return self.throwError("TypeError", "Cannot set property");
                 }
