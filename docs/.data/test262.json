@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 46040,
+    "passing": 46062,
     "total": 48247,
-    "percentage": 95.4,
+    "percentage": 95.5,
     "parseFail": 29,
-    "runtimeFail": 2166,
+    "runtimeFail": 2144,
     "hostFail": 12
   },
   "negative": {
@@ -13,16 +13,16 @@
     "percentage": 99.8
   },
   "skipped": 261,
-  "generatedAt": "2026-06-25",
+  "generatedAt": "2026-06-26",
   "harness": "real (WebKit JSTests/test262 corpus)",
   "suites": [
     {
       "name": "language",
-      "passing": 18492,
+      "passing": 18511,
       "total": 19070,
-      "percentage": 97,
+      "percentage": 97.1,
       "parseFail": 8,
-      "runtimeFail": 570,
+      "runtimeFail": 551,
       "hostFail": 0
     },
     {
@@ -45,11 +45,11 @@
     },
     {
       "name": "staging",
-      "passing": 1066,
+      "passing": 1069,
       "total": 1345,
-      "percentage": 79.3,
+      "percentage": 79.5,
       "parseFail": 9,
-      "runtimeFail": 268,
+      "runtimeFail": 265,
       "hostFail": 2
     },
     {
