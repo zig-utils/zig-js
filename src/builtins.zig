@@ -1531,7 +1531,9 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // Array `length` is a data property { writable, !enumerable, !configurable }.
     // Redefining it can change the value (ToUint32, truncating/extending) and
     // toggle writability, but not make it configurable/enumerable or an accessor.
-    if (target.is_array and std.mem.eql(u8, key, "length")) {
+    // An arguments object is `is_array` only for index storage; its `length` is
+    // an ORDINARY data property, so it falls through to the generic define path.
+    if (target.is_array and !target.is_arguments and std.mem.eql(u8, key, "length")) {
         if (get != null or set != null) return false;
         // ArraySetLength (ES 10.4.2.4): ToUint32(value) is validated FIRST — a
         // value whose ToUint32 differs from its ToNumber is a RangeError, *before*
@@ -2180,7 +2182,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         return dataDescriptor(self, v, a);
     }
     if (o.is_array) {
-        if (std.mem.eql(u8, key, "length")) {
+        // A real Array's exotic `length`. An arguments object's `length` is an
+        // ordinary own property handled by the getOwn path above (so a deleted
+        // one is absent), so exclude it here.
+        if (!o.is_arguments and std.mem.eql(u8, key, "length")) {
             const w = if (o.attrs != null) o.getAttr("length").writable else true;
             return dataDescriptor(self, Value.num(@floatFromInt(@max(o.elements.items.len, o.array_len))), .{ .writable = w, .enumerable = false, .configurable = false });
         }

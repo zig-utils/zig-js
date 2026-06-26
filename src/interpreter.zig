@@ -7637,9 +7637,15 @@ pub const Interpreter = struct {
                     // other keys (methods, constructor, @@toStringTag) fall through.
                 }
                 if (o.is_array) {
-                    if (std.mem.eql(u8, key, "length"))
-                        if (o.is_arguments) return o.getOwn("length") orelse Value.num(@floatFromInt(o.elementsLen()));
-                    if (std.mem.eql(u8, key, "length"))
+                    // An arguments object's `length` is an ordinary own data
+                    // property (deletable / redefinable), not the Array exotic
+                    // length — once deleted it is simply absent (fall through to
+                    // the prototype lookup), with no element-count fallback.
+                    if (o.is_arguments) {
+                        if (std.mem.eql(u8, key, "length")) {
+                            if (o.getOwn("length")) |l| return l;
+                        }
+                    } else if (std.mem.eql(u8, key, "length"))
                         return Value.num(@floatFromInt(o.arrayLength()));
                     // An accessor defined on an index (via defineProperty) wins
                     // over the dense element store, so the getter is invoked.
@@ -7678,10 +7684,13 @@ pub const Interpreter = struct {
                 while (cur) |c| {
                     if (c.proxy_handler != null or c.proxy_revoked)
                         return self.proxyGet(c, key, receiver);
-                    if (c.is_array and std.mem.eql(u8, key, "length"))
-                        if (c.is_arguments) return c.getOwn("length") orelse Value.num(@floatFromInt(c.elements.items.len));
-                    if (c.is_array and std.mem.eql(u8, key, "length"))
-                        return Value.num(@floatFromInt(@max(c.elements.items.len, c.array_len)));
+                    if (c.is_array and std.mem.eql(u8, key, "length")) {
+                        // arguments `length` is an ordinary own property (absent
+                        // once deleted); a real Array's is the exotic length.
+                        if (c.is_arguments) {
+                            if (c.getOwn("length")) |l| return l;
+                        } else return Value.num(@floatFromInt(@max(c.elements.items.len, c.array_len)));
+                    }
                     if (c.getAccessor(key)) |acc| {
                         // An explicit `get: undefined` is stored as the undefined
                         // value but means "no getter".
@@ -8480,7 +8489,13 @@ pub const Interpreter = struct {
         // Dense array element → leave a hole (reads as absent), length unchanged.
         // A per-index descriptor may mark it non-configurable (delete fails).
         if (o.is_array) {
-            if (std.mem.eql(u8, key, "length")) return false;
+            if (std.mem.eql(u8, key, "length")) {
+                // A real Array's `length` is non-configurable (not deletable); an
+                // arguments object's is an ordinary own property → delete it,
+                // honoring [[Configurable]].
+                if (!o.is_arguments) return false;
+                return o.deleteNamedDataOwn(self.arena, self.root_shape, key);
+            }
             if (arrayElementIndex(key)) |i| {
                 if (o.denseElementInBounds(i)) {
                     if (o.attrs != null and !o.getAttr(key).configurable) return false;
@@ -32333,7 +32348,10 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
         }
     }
     if (o.is_array) {
-        if (std.mem.eql(u8, name, "length")) return true;
+        // A real Array always has an own `length`; an arguments object's `length`
+        // is an ordinary own property already handled by getOwn above (so a
+        // deleted one is genuinely absent).
+        if (!o.is_arguments and std.mem.eql(u8, name, "length")) return true;
         if (Interpreter.arrayElementIndex(name)) |i| return o.denseElementPresent(i);
     }
     return false;
