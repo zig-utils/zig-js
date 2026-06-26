@@ -3416,12 +3416,20 @@ pub const Interpreter = struct {
 
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
-        for (members) |m| {
+        // The desugared `this.<name> = init` member node of each PUBLIC instance
+        // field with a computed name, by member index. A computed field name is
+        // evaluated ONCE (at class definition, in source order); the member loop
+        // below bakes that key into the node so it is not re-evaluated for every
+        // instance.
+        const field_member_nodes = try self.arena.alloc(?*Node, members.len);
+        @memset(field_member_nodes, null);
+        for (members, 0..) |m, i| {
             if (!m.is_field or m.is_static) continue;
             const this_node = try self.arena.create(Node);
             this_node.* = .this_expr;
             const member_node = try self.arena.create(Node);
             member_node.* = .{ .member = .{ .object = this_node, .property = m.key, .computed = m.key_expr } };
+            if (m.key_expr != null) field_member_nodes[i] = member_node;
             const raw_value = m.field_init orelse blk: {
                 const u = try self.arena.create(Node);
                 u.* = .undefined_lit;
@@ -3535,7 +3543,7 @@ pub const Interpreter = struct {
             cf.private_brand_names = brand_names.items;
         }
 
-        for (members) |m| {
+        for (members, 0..) |m, i| {
             // `static { ... }` block: run with `this` = the class object and the
             // class as its home object, so `super.x` resolves on the superclass
             // (the class object's prototype is the parent class for statics).
@@ -3554,6 +3562,16 @@ pub const Interpreter = struct {
             const kv: ?Value = if (m.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
             const key = if (kv) |k| try self.keyOf(k) else m.key;
             const name_str = if (kv) |k| try self.keyDisplayName(k) else m.key;
+            // A public instance field's computed NAME was just evaluated here,
+            // once and in source order. Bake the resulting key into its desugared
+            // per-instance initializer so the name expression does not re-run for
+            // every `new` (and its side effects happen exactly once).
+            if (kv != null and m.is_field and !m.is_static) {
+                if (field_member_nodes[i]) |mn| {
+                    mn.member.property = key;
+                    mn.member.computed = null;
+                }
+            }
             // A static class element may not have the key "prototype" — the
             // constructor's `prototype` is a reserved, non-configurable own
             // property. The non-computed form is a parse SyntaxError; a computed
