@@ -510,6 +510,14 @@ pub const Object = struct {
     /// finalized accurately while migration is incremental.
     backing_allocator: ?std.mem.Allocator = null,
     backing_flags: ObjectBackingFlags = .{},
+    /// `backingFor`/`(de)activateBacking` touch `backing_flags`/`backing_allocator`
+    /// while the caller holds *whichever* structure lock matches the field
+    /// (elements_lock for elements, property_lock for slots/attrs/accessors), so
+    /// those don't mutually exclude on the shared packed `backing_flags` byte —
+    /// under `parallel_js` an elements-grow on one thread races an attrs-grow on
+    /// another. This dedicated lock serializes backing activation across them.
+    /// Gated on `element_locks_enabled` so the default engine pays nothing.
+    backing_lock: std.atomic.Mutex = .unlocked,
     /// Coarse synchronization for ordinary named-property metadata: shape
     /// publication, slots, accessors, attributes, and key order. The Layer-B GIL
     /// still serializes JS execution today; this lock is the Layer-C object-side
@@ -734,6 +742,19 @@ pub const Object = struct {
     /// non-null on a Temporal object.
     temporal: ?*TemporalData = null,
 
+    fn lockBacking(self: *Object) void {
+        if (!element_locks_enabled.load(.acquire)) return;
+        var spins: usize = 0;
+        while (!self.backing_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+    fn unlockBacking(self: *Object) void {
+        if (!element_locks_enabled.load(.acquire)) return;
+        self.backing_lock.unlock();
+    }
+
+    // Assumes `backing_lock` held (called only from `backingFor`).
     fn activateBacking(self: *Object, comptime field: []const u8) ?std.mem.Allocator {
         const state = gc_runtime.activeObjectBacking() orelse return null;
         if (self.backing_allocator == null) self.backing_allocator = state.allocator;
@@ -747,6 +768,8 @@ pub const Object = struct {
     }
 
     fn deactivateBacking(self: *Object, comptime field: []const u8) void {
+        self.lockBacking();
+        defer self.unlockBacking();
         if (!@field(self.backing_flags, field)) return;
         @field(self.backing_flags, field) = false;
         if (gc_runtime.activeObjectBacking()) |state| {
@@ -757,6 +780,8 @@ pub const Object = struct {
     }
 
     fn backingFor(self: *Object, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
+        self.lockBacking();
+        defer self.unlockBacking();
         if (self.backing_allocator) |a| {
             if (!@field(self.backing_flags, field)) {
                 if (self.activateBacking(field)) |active| return active;
