@@ -1702,6 +1702,38 @@ pub const Interpreter = struct {
             },
 
             .assign => |a| blk: {
+                // A PUBLIC class field initializer desugars to `this.<name> =
+                // <field_init_value>`, but DefineField is CreateDataPropertyOrThrow,
+                // not [[Set]]: it defines an own data property (shadowing any
+                // same-named accessor up the prototype chain) and throws on a
+                // non-extensible receiver. The anonymous RHS is named with the
+                // field name.
+                if (a.value.* == .field_init_value and a.target.* == .member) {
+                    const m = a.target.member;
+                    const obj = try self.eval(m.object);
+                    const key = try self.memberKey(m.property, m.computed);
+                    const v = try self.eval(a.value);
+                    try self.maybeNameAnon(v, a.value.field_init_value, key);
+                    if (obj.isObject()) {
+                        const o = obj.asObj();
+                        if (o.proxy_handler != null or o.proxy_revoked) {
+                            // A Proxy receiver must observe the field through its
+                            // `defineProperty` trap (CreateDataPropertyOrThrow → an
+                            // own {w,e,c}=true data descriptor).
+                            const desc = (try self.newObject()).asObj();
+                            try self.setProp(desc, "value", v);
+                            try self.setProp(desc, "writable", Value.boolVal(true));
+                            try self.setProp(desc, "enumerable", Value.boolVal(true));
+                            try self.setProp(desc, "configurable", Value.boolVal(true));
+                            try builtins.defineOne(self, o, key, desc);
+                        } else {
+                            if (!objectHasOwn(o, key) and !o.extensible)
+                                return self.throwError("TypeError", "Cannot define class field on a non-extensible object");
+                            try self.setProp(o, key, v);
+                        }
+                    }
+                    break :blk v;
+                }
                 // Capture the target reference BEFORE the RHS: PutValue uses the
                 // initially-created Reference even if the RHS deletes the `with`
                 // binding or a direct eval introduces a closer one.
