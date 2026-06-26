@@ -7856,7 +7856,7 @@ pub const Interpreter = struct {
                         // once deleted); a real Array's is the exotic length.
                         if (c.is_arguments) {
                             if (c.getOwn("length")) |l| return l;
-                        } else return Value.num(@floatFromInt(@max(c.elements.items.len, c.array_len)));
+                        } else return Value.num(@floatFromInt(c.arrayLength())); // locked length read (grow-vs-read)
                     }
                     if (c.getAccessor(key)) |acc| {
                         // An explicit `get: undefined` is stored as the undefined
@@ -7873,7 +7873,9 @@ pub const Interpreter = struct {
                                 const aenv: *Environment = @ptrCast(@alignCast(c.arg_map_env.?));
                                 return aenv.get(nm) orelse Value.undef();
                             }
-                            if (c.getAccessor(key) == null and i < c.elements.items.len and !c.isHole(i)) return c.elements.items[i];
+                            // Locked dense read (no-GIL grow-vs-read class): a peer
+                            // append/realloc must not race this len/bounds/element read.
+                            if (c.getAccessor(key) == null) if (c.denseElement(i)) |v| return v;
                         }
                     }
                     if (c.prim) |p| {
