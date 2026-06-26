@@ -471,6 +471,20 @@ const TLRecord = struct {
     gil: *gil_mod.Gil,
     arena: std.mem.Allocator,
     map: std.AutoHashMapUnmanaged(u64, Value) = .empty,
+    // Each thread keys `map` by its own tid, but they share the table: a peer's
+    // `put` (which can rehash/grow) races another thread's `get`/`put` under
+    // `parallel_js`. Always-lock (ThreadLocal is a niche API — uncontended in the
+    // single-thread case), no gating needed.
+    map_lock: std.atomic.Mutex = .unlocked,
+    fn lockMap(self: *TLRecord) void {
+        var spins: usize = 0;
+        while (!self.map_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+    fn unlockMap(self: *TLRecord) void {
+        self.map_lock.unlock();
+    }
 };
 
 const UnlockTokenRecord = struct {
@@ -1124,6 +1138,8 @@ fn tlValueGetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.prototype.value called on incompatible receiver");
+    rec.lockMap();
+    defer rec.unlockMap();
     return rec.map.get(currentTid()) orelse Value.undef();
 }
 
@@ -1131,6 +1147,8 @@ fn tlValueSetFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
     const rec = recOf(TLRecord, this) orelse return self.throwError("TypeError", "ThreadLocal.prototype.value called on incompatible receiver");
     const v = if (args.len > 0) args[0] else Value.undef();
+    rec.lockMap();
+    defer rec.unlockMap();
     try rec.map.put(rec.arena, currentTid(), v);
     return Value.undef();
 }
