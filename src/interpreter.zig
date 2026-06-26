@@ -1386,9 +1386,14 @@ pub const Interpreter = struct {
             if (e.with_object) |wo| {
                 if (try self.withHasBinding(wo, name)) {
                     // Record the WithBaseObject so a call with this identifier as
-                    // callee binds `this` to it (consumed by evalCall), without a
-                    // second HasProperty.
+                    // callee binds `this` to it (consumed by evalCall).
                     self.with_this_pending = wo;
+                    // Object Environment Record GetBindingValue does its OWN
+                    // HasProperty(N) before Get(N) — distinct from the HasBinding
+                    // check above — so a proxy env observes a second `has`. A
+                    // binding that vanished in between reads as undefined (a `with`
+                    // is always sloppy, so no ReferenceError).
+                    if (!try self.hasPropertyResult(wo, name)) return Value.undef();
                     return try self.getProperty(Value.obj(wo), name);
                 }
             }
