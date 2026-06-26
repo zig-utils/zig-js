@@ -116,7 +116,7 @@ const phases = [
 // currently-observed flavor wedges INSIDE one put/delete op (the engine
 // never returns to JS), where the harness timeout remains the only backstop
 // — see staging INTEGRATE.md smoke notes.
-const MAIN_PHASE_BUDGET_MS = 45000;
+const MAIN_PHASE_BUDGET_MS = 45000 * ((typeof globalThis !== "undefined" && globalThis.__timeScale) || 1);
 const mainPhaseT0 = Date.now();
 for (const phase of phases) {
     const count = phase.families * OBJS_PER_FAMILY;
