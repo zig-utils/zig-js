@@ -681,6 +681,13 @@ pub const Function = struct {
     /// `this` through `super()` before completing normally.
     is_class_constructor: bool = false,
     is_derived_constructor: bool = false,
+    /// True when this (arrow) function was created lexically inside a class field
+    /// initializer / static block. The field-initializer eval restrictions
+    /// (`new.target` ⇒ undefined; a direct eval may not reference `arguments` or
+    /// call `super()`) are lexical, so an arrow defined there carries the context
+    /// even when invoked later (`x = () => eval('arguments')`). Only meaningful for
+    /// arrows; a non-arrow call always resets the field-initializer context.
+    field_init_ctx: bool = false,
     /// A derived class constructor's instance field initializers, run when
     /// `super()` returns (not at the start of the body). Empty for a base class,
     /// whose field initializers are prepended to the body and run at its start.
@@ -3160,6 +3167,7 @@ pub const Interpreter = struct {
             func.home_object = self.home_object;
             func.super_ctor = self.super_ctor;
             func.arrow_this = self.this_value; // captured lexically; used on every call
+            func.field_init_ctx = self.in_field_initializer; // field-init eval restrictions are lexical
         }
         // Compile a generator body up front for the suspendable VM. Bodies
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
@@ -4415,9 +4423,10 @@ pub const Interpreter = struct {
         self.new_target = if (func.is_arrow) saved_nt else new_target; // arrows inherit lexically
         self.direct_eval_new_target_allowed = !func.is_arrow;
         // A non-arrow function call is a fresh context that is not a field
-        // initializer; arrows inherit the enclosing one (so `field = () => eval(…)`
-        // keeps the field-initializer restrictions).
-        if (!func.is_arrow) self.in_field_initializer = false;
+        // initializer; an arrow carries the field-initializer context LEXICALLY from
+        // where it was defined (so `field = () => eval('arguments')` keeps the
+        // restriction even when invoked later, after the field has been built).
+        self.in_field_initializer = func.is_arrow and func.field_init_ctx;
         // Arrows inherit the enclosing super()-call legality; a non-arrow function
         // establishes it (only a derived constructor permits `super()`).
         if (!func.is_arrow) self.in_derived_ctor = func.is_derived_constructor;
