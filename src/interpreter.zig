@@ -1445,7 +1445,13 @@ pub const Interpreter = struct {
     fn bindingEnvOf(start: *Environment, name: []const u8) ?*Environment {
         var env: ?*Environment = start;
         while (env) |e| {
-            if (e.vars.getPtr(name) != null or e.aliases.get(name) != null) return e;
+            // Existence check under the binding lock (same no-GIL race class as
+            // lookupIdent); the `getPtr` result is not escaped, only its
+            // presence, so nothing dangles after unlock.
+            e.lockBindings();
+            const owns = e.vars.getPtr(name) != null or e.aliases.get(name) != null;
+            e.unlockBindings();
+            if (owns) return e;
             env = e.parent;
         }
         return null;
@@ -1454,7 +1460,10 @@ pub const Interpreter = struct {
     fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
         var env: ?*Environment = self.env;
         while (env) |e| {
-            if (e.aliases.get(name) != null or e.vars.get(name) != null) return null; // a real binding owns it
+            e.lockBindings();
+            const owned = e.aliases.get(name) != null or e.vars.get(name) != null;
+            e.unlockBindings();
+            if (owned) return null; // a real binding owns it
             if (e.with_object) |wo| {
                 if (try self.withHasBinding(wo, name)) return wo;
             }
