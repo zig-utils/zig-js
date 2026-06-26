@@ -4,7 +4,7 @@ A **JavaScript engine written in pure Zig**, with a **JavaScriptCore C-API-compa
 
 `zig-js` is a small, embeddable engine for Zig applications, tools, and runtimes that want to own their JS stack. Use it directly as a Zig module, or link it in place of `JavaScriptCore.framework` when a host already targets the JSC C API.
 
-It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **46,128 / 48,247 (95.6%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
+It tracks the ECMAScript spec closely and is graded against the **real [tc39/test262](https://github.com/tc39/test262) corpus** — currently **46,167 / 48,247 (95.7%)** of the scored "can we run it" tests pass. See [Conformance](#conformance) for the full breakdown.
 
 ```zig
 const js = @import("js");
@@ -46,17 +46,17 @@ Measured by `zig build test262` against the pinned tc39/test262 submodule. The s
 
 | axis | meaning | passing |
 | ---- | ------- | ------: |
-| **valid** | can we run the program? (scored corpus) | **46,128 / 48,247 (95.6%)** |
+| **valid** | can we run the program? (scored corpus) | **46,167 / 48,247 (95.7%)** |
 | negative | do we reject invalid input? (early errors) | 4,661 / 4,669 (99.8%) |
 
-Of the valid corpus: **29 parse failures**, **2,078 runtime failures**, **12 host failures**. The runner currently skips 261 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `staging`, Annex B, and the async-generator / `for await` VM lowering in `language`.
+Of the valid corpus: **29 parse failures**, **2,039 runtime failures**, **12 host failures**. The runner currently skips 261 tests that need more harness work (top-level-await modules, some async-harness protocols, unloadable includes). Remaining valid failures concentrate in `intl402` (CLDR data), `Temporal` edge cases, `staging`, Annex B, and the async-generator / `for await` VM lowering in `language`.
 
 ### Per area (valid)
 
 | area | passing | area | passing |
 | ---- | ------: | ---- | ------: |
-| `language` | 18,566 / 19,070 (97.4%) | `Object` | 3,411 / 3,411 (100%) |
-| `Array` | 3,081 / 3,081 (100%) | `RegExp` | 1,685 / 1,687 (99.9%) |
+| `language` | 18,604 / 19,070 (97.6%) | `Object` | 3,411 / 3,411 (100%) |
+| `Array` | 3,078 / 3,081 (99.9%) | `RegExp` | 1,685 / 1,687 (99.9%) |
 | `String` | 1,223 / 1,223 (100%) | `TypedArray` | 1,446 / 1,446 (100%) |
 | `TypedArrayConstructors` | 738 / 738 (100%) | `Uint8Array` | 70 / 70 (100%) |
 | `Map` | 204 / 204 (100%) | `Set` | 383 / 383 (100%) |
@@ -66,7 +66,7 @@ Of the valid corpus: **29 parse failures**, **2,078 runtime failures**, **12 hos
 | `WeakSet` | 85 / 85 (100%) | `WeakMap` | 141 / 141 (100%) |
 | `WeakRef` | 29 / 29 (100%) | `FinalizationRegistry` | 47 / 47 (100%) |
 | `Temporal` | 4,009 / 4,603 (87.1%) | `intl402` | 2,675 / 3,341 (80.1%) |
-| `annexB` | 984 / 1,071 (91.9%) | `staging` | 1,080 / 1,345 (80.3%) |
+| `annexB` | 984 / 1,071 (91.9%) | `staging` | 1,084 / 1,345 (80.6%) |
 | `SharedArrayBuffer` | 104 / 104 (100%) | `ArrayBuffer` | 221 / 221 (100%) |
 | `Atomics` | 390 / 390 (100%) | — | — |
 | `SuppressedError` | 22 / 22 (100%) | `ThrowTypeError` | 14 / 14 (100%) |
