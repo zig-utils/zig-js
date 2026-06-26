@@ -3525,10 +3525,12 @@ pub const Interpreter = struct {
         };
         const class_val = try self.makeFunction(fnode, self.env);
         const class_obj = class_val.asObj();
-        // Now that the constructor exists, bind the class name (immutable) in the
-        // class-body scope so the body can reference it. An anonymous class
-        // (`class {}` / `var X = class {}`) has no inner binding.
-        if (name.len > 0) try class_env.putFnName(name, class_val);
+        // Now that the constructor exists, bind the class name in the class-body
+        // scope so the body can reference it. It is a STRICT immutable (const)
+        // binding — assigning to the class name inside the body throws a TypeError
+        // even in sloppy code (unlike a named function expression's name). An
+        // anonymous class (`class {}` / `var X = class {}`) has no inner binding.
+        if (name.len > 0) try class_env.putConst(name, class_val);
         const proto = try self.protoObject(class_obj);
         // A class's `prototype` is non-writable, non-enumerable, non-configurable.
         try class_obj.setAttr(self.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
