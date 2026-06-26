@@ -1632,7 +1632,12 @@ pub const Interpreter = struct {
             .undefined_lit => Value.undef(),
             .elision => Value.undef(), // only meaningful inside an array literal
             .this_expr => self.this_value,
-            .new_target_expr => self.new_target,
+            // A class field initializer / static block is run as a method-like
+            // function (it is [[Call]]ed, never [[Construct]]ed), so `new.target`
+            // inside it — including inside a direct `eval` in it — is undefined.
+            // `callPlain` clears `in_field_initializer` for any non-arrow call, so a
+            // `new X()` made from a field initializer still sees its own new.target.
+            .new_target_expr => if (self.in_field_initializer) Value.undef() else self.new_target,
             .identifier => |name| blk: {
                 // Walk the lexical chain (bindings and `with` objects in chain
                 // order), so a `with` object shadows outer scopes but is itself
