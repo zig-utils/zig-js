@@ -2910,7 +2910,12 @@ pub const Parser = struct {
             const key_tok = self.advance();
             const key: []const u8 = switch (key_tok.kind) {
                 .identifier, .string => key_tok.text,
-                .number => try std.fmt.allocPrint(self.arena, "{d}", .{key_tok.number}),
+                // A BigInt literal key (`1n`) is ToString'd from its exact value,
+                // not the lossy f64.
+                .number => if (key_tok.is_bigint)
+                    (key_tok.bigint_text orelse try std.fmt.allocPrint(self.arena, "{d}", .{key_tok.bigint}))
+                else
+                    try std.fmt.allocPrint(self.arena, "{d}", .{key_tok.number}),
                 else => return ParseError.UnexpectedToken,
             };
             var val: *Node = undefined;
@@ -3052,7 +3057,11 @@ pub const Parser = struct {
         const t = self.advance();
         const key: []const u8 = switch (t.kind) {
             .identifier, .string, .private_name => t.text,
-            .number => try std.fmt.allocPrint(self.arena, "{d}", .{t.number}),
+            // A BigInt literal key (`1n`) is ToString'd from its exact value.
+            .number => if (t.is_bigint)
+                (t.bigint_text orelse try std.fmt.allocPrint(self.arena, "{d}", .{t.bigint}))
+            else
+                try std.fmt.allocPrint(self.arena, "{d}", .{t.number}),
             else => return ParseError.UnexpectedToken,
         };
         return .{ .key = key, .expr = null };
