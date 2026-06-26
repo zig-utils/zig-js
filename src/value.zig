@@ -1497,6 +1497,25 @@ pub const Object = struct {
         return m.get(name);
     }
 
+    /// Snapshot this object's own accessor keys (dup'd into `arena`) under
+    /// `property_lock`. Callers that need to iterate accessor keys while also
+    /// mutating the object (e.g. `seal`/`freeze`, which `setAttr` each key) must
+    /// use this rather than iterating the live `accessors` map: under
+    /// `parallel_js` a peer's concurrent `setAccessor` can grow (reallocate) the
+    /// `StringHashMap` mid-iteration, corrupting it (the "grow vs lookup" panic).
+    /// The snapshot is stable; the subsequent per-key work re-locks via the
+    /// `getAttr`/`setAttr` accessors.
+    pub fn accessorKeysSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const m = self.accessors orelse return &.{};
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        try list.ensureTotalCapacityPrecise(arena, m.count());
+        var it = m.iterator();
+        while (it.next()) |e| list.appendAssumeCapacity(try arena.dupe(u8, e.key_ptr.*));
+        return list.items;
+    }
+
     /// Define/merge an own accessor (get and/or set). Promotes the name to an
     /// accessor property.
     pub fn setAccessor(self: *Object, arena: std.mem.Allocator, name: []const u8, get: ?Value, set: ?Value) std.mem.Allocator.Error!void {

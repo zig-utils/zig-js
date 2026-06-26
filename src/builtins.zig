@@ -1873,13 +1873,14 @@ fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
         if (freeze) a.writable = false;
         try o.setAttr(self.arena, k, a);
     }
-    if (o.accessors) |m| {
-        var it = m.iterator();
-        while (it.next()) |e| {
-            var a = o.getAttr(e.key_ptr.*);
-            a.configurable = false;
-            try o.setAttr(self.arena, e.key_ptr.*, a);
-        }
+    // Accessor keys via a locked snapshot, not the live `accessors` map: a peer
+    // freezing/sealing the same shared object under `parallel_js` may grow that
+    // `StringHashMap` mid-iteration (the "grow vs lookup" panic). See
+    // `Object.accessorKeysSnapshot`.
+    for (try o.accessorKeysSnapshot(self.arena)) |k| {
+        var a = o.getAttr(k);
+        a.configurable = false;
+        try o.setAttr(self.arena, k, a);
     }
     // An array's dense element indices live in `elements` (not the shape), so
     // they aren't in `ownKeys` — lock each present one, plus `length` (which
@@ -1960,11 +1961,11 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
         }
         s = sh.parent;
     }
-    if (o.accessors) |m| {
-        var it = m.iterator();
-        while (it.next()) |e| {
-            if (o.getAttr(e.key_ptr.*).configurable) return false;
-        }
+    // Locked snapshot, not live iteration: a concurrent `setAccessor` on a shared
+    // object under `parallel_js` may grow this map mid-walk. See
+    // `Object.accessorKeysSnapshot`.
+    for (try o.accessorKeysSnapshot(self.arena)) |k| {
+        if (o.getAttr(k).configurable) return false;
     }
     return true;
 }

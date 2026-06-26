@@ -238,8 +238,26 @@ per-thread before threads stop holding the GIL):
      conservative scan is skipped under a parallel collection (it raced the
      joiner's `beginPark`/`endPark` and is covered precisely by `gc_parked`).
      *Open:* a peer blocked on `Atomics.wait`/`Lock`/`Condition` under
-     `parallel_js` is not yet `gc_parked`, so it makes the collector abort
-     (safe) rather than collect — a follow-up for full generality.
+     `parallel_js` is not `gc_parked`, so it makes the collector abort (safe)
+     rather than collect. This is **not** the same easy case as `join`, and
+     investigation shows the frozen-trace approach does not fit: unlike `join`
+     (which truly blocks until `rec.done`), these sync-wait loops are *not
+     frozen* — `propWait`/`acquireLock`/`condWaitCore` wake every ~5 ms to
+     `pumpTasks` and re-park (`jsthread.zig` `while (!ticket.woken) { … pumpTasks
+     … waitPropTicketTimeout … }`). So a "blocked" peer actually cycles
+     park→pump→park, running JS (microtasks) and allocating born-grey cells on
+     each pump. Setting `gc_parked` only around the inner `conditionWait` would
+     need a `gc_park_lock` to serialize the wake against the collector's root
+     read (a real race), and even then the collector would rarely catch a peer
+     mid-park, while the per-pump born-cell allocation keeps defeating the
+     finish-convergence check — so it would abort anyway. A naive attempt
+     (gc_parked at the sync sites without this understanding) regressed: when the
+     *host* thread was the collector it swept its own captured-env vars and threw
+     `ConcurrentAccessError`. Conclusion: blocked-peer mid-script collection is
+     not a quick wiring follow-up; it needs either a genuinely-parked wait
+     primitive (no periodic pump) under `parallel_midscript_gc`, or to be left to
+     the quiescent fallback (current behavior, which is correct). Recorded here so
+     it is not re-attempted as low-hanging fruit.
    - **Terminate or abort.** The collector drives root-publication generations,
      marking between, until a *born-cell-stable, nothing-deferred* quiescent
      window, then attempts `finishConcurrentMarkParallel`. That fold-traces the
@@ -288,6 +306,24 @@ per-thread before threads stop holding the GIL):
    TSan-clean. (A seqlock/RCU read path remains a possible future optimization if
    the lock proves a parallel-throughput bottleneck, but it is no longer a
    correctness blocker.)
+   *Residual instance found + fixed (the "`StringHashMap`-grow panic" in the
+   semantics batch).* The blocker-#3 audit had covered `getOwn`/binding reads but
+   missed two **map-content iterations** that walked the live `Object.accessors`
+   `StringHashMap` unlocked while `seal`/`freeze` ran: `lockKeys` and the
+   `isFrozen`/`isSealed` integrity check (`builtins.zig`). Under `parallel_js`
+   two threads sealing/freezing the *same* shared object (`frozen-seal-race.js`)
+   could grow (reallocate) that map on one thread while the other iterated it —
+   the rare grow-corruption panic. Fixed by iterating a `property_lock`-held
+   **snapshot** of the accessor keys (`Object.accessorKeysSnapshot`) instead of
+   the live map; behavior-identical (same keys, same per-key `getAttr`/`setAttr`),
+   GIL path unchanged. Validated: unit suite unchanged vs. baseline,
+   `frozen-seal-race.js`/`proto-cycle-race.js`/`private-fields-shared.js` PASS
+   under `parallel_js`, freeze/seal/isFrozen-with-accessors conformance spot-check
+   green. *Lesson for the remaining audit: every unlocked `o.accessors`/`o.attrs`
+   **content** read (`.?.get` / `|m| iterate`) is a grow-race site, distinct from
+   the benign unlocked pointer-`== null` fast-path guards; the pointer guards that
+   gate into a locked accessor are fine, but a guard that then reads the map
+   inline is not.*
 4. **Other shared globals** — **symbol registry done:** the cross-realm
    GlobalSymbolRegistry get-or-create (`Symbol.for` + lazy registry creation) is
    now atomic under `Gil.symbol_registry_lock` (the key `ToString` is computed
