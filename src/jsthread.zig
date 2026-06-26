@@ -1164,8 +1164,12 @@ fn sameValueZero(a: Value, b: Value) bool {
 }
 
 fn isAccessor(o: *value.Object, key: []const u8) bool {
-    if (o.accessors) |m| return m.get(key) != null;
-    return false;
+    // Read via the property_lock-guarded accessor (not the live map): this runs
+    // on the index-keyed property-mode Atomics fall-through where the caller does
+    // NOT already hold the lock, so under parallel_js a concurrent
+    // defineProperty-accessor could grow o.accessors mid-`get` (the same
+    // "grow vs lookup" class fixed in seal/freeze).
+    return o.getAccessor(key) != null;
 }
 
 fn isLockedNamedAtomicsKey(key: []const u8) bool {
