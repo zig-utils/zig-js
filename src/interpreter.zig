@@ -1952,6 +1952,10 @@ pub const Interpreter = struct {
                 // brand exists, so the initializer may reference the field.
                 if (self.this_value.isObject()) try self.addPrivateBrandChecked(self.this_value.asObj(), d.name);
                 const fv = try self.eval(d.value);
+                // An anonymous initializer takes the field's source name (`#x`,
+                // the part of the storage key before the NUL marker).
+                const raw_init = if (d.value.* == .field_init_value) d.value.field_init_value else d.value;
+                try self.maybeNameAnon(fv, raw_init, std.mem.sliceTo(d.name, 0));
                 if (self.this_value.isObject()) {
                     const o = self.this_value.asObj();
                     try o.setOwn(self.arena, self.root_shape, d.name, fv);
@@ -3570,7 +3574,16 @@ pub const Interpreter = struct {
             if (m.static_block != null) continue;
             const kv: ?Value = if (m.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
             const key = if (kv) |k| try self.keyOf(k) else m.key;
-            const name_str = if (kv) |k| try self.keyDisplayName(k) else m.key;
+            // The name an anonymous field/method initializer takes from this key.
+            // A private name (`#x`) was rewritten to the `#x\x00<serial>` storage
+            // key, but its function name is the source form `#x` (the part before
+            // the NUL marker).
+            const name_str = if (kv) |k|
+                try self.keyDisplayName(k)
+            else if (value.isPrivateKey(m.key))
+                std.mem.sliceTo(m.key, 0)
+            else
+                m.key;
             // A public instance field's computed NAME was just evaluated here,
             // once and in source order. Bake the resulting key into its desugared
             // per-instance initializer so the name expression does not re-run for
