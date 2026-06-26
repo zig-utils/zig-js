@@ -537,26 +537,48 @@ pub const Binding = struct {
         // enabled (`gc_scan_native_stack`) for a guarded mid-script collect;
         // quiescent collection keeps it off and stays precise. See
         // `stack_scan.zig` and docs/threads/P7-gc-design.md.
+        const par: ?*interp.Interpreter = ctx.gc_par_collector.load(.acquire);
         if (ctx.gc_scan_native_stack) {
             _ = stack_scan.scan(v);
             // Plus every parked peer thread's published range (the multi-thread
-            // safepoint protocol): they cannot run while we hold the GIL, so
-            // their stacks are frozen. `collectMidScript` only set the flag
-            // after confirming all peers are parked-and-published.
-            if (ctx.gil) |g| {
+            // safepoint protocol): their stacks are frozen. Skipped under a
+            // *parallel* collection: there, a parked peer is traced precisely via
+            // `gc_parked` (below), and its park record's `beginPark`/`endPark`
+            // flip too fast to scan race-free without the GIL it doesn't hold.
+            if (par == null) if (ctx.gil) |g| {
                 const me = stack_scan.parkRecord();
                 for (g.park_records.items) |rec| {
                     if (rec == me) continue;
                     if (stack_scan.isParked(rec)) stack_scan.scanRecord(rec, v);
                 }
-            }
+            };
         }
+        // Under a *parallel* collection (`par` set, the elected collector
+        // interpreter) we read each shared realm list under the same lock its
+        // mutators take, and trace only the collector's own interpreter + parked
+        // peers precisely — running peers self-publish their roots through the
+        // insertion barrier (see `Context.driveParallelCollection`).
         v.mark(ctx.global_object);
         v.mark(ctx.tdz_marker);
-        traceEnv(&ctx.env, v); // the global environment is embedded by value
+        traceEnv(&ctx.env, v); // the global environment is embedded by value (binding_lock)
+
+        if (par != null) ctx.lockMicrotasks();
         for (ctx.microtasks.items) |mt| traceMicrotask(mt, v);
+        if (par != null) ctx.unlockMicrotasks();
+
+        // `async_waiters` + `c_api_handles` + `finalization_cleanup_jobs` share
+        // `realm_lock` (taken by their mutators only under parallel_js).
+        ctx.realmLock();
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
         for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
+        for (ctx.c_api_handles.items) |h| {
+            // each ref is a `*Boxed` ({ value: Value }), so the pointer aliases `*Value`.
+            const vp: *const Value = @ptrCast(@alignCast(h.ref));
+            markValue(v, vp.*);
+        }
+        ctx.realmUnlock();
+
+        if (par != null) if (ctx.gil) |g| g.lockApi();
         for (ctx.js_threads.items) |rec| {
             const io = agent.engineIo();
             rec.join_mutex.lockUncancelable(io);
@@ -565,11 +587,22 @@ pub const Binding = struct {
             if (rec.js_obj) |o| v.mark(o);
             for (rec.pending_joins.items) |pending| v.mark(pending.promise);
         }
-        // Under the GIL/world-stopped collection this is uncontended; the lock is
-        // for future parallel collection where a mutator may push/pop concurrently.
+        if (par != null) if (ctx.gil) |g| g.unlockApi();
+
         ctx.lockActiveInterpreters();
-        for (ctx.active_interpreters.items) |machine| traceInterpreterRoots(machine, v);
+        for (ctx.active_interpreters.items) |machine| {
+            // In a parallel collection, trace directly only interpreters whose
+            // VM stack is *stable*: the collector's own (at its safepoint) and any
+            // peer blocked in native park code (`gc_parked` — frozen, not running
+            // JS). A *running* peer's stack changes underfoot, so it publishes its
+            // own roots through the barrier at a safepoint instead.
+            if (par) |collector| {
+                if (machine != collector and !machine.gc_parked.load(.acquire)) continue;
+            }
+            traceInterpreterRoots(machine, v);
+        }
         ctx.unlockActiveInterpreters();
+
         if (ctx.gil) |g| {
             g.lockPropWaiters();
             defer g.unlockPropWaiters();
@@ -580,13 +613,10 @@ pub const Binding = struct {
             }
         }
         if (ctx.mod_cache) |cache| traceModuleGraph(cache, v);
-        markValue(v, ctx.exception orelse Value.undef());
-        // C-API protected handles: each ref is a `*Boxed` ({ value: Value }),
-        // so the pointer aliases `*Value`.
-        for (ctx.c_api_handles.items) |h| {
-            const vp: *const Value = @ptrCast(@alignCast(h.ref));
-            markValue(v, vp.*);
-        }
+        // `ctx.exception` is the host/join hand-off slot — redundant with each
+        // active interpreter's own `exception` (traced above) and mutated by
+        // peers without a lock, so skip it under a parallel collection.
+        if (par == null) markValue(v, ctx.exception orelse Value.undef());
     }
 
     pub fn trace(cell: *anyopaque, kind: Kind, v: anytype) void {

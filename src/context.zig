@@ -196,6 +196,35 @@ pub const Context = struct {
     gc_concurrent: bool = false,
     gc_marker: ?std.Thread = null,
     gc_marker_stop: std.atomic.Value(bool) = .init(false),
+    /// Phase 7 / M3: mid-script collection under *parallel* mutators (no GIL).
+    /// Opt-in (`parallel_midscript_gc`, requires `parallel_js`). The driver is
+    /// abort-safe: it sweeps only on confirmed root-handshake stability and
+    /// otherwise clears marking without freeing anything, so it can never
+    /// deadlock (no mutator blocks for it) or use-after-free (no sweep without
+    /// convergence). See `driveParallelCollection` and docs/threads/P7-gil-removal.md.
+    gc_par_enabled: bool = false,
+    /// Single-collector election: the first interpreter to CAS this from null to
+    /// its own pointer at a safepoint drives the cycle; the others publish their
+    /// roots and resume. Doubles as "a parallel collection is in progress" and as
+    /// the one interpreter `traceRoots` may read directly (the collector is at
+    /// its own safepoint; peers self-publish via the barrier).
+    gc_par_collector: std.atomic.Value(?*interp.Interpreter) = .init(null),
+    /// Root-publication generation the collector currently wants (0 = none). A
+    /// peer at a safepoint (or about to park) whose `gc_published_gen` is behind
+    /// this publishes its precise roots through the insertion barrier and catches
+    /// up. Bumped once per begin/finish root scan.
+    gc_par_request: std.atomic.Value(u64) = .init(0),
+    /// Count of mid-script parallel collections that reached a *finishing* sweep
+    /// (not aborted). Tests assert this is non-zero to prove the collector
+    /// actually reclaimed while peers ran, rather than always falling back to
+    /// quiescent collection.
+    gc_par_collections: std.atomic.Value(u64) = .init(0),
+    /// Guards the low-frequency realm-root lists that have no other lock —
+    /// `async_waiters`, `c_api_handles`, `finalization_cleanup_jobs` — so the
+    /// mid-script parallel collector can read them while peers mutate. Taken by
+    /// both the writers and the collector **only under `parallel_js`** (a null
+    /// `realm_lock_p` in GIL mode keeps those paths byte-identical). A brief mutex.
+    realm_lock: std.atomic.Mutex = .unlocked,
     /// C-API `Boxed` handles (`JSValueRef`s) protected by the embedder.
     /// `JSValueProtect` registers a wrapper here when the GC is on (`*Boxed`
     /// aliases `*Value`, its first field); `gc.zig`'s `traceRoots` marks them
@@ -270,6 +299,12 @@ pub const Context = struct {
         /// not hold the context GIL; legacy blocking/result bookkeeping still
         /// takes it briefly.
         parallel_js: bool = false,
+        /// Experimental (requires `parallel_js`): enable the abort-safe mid-script
+        /// parallel collector so a long-running parallel workload can reclaim
+        /// garbage at safepoints without a quiescent point. Off by default —
+        /// quiescent collection already covers correctness; this is a pause-time
+        /// optimization under test.
+        parallel_midscript_gc: bool = false,
     };
 
     /// The engine's precise-GC heap type and its root-tracing binding (issue #1
@@ -334,6 +369,9 @@ pub const Context = struct {
         };
         if (options.parallel_js and !(options.enable_threads and options.enable_gc and options.parallel_gc))
             return error.InvalidThreadTestingOptions;
+        if (options.parallel_midscript_gc and !options.parallel_js)
+            return error.InvalidThreadTestingOptions;
+        self.gc_par_enabled = options.parallel_midscript_gc;
         if (options.enable_gc) {
             // GC cells are gpa-backed (the collector frees them individually);
             // the binding wraps this Context, whose roots it traces.
@@ -599,6 +637,33 @@ pub const Context = struct {
         self.active_interp_lock.store(0, .release);
     }
 
+    /// Lock `realm_lock` only under `parallel_js` (a no-op in GIL mode, so those
+    /// realm-list mutations stay byte-identical there). Guards `async_waiters`,
+    /// `c_api_handles`, and `finalization_cleanup_jobs` against the mid-script
+    /// parallel collector's reads.
+    fn spinLockMutex(m: *std.atomic.Mutex) void {
+        var spins: usize = 0;
+        while (!m.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+    pub fn realmLock(self: *Context) void {
+        if (self.parallel_js) spinLockMutex(&self.realm_lock);
+    }
+    pub fn realmUnlock(self: *Context) void {
+        if (self.parallel_js) self.realm_lock.unlock();
+    }
+
+    /// Lock the realm microtask queue (`microtasks`). Peers take this via the
+    /// interpreter's `microtask_lock` pointer under parallel_js; the collector
+    /// takes it directly while tracing the queue.
+    pub fn lockMicrotasks(self: *Context) void {
+        spinLockMutex(&self.microtask_lock);
+    }
+    pub fn unlockMicrotasks(self: *Context) void {
+        self.microtask_lock.unlock();
+    }
+
     pub fn pushActiveInterpreter(self: *Context, machine: *interp.Interpreter) !void {
         self.lockActiveInterpreters();
         defer self.unlockActiveInterpreters();
@@ -688,10 +753,18 @@ pub const Context = struct {
         }
     }
 
-    fn collectMidScript(raw_ctx: *anyopaque) void {
+    fn collectMidScript(raw_ctx: *anyopaque, raw_machine: *anyopaque) void {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
+        const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
         const h = self.gc orelse return;
         if (!stack_scan.supported) return;
+        // Parallel mid-script collection (opt-in: `parallel_midscript_gc`). Runs
+        // even though `gil != null` because `parallel_js` drops the *execution*
+        // GIL. Abort-safe; see `serviceParallelGc`.
+        if (self.gc_par_enabled and h.parallel) {
+            self.serviceParallelGc(h, machine);
+            return;
+        }
         if (self.gil != null) return;
         // Parallel-mutator mode (parallel_gc): mid-script collection is not yet
         // safe with multiple mutators running without the GIL — it needs the
@@ -744,7 +817,151 @@ pub const Context = struct {
         }
     }
 
+    // ---- Mid-script parallel collector (issue #1 M3) ----------------------
+    //
+    // Every interpreter (the host + each spawned `Thread`) reaches this from its
+    // safepoint (~every 1024 steps). The first to win the `gc_par_collector`
+    // election drives a concurrent mark; the rest publish their precise roots
+    // through the insertion barrier and resume — no mutator ever blocks for the
+    // collector. The driver is *abort-safe*: it sweeps only after a root
+    // handshake confirms every peer has published and the heap is stable, and
+    // otherwise discards the mark without freeing anything (falling back to the
+    // next quiescent `collectGarbage`). So it can neither deadlock nor
+    // use-after-free. See docs/threads/P7-gil-removal.md.
+
+    fn serviceParallelGc(self: *Context, h: *GcHeap, machine: *interp.Interpreter) void {
+        if (self.gc_par_collector.load(.acquire)) |c| {
+            // A collection is in progress; if we aren't the collector, publish
+            // our roots for the requested generation and resume.
+            if (c != machine) self.publishParallelRoots(machine);
+            return;
+        }
+        // No collection running. Start one only under heap pressure.
+        if (!h.shouldCollect()) return;
+        // Elect a single collector; losers publish and resume.
+        if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) {
+            self.publishParallelRoots(machine);
+            return;
+        }
+        defer self.gc_par_collector.store(null, .release);
+        self.driveParallelCollection(h, machine);
+        // NOTE: `gc_par_request` is monotonic and is NOT reset here. Each cycle's
+        // first generation (a fresh `fetchAdd`) is strictly greater than any
+        // interpreter's `gc_published_gen`, so every peer republishes for the new
+        // cycle rather than a stale high `published_gen` falsely satisfying a low
+        // new generation (which would skip republication of post-whiten roots —
+        // a use-after-free). Peers only publish at all while a collector is
+        // elected (`gc_par_collector != null`), so a non-zero idle request is inert.
+    }
+
+    /// Peer/loser path: if the collector has an open request this interpreter
+    /// hasn't served, shade its precise roots into the marker's hand-off buffer
+    /// and record the generation. Called from a safepoint (or the park path),
+    /// where the interpreter holds no per-structure lock.
+    fn publishParallelRoots(self: *Context, machine: *interp.Interpreter) void {
+        const req = self.gc_par_request.load(.acquire);
+        if (req == 0) return;
+        if (machine.gc_published_gen.load(.acquire) >= req) return;
+        gc_mod.publishInterpreterRoots(machine);
+        machine.gc_published_gen.store(req, .release);
+    }
+
+    /// True once every active peer interpreter (all but the collector) has
+    /// published generation `gen`. A peer that has exited is gone from the list;
+    /// a peer that parked published via the park path. Never blocks a peer.
+    fn allParallelPublished(self: *Context, gen: u64, me: *interp.Interpreter) bool {
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
+        for (self.active_interpreters.items) |m| {
+            if (m == me) continue;
+            // A parked peer is frozen and traced directly by the collector, so it
+            // need not publish; only running peers must reach the generation.
+            if (m.gc_parked.load(.acquire)) continue;
+            if (m.gc_published_gen.load(.acquire) < gen) return false;
+        }
+        return true;
+    }
+
+    fn driveParallelCollection(self: *Context, h: *GcHeap, machine: *interp.Interpreter) void {
+        // BEGIN: whiten + arm the barrier under alloc_lock, then trace the
+        // collector-safe roots — realm roots (lock-guarded), this collector's own
+        // interpreter + native stack, and parked peers' frozen stacks. Running
+        // peers self-publish via the handshake (traceRoots reads gc_par_collector
+        // to skip them). gc_par_collector is already set to `machine`.
+        self.gc_scan_native_stack = true;
+        h.beginConcurrentMarkParallel();
+        self.gc_scan_native_stack = false;
+
+        const max_rounds: u32 = 32;
+        // Per-round bound on how many mark-and-poll iterations to spend waiting
+        // for every running peer to publish before giving up and aborting. Each
+        // iteration drains marker work, so this is not pure spinning; a peer
+        // reaches its safepoint within ~1024 JS steps. The loop also yields the
+        // CPU periodically so peers can run to their safepoints (important when
+        // threads outnumber cores, and under TSan's ~10× slowdown).
+        const wait_budget: u64 = 50_000;
+        var prev_born: usize = h.bornPendingLen();
+        var round: u32 = 0;
+        while (round < max_rounds) : (round += 1) {
+            // Open a fresh root-publication generation; peers catch up at their
+            // safepoints. Mark concurrently while we wait (the collector is also
+            // the marker here — no separate marker thread).
+            const gen = self.gc_par_request.fetchAdd(1, .acq_rel) + 1;
+            var waited: u64 = 0;
+            while (!self.allParallelPublished(gen, machine)) {
+                self.gc_scan_native_stack = true;
+                _ = h.concurrentMarkRound();
+                self.gc_scan_native_stack = false;
+                waited += 1;
+                if (waited >= wait_budget) {
+                    self.gc_scan_native_stack = true;
+                    h.abortConcurrentMarkParallel();
+                    self.gc_scan_native_stack = false;
+                    return;
+                }
+                // Yield so peers get scheduled to reach their safepoints and
+                // publish, rather than starving them by busy-spinning.
+                if ((waited & 0x3ff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            }
+            // Everyone published this generation. Drain to local quiescence.
+            self.gc_scan_native_stack = true;
+            while (!h.concurrentMarkRound()) {}
+            self.gc_scan_native_stack = false;
+
+            // On any one-round lull (born-cell set unchanged → peers not
+            // mid-allocation, so born payloads are initialized) with nothing
+            // deferred (a running peer's generator can't be traced soundly),
+            // ATTEMPT to finish. `finishConcurrentMarkParallel` is itself
+            // self-checking: it sweeps only if no peer allocated during the
+            // finish, otherwise it returns false (having done useful marking) and
+            // we simply keep going. So being aggressive here is safe and lets the
+            // collector converge as soon as it catches a genuine lull.
+            const born = h.bornPendingLen();
+            if (born == prev_born and h.deferredPendingLen() == 0) {
+                self.gc_scan_native_stack = true;
+                const swept = h.finishConcurrentMarkParallel();
+                self.gc_scan_native_stack = false;
+                if (swept) {
+                    _ = self.gc_par_collections.fetchAdd(1, .monotonic);
+                    return;
+                }
+                // Allocation happened during the finish — its born fold already
+                // ran, so refresh the baseline and keep marking.
+            }
+            prev_born = h.bornPendingLen();
+        }
+        // Couldn't converge within the round budget (heavy continuous allocation
+        // or a deferred generator) — abort and let quiescent collection reclaim.
+        self.gc_scan_native_stack = true;
+        h.abortConcurrentMarkParallel();
+        self.gc_scan_native_stack = false;
+    }
+
     pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
+        // Read by the mid-script parallel collector; guard under `realm_lock`
+        // (a no-op outside parallel_js).
+        self.realmLock();
+        defer self.realmUnlock();
         for (self.finalization_cleanup_jobs.items) |queued| {
             if (queued == registry) return;
         }
@@ -6581,6 +6798,77 @@ test "parallel_js (M3 GIL-removal slice): real Thread contends Atomics.Mutex wit
         \\shared.n;
     );
     try std.testing.expectEqual(@as(f64, 2000), result.asNum());
+}
+
+test "parallel_js (M3): mid-script parallel collector reclaims garbage while threads run, no GIL" {
+    // The mid-script parallel GC driver end to end: real JS `Thread`s allocate
+    // and retain object graphs with no execution GIL while a collector elected
+    // among them marks + sweeps at safepoints. Each thread keeps a private array
+    // of retained objects (interpreter roots, published through the insertion
+    // barrier at safepoints) and churns garbage in bursts separated by
+    // non-allocating compute lulls — the lulls let the born-cell set quiesce so
+    // the collector can reach a stable, abort-safe finish and sweep WHILE peers
+    // still run. The retained graph must survive every collection (a swept-live
+    // bug would corrupt the per-round records and fail the oracle), the run must
+    // complete (no deadlock — peers never block for the collector), and at least
+    // one parallel collection must actually finish. TSan-clean.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    });
+    defer ctx.destroy();
+
+    // Wrapped in an IIFE so re-evaluating (the retry below) doesn't redeclare a
+    // top-level `const`. Each worker keeps a private array of retained objects
+    // (interpreter roots, published through the insertion barrier at safepoints)
+    // and churns garbage in bursts separated by non-allocating compute lulls.
+    const src =
+        \\(() => {
+        \\  const N = 3;
+        \\  const threads = [];
+        \\  for (let t = 0; t < N; t++) {
+        \\    threads.push(new Thread(() => {
+        \\      const keep = [];
+        \\      for (let round = 0; round < 6; round++) {
+        \\        let last = null;
+        \\        for (let i = 0; i < 500; i++) last = { a: i, b: { c: i }, d: [i, i + 1] };
+        \\        keep.push({ round: round, tag: last.a });
+        \\        let s = 0;
+        \\        for (let j = 0; j < 6000; j++) s = (s + j) & 0x3fffffff;
+        \\        if (s < 0) keep.push({ never: true });
+        \\      }
+        \\      // Oracle: the retained graph is intact (no live object was swept).
+        \\      if (keep.length !== 6) return -1;
+        \\      let sum = 0;
+        \\      for (let kk = 0; kk < keep.length; kk++) {
+        \\        if (keep[kk].round !== kk || keep[kk].tag !== 499) return -2;
+        \\        sum += keep[kk].round;
+        \\      }
+        \\      return sum === 15 ? 1 : -3;
+        \\    }));
+        \\  }
+        \\  let ok = 0;
+        \\  for (const t of threads) { if (t.join() === 1) ok++; }
+        \\  return ok;
+        \\})();
+    ;
+    // Retry the workload until the elected collector reaches at least one
+    // *finishing* parallel sweep (convergence depends on catching a quiescent
+    // window, so it's retried for determinism). Correctness — every thread's
+    // retained graph survived every collection, with no deadlock — is asserted on
+    // EVERY attempt; a swept-live bug would corrupt the per-round records (a
+    // negative oracle) or crash, failing immediately.
+    var attempt: usize = 0;
+    while (attempt < 10) : (attempt += 1) {
+        const result = try ctx.evaluate(src);
+        try std.testing.expectEqual(@as(f64, 3), result.asNum());
+        if (ctx.gc_par_collections.load(.monotonic) > 0) break;
+    }
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > 0);
 }
 
 test "parallel_js (M3 GIL-removal slice): Lock.asyncHold grants serialize without context GIL" {

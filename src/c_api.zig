@@ -290,6 +290,10 @@ export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
     const c = ctxFrom(ctx) orelse return;
     if (c.gc == null) return; // arena contexts keep values for the context lifetime.
     const raw = v orelse return;
+    // `c_api_handles` is read by the mid-script parallel collector; guard it
+    // under `realm_lock` (a no-op outside parallel_js).
+    c.realmLock();
+    defer c.realmUnlock();
     for (c.c_api_handles.items) |*h| {
         if (h.ref == raw) {
             h.count += 1;
@@ -303,6 +307,8 @@ export fn JSValueUnprotect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
     const c = ctxFrom(ctx) orelse return;
     if (c.gc == null) return;
     const raw = v orelse return;
+    c.realmLock();
+    defer c.realmUnlock();
     for (c.c_api_handles.items, 0..) |*h, i| {
         if (h.ref != raw) continue;
         if (h.count > 1) {

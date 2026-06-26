@@ -782,7 +782,20 @@ pub const Interpreter = struct {
     /// (no other running JS threads; conservative native-stack scan available).
     /// See `stack_scan.zig` and docs/threads/P7-gc-design.md.
     gc_safepoint_ctx: ?*anyopaque = null,
-    gc_safepoint_fn: ?*const fn (ctx: *anyopaque) void = null,
+    gc_safepoint_fn: ?*const fn (ctx: *anyopaque, machine: *anyopaque) void = null,
+    /// Root-publication generation this interpreter last published for, under the
+    /// parallel mid-script collector (issue #1 M3). Written by this interpreter's
+    /// own thread (at a safepoint or when parking), read by the collector to know
+    /// every peer has published the current generation. Atomic for the cross-thread
+    /// read; `0` until the first publish.
+    gc_published_gen: std.atomic.Value(u64) = .init(0),
+    /// True while this interpreter's thread is blocked in native park code
+    /// (Thread.join, Atomics.wait, contended Lock/Condition) with no GIL — it is
+    /// not running JS, so its roots are frozen. The mid-script parallel collector
+    /// then traces it *directly* (safe: frozen) instead of waiting for it to
+    /// publish at a safepoint it won't reach. Set by the park sites, read by the
+    /// collector. Atomic for the cross-thread read.
+    gc_parked: std.atomic.Value(bool) = .init(false),
     /// Active VM `Exec` frames on this interpreter, innermost last. The VM
     /// operand stack is arena-backed (not a GC cell), so its live `Value`s are
     /// invisible to both the precise tracer and a conservative native-stack
@@ -4917,7 +4930,7 @@ pub const Interpreter = struct {
     pub fn serviceGcSafepoint(self: *Interpreter) void {
         const f = self.gc_safepoint_fn orelse return;
         const ctx = self.gc_safepoint_ctx orelse return;
-        f(ctx);
+        f(ctx, self);
     }
 
     /// Host cleanup jobs for FinalizationRegistry. Explicit `cleanupSome()` and

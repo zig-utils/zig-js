@@ -363,7 +363,12 @@ fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.Hos
         rec.join_mutex.unlock(io);
         return self.throwError("TypeError", "Thread.prototype.join cannot block the current thread");
     }
+    // While blocked joining (no GIL), this interpreter isn't running user JS —
+    // its roots are frozen — so let the mid-script parallel collector trace it
+    // directly instead of waiting for a safepoint it won't reach.
+    self.gc_parked.store(true, .release);
     while (!rec.done) try parkPumpThreadJoin(self, rec);
+    self.gc_parked.store(false, .release);
     const threw = rec.threw;
     const result = rec.result;
     rec.join_mutex.unlock(io);
