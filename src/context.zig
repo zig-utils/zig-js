@@ -407,6 +407,10 @@ pub const Context = struct {
             // (parallel_gc). The default engine leaves them no-ops (a relaxed load).
             if (options.concurrent_gc or options.parallel_gc) {
                 interp.Environment.binding_locks_enabled.store(true, .release);
+                // Same trigger: the per-object dense-element lock guards a
+                // grow/realloc against concurrent readers (lookupIdent's analogue
+                // for arrays).
+                value.Object.element_locks_enabled.store(true, .release);
                 // Same trigger: bytecode may run on multiple threads, so the VM
                 // inline caches need the parallel-safe (seqlock) protocol.
                 @import("bytecode.zig").ic_seqlock_enabled.store(true, .release);
