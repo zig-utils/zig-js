@@ -5440,7 +5440,10 @@ pub const Interpreter = struct {
                 try self.spreadDataProps(v, src);
                 continue;
             }
-            const kv: ?Value = if (p.key_expr) |ke| try self.eval(ke) else null;
+            // ToPropertyKey ONCE (its valueOf/@@toPrimitive runs a single time);
+            // keyOf and keyDisplayName then read the resulting primitive without
+            // re-coercing.
+            const kv: ?Value = if (p.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
             const key = if (kv) |k| try self.keyOf(k) else p.key;
             // The name a method/accessor takes from this key (a symbol shows as
             // `[description]`, not its internal key).
