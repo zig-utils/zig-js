@@ -3666,15 +3666,25 @@ pub const Interpreter = struct {
             if (m.static_block) |block| {
                 const saved_this = self.this_value;
                 const saved_home = self.home_object;
+                const saved_env = self.env;
                 self.this_value = class_val;
                 self.home_object = class_obj;
+                // A `static {}` block is its own function-like scope: it gets a
+                // fresh variable environment so its `var` declarations stay local
+                // (each block, and the outer scope, are independent).
+                const block_env = try gc_mod.allocEnv(self.arena);
+                self.initEnvironment(block_env, class_env, true);
+                self.env = block_env;
+                if (block.* == .block) try self.hoistVarNames(block.block);
                 _ = self.eval(block) catch |e| {
                     self.this_value = saved_this;
                     self.home_object = saved_home;
+                    self.env = saved_env;
                     return e;
                 };
                 self.this_value = saved_this;
                 self.home_object = saved_home;
+                self.env = saved_env;
                 continue;
             }
             if (!m.is_field or !m.is_static) continue;
