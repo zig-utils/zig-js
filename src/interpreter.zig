@@ -1396,10 +1396,23 @@ pub const Interpreter = struct {
     /// chain order. Returns the value, or null when unresolved (the caller then
     /// tries the global object and finally throws a ReferenceError).
     fn lookupIdent(self: *Interpreter, name: []const u8) EvalError!?Value {
+        // Read each scope's binding tables under its `binding_lock` (via the
+        // flag-gated `lockBindings`, like `Environment.get`): a peer thread may
+        // be mutating `vars`/`aliases` through `Environment.put` (which locks),
+        // so an unlocked `.get` here races the grow — the systemic no-GIL
+        // Environment race the Linux-TSan corpus gate surfaced (it hit even
+        // smoke.js: main defines a global while a worker resolves one). In the
+        // default engine `binding_locks_enabled` is false, so `lockBindings` is a
+        // single relaxed-ish load that returns immediately — the walk stays
+        // lock-free and full-speed.
         var env: ?*Environment = self.env;
         while (env) |e| {
-            if (e.aliases.get(name)) |a| return a.env.get(a.name);
-            if (e.vars.get(name)) |v| return v;
+            e.lockBindings();
+            const alias = e.aliases.get(name);
+            const found_var: ?Value = if (alias == null) e.vars.get(name) else null;
+            e.unlockBindings();
+            if (alias) |a| return a.env.get(a.name);
+            if (found_var) |v| return v;
             if (e.with_object) |wo| {
                 if (try self.withHasBinding(wo, name)) {
                     // Record the WithBaseObject so a call with this identifier as
