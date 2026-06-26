@@ -255,6 +255,7 @@ pub fn main(init: std.process.Init) !void {
     // `-Dthreads-case=<path>` to probe a single file safely).
     var parallel_js = false;
     var sweep = false;
+    var list_mode = false;
     var one: ?[]const u8 = null;
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
@@ -264,7 +265,17 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         if (std.mem.eql(u8, a, "sweep")) sweep = true;
+        if (std.mem.eql(u8, a, "list")) list_mode = true;
         if (std.mem.eql(u8, a, "one")) one = args.next();
+    }
+
+    // `list`: print the green allowlist (one path per line) and exit, so a
+    // driver (CI's whole-corpus no-GIL TSan sweep) can run each entry in its own
+    // process via `threads-test parallel-js one <path>` — per-case isolation that
+    // sidesteps the cumulative-load OOM of a single all-in-one-process TSan run.
+    if (list_mode) {
+        for (allowlist) |name| std.debug.print("{s}\n", .{name});
+        return;
     }
 
     var dir = cwd.openDir(io, corpus_root, .{}) catch {

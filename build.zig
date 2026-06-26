@@ -120,6 +120,16 @@ pub fn build(b: *std.Build) void {
     const threads_test_step = b.step("threads-test", "Run the vendored PR-249 threads corpus allowlist");
     threads_test_step.dependOn(&run_threads_test.step);
 
+    // Compile-only: install the threads-test exe to zig-out/bin without running
+    // it, so CI's whole-corpus no-GIL TSan sweep can invoke it directly at a
+    // stable path — `zig build threads-test-bin -Dtsan=true` then
+    // `./zig-out/bin/threads-test parallel-js one <path>` per case. Per-case
+    // isolation sidesteps the cumulative-load OOM of a single 209-in-one-process
+    // TSan run (TSan shadow memory grows across the whole allowlist).
+    const threads_test_install = b.addInstallArtifact(threads_test, .{});
+    const threads_test_bin_step = b.step("threads-test-bin", "Build the threads-test exe only (no run)");
+    threads_test_bin_step.dependOn(&threads_test_install.step);
+
     // test262 ingestion: `zig build test262 [-Dtest262=<root>]` runs the real
     // tc39/test262 corpus through the engine and reports the (partial) pass
     // rate. The default root is the pinned `test262` git submodule, so we always
