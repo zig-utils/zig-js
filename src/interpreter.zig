@@ -3414,6 +3414,17 @@ pub const Interpreter = struct {
         self.current_private_map = private_map;
         defer self.current_private_map = saved_pm;
 
+        // The class name is bound as an immutable binding in a scope that wraps the
+        // whole class body, so methods, static initializers, and instance-field
+        // initializers can refer to the class by name (`static x = C.m()`). The
+        // constructor and methods close over this env; the binding is installed
+        // once the constructor value exists.
+        const outer_env = self.env;
+        const class_env = try gc_mod.allocEnv(self.arena);
+        self.initEnvironment(class_env, outer_env, false);
+        self.env = class_env;
+        defer self.env = outer_env;
+
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
         // The desugared `this.<name> = init` member node of each PUBLIC instance
@@ -3497,6 +3508,10 @@ pub const Interpreter = struct {
         };
         const class_val = try self.makeFunction(fnode, self.env);
         const class_obj = class_val.asObj();
+        // Now that the constructor exists, bind the class name (immutable) in the
+        // class-body scope so the body can reference it. An anonymous class
+        // (`class {}` / `var X = class {}`) has no inner binding.
+        if (name.len > 0) try class_env.putFnName(name, class_val);
         const proto = try self.protoObject(class_obj);
         // A class's `prototype` is non-writable, non-enumerable, non-configurable.
         try class_obj.setAttr(self.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
