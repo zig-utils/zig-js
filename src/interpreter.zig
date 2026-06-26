@@ -8149,6 +8149,22 @@ pub const Interpreter = struct {
                     // property's value is read), landing as a plain data prop.
                     try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
                 }
+            } else if (val.isString()) {
+                // ToObject(string): a String exotic object whose own *enumerable*
+                // properties are its UTF-16 index chars (`{...r} = "foo"` ⇒
+                // r = {0:"f",1:"o",2:"o"}; `length` is non-enumerable). Other
+                // primitives (number/boolean/symbol/bigint) have no own enumerable
+                // properties, so their rest object is correctly empty.
+                const s = val.asStr();
+                const n = utf16LenOfString(s);
+                var i: usize = 0;
+                outer_str: while (i < n) : (i += 1) {
+                    const k = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                    for (consumed.items) |c| {
+                        if (std.mem.eql(u8, c, k)) continue :outer_str;
+                    }
+                    try self.setProp(rest_obj.asObj(), k, try self.elementAt(val, i));
+                }
             }
             // A declaration binds the rest name; an assignment writes through the
             // target reference — which may be a member (`({...obj.y} = …)`), so it
