@@ -1846,6 +1846,31 @@ pub const Interpreter = struct {
                         }
                     }
                 }
+                // `base[key] = value`: the LeftHandSide is evaluated before the RHS,
+                // but RequireObjectCoercible(base) and ToPropertyKey(key) are deferred
+                // to PutValue — so the spec order is base, key expression, RHS, THEN
+                // the null/undefined check and ToPropertyKey. assignTo would run the
+                // RHS first (its caller already evaluated it), tripping a key
+                // `toString` / the base check before the RHS.
+                if (a.target.* == .member) {
+                    const m = a.target.member;
+                    if (m.computed) |ce| {
+                        const recv = try self.eval(m.object);
+                        const kv = try self.eval(ce);
+                        const v = try self.eval(a.value);
+                        if (recv.isNull() or recv.isUndefined())
+                            return self.throwError("TypeError", "cannot set property of null or undefined");
+                        if (fastNumericIndex(kv)) |idx| {
+                            if (try self.setFastArrayNumericIndex(recv, idx, v)) break :blk v;
+                            var fast_key_buf: [24]u8 = undefined;
+                            const key = std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
+                            try self.setMember(recv, key, v);
+                        } else {
+                            try self.setMember(recv, try self.keyOf(kv), v);
+                        }
+                        break :blk v;
+                    }
+                }
                 const v = try self.eval(a.value);
                 // NamedEvaluation: `f = function(){}` names the function "f"
                 // (only a bare identifier target, per spec).
