@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 46062,
+    "passing": 46128,
     "total": 48247,
-    "percentage": 95.5,
+    "percentage": 95.6,
     "parseFail": 29,
-    "runtimeFail": 2144,
+    "runtimeFail": 2078,
     "hostFail": 12
   },
   "negative": {
@@ -18,11 +18,11 @@
   "suites": [
     {
       "name": "language",
-      "passing": 18511,
+      "passing": 18566,
       "total": 19070,
-      "percentage": 97.1,
+      "percentage": 97.4,
       "parseFail": 8,
-      "runtimeFail": 551,
+      "runtimeFail": 496,
       "hostFail": 0
     },
     {
@@ -45,11 +45,11 @@
     },
     {
       "name": "staging",
-      "passing": 1069,
+      "passing": 1080,
       "total": 1345,
-      "percentage": 79.5,
+      "percentage": 80.3,
       "parseFail": 9,
-      "runtimeFail": 265,
+      "runtimeFail": 254,
       "hostFail": 2
     },
     {
