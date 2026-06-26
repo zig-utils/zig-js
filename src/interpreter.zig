@@ -368,6 +368,12 @@ pub const Environment = struct {
     /// expression's own name. Reassignment throws in strict code but is a silent
     /// no-op in sloppy code (unlike `const`, which always throws).
     fn_names: std.StringHashMapUnmanaged(void) = .{},
+    /// Names that are *deletable* bindings — a sloppy direct eval's top-level
+    /// `var`/function declarations create deletable (configurable) bindings in the
+    /// surrounding variable environment (EvalDeclarationInstantiation step 16.b),
+    /// unlike ordinary declarations. `delete x` removes such a binding and returns
+    /// true; a subsequent reference is then unresolvable (ReferenceError).
+    deletable: std.StringHashMapUnmanaged(void) = .{},
     /// Module *indirect bindings* (`import { x } from "m"`): `local` resolves
     /// live to `name` in another module's environment, so a mutation of the
     /// exporter's binding is visible here. Assigning to one is a TypeError.
@@ -462,6 +468,28 @@ pub const Environment = struct {
         defer self.unlockBindings();
         const gop = try self.fn_names.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
+    }
+
+    /// Mark a binding in *this* scope as deletable (a sloppy eval-created var/fn).
+    pub fn markDeletable(self: *Environment, name: []const u8) EvalError!void {
+        const a = self.bindingAllocator();
+        self.lockBindings();
+        defer self.unlockBindings();
+        const gop = try self.deletable.getOrPut(a, name);
+        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
+    }
+
+    /// Remove a binding from *this* scope entirely (DeleteBinding for a deletable
+    /// eval var). Drops it from `vars` and every side table so it no longer
+    /// resolves. Returns whether a binding was present.
+    pub fn removeVar(self: *Environment, name: []const u8) bool {
+        self.lockBindings();
+        defer self.unlockBindings();
+        const removed = self.vars.remove(name);
+        _ = self.consts.remove(name);
+        _ = self.fn_names.remove(name);
+        _ = self.deletable.remove(name);
+        return removed;
     }
 
     /// Whether the nearest binding named `name` is a non-strict immutable
@@ -1002,6 +1030,7 @@ pub const Interpreter = struct {
     /// name)` and reflection see them (the test262 async harness relies on this).
     pub fn globalDefine(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
         const vs = self.env.varScope(); // `var`/function declarations hoist here
+        const existed_local = vs.vars.contains(name);
         try vs.put(name, v);
         if (vs.parent == null) {
             if (self.global_object) |g| {
@@ -1015,6 +1044,10 @@ pub const Interpreter = struct {
                 // (configurable); a script's GlobalDeclarationInstantiation does not.
                 if (!existed) try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
             }
+        } else if (!existed_local and self.eval_decl_deletable) {
+            // A sloppy direct eval's top-level var/function in a *function* variable
+            // environment is a fresh deletable binding (no global object backs it).
+            try vs.markDeletable(name);
         }
     }
 
@@ -1712,7 +1745,15 @@ pub const Interpreter = struct {
                             break :blk Value.boolVal(ok);
                         }
                     }
-                    if (self.env.get(target.identifier) != null) {
+                    if (bindingEnvOf(self.env, target.identifier)) |e| {
+                        // A deletable binding (a sloppy eval-created var/function in a
+                        // function variable env) is removed and `delete` is true; a
+                        // later reference is then unresolvable. Any other declarative
+                        // binding (`let`/`const`/param/ordinary var) is non-deletable.
+                        if (e.deletable.contains(target.identifier)) {
+                            _ = e.removeVar(target.identifier);
+                            break :blk Value.boolVal(true);
+                        }
                         if (self.strict) return self.throwError("TypeError", "Cannot delete binding");
                         break :blk Value.boolVal(false);
                     }
@@ -2084,8 +2125,14 @@ pub const Interpreter = struct {
                             try self.setMember(Value.obj(o), d.name, v);
                             break :blk Value.undef();
                         }
+                        try self.globalDefine(d.name, v);
                     }
-                    try self.globalDefine(d.name, v);
+                    // A bare `var x;` (no initializer) is a runtime no-op: the
+                    // binding already exists from declaration instantiation
+                    // (hoistVarNames runs at the var scope before the body). Calling
+                    // globalDefine here would clobber a prior value (`var x=5; var x;`
+                    // ⇒ 5, not undefined) and resurrect a binding a preceding
+                    // `delete` removed (a sloppy eval's deletable var).
                 } else if (d.kind == .@"const") {
                     try self.checkRestrictedGlobalLexical(d.name);
                     try self.env.putConst(d.name, v);
@@ -4326,6 +4373,8 @@ pub const Interpreter = struct {
         const saved_pe = self.in_param_expr;
         const saved_pd = self.in_param_default;
         self.in_param_default = false; // a function body is not a parameter default
+        const saved_edd = self.eval_decl_deletable;
+        self.eval_decl_deletable = false; // a function's own vars aren't eval-deletable, even if called from eval
         const saved_idc = self.in_derived_ctor;
         const saved_pm = self.current_private_map;
         if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
@@ -4384,6 +4433,7 @@ pub const Interpreter = struct {
             self.in_field_initializer = saved_fi;
             self.in_param_expr = saved_pe;
             self.in_param_default = saved_pd;
+            self.eval_decl_deletable = saved_edd;
             self.in_derived_ctor = saved_idc;
             self.current_private_map = saved_pm;
             self.pending_field_inits = saved_pfi;

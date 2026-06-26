@@ -217,6 +217,11 @@ fn finalizeEnv(e: *Environment) void {
     e.fn_names.deinit(a);
     e.fn_names = .{};
 
+    var dit = e.deletable.keyIterator();
+    while (dit.next()) |key| e.freeBindingName(key.*);
+    e.deletable.deinit(a);
+    e.deletable = .{};
+
     var ait = e.aliases.iterator();
     while (ait.next()) |entry| {
         e.freeBindingName(entry.key_ptr.*);
