@@ -2188,7 +2188,16 @@ pub const Interpreter = struct {
                     self.initEnvironment(iter_env, saved_env, false);
                     self.env = iter_env;
                 }
-                try self.bindLoopTarget(decl_kind, target, try self.getProperty(res, "value"));
+                // Binding/assigning the loop target is also an abrupt-completion
+                // close site: if PutValue or a destructuring assignment throws
+                // (e.g. a setter on `for (x.attr of it)`), IteratorClose runs
+                // before the error propagates. (IteratorValue itself — the
+                // `.value` get — does NOT close, so it stays outside the catch.)
+                const next_value = try self.getProperty(res, "value");
+                self.bindLoopTarget(decl_kind, target, next_value) catch |e| {
+                    self.iteratorCloseKeepingThrow(iter_obj);
+                    return e;
+                };
                 // A throw in the body closes the iterator before propagating. On a
                 // throw completion any error from IteratorClose is discarded AND the
                 // original thrown value is preserved (iteratorClose can overwrite
