@@ -1283,6 +1283,10 @@ pub const Interpreter = struct {
     /// `return`s an already-constructed instance, so a later `new` re-installs the
     /// derived class's private members on it).
     fn addPrivateBrandChecked(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!void {
+        // PrivateFieldAdd / PrivateMethodOrAccessorAdd step 1: a private member
+        // cannot be added to a non-extensible object.
+        if (!o.extensible)
+            return self.throwError("TypeError", "Cannot add a private member to a non-extensible object");
         if (o.hasPrivateBrand(name))
             return self.throwError("TypeError", "Cannot initialize a private member twice on the same object");
         try o.addPrivateBrand(self.arena, name);
@@ -1991,11 +1995,12 @@ pub const Interpreter = struct {
             },
             .private_field_def => |d| blk: {
                 // PrivateFieldAdd: brand `this` with this field's name (in
-                // declaration order, so a field read before its own definition
-                // throws) and define it as an own, writable, non-enumerable,
-                // non-configurable property. The value is evaluated *after* the
-                // brand exists, so the initializer may reference the field.
-                if (self.this_value.isObject()) try self.addPrivateBrandChecked(self.this_value.asObj(), d.name);
+                // declaration order) as an own, writable, non-enumerable,
+                // non-configurable property. Per DefineField, the initializer is
+                // evaluated FIRST and PrivateFieldAdd (the brand + the
+                // extensibility check + the store) happens AFTER — so a field
+                // whose initializer seals `this` (`#g = (preventExtensions(this),
+                // …)`) makes its own add throw, and a field cannot reference itself.
                 const fv = try self.eval(d.value);
                 // An anonymous initializer takes the field's source name (`#x`,
                 // the part of the storage key before the NUL marker).
@@ -2003,6 +2008,7 @@ pub const Interpreter = struct {
                 try self.maybeNameAnon(fv, raw_init, std.mem.sliceTo(d.name, 0));
                 if (self.this_value.isObject()) {
                     const o = self.this_value.asObj();
+                    try self.addPrivateBrandChecked(o, d.name);
                     try o.setOwn(self.arena, self.root_shape, d.name, fv);
                     try o.setAttr(self.arena, d.name, .{ .writable = true, .enumerable = false, .configurable = false });
                 }
@@ -3728,8 +3734,9 @@ pub const Interpreter = struct {
             self.this_value = class_val;
             self.home_object = class_obj;
             self.in_field_initializer = true;
-            // A static private field brands the class object (in order).
-            if (value.isPrivateKey(key)) try class_obj.addPrivateBrand(self.arena, key);
+            // DefineField order: evaluate the initializer FIRST, then
+            // PrivateFieldAdd (brand + extensibility check) — so a static private
+            // field whose initializer seals the class object makes its own add throw.
             const fv2 = if (m.field_init) |init_node| self.eval(init_node) catch |e| {
                 self.this_value = saved_this;
                 self.home_object = saved_home;
@@ -3740,6 +3747,7 @@ pub const Interpreter = struct {
             self.home_object = saved_home;
             self.in_field_initializer = saved_fi;
             if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
+            if (value.isPrivateKey(key)) try self.addPrivateBrandChecked(class_obj, key);
             try self.setProp(class_obj, key, fv2);
         }
 
