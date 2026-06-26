@@ -6382,10 +6382,10 @@ pub const Interpreter = struct {
         }
         // TimeClip(t): a non-finite or out-of-±8.64e15 time is NaN, otherwise the
         // integer part (toward zero), with -0 normalized to +0.
-        o.date_ms = if (std.math.isNan(t) or @abs(t) > 8.64e15) std.math.nan(f64) else blk: {
+        o.setDateMs(if (std.math.isNan(t) or @abs(t) > 8.64e15) std.math.nan(f64) else blk: {
             const tr = @trunc(t);
             break :blk if (tr == 0) 0 else tr;
-        };
+        });
         return Value.obj(o);
     }
 
@@ -6484,14 +6484,14 @@ pub const Interpreter = struct {
             tf = @as(f64, @floatFromInt(days)) * @as(f64, @floatFromInt(ms_per_day)) + @as(f64, @floatFromInt(tod));
             if (@abs(tf) > 8.64e15) tf = nan;
         }
-        o.date_ms = tf;
+        o.setDateMs(tf);
         return Value.num(tf);
     }
 
     /// `Date.prototype` methods (UTC-based; v1 ignores local timezone, so
     /// get*/getUTC* coincide). Time is the internal-slot field `date_ms`.
     fn dateMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
-        const t = o.date_ms;
+        const t = o.dateMs();
         const nan = std.math.nan(f64);
         if (eq(name, "getTime") or eq(name, "valueOf")) return Value.num(t);
         // toLocale{,Date,Time}String(locales, options) === new Intl.DateTimeFormat
@@ -6512,7 +6512,7 @@ pub const Interpreter = struct {
         if (eq(name, "setTime")) {
             var nt = try self.toNumberV(arg0(args));
             if (@abs(nt) > 8.64e15) nt = nan;
-            o.date_ms = nt;
+            o.setDateMs(nt);
             return Value.num(nt);
         }
 
@@ -6547,7 +6547,7 @@ pub const Interpreter = struct {
             if (sy) {
                 const yv = arg0(a).toNumber();
                 if (std.math.isNan(yv)) {
-                    o.date_ms = nan;
+                    o.setDateMs(nan);
                     return Value.num(nan);
                 }
                 const yi = @trunc(yv);
@@ -11755,7 +11755,7 @@ pub const Interpreter = struct {
         // built-in Date toString, which OrdinaryToPrimitive above skipped as a
         // native thunk.
         if (o.is_date) {
-            if (hint == .number) return Value.num(o.date_ms);
+            if (hint == .number) return Value.num(o.dateMs());
             return (try self.dateMethod(o, "toString", &.{})) orelse Value.str("Invalid Date");
         }
         // The built-in "[object …]" / array-join / Date / error fallback is the
@@ -25139,7 +25139,7 @@ fn dateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     // skips the native valueOf, so read it directly); other objects observe
     // their own valueOf/toString.
     if (o.is_date) {
-        if (!std.math.isFinite(o.date_ms)) return Value.nul();
+        if (!std.math.isFinite(o.dateMs())) return Value.nul();
     } else {
         const tv = try self.toPrimitive(Value.obj(o), .number);
         if (tv.isNumber() and !std.math.isFinite(tv.asNum())) return Value.nul();
@@ -25154,7 +25154,7 @@ fn dateToTemporalInstantFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or !this.asObj().is_date)
         return self.throwError("TypeError", "Date.prototype.toTemporalInstant called on a non-Date");
-    const ms = this.asObj().date_ms;
+    const ms = this.asObj().dateMs();
     if (!std.math.isFinite(ms)) return self.throwError("RangeError", "invalid Date");
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
     o.temporal.?.epoch_ns = @as(i128, @intFromFloat(ms)) * 1_000_000;
@@ -32232,7 +32232,7 @@ fn dateConstructor(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         // `new Date(dateObject)` copies its time value; otherwise ToPrimitive
         // (a string would be parsed — not yet — else ToNumber).
         if (args[0].isObject() and args[0].asObj().is_date)
-            return self.makeDate(args[0].asObj().date_ms);
+            return self.makeDate(args[0].asObj().dateMs());
         const prim = try self.toPrimitive(args[0], .default);
         if (prim.isString()) return self.makeDate(dateParseISO(prim.asStr()));
         // ToNumber(prim): a Symbol or BigInt primitive throws a TypeError.

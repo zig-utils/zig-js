@@ -582,6 +582,7 @@ pub const Object = struct {
     is_date: bool = false,
     date_ms: f64 = 0,
     is_array: bool = false,
+    // (atomic accessors for `date_ms` are defined as methods below)
     /// Test-shell `$vm.ensureArrayStorage(array)` marker. zig-js uses one
     /// generic array element backing rather than JSC's multiple butterfly
     /// regimes; this bit records the requested ArrayStorage witness mode so
@@ -854,6 +855,17 @@ pub const Object = struct {
     pub fn unlockElements(self: *const Object) void {
         if (!element_locks_enabled.load(.acquire)) return;
         @constCast(self).elements_lock.unlock();
+    }
+
+    /// `Date`'s [[DateValue]] slot, read/written atomically: a shared Date can be
+    /// `setTime`'d on one thread while another reads it (no-GIL). A single f64 is
+    /// one word, so `.monotonic` is a plain load/store (no perf cost) and just
+    /// tells ThreadSanitizer the access is synchronized.
+    pub fn dateMs(self: *const Object) f64 {
+        return @atomicLoad(f64, &@constCast(self).date_ms, .monotonic);
+    }
+    pub fn setDateMs(self: *Object, v: f64) void {
+        @atomicStore(f64, &self.date_ms, v, .monotonic);
     }
 
     pub fn elementsLen(self: *const Object) usize {
