@@ -207,9 +207,15 @@ per-thread before threads stop holding the GIL):
    thread), so a peer publishes its own roots at a safepoint without the
    collector ever reading its live VM stack.
 
-   *Abort-safe driver — the spec for the remaining wiring.* `collectMidScript`'s
-   `h.parallel` branch (which today early-returns) becomes a best-effort
-   collector that is sound by construction:
+   *Abort-safe driver — IMPLEMENTED (`parallel_midscript_gc`), validated
+   TSan-clean.* `collectMidScript`'s `h.parallel` branch is now a best-effort
+   collector that is sound by construction. The end-to-end test
+   ("parallel_js (M3): mid-script parallel collector reclaims garbage while
+   threads run") runs 3 real `Thread`s building + retaining graphs with no GIL
+   while a collector among them marks+sweeps: every retained graph survives
+   every collection, the run completes (no deadlock), and a parallel collection
+   finishes — 10/10 non-TSan and ThreadSanitizer-clean (zero data races). How it
+   works:
    - **Election.** A thread at its safepoint CAS-claims a single collector slot;
      losers `publishInterpreterRoots(self)` and return. No mutator ever blocks
      for the collector, so no mutator can be stuck holding a per-structure lock
@@ -218,23 +224,32 @@ per-thread before threads stop holding the GIL):
      `alloc_lock`, then traces only the *collector-safe* roots: realm-level
      state, the collector's own interpreter, and **parked** peers' frozen
      stacks (park records). Running peers' `active_interpreters` are skipped —
-     they self-publish. (Open: a realm-root parallel-safety audit, so the
-     collector's reads of `ctx.microtasks` / `async_waiters` / `js_threads` /
-     `c_api_handles` don't race a peer; several realm globals are already
-     lock-guarded, the rest must be before this drives arbitrary workloads.)
-   - **Dual publication.** Peers with an interpreter publish precise roots
-     (`publishInterpreterRoots`). Peers whose live `Value`s sit only in native
-     frames (no safepoints — e.g. a host loop) need a *conservative* self-scan
-     into `barrier_buf`; this conservative-publish helper is still to be built.
-   - **Terminate or abort.** The collector drives a bounded number of
-     `concurrentMarkRound`s, re-opening the handshake each round until every
-     active interpreter is *published-this-generation-or-parked* and a full
-     round adds zero greys — then `finishConcurrentMark` sweeps under
-     `alloc_lock`. If it can't converge within the bound (heavy contention), it
-     **aborts**: clear `marking`/`concurrent` and the scratch buffers, **do not
-     sweep**. An aborted mark frees nothing, so it can never use-after-free; the
-     next quiescent `collectGarbage` reclaims the garbage. This makes the driver
-     safe to land incrementally — it collects when it can converge cheaply and
+     they self-publish. The realm-root parallel-safety audit is **done**:
+     `traceRoots` reads `microtasks` under `microtask_lock`, `js_threads` under
+     the Gil `api_lock`, and `async_waiters`/`c_api_handles`/
+     `finalization_cleanup_jobs` under a new `Context.realm_lock` (all taken by
+     their mutators only under `parallel_js`); `ctx.exception` (redundant with
+     each interpreter's own) is skipped. The conservative native-stack scan was
+     made race-free too: `markConservativeWord` claims via the atomic
+     `claimMark`, and `buildAddrIndex` snapshots the all-list under `alloc_lock`.
+   - **Publication.** Running peers publish precise roots
+     (`publishInterpreterRoots`) at their safepoint; a peer blocked in `join` is
+     flagged `gc_parked` and traced directly (frozen). The redundant park-record
+     conservative scan is skipped under a parallel collection (it raced the
+     joiner's `beginPark`/`endPark` and is covered precisely by `gc_parked`).
+     *Open:* a peer blocked on `Atomics.wait`/`Lock`/`Condition` under
+     `parallel_js` is not yet `gc_parked`, so it makes the collector abort
+     (safe) rather than collect — a follow-up for full generality.
+   - **Terminate or abort.** The collector drives root-publication generations,
+     marking between, until a *born-cell-stable, nothing-deferred* quiescent
+     window, then attempts `finishConcurrentMarkParallel`. That fold-traces the
+     born cells (catching their **un-barriered creation-time references** — e.g.
+     an `Environment.parent` — which is why a naive finish swept live parents),
+     drains to closure, and **sweeps only if no peer allocated during the
+     finish** (`born_concurrent` still empty under `alloc_lock`); otherwise it
+     returns false and the driver **aborts**, freeing nothing. An aborted mark
+     can never use-after-free; the next quiescent `collectGarbage` reclaims the
+     garbage. So the driver collects when it catches a cheap quiescent window and
      falls back to quiescent collection otherwise, never trading correctness for
      pause-time.
 
