@@ -111,6 +111,11 @@ pub const Generator = struct {
     backing_allocator: ?std.mem.Allocator = null,
     backing_stores_live: ?*usize = null,
     backing_flags: BackingFlags = .{},
+    // `backingFor` is reached from both the request path (`requests_mutex`) and
+    // the resume path (`resume_mutex`); under `parallel_js` an enqueue on one
+    // thread races a resume on another on the packed `backing_flags` byte. Its
+    // own lock serializes the lazy flag-set (rare — once per backing kind).
+    backing_lock: std.atomic.Mutex = .unlocked,
     chunk: *Chunk,
     exec: Exec = .{},
     env: *Environment,
@@ -146,6 +151,11 @@ pub const Generator = struct {
 
     fn backingFor(self: *Generator, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
         const a = self.backing_allocator orelse return fallback;
+        var spins: usize = 0;
+        while (!self.backing_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        defer self.backing_lock.unlock();
         if (!@field(self.backing_flags, field)) {
             @field(self.backing_flags, field) = true;
             if (self.backing_stores_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
