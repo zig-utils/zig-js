@@ -580,9 +580,15 @@ flush their residual queue). With the budget-cleared corpus and these fixes, the
 promoted `parallel_js` allowlist now runs clean. (6)
 What now gates the GIL drop is the
 whole-corpus TSan campaign +
-serial-perf gate — drive the remaining rare no-GIL races (this blocking-gate
-drain flake and the `StringHashMap`-grow panic occasionally seen in the
-semantics batch) to zero under TSan. `-Dtsan` is now wired through to the corpus
+serial-perf gate. The two *named* remaining rare no-GIL races are now both
+closed: the blocking-gate drain flake (re-derived its GIL-specific assertion),
+and the `StringHashMap`-grow panic in the semantics batch — root-caused to
+unlocked map-*content* reads of `Object.accessors` in `seal`/`freeze`
+(`lockKeys` / the integrity check) and in the index-keyed property-mode
+`Atomics` accessor check (`isAccessor`), all now reading via a
+`property_lock`-held snapshot / the locked `getAccessor`. What remains is to run
+the whole corpus under TSan to surface any *un-named* residual races and clear
+the serial-perf gate. `-Dtsan` is now wired through to the corpus
 binary (`zig build threads-test -Dtsan=true` builds the corpus and the engine it
 links under ThreadSanitizer, via a dedicated TSan-instrumented `js` module;
 default-off so other targets are byte-identical). With the pinned toolchain
