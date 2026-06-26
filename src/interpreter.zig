@@ -1259,7 +1259,11 @@ pub const Interpreter = struct {
     pub fn globalDefineFunc(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
         const vs = self.env.varScope();
         if (vs.parent != null or self.global_object == null) {
+            const existed = vs.vars.contains(name);
             try vs.put(name, v);
+            // A sloppy direct eval's top-level function declaration in a function
+            // variable env is a deletable binding, like its `var` siblings.
+            if (!existed and vs.parent != null and self.eval_decl_deletable) try vs.markDeletable(name);
             return;
         }
         const g = self.global_object.?;
