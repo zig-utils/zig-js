@@ -3426,6 +3426,129 @@ pub const Interpreter = struct {
         }
     }
 
+    // ---- AST deep copy (for per-evaluation private-name rewriting) -------------
+    // A class with private names is rewritten in place (`#x` → a unique storage
+    // key). Two evaluations of the SAME class source (`classfactory()`) must get
+    // DISTINCT keys, so each evaluation first deep-copies its member ASTs and
+    // rewrites the copy — leaving the runtime (which reads the rewritten keys
+    // directly, and works for nested classes / async / the VM) unchanged.
+
+    fn deepCopyNodes(self: *Interpreter, nodes: []const *Node) EvalError![]*Node {
+        const out = try self.arena.alloc(*Node, nodes.len);
+        for (nodes, 0..) |n, i| out[i] = try self.deepCopyNode(n);
+        return out;
+    }
+
+    fn deepCopyOpt(self: *Interpreter, n: ?*Node) EvalError!?*Node {
+        return if (n) |x| try self.deepCopyNode(x) else null;
+    }
+
+    fn deepCopyFunction(self: *Interpreter, f: *const ast.FunctionNode) EvalError!*ast.FunctionNode {
+        const nf = try self.arena.create(ast.FunctionNode);
+        nf.* = f.*; // scalars + flags
+        const params = try self.arena.alloc(ast.Param, f.params.len);
+        for (f.params, 0..) |p, i| params[i] = .{
+            .name = p.name,
+            .default = try self.deepCopyOpt(p.default),
+            .is_rest = p.is_rest,
+            .pattern = try self.deepCopyOpt(p.pattern),
+        };
+        nf.params = params;
+        nf.body = try self.deepCopyNode(f.body);
+        return nf;
+    }
+
+    fn deepCopyClassMembers(self: *Interpreter, members: []const ast.ClassMember) EvalError![]ast.ClassMember {
+        const out = try self.arena.alloc(ast.ClassMember, members.len);
+        for (members, 0..) |m, i| {
+            out[i] = m; // scalars (key, flags, accessor)
+            out[i].key_expr = try self.deepCopyOpt(m.key_expr);
+            out[i].func = try self.deepCopyOpt(m.func);
+            out[i].field_init = try self.deepCopyOpt(m.field_init);
+            out[i].static_block = try self.deepCopyOpt(m.static_block);
+        }
+        return out;
+    }
+
+    /// Deep-copy an AST subtree (string/number leaves share their immutable
+    /// payloads; every node gets a fresh allocation so a later rewrite mutates
+    /// only this copy). Exhaustive — the compiler flags any unhandled variant.
+    fn deepCopyNode(self: *Interpreter, node: *const Node) EvalError!*Node {
+        const n = try self.arena.create(Node);
+        n.* = switch (node.*) {
+            .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .identifier, .break_stmt, .continue_stmt, .import_decl, .import_meta => node.*,
+            .unary => |u| .{ .unary = .{ .op = u.op, .operand = try self.deepCopyNode(u.operand) } },
+            .delete_expr => |x| .{ .delete_expr = try self.deepCopyNode(x) },
+            .update => |u| .{ .update = .{ .inc = u.inc, .prefix = u.prefix, .target = try self.deepCopyNode(u.target) } },
+            .binary => |b| .{ .binary = .{ .op = b.op, .left = try self.deepCopyNode(b.left), .right = try self.deepCopyNode(b.right) } },
+            .logical => |l| .{ .logical = .{ .op = l.op, .left = try self.deepCopyNode(l.left), .right = try self.deepCopyNode(l.right) } },
+            .sequence => |s| .{ .sequence = .{ .first = try self.deepCopyNode(s.first), .second = try self.deepCopyNode(s.second) } },
+            .assign => |a| .{ .assign = .{ .target = try self.deepCopyNode(a.target), .value = try self.deepCopyNode(a.value) } },
+            .op_assign => |a| .{ .op_assign = .{ .target = try self.deepCopyNode(a.target), .op = a.op, .value = try self.deepCopyNode(a.value) } },
+            .logical_assign => |a| .{ .logical_assign = .{ .target = try self.deepCopyNode(a.target), .op = a.op, .value = try self.deepCopyNode(a.value) } },
+            .conditional => |c| .{ .conditional = .{ .cond = try self.deepCopyNode(c.cond), .consequent = try self.deepCopyNode(c.consequent), .alternate = try self.deepCopyNode(c.alternate) } },
+            .function => |f| .{ .function = try self.deepCopyFunction(f) },
+            .yield_expr => |y| .{ .yield_expr = .{ .argument = try self.deepCopyOpt(y.argument), .delegate = y.delegate } },
+            .await_expr => |a| .{ .await_expr = .{ .argument = try self.deepCopyNode(a.argument) } },
+            .class_expr => |c| .{ .class_expr = .{ .name = c.name, .superclass = try self.deepCopyOpt(c.superclass), .members = try self.deepCopyClassMembers(c.members), .source = c.source } },
+            .super_call => |args| .{ .super_call = try self.deepCopyNodes(args) },
+            .super_member => |sm| .{ .super_member = .{ .property = sm.property, .computed = try self.deepCopyOpt(sm.computed) } },
+            .call => |c| .{ .call = .{ .callee = try self.deepCopyNode(c.callee), .args = try self.deepCopyNodes(c.args), .optional = c.optional } },
+            .new_expr => |x| .{ .new_expr = .{ .callee = try self.deepCopyNode(x.callee), .args = try self.deepCopyNodes(x.args) } },
+            .tagged_template => |t| .{ .tagged_template = .{ .tag = try self.deepCopyNode(t.tag), .cooked = t.cooked, .raw = t.raw, .exprs = try self.deepCopyNodes(t.exprs) } },
+            .member => |m| .{ .member = .{ .object = try self.deepCopyNode(m.object), .property = m.property, .computed = try self.deepCopyOpt(m.computed), .optional = m.optional } },
+            .optional_chain => |x| .{ .optional_chain = try self.deepCopyNode(x) },
+            .field_init_value => |x| .{ .field_init_value = try self.deepCopyNode(x) },
+            .private_field_def => |d| .{ .private_field_def = .{ .name = d.name, .value = try self.deepCopyNode(d.value) } },
+            .object_lit => |props| blk: {
+                const out = try self.arena.alloc(ast.Property, props.len);
+                for (props, 0..) |p, i| out[i] = .{ .key = p.key, .key_expr = try self.deepCopyOpt(p.key_expr), .value = try self.deepCopyNode(p.value), .accessor = p.accessor, .is_spread = p.is_spread, .proto_setter = p.proto_setter };
+                break :blk .{ .object_lit = out };
+            },
+            .array_lit => |items| .{ .array_lit = try self.deepCopyNodes(items) },
+            .spread => |x| .{ .spread = try self.deepCopyNode(x) },
+            .obj_pattern => |pat| blk: {
+                const props = try self.arena.alloc(ast.ObjPatProp, pat.props.len);
+                for (pat.props, 0..) |p, i| props[i] = .{ .key = p.key, .key_expr = try self.deepCopyOpt(p.key_expr), .target = try self.deepCopyNode(p.target), .default = try self.deepCopyOpt(p.default) };
+                break :blk .{ .obj_pattern = .{ .props = props, .rest = try self.deepCopyOpt(pat.rest) } };
+            },
+            .arr_pattern => |pat| blk: {
+                const elems = try self.arena.alloc(ast.ArrPatElem, pat.elems.len);
+                for (pat.elems, 0..) |el, i| elems[i] = .{ .target = try self.deepCopyOpt(el.target), .default = try self.deepCopyOpt(el.default) };
+                break :blk .{ .arr_pattern = .{ .elems = elems, .rest = try self.deepCopyOpt(pat.rest) } };
+            },
+            .var_decl => |vd| .{ .var_decl = .{ .kind = vd.kind, .name = vd.name, .init = try self.deepCopyOpt(vd.init), .dispose = vd.dispose } },
+            .destructure_decl => |dd| .{ .destructure_decl = .{ .kind = dd.kind, .pattern = try self.deepCopyNode(dd.pattern), .init = try self.deepCopyNode(dd.init) } },
+            .func_decl => |f| .{ .func_decl = try self.deepCopyFunction(f) },
+            .return_stmt => |x| .{ .return_stmt = try self.deepCopyOpt(x) },
+            .throw_stmt => |x| .{ .throw_stmt = try self.deepCopyNode(x) },
+            .try_stmt => |t| blk: {
+                const nt = try self.arena.create(ast.TryNode);
+                nt.* = .{ .block = try self.deepCopyNode(t.block), .catch_param = try self.deepCopyOpt(t.catch_param), .catch_block = try self.deepCopyOpt(t.catch_block), .finally_block = try self.deepCopyOpt(t.finally_block) };
+                break :blk .{ .try_stmt = nt };
+            },
+            .labeled_stmt => |l| .{ .labeled_stmt = .{ .label = l.label, .body = try self.deepCopyNode(l.body) } },
+            .expr_stmt => |x| .{ .expr_stmt = try self.deepCopyNode(x) },
+            .block => |stmts| .{ .block = try self.deepCopyNodes(stmts) },
+            .decl_group => |stmts| .{ .decl_group = try self.deepCopyNodes(stmts) },
+            .if_stmt => |i| .{ .if_stmt = .{ .cond = try self.deepCopyNode(i.cond), .consequent = try self.deepCopyNode(i.consequent), .alternate = try self.deepCopyOpt(i.alternate) } },
+            .while_stmt => |w| .{ .while_stmt = .{ .cond = try self.deepCopyNode(w.cond), .body = try self.deepCopyNode(w.body) } },
+            .do_while_stmt => |d| .{ .do_while_stmt = .{ .body = try self.deepCopyNode(d.body), .cond = try self.deepCopyNode(d.cond) } },
+            .for_stmt => |f| .{ .for_stmt = .{ .init = try self.deepCopyOpt(f.init), .cond = try self.deepCopyOpt(f.cond), .update = try self.deepCopyOpt(f.update), .body = try self.deepCopyNode(f.body) } },
+            .for_in => |f| .{ .for_in = .{ .decl_kind = f.decl_kind, .target = try self.deepCopyNode(f.target), .iterable = try self.deepCopyNode(f.iterable), .body = try self.deepCopyNode(f.body), .is_of = f.is_of, .is_await = f.is_await } },
+            .switch_stmt => |s| blk: {
+                const cases = try self.arena.alloc(ast.SwitchCase, s.cases.len);
+                for (s.cases, 0..) |c, i| cases[i] = .{ .@"test" = try self.deepCopyOpt(c.@"test"), .body = try self.deepCopyNodes(c.body) };
+                break :blk .{ .switch_stmt = .{ .disc = try self.deepCopyNode(s.disc), .cases = cases } };
+            },
+            .with_stmt => |w| .{ .with_stmt = .{ .obj = try self.deepCopyNode(w.obj), .body = try self.deepCopyNode(w.body) } },
+            .export_decl => node.*, // exports never appear inside a class body
+            .import_call => |ic| .{ .import_call = .{ .specifier = try self.deepCopyNode(ic.specifier), .options = try self.deepCopyOpt(ic.options) } },
+            .program => |stmts| .{ .program = try self.deepCopyNodes(stmts) },
+        };
+        return n;
+    }
+
     /// Rewrite this class's private names (`#x` → a unique storage key) in member
     /// keys and bodies, and return the raw→storage map (persisted in the arena) so
     /// the class's functions can resolve private names a direct eval references.
@@ -3503,7 +3626,19 @@ pub const Interpreter = struct {
         return self.buildClass(name, members, super_obj, super_proto, source, derived, class_env);
     }
 
-    fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment) EvalError!Value {
+    fn buildClass(self: *Interpreter, name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment) EvalError!Value {
+        // A class with private names is rewritten (`#x` → a unique storage key) in
+        // place. Deep-copy the member ASTs first so EACH evaluation rewrites its
+        // own copy — two evaluations of the same class source then have distinct
+        // private names (the `classfactory()` / multiple-evaluations tests).
+        var has_private = false;
+        for (members_arg) |m| {
+            if (m.key_expr == null and value.isRawPrivateName(m.key)) {
+                has_private = true;
+                break;
+            }
+        }
+        const members = if (has_private) try self.deepCopyClassMembers(members_arg) else members_arg;
         const private_map = try self.rewriteClassPrivateNames(members);
         // Execute the class's static elements / field initializers with this
         // class's private map active, so a direct eval in them resolves the
