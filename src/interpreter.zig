@@ -4211,9 +4211,32 @@ pub const Interpreter = struct {
         if (func.is_async and func.is_generator) return self.newObject();
 
         if (func.is_expr_body) return self.eval(func.body);
-        // Hoist the body's `var` declarations into the function scope (the current
-        // `call_env`) before executing it, so a forward reference reads undefined.
-        if (func.body.* == .block) try self.hoistVarNames(func.body.block);
+        // FunctionDeclarationInstantiation: when the formals contain a parameter
+        // expression (a default Initializer), the body runs in a SEPARATE variable
+        // environment, so a closure created in the parameter list cannot see the
+        // body's `var`/function declarations (and vice-versa). A body `var` that
+        // names a parameter inherits the parameter's bound value.
+        var has_param_expr = false;
+        for (func.params) |p| if (p.default != null) {
+            has_param_expr = true;
+            break;
+        };
+        if (func.body.* == .block) {
+            if (has_param_expr) {
+                const body_env = try gc_mod.allocEnv(self.arena);
+                self.initEnvironment(body_env, call_env, true);
+                self.env = body_env;
+                try self.hoistVarNames(func.body.block);
+                for (func.params) |p| {
+                    if (p.pattern == null and !p.is_rest and body_env.vars.contains(p.name)) {
+                        if (call_env.get(p.name)) |pv| try body_env.put(p.name, pv);
+                    }
+                }
+            } else {
+                // Hoist the body's `var`s into the (shared) function scope.
+                try self.hoistVarNames(func.body.block);
+            }
+        }
         // Expose this activation's parameter names + tag the body block as the
         // function-body scope, for Annex B B.3.3 block-function analysis.
         const saved_params = self.cur_params;
