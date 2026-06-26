@@ -178,8 +178,11 @@ pub const AsyncGenRequest = struct {
 /// encoding (matching the tree-walker's `memberKey`); everything else coerces
 /// to string.
 fn propKey(vm: *Interpreter, key: Value) EvalError![]const u8 {
-    if (key.isObject() and key.asObj().is_symbol) return key.asObj().sym_key;
-    return key.toString(vm.arena);
+    // ToPropertyKey: an object key is first ToPrimitive(key, string) — running its
+    // `[Symbol.toPrimitive]`/`toString`/`valueOf` — and a Symbol key is registered
+    // so it round-trips through getOwnPropertySymbols/proxy traps. Shared with the
+    // tree-walker so a computed `{[obj]: …}` / `o[obj]` coerces identically.
+    return vm.keyOf(key);
 }
 
 fn generatorStackAllocator(vm: *Interpreter, gen: ?*Generator) std.mem.Allocator {
