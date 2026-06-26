@@ -17750,10 +17750,18 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
     const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
     if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     if (ab.immutable) return self.throwError("TypeError", "ArrayBuffer is already immutable");
-    const out = try self.makeArrayBuffer(new_len);
-    @memcpy(out.array_buffer.?.bytes()[0..@min(new_len, ab.bytes().len)], ab.bytes()[0..@min(new_len, ab.bytes().len)]);
-    out.array_buffer.?.immutable = true;
-    ab.detached = true;
+    const out = try self.makeArrayBuffer(new_len); // alloc before the lock (may GC)
+    // Serialize bytes-copy + detach against a peer's Atomics (see transfer).
+    ab.lockBuffer();
+    const was_detached = ab.detached;
+    if (!was_detached) {
+        const n = @min(new_len, ab.bytes().len);
+        @memcpy(out.array_buffer.?.bytes()[0..n], ab.bytes()[0..n]);
+        out.array_buffer.?.immutable = true;
+        ab.detached = true;
+    }
+    ab.unlockBuffer();
+    if (was_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
     return Value.obj(out);
 }
 
@@ -17817,10 +17825,22 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
             if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
             if (ab.immutable) return self.throwError("TypeError", "an immutable ArrayBuffer cannot be transferred");
-            const out = try self.makeArrayBuffer(new_len);
-            @memcpy(out.array_buffer.?.bytes()[0..@min(new_len, ab.bytes().len)], ab.bytes()[0..@min(new_len, ab.bytes().len)]);
-            if (!fixed) out.array_buffer.?.max_byte_length = ab.max_byte_length;
-            ab.detached = true;
+            const out = try self.makeArrayBuffer(new_len); // alloc before the lock (may GC)
+            // Serialize the bytes copy + detach against a peer's Atomics on this
+            // buffer (which take `lockBuffer`) under `parallel_js`. Detach does not
+            // free `local_data` (GC owns it), so this is a data-race fix, not a
+            // UAF fix — `lockBuffer` suffices. Throw outside the lock (throwError
+            // allocates). Re-check `detached` under the lock.
+            ab.lockBuffer();
+            const was_detached = ab.detached;
+            if (!was_detached) {
+                const n = @min(new_len, ab.bytes().len);
+                @memcpy(out.array_buffer.?.bytes()[0..n], ab.bytes()[0..n]);
+                if (!fixed) out.array_buffer.?.max_byte_length = ab.max_byte_length;
+                ab.detached = true;
+            }
+            ab.unlockBuffer();
+            if (was_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
             return Value.obj(out);
         }
     }.call;
