@@ -1773,15 +1773,21 @@ pub const Interpreter = struct {
                         try self.setMember(Value.obj(wo), name, v);
                         break :blk v;
                     }
-                    if (bindingEnvOf(self.env, name)) |e| if (e.parent != null and
-                        !e.consts.contains(name) and !e.fn_names.contains(name) and e.aliases.get(name) == null and
-                        !self.isTdz(e.vars.get(name) orelse Value.undef()))
-                    {
-                        const v = try self.eval(a.value);
-                        try self.maybeNameAnon(v, a.value, name);
-                        try e.assign(name, v); // write to the captured binding
-                        break :blk v;
-                    };
+                    if (bindingEnvOf(self.env, name)) |e| {
+                        // Read the 4 binding tables under one lock hold (no-GIL
+                        // race class); isTdz on the copied value needs no lock.
+                        e.lockBindings();
+                        const eligible = e.parent != null and !e.consts.contains(name) and
+                            !e.fn_names.contains(name) and e.aliases.get(name) == null;
+                        const cur = e.vars.get(name) orelse Value.undef();
+                        e.unlockBindings();
+                        if (eligible and !self.isTdz(cur)) {
+                            const v = try self.eval(a.value);
+                            try self.maybeNameAnon(v, a.value, name);
+                            try e.assign(name, v); // write to the captured binding
+                            break :blk v;
+                        }
+                    }
                 }
                 const v = try self.eval(a.value);
                 // NamedEvaluation: `f = function(){}` names the function "f"
@@ -1817,13 +1823,17 @@ pub const Interpreter = struct {
                         const old = try self.eval(oa.target);
                         const rhs = try self.eval(oa.value);
                         const new = try self.applyBinary(oa.op, old, rhs);
-                        if (benv) |e| if (e.parent != null and !e.consts.contains(name) and
-                            !e.fn_names.contains(name) and e.aliases.get(name) == null and
-                            !self.isTdz(e.vars.get(name) orelse Value.undef()))
-                        {
-                            try e.assign(name, new); // write to the captured binding
-                            break :blk new;
-                        };
+                        if (benv) |e| {
+                            e.lockBindings();
+                            const eligible = e.parent != null and !e.consts.contains(name) and
+                                !e.fn_names.contains(name) and e.aliases.get(name) == null;
+                            const cur = e.vars.get(name) orelse Value.undef();
+                            e.unlockBindings();
+                            if (eligible and !self.isTdz(cur)) {
+                                try e.assign(name, new); // write to the captured binding
+                                break :blk new;
+                            }
+                        }
                         try self.assignTo(oa.target, new);
                         break :blk new;
                     },
