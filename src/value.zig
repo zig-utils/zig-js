@@ -633,9 +633,11 @@ pub const Object = struct {
     /// surfaced to host callbacks via private-data accessors later.
     private_data: ?*anyopaque = null,
     /// `Thread.restrict(obj)`: the only OS thread allowed to touch this
-    /// object through the enforced internal-method funnels (null =
-    /// unrestricted). Foreign access throws `ConcurrentAccessError`.
-    restricted_to: ?u64 = null,
+    /// object through the enforced internal-method funnels (0 =
+    /// unrestricted). Foreign access throws `ConcurrentAccessError`. Atomic: the
+    /// claim is a CAS (two `Thread.restrict` calls on the same object race), and
+    /// the enforcement check reads it from any thread. Thread ids are never 0.
+    restricted_to: std.atomic.Value(u64) = .init(0),
     /// True for `Error`-family instances; drives `toString` and `instanceof`.
     is_error: bool = false,
     /// True for `RegExp` instances (carries `source`/`flags` properties; matching

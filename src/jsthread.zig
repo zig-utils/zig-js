@@ -1751,12 +1751,12 @@ fn threadRestrictFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value
         o.prim == null and o.error_ctor == null and o.getOwn("constructor") == null;
     if (!plain) return self.throwError("TypeError", "cannot restrict this object");
     const tid: u64 = @intCast(std.Thread.getCurrentId());
-    if (o.restricted_to) |owner| {
+    // Claim via CAS 0→tid so two concurrent restricts can't both win.
+    if (o.restricted_to.cmpxchgStrong(0, tid, .acq_rel, .acquire)) |owner| {
         if (owner != tid)
             return self.throwError("ConcurrentAccessError", "Thread.restrict called from a non-owning thread");
         return v; // owner double-restrict is a no-op returning o
     }
-    o.restricted_to = tid;
     return v;
 }
 
