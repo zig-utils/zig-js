@@ -4517,6 +4517,12 @@ pub const Interpreter = struct {
                     try args_obj.asObj().setAccessor(self.arena, "callee", Value.obj(tte), Value.obj(tte));
                     try args_obj.asObj().setAttr(self.arena, "callee", .{ .enumerable = false, .configurable = false });
                 }
+            } else if (func.obj) |fo| {
+                // A mapped (sloppy, simple-parameter) arguments object's `callee` is
+                // an own data property = the callee function itself, {writable: true,
+                // enumerable: false, configurable: true}.
+                try args_obj.asObj().setOwn(self.arena, self.root_shape, "callee", Value.obj(fo));
+                try args_obj.asObj().setAttr(self.arena, "callee", .{ .writable = true, .enumerable = false, .configurable = true });
             }
             // Mapped arguments [[ParameterMap]]: in sloppy mode with simple
             // parameters, each in-range index aliases its parameter binding (a
@@ -7842,12 +7848,15 @@ pub const Interpreter = struct {
                 if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, receiver);
                 if (moduleNsOf(o)) |ns| return moduleNsGet(self, ns, key);
                 // Legacy `caller`: a *non-strict ordinary* function (not strict,
-                // arrow, generator, async, or bound) reads `null` for `.caller`,
-                // shadowing the inherited %ThrowTypeError% poison pill — which
-                // still fires for strict/bound functions and for `.arguments`.
+                // arrow, generator, async, or bound) reads `undefined` for `.caller`
+                // (we don't expose the live call stack — the "extension not
+                // supported" answer test262 accepts), shadowing the inherited
+                // %ThrowTypeError% poison pill — which still fires for strict/bound
+                // functions and for `.arguments`. (Not `null`: `fn.caller` is never
+                // null in the legacy extension; code does `caller === undefined`.)
                 if (std.mem.eql(u8, key, "caller") and o.bound == null and o.getOwn(key) == null) {
                     if (funcOf(recv)) |f| {
-                        if (!f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async) return Value.nul();
+                        if (!f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async) return Value.undef();
                     }
                 }
                 // A (non-arrow) function's `.prototype` is an own data property,
