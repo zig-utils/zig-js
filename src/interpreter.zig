@@ -2062,6 +2062,10 @@ pub const Interpreter = struct {
             },
             .super_member => |m| blk: {
                 const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                // GetThisBinding (SuperProperty step 2) precedes evaluating the
+                // property key (step 3): in a derived constructor before `super()`,
+                // `super[expr]` / `super.x` is a ReferenceError and `expr` never runs.
+                if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
                 // GetSuperBase is captured BEFORE ToPropertyKey of the computed key,
                 // so a key whose `toString` mutates the home object's prototype
                 // can't change which base the lookup uses (RequireObjectCoercible:
@@ -8453,6 +8457,9 @@ pub const Interpreter = struct {
             // through an inherited setter of) the current instance.
             .super_member => |m| {
                 const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                // GetThisBinding precedes evaluating the key (see the read path): a
+                // derived-ctor `super[expr] = …` before `super()` is a ReferenceError.
+                if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
                 // GetSuperBase before ToPropertyKey of the computed key (see the
                 // read path), so a key `toString` that mutates the home prototype
                 // can't redirect the write.
