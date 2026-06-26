@@ -191,7 +191,7 @@ const Serializer = struct {
                 try s.w.int(u64, @intFromPtr(storage.retain()));
                 return;
             }
-            if (ab.detached) return s.throwClone("DataCloneError: detached ArrayBuffer cannot be cloned");
+            if (ab.isDetached()) return s.throwClone("DataCloneError: detached ArrayBuffer cannot be cloned");
             try s.w.tag(.array_buffer);
             try s.w.int(u64, if (ab.max_byte_length) |m| @intCast(m) else std.math.maxInt(u64));
             try s.w.str(ab.bytes());

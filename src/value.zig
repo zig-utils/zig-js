@@ -118,7 +118,7 @@ pub const ArrayBufferData = struct {
     /// arena. Shared buffers set this for the metadata only; their bytes are
     /// owned by `SharedBufferStorage`.
     gc_owned: bool = false,
-    detached: bool = false,
+    detached_flag: std.atomic.Value(bool) = .init(false),
     /// For a resizable ArrayBuffer (or growable SharedArrayBuffer), the maximum
     /// byte length; null means fixed-length (not resizable/growable).
     max_byte_length: ?usize = null,
@@ -134,6 +134,17 @@ pub const ArrayBufferData = struct {
     pub inline fn bytes(self: *const ArrayBufferData) []u8 {
         if (self.shared) |s| return s.slice();
         return self.local_data;
+    }
+
+    /// The detach flag, accessed atomically: a peer thread can `transfer`/detach
+    /// a (non-shared) buffer while another reads it (no-GIL). A single bool is one
+    /// byte, so `.monotonic` is a plain load/store — it just marks the access
+    /// synchronized for ThreadSanitizer.
+    pub inline fn isDetached(self: *const ArrayBufferData) bool {
+        return @constCast(self).detached_flag.load(.monotonic);
+    }
+    pub inline fn setDetached(self: *ArrayBufferData, v: bool) void {
+        self.detached_flag.store(v, .monotonic);
     }
 
     pub fn lockBuffer(self: *const ArrayBufferData) void {
@@ -389,7 +400,7 @@ pub const TypedArrayData = struct {
     /// unless its range no longer fits.
     pub fn currentLength(self: *const TypedArrayData) ?usize {
         const buf = self.buffer.array_buffer orelse return null;
-        if (buf.detached) return null;
+        if (buf.isDetached()) return null;
         const esz = self.kind.byteSize();
         if (self.byte_offset > buf.bytes().len) return null;
         if (self.track_length) return (buf.bytes().len - self.byte_offset) / esz;
@@ -411,7 +422,7 @@ pub const DataViewData = struct {
     /// resizable buffer shrank below it) or detached.
     pub fn currentByteLength(self: *const DataViewData) ?usize {
         const buf = self.buffer.array_buffer orelse return null;
-        if (buf.detached) return null;
+        if (buf.isDetached()) return null;
         if (self.byte_offset > buf.bytes().len) return null;
         if (self.track_length) return buf.bytes().len - self.byte_offset;
         if (self.byte_offset + self.byte_length > buf.bytes().len) return null;

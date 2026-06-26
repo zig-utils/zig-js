@@ -7877,7 +7877,7 @@ pub const Interpreter = struct {
                 }
                 if (o.array_buffer) |ab| {
                     if (std.mem.eql(u8, key, "byteLength") and o.getOwn(key) == null and o.getAccessor(key) == null)
-                        return Value.num(@floatFromInt(if (ab.detached) 0 else ab.bytes().len));
+                        return Value.num(@floatFromInt(if (ab.isDetached()) 0 else ab.bytes().len));
                 }
                 if (o.typed_array) |ta| {
                     const cur = ta.currentLength(); // null when detached / out of bounds
@@ -8991,7 +8991,7 @@ pub const Interpreter = struct {
         });
         if (!res.isObject() or res.asObj().typed_array == null)
             return self.throwError("TypeError", "TypedArray species did not return a TypedArray");
-        if (res.asObj().typed_array.?.buffer.array_buffer.?.detached)
+        if (res.asObj().typed_array.?.buffer.array_buffer.?.isDetached())
             return self.throwError("TypeError", "TypedArray species returned a detached TypedArray");
         if (res.asObj().typed_array.?.kind.isBigInt() != kind.isBigInt())
             return self.throwError("TypeError", "TypedArray species content type does not match");
@@ -9090,7 +9090,7 @@ pub const Interpreter = struct {
             // byteOffset/length coercions run user code, so they stay outside.
             const abuf = buffer.array_buffer.?;
             abuf.lockBuffer();
-            const ab_detached = abuf.detached;
+            const ab_detached = abuf.isDetached();
             const buflen = if (ab_detached) 0 else abuf.bytes().len;
             abuf.unlockBuffer();
             if (ab_detached) return self.throwError("TypeError", "Cannot construct a TypedArray on a detached buffer");
@@ -13880,7 +13880,7 @@ fn host262DetachFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = ctx;
     const v = if (args.len > 0) args[0] else Value.undef();
     if (v.isObject()) if (v.asObj().array_buffer) |ab| {
-        ab.detached = true;
+        ab.setDetached(true);
     };
     return Value.undef();
 }
@@ -14593,7 +14593,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (!buf_v.isObject() or buf_v.asObj().array_buffer == null) return self.throwError("TypeError", "First argument to DataView must be an ArrayBuffer");
     const ab = buf_v.asObj().array_buffer.?;
     const offset = try toIndexArg(self, if (args.len > 1) args[1] else Value.undef());
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const buf_len = ab.bytes().len;
     if (offset > buf_len) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
     var view_len: usize = buf_len - @as(usize, @intCast(offset));
@@ -14601,7 +14601,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const track = (args.len <= 2 or args[2].isUndefined()) and ab.max_byte_length != null;
     if (args.len > 2 and !args[2].isUndefined()) {
         const vl = try toIndexArg(self, args[2]);
-        if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+        if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
         if (offset + vl > @as(u64, @intCast(ab.bytes().len))) return self.throwError("RangeError", "Invalid DataView length");
         view_len = @intCast(vl);
     }
@@ -14610,7 +14610,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     // The detached/out-of-bounds re-check after OrdinaryCreateFromConstructor is
     // spec'd: reading newTarget.prototype can run user code that detaches or
     // resizes the buffer.
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const live_len = ab.bytes().len;
     if (offset > live_len) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
     if (!track and offset + @as(u64, @intCast(view_len)) > @as(u64, @intCast(live_len)))
@@ -16871,11 +16871,11 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     if (!this.isObject() or this.asObj().array_buffer == null or this.asObj().array_buffer.?.is_shared != want_shared)
         return self.throwError("TypeError", kind_name ++ ".prototype.slice called on an incompatible receiver");
     const ab = this.asObj().array_buffer.?;
-    if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.bytes().len;
     const start = try relIndex(self, if (args.len > 0) args[0] else Value.undef(), blen, 0);
     const end = try relIndex(self, if (args.len > 1) args[1] else Value.undef(), blen, @floatFromInt(blen));
-    if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const src_len = ab.bytes().len;
     const safe_count = if (start >= src_len) 0 else @min(if (end > start) end - start else 0, src_len - start);
     // ArrayBufferSpeciesCreate(O, newLen).
@@ -16887,11 +16887,11 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
     const nb = new_v.asObj().array_buffer.?;
     if (nb.is_shared != want_shared)
         return self.throwError("TypeError", "ArrayBuffer species constructor returned a buffer of the wrong shared-ness");
-    if (!want_shared and nb.detached) return self.throwError("TypeError", "species constructor returned a detached ArrayBuffer");
+    if (!want_shared and nb.isDetached()) return self.throwError("TypeError", "species constructor returned a detached ArrayBuffer");
     if (!want_shared and nb.immutable) return self.throwError("TypeError", "species constructor returned an immutable ArrayBuffer");
     if (new_v.asObj() == this.asObj()) return self.throwError("TypeError", "ArrayBuffer species constructor returned the same buffer");
     if (nb.bytes().len < safe_count) return self.throwError("TypeError", "ArrayBuffer species constructor returned too small a buffer");
-    if (!want_shared and ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (!want_shared and ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     @memcpy(nb.bytes()[0..safe_count], ab.bytes()[start .. start + safe_count]);
     return new_v;
 }
@@ -17617,7 +17617,7 @@ fn uint8ArrayBytes(o: *value.Object) ?[]u8 {
     const ta = o.typed_array orelse return null;
     if (ta.kind != .u8) return null;
     const buf = ta.buffer.array_buffer orelse return null;
-    if (buf.detached) return null;
+    if (buf.isDetached()) return null;
     const avail = if (ta.byte_offset <= buf.bytes().len) buf.bytes().len - ta.byte_offset else 0;
     const n = @min(ta.length, avail);
     return buf.bytes()[ta.byte_offset .. ta.byte_offset + n];
@@ -17763,10 +17763,10 @@ fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resiza
             // receiver throws (it has its own byteLength/maxByteLength/growable).
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a SharedArrayBuffer");
             return switch (which) {
-                .byte_length => Value.num(@floatFromInt(if (ab.detached) 0 else ab.bytes().len)),
-                .max_byte_length => Value.num(@floatFromInt(if (ab.detached) 0 else (ab.max_byte_length orelse ab.bytes().len))),
+                .byte_length => Value.num(@floatFromInt(if (ab.isDetached()) 0 else ab.bytes().len)),
+                .max_byte_length => Value.num(@floatFromInt(if (ab.isDetached()) 0 else (ab.max_byte_length orelse ab.bytes().len))),
                 .resizable => Value.boolVal(ab.max_byte_length != null),
-                .detached => Value.boolVal(ab.detached),
+                .detached => Value.boolVal(ab.isDetached()),
                 .immutable => Value.boolVal(ab.immutable),
             };
         }
@@ -17782,17 +17782,17 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
     const ab = this.asObj().array_buffer.?;
     if (ab.is_shared) return self.throwError("TypeError", "transferToImmutable cannot be called on a SharedArrayBuffer");
     const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     if (ab.immutable) return self.throwError("TypeError", "ArrayBuffer is already immutable");
     const out = try self.makeArrayBuffer(new_len); // alloc before the lock (may GC)
     // Serialize bytes-copy + detach against a peer's Atomics (see transfer).
     ab.lockBuffer();
-    const was_detached = ab.detached;
+    const was_detached = ab.isDetached();
     if (!was_detached) {
         const n = @min(new_len, ab.bytes().len);
         @memcpy(out.array_buffer.?.bytes()[0..n], ab.bytes()[0..n]);
         out.array_buffer.?.immutable = true;
-        ab.detached = true;
+        ab.setDetached(true);
     }
     ab.unlockBuffer();
     if (was_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
@@ -17806,12 +17806,12 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
     if (!this.isObject() or this.asObj().array_buffer == null) return self.throwError("TypeError", "ArrayBuffer.prototype.sliceToImmutable called on a non-ArrayBuffer");
     const ab = this.asObj().array_buffer.?;
     if (ab.is_shared) return self.throwError("TypeError", "sliceToImmutable cannot be called on a SharedArrayBuffer");
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const blen = ab.bytes().len;
     const start = try relIndex(self, if (args.len > 0) args[0] else Value.undef(), blen, 0);
     const end = try relIndex(self, if (args.len > 1) args[1] else Value.undef(), blen, @floatFromInt(blen));
     const count = if (end > start) end - start else 0;
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const src_len = ab.bytes().len;
     if (src_len < end) return self.throwError("RangeError", "ArrayBuffer shrank below resolved slice end");
     const out = try self.makeArrayBuffer(count);
@@ -17828,13 +17828,13 @@ fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a SharedArrayBuffer");
     if (ab.max_byte_length == null) return self.throwError("TypeError", "ArrayBuffer is not resizable");
     const new_len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
-    if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     if (new_len > ab.max_byte_length.?) return self.throwError("RangeError", "resize exceeds maxByteLength");
     const nl: usize = @intCast(new_len);
     const fresh = try self.allocArrayBufferBytes(nl);
     errdefer self.freeArrayBufferBytes(fresh, ab.gc_owned);
     ab.lockBuffer();
-    if (ab.detached) {
+    if (ab.isDetached()) {
         ab.unlockBuffer();
         return self.throwError("TypeError", "ArrayBuffer is detached");
     }
@@ -17857,7 +17857,7 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             const ab = this.asObj().array_buffer.?;
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
             const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
-            if (ab.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+            if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
             if (ab.immutable) return self.throwError("TypeError", "an immutable ArrayBuffer cannot be transferred");
             const out = try self.makeArrayBuffer(new_len); // alloc before the lock (may GC)
             // Serialize the bytes copy + detach against a peer's Atomics on this
@@ -17866,12 +17866,12 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             // UAF fix — `lockBuffer` suffices. Throw outside the lock (throwError
             // allocates). Re-check `detached` under the lock.
             ab.lockBuffer();
-            const was_detached = ab.detached;
+            const was_detached = ab.isDetached();
             if (!was_detached) {
                 const n = @min(new_len, ab.bytes().len);
                 @memcpy(out.array_buffer.?.bytes()[0..n], ab.bytes()[0..n]);
                 if (!fixed) out.array_buffer.?.max_byte_length = ab.max_byte_length;
-                ab.detached = true;
+                ab.setDetached(true);
             }
             ab.unlockBuffer();
             if (was_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
@@ -23399,7 +23399,7 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
                     return self.throwError("TypeError", "DataCloneError: only ArrayBuffers are transferable");
                 const ab = entry.asObj().array_buffer.?;
                 if (ab.is_shared) return self.throwError("TypeError", "DataCloneError: a SharedArrayBuffer is not transferable");
-                if (ab.detached) return self.throwError("TypeError", "DataCloneError: cannot transfer a detached ArrayBuffer");
+                if (ab.isDetached()) return self.throwError("TypeError", "DataCloneError: cannot transfer a detached ArrayBuffer");
                 if (ab.immutable) return self.throwError("TypeError", "DataCloneError: cannot transfer an immutable ArrayBuffer");
                 for (transfer.items) |seen| if (seen == entry.asObj())
                     return self.throwError("TypeError", "DataCloneError: duplicate transferable");
@@ -23411,7 +23411,7 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     // The move: the clone owns a copy of the bytes; the sources detach now
     // (after a fully successful serialize, so a DataCloneError mid-graph
     // leaves the inputs untouched).
-    for (transfer.items) |o| o.array_buffer.?.detached = true;
+    for (transfer.items) |o| o.array_buffer.?.setDetached(true);
     return structured_clone.deserialize(self, bytes);
 }
 
@@ -23618,7 +23618,7 @@ fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, o
     // ValidateTypedArray(write): reject an immutable buffer before the index is
     // coerced (the value isn't coerced yet either).
     if (write and ta.buffer.array_buffer.?.immutable) return self.throwError("TypeError", "Atomics cannot write to an immutable ArrayBuffer");
-    if (ta.buffer.array_buffer.?.detached) return self.throwError("TypeError", "ArrayBuffer is detached");
+    if (ta.buffer.array_buffer.?.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     const i = try toIndexArg(self, idx_v);
     if (i >= ta.length) return self.throwError("RangeError", "Access index out of bounds for atomic access.");
     return .{ .ta = ta, .i = @intCast(i) };
