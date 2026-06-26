@@ -3543,22 +3543,16 @@ pub const Interpreter = struct {
             cf.private_brand_names = brand_names.items;
         }
 
+        // ClassDefinitionEvaluation splits into two source-order passes. Pass 1
+        // (this loop) is step 28: evaluate EVERY computed element name and define
+        // methods/accessors; field names are evaluated here but their initializers
+        // are deferred. Static field names/displaynames are stashed for pass 2.
+        const static_keys = try self.arena.alloc([]const u8, members.len);
+        const static_names = try self.arena.alloc([]const u8, members.len);
         for (members, 0..) |m, i| {
-            // `static { ... }` block: run with `this` = the class object and the
-            // class as its home object, so `super.x` resolves on the superclass
-            // (the class object's prototype is the parent class for statics).
-            if (m.static_block) |block| {
-                const saved_this = self.this_value;
-                const saved_home = self.home_object;
-                self.this_value = class_val;
-                self.home_object = class_obj;
-                defer {
-                    self.this_value = saved_this;
-                    self.home_object = saved_home;
-                }
-                _ = try self.eval(block);
-                continue;
-            }
+            // A `static { ... }` block has no name to evaluate; it runs in pass 2
+            // (step 34), interleaved with static-field initializers in source order.
+            if (m.static_block != null) continue;
             const kv: ?Value = if (m.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
             const key = if (kv) |k| try self.keyOf(k) else m.key;
             const name_str = if (kv) |k| try self.keyDisplayName(k) else m.key;
@@ -3579,29 +3573,11 @@ pub const Interpreter = struct {
             if (m.is_static and !m.is_ctor and !value.isPrivateKey(key) and eq(key, "prototype"))
                 return self.throwError("TypeError", "Classes may not have a static property named 'prototype'");
             if (m.is_field) {
+                // A static field's name is now resolved; its initializer (DefineField)
+                // is deferred to pass 2 so every element's name is evaluated first.
                 if (m.is_static) {
-                    // DefineField runs a static initializer with `this` = the class
-                    // (and the class as home object for `super`), so an arrow in the
-                    // initializer captures the class lexically.
-                    const saved_this = self.this_value;
-                    const saved_home = self.home_object;
-                    const saved_fi = self.in_field_initializer;
-                    self.this_value = class_val;
-                    self.home_object = class_obj;
-                    self.in_field_initializer = true;
-                    // A static private field brands the class object (in order).
-                    if (value.isPrivateKey(key)) try class_obj.addPrivateBrand(self.arena, key);
-                    const fv2 = if (m.field_init) |init_node| self.eval(init_node) catch |e| {
-                        self.this_value = saved_this;
-                        self.home_object = saved_home;
-                        self.in_field_initializer = saved_fi;
-                        return e;
-                    } else Value.undef();
-                    self.this_value = saved_this;
-                    self.home_object = saved_home;
-                    self.in_field_initializer = saved_fi;
-                    if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
-                    try self.setProp(class_obj, key, fv2);
+                    static_keys[i] = key;
+                    static_names[i] = name_str;
                 }
                 continue;
             }
@@ -3633,6 +3609,50 @@ pub const Interpreter = struct {
             // unlike object-literal properties.
             try home.setAttr(self.arena, key, .{ .writable = !(value.isPrivateKey(key) and m.accessor == .none), .enumerable = false, .configurable = true });
         }
+
+        // Pass 2 (step 34): run the static elements — `static { }` blocks and
+        // static-field initializers — in source order, now that EVERY computed
+        // name (including later instance/static field names) has been evaluated.
+        // `this`/home is the class object so `super` and arrows resolve correctly.
+        for (members, 0..) |m, i| {
+            if (m.static_block) |block| {
+                const saved_this = self.this_value;
+                const saved_home = self.home_object;
+                self.this_value = class_val;
+                self.home_object = class_obj;
+                _ = self.eval(block) catch |e| {
+                    self.this_value = saved_this;
+                    self.home_object = saved_home;
+                    return e;
+                };
+                self.this_value = saved_this;
+                self.home_object = saved_home;
+                continue;
+            }
+            if (!m.is_field or !m.is_static) continue;
+            const key = static_keys[i];
+            const name_str = static_names[i];
+            const saved_this = self.this_value;
+            const saved_home = self.home_object;
+            const saved_fi = self.in_field_initializer;
+            self.this_value = class_val;
+            self.home_object = class_obj;
+            self.in_field_initializer = true;
+            // A static private field brands the class object (in order).
+            if (value.isPrivateKey(key)) try class_obj.addPrivateBrand(self.arena, key);
+            const fv2 = if (m.field_init) |init_node| self.eval(init_node) catch |e| {
+                self.this_value = saved_this;
+                self.home_object = saved_home;
+                self.in_field_initializer = saved_fi;
+                return e;
+            } else Value.undef();
+            self.this_value = saved_this;
+            self.home_object = saved_home;
+            self.in_field_initializer = saved_fi;
+            if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
+            try self.setProp(class_obj, key, fv2);
+        }
+
         try self.setProp(proto, "constructor", class_val);
         try proto.setAttr(self.arena, "constructor", .{ .writable = true, .enumerable = false, .configurable = true });
         return class_val;
