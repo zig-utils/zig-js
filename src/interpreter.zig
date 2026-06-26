@@ -5248,7 +5248,10 @@ pub const Interpreter = struct {
                 .none => {
                     const pv = try self.eval(p.value);
                     if (p.proto_setter) { // only the `__proto__: value` colon form
-                        if (pv.isObject()) v.asObj().proto = pv.asObj();
+                        // Only an Object or null sets [[Prototype]]; any other
+                        // value (incl. a Symbol/BigInt, which are object-tagged) is
+                        // discarded without creating an own `__proto__` property.
+                        if (builtins.isRealObject(pv)) v.asObj().proto = pv.asObj();
                         if (pv.isNull()) v.asObj().proto = null;
                         continue;
                     }

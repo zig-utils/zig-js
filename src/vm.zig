@@ -388,7 +388,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .init_proto => {
                 const v = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
-                if (v.isObject()) obj.asObj().proto = v.asObj() else if (v.isNull()) obj.asObj().proto = null;
+                // Only an Object or null sets [[Prototype]]; a Symbol/BigInt (also
+                // object-tagged) or any other value is discarded.
+                if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint)
+                    obj.asObj().proto = v.asObj()
+                else if (v.isNull()) obj.asObj().proto = null;
             },
             .init_prop_computed => {
                 const key = stack.pop().?;
