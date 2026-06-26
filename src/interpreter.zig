@@ -3565,6 +3565,10 @@ pub const Interpreter = struct {
             .body = body,
             .source = source,
             .is_expr_body = false,
+            // All class code is strict, so the constructor is a strict function
+            // (e.g. its `.caller`/`.arguments` hit the %ThrowTypeError% poison pill
+            // rather than the legacy sloppy `null`).
+            .is_strict = true,
         };
         const class_val = try self.makeFunction(fnode, self.env);
         const class_obj = class_val.asObj();
