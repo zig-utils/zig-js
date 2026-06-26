@@ -9084,8 +9084,16 @@ pub const Interpreter = struct {
             if (byte_offset % size != 0) return self.throwError("RangeError", "invalid typed array offset");
             const has_len = args.len > 2 and !args[2].isUndefined();
             const req_len: usize = if (has_len) @intCast(try toIndexArg(self, args[2])) else 0;
-            if (buffer.array_buffer.?.detached) return self.throwError("TypeError", "Cannot construct a TypedArray on a detached buffer");
-            const buflen = buffer.array_buffer.?.bytes().len;
+            // Snapshot detached + byte length under the buffer lock: a peer's
+            // ArrayBuffer.resize swaps `local_data` concurrently (no-GIL), which
+            // this read of `bytes()` would otherwise race. The earlier
+            // byteOffset/length coercions run user code, so they stay outside.
+            const abuf = buffer.array_buffer.?;
+            abuf.lockBuffer();
+            const ab_detached = abuf.detached;
+            const buflen = if (ab_detached) 0 else abuf.bytes().len;
+            abuf.unlockBuffer();
+            if (ab_detached) return self.throwError("TypeError", "Cannot construct a TypedArray on a detached buffer");
             if (byte_offset > buflen) return self.throwError("RangeError", "invalid typed array offset");
             var length: usize = undefined;
             // Omitting the length on a resizable buffer makes the view
