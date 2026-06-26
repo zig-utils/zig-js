@@ -1,6 +1,7 @@
 const std = @import("std");
 const lex = @import("lexer.zig");
 const ast = @import("ast.zig");
+const value_mod = @import("value.zig");
 const regex = @import("regex");
 
 const Token = lex.Token;
@@ -2915,7 +2916,9 @@ pub const Parser = struct {
                 .number => if (key_tok.is_bigint)
                     (key_tok.bigint_text orelse try std.fmt.allocPrint(self.arena, "{d}", .{key_tok.bigint}))
                 else
-                    try std.fmt.allocPrint(self.arena, "{d}", .{key_tok.number}),
+                    // A numeric LiteralPropertyName is ToString'd via Number::toString
+                    // (so `0.0000001` keys as "1e-7", `1.0` as "1"), not Zig's `{d}`.
+                    try value_mod.numberToString(self.arena, key_tok.number),
                 else => return ParseError.UnexpectedToken,
             };
             var val: *Node = undefined;
@@ -3061,7 +3064,8 @@ pub const Parser = struct {
             .number => if (t.is_bigint)
                 (t.bigint_text orelse try std.fmt.allocPrint(self.arena, "{d}", .{t.bigint}))
             else
-                try std.fmt.allocPrint(self.arena, "{d}", .{t.number}),
+                // ToString'd via Number::toString (`0.0000001` → "1e-7"), not `{d}`.
+                try value_mod.numberToString(self.arena, t.number),
             else => return ParseError.UnexpectedToken,
         };
         return .{ .key = key, .expr = null };
