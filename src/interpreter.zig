@@ -876,6 +876,10 @@ pub const Interpreter = struct {
     /// object each time. A child realm re-parses its source, producing distinct
     /// nodes, so realms never share an entry.
     template_cache: std.AutoHashMapUnmanaged(*const anyopaque, Value) = .empty,
+    /// Set by `lookupIdent` when an identifier resolved through a `with` binding
+    /// object; `evalCall` reads it right after evaluating a bare-identifier
+    /// callee to bind `this` to that object (WithBaseObject), then it's stale.
+    with_this_pending: ?*value.Object = null,
     /// [[HomeObject]] of the executing method (for `super.x`) and the superclass
     /// constructor of the executing derived constructor (for `super(...)`).
     home_object: ?*value.Object = null,
@@ -1380,7 +1384,13 @@ pub const Interpreter = struct {
             if (e.aliases.get(name)) |a| return a.env.get(a.name);
             if (e.vars.get(name)) |v| return v;
             if (e.with_object) |wo| {
-                if (try self.withHasBinding(wo, name)) return try self.getProperty(Value.obj(wo), name);
+                if (try self.withHasBinding(wo, name)) {
+                    // Record the WithBaseObject so a call with this identifier as
+                    // callee binds `this` to it (consumed by evalCall), without a
+                    // second HasProperty.
+                    self.with_this_pending = wo;
+                    return try self.getProperty(Value.obj(wo), name);
+                }
             }
             env = e.parent;
         }
@@ -3671,6 +3681,12 @@ pub const Interpreter = struct {
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
                 return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
             }
+            // Evaluating the callee MemberExpression does RequireObjectCoercible on
+            // the base, so a nullish receiver throws BEFORE the arguments are
+            // evaluated — `o.bar.gar(foo())` must not run `foo()` when `o.bar` is
+            // undefined.
+            if (recv.isNull() or recv.isUndefined())
+                return self.throwError("TypeError", "cannot read property of null or undefined");
             const args = try self.evalArgs(arg_nodes);
             return self.callMethod(recv, key, args);
         }
@@ -3685,12 +3701,20 @@ pub const Interpreter = struct {
             const args = try self.evalArgs(arg_nodes);
             return self.callValueWithThis(method, args, self.this_value);
         }
+        // A bare-identifier callee resolved through a `with` binding object is
+        // invoked with that object as `this` (its WithBaseObject), e.g.
+        // `with (obj) { method(); }` calls `method` with `this === obj`.
+        // `lookupIdent` records the providing object during the SAME resolution,
+        // so this needs no extra `HasProperty` (which a proxy env would observe).
+        self.with_this_pending = null;
         const callee = try self.eval(callee_node);
+        const with_this: ?*value.Object = if (callee_node.* == .identifier) self.with_this_pending else null;
         if (optional and (callee.isNull() or callee.isUndefined())) return error.OptShortCircuit;
         const args = try self.evalArgs(arg_nodes);
         const saved_direct_eval = self.direct_eval_call;
         self.direct_eval_call = !optional and callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
         defer self.direct_eval_call = saved_direct_eval;
+        if (with_this) |wo| return self.callValueWithThis(callee, args, Value.obj(wo));
         return self.callValue(callee, args);
     }
 
