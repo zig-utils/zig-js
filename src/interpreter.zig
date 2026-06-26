@@ -3395,6 +3395,17 @@ pub const Interpreter = struct {
         // `super()`), its prototype's [[Prototype]] is null, and its constructor's
         // [[Prototype]] is %Function.prototype% (the makeFunction default).
         const derived = superclass != null;
+        // The class name is a binding in a scope that wraps the WHOLE class,
+        // including the heritage expression — where the name is in TDZ, so
+        // `class x extends x {}` is a ReferenceError. Create that scope before
+        // evaluating heritage; buildClass installs the actual (const) binding once
+        // the constructor exists.
+        const outer_env = self.env;
+        const class_env = try gc_mod.allocEnv(self.arena);
+        self.initEnvironment(class_env, outer_env, false);
+        self.env = class_env;
+        defer self.env = outer_env;
+        if (name.len > 0) try class_env.put(name, self.tdzVal());
         if (superclass) |sc| {
             const sv = try self.eval(sc);
             if (sv.isNull()) {
@@ -3419,10 +3430,10 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "class extends value is not a constructor");
             }
         }
-        return self.buildClass(name, members, super_obj, super_proto, source, derived);
+        return self.buildClass(name, members, super_obj, super_proto, source, derived, class_env);
     }
 
-    fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool) EvalError!Value {
+    fn buildClass(self: *Interpreter, name: []const u8, members: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment) EvalError!Value {
         const private_map = try self.rewriteClassPrivateNames(members);
         // Execute the class's static elements / field initializers with this
         // class's private map active, so a direct eval in them resolves the
@@ -3431,16 +3442,10 @@ pub const Interpreter = struct {
         self.current_private_map = private_map;
         defer self.current_private_map = saved_pm;
 
-        // The class name is bound as an immutable binding in a scope that wraps the
-        // whole class body, so methods, static initializers, and instance-field
-        // initializers can refer to the class by name (`static x = C.m()`). The
-        // constructor and methods close over this env; the binding is installed
-        // once the constructor value exists.
-        const outer_env = self.env;
-        const class_env = try gc_mod.allocEnv(self.arena);
-        self.initEnvironment(class_env, outer_env, false);
-        self.env = class_env;
-        defer self.env = outer_env;
+        // `class_env` (created by evalClass, already the current scope) is the
+        // scope wrapping the class body; the class name is bound there once the
+        // constructor exists, so methods, static initializers, and instance-field
+        // initializers can refer to the class by name (`static x = C.m()`).
 
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;
