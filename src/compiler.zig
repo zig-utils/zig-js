@@ -822,7 +822,7 @@ pub const Compiler = struct {
     }
 
     /// `{ k0: t0 = d0, ... } = src` (assignment form, in a generator).
-    fn compileObjectAssign(self: *Compiler, props: []const ast.ObjPatProp, rest: ?[]const u8, src: []const u8) CompileError!void {
+    fn compileObjectAssign(self: *Compiler, props: []const ast.ObjPatProp, rest: ?*ast.Node, src: []const u8) CompileError!void {
         if (rest != null) return error.Unsupported; // object rest in a yield pattern → tree-walk fallback
         for (props) |prop| {
             // PropertyName (may be computed and yield), then the target reference.

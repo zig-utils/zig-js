@@ -238,7 +238,10 @@ pub const Node = union(enum) {
     spread: *Node,
     /// Destructuring binding patterns (used as a declaration/assignment target,
     /// never evaluated as an expression). `rest` names a `...rest` binding.
-    obj_pattern: struct { props: []ObjPatProp, rest: ?[]const u8 },
+    // `rest` is the `...target` of an object pattern: an identifier node for a
+    // binding (`{...r}`), or — in an assignment pattern — any simple assignment
+    // target such as a member (`({...obj.y} = v)`).
+    obj_pattern: struct { props: []ObjPatProp, rest: ?*Node },
     arr_pattern: struct { elems: []ArrPatElem, rest: ?*Node },
 
     // statements

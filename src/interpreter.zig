@@ -1213,7 +1213,7 @@ pub const Interpreter = struct {
             .identifier => |n| try out.append(self.arena, n),
             .obj_pattern => |p| {
                 for (p.props) |prop| try self.evalPatternVarNames(prop.target, out);
-                if (p.rest) |r| try out.append(self.arena, r);
+                if (p.rest) |r| if (r.* == .identifier) try out.append(self.arena, r.identifier);
             },
             .arr_pattern => |p| {
                 for (p.elems) |elem| if (elem.target) |t| try self.evalPatternVarNames(t, out);
@@ -1298,7 +1298,7 @@ pub const Interpreter = struct {
             .identifier => |name| self.env.put(name, tdz) catch {},
             .obj_pattern => |p| {
                 for (p.props) |pr| self.tdzBindPattern(pr.target, tdz);
-                if (p.rest) |r| self.env.put(r, tdz) catch {}; // object rest is a name
+                if (p.rest) |r| if (r.* == .identifier) self.env.put(r.identifier, tdz) catch {}; // a binding object rest is a name
             },
             .arr_pattern => |p| {
                 for (p.elems) |e| if (e.target) |t| self.tdzBindPattern(t, tdz);
@@ -1321,7 +1321,7 @@ pub const Interpreter = struct {
             .identifier => |name| try self.checkRestrictedGlobalLexical(name),
             .obj_pattern => |p| {
                 for (p.props) |pr| try self.checkRestrictedGlobalLexicalPattern(pr.target);
-                if (p.rest) |r| try self.checkRestrictedGlobalLexical(r);
+                if (p.rest) |r| if (r.* == .identifier) try self.checkRestrictedGlobalLexical(r.identifier);
             },
             .arr_pattern => |p| {
                 for (p.elems) |e| if (e.target) |t| try self.checkRestrictedGlobalLexicalPattern(t);
@@ -2577,7 +2577,7 @@ pub const Interpreter = struct {
             .identifier => |name| out.append(arena, name) catch {},
             .obj_pattern => |p| {
                 for (p.props) |pr| collectPatternNames(pr.target, out, arena);
-                if (p.rest) |r| out.append(arena, r) catch {};
+                if (p.rest) |r| if (r.* == .identifier) out.append(arena, r.identifier) catch {};
             },
             .arr_pattern => |p| {
                 for (p.elems) |e| if (e.target) |t| collectPatternNames(t, out, arena);
@@ -2766,7 +2766,7 @@ pub const Interpreter = struct {
             .identifier => |nm| try list.append(arena, nm),
             .obj_pattern => |p| {
                 for (p.props) |pr| try appendPatternNames(arena, pr.target, list);
-                if (p.rest) |r| try list.append(arena, r);
+                if (p.rest) |r| if (r.* == .identifier) try list.append(arena, r.identifier);
             },
             .arr_pattern => |p| {
                 for (p.elems) |e| if (e.target) |t| try appendPatternNames(arena, t, list);
@@ -4378,7 +4378,7 @@ pub const Interpreter = struct {
             .identifier => |n| return std.mem.eql(u8, n, name),
             .obj_pattern => |p| {
                 for (p.props) |prop| if (patternBindsName(prop.target, name)) return true;
-                if (p.rest) |r| if (std.mem.eql(u8, r, name)) return true;
+                if (p.rest) |r| if (r.* == .identifier and std.mem.eql(u8, r.identifier, name)) return true;
             },
             .arr_pattern => |p| {
                 for (p.elems) |elem| if (elem.target) |t| {
@@ -7829,7 +7829,7 @@ pub const Interpreter = struct {
         }
     }
 
-    fn destructureObject(self: *Interpreter, props: []ast.ObjPatProp, rest: ?[]const u8, val: Value, declare: bool) EvalError!void {
+    fn destructureObject(self: *Interpreter, props: []ast.ObjPatProp, rest: ?*Node, val: Value, declare: bool) EvalError!void {
         if (val.isUndefined() or val.isNull())
             return self.throwError("TypeError", "cannot destructure null or undefined");
         var consumed: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -7845,7 +7845,7 @@ pub const Interpreter = struct {
             }
             try self.bindPattern(prop.target, v, declare);
         }
-        if (rest) |rest_name| {
+        if (rest) |rest_target| {
             const rest_obj = try self.newObject();
             if (val.isObject()) {
                 // Object rest copies only the *enumerable* own properties. A Proxy
@@ -7869,14 +7869,13 @@ pub const Interpreter = struct {
                     try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
                 }
             }
+            // A declaration binds the rest name; an assignment writes through the
+            // target reference — which may be a member (`({...obj.y} = …)`), so it
+            // runs a setter / honors a const binding like any other assignment.
             if (declare) {
-                try self.env.put(rest_name, rest_obj);
+                try self.bindPattern(rest_target, rest_obj, true);
             } else {
-                // An assignment target (not a declaration): `({...r} = …)` must
-                // honor a `const` binding, like any other assignment.
-                if (self.env.isConst(rest_name)) |is_c| if (is_c)
-                    return self.throwError("TypeError", "Assignment to constant variable.");
-                try self.env.assign(rest_name, rest_obj);
+                try self.assignTo(rest_target, rest_obj);
             }
         }
     }

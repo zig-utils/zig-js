@@ -670,7 +670,7 @@ pub const Parser = struct {
             .identifier => |name| try out.append(self.arena, name),
             .obj_pattern => |p| {
                 for (p.props) |prop| try self.addPatternNames(out, prop.target);
-                if (p.rest) |name| try out.append(self.arena, name);
+                if (p.rest) |r| if (r.* == .identifier) try out.append(self.arena, r.identifier);
             },
             .arr_pattern => |p| {
                 for (p.elems) |elem| if (elem.target) |target|
@@ -1288,7 +1288,7 @@ pub const Parser = struct {
                 _ = self.pending_cover_inits.remove(node);
                 _ = self.pending_proto_dup.remove(node);
                 var out: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
-                var rest_name: ?[]const u8 = null;
+                var rest_target: ?*ast.Node = null;
                 var seen_spread = false;
                 for (props) |p| {
                     // An object rest property (`...rest`) must be the last member.
@@ -1299,17 +1299,15 @@ pub const Parser = struct {
                         // (an identifier or member) — `({...import.meta} = x)`,
                         // `({...(a+b)} = x)`, `({...[a]} = x)` are SyntaxErrors.
                         if (p.value.* != .identifier and p.value.* != .member) return ParseError.InvalidAssignmentTarget;
-                        if (p.value.* == .identifier) {
-                            if (self.isForbiddenBindingName(p.value.identifier)) return ParseError.UnexpectedToken;
-                            rest_name = p.value.identifier;
-                        }
+                        if (p.value.* == .identifier and self.isForbiddenBindingName(p.value.identifier)) return ParseError.UnexpectedToken;
+                        rest_target = try self.exprToTarget(p.value);
                     } else if (p.value.* == .assign) {
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value.assign.target), .default = p.value.assign.value });
                     } else {
                         try out.append(self.arena, .{ .key = p.key, .key_expr = p.key_expr, .target = try self.exprToTarget(p.value) });
                     }
                 }
-                return self.alloc(.{ .obj_pattern = .{ .props = out.items, .rest = rest_name } });
+                return self.alloc(.{ .obj_pattern = .{ .props = out.items, .rest = rest_target } });
             },
             else => return ParseError.InvalidAssignmentTarget,
         }
@@ -1345,12 +1343,13 @@ pub const Parser = struct {
     fn parseObjectPattern(self: *Parser) ParseError!*Node {
         try self.expect(.lbrace);
         var props: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
-        var rest: ?[]const u8 = null;
+        var rest: ?*Node = null;
         while (!self.check(.rbrace) and !self.check(.eof)) {
             if (self.match(.ellipsis)) {
                 const r = self.advance();
+                // A BindingRestProperty target is a plain BindingIdentifier.
                 if (r.kind != .identifier) return ParseError.UnexpectedToken;
-                rest = r.text;
+                rest = try self.alloc(.{ .identifier = r.text });
                 break;
             }
             var key: []const u8 = "";
