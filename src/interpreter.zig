@@ -8325,13 +8325,16 @@ pub const Interpreter = struct {
         errdefer if (!done) self.iteratorCloseKeepingThrow(iter_obj);
         for (elems) |elem| {
             // Assignment destructuring evaluates a member target's Reference
-            // (its object and computed key) BEFORE IteratorStep, so a throw there
-            // closes the still-open iterator without ever calling `next()`.
+            // (its object, then the computed key EXPRESSION) BEFORE IteratorStep, so
+            // a throw there closes the still-open iterator without ever calling
+            // `next()`. ToPropertyKey of the computed key is deferred to PutValue.
             var member_recv: Value = Value.undef();
-            var member_key: ?[]const u8 = null;
+            var member_keyval: Value = Value.undef();
+            var is_member = false;
             if (!declare) if (elem.target) |t| if (t.* == .member) {
+                is_member = true;
                 member_recv = try self.eval(t.member.object);
-                member_key = try self.memberKey(t.member.property, t.member.computed);
+                if (t.member.computed) |ce| member_keyval = try self.eval(ce);
             };
             var v: Value = Value.undef();
             if (!done) {
@@ -8352,7 +8355,10 @@ pub const Interpreter = struct {
                 if (v.isUndefined()) {
                     if (elem.default) |d| v = try self.eval(d);
                 }
-                if (member_key) |k| try self.setMember(member_recv, k, v) else try self.bindPattern(t, v, declare);
+                if (is_member) {
+                    const tkey = if (t.member.computed != null) try self.keyOf(member_keyval) else t.member.property;
+                    try self.setMember(member_recv, tkey, v);
+                } else try self.bindPattern(t, v, declare);
             }
         }
         if (rest) |rest_target| {
