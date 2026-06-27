@@ -643,7 +643,10 @@ pub const Object = struct {
     /// Conservative guard for fast indexed writes: once an object has ever had an
     /// array-index data/accessor property, prototype-chain writes must use the
     /// ordinary path so inherited setters/non-writable data stay observable.
-    has_indexed_property: bool = false,
+    /// Atomic: read on the indexed-write fast path while a peer can set it when a
+    /// proto-chain object gains an array-index property (no-GIL). One byte → a
+    /// plain load/store. Mirrors `indexed_own_seen`.
+    has_indexed_property: std.atomic.Value(bool) = .init(false),
     /// Conservative cross-thread guard for prototype-chain indexed writes. Unlike
     /// `has_indexed_property`, this also records dense element creation and is
     /// used only when another object is consulting this object as a prototype.
@@ -1637,7 +1640,7 @@ pub const Object = struct {
             gop.key_ptr.* = try alloc.dupe(u8, name);
             gop.value_ptr.* = .{};
             if (canonicalIndex(name) != null) {
-                self.has_indexed_property = true;
+                self.has_indexed_property.store(true, .monotonic);
                 self.indexed_own_seen.store(true, .release);
             }
             // First accessor on this object: start key_order by snapshotting the
@@ -1733,7 +1736,7 @@ pub const Object = struct {
         try self.slots.append(self.slotsAllocator(arena), v); // new slot index == base.count == child.slot
         self.shape = child;
         if (canonicalIndex(name) != null) {
-            self.has_indexed_property = true;
+            self.has_indexed_property.store(true, .monotonic);
             self.indexed_own_seen.store(true, .release);
         }
         // A new data key on an accessor-bearing object records its creation order

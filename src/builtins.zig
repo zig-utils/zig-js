@@ -1608,7 +1608,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
                 if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
                 try target.setAttr(self.arena, key, attr);
-                target.has_indexed_property = true;
+                target.has_indexed_property.store(true, .monotonic);
                 // Redefining a mapped index as non-writable severs the parameter link.
                 if (am_mapped and !attr.writable) target.arg_map_names[i] = "";
                 if (i >= target.array_len) target.array_len = i + 1;

@@ -4819,7 +4819,7 @@ pub const Interpreter = struct {
     fn arrayProtoChainCleanForIndexedSet(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property)
+            if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property.load(.monotonic))
                 return false;
             if (c.indexed_own_seen.load(.acquire)) return false;
             cur = self.effectiveProto(c);
@@ -4830,7 +4830,7 @@ pub const Interpreter = struct {
     fn arrayProtoChainCleanForDenseAppend(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
-            if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property)
+            if (c.proxy_handler != null or c.proxy_revoked or c.typed_array != null or c.has_indexed_property.load(.monotonic))
                 return false;
             if (c.indexed_own_seen.load(.acquire)) return false;
             cur = self.effectiveProto(c);
@@ -4843,7 +4843,7 @@ pub const Interpreter = struct {
         const o = recv.asObj();
         try self.checkRestricted(o);
         if (!o.is_array or o.is_arguments or o.accessors != null or o.attrs != null or
-            o.has_indexed_property or !o.extensible or !self.arrayProtoChainCleanForIndexedSet(o))
+            o.has_indexed_property.load(.monotonic) or !o.extensible or !self.arrayProtoChainCleanForIndexedSet(o))
             return false;
         const dense_cap: usize = 1 << 24;
         return try o.setOrGrowDenseElement(self.arena, index, v, dense_cap);
@@ -4900,7 +4900,7 @@ pub const Interpreter = struct {
     /// Apply the deletion half of ArraySetLength after writability/coercion
     /// checks. Returns false when a non-configurable element blocks the shrink.
     pub fn setArrayLength(self: *Interpreter, o: *value.Object, requested_len: usize) EvalError!bool {
-        if (!o.is_arguments and o.attrs == null and o.accessors == null and !o.has_indexed_property) {
+        if (!o.is_arguments and o.attrs == null and o.accessors == null and !o.has_indexed_property.load(.monotonic)) {
             o.truncateDenseElementsAndSetLength(requested_len);
             return true;
         }
@@ -10004,7 +10004,7 @@ pub const Interpreter = struct {
             if (@as(f64, @floatFromInt(len)) + @as(f64, @floatFromInt(args.len)) > 9007199254740991.0)
                 return self.throwError("TypeError", "push would exceed the maximum array length 2**53-1");
             if (o.is_array and !o.is_arguments and o.accessors == null and o.attrs == null and
-                !o.has_indexed_property and o.extensible and self.arrayProtoChainCleanForDenseAppend(o))
+                !o.has_indexed_property.load(.monotonic) and o.extensible and self.arrayProtoChainCleanForDenseAppend(o))
             {
                 if (try o.appendPackedDenseElements(self.arena, args)) |new_len|
                     return Value.num(@floatFromInt(new_len));
