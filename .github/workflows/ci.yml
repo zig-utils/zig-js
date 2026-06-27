@@ -10,11 +10,13 @@ name: CI
 # TSan on darwin — bundled libcxx failed with `undeclared identifier 'INFINITY'`
 # — which is why this was Linux-only before.)
 #
-# Triggers are pull_request + manual dispatch (not every push to main). Add
-# `push: { branches: [main] }` once the suite is green on main (the toolchain
-# pin is confirmed to resolve; see the `gate` matrix below).
+# Triggers: pull_request + push-to-main + manual dispatch + nightly schedule. The
+# no-GIL TSan corpus gate, suppression witness, and test262-parallel leg now run on
+# every PR and main push (production gating), not just nightly.
 on:
   pull_request:
+  push:
+    branches: [main] # this project lands directly on main, so gate main pushes too
   workflow_dispatch:
   schedule:
     - cron: '0 7 * * *' # nightly continuous validation (incl. the race-hunt probe)
@@ -82,9 +84,9 @@ jobs:
   # zero: a TSan report names the next fix.
   tsan-nogil-corpus:
     name: tsan-nogil-corpus (shard ${{ matrix.shard }}/4)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Gates every PR + main push (production no-GIL safety), plus nightly. Now at
+    # zero engine-state races, so it hard-blocks: a TSan report fails the run.
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -147,7 +149,7 @@ jobs:
   # then be hiding — and (c) pass *with* the suppressions.
   tsan-suppression-witness:
     name: tsan-suppression-witness
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Gates every PR + main push (production no-GIL safety), plus nightly.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
