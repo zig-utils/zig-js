@@ -29,7 +29,13 @@
 // owner setStructure publication.
 load("../harness.js", "caller relative");
 
-const ROUNDS = 5000;
+// Under no-GIL + ThreadSanitizer (~10x slowdown) 5000 rounds exceeds the corpus
+// runner's per-case cap; a third still exercises the install-vs-owner-add race
+// thoroughly. GIL mode keeps the full count.
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const ROUNDS = NO_GIL ? 1500 : 5000;
 const FOREIGN_SENT = 0x5e117;
 const gate = { round: 0, fdone: 0, stop: 0 };
 const channel = { obj: null };

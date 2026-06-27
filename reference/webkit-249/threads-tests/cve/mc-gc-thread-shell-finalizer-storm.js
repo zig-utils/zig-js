@@ -31,7 +31,13 @@
 // the detach/exit paths (ThreadManager.cpp EXIT1.8).
 load("../harness.js", "caller relative");
 
-const WAVES = 8;
+// Under no-GIL + ThreadSanitizer (~10x slowdown) the full storm exceeds the
+// corpus runner's per-case cap; fewer waves keep the same interleavings while
+// finishing in time. GIL mode keeps the full stress.
+const NO_GIL = typeof $vm !== "undefined"
+    && typeof $vm.useThreadGIL === "function"
+    && $vm.useThreadGIL() === false;
+const WAVES = NO_GIL ? 3 : 8;
 const PER_WAVE = 6;     // threads per wave whose shells are dropped unjoined
 const JOINED_PER_WAVE = 4; // threads per wave watched via asyncJoin
 
