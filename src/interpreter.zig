@@ -3516,6 +3516,8 @@ pub const Interpreter = struct {
                     try self.rewritePrivateNamesInNode(p.target, map);
                     if (p.default) |d| try self.rewritePrivateNamesInNode(d, map);
                 }
+                // `({...this.#x} = …)`: the rest target may reference a private name.
+                if (pat.rest) |r| try self.rewritePrivateNamesInNode(r, map);
             },
             .arr_pattern => |pat| {
                 for (pat.elems) |el| {
