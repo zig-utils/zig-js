@@ -2750,6 +2750,15 @@ pub const Parser = struct {
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
                 var sub = try Parser.init(self.arena, raw[expr_start..expr_end]);
+                // A `${ }` substitution inherits the enclosing parsing context, so
+                // `yield`/`await`/`#x`/strict-mode keywords are recognized inside a
+                // template in a generator/async/class/strict/module body.
+                sub.in_generator = self.in_generator;
+                sub.in_async = self.in_async;
+                sub.in_class = self.in_class;
+                sub.strict = self.strict;
+                sub.module = self.module;
+                sub.eval_private_allowed = self.eval_private_allowed;
                 node = try self.concatExpr(node, try sub.parseExpression());
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
             } else {
@@ -2790,6 +2799,15 @@ pub const Parser = struct {
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
                 var sub = try Parser.init(self.arena, raw[expr_start..expr_end]);
+                // A `${ }` substitution inherits the enclosing parsing context, so
+                // `yield`/`await`/`#x`/strict-mode keywords are recognized inside a
+                // template in a generator/async/class/strict/module body.
+                sub.in_generator = self.in_generator;
+                sub.in_async = self.in_async;
+                sub.in_class = self.in_class;
+                sub.strict = self.strict;
+                sub.module = self.module;
+                sub.eval_private_allowed = self.eval_private_allowed;
                 try exprs.append(self.arena, try sub.parseExpression());
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
                 raw_start = i;
