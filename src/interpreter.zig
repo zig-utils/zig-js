@@ -2640,18 +2640,42 @@ pub const Interpreter = struct {
         defer if (lexical) {
             self.env = outer;
         };
+        // The for-head's lexical environment, which holds any `using`/`await using`
+        // resource declared in the init — disposed at the END of the ForStatement.
+        var loop_env: ?*Environment = null;
         if (init_node) |ini| {
             if (lexical) {
                 // The loop's lexical declaration lives in its own environment.
-                const loop_env = try gc_mod.allocEnv(self.arena);
-                self.initEnvironment(loop_env, outer, false);
-                self.env = loop_env;
+                const le = try gc_mod.allocEnv(self.arena);
+                self.initEnvironment(le, outer, false);
+                self.env = le;
+                loop_env = le;
             }
             _ = try self.eval(ini);
         }
         // CreatePerIterationEnvironment (initial copy, before the first test).
         if (lexical) self.env = try self.perIterEnv(outer, names.items, self.env);
 
+        const last = self.runForBody(cond, update, body, my_label, lexical, outer, names.items) catch |e| {
+            // DisposeResources runs on an abrupt completion too, threading the error.
+            if (loop_env) |le| if (le.disposables.items.len > 0 and e == error.Throw) {
+                const body_err = self.exception;
+                if (try self.disposeScope(le, body_err)) |err| self.exception = err;
+            };
+            return e;
+        };
+        if (loop_env) |le| if (le.disposables.items.len > 0) {
+            if (try self.disposeScope(le, null)) |err| {
+                self.exception = err;
+                return error.Throw;
+            }
+        };
+        return last;
+    }
+
+    /// The `for` loop's iteration, factored out so `evalFor` can run DisposeResources
+    /// for a for-head `using` on both normal and abrupt completion.
+    fn runForBody(self: *Interpreter, cond: ?*Node, update: ?*Node, body: *Node, my_label: ?[]const u8, lexical: bool, outer: *Environment, names: []const []const u8) EvalError!Value {
         var last: Value = Value.undef();
         while (true) {
             if (cond) |c| {
@@ -2661,7 +2685,7 @@ pub const Interpreter = struct {
             if (self.loopSignal(my_label)) |stop| if (stop) break;
             // CreatePerIterationEnvironment: copy this iteration's bindings into a
             // fresh env, then run the update against it.
-            if (lexical) self.env = try self.perIterEnv(outer, names.items, self.env);
+            if (lexical) self.env = try self.perIterEnv(outer, names, self.env);
             if (update) |u| _ = try self.eval(u);
         }
         return last;
