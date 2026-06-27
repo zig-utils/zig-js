@@ -2492,6 +2492,10 @@ pub const Interpreter = struct {
                     // EnumerateObjectProperties: own + inherited enumerable string
                     // keys with prototype-chain shadowing (see forInKeyList).
                     for (try self.forInKeyList(o)) |k| {
+                        // A property deleted (or made non-enumerable) before it is
+                        // reached must not be visited: the key list is a snapshot,
+                        // so re-check the property still exists on the chain.
+                        if (!try self.hasPropertyResult(o, k)) continue;
                         const saved_env = self.env;
                         defer self.env = saved_env;
                         if (lexical) {
