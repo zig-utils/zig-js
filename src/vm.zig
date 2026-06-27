@@ -593,6 +593,23 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
+            .call_eval => {
+                // A bare `eval(args)` call: mark it a DIRECT eval so, if the callee
+                // is the eval intrinsic, the eval'd code runs in this body's scope
+                // (sees its `let`/`var`/private names). Ignored if `eval` was shadowed.
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const callee = stack.items[base - 1];
+                const saved = vm.direct_eval_call;
+                vm.direct_eval_call = true;
+                const result = callValue(vm, callee, stack.items[base..], Value.undef()) catch |e| {
+                    vm.direct_eval_call = saved;
+                    return e;
+                };
+                vm.direct_eval_call = saved;
+                stack.shrinkRetainingCapacity(base - 1);
+                try stack.append(stack_alloc, result);
+            },
             .call_method => {
                 const argc = inst.b;
                 const base = stack.items.len - argc;

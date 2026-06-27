@@ -1128,7 +1128,8 @@ pub const Compiler = struct {
                     // function's locals (and correct `this`/private names), which
                     // live in the environment only on the tree-walker — so bail to
                     // it. Generators/top level (scope == null, env-mode) are fine.
-                    if (self.scope != null and c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval"))
+                    const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
+                    if (self.scope != null and is_eval)
                         return error.Unsupported;
                     try self.compileExpr(c.callee);
                     if (spread) {
@@ -1136,7 +1137,9 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.call_spread, 0);
                     } else {
                         for (c.args) |arg| try self.compileExpr(arg);
-                        _ = try self.chunk.emit(.call, @intCast(c.args.len));
+                        // A bare `eval(...)` in an env-mode body is a candidate direct
+                        // eval (runs in this scope if the callee is the eval intrinsic).
+                        _ = try self.chunk.emit(if (is_eval) .call_eval else .call, @intCast(c.args.len));
                     }
                 }
             },
