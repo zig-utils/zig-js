@@ -293,7 +293,9 @@ pub const Node = union(enum) {
     export_decl: *ExportNode,
     /// `import(specifier)` / `import(specifier, options)` — dynamic import; an
     /// expression that evaluates to a promise for the module namespace.
-    import_call: struct { specifier: *Node, options: ?*Node = null },
+    // `phase` is "" for an ordinary `import(x)`, or "defer"/"source" for the
+    // phased `import.defer(x)` / `import.source(x)` dynamic forms.
+    import_call: struct { specifier: *Node, options: ?*Node = null, phase: []const u8 = "" },
     /// `import.meta` — the meta-object of the surrounding module.
     import_meta,
     program: []*Node,

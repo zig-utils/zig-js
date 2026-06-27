@@ -899,7 +899,7 @@ pub const Interpreter = struct {
     /// script evaluation (where `import(...)` rejects).
     cur_module: []const u8 = "",
     dyn_import_ctx: ?*anyopaque = null,
-    dyn_import: ?*const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, out: *Value) bool = null,
+    dyn_import: ?*const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, out: *Value) bool = null,
     /// Deferred-evaluation trigger (set by the module driver): evaluates the
     /// `import defer` module identified by `module` (an opaque `*Context.Module`)
     /// the first time a binding of its deferred namespace is accessed. Idempotent
@@ -2083,7 +2083,7 @@ pub const Interpreter = struct {
             .await_expr => |a| try self.evalAwait(a.argument),
 
             .import_meta => try self.evalImportMeta(),
-            .import_call => |ic| try self.evalImportCall(ic.specifier, ic.options),
+            .import_call => |ic| try self.evalImportCall(ic.specifier, ic.options, ic.phase),
 
             .super_call => |sc| blk: {
                 // `super()` is a SyntaxError outside a derived constructor — the
@@ -3780,7 +3780,7 @@ pub const Interpreter = struct {
             },
             .with_stmt => |w| .{ .with_stmt = .{ .obj = try self.deepCopyNode(w.obj), .body = try self.deepCopyNode(w.body) } },
             .export_decl => node.*, // exports never appear inside a class body
-            .import_call => |ic| .{ .import_call = .{ .specifier = try self.deepCopyNode(ic.specifier), .options = try self.deepCopyOpt(ic.options) } },
+            .import_call => |ic| .{ .import_call = .{ .specifier = try self.deepCopyNode(ic.specifier), .options = try self.deepCopyOpt(ic.options), .phase = ic.phase } },
             .program => |stmts| .{ .program = try self.deepCopyNodes(stmts) },
         };
         return n;
@@ -5523,7 +5523,7 @@ pub const Interpreter = struct {
     /// `import(specifier [, options])` — returns a promise for the module
     /// namespace. Per IfAbruptRejectPromise, evaluating/coercing the specifier
     /// abruptly rejects the returned promise rather than throwing.
-    fn evalImportCall(self: *Interpreter, spec_node: *Node, options_node: ?*Node) EvalError!Value {
+    fn evalImportCall(self: *Interpreter, spec_node: *Node, options_node: ?*Node, phase: []const u8) EvalError!Value {
         const pobj = try promise.newPromise(self);
         const p = promise.promiseOf(Value.obj(pobj)).?;
         // Evaluate specifier then options (their side effects are observable),
@@ -5555,7 +5555,7 @@ pub const Interpreter = struct {
         // module driver). With no host (plain script), reject with a TypeError.
         if (self.dyn_import) |f| {
             var out: Value = Value.undef();
-            if (f(self.dyn_import_ctx.?, self, self.cur_module, spec, &out)) {
+            if (f(self.dyn_import_ctx.?, self, self.cur_module, spec, phase, &out)) {
                 try promise.resolve(self, p, out);
             } else {
                 try promise.reject(self, p, self.exception);

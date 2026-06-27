@@ -3054,6 +3054,7 @@ pub const Parser = struct {
         const saved_no_in = self.no_in;
         self.no_in = false;
         defer self.no_in = saved_no_in;
+        var phase: []const u8 = "";
         if (self.match(.dot)) {
             const m = self.advance();
             if (m.kind != .identifier) return ParseError.UnexpectedToken;
@@ -3068,7 +3069,7 @@ pub const Parser = struct {
                 return self.alloc(.import_meta);
             }
             if (std.mem.eql(u8, m.text, "source") or std.mem.eql(u8, m.text, "defer")) {
-                // fall through to the call form below.
+                phase = m.text; // phased dynamic import; fall through to the call form
             } else return ParseError.UnexpectedToken;
         }
         try self.expect(.lparen);
@@ -3086,7 +3087,7 @@ pub const Parser = struct {
             }
         }
         try self.expect(.rparen);
-        return self.alloc(.{ .import_call = .{ .specifier = spec, .options = options } });
+        return self.alloc(.{ .import_call = .{ .specifier = spec, .options = options, .phase = phase } });
     }
 
     /// True when the next token starts a property name — used to tell an

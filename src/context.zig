@@ -1560,7 +1560,7 @@ pub const Context = struct {
     /// link, and evaluate the target module, writing its namespace into `out`.
     /// Returns false (leaving the reason in `machine.exception`) on any failure,
     /// so the caller rejects the dynamic-import promise.
-    fn dynImportHook(ctx: *anyopaque, machine: *interp.Interpreter, referrer: []const u8, specifier: []const u8, out: *value.Value) bool {
+    fn dynImportHook(ctx: *anyopaque, machine: *interp.Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, out: *value.Value) bool {
         const self: *Context = @ptrCast(@alignCast(ctx));
         const host = self.mod_host orelse return self.dynImportFail(machine, "dynamic import is not available");
         const cache = self.mod_cache orelse return self.dynImportFail(machine, "dynamic import is not available");
@@ -1569,6 +1569,13 @@ pub const Context = struct {
             return self.dynImportFail(machine, "Cannot resolve module specifier");
         const dep = self.loadModule(dep_path, src, host, cache) catch return self.surfaceFail(machine);
         self.linkModule(dep) catch return self.surfaceFail(machine);
+        // `import.defer(x)`: resolve the promise with the deferred namespace
+        // without evaluating — evaluation is triggered lazily on first access.
+        if (std.mem.eql(u8, phase, "defer")) {
+            const dns = self.deferredNamespaceObject(dep) catch return self.surfaceFail(machine);
+            out.* = Value.obj(dns);
+            return true;
+        }
         self.evalModule(machine, dep) catch return self.surfaceFail(machine);
         const ns = self.namespaceObject(dep) catch return self.surfaceFail(machine);
         self.fillNamespace(machine, dep, ns) catch return self.surfaceFail(machine);
