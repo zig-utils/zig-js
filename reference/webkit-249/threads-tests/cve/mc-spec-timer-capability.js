@@ -7,8 +7,8 @@
 //
 //   (S2, deterministic) With useJSThreads=1 and useSharedArrayBuffer=0 the
 //   Thread API is present and the SharedArrayBuffer constructor is ABSENT
-//   (OptionsList.h:683 vs :703 are independent gates; JSGlobalObject.cpp:
-//   2004 vs 2007). Note the jsc shell force-enables SAB in its defaults
+//   (OptionsList.h:691 vs :712 are independent gates; JSGlobalObject.cpp:
+//   2139 vs 2142). Note the jsc shell force-enables SAB in its defaults
 //   (jsc.cpp:4147); the explicit =0 above must win — if SAB shows up here,
 //   the gate split regressed or the shell default leaked past runtime flags.
 //
@@ -20,6 +20,12 @@
 //   observed ticks per Date.now() millisecond. If a future change coarsens,
 //   throttles, or gates the property-atomics fast path, this assertion or
 //   the gating shape fails and forces the SPEC-api §4.5 conversation.
+//
+// CVE-AUDIT Tier-B B15 disposition: EMBEDDER OBLIGATION — no engine code
+// change. PASS here means the timer capability is present as designed; the
+// deliverable is docs/threads/INTEGRATE-api.md 9.2-11 + the OptionsList.h
+// useJSThreads help text (treat the flag as native-code-equivalent for
+// confidentiality; multi-tenant = multi-process).
 //
 // WRITTEN DURING BRING-UP: do not execute until the GIL-off ladder is up.
 // Under the phase-1 cooperative GIL the spinner may starve the observer;

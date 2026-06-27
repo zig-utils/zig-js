@@ -17,6 +17,11 @@ const corpus_root = "reference/webkit-249/threads-tests";
 
 const allowlist = [_][]const u8{
     "smoke.js",
+    // Pulled from oven-sh/WebKit PR #249 @3a14f2a8 (2026-06-23): top-level
+    // sort-comparator-shape cases, green on zig-js.
+    "dw1-sort-comparator-callsite-shapes.js",
+    "dw1-sort-comparator-iterator-host.js",
+    "dw1-sort-comparator-osr.js",
     "api/condition-basic.js",
     "api/condition-async-wait.js",
     "api/condition-wait-termination.js",
@@ -95,6 +100,7 @@ const allowlist = [_][]const u8{
     "cve/mc-val-atom-identity.js",
     "cve/mc-val-llint-cache-storm.js",
     "cve/mc-val-multislot-clone.js",
+    "cve/mc-val-tid-reissue-false-owner.js", // PR #249 @3a14f2a8
     "cve/mc-wait-property-wait-lost-wakeup.js",
     "gc-stress/conservative-scan-register.js",
     "gc-stress/havebadtime-vs-indexed-fastpath.js",
@@ -194,6 +200,13 @@ const allowlist = [_][]const u8{
     "objectmodel/i03-t5-racing-growers.js",
     "objectmodel/i03-visit-range-outofline.js",
     "objectmodel/i08-named-vs-indexed-first-install.js",
+    // Pulled from oven-sh/WebKit PR #249 @3a14f2a8 (2026-06-23): new object-model
+    // cases, green on zig-js.
+    "objectmodel/array-storage-property-transition.js",
+    "objectmodel/cow-named-property-transition.js",
+    "objectmodel/r47-foreign-dictionary-flatten.js",
+    "objectmodel/r47-typedarray-slowdown-wastememory.js",
+    "objectmodel/r48-typedarray-segmented-arraybuffer.js",
     "semantics/atom-rope-torture.js",
     "semantics/date-cache-churn.js",
     "semantics/frozen-seal-race.js",
@@ -216,6 +229,7 @@ const allowlist = [_][]const u8{
     "scaling/splay-like.js",
     "scaling/string-heavy.js",
     "vmstate/all-flags-identity.js",
+    "vmstate/globalthis-postpublication-negative.js", // PR #249 @3a14f2a8
     "vmstate/exception-state-per-thread.js",
     "vmstate/flags-off-baseline.js",
     "vmstate/microtask-ordering.js",

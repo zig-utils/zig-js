@@ -1,22 +1,23 @@
 //@ requireOptions("--useJSThreads=1")
 // MC-LIFE S6 (docs/threads/cve/map-MC-LIFE.md): relocating wasm Memory grow
-// vs spawned typed-array readers — the documented OPEN DEPENDENCY in
-// ArrayBufferContents::refreshAfterWasmMemoryGrow (ArrayBuffer.cpp): the
-// stale-mapping quarantine half is landed, but the heap-stop conduction in
-// Wasm::Memory::grow's relocating (BoundsChecking) arm is not. Until it
-// lands, GIL-off a reader can pair a post-grow length with the pre-grow base
-// and run off the end of the old (alive-but-short) mapping.
+// vs spawned typed-array readers. Both halves of annex N6 arm 4 are NOW
+// LANDED: the stale-mapping quarantine in ArrayBufferContents::
+// refreshAfterWasmMemoryGrow (ArrayBuffer.cpp), AND the heap §10 stop
+// conduction in Wasm::Memory::grow's relocating (BoundsChecking) arm
+// (wasm/WasmMemory.cpp; CVE-AUDIT Tier-B B4). GIL-off, publication of the
+// new {base,length} runs inside stopTheWorldAndRun, so a reader cannot pair
+// a post-grow length with the pre-grow base.
 //
-// SUSCEPTIBILITY TEST, expected to FAIL (crash/ASAN report) GIL-off until
-// the N6 arm 4 stop conduction lands; passes under the GIL and must pass
-// post-fix. Spawned threads perform ONLY typed-array accesses (SPEC-api
+// REGRESSION GATE: must PASS GIL-off once the wasm refusal lifts (and under
+// the GIL today). Spawned threads perform ONLY typed-array accesses (SPEC-api
 // refuses spawned wasm EXECUTION; views over a main-created Memory are plain
 // TA accesses). Amplifier-ready: the hot reader loop is the torn-pair window.
 load("../harness.js", "caller relative");
 
 // FIXME(U-T13/MC-LIFE-S6): this premise-skip self-retires when the GIL-off
-// wasm refusal is lifted (relocating-grow stop conduction lands); the guard
-// below then never fires and the test runs at full strength.
+// wasm refusal is lifted (B4 relocating-grow stop conduction has landed; the
+// refusal is now the only remaining gate); the guard below then never fires
+// and the test runs at full strength.
 // Wasm is deliberately refused GIL-off (U-T13: 'JSC: disabling useWasm under
 // GIL-off...') until the N6 arm 4 stop conduction this test targets actually
 // lands. That refusal is the accepted engine behavior, not a failure here:

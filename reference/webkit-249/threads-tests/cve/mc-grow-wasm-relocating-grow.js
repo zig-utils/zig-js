@@ -11,16 +11,16 @@
 // fresh Gigacage allocation + memcpy + handle swap (WasmMemory.cpp:337-358).
 // SPEC-ungil annex N6 arm 4 requires that relocation to run under a heap §10
 // stop ("grow relocate: stop-separated, no concurrent reader"); the stop
-// conduction is an OPEN DEPENDENCY recorded in the tree
-// (runtime/ArrayBuffer.cpp:279-289, :1547-1557).
+// conduction is NOW LANDED in Memory::grow's BoundsChecking arm
+// (wasm/WasmMemory.cpp, gilOffProcess-gated stopTheWorldAndRun around the
+// handle swap + success() publication; CVE-AUDIT Tier-B B4). The keepalive
+// quarantine in runtime/ArrayBuffer.cpp covers captured/hoisted pre-grow
+// snapshots to the NEXT stop.
 //
-// While the hole is open, a spawned reader can pair a POST-grow length with
-// the PRE-grow base (the keepalive quarantine only protects the pre-grow
-// length over the pre-grow base) and access past the end of the old, exactly
-// oldLen-sized mapping: this test is EXPECTED TO FAIL (crash / ASAN fault)
-// until Memory::grow's BoundsChecking arm conducts the stop (or gilOff
-// always reserves maxByteLength VA, converting S5b into S5a). It must pass
-// afterwards.
+// REGRESSION GATE: this test must PASS once the GIL-off wasm refusal lifts
+// (it premise-SKIPs until then). A crash / ASAN fault here means a
+// {post-grow length, pre-grow base} pairing escaped the stop — the B4
+// invariant has regressed.
 //
 // Wasm EXECUTION on spawned threads is refused (§I); this test never runs
 // wasm code off-main — the spawned threads touch the memory purely through

@@ -12,20 +12,20 @@
 // steady state is the regression that bumpAndReclaim actually drains the
 // backlog (and that the I10 no-op exemption doesn't silently skip it).
 //
-// S7 shape (CHARTERED, leak-until-integration): flag-on,
-// RetiredJITArtifacts::retireHandlerChain and retireOptimizedJITCode leak
-// unconditionally (epochCoversEveryJSThread returns !useJSThreads —
-// bytecode/RetiredJITArtifacts.cpp). The cross-thread arm makes the leak
-// rate JS-controllable: foreign touches fire TTL watchpoints, jettisoning
-// optimized code; IC megamorphic churn displaces handler chains. EXPECTED
-// BEHAVIOR per landing state:
-//   - while the charter is open: this test still PASSES functionally, but
-//     RSS / executable-pool consumption grows monotonically with ITERS —
-//     run it under an external RSS/pool monitor (the harness assertion
-//     here is correctness + completion, the quota assertion is external);
-//   - after per-thread epoch publication + the R2 N-stack scan land:
-//     memory must reach steady state; re-run under the monitor and keep
-//     this test as the regression for BOTH landings.
+// S7 shape (B14, CLOSED — per-thread epoch publication + R2 N-stack scan
+// landed): RetiredJITArtifacts::retireHandlerChain / retire() route through
+// the epoch facility flag-on (epochCoversEveryJSThread now true), and
+// retireOptimizedJITCode releases inline (R2's N-stack scan in
+// Heap::gatherStackRoots covers every mutator). The cross-thread arm makes
+// the retire rate JS-controllable: foreign touches fire TTL watchpoints,
+// jettisoning optimized code; IC megamorphic churn displaces handler
+// chains. EXPECTED BEHAVIOR (the S7 leg, now an in-test assertion below):
+// process RSS reaches steady state across the churn loop's second half —
+// MemoryFootprint().current sampled at the GC checkpoints must not grow
+// monotonically past the warm-up midpoint by more than a bounded slop
+// (executable-pool fragmentation + unrelated lazy growth). Pre-fix this
+// grew unboundedly with ITERS (every displaced chain + every jettisoned
+// JITCode leaked); the bounded-RSS assertion is the S7 regression.
 //
 // Deterministic in outcome; amplifier-ready (ITERS/SHAPES are the knobs;
 // rule 1: never shrink them to call the surface safe).
@@ -76,6 +76,24 @@ const toucher = new Thread((zoo, ctl) => {
     return localSum | 0;
 }, zoo, ctl);
 
+// S7 leg: bounded-RSS oracle. MemoryFootprint() is the jsc shell's process
+// RSS sampler ({current, peak} in bytes). We sample at every GC checkpoint
+// after a warm-up half (so tier-up, code installation, and first-touch heap
+// growth have stabilized) and require the LAST sample not to exceed the
+// first post-warm-up sample by more than a generous slop. The slop absorbs
+// (a) executable-pool / malloc fragmentation, (b) the toucher's own
+// long-lived allocation, (c) GC eden growth between checkpoints; pre-fix
+// the leak grew by tens of MB over the same range (every IC chain + every
+// DFG/FTL JITCode for hotRead/hotWrite, ~ITERS× jettisons), so the bound
+// discriminates. On platforms without a process-RSS sampler the shell stub
+// returns 0 for both fields — the oracle then degenerates to 0<=slop and
+// the correctness/completion arms still gate.
+const haveFootprint = typeof MemoryFootprint === "function";
+const RSS_SLOP_BYTES = 16 * 1024 * 1024;
+const WARMUP_ITERS = ITERS >> 1;
+let rssBaseline = -1;
+let rssLast = -1;
+
 let expected = 0;
 for (let iter = 1; iter <= ITERS; ++iter) {
     // Hot megamorphic traffic: tiers up, builds handler chains.
@@ -105,6 +123,16 @@ for (let iter = 1; iter <= ITERS; ++iter) {
         // values the hot write published this round.
         const check = 50 * SHAPES * iter + 50 * (SHAPES * (SHAPES - 1) / 2);
         shouldBe(expected, check, "iter " + iter + ": megamorphic IC stayed correct through retire churn");
+        // S7: sample RSS post-gc. Two back-to-back collections so the §11
+        // bumpAndReclaim drains items retired BEFORE this checkpoint (an
+        // item retired at epoch E needs the NEXT stop's stamp to expire).
+        if (haveFootprint && iter >= WARMUP_ITERS) {
+            gc();
+            const rss = MemoryFootprint().current;
+            if (rssBaseline < 0)
+                rssBaseline = rss;
+            rssLast = rss;
+        }
     }
 }
 
@@ -115,9 +143,22 @@ const toucherSum = toucher.join();
 shouldBeTrue(Number.isInteger(toucherSum), "toucher completed cleanly");
 
 // Final drain: several full collections back-to-back; post-integration this
-// must leave the retire backlog empty (externally: RSS steady). The test's
-// own observable is that nothing crashed, hung, or mis-executed across
-// ~ITERS*SHAPES handler-chain retirements and TTL-fire jettisons.
+// must leave the retire backlog empty (RSS steady — asserted below). The
+// test's own observable is that nothing crashed, hung, or mis-executed
+// across ~ITERS*SHAPES handler-chain retirements and TTL-fire jettisons.
 for (let i = 0; i < 4; ++i)
     gc();
 shouldBeTrue(true, "retire churn survived " + ITERS + " rounds x " + SHAPES + " shapes");
+
+// S7 leg gate (B14): bounded RSS over the second-half churn. Pre-fix this
+// failed by tens of MB (monotone growth — every retire leaked); post-fix
+// the epoch drain + R2-licensed JITCode release bound it. rssBaseline < 0
+// only when MemoryFootprint is unavailable (stub platform) — the bound
+// trivially holds and the run still gates on correctness/completion.
+if (haveFootprint && rssBaseline >= 0) {
+    const growth = rssLast - rssBaseline;
+    shouldBeTrue(growth <= RSS_SLOP_BYTES,
+        "S7: RSS bounded over churn second half (baseline=" + rssBaseline
+        + " last=" + rssLast + " growth=" + growth
+        + " slop=" + RSS_SLOP_BYTES + ")");
+}

@@ -10,6 +10,31 @@
 // --useJSThreads=1 and no Thread ever spawned; both must stay green forever.
 load("../resources/assert.js", "caller relative");
 
+// PREMISE SELF-CHECK: this is a DEFAULT-configuration (flag-off) witness.
+// jsc applies JSC_<option> environment variables in Options::initialize(),
+// before the (empty) argv this file runs with, so an ambient export like
+// JSC_useJSThreads=1 (e.g. a GIL-off rung that pins its whole configuration
+// via env) silently inverts the premise: the "Thread must not leak
+// flag-off" assert below would then FAIL without any engine regression. We
+// deliberately do NOT pin --useJSThreads=0 on the header: that would
+// convert this default-config witness into an explicit-value test (and a
+// future default flip would make its green vacuous). Instead, query the
+// EFFECTIVE option at runtime via the unconditional shell builtin
+// jscOptions() — same pattern as heap-option-off.js — and emit the
+// THREADS-PREMISE-SKIP marker recognized by Tools/threads/run-tests.sh
+// (counted as SKIP, never PASS or FAIL), so an env/premise contradiction
+// surfaces as an actionable skip at the rung definition. The flag-ON
+// behavior of these same checks is covered by the twin
+// i03-single-threaded-flag-on.js, which pins --useJSThreads=1 explicitly.
+if (typeof jscOptions === "function" && jscOptions().useJSThreads) {
+    print("THREADS-PREMISE-SKIP: useJSThreads is ON in the effective configuration"
+        + " (ambient JSC_* env?); i03-single-threaded-no-change.js is a"
+        + " default-configuration (flag-off) witness per SPEC-objectmodel"
+        + " I22/E3 and cannot run meaningfully under it. The flag-on twin"
+        + " i03-single-threaded-flag-on.js carries the same checks.");
+    quit();
+}
+
 // Flag-off there is no Thread API (the GIL stub is flag-gated).
 shouldBe(typeof Thread, "undefined", "Thread must not leak flag-off");
 

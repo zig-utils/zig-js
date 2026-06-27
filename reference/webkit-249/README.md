@@ -4,9 +4,17 @@ Unmodified reference copies vendored from **oven-sh/WebKit pull request #249**
 ("Shared-memory threads for JavaScriptCore").
 
 - Source: https://github.com/oven-sh/WebKit/pull/249
-- Head SHA: `25375a997f4f1faebc123f4733a546ba789107bd`
-- Fetched: 2026-06-10 (sparse partial clone of `JSTests/threads`, `docs/threads`,
-  `THREAD.md`, `JSTests/threads.yaml` from the PR head)
+- Head SHA: `3a14f2a821ac56fcb01d1c765200be7e9dfdb458`
+- Fetched: 2026-06-10 (initial sparse clone at `25375a99`), refreshed 2026-06-27
+  with the 30 new + 10 modified `JSTests/threads/*.js` files the PR gained through
+  head `3a14f2a8` (2026-06-23). New cases include `objectmodel/` array-storage/COW/
+  dictionary/typedarray-segment transitions, `dw1-sort-comparator-*`, `congc-*`
+  concurrent-GC stress, `checktraps-*`, and `cve/` regressions. zig-js runs the
+  object-model/sort/vmstate/atomics-portable ones (the green ones are now in the
+  threads-test allowlist); the `congc-*`/`jit/`/`checktraps-*` cases target JSC
+  JIT/concurrent-GC machinery zig-js lacks. Three new `cve/` cases currently fail
+  on zig-js and are tracked as edge cases to investigate (a timer-capability
+  exposure difference, and two TypedArray/detached-buffer behaviors).
 
 ## Licensing
 

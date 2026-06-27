@@ -7,9 +7,22 @@
 // serializes mutators, so this is green-by-construction there. Execute
 // post-ungil, ideally under ASAN and Tools/threads/amplify.sh.
 //
-// Mechanism under test: DFGClobberize.h gives CheckTraps write(InternalState)
-// only, so a DFG/FTL loop can carry a masked flat base across a safepoint
-// poll while re-loading publicLength through it. The live publicLength
+// CLOSED Tier-B B3 (B3-JIT-POLL-CLOBBER-LINT, 2026-06): DFGClobberize.h's
+// GIL-off CheckTraps entry now writes JSObject_butterfly +
+// Butterfly_vectorLength alongside Butterfly_publicLength, forcing
+// SAME-SNAPSHOT {base, length} per poll boundary so CSE/LICM cannot carry a
+// masked flat base across the poll while re-loading publicLength through it;
+// the validateButterflyTagDisciplineForGraph lint (DFGSpeculativeJIT.cpp /
+// FTLLowerDFGToB3.cpp call sites) asserts no GetButterfly result is consumed
+// across a JSObject_butterfly-clobbering boundary. This test is now EXPECTED
+// PASS under the pinned GIL-off env + ASAN; it remains a regression guard
+// for the mechanism below.
+//
+// Mechanism under test: pre-fix, DFGClobberize.h gave CheckTraps
+// write(InternalState) only (later: value-heap writes but NOT
+// JSObject_butterfly), so a DFG/FTL loop could carry a masked flat base
+// across a safepoint poll while re-loading publicLength through it. The
+// live publicLength
 // (fragment 0 slot 0 low half) ALIASES the flat IndexingHeader and, after a
 // foreign segmenting growth, can exceed the frozen flat-era vectorLength
 // (OM I9b / C4). The in-tree contiguous in-bounds check

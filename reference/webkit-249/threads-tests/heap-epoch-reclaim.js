@@ -1,10 +1,16 @@
-//@ requireOptions("--useDollarVM=1")
+//@ requireOptions("--useDollarVM=1", "--useSharedGCHeap=0")
 // SPEC-heap.md T10: I11 epoch unit test (T7), driven from JS.
 //
 // epochReclaim MUST run in the 1-client !ISS configuration (the harness
 // refuses otherwise), so this file runs it alone — no other heap-*.js
-// scenario shares this process. It deliberately does NOT pass
-// --useSharedGCHeap: the legacy runEndPhase reclamation site is the sole
+// scenario shares this process. It PINS --useSharedGCHeap=0 (merely
+// omitting the option is not enough: the pinned GIL-off ambient env sets
+// JSC_useSharedGCHeap=1, and under gilOffProcess the first VM ctor then
+// eagerly flips sticky-ISS at clientSet()==1 — UNGIL §0 U0c — so the
+// harness would refuse from birth). Pinning the option off also unmakes
+// gilOffProcess (the JSCConfig latch requires useSharedGCHeap), so this
+// run is the legacy configuration regardless of ambient GIL-off flags.
+// The legacy runEndPhase reclamation site is the sole
 // option-off behavior delta (I10 exemption) and is exactly what this checks:
 //   retire -> legacy GC -> NOT freed by the retiring cycle -> legacy GC -> freed,
 // plus the negative half: a conducted cycle's own periphery suspension never

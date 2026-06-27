@@ -10,6 +10,13 @@
 // state left by the post-revert legacy protocol. Items retired while shared
 // drain at the legacy runEndPhase site after the reversion.
 //
+// GIL-off (UNGIL §0 U0c, ANNEX U0C): the §10D reversion arm no-ops — the
+// designated server stays ISS for process lifetime and the poll only disarms
+// the hint. The harness scenario mode-splits: GIL-off it verifies the U0c
+// shape (poll disarms, server stays shared, retired items drain at §10
+// step 7 of conducted full cycles) instead of waiting for a reversion the
+// spec forbids.
+//
 // Runnable in the no-JIT TSAN config and JIT-on (§5.5).
 load("./resources/assert.js", "caller relative");
 
