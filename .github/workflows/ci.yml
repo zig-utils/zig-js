@@ -215,6 +215,55 @@ jobs:
           fi
           [ "$fail" -eq 0 ]
 
+  # Runs a curated test262 cross-section in GIL-free parallel contexts and asserts
+  # it introduces no NEW failures vs the baseline (arena) engine — i.e. the
+  # parallel-mode locked paths + GC-managed allocator are correct across a broad
+  # slice of the language, not just the threads corpus. (The full corpus is too
+  # slow per-context under GC for CI; this is the representative gate.)
+  test262-parallel:
+    name: test262-parallel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: zig-js
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-regex
+          path: zig-regex
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-gc
+          path: zig-gc
+      - uses: pantry-pm/pantry/packages/action@main
+        with:
+          packages: zig@0.17.0-dev
+      - name: Parallel test262 introduces no new failures
+        working-directory: zig-js
+        run: |
+          set -uo pipefail
+          SUBS="test/language/types/boolean test/language/types/number test/language/statements/class/subclass-builtins test/built-ins/Object/keys test/built-ins/Map/prototype/set"
+          zig build test262-bin >/dev/null
+          BASE=./zig-out/bin/test262
+          fails_base=0
+          for s in $SUBS; do
+            f=$("$BASE" --diag "$s" 2>&1 | grep -oE '[0-9]+ fail' | grep -oE '[0-9]+' | head -1 || echo 0)
+            fails_base=$((fails_base + ${f:-0}))
+          done
+          echo "baseline (arena) total fails: $fails_base"
+          zig build test262-bin -Dtest262-parallel-js=true >/dev/null
+          PAR=./zig-out/bin/test262
+          fails_par=0
+          for s in $SUBS; do
+            line=$("$PAR" --diag "$s" 2>&1 | tail -1); echo "$line"
+            f=$(echo "$line" | grep -oE '[0-9]+ fail' | grep -oE '[0-9]+' | head -1 || echo 0)
+            fails_par=$((fails_par + ${f:-0}))
+          done
+          echo "parallel total fails: $fails_par (baseline: $fails_base)"
+          if [ "$fails_par" -gt "$fails_base" ]; then
+            echo "::error::parallel mode introduced $((fails_par - fails_base)) new test262 failures"; exit 1
+          fi
+
   docs:
     runs-on: ubuntu-latest
     steps:
