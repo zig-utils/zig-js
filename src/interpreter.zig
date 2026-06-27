@@ -3009,7 +3009,25 @@ pub const Interpreter = struct {
     fn hoistOneVar(self: *Interpreter, name: []const u8) EvalError!void {
         const vs = self.env.varScope();
         if (vs.vars.contains(name)) return; // param / hoisted function / earlier var
-        try self.globalDefine(name, Value.undef());
+        try vs.put(name, Value.undef());
+        if (vs.parent == null) {
+            if (self.global_object) |g| {
+                // CreateGlobalVarBinding: define the global object property only
+                // when it is ABSENT; an existing own property (e.g. one installed
+                // via defineProperty) is left untouched — value and attributes
+                // preserved — rather than reset by the declaration.
+                if (g.getOwn(name) == null and g.getAccessor(name) == null) {
+                    if (!g.extensible)
+                        return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
+                    try self.setProp(g, name, Value.undef());
+                    // A script's GlobalDeclarationInstantiation makes a global var
+                    // non-configurable; a sloppy eval's makes it deletable.
+                    try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
+                }
+            }
+        } else if (self.eval_decl_deletable) {
+            try vs.markDeletable(name); // a sloppy eval's top-level var in a function var-env is deletable
+        }
     }
 
     fn hoistPatternVars(self: *Interpreter, pat: *Node) EvalError!void {
