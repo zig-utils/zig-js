@@ -643,6 +643,7 @@ pub const Compiler = struct {
         try self.emitLoad(it_name);
         _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
         if (await_each) _ = try self.chunk.emit(.await_op, 0); // await the next() result
+        if (!keys_first) _ = try self.chunk.emit(.assert_iter_result, 0); // IteratorNext: result must be an Object
         try self.emitDefine(r_name);
         // if (r.done) break  — `not` then jump_if_false exits exactly when done.
         try self.emitLoad(r_name);

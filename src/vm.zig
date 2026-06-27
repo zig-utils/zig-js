@@ -679,7 +679,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try stack.append(stack_alloc, res);
             },
             .assert_iter_result => {
-                if (!stack.items[stack.items.len - 1].isObject())
+                // Type(result) must be Object — a Symbol/BigInt is object-tagged here
+                // but is not an Object.
+                const r = stack.items[stack.items.len - 1];
+                if (!r.isObject() or r.asObj().is_symbol or r.asObj().is_bigint)
                     return vm.throwError("TypeError", "iterator result is not an object");
             },
             .iter_of => {

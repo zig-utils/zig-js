@@ -1597,6 +1597,11 @@ pub const Interpreter = struct {
     /// Evaluate a `{…}` block in its own lexical scope, disposing any `using`
     /// resources declared in it when it exits (normally or abruptly).
     fn evalBlockScope(self: *Interpreter, stmts: []*Node) EvalError!Value {
+        // A label on a block (`L: { … }`) labels the BLOCK, not a loop nested inside
+        // it — so consume the pending label here, keeping it from being adopted by an
+        // inner loop (`L: { do { break L; } while (true); … }` must break the block).
+        // The matching break is consumed at the `.labeled_stmt` level.
+        _ = self.takeLabel();
         const block_env = try gc_mod.allocEnv(self.arena);
         self.initEnvironment(block_env, self.env, false);
         if (self.mark_fn_body) {
@@ -2378,6 +2383,9 @@ pub const Interpreter = struct {
             while (true) {
                 const res0 = try self.callMethod(iter_obj, "next", &.{});
                 const res = if (is_await) try self.awaitValue(res0) else res0;
+                // IteratorNext: the result of `next()` must be an Object (a Symbol
+                // or BigInt is object-tagged here but is not an Object per Type()).
+                if (!builtins.isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
                 if ((try self.getProperty(res, "done")).toBoolean()) break; // exhausted — no close
                 const saved_env = self.env;
                 defer self.env = saved_env;
