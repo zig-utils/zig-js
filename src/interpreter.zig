@@ -1439,7 +1439,7 @@ pub const Interpreter = struct {
     /// and — at a `with` object Environment Record — that object's properties, in
     /// chain order. Returns the value, or null when unresolved (the caller then
     /// tries the global object and finally throws a ReferenceError).
-    fn lookupIdent(self: *Interpreter, name: []const u8) EvalError!?Value {
+    pub fn lookupIdent(self: *Interpreter, name: []const u8) EvalError!?Value {
         // Read each scope's binding tables under its `binding_lock` (via the
         // flag-gated `lockBindings`, like `Environment.get`): a peer thread may
         // be mutating `vars`/`aliases` through `Environment.put` (which locks),
@@ -1501,7 +1501,7 @@ pub const Interpreter = struct {
         return null;
     }
 
-    fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
+    pub fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
         var env: ?*Environment = self.env;
         while (env) |e| {
             e.lockBindings();

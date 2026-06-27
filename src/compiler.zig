@@ -122,6 +122,39 @@ fn nodeHasYield(node: *const ast.Node) bool {
     };
 }
 
+/// Conservatively, does a statement subtree contain a construct that could leave a
+/// `with` block ABRUPTLY (skipping the matching `exit_with`, which would leave the
+/// VM's environment pointing at the popped with-record)? `with` bodies that might
+/// `yield`/`return`/`throw`/`break`/`continue` are kept on the tree-walker. Stops at
+/// nested function boundaries (their control flow is self-contained). Overly strict
+/// (a `break` for an inner loop inside the `with` also bails), but always safe.
+fn stmtCanEscapeAbruptly(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .yield_expr, .return_stmt, .throw_stmt, .break_stmt, .continue_stmt => true,
+        .function => false,
+        .block => |b| blk: {
+            for (b) |s| if (stmtCanEscapeAbruptly(s)) break :blk true;
+            break :blk false;
+        },
+        .if_stmt => |i| stmtCanEscapeAbruptly(i.consequent) or (i.alternate != null and stmtCanEscapeAbruptly(i.alternate.?)),
+        .while_stmt => |s| stmtCanEscapeAbruptly(s.body),
+        .do_while_stmt => |s| stmtCanEscapeAbruptly(s.body),
+        .for_stmt => |f| stmtCanEscapeAbruptly(f.body),
+        .for_in => |f| stmtCanEscapeAbruptly(f.body),
+        .with_stmt => |w| stmtCanEscapeAbruptly(w.body),
+        .labeled_stmt => |l| stmtCanEscapeAbruptly(l.body),
+        .try_stmt => |t| stmtCanEscapeAbruptly(t.block) or
+            (t.catch_block != null and stmtCanEscapeAbruptly(t.catch_block.?)) or
+            (t.finally_block != null and stmtCanEscapeAbruptly(t.finally_block.?)),
+        .switch_stmt => |sw| blk: {
+            for (sw.cases) |c| for (c.body) |s| if (stmtCanEscapeAbruptly(s)) break :blk true;
+            break :blk false;
+        },
+        // An expression statement may embed a `yield` (e.g. `x = yield`).
+        else => nodeHasYield(node),
+    };
+}
+
 /// Where a referenced name lives.
 const Resolved = union(enum) {
     local: u32, // slot in the current frame
@@ -357,6 +390,18 @@ pub const Compiler = struct {
                 try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body, !f.is_of, f.is_await);
             },
             .try_stmt => |t| try self.compileTry(t),
+            .with_stmt => |w| {
+                // `with (obj) body`: push an object Environment Record, run the body,
+                // pop it. Only safe when the body can't leave abruptly (which would
+                // skip exit_with) — otherwise keep the whole generator on the
+                // tree-walker. The object expression itself may `yield` (evaluated
+                // before the push).
+                if (stmtCanEscapeAbruptly(w.body)) return error.Unsupported;
+                try self.compileExpr(w.obj);
+                _ = try self.chunk.emit(.enter_with, 0);
+                try self.compileStmt(w.body);
+                _ = try self.chunk.emit(.exit_with, 0);
+            },
             else => return error.Unsupported,
         }
     }

@@ -290,13 +290,16 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             .set_acc => acc = stack.pop().?,
 
             .load_var => {
+                // `lookupIdent` is `env.get` plus `with`-object resolution (honoring
+                // `Symbol.unscopables`); identical to `env.get` when no `with` is on
+                // the chain, so this is a no-op for ordinary generator/async bodies.
                 const name = chunk.names.items[inst.a];
-                const v = vm.env.get(name) orelse vm.globalProp(name) orelse return vm.throwError("ReferenceError", name);
+                const v = (try vm.lookupIdent(name)) orelse vm.globalProp(name) orelse return vm.throwError("ReferenceError", name);
                 try stack.append(stack_alloc, v);
             },
             .load_var_or_undef => {
                 const name = chunk.names.items[inst.a];
-                try stack.append(stack_alloc, vm.env.get(name) orelse vm.globalProp(name) orelse Value.undef());
+                try stack.append(stack_alloc, (try vm.lookupIdent(name)) orelse vm.globalProp(name) orelse Value.undef());
             },
             .store_var => {
                 const name = chunk.names.items[inst.a];
@@ -481,6 +484,17 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
                 try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), try propKey(vm, key), vm.this_value));
             },
+            .enter_with => {
+                // `with (obj)`: push an object Environment Record. ToObject(obj)
+                // boxes a primitive; null/undefined throw (only those, not every
+                // non-object). `vm.env` is restored by `exit_with` at block end.
+                const obj = try vm.toObject(stack.pop().?);
+                const wenv = try gc_mod.allocEnv(vm.arena);
+                vm.initEnvironment(wenv, vm.env, false);
+                wenv.with_object = obj;
+                vm.env = wenv;
+            },
+            .exit_with => vm.env = vm.env.parent.?,
             .set_prop => {
                 const v = stack.pop().?;
                 const obj = stack.pop().?;
@@ -712,12 +726,19 @@ fn makeIterResult(vm: *Interpreter, v: Value, done: bool) EvalError!Value {
 /// there is no default. The caller must have `vm.env == param_env` on entry; on
 /// return `vm.env` is the chosen body env (the caller restores it via its defer).
 fn paramsBodyVarEnv(vm: *Interpreter, func: *Function, param_env: *Environment) EvalError!*Environment {
+    if (func.body.* != .block) return param_env;
     var has_param_expr = false;
     for (func.params) |p| if (p.default != null) {
         has_param_expr = true;
         break;
     };
-    if (!has_param_expr or func.body.* != .block) return param_env;
+    if (!has_param_expr) {
+        // Params and body share one env; hoist the body's `var` names into it so a
+        // reference before the declaration (e.g. inside a `with`) resolves to the
+        // local binding (undefined) rather than falling through to an outer scope.
+        try vm.hoistVarNames(func.body.block);
+        return param_env;
+    }
     const be = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(be, param_env, true);
     vm.env = be;
@@ -1010,11 +1031,14 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
         try promise.reject(vm, rp, reason);
         return Value.obj(result);
     };
+    // Separate body var-env + body-var hoisting (see makeGenerator); without the
+    // hoist a `with` in the body resolves a not-yet-declared `var` to an outer scope.
+    const body_env = try paramsBodyVarEnv(vm, func, genv);
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
-        .env = genv,
+        .env = body_env,
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,

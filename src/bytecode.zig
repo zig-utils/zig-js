@@ -174,6 +174,8 @@ pub const Op = enum(u8) {
     get_prop, // operand a: name index; pop object -> push object[name]
     super_get, // operand a: name index; push super.[name] (home_object.proto[name], receiver = this)
     super_get_index, // pop key; push super[key] (home_object.proto[key], receiver = this)
+    enter_with, // pop object; push an object Environment Record (with_object = ToObject(it)) onto vm.env
+    exit_with, // pop the innermost with/block environment off vm.env (restore its parent)
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
     set_index, // pop value, pop key, pop object -> push value (after set)
