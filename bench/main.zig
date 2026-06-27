@@ -98,6 +98,40 @@ fn timeTreeWalk(gpa: std.mem.Allocator, io: std.Io, case: Case) !u64 {
     return @intCast(nowNs(io) - t0);
 }
 
+/// Parallel throughput scaling: N JS `Thread`s each run an independent, shared-
+/// state-free compute loop in one GIL-free context. If GIL removal delivers real
+/// parallelism, wall-clock stays ~flat as N grows (up to core count), so the
+/// scaling factor (throughput(N)/throughput(1)) approaches N. Under a GIL it
+/// would stay ~1.0.
+fn benchParallel(gpa: std.mem.Allocator, io: std.Io) !void {
+    const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true }); // parallel by default
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        // `var` (function-scoped) avoids a fresh per-iteration `let` binding —
+        // which under the GC-managed parallel engine is a GC cell per iteration,
+        // pathologically slow until the GC gets a tight-loop alloc fast path
+        // (tracked as remaining GC-maturity work). This loop is pure arithmetic,
+        // so it isolates parallel *compute* scaling.
+        \\globalThis.work = function(){ var s = 0; for (var i = 0; i < 2000000; i++) s = (s + i) % 1000003; return s; };
+        \\globalThis.spawn = function(n){ let ts = []; for (let i = 0; i < n; i++) ts.push(new Thread(work)); let r = 0; for (const t of ts) r += t.join(); return r; };
+    );
+    const cores = std.Thread.getCpuCount() catch 4;
+    std.debug.print("\nparallel throughput scaling — {d} cores, each thread a 4M-iter loop (no shared state)\n", .{cores});
+    std.debug.print("{s:>8} {s:>14} {s:>10}\n", .{ "threads", "wall ns", "scaling" });
+    var base: u64 = 1;
+    for ([_]usize{ 1, 2, 4, 8 }) |n| {
+        if (n > cores * 2) break;
+        const src = try std.fmt.allocPrint(ctx.arena(), "spawn({d})", .{n});
+        _ = try ctx.evaluate(src); // warm up (thread pool, JIT-of-bytecode, caches)
+        const t0 = nowNs(io);
+        _ = try ctx.evaluate(src);
+        const dt: u64 = @intCast(nowNs(io) - t0);
+        if (n == 1) base = @max(dt, 1);
+        const scaling = @as(f64, @floatFromInt(n)) * @as(f64, @floatFromInt(base)) / @as(f64, @floatFromInt(@max(dt, 1)));
+        std.debug.print("{d:>8} {d:>14} {d:>9.2}x\n", .{ n, dt, scaling });
+    }
+}
+
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .environ = .empty });
@@ -116,4 +150,6 @@ pub fn main() !void {
         const speedup = @as(f64, @floatFromInt(tw_per)) / @as(f64, @floatFromInt(@max(vm_per, 1)));
         std.debug.print("{s:<28} {d:>12} {d:>12} {d:>8.2}x\n", .{ case.name, vm_per, tw_per, speedup });
     }
+
+    try benchParallel(gpa, io);
 }
