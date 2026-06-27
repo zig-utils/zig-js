@@ -151,9 +151,16 @@ pub const ArrayBufferData = struct {
         const sc = &@constCast(self).resize_seq;
         while (true) {
             const s1 = sc.load(.acquire);
+            if ((s1 & 1) != 0) { // writer mid-swap
+                std.atomic.spinLoopHint();
+                continue;
+            }
             const p = @atomicLoad([*]u8, &ld.ptr, .monotonic);
             const l = @atomicLoad(usize, &ld.len, .monotonic);
-            if ((s1 & 1) == 0 and sc.load(.acquire) == s1) return p[0..l];
+            // Re-read the seqcount with a no-op acq_rel RMW (Zig has no standalone
+            // fence): its release ordering keeps the ptr/len loads from being
+            // reordered past it, so a torn pair can't slip through the check.
+            if (sc.fetchAdd(0, .acq_rel) == s1) return p[0..l];
             std.atomic.spinLoopHint();
         }
     }
@@ -2363,4 +2370,100 @@ test "object named property delete rebuild serializes with writers" {
         shape = s.parent;
     }
     try std.testing.expectEqual(count, object.slots.items.len);
+}
+
+// ---- no-GIL regression tests (issue #1): the atomic/seqlock primitives that
+// keep the corpus TSan-clean. Run under `-Dtsan=true` to also catch data races;
+// without TSan they still catch torn reads / crashes / corruption. ----
+
+test "Object.proto atomic read survives concurrent setPrototypeOf" {
+    var a = Object{};
+    var b = Object{};
+    var o = Object{ .proto = &a };
+    const Worker = struct {
+        fn reader(target: *Object, pa: *Object, pb: *Object, stop: *std.atomic.Value(bool)) void {
+            while (!stop.load(.monotonic)) {
+                const p = target.protoAtomic();
+                // Must always be one of the two valid protos (never a torn ptr).
+                if (p != pa and p != pb) @panic("proto torn read");
+            }
+        }
+        fn writer(target: *Object, pa: *Object, pb: *Object, stop: *std.atomic.Value(bool)) void {
+            var i: usize = 0;
+            while (i < 200_000) : (i += 1) target.setProtoAtomic(if ((i & 1) == 0) pa else pb);
+            stop.store(true, .release);
+        }
+    };
+    var stop = std.atomic.Value(bool).init(false);
+    var readers: [4]std.Thread = undefined;
+    for (&readers) |*t| t.* = try std.Thread.spawn(.{}, Worker.reader, .{ &o, &a, &b, &stop });
+    const w = try std.Thread.spawn(.{}, Worker.writer, .{ &o, &a, &b, &stop });
+    w.join();
+    for (readers) |t| t.join();
+    const final = o.protoAtomic();
+    try std.testing.expect(final == &a or final == &b);
+}
+
+test "ArrayBufferData.bytes seqlock stays consistent across concurrent resize swaps" {
+    const prev = Object.element_locks_enabled.swap(true, .release);
+    defer Object.element_locks_enabled.store(prev, .release);
+    var sa: [16]u8 = undefined;
+    @memset(&sa, 0xAA);
+    var sb: [128]u8 = undefined;
+    @memset(&sb, 0xBB);
+    var ab = ArrayBufferData{ .local_data = sa[0..] };
+    const Worker = struct {
+        fn reader(buf: *ArrayBufferData, pa: [*]u8, pb: [*]u8, stop: *std.atomic.Value(bool)) void {
+            while (!stop.load(.monotonic)) {
+                const s = buf.bytes();
+                // ptr and len must always agree (seqlock): A is 16 bytes, B is 128.
+                const ok = (s.ptr == pa and s.len == 16) or (s.ptr == pb and s.len == 128);
+                if (!ok) @panic("bytes() torn ptr/len");
+            }
+        }
+        fn writer(buf: *ArrayBufferData, a: []u8, b: []u8, stop: *std.atomic.Value(bool)) void {
+            var i: usize = 0;
+            while (i < 200_000) : (i += 1) buf.swapLocalData(if ((i & 1) == 0) a else b);
+            stop.store(true, .release);
+        }
+    };
+    var stop = std.atomic.Value(bool).init(false);
+    var readers: [4]std.Thread = undefined;
+    for (&readers) |*t| t.* = try std.Thread.spawn(.{}, Worker.reader, .{ &ab, sa[0..].ptr, sb[0..].ptr, &stop });
+    const w = try std.Thread.spawn(.{}, Worker.writer, .{ &ab, sa[0..], sb[0..], &stop });
+    w.join();
+    for (readers) |t| t.join();
+}
+
+test "Object.has_indexed_property atomic flag converges under concurrent set" {
+    var o = Object{};
+    const Worker = struct {
+        fn run(target: *Object) void {
+            var i: usize = 0;
+            while (i < 100_000) : (i += 1) {
+                if ((i & 1) == 0) target.has_indexed_property.store(true, .monotonic) else _ = target.has_indexed_property.load(.monotonic);
+            }
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{&o});
+    for (threads) |t| t.join();
+    try std.testing.expect(o.has_indexed_property.load(.acquire));
+}
+
+test "Object.restricted_to CAS lets exactly one concurrent claimer win" {
+    var o = Object{};
+    const Worker = struct {
+        fn run(target: *Object, my_tid: u64, won: *std.atomic.Value(u32)) void {
+            // Mirror Thread.restrict's claim: CAS 0 -> tid; null means we won.
+            if (target.restricted_to.cmpxchgStrong(0, my_tid, .acq_rel, .acquire) == null)
+                _ = won.fetchAdd(1, .acq_rel);
+        }
+    };
+    var won = std.atomic.Value(u32).init(0);
+    var threads: [16]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Worker.run, .{ &o, @as(u64, i) + 1, &won });
+    for (threads) |t| t.join();
+    try std.testing.expectEqual(@as(u32, 1), won.load(.acquire));
+    try std.testing.expect(o.restricted_to.load(.acquire) != 0);
 }
