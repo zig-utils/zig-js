@@ -77,6 +77,18 @@ pub const LockedArena = struct {
 };
 
 /// An isolated engine instance — the homegrown analogue of a JSC
+/// Enable (or disable) the process-wide parallel/concurrent synchronization
+/// protocols as ONE unit, so they can never drift: Environment binding locks,
+/// Object element/backing locks + the `bytes()` seqlock, and the bytecode inline-
+/// cache seqlock. They share a single trigger (`concurrent_gc or parallel_gc`)
+/// and must always agree — routing every flip through here is the single source
+/// of truth (the default engine leaves all three a relaxed-load no-op).
+pub fn setParallelSyncEnabled(on: bool) void {
+    interp.Environment.binding_locks_enabled.store(on, .release);
+    value.Object.element_locks_enabled.store(on, .release);
+    @import("bytecode.zig").ic_seqlock_enabled.store(on, .release);
+}
+
 /// `JSGlobalContextRef`. Owns an arena for all interpreter-lived allocations
 /// (AST, strings, objects, boxed values) and a persistent global environment
 /// so variables survive across `evaluate` calls, like a real global context.
@@ -402,19 +414,11 @@ pub const Context = struct {
             self.gc_binding = bind;
             // Single-mutator only for now: concurrent marking + no peer mutators.
             self.gc_concurrent = options.concurrent_gc and !options.enable_threads;
-            // Turn on Environment binding locks process-wide: needed only when the
+            // Turn on the parallel/concurrent synchronization protocols process-
+            // wide as one unit, so they can never drift: needed only when the
             // marker runs concurrently (concurrent_gc) or mutators run in parallel
-            // (parallel_gc). The default engine leaves them no-ops (a relaxed load).
-            if (options.concurrent_gc or options.parallel_gc) {
-                interp.Environment.binding_locks_enabled.store(true, .release);
-                // Same trigger: the per-object dense-element lock guards a
-                // grow/realloc against concurrent readers (lookupIdent's analogue
-                // for arrays).
-                value.Object.element_locks_enabled.store(true, .release);
-                // Same trigger: bytecode may run on multiple threads, so the VM
-                // inline caches need the parallel-safe (seqlock) protocol.
-                @import("bytecode.zig").ic_seqlock_enabled.store(true, .release);
-            }
+            // (parallel_gc). The default engine leaves them no-ops (relaxed loads).
+            if (options.concurrent_gc or options.parallel_gc) setParallelSyncEnabled(true);
         }
         // Route all cell allocation (the global object + TDZ sentinel,
         // installGlobals, and the mirror loop below) through the GC when
