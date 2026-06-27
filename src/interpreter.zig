@@ -32938,6 +32938,13 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     const root_shape = try Shape.createRoot(arena);
     try installGlobals(&env, root_shape);
     var interp = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape };
+    // The TDZ sentinel (a unique object marking a declared-but-uninitialized
+    // let/const) is normally installed by Context.init; this bare test-helper
+    // interpreter must create it too, or any TDZ-using program (classes, a
+    // let/const read before init) crashes in `tdzVal`.
+    const tdz = try arena.create(value.Object);
+    tdz.* = .{};
+    interp.tdz_marker = tdz;
     return interp.eval(prog);
 }
 
