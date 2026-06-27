@@ -47,6 +47,23 @@ fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError
 pub const Frame = struct {
     slots: []Value,
     parent: ?*Frame,
+    // A closure shared across threads resolves its upvalues to one defining
+    // frame, so concurrent load_upval/store_upval read+write the same slot —
+    // serialize them here (the binding_lock analogue for VM frames). Gated on
+    // the parallel flag, so the default engine takes no lock.
+    upval_lock: std.atomic.Mutex = .unlocked,
+
+    fn lockUpval(self: *Frame) void {
+        if (!bc.ic_seqlock_enabled.load(.acquire)) return;
+        var spins: usize = 0;
+        while (!self.upval_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+    fn unlockUpval(self: *Frame) void {
+        if (!bc.ic_seqlock_enabled.load(.acquire)) return;
+        self.upval_lock.unlock();
+    }
 };
 
 /// A resumable execution state: the operand stack, completion accumulator, and
@@ -327,13 +344,19 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 var f = frame.?;
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
-                try stack.append(stack_alloc, f.slots[inst.b]);
+                f.lockUpval();
+                const v = f.slots[inst.b];
+                f.unlockUpval();
+                try stack.append(stack_alloc, v);
             },
             .store_upval => {
                 var f = frame.?;
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
-                f.slots[inst.b] = stack.items[stack.items.len - 1]; // leaves value
+                const v = stack.items[stack.items.len - 1]; // leaves value on the stack
+                f.lockUpval();
+                f.slots[inst.b] = v;
+                f.unlockUpval();
             },
 
             .neg => {
