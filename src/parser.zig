@@ -2110,9 +2110,11 @@ pub const Parser = struct {
         // (the orphaned `*` fails to parse as the yield's operand below).
         const delegate = self.noNewlineBefore(0) and self.match(.star);
         var arg: ?*Node = null;
-        // A bare `yield` (no operand) is allowed before a terminator; `yield*`
-        // always takes an operand.
-        if (delegate or self.startsExpression()) arg = try self.parseAssignment();
+        // `yield [no LineTerminator here] AssignmentExpression`: a newline after a
+        // plain `yield` ends it (the next line is a separate statement), so
+        // `yield \n x` yields undefined. `yield*` always takes an operand (its
+        // newline restriction, before the `*`, was already enforced above).
+        if (delegate or (self.noNewlineBefore(0) and self.startsExpression())) arg = try self.parseAssignment();
         return self.alloc(.{ .yield_expr = .{ .argument = arg, .delegate = delegate } });
     }
 
