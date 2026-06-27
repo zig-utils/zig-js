@@ -932,6 +932,11 @@ pub const Compiler = struct {
             .boolean => |b| _ = try self.chunk.emit(if (b) .load_true else .load_false, 0),
             .null_lit => _ = try self.chunk.emit(.load_null, 0),
             .undefined_lit => _ = try self.chunk.emit(.load_undefined, 0),
+            .regex_literal => |r| {
+                // A fresh RegExp per evaluation (so `yield /abc/i` works); pattern
+                // and flags are stored as names and rebuilt at runtime.
+                _ = try self.chunk.emitAB(.make_regex, try self.chunk.addName(r.pattern), try self.chunk.addName(r.flags));
+            },
             .identifier => |name| try self.emitLoad(name),
             .unary => |u| {
                 // `typeof <unresolved global>` must yield "undefined", not throw,

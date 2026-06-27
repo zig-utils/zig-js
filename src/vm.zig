@@ -495,6 +495,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 vm.env = wenv;
             },
             .exit_with => vm.env = vm.env.parent.?,
+            .make_regex => {
+                // A regex literal is a fresh RegExp object on each evaluation.
+                const pattern = chunk.names.items[inst.a];
+                const flags = chunk.names.items[inst.b];
+                try stack.append(stack_alloc, try vm.makeRegex(pattern, flags));
+            },
             .set_prop => {
                 const v = stack.pop().?;
                 const obj = stack.pop().?;
