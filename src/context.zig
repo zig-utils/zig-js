@@ -285,6 +285,14 @@ pub const Context = struct {
         /// thread *concurrently* with the mutator at safepoints. Single-mutator
         /// only (no `enable_threads`); default off. See docs/threads/P7-gc-design.md.
         concurrent_gc: bool = false,
+        /// Run spawned `Thread`s with TRUE parallelism — drop the per-context GIL
+        /// so JS executes concurrently across threads (issue #1 Layer C). Requires
+        /// `enable_threads`; implies `enable_gc` (cells must be GC-managed and
+        /// thread-safe). DEFAULT OFF: the GIL keeps single-threaded throughput
+        /// maximal (the parallel sync protocols are no-ops when off). Correctness
+        /// is gated by the whole-corpus no-GIL ThreadSanitizer CI gate (zero
+        /// engine-state races) plus the serial-perf gate; see P7-gil-removal.md.
+        parallel: bool = false,
     };
 
     /// Test/conformance-only creation knobs. These model harness flags such as
@@ -334,14 +342,26 @@ pub const Context = struct {
     }
 
     pub fn createWith(gpa: std.mem.Allocator, options: Options) !*Context {
+        // `parallel` is the public face of the GIL-free vertical slice; it implies
+        // GC-managed (thread-safe) cells and the parallel-GC backing. It requires
+        // `enable_threads` — createWithTestingOptions validates that and errors if
+        // it's missing.
         return createWithTestingOptions(gpa, .{
             .enable_threads = options.enable_threads,
-            .enable_gc = options.enable_gc,
+            .enable_gc = options.enable_gc or options.parallel,
             .concurrent_gc = options.concurrent_gc,
+            .parallel_gc = options.parallel,
+            .parallel_js = options.parallel,
         });
     }
 
     pub fn createWithTestingOptions(gpa: std.mem.Allocator, options: TestingOptions) !*Context {
+        // Validate option dependencies before allocating anything, so the error
+        // path leaks nothing.
+        if (options.parallel_js and !(options.enable_threads and options.enable_gc and options.parallel_gc))
+            return error.InvalidThreadTestingOptions;
+        if (options.parallel_midscript_gc and !options.parallel_js)
+            return error.InvalidThreadTestingOptions;
         const arena_state = try gpa.create(std.heap.ArenaAllocator);
         arena_state.* = std.heap.ArenaAllocator.init(gpa);
         errdefer {
@@ -379,10 +399,6 @@ pub const Context = struct {
             .max_js_threads = options.max_js_threads,
             .parallel_js = options.parallel_js,
         };
-        if (options.parallel_js and !(options.enable_threads and options.enable_gc and options.parallel_gc))
-            return error.InvalidThreadTestingOptions;
-        if (options.parallel_midscript_gc and !options.parallel_js)
-            return error.InvalidThreadTestingOptions;
         self.gc_par_enabled = options.parallel_midscript_gc;
         if (options.enable_gc) {
             // GC cells are gpa-backed (the collector frees them individually);
@@ -5612,6 +5628,16 @@ test "Atomics on plain properties: semantics, exact counter, wait/notify" {
         \\if (globalThis.__waitAsyncOutcome !== "timed-out")
         \\  throw new Error("waitAsync timeout: " + globalThis.__waitAsyncOutcome);
     );
+}
+
+test "Context.createWith parallel option yields a working GIL-free context" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .parallel = true });
+    defer ctx.destroy();
+    const v = try ctx.evaluate("let s = 0; for (let i = 0; i < 100; i++) s += i; s");
+    try std.testing.expectEqual(@as(f64, 4950), v.asNum());
+    // `parallel` implies the GC-managed/thread-safe path and requires
+    // `enable_threads`; without it the option set is rejected.
+    try std.testing.expectError(error.InvalidThreadTestingOptions, Context.createWith(std.testing.allocator, .{ .parallel = true }));
 }
 
 test "Thread blocking APIs respect the main can-block gate" {
