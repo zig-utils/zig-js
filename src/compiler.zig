@@ -292,7 +292,11 @@ pub const Compiler = struct {
             },
             .global => {
                 const ni = try self.chunk.addName(name);
-                if (self.mode == .program and kind != .@"var")
+                // In env-mode (program / generator / async body) a `let`/`const`
+                // binds in the current lexical environment via `def_lex` (tracking
+                // const-ness and keeping it distinct from the variable scope's
+                // `var`s); a `var` hoists to the variable scope via `def_var`.
+                if (kind != .@"var")
                     _ = try self.chunk.emitAB(.def_lex, ni, if (kind == .@"const") 2 else 1)
                 else
                     _ = try self.chunk.emit(.def_var, ni);

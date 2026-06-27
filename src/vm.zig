@@ -764,6 +764,18 @@ fn makeIterResult(vm: *Interpreter, v: Value, done: bool) EvalError!Value {
     return o;
 }
 
+/// A function body's lexical Environment Record, distinct from its variable
+/// environment `var_env` (FunctionDeclarationInstantiation steps 30–32 / 34): the
+/// body's `let`/`const` live here, so they don't collide with `var`s in `var_env`
+/// and a direct `eval`'s `var` can detect a conflict (`{ let x; eval('var x') }` is
+/// a SyntaxError). A child block scope (not a variable scope), so `var` still hoists
+/// out to `var_env`.
+fn bodyLexicalEnv(vm: *Interpreter, var_env: *Environment) EvalError!*Environment {
+    const le = try gc_mod.allocEnv(vm.arena);
+    vm.initEnvironment(le, var_env, false);
+    return le;
+}
+
 /// FunctionDeclarationInstantiation step 27: when the formals contain a parameter
 /// expression (a default value), the body gets a variable environment distinct
 /// from the parameter environment `param_env`, so a closure created in the
@@ -829,11 +841,12 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     // parameter inherits that parameter's bound value. Mirrors `callPlain`. With no
     // default, params and body share `genv`.
     const body_env = try paramsBodyVarEnv(vm, func, genv);
+    const lexical_env = try bodyLexicalEnv(vm, body_env);
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
-        .env = body_env,
+        .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
@@ -1091,11 +1104,12 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     // Separate body var-env + body-var hoisting (see makeGenerator); without the
     // hoist a `with` in the body resolves a not-yet-declared `var` to an outer scope.
     const body_env = try paramsBodyVarEnv(vm, func, genv);
+    const lexical_env = try bodyLexicalEnv(vm, body_env);
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
-        .env = body_env,
+        .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
@@ -1228,11 +1242,12 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const bound_this = try bindThisForCall(vm, func, this_val);
     // Separate body var-env when the params contain a default (see makeGenerator).
     const body_env = try paramsBodyVarEnv(vm, func, genv);
+    const lexical_env = try bodyLexicalEnv(vm, body_env);
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
-        .env = body_env,
+        .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
