@@ -140,6 +140,65 @@ jobs:
           # functional fails/timeouts under TSan slowness do not fail the gate).
           [ "$races" -eq 0 ]
 
+  # Proves the program-byte suppressions are load-bearing AND narrow: the
+  # suppressed cases must (a) report races *without* the suppression file
+  # (so it isn't masking nothing), (b) have every such race touch a program-byte
+  # access function — never an engine-state frame, which the suppression would
+  # then be hiding — and (c) pass *with* the suppressions.
+  tsan-suppression-witness:
+    name: tsan-suppression-witness
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: zig-js
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-regex
+          path: zig-regex
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-gc
+          path: zig-gc
+      - uses: pantry-pm/pantry/packages/action@main
+        with:
+          packages: zig@0.17.0-dev
+      - name: Build the TSan-instrumented threads-test binary
+        working-directory: zig-js
+        run: zig build threads-test-bin -Dtsan=true
+      - name: Witness suppressions are load-bearing and narrow
+        working-directory: zig-js
+        run: |
+          set -uo pipefail
+          BIN=./zig-out/bin/threads-test
+          CASES="cve/mc-df-ta-detach-resize.js cve/mc-prim-arraybuffer-transfer-vs-atomics.js gc-stress/havebadtime-vs-indexed-fastpath.js"
+          # Frames a program-byte race legitimately touches (the only things that
+          # access a buffer's data bytes). Anything else in a suppressed race
+          # report means the suppression is hiding an engine-state race.
+          OK_FRAMES='ta(Write|Read|AtomicLoadRaw|AtomicStoreRaw|AtomicRmwRaw|AtomicCasRaw|StoreInternal|LoadInternal)|__tsan_memcpy|arrayBufferResizeFn|arrayBufferTransfer'
+          fail=0
+          for c in $CASES; do
+            # (a) WITHOUT suppressions, report ALL races (no halt) — must be >0.
+            TSAN_OPTIONS="halt_on_error=0 exitcode=0" timeout 600 "$BIN" parallel-js one "$c" > raw.log 2>&1 || true
+            if ! grep -q "ThreadSanitizer: data race" raw.log; then
+              echo "::error::$c: no race without suppressions — suppression is inert"; fail=1; continue
+            fi
+            # (b) every race SUMMARY must name a program-byte frame.
+            if grep "SUMMARY: ThreadSanitizer: data race" raw.log | grep -qvE "$OK_FRAMES"; then
+              echo "::error::$c: a suppressed race is NOT purely program-byte — suppression would mask an engine race:"
+              grep "SUMMARY: ThreadSanitizer: data race" raw.log | grep -vE "$OK_FRAMES"
+              fail=1; continue
+            fi
+            # (c) WITH suppressions, the case must pass.
+            if TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/tsan-suppressions.txt" timeout 600 "$BIN" parallel-js one "$c" > supp.log 2>&1; then
+              echo "$c: load-bearing + narrow + passes with suppressions ✓"
+            else
+              echo "::error::$c still fails WITH suppressions"; tail -8 supp.log; fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
+
   docs:
     runs-on: ubuntu-latest
     steps:
