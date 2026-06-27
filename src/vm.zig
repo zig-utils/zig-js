@@ -347,7 +347,15 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             },
             .def_var => {
                 const name = chunk.names.items[inst.a];
-                try vm.globalDefine(name, stack.pop().?);
+                const val = stack.pop().?;
+                // A `var x = init` (b == 1) whose name a `with` object provides
+                // writes to that object: ResolveBinding runs before PutValue, and
+                // the object Environment Record (honoring `@@unscopables`) shadows
+                // the hoisted var binding, which is left untouched. Mirrors the
+                // tree-walker's `assignWithObject` capture. A bare `var x;` (b == 0)
+                // never redirects.
+                const wo: ?*value.Object = if (inst.b == 1) try vm.assignWithObject(name) else null;
+                if (wo) |o| try vm.setMember(Value.obj(o), name, val) else try vm.globalDefine(name, val);
             },
             .def_lex => {
                 const name = chunk.names.items[inst.a];
@@ -1946,6 +1954,35 @@ test "vm: for loop with ++ and compound assignment" {
     try std.testing.expectEqual(@as(f64, 45), (try vmRun(a, "let s = 0; for (let i = 0; i < 10; i++) { s += i; } s")).asNum());
     try std.testing.expectEqual(@as(f64, 5), (try vmRun(a, "let x = 5; let y = x++; y")).asNum());
     try std.testing.expectEqual(@as(f64, 6), (try vmRun(a, "let x = 5; let y = ++x; y")).asNum());
+}
+
+test "vm: `var x = init` inside `with` resolves the binding through the with object" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // ResolveBinding finds the `with` object's own `a`, so the initializer's
+    // PutValue writes there — the hoisted `var a` is left untouched.
+    try std.testing.expectEqual(@as(f64, 9), (try vmRun(a,
+        \\var o = { a: 1 }; with (o) { var a = 9; } o.a
+    )).asNum());
+    // The outer hoisted `a` keeps its value (the write did NOT fall through).
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(a,
+        \\var o = { a: 1 }; var a = 1; with (o) { var a = 9; } a
+    )).asNum());
+    // A bare `var a;` (no initializer, b == 0) never redirects: no PutValue.
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(a,
+        \\var o = { a: 1 }; with (o) { var a; } o.a
+    )).asNum());
+    // No own property → the write targets the outer/global var, as before.
+    try std.testing.expectEqual(@as(f64, 9), (try vmRun(a,
+        \\var a = 1; with ({}) { var a = 9; } a
+    )).asNum());
+    // `[Symbol.unscopables]` hides `a` from `with` scope, so the write falls
+    // through to the outer var and the object property is untouched.
+    try std.testing.expectEqual(@as(f64, 1), (try vmRun(a,
+        \\var o = { a: 1 }; o[Symbol.unscopables] = { a: true };
+        \\with (o) { var a = 9; } o.a
+    )).asNum());
 }
 
 test "vm: compiler still falls back for try/catch" {

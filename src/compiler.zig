@@ -277,10 +277,14 @@ pub const Compiler = struct {
     /// Emit a definition of `name` (var/let/const/function decl) with its value
     /// already on the stack; consumes the value.
     fn emitDefine(self: *Compiler, name: []const u8) CompileError!void {
-        try self.emitDefineKind(name, .@"var");
+        try self.emitDefineKind(name, .@"var", false);
     }
 
-    fn emitDefineKind(self: *Compiler, name: []const u8, kind: ast.DeclKind) CompileError!void {
+    /// `has_init` marks a `var x = init` (vs a bare `var x;`): only the
+    /// initializer form may have its write redirected to a `with` object that
+    /// provides `x` (ResolveBinding before PutValue) — a bare declaration never
+    /// touches the `with` object.
+    fn emitDefineKind(self: *Compiler, name: []const u8, kind: ast.DeclKind, has_init: bool) CompileError!void {
         switch (self.resolve(name)) {
             .local => |slot| {
                 _ = try self.chunk.emit(.store_local, slot);
@@ -299,7 +303,10 @@ pub const Compiler = struct {
                 if (kind != .@"var")
                     _ = try self.chunk.emitAB(.def_lex, ni, if (kind == .@"const") 2 else 1)
                 else
-                    _ = try self.chunk.emit(.def_var, ni);
+                    // Only a real `var x = init` (b == 1) may redirect to a `with`
+                    // object; a non-program `let`/`const` reaching this branch is a
+                    // fresh lexical binding and must never touch the `with` object.
+                    _ = try self.chunk.emitAB(.def_var, ni, if (has_init and kind == .@"var") 1 else 0);
             },
         }
     }
@@ -336,7 +343,7 @@ pub const Compiler = struct {
                 // `using x = v;` / `await using x = v;`: keep a copy of the resource
                 // to register for DisposeResources at the variable scope's exit.
                 if (d.dispose != 0) _ = try self.chunk.emit(.dup, 0);
-                try self.emitDefineKind(d.name, d.kind);
+                try self.emitDefineKind(d.name, d.kind, d.init != null);
                 if (d.dispose != 0) _ = try self.chunk.emit(.register_disposable, if (d.dispose == 2) 1 else 0);
             },
             .func_decl => |fnode| {
