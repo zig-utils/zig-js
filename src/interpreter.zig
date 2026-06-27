@@ -12477,11 +12477,18 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     // (Strict eval keeps them local in `eval_env`, so the flag is moot there.)
     const saved_deletable = self.eval_decl_deletable;
     self.eval_decl_deletable = !parser.strict;
+    // The eval'd code is strict if the call is a direct eval in strict code OR the
+    // code's own Directive Prologue has a Use Strict directive (`parser.strict`
+    // captured both). Run the body under that strictness — e.g. `eval('"use
+    // strict"; x = 1')` from sloppy code is a ReferenceError on the undeclared `x`.
+    const saved_strict = self.strict;
+    self.strict = parser.strict;
     defer {
         self.env = saved_env;
         self.this_value = saved_this;
         self.global_object = saved_glob;
         self.eval_decl_deletable = saved_deletable;
+        self.strict = saved_strict;
     }
 
     // Eval creates a fresh lexical environment for let/const/class declarations,
