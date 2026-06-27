@@ -736,11 +736,27 @@ pub const Lexer = struct {
             }
         }
         const cleaned = try stripSeparators(self.arena, self.src[start..self.i]);
-        const n = std.fmt.parseFloat(f64, cleaned) catch return LexError.InvalidNumber;
+        var n = std.fmt.parseFloat(f64, cleaned) catch return LexError.InvalidNumber;
         // A leading `0` immediately followed by another digit is a legacy octal
         // (`0123`) or non-octal-decimal (`08`) literal — flagged for strict mode.
+        const num_tok = self.src[start..self.i];
         const legacy = self.src[start] == '0' and start + 1 < self.src.len and std.ascii.isDigit(self.src[start + 1]);
-        return .{ .kind = .number, .text = self.src[start..self.i], .number = n, .pos = start, .legacy_octal = legacy };
+        if (legacy) {
+            // A LegacyOctalIntegerLiteral is `0` followed by only octal digits
+            // (0-7) and has the octal value. A NonOctalDecimalIntegerLiteral
+            // (e.g. `08`, `019` — a digit 8/9 appears) keeps its decimal value.
+            var all_octal = true;
+            for (num_tok) |c| if (c < '0' or c > '7') {
+                all_octal = false;
+                break;
+            };
+            if (all_octal) {
+                var v: f64 = 0;
+                for (num_tok) |c| v = v * 8 + @as(f64, @floatFromInt(c - '0'));
+                n = v;
+            }
+        }
+        return .{ .kind = .number, .text = num_tok, .number = n, .pos = start, .legacy_octal = legacy };
     }
 
     fn lexString(self: *Lexer) LexError!Token {
@@ -1021,14 +1037,21 @@ pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
             return i + 1;
         },
         '0'...'7' => {
-            // `\0` (not followed by a digit) is NUL; legacy octal escapes are
-            // out of scope, so any other digit is taken literally below.
-            if (e == '0' and (i + 1 >= src.len or !std.ascii.isDigit(src[i + 1]))) {
-                try buf.append(arena, 0);
-                return i + 1;
+            // LegacyOctalEscapeSequence (Annex B.1.2): 1-3 octal digits with
+            // value ≤ 0o377 (255). A leading 0-3 admits up to two more octal
+            // digits; a leading 4-7 admits one more. (`\0` not followed by an
+            // octal digit is the non-legacy NUL escape — value 0, zero extra
+            // digits — and falls out of the same loop.)
+            var val: u21 = @as(u21, e - '0');
+            var j = i + 1;
+            const max_more: usize = if (e <= '3') 2 else 1;
+            var taken: usize = 0;
+            while (taken < max_more and j < src.len and src[j] >= '0' and src[j] <= '7') : (taken += 1) {
+                val = val * 8 + @as(u21, src[j] - '0');
+                j += 1;
             }
-            try buf.append(arena, e);
-            return i + 1;
+            try appendCodePoint(arena, buf, val);
+            return j;
         },
         'x' => {
             if (i + 2 < src.len) {
