@@ -215,7 +215,10 @@ pub const Node = union(enum) {
     /// A tagged template `tag`a${x}b`` — calls `tag(strings, ...exprs)` where
     /// `strings` is the cooked-string array (with a `raw` array of the
     /// unescaped text). `cooked`/`raw` have one more element than `exprs`.
-    tagged_template: struct { tag: *Node, cooked: [][]const u8, raw: [][]const u8, exprs: []*Node },
+    // `cooked[k]` is null when that quasi contains an invalid escape sequence:
+    // a tagged template tolerates these (the cooked value is `undefined`) while
+    // the raw text is preserved. (An untagged template is a SyntaxError.)
+    tagged_template: struct { tag: *Node, cooked: []?[]const u8, raw: [][]const u8, exprs: []*Node },
     /// `object.property` (computed == null) or `object[computed]`. `optional`
     /// marks `?.` access (short-circuits the chain when the object is nullish).
     member: struct { object: *Node, property: []const u8 = "", computed: ?*Node = null, optional: bool = false },

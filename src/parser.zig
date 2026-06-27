@@ -2763,20 +2763,27 @@ pub const Parser = struct {
     /// more quasi than substitution.
     fn parseTaggedTemplate(self: *Parser, tag: *Node, raw_in: []const u8) ParseError!*Node {
         const raw = try normalizeTemplateRaw(self.arena, raw_in);
-        var cooked: std.ArrayListUnmanaged([]const u8) = .empty;
+        var cooked: std.ArrayListUnmanaged(?[]const u8) = .empty;
         var raws: std.ArrayListUnmanaged([]const u8) = .empty;
         var exprs: std.ArrayListUnmanaged(*Node) = .empty;
         var buf: std.ArrayListUnmanaged(u8) = .empty;
+        // A quasi that holds an invalid escape has an `undefined` cooked value
+        // (tolerated in a tagged template); track that per quasi and flush null.
+        var span_invalid = false;
         var raw_start: usize = 0;
         var i: usize = 0;
         while (i < raw.len) {
             const c = raw[i];
             if (c == '\\' and i + 1 < raw.len) {
+                validateTemplateEscape(raw, i + 1) catch {
+                    span_invalid = true;
+                };
                 i = try lex.appendEscape(self.arena, &buf, raw, i + 1);
             } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
-                try cooked.append(self.arena, try buf.toOwnedSlice(self.arena));
+                try cooked.append(self.arena, if (span_invalid) null else try buf.toOwnedSlice(self.arena));
                 try raws.append(self.arena, raw[raw_start..i]);
                 buf = .empty;
+                span_invalid = false;
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
                 var sub = try Parser.init(self.arena, raw[expr_start..expr_end]);
@@ -2788,7 +2795,7 @@ pub const Parser = struct {
                 i += 1;
             }
         }
-        try cooked.append(self.arena, try buf.toOwnedSlice(self.arena));
+        try cooked.append(self.arena, if (span_invalid) null else try buf.toOwnedSlice(self.arena));
         try raws.append(self.arena, raw[raw_start..]);
         return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked.items, .raw = raws.items, .exprs = exprs.items } });
     }

@@ -4205,7 +4205,7 @@ pub const Interpreter = struct {
     /// `tag`a${x}b`` → `tag(strings, x)` where `strings` is the frozen cooked
     /// array carrying a frozen `raw` array. The tag's `this` is the member
     /// receiver for `obj.tag`...`` (e.g. `String.raw`...``), else undefined.
-    fn evalTaggedTemplate(self: *Interpreter, site: *const Node, tag_node: *Node, cooked: [][]const u8, raw: [][]const u8, expr_nodes: []*Node) EvalError!Value {
+    fn evalTaggedTemplate(self: *Interpreter, site: *const Node, tag_node: *Node, cooked: []?[]const u8, raw: [][]const u8, expr_nodes: []*Node) EvalError!Value {
         // GetTemplateObject: the frozen "strings" object is cached by call site
         // (this AST node) and reused on every evaluation, so the tag receives the
         // same object each time. Build it only on a cache miss.
@@ -4213,7 +4213,7 @@ pub const Interpreter = struct {
             cached.asObj()
         else blk: {
             const s = (try self.newArray()).asObj();
-            for (cooked) |c| try s.elements.append(s.elementsAllocator(self.arena), Value.str(c));
+            for (cooked) |c| try s.elements.append(s.elementsAllocator(self.arena), if (c) |cv| Value.str(cv) else Value.undef());
             const raw_arr = (try self.newArray()).asObj();
             for (raw) |c| try raw_arr.elements.append(raw_arr.elementsAllocator(self.arena), Value.str(c));
             try freezeTemplateArray(self, raw_arr);
