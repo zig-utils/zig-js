@@ -1091,16 +1091,19 @@ pub const Compiler = struct {
             .object_lit => |props| {
                 _ = try self.chunk.emit(.new_object, 0);
                 for (props) |p| {
-                    // Spread + accessor properties are lowered only inside
-                    // generators (where lowering is mandatory); plain code keeps
-                    // tree-walking, which has the fuller/faster path.
+                    // Object spread lowers everywhere (`init_spread` is the same
+                    // CopyDataProperties helper the tree-walker uses), so a nested
+                    // non-generator function that spreads (`*g(){ yield {...(()=>({...x}))()} }`)
+                    // no longer bails the whole generator. Accessor (get/set) props
+                    // are still lowered only inside a generator (where lowering is
+                    // mandatory); plain code keeps the tree-walker's fuller path.
                     if (p.is_spread or p.accessor != .none) {
-                        if (!self.in_generator) return error.Unsupported;
                         if (p.is_spread) {
                             try self.compileExpr(p.value); // CopyDataProperties source
                             _ = try self.chunk.emit(.init_spread, 0);
                             continue;
                         }
+                        if (!self.in_generator) return error.Unsupported;
                         // Getter/setter: push key, push the function, install.
                         if (p.key_expr) |ke| {
                             try self.compileExpr(ke);
