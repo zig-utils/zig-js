@@ -2698,6 +2698,12 @@ pub const Parser = struct {
                 const idx = try self.parseExpression();
                 try self.expect(.rbracket);
                 callee = try self.alloc(.{ .member = .{ .object = callee, .computed = idx } });
+            } else if (self.check(.template)) {
+                // `new tag`tmpl`` parses as `new (tag`tmpl`)`: a tagged template is a
+                // MemberExpression, so it binds to the `new` operand (the tag call
+                // happens first, then `new` constructs its result).
+                const tmpl = self.advance();
+                callee = try self.parseTaggedTemplate(callee, tmpl.text);
             } else break;
         }
         const args: []*Node = if (self.check(.lparen)) try self.parseArgs() else &.{};
