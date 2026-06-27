@@ -687,6 +687,10 @@ pub const Function = struct {
     /// `this` through `super()` before completing normally.
     is_class_constructor: bool = false,
     is_derived_constructor: bool = false,
+    // A synthesized default derived constructor (`constructor(...args){ super(...args) }`):
+    // it forwards its arguments to the super constructor DIRECTLY, without the
+    // observable @@iterator of a real spread.
+    is_default_ctor: bool = false,
     /// True when this (arrow) function was created lexically inside a class field
     /// initializer / static block. The field-initializer eval restrictions
     /// (`new.target` ⇒ undefined; a direct eval may not reference `arguments` or
@@ -992,6 +996,7 @@ pub const Interpreter = struct {
     /// context (global eval, a method, a base constructor) from the runtime
     /// TypeError of `super()` in an `extends null` constructor.
     in_derived_ctor: bool = false,
+    in_default_ctor: bool = false, // executing a synthesized default derived constructor
     /// The private-name map of the class whose method/constructor/static element is
     /// currently executing (see Function.private_map). A direct eval uses it to
     /// rewrite the private names in the eval'd code to the right storage keys.
@@ -2099,7 +2104,14 @@ pub const Interpreter = struct {
                 // %Function.prototype%, not a constructor → a runtime TypeError.
                 if (!self.in_derived_ctor) return self.throwError("SyntaxError", "'super' keyword unexpected here");
                 const sup = self.super_ctor orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
-                const args = try self.evalArgs(sc);
+                // A synthesized default derived constructor forwards its arguments
+                // to the super constructor DIRECTLY — its `super(...args)` does not
+                // run a user-observable spread, so a hijacked Array.prototype
+                // @@iterator is never invoked. (`args` is its rest-parameter array.)
+                const args = if (self.in_default_ctor) dblk: {
+                    const av = self.env.get("args") orelse Value.undef();
+                    break :dblk if (av.isObject() and av.asObj().is_array) av.asObj().elements.items else &[_]Value{};
+                } else try self.evalArgs(sc);
                 // Construct the superclass with the most-derived class as NewTarget,
                 // so the produced object's prototype is the derived class's.
                 const sup_ret = try self.constructNT(Value.obj(sup), args, self.new_target);
@@ -4032,6 +4044,7 @@ pub const Interpreter = struct {
             cf.private_map = private_map; // a direct eval in a field initializer resolves private names
             cf.is_class_constructor = true;
             cf.is_derived_constructor = derived;
+            cf.is_default_ctor = derived and ctor_node == null;
             if (derived) cf.field_inits = field_inits.items;
             // Private brands. Methods/accessors are added all at once before field
             // initializers run, so they brand the instance up front; *fields* are
@@ -4608,6 +4621,7 @@ pub const Interpreter = struct {
         const saved_edd = self.eval_decl_deletable;
         self.eval_decl_deletable = false; // a function's own vars aren't eval-deletable, even if called from eval
         const saved_idc = self.in_derived_ctor;
+        const saved_dfc = self.in_default_ctor;
         const saved_pm = self.current_private_map;
         if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
         const saved_pfi = self.pending_field_inits;
@@ -4650,6 +4664,7 @@ pub const Interpreter = struct {
         // Arrows inherit the enclosing super()-call legality; a non-arrow function
         // establishes it (only a derived constructor permits `super()`).
         if (!func.is_arrow) self.in_derived_ctor = func.is_derived_constructor;
+        if (!func.is_arrow) self.in_default_ctor = func.is_default_ctor;
         self.this_initialized = !func.is_derived_constructor;
         defer {
             self.env = saved_env;
@@ -4668,6 +4683,7 @@ pub const Interpreter = struct {
             self.in_param_default = saved_pd;
             self.eval_decl_deletable = saved_edd;
             self.in_derived_ctor = saved_idc;
+            self.in_default_ctor = saved_dfc;
             self.current_private_map = saved_pm;
             self.pending_field_inits = saved_pfi;
             self.pending_brand_names = saved_pbn;
