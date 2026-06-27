@@ -178,6 +178,7 @@ pub const Op = enum(u8) {
     exit_with, // pop the innermost with/block environment off vm.env (restore its parent)
     make_regex, // operands a: pattern name index, b: flags name index; push a fresh RegExp object
     register_disposable, // operand a: 0 = `using`, 1 = `await using`; pop value, register it for DisposeResources at body exit
+    array_append_hole, // append an array-literal elision (a hole that reads as absent) to the array on the stack top
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
     set_index, // pop value, pop key, pop object -> push value (after set)

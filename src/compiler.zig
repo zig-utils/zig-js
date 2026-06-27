@@ -1210,7 +1210,10 @@ pub const Compiler = struct {
             .array_lit => |elems| {
                 _ = try self.chunk.emit(.new_array, 0);
                 for (elems) |e| {
-                    if (e.* == .elision) return error.Unsupported; // array holes → tree-walk
+                    if (e.* == .elision) {
+                        _ = try self.chunk.emit(.array_append_hole, 0); // `[,]` — a hole
+                        continue;
+                    }
                     if (e.* == .spread) {
                         if (!self.in_generator) return error.Unsupported; // non-generator spread → tree-walk
                         try self.compileExpr(e.spread);

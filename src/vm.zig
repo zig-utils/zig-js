@@ -432,6 +432,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const arr = stack.items[stack.items.len - 1];
                 try arr.asObj().elements.append(arr.asObj().elementsAllocator(vm.arena), v);
             },
+            .array_append_hole => {
+                // An array-literal elision: a slot that reads as absent (skipped by
+                // iteration, `in`, etc.) but counts toward length.
+                const arr = stack.items[stack.items.len - 1].asObj();
+                try arr.markHole(vm.arena, arr.elements.items.len);
+                try arr.elements.append(arr.elementsAllocator(vm.arena), Value.undef());
+            },
             .get_prop => {
                 const obj = stack.pop().?;
                 const name = chunk.names.items[inst.a];
