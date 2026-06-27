@@ -2169,6 +2169,14 @@ pub const Interpreter = struct {
                 try self.eval(c.alternate),
 
             .var_decl => |d| blk: {
+                // ResolveBinding happens BEFORE the Initializer is evaluated:
+                // for a `var x = init` whose name a `with` object provides,
+                // capture that target object first, so a side effect in the
+                // initializer (e.g. `delete obj.x`) can't retarget the write.
+                const with_target: ?*value.Object = if (d.kind == .@"var" and d.init != null)
+                    try self.assignWithObject(d.name)
+                else
+                    null;
                 var v: Value = Value.undef();
                 if (d.init) |init_node| {
                     v = try self.eval(init_node);
@@ -2184,7 +2192,7 @@ pub const Interpreter = struct {
                     // an initializer, or when no `with` shadows the name, the var
                     // scope binding takes the value as before.
                     if (d.init != null) {
-                        if (try self.assignWithObject(d.name)) |o| {
+                        if (with_target) |o| {
                             try self.setMember(Value.obj(o), d.name, v);
                             break :blk Value.undef();
                         }
