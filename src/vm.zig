@@ -879,7 +879,9 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     set_proto: {
         if (func.obj) |fobj| {
             const fp = try vm.getProperty(Value.obj(fobj), "prototype");
-            if (fp.isObject()) {
+            // GetPrototypeFromConstructor: only an *Object* `.prototype` is used;
+            // a Symbol/BigInt (object-tagged here) is "not Object" and falls back.
+            if (fp.isObject() and !fp.asObj().is_symbol and !fp.asObj().is_bigint) {
                 obj.proto = fp.asObj();
                 break :set_proto;
             }
@@ -1282,7 +1284,9 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     set_proto: {
         if (func.obj) |fobj| {
             const fp = try vm.getProperty(Value.obj(fobj), "prototype");
-            if (fp.isObject()) {
+            // GetPrototypeFromConstructor: only an *Object* `.prototype` is used;
+            // a Symbol/BigInt (object-tagged here) is "not Object" and falls back.
+            if (fp.isObject() and !fp.asObj().is_symbol and !fp.asObj().is_bigint) {
                 obj.proto = fp.asObj();
                 break :set_proto;
             }
