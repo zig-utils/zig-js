@@ -1165,7 +1165,8 @@ pub const Context = struct {
         ns: ?*value.Object = null, // the namespace exotic object, if requested
         deferred_ns: ?*value.Object = null, // the `import defer` namespace, if requested (distinct, cached)
         linked: bool = false,
-        evaluated: bool = false,
+        eval_started: bool = false, // [[Status]] reached ~evaluating~
+        evaluated: bool = false, // [[Status]] reached ~evaluated~ (completed, even if it threw)
         // A synthetic module (`import x from "m" with { type: "json"|"text" }`):
         // its raw source, turned into the sole `default` export at evaluation
         // time per `syn_type` ("json" → JSON.parse, "text" → the string itself).
@@ -1476,8 +1477,9 @@ pub const Context = struct {
     /// Evaluate a module (and its not-yet-evaluated dependencies first), running
     /// its top-level items in its own environment with `this === undefined`.
     fn evalModule(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
-        if (m.evaluated) return;
-        m.evaluated = true;
+        if (m.eval_started) return;
+        m.eval_started = true;
+        defer m.evaluated = true; // reaches ~evaluated~ on completion, even on a throw
         if (m.syn_source) |src| {
             // The synthetic module's `default` export: JSON.parse(source) for a
             // JSON module (a malformed body throws SyntaxError here), or the raw
@@ -1552,7 +1554,14 @@ pub const Context = struct {
     /// string-keyed access of its deferred namespace (idempotent via `evaluated`).
     fn deferTriggerHook(ctx: *anyopaque, machine: *interp.Interpreter, module: *anyopaque) interp.EvalError!void {
         const self: *Context = @ptrCast(@alignCast(ctx));
-        try self.evalModule(machine, @ptrCast(@alignCast(module)));
+        const m: *Module = @ptrCast(@alignCast(module));
+        // EnsureDeferredNamespaceEvaluation / ReadyForSyncExecution: a module that
+        // is already evaluating (its own deferred namespace observed mid-evaluation,
+        // directly or via a dependency) cannot trigger its own evaluation — a
+        // TypeError, rather than re-entering or reading a half-initialized binding.
+        if (m.eval_started and !m.evaluated)
+            return machine.throwError("TypeError", "Cannot trigger evaluation of a module that is already evaluating");
+        try self.evalModule(machine, m);
     }
 
     /// Runtime `import(specifier)` driver (wired into the interpreter as
