@@ -885,9 +885,9 @@ pub const Parser = struct {
         // Bare side-effect import: `import "spec";`
         if (self.check(.string)) {
             const spec = self.advance().text;
-            try self.parseImportAttributesOpt();
+            const at = try self.parseImportAttributesOpt();
             try self.consumeStatementTerminator();
-            return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = &.{} } });
+            return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = &.{}, .attr_type = at } });
         }
         // Source-phase import: `import source x from "mod"`. The contextual
         // keyword is only recognized when a binding and following `from` are
@@ -899,9 +899,9 @@ pub const Parser = struct {
             try entries.append(self.arena, .{ .imported = "source", .local = name });
             try self.expectContextual("from");
             const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
-            try self.parseImportAttributesOpt();
+            const at = try self.parseImportAttributesOpt();
             try self.consumeStatementTerminator();
-            return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items } });
+            return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items, .attr_type = at } });
         }
         // Default binding: `import name ...`
         if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "from")) {
@@ -922,29 +922,33 @@ pub const Parser = struct {
         }
         try self.expectContextual("from");
         const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
-        try self.parseImportAttributesOpt();
+        const at = try self.parseImportAttributesOpt();
         try self.consumeStatementTerminator();
-        return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items } });
+        return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items, .attr_type = at } });
     }
 
-    /// Static import attributes: `with { key: "value", ... }`. The host does
-    /// not interpret them yet, but the parser must validate the clause shape and
-    /// duplicate keys so module linking observes the right phase.
-    fn parseImportAttributesOpt(self: *Parser) ParseError!void {
-        if (!self.checkContextual("with")) return;
+    /// Static import attributes: `with { key: "value", ... }`. Validates the
+    /// clause shape and duplicate keys, and returns the value of the `type`
+    /// attribute (`""` when absent) — which selects the imported module's type
+    /// (e.g. `"json"`).
+    fn parseImportAttributesOpt(self: *Parser) ParseError![]const u8 {
+        if (!self.checkContextual("with")) return "";
         _ = self.advance();
         try self.expect(.lbrace);
         var keys: std.StringHashMapUnmanaged(void) = .empty;
+        var type_value: []const u8 = "";
         while (!self.check(.rbrace)) {
             const key = try self.moduleExportName();
             if (keys.contains(key)) return ParseError.UnexpectedToken;
             try keys.put(self.arena, key, {});
             try self.expect(.colon);
             if (!self.check(.string)) return ParseError.UnexpectedToken;
-            _ = self.advance();
+            const val = self.advance().text;
+            if (std.mem.eql(u8, key, "type")) type_value = val;
             if (!self.match(.comma)) break;
         }
         try self.expect(.rbrace);
+        return type_value;
     }
 
     /// `{ a, b as c, "str" as d }` import bindings.
@@ -984,7 +988,7 @@ pub const Parser = struct {
             }
             try self.expectContextual("from");
             node.from = self.advance().text;
-            try self.parseImportAttributesOpt();
+            _ = try self.parseImportAttributesOpt(); // export-from attributes: validated, not yet typed
             try self.consumeStatementTerminator();
             return self.alloc(.{ .export_decl = node });
         }
@@ -1008,7 +1012,7 @@ pub const Parser = struct {
             if (self.checkContextual("from")) {
                 _ = self.advance();
                 node.from = self.advance().text;
-                try self.parseImportAttributesOpt();
+                _ = try self.parseImportAttributesOpt(); // re-export attributes: validated, not yet typed
                 // Re-export: the names are imported from the source module, not local.
                 for (entries.items) |*e| {
                     e.imported = e.local;

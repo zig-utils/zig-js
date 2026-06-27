@@ -282,7 +282,10 @@ pub const Node = union(enum) {
     /// `import ... from "spec"` / `import "spec"`. `entries` carries each binding
     /// the import introduces (default/namespace/named); empty for a bare
     /// side-effect import.
-    import_decl: struct { specifier: []const u8, entries: []ImportEntry },
+    // `attr_type` is the value of the `type` import attribute (`with { type:
+    // "json" }`), determining the imported module's type ("json", "bytes", …);
+    // empty when no `type` attribute is present (an ordinary JS module).
+    import_decl: struct { specifier: []const u8, entries: []ImportEntry, attr_type: []const u8 = "" },
     /// An `export` declaration in one of its forms (see `ExportNode`).
     export_decl: *ExportNode,
     /// `import(specifier)` / `import(specifier, options)` — dynamic import; an
