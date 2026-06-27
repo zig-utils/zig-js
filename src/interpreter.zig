@@ -2336,14 +2336,14 @@ pub const Interpreter = struct {
             },
             .for_stmt => |f| try self.evalFor(f.init, f.cond, f.update, f.body),
             .switch_stmt => |s| try self.evalSwitch(s.disc, s.cases),
-            .for_in => |f| try self.evalForInOf(f.decl_kind, f.target, f.iterable, f.body, f.is_of, f.is_await),
+            .for_in => |f| try self.evalForInOf(f.decl_kind, f.target, f.iterable, f.body, f.is_of, f.is_await, f.dispose),
         };
     }
 
     /// `for-of` (values of arrays/strings) and `for-in` (own keys of objects /
     /// indices of arrays). Each iteration binds the loop variable then runs the
     /// body, honoring break/continue/return.
-    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool) EvalError!Value {
+    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool, dispose: u8) EvalError!Value {
         const my_label = self.takeLabel();
         // A `let`/`const` loop binding gets a fresh declarative environment per
         // iteration, so a closure created in the head or body captures *that*
@@ -2381,10 +2381,14 @@ pub const Interpreter = struct {
                 if ((try self.getProperty(res, "done")).toBoolean()) break; // exhausted — no close
                 const saved_env = self.env;
                 defer self.env = saved_env;
+                // The per-iteration env also holds a `for (using x of …)` resource,
+                // disposed (DisposeResources) at the END of each iteration.
+                var iter_env: ?*Environment = null;
                 if (lexical) {
-                    const iter_env = try gc_mod.allocEnv(self.arena);
-                    self.initEnvironment(iter_env, saved_env, false);
-                    self.env = iter_env;
+                    const e = try gc_mod.allocEnv(self.arena);
+                    self.initEnvironment(e, saved_env, false);
+                    self.env = e;
+                    iter_env = e;
                 }
                 // Binding/assigning the loop target is also an abrupt-completion
                 // close site: if PutValue or a destructuring assignment throws
@@ -2396,13 +2400,32 @@ pub const Interpreter = struct {
                     self.iteratorCloseKeepingThrow(iter_obj);
                     return e;
                 };
+                // `for (using/await using x of …)`: register the bound resource for
+                // disposal at the end of this iteration.
+                if (dispose != 0) self.addDisposable(next_value, dispose == 2) catch |e| {
+                    self.iteratorCloseKeepingThrow(iter_obj);
+                    return e;
+                };
                 // A throw in the body closes the iterator before propagating. On a
                 // throw completion any error from IteratorClose is discarded AND the
                 // original thrown value is preserved (iteratorClose can overwrite
                 // `self.exception` via a throwing `return`/get-method).
                 last = self.eval(body) catch |e| {
+                    if (e == error.Throw) if (iter_env) |ie| if (ie.disposables.items.len > 0) {
+                        const body_err = self.exception;
+                        if (self.disposeScope(ie, body_err) catch null) |de| self.exception = de;
+                    };
                     self.iteratorCloseKeepingThrow(iter_obj);
                     return e;
+                };
+                // DisposeResources at the end of a normal iteration; a disposal error
+                // is a throw completion that also closes the iterator.
+                if (iter_env) |ie| if (ie.disposables.items.len > 0) {
+                    if (try self.disposeScope(ie, null)) |de| {
+                        self.exception = de;
+                        self.iteratorCloseKeepingThrow(iter_obj);
+                        return error.Throw;
+                    }
                 };
                 // `break`/`return` (an abrupt loop exit) also closes the iterator.
                 // Unlike the throw case above, this is a normal/return completion,

@@ -1532,6 +1532,7 @@ pub const Parser = struct {
         const save = self.pos;
         var decl_kind: ?ast.DeclKind = null;
         var is_using = false;
+        var dispose: u8 = 0; // 1 = `using`, 2 = `await using` (for a for-of head)
         if (isKeyword(self.cur(), "var")) {
             decl_kind = .@"var";
             _ = self.advance();
@@ -1547,6 +1548,7 @@ pub const Parser = struct {
             // `for (using x of …)` (but `for (using of …)` has `using` as the var).
             decl_kind = .@"const";
             is_using = true;
+            dispose = 1;
             _ = self.advance();
         } else if (isKeyword(self.cur(), "await") and self.peekIsKeyword(1, "using") and
             self.peekKind(2) == .identifier and self.noNewlineBefore(1) and self.noNewlineBefore(2))
@@ -1555,6 +1557,7 @@ pub const Parser = struct {
             // `of`, so consume both declaration keywords before parsing target.
             decl_kind = .@"const";
             is_using = true;
+            dispose = 2;
             _ = self.advance(); // await
             _ = self.advance(); // using
         }
@@ -1605,6 +1608,7 @@ pub const Parser = struct {
                     .body = body,
                     .is_of = is_of,
                     .is_await = is_await,
+                    .dispose = dispose,
                 } });
             }
         };

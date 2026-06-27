@@ -387,6 +387,7 @@ pub const Compiler = struct {
                 // generators (via `enum_keys`); for-await only in async bodies.
                 if (!f.is_of and !self.in_generator) return error.Unsupported;
                 if (f.is_await and !self.in_async) return error.Unsupported;
+                if (f.dispose != 0) return error.Unsupported; // `for (using x of …)` disposal → tree-walk
                 try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body, !f.is_of, f.is_await);
             },
             .try_stmt => |t| try self.compileTry(t),
