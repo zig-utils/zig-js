@@ -285,7 +285,10 @@ pub const Node = union(enum) {
     // `attr_type` is the value of the `type` import attribute (`with { type:
     // "json" }`), determining the imported module's type ("json", "bytes", …);
     // empty when no `type` attribute is present (an ordinary JS module).
-    import_decl: struct { specifier: []const u8, entries: []ImportEntry, attr_type: []const u8 = "" },
+    // `deferred` marks `import defer * as ns from "m"`: the module is loaded and
+    // linked but not evaluated until a binding of the (deferred) namespace is
+    // first accessed.
+    import_decl: struct { specifier: []const u8, entries: []ImportEntry, attr_type: []const u8 = "", deferred: bool = false },
     /// An `export` declaration in one of its forms (see `ExportNode`).
     export_decl: *ExportNode,
     /// `import(specifier)` / `import(specifier, options)` — dynamic import; an

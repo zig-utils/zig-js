@@ -1458,7 +1458,10 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         if (!s.isUndefined() and !(s.isObject() and s.asObj().isCallableObject()))
             return self.throwError("TypeError", "Setter must be a function");
     }
-    if (interpreter.isModuleNs(target)) return moduleNamespaceDefine(self, target, key, d);
+    if (interpreter.isModuleNs(target)) {
+        try interpreter.triggerDeferForKey(self, target, key); // `import defer`: a string [[DefineOwnProperty]] evaluates first
+        return moduleNamespaceDefine(self, target, key, d);
+    }
     // [[DefineOwnProperty]] on a Proxy: invoke the `defineProperty` trap with the
     // normalized descriptor object; a falsy result is a TypeError. An absent trap
     // forwards to the target.
@@ -2098,7 +2101,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     const key = try self.keyOf(arg(args, 1));
     // Private members are internal slots — invisible to reflection.
     if (value.isPrivateKey(key)) return Value.undef();
-    if (interpreter.isModuleNs(o)) return interpreter.moduleNsDesc(self, o, key);
+    if (interpreter.isModuleNs(o)) {
+        try interpreter.triggerDeferForKey(self, o, key); // `import defer`: a string [[GetOwnProperty]] evaluates first
+        return interpreter.moduleNsDesc(self, o, key);
+    }
 
     // [[GetOwnProperty]] on a Proxy: the trap returns a descriptor object or
     // undefined; the result is normalized (CompletePropertyDescriptor). An

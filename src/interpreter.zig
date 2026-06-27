@@ -900,6 +900,12 @@ pub const Interpreter = struct {
     cur_module: []const u8 = "",
     dyn_import_ctx: ?*anyopaque = null,
     dyn_import: ?*const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, out: *Value) bool = null,
+    /// Deferred-evaluation trigger (set by the module driver): evaluates the
+    /// `import defer` module identified by `module` (an opaque `*Context.Module`)
+    /// the first time a binding of its deferred namespace is accessed. Idempotent
+    /// (the module's own `evaluated` flag makes a re-trigger a no-op).
+    defer_trigger_ctx: ?*anyopaque = null,
+    defer_trigger: ?*const fn (ctx: *anyopaque, self: *Interpreter, module: *anyopaque) EvalError!void = null,
     /// The surrounding module's `import.meta` object, created lazily and cached.
     import_meta_obj: ?*value.Object = null,
     /// Legacy static RegExp match state (Annex B): updated after a successful
@@ -7733,6 +7739,7 @@ pub const Interpreter = struct {
             }
         }.f;
         if (moduleNsOf(t)) |ns| {
+            try triggerDeferModule(self, ns); // `import defer`: [[OwnPropertyKeys]] evaluates first
             // Sorted string export names first, then the @@toStringTag symbol key.
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
             try list.appendSlice(self.arena, ns.names);
@@ -7997,7 +8004,10 @@ pub const Interpreter = struct {
                 const o = recv.asObj();
                 if (o.is_symbol or o.is_bigint) return self.getPrimitiveMember(recv, key);
                 if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGet(o, key, receiver);
-                if (moduleNsOf(o)) |ns| return moduleNsGet(self, ns, key);
+                if (moduleNsOf(o)) |ns| {
+                    try triggerDeferIfString(self, ns, key); // `import defer`: a string [[Get]] evaluates first
+                    return moduleNsGet(self, ns, key);
+                }
                 // Legacy `caller`: a *non-strict ordinary* function (not strict,
                 // arrow, generator, async, or bound) reads `undefined` for `.caller`
                 // (we don't expose the live call stack — the "extension not
@@ -8968,7 +8978,10 @@ pub const Interpreter = struct {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyDelete(o, key);
         // A module namespace's own properties (exports + @@toStringTag) are
         // non-configurable → [[Delete]] returns false; a non-own key "deletes".
-        if (moduleNsOf(o)) |ns| return !moduleNsHas(ns, key);
+        if (moduleNsOf(o)) |ns| {
+            try triggerDeferIfString(self, ns, key);
+            return !moduleNsHas(ns, key);
+        }
         // Integer-Indexed Exotic [[Delete]]: a canonical numeric key cannot be
         // deleted when it is a valid index (returns false); any other numeric key
         // (out of bounds, "-0", fractional) "deletes" as a no-op (returns true).
@@ -9650,7 +9663,10 @@ pub const Interpreter = struct {
     }
 
     fn objectProtoHasOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
-        if (isModuleNs(o)) return !(try moduleNsDesc(self, o, key)).isUndefined();
+        if (moduleNsOf(o)) |ns| {
+            try triggerDeferIfString(self, ns, key);
+            return !(try moduleNsDesc(self, o, key)).isUndefined();
+        }
         if (o.proxy_handler != null or o.proxy_revoked) {
             const desc = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(o), self.keyToValue(key) });
             return !desc.isUndefined();
@@ -9659,7 +9675,8 @@ pub const Interpreter = struct {
     }
 
     fn objectProtoPropertyIsEnumerable(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
-        if (isModuleNs(o)) {
+        if (moduleNsOf(o)) |ns| {
+            try triggerDeferIfString(self, ns, key);
             _ = try moduleNsDesc(self, o, key);
             return moduleNsEnumerable(o, key);
         }
@@ -12459,7 +12476,10 @@ pub const Interpreter = struct {
         var cur: ?*value.Object = o;
         while (cur) |c| {
             if (c.proxy_handler != null or c.proxy_revoked) return self.proxyHas(c, key);
-            if (moduleNsOf(c)) |ns| return moduleNsHas(ns, key);
+            if (moduleNsOf(c)) |ns| {
+                try triggerDeferIfString(self, ns, key);
+                return moduleNsHas(ns, key);
+            }
             if (objectHasOwn(c, key)) return true;
             cur = self.effectiveProto(c);
         }
@@ -24169,7 +24189,38 @@ pub const ModuleNs = struct {
     envs: []*Environment, // parallel: the env holding each binding
     locals: [][]const u8, // parallel: local binding name in that env
     tag_key: []const u8, // the @@toStringTag property key
+    // `import defer * as ns`: until `defer_module` is evaluated, a *string*-keyed
+    // operation (a binding [[Get]]/[[HasProperty]]/[[GetOwnProperty]]/[[Delete]]/
+    // [[DefineOwnProperty]] or [[OwnPropertyKeys]]) triggers its evaluation first.
+    // Symbol keys (incl. @@toStringTag), [[Set]], and the structural traps do not.
+    deferred: bool = false,
+    defer_module: ?*anyopaque = null, // *Context.Module, evaluated via defer_trigger
 };
+
+/// Trigger ModuleEvaluation of a deferred namespace's backing module (once — its
+/// `evaluated` flag makes a repeat a no-op). Used by [[OwnPropertyKeys]], which
+/// always triggers.
+fn triggerDeferModule(self: *Interpreter, ns: *ModuleNs) EvalError!void {
+    if (!ns.deferred) return;
+    const mod = ns.defer_module orelse return;
+    if (self.defer_trigger) |f| try f(self.defer_trigger_ctx.?, self, mod);
+}
+
+/// A deferred-namespace access of a *string* key triggers evaluation; symbol /
+/// private keys (incl. @@toStringTag) never do.
+fn triggerDeferIfString(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!void {
+    if (value.isSymbolKey(key) or value.isPrivateKey(key)) return;
+    try triggerDeferModule(self, ns);
+}
+
+/// Object-level wrappers for the builtin reflection paths (no-op unless `o` is a
+/// deferred module namespace).
+pub fn triggerDeferForKey(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!void {
+    if (moduleNsOf(o)) |ns| try triggerDeferIfString(self, ns, key);
+}
+pub fn triggerDeferForOwnKeys(self: *Interpreter, o: *value.Object) EvalError!void {
+    if (moduleNsOf(o)) |ns| try triggerDeferModule(self, ns);
+}
 
 fn moduleNsOf(o: *value.Object) ?*ModuleNs {
     if (o.module_ns) |p| return @ptrCast(@alignCast(p));

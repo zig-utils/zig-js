@@ -903,6 +903,11 @@ pub const Parser = struct {
             try self.consumeStatementTerminator();
             return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items, .attr_type = at } });
         }
+        // Deferred namespace import: `import defer * as ns from "m"`. `defer` is
+        // a contextual keyword recognized only when followed by `*` (otherwise it
+        // is an ordinary default-import binding name, e.g. `import defer from …`).
+        const deferred = self.checkContextual("defer") and self.peekKind(1) == .star;
+        if (deferred) _ = self.advance(); // consume `defer`
         // Default binding: `import name ...`
         if (self.check(.identifier) and !std.mem.eql(u8, self.cur().text, "from")) {
             const name = self.advance().text;
@@ -924,7 +929,7 @@ pub const Parser = struct {
         const spec = if (self.check(.string)) self.advance().text else return ParseError.UnexpectedToken;
         const at = try self.parseImportAttributesOpt();
         try self.consumeStatementTerminator();
-        return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items, .attr_type = at } });
+        return self.alloc(.{ .import_decl = .{ .specifier = spec, .entries = entries.items, .attr_type = at, .deferred = deferred } });
     }
 
     /// Static import attributes: `with { key: "value", ... }`. Validates the

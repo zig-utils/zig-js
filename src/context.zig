@@ -1048,6 +1048,8 @@ pub const Context = struct {
         if (self.mod_host != null) {
             machine.dyn_import = dynImportHook;
             machine.dyn_import_ctx = self;
+            machine.defer_trigger = deferTriggerHook;
+            machine.defer_trigger_ctx = self;
             machine.cur_module = self.script_referrer;
         }
 
@@ -1161,6 +1163,7 @@ pub const Context = struct {
         exports: std.StringHashMapUnmanaged(ExportKind) = .{}, // exported name -> binding
         star_sources: std.ArrayListUnmanaged(*Module) = .empty, // `export * from`
         ns: ?*value.Object = null, // the namespace exotic object, if requested
+        deferred_ns: ?*value.Object = null, // the `import defer` namespace, if requested (distinct, cached)
         linked: bool = false,
         evaluated: bool = false,
         // A synthetic module (`import x from "m" with { type: "json"|"text" }`):
@@ -1206,6 +1209,8 @@ pub const Context = struct {
         }
         machine.dyn_import = dynImportHook;
         machine.dyn_import_ctx = self;
+        machine.defer_trigger = deferTriggerHook;
+        machine.defer_trigger_ctx = self;
         // Populate any namespace objects after the whole graph has evaluated, so
         // every exported binding holds its final value.
         const outcome = self.evalModule(&machine, root);
@@ -1417,7 +1422,8 @@ pub const Context = struct {
                     if (isSourceImport(entry)) {
                         try m.env.putConst(entry.local, Value.obj(try self.newModuleSourceObject()));
                     } else if (std.mem.eql(u8, entry.imported, "*")) {
-                        try m.env.putConst(entry.local, Value.obj(try self.namespaceObject(dep.?)));
+                        const nsobj = if (imp.deferred) try self.deferredNamespaceObject(dep.?) else try self.namespaceObject(dep.?);
+                        try m.env.putConst(entry.local, Value.obj(nsobj));
                     } else if (resolveExport(dep.?, entry.imported, 0)) |res| {
                         try m.env.putAlias(entry.local, res.env, res.name);
                     } else {
@@ -1486,7 +1492,9 @@ pub const Context = struct {
         for (m.items) |item| switch (item.*) {
             .import_decl => |imp| {
                 const source_only = imp.entries.len == 1 and isSourceImport(imp.entries[0]);
-                if (!source_only or !isHostModuleSourceSpecifier(imp.specifier))
+                // A deferred import (`import defer`) is NOT eagerly evaluated; its
+                // evaluation is triggered lazily on first namespace access.
+                if ((!source_only or !isHostModuleSourceSpecifier(imp.specifier)) and !imp.deferred)
                     try self.evalModule(machine, m.deps.get(imp.specifier).?);
             },
             .export_decl => |e| if (e.from.len > 0) try self.evalModule(machine, m.deps.get(e.from).?),
@@ -1521,6 +1529,30 @@ pub const Context = struct {
         var machine = self.interpreter();
         try self.fillNamespace(&machine, module, ns);
         return ns;
+    }
+
+    /// Build (or return) the *deferred* namespace exotic object for `module`
+    /// (`import defer * as ns`): a distinct, cached object whose string-keyed
+    /// accesses lazily trigger `module`'s evaluation (via `defer_trigger`).
+    fn deferredNamespaceObject(self: *Context, module: *Module) RunError!*value.Object {
+        if (module.deferred_ns) |ns| return ns;
+        const a = self.arena();
+        const ns = try gc_mod.allocObj(a);
+        ns.* = .{};
+        module.deferred_ns = ns;
+        var machine = self.interpreter();
+        try self.fillNamespace(&machine, module, ns);
+        const modns: *interp.ModuleNs = @ptrCast(@alignCast(ns.module_ns.?));
+        modns.deferred = true;
+        modns.defer_module = module;
+        return ns;
+    }
+
+    /// `defer_trigger` hook: evaluate the `import defer` module on first
+    /// string-keyed access of its deferred namespace (idempotent via `evaluated`).
+    fn deferTriggerHook(ctx: *anyopaque, machine: *interp.Interpreter, module: *anyopaque) interp.EvalError!void {
+        const self: *Context = @ptrCast(@alignCast(ctx));
+        try self.evalModule(machine, @ptrCast(@alignCast(module)));
     }
 
     /// Runtime `import(specifier)` driver (wired into the interpreter as
