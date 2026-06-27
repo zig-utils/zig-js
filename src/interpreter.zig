@@ -5311,7 +5311,12 @@ pub const Interpreter = struct {
                 jsthread.pumpTasks(self);
                 jsthread.pollPropAsync(self);
                 self.drainMicrotasks() catch {};
+                // A peer thread settling an asyncJoin/propAsync can `enqueue`
+                // (locked append) into this shared realm queue concurrently, so
+                // read its length under the same `microtask_lock`.
+                self.lockMicrotasks();
                 const q_empty = if (self.microtasks) |q| q.items.len == 0 else true;
+                self.unlockMicrotasks();
                 g.lockApi();
                 const tasks_empty = g.tasks.items.len == 0;
                 g.unlockApi();
@@ -13330,13 +13335,17 @@ fn drainRunLoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     var rounds: usize = 0;
     while (rounds < 8) : (rounds += 1) {
+        self.lockMicrotasks();
         const before = if (self.microtasks) |q| q.items.len else 0;
+        self.unlockMicrotasks();
         jsthread.pumpTasks(self);
         jsthread.pollPropAsync(self);
         try self.drainMicrotasks();
         try self.drainFinalizationCleanupJobs();
         try self.drainMicrotasks();
+        self.lockMicrotasks();
         const after = if (self.microtasks) |q| q.items.len else 0;
+        self.unlockMicrotasks();
         if (before == 0 and after == 0) break;
     }
     return Value.undef();
