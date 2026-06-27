@@ -8200,6 +8200,18 @@ pub const Interpreter = struct {
         for (props) |prop| {
             const key = if (prop.key_expr) |ke| try self.keyOf(try self.eval(ke)) else prop.key;
             try consumed.append(self.arena, key);
+            // KeyedDestructuringAssignmentEvaluation: when the target is a plain
+            // member reference (assignment form), its reference (base, then the key
+            // EXPRESSION) is evaluated BEFORE GetV(value, key) — and ToPropertyKey of
+            // the target's computed key is deferred to PutValue, after GetV.
+            const member_assign = !declare and prop.target.* == .member;
+            var m_base: Value = undefined;
+            var m_keyval: Value = undefined;
+            if (member_assign) {
+                const m = prop.target.member;
+                m_base = try self.eval(m.object);
+                if (m.computed) |ce| m_keyval = try self.eval(ce);
+            }
             var v = try self.getProperty(val, key);
             if (v.isUndefined()) {
                 if (prop.default) |d| {
@@ -8207,7 +8219,13 @@ pub const Interpreter = struct {
                     if (prop.target.* == .identifier) try self.maybeNameAnon(v, d, prop.target.identifier);
                 }
             }
-            try self.bindPattern(prop.target, v, declare);
+            if (member_assign) {
+                const m = prop.target.member;
+                const tkey = if (m.computed != null) try self.keyOf(m_keyval) else m.property;
+                try self.setMember(m_base, tkey, v);
+            } else {
+                try self.bindPattern(prop.target, v, declare);
+            }
         }
         if (rest) |rest_target| {
             const rest_obj = try self.newObject();
