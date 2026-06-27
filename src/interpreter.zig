@@ -17881,7 +17881,7 @@ fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const old_data = ab.local_data;
     const copy_len = @min(nl, old_data.len);
     @memcpy(fresh[0..copy_len], old_data[0..copy_len]);
-    ab.local_data = fresh;
+    ab.swapLocalData(fresh); // seqlock: bytes() readers retry across the swap
     ab.unlockBuffer();
     self.freeArrayBufferBytes(old_data, ab.gc_owned);
     return Value.undef();

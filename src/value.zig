@@ -103,6 +103,9 @@ pub const TAKind = enum {
 /// / transfer; a detached buffer's views read undefined / throw on length checks.
 pub const ArrayBufferData = struct {
     lock: std.atomic.Mutex = .unlocked,
+    /// Seqlock counter for `local_data` swaps in `resize` (see `bytes`). Even =
+    /// stable, odd = swap in progress.
+    resize_seq: std.atomic.Value(u32) = .init(0),
     /// Backing bytes of a NON-shared buffer. Arena contexts keep these in the
     /// realm arena; GC contexts allocate them from the context backing
     /// allocator so object finalization can release them on collection. Empty
@@ -131,9 +134,38 @@ pub const ArrayBufferData = struct {
     /// The buffer's live bytes: the shared storage's published slice for a
     /// SharedArrayBuffer (always current, even after another realm grows it),
     /// the arena bytes otherwise.
+    /// A resize swaps `local_data` (ptr+len) under `lockBuffer`; an unlocked
+    /// reader here could otherwise read a torn ptr/len (→ OOB). Under parallel
+    /// mode, read it through a seqlock against `resize_seq` (bumped odd→even
+    /// around the swap in `arrayBufferResize`). Default engine: the gate is off,
+    /// so this stays a single field load. Callers that already hold `lockBuffer`
+    /// (the Atomics paths) see a stable `resize_seq` and return on the first try —
+    /// no re-entrancy, no deadlock.
     pub inline fn bytes(self: *const ArrayBufferData) []u8 {
         if (self.shared) |s| return s.slice();
-        return self.local_data;
+        if (!Object.element_locks_enabled.load(.monotonic)) return self.local_data;
+        // Seqlock read: ptr+len accessed with relaxed atomics (a plain mov each,
+        // so even a retried read is a non-racing atomic access — TSan-clean), and
+        // the seqcount makes the pair consistent across a concurrent resize swap.
+        const ld = &@constCast(self).local_data;
+        const sc = &@constCast(self).resize_seq;
+        while (true) {
+            const s1 = sc.load(.acquire);
+            const p = @atomicLoad([*]u8, &ld.ptr, .monotonic);
+            const l = @atomicLoad(usize, &ld.len, .monotonic);
+            if ((s1 & 1) == 0 and sc.load(.acquire) == s1) return p[0..l];
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    /// Swap `local_data` to `fresh` as a seqlock writer: odd during the swap,
+    /// even after; ptr/len stored with relaxed atomics to pair with `bytes()`.
+    /// Caller holds `lockBuffer` (writers serialized).
+    pub fn swapLocalData(self: *ArrayBufferData, fresh: []u8) void {
+        _ = self.resize_seq.fetchAdd(1, .acq_rel); // → odd
+        @atomicStore([*]u8, &self.local_data.ptr, fresh.ptr, .monotonic);
+        @atomicStore(usize, &self.local_data.len, fresh.len, .monotonic);
+        _ = self.resize_seq.fetchAdd(1, .release); // → even
     }
 
     /// The detach flag, accessed atomically: a peer thread can `transfer`/detach
