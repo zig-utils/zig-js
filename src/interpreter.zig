@@ -1484,10 +1484,14 @@ pub const Interpreter = struct {
                     self.with_this_pending = wo;
                     // Object Environment Record GetBindingValue does its OWN
                     // HasProperty(N) before Get(N) — distinct from the HasBinding
-                    // check above — so a proxy env observes a second `has`. A
-                    // binding that vanished in between reads as undefined (a `with`
-                    // is always sloppy, so no ReferenceError).
-                    if (!try self.hasPropertyResult(wo, name)) return Value.undef();
+                    // check above — so a proxy env observes a second `has`. If the
+                    // binding vanished in between (e.g. a `@@unscopables` getter
+                    // deleted it), GetBindingValue with S=true throws a
+                    // ReferenceError; a sloppy reference reads undefined.
+                    if (!try self.hasPropertyResult(wo, name)) {
+                        if (self.strict) return self.throwError("ReferenceError", name);
+                        return Value.undef();
+                    }
                     return try self.getProperty(Value.obj(wo), name);
                 }
             }
