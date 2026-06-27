@@ -8115,6 +8115,14 @@ pub const Interpreter = struct {
                 while (cur) |c| {
                     if (c.proxy_handler != null or c.proxy_revoked)
                         return self.proxyGet(c, key, receiver);
+                    // A module namespace reached through the prototype chain (its
+                    // exports live in the ModuleNs, not as own properties): a
+                    // string [[Get]] triggers a deferred module's evaluation, then
+                    // reads the export (its [[Prototype]] is null, so it ends here).
+                    if (moduleNsOf(c)) |ns| {
+                        try triggerDeferIfString(self, ns, key);
+                        return moduleNsGet(self, ns, key);
+                    }
                     if (c.is_array and std.mem.eql(u8, key, "length")) {
                         // arguments `length` is an ordinary own property (absent
                         // once deleted); a real Array's is the exotic length.
