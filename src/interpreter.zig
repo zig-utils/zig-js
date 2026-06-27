@@ -2830,7 +2830,7 @@ pub const Interpreter = struct {
     /// ReferenceError. Recurses through nested control-flow statements but stops
     /// at function boundaries (their vars belong to their own scope); existing
     /// bindings (parameters, hoisted functions, earlier vars) are left untouched.
-    fn hoistVarNames(self: *Interpreter, stmts: []*Node) EvalError!void {
+    pub fn hoistVarNames(self: *Interpreter, stmts: []*Node) EvalError!void {
         for (stmts) |s| try self.hoistVarsIn(s);
     }
 

@@ -691,6 +691,32 @@ fn makeIterResult(vm: *Interpreter, v: Value, done: bool) EvalError!Value {
     return o;
 }
 
+/// FunctionDeclarationInstantiation step 27: when the formals contain a parameter
+/// expression (a default value), the body gets a variable environment distinct
+/// from the parameter environment `param_env`, so a closure created in the
+/// parameter list cannot see the body's `var`s. Returns `param_env` unchanged when
+/// there is no default. The caller must have `vm.env == param_env` on entry; on
+/// return `vm.env` is the chosen body env (the caller restores it via its defer).
+fn paramsBodyVarEnv(vm: *Interpreter, func: *Function, param_env: *Environment) EvalError!*Environment {
+    var has_param_expr = false;
+    for (func.params) |p| if (p.default != null) {
+        has_param_expr = true;
+        break;
+    };
+    if (!has_param_expr or func.body.* != .block) return param_env;
+    const be = try gc_mod.allocEnv(vm.arena);
+    vm.initEnvironment(be, param_env, true);
+    vm.env = be;
+    try vm.hoistVarNames(func.body.block);
+    // A body `var` that names a simple parameter inherits the parameter's value.
+    for (func.params) |p| {
+        if (p.pattern == null and !p.is_rest and be.vars.contains(p.name)) {
+            if (param_env.get(p.name)) |pv| try be.put(p.name, pv);
+        }
+    }
+    return be;
+}
+
 /// Build the generator object produced by calling a `function*`. The body is
 /// not run yet; it runs lazily on the first `.next()`.
 pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
@@ -716,10 +742,18 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     try vm.bindParams2(func.params, args, func.is_arrow);
     const bound_this = try bindThisForCall(vm, func, this_val);
 
+    // A generator whose parameter list contains an expression (a default value)
+    // gets a body variable environment distinct from the parameter environment, so
+    // a closure created in the parameter list can't see the body's `var`s (and
+    // vice-versa). Body `var`s hoist into `body_env`; a body `var` naming a simple
+    // parameter inherits that parameter's bound value. Mirrors `callPlain`. With no
+    // default, params and body share `genv`.
+    const body_env = try paramsBodyVarEnv(vm, func, genv);
+
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
-        .env = genv,
+        .env = body_env,
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
@@ -1086,11 +1120,13 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     defer vm.env = saved_env;
     try vm.bindParams2(func.params, args, func.is_arrow);
     const bound_this = try bindThisForCall(vm, func, this_val);
+    // Separate body var-env when the params contain a default (see makeGenerator).
+    const body_env = try paramsBodyVarEnv(vm, func, genv);
 
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
-        .env = genv,
+        .env = body_env,
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
