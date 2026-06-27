@@ -2989,6 +2989,11 @@ pub const Interpreter = struct {
             },
             .destructure_decl => |d| if (d.kind != .@"var") try appendPatternNames(self.arena, d.pattern, stack),
             .class_expr => |c| if (c.name.len > 0) try stack.append(self.arena, c.name),
+            // An async/generator/async-generator function declaration is an
+            // ordinary lexical (block-scoped) binding, never an Annex B B.3.3
+            // legacy candidate — so it shadows like let/const/class. (A *plain*
+            // function declaration is handled by the candidate loops below.)
+            .func_decl => |f| if (f.is_generator or f.is_async) try stack.append(self.arena, f.name),
             else => {},
         }
     }
@@ -3015,11 +3020,11 @@ pub const Interpreter = struct {
         // function declaration does not block, hence the depth >= 1 gate.
         if (depth >= 1) {
             for (stmts) |s| switch (s.*) {
-                .func_decl => |f| if (!annexbStackHas(stack.*, f.name)) try out.put(self.arena, f.name, {}),
+                .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try out.put(self.arena, f.name, {}),
                 else => {},
             };
             for (stmts) |s| switch (s.*) {
-                .func_decl => |f| try stack.append(self.arena, f.name),
+                .func_decl => |f| if (!f.is_generator and !f.is_async) try stack.append(self.arena, f.name),
                 else => {},
             };
         }
@@ -3032,7 +3037,7 @@ pub const Interpreter = struct {
     fn annexbScanBranch(self: *Interpreter, node: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
         switch (node.*) {
             .block => |b| try self.annexbScanList(b, stack, depth + 1, out),
-            .func_decl => |f| if (!annexbStackHas(stack.*, f.name)) try out.put(self.arena, f.name, {}),
+            .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try out.put(self.arena, f.name, {}),
             else => try self.annexbScanStmt(node, stack, depth, out),
         }
     }
@@ -3064,11 +3069,11 @@ pub const Interpreter = struct {
                 // The whole switch is one lexical (CaseBlock) scope across all cases.
                 for (sw.cases) |c| for (c.body) |cs| try self.annexbPushLexical(cs, stack);
                 for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
-                    .func_decl => |fd| if (!annexbStackHas(stack.*, fd.name)) try out.put(self.arena, fd.name, {}),
+                    .func_decl => |fd| if (!fd.is_generator and !fd.is_async and !annexbStackHas(stack.*, fd.name)) try out.put(self.arena, fd.name, {}),
                     else => {},
                 };
                 for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
-                    .func_decl => |fd| try stack.append(self.arena, fd.name),
+                    .func_decl => |fd| if (!fd.is_generator and !fd.is_async) try stack.append(self.arena, fd.name),
                     else => {},
                 };
                 for (sw.cases) |c| for (c.body) |cs| try self.annexbScanStmt(cs, stack, depth + 1, out);
