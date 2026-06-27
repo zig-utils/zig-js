@@ -137,8 +137,10 @@ pub fn build(b: *std.Build) void {
     // bump it).
     const t262_root = b.option([]const u8, "test262", "Path to the test262 corpus root") orelse
         "test262";
+    const t262_parallel = b.option(bool, "test262-parallel-js", "Run every test262 test in a GIL-free parallel context (exercises the parallel-mode locks + the GC across the whole language surface)") orelse false;
     const t262_options = b.addOptions();
     t262_options.addOption([]const u8, "root", t262_root);
+    t262_options.addOption(bool, "parallel_js", t262_parallel);
 
     const test262 = b.addExecutable(.{
         .name = "test262",

@@ -377,7 +377,19 @@ fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path:
     }
     buf.appendSlice(gpa, src) catch return .skip;
 
-    const ctx = js.Context.createWithTestingOptions(gpa, .{
+    // `-Dtest262-parallel-js` runs every test in a GIL-free parallel context:
+    // the test JS is single-threaded, so this doesn't probe concurrency races,
+    // but it exercises the parallel-mode locked paths and the GC-managed cell
+    // allocator across the entire language surface — catching deadlocks, locked-
+    // path correctness regressions, and GC-allocation gaps that the threads
+    // corpus (a narrow slice of the language) can't.
+    const ctx = js.Context.createWithTestingOptions(gpa, if (build_options.parallel_js) .{
+        .main_can_block = !meta.can_block_false,
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    } else .{
         .main_can_block = !meta.can_block_false,
     }) catch return .skip;
     defer ctx.destroy();
@@ -563,7 +575,19 @@ fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_pat
 /// link + evaluate the test body as a Module against its sibling fixtures.
 fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, meta: Meta) Outcome {
     if (meta.negative_resolution and !moduleRootParses(gpa, src)) return .fail_negative;
-    const ctx = js.Context.createWithTestingOptions(gpa, .{
+    // `-Dtest262-parallel-js` runs every test in a GIL-free parallel context:
+    // the test JS is single-threaded, so this doesn't probe concurrency races,
+    // but it exercises the parallel-mode locked paths and the GC-managed cell
+    // allocator across the entire language surface — catching deadlocks, locked-
+    // path correctness regressions, and GC-allocation gaps that the threads
+    // corpus (a narrow slice of the language) can't.
+    const ctx = js.Context.createWithTestingOptions(gpa, if (build_options.parallel_js) .{
+        .main_can_block = !meta.can_block_false,
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    } else .{
         .main_can_block = !meta.can_block_false,
     }) catch return .skip;
     defer ctx.destroy();
