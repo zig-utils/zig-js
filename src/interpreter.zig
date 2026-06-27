@@ -2121,7 +2121,9 @@ pub const Interpreter = struct {
                 const fis = self.pending_field_inits;
                 self.pending_field_inits = &.{};
                 for (fis) |fi| _ = try self.eval(fi);
-                break :blk Value.undef();
+                // SuperCall evaluates to the new `this` (BindThisValue's result),
+                // so `value = super()` observes the bound object.
+                break :blk self.this_value;
             },
             .super_member => |m| blk: {
                 const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
