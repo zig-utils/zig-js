@@ -550,6 +550,19 @@ pub const Compiler = struct {
             }
             return;
         }
+        // An ASSIGNMENT target that embeds a `yield`/`await` (`for ([ x = yield ]
+        // of …)`) must be lowered to bytecode so the suspend point is real — route
+        // it through the yield-aware destructuring path instead of `bind_pattern`
+        // (which defers to the tree-walker and can't suspend). The loop value is on
+        // the stack; move it into a temp first. Patterns WITHOUT yield/await keep
+        // using `bind_pattern`, which handles object-rest / fn-name NamedEvaluation /
+        // iterator-close that the assignment lowering bails on.
+        if (decl_kind == null and (target.* == .arr_pattern or target.* == .obj_pattern) and nodeHasYield(target)) {
+            const src = try self.freshTemp();
+            try self.emitDefine(src); // consume the loop value from the stack
+            try self.compileAssignPattern(target, src);
+            return;
+        }
         // `bind_pattern` destructures into the live environment, which is the
         // binding scope only in env-mode (generators/async). A slot-allocated
         // (frame-mode) function keeps falling back to the tree-walker.
