@@ -186,7 +186,10 @@ pub const Node = union(enum) {
     logical: struct { op: LogicalOp, left: *Node, right: *Node },
     /// The comma operator: evaluate `first` (discarded), then `second` (result).
     sequence: struct { first: *Node, second: *Node },
-    assign: struct { target: *Node, value: *Node },
+    // `target_parenthesized` records that the LHS was a parenthesized expression
+    // (`(x) = f`): such a target is NOT an IdentifierRef, so NamedEvaluation does
+    // not apply (the assigned anonymous function keeps the empty name).
+    assign: struct { target: *Node, value: *Node, target_parenthesized: bool = false },
     /// Compound assignment `target op= value`: the LeftHandSide reference is
     /// resolved ONCE (GetValue then PutValue use the same reference), so a
     /// `with`-bound getter that mutates its scope is observed correctly.

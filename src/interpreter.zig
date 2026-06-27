@@ -1902,8 +1902,9 @@ pub const Interpreter = struct {
                 }
                 const v = try self.eval(a.value);
                 // NamedEvaluation: `f = function(){}` names the function "f"
-                // (only a bare identifier target, per spec).
-                if (a.target.* == .identifier) try self.maybeNameAnon(v, a.value, a.target.identifier);
+                // (only a bare, *unparenthesized* identifier target — a
+                // parenthesized `(f) =` is not an IdentifierRef).
+                if (a.target.* == .identifier and !a.target_parenthesized) try self.maybeNameAnon(v, a.value, a.target.identifier);
                 try self.assignTo(a.target, v);
                 break :blk v;
             },

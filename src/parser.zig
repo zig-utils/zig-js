@@ -2224,8 +2224,11 @@ pub const Parser = struct {
                 return ParseError.UnexpectedToken;
             _ = self.advance();
             const value = try self.parseAssignment();
-            if (target.* == .identifier) nameAnon(value, target.identifier); // `f = function(){}`
-            return self.alloc(.{ .assign = .{ .target = target, .value = value } });
+            // A parenthesized LHS (`(f) = function(){}`) is not an IdentifierRef,
+            // so NamedEvaluation does not apply — the function stays anonymous.
+            const lhs_paren = self.paren_wrapped.contains(target);
+            if (target.* == .identifier and !lhs_paren) nameAnon(value, target.identifier); // `f = function(){}`
+            return self.alloc(.{ .assign = .{ .target = target, .value = value, .target_parenthesized = lhs_paren } });
         }
         // Compound assignment `a op= b` desugars to `a = a op b`.
         const compound: ?ast.BinaryOp = switch (self.cur().kind) {
