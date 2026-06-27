@@ -8250,6 +8250,13 @@ pub const Interpreter = struct {
                 m_base = try self.eval(m.object);
                 if (m.computed) |ce| m_keyval = try self.eval(ce);
             }
+            // KeyedBindingInitialization for a SingleNameBinding resolves the
+            // target binding (step 2) BEFORE GetV(value, P) (step 3). Inside a
+            // `with`, that ResolveBinding walk is observable — the object
+            // Environment Record's [[HasBinding]] (a proxy `has` trap). Trigger
+            // it now (a no-op when no `with` shadows the name).
+            if (declare and prop.target.* == .identifier)
+                _ = try self.assignWithObject(prop.target.identifier);
             var v = try self.getProperty(val, key);
             if (v.isUndefined()) {
                 if (prop.default) |d| {
