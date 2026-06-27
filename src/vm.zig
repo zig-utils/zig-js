@@ -47,22 +47,40 @@ fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError
 pub const Frame = struct {
     slots: []Value,
     parent: ?*Frame,
-    // A closure shared across threads resolves its upvalues to one defining
-    // frame, so concurrent load_upval/store_upval read+write the same slot —
-    // serialize them here (the binding_lock analogue for VM frames). Gated on
-    // the parallel flag, so the default engine takes no lock.
-    upval_lock: std.atomic.Mutex = .unlocked,
+    // Once a closure captures this frame (`makeClosure` walks the chain marking
+    // `escaped`), its slots can be read/written concurrently: the defining
+    // function via load/store_local on its own frame, and any escaped closure via
+    // load/store_upval walking into it. So slot access on an escaped frame is
+    // serialized by `slot_lock`. Non-escaped frames (the vast majority — never
+    // captured) take no lock at all; and the whole thing is additionally gated on
+    // the parallel flag, so the GIL/single-threaded engine pays nothing.
+    escaped: std.atomic.Value(bool) = .init(false),
+    slot_lock: std.atomic.Mutex = .unlocked,
 
-    fn lockUpval(self: *Frame) void {
-        if (!bc.ic_seqlock_enabled.load(.acquire)) return;
+    inline fn lockSlots(self: *Frame, enabled: bool) bool {
+        // `enabled` is the parallel-mode flag, hoisted out of the opcode loop by
+        // the caller. When false (default engine) this is a single register branch.
+        // Monotonic `escaped` is enough: a closure reaching this frame on another
+        // thread already synchronized via the closure object's publication.
+        if (!enabled or !self.escaped.load(.monotonic)) return false;
         var spins: usize = 0;
-        while (!self.upval_lock.tryLock()) : (spins += 1) {
+        while (!self.slot_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        return true;
     }
-    fn unlockUpval(self: *Frame) void {
-        if (!bc.ic_seqlock_enabled.load(.acquire)) return;
-        self.upval_lock.unlock();
+    fn unlockSlots(self: *Frame, held: bool) void {
+        if (held) self.slot_lock.unlock();
+    }
+
+    /// Mark this frame and every ancestor as escaped — a closure capturing this
+    /// frame can reach them all through the upvalue walk.
+    fn markEscapedChain(self: *Frame) void {
+        var f: ?*Frame = self;
+        while (f) |fr| : (f = fr.parent) {
+            if (fr.escaped.load(.monotonic)) break; // chain already marked
+            fr.escaped.store(true, .release);
+        }
     }
 };
 
@@ -275,6 +293,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     var acc: Value = exec.acc;
     var ip: usize = exec.ip;
     const code = chunk.code.items;
+    // Parallel-mode flag hoisted out of the hot loop: in the default engine this
+    // is false, so the per-opcode frame-slot lock check is a single predicted
+    // register branch (no atomic load, no call) — load_local/store_local stay at
+    // full speed.
+    const frame_locking = bc.ic_seqlock_enabled.load(.monotonic);
 
     while (ip < code.len) {
         vm.steps += 1;
@@ -338,15 +361,27 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try vm.bindPatternVM(pat, v, inst.b);
             },
 
-            .load_local => try stack.append(stack_alloc, frame.?.slots[inst.a]),
-            .store_local => frame.?.slots[inst.a] = stack.items[stack.items.len - 1], // leaves value
+            .load_local => {
+                const cf = frame.?;
+                const held = cf.lockSlots(frame_locking);
+                const v = cf.slots[inst.a];
+                cf.unlockSlots(held);
+                try stack.append(stack_alloc, v);
+            },
+            .store_local => {
+                const cf = frame.?;
+                const v = stack.items[stack.items.len - 1]; // leaves value on the stack
+                const held = cf.lockSlots(frame_locking);
+                cf.slots[inst.a] = v;
+                cf.unlockSlots(held);
+            },
             .load_upval => {
                 var f = frame.?;
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
-                f.lockUpval();
+                const held = f.lockSlots(frame_locking);
                 const v = f.slots[inst.b];
-                f.unlockUpval();
+                f.unlockSlots(held);
                 try stack.append(stack_alloc, v);
             },
             .store_upval => {
@@ -354,9 +389,9 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
                 const v = stack.items[stack.items.len - 1]; // leaves value on the stack
-                f.lockUpval();
+                const held = f.lockSlots(frame_locking);
                 f.slots[inst.b] = v;
-                f.unlockUpval();
+                f.unlockSlots(held);
             },
 
             .neg => {
@@ -1703,6 +1738,10 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .frame = frame,
         .local_count = tmpl.local_count,
     };
+    // The closure can reach `frame` and all its ancestors via the upvalue walk,
+    // so their slots may now be touched concurrently — mark the chain escaped so
+    // load/store_{local,upval} serialize on those frames (no-GIL only).
+    if (frame) |fr| fr.markEscapedChain();
     const obj = try gc_mod.allocObj(vm.arena);
     const fproto: ?*value.Object = blk: {
         const tag: ?[]const u8 = if (tmpl.is_generator and tmpl.is_async)
