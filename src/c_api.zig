@@ -117,6 +117,16 @@ export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContex
     return @ptrCast(ctx);
 }
 
+/// zig-js extension (issue #1): create a context with the `Thread` API enabled.
+/// With `gil == false` — the default execution model — spawned `Thread`s run
+/// TRUE-parallel (no GIL), backed by the GC-managed thread-safe cell allocator;
+/// with `gil == true` they're serialized behind the per-context GIL. Returns null
+/// on failure. (`JSGlobalContextCreate` stays single-threaded for JSC parity.)
+export fn ZJSGlobalContextCreateThreaded(gil: bool) callconv(.c) JSContextRef {
+    const ctx = Context.createWith(gpa, .{ .enable_threads = true, .gil = gil }) catch return null;
+    return @ptrCast(ctx);
+}
+
 export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
     const c = ctxFrom(ctx) orelse return;
     c.destroy();
@@ -585,6 +595,26 @@ test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueIsNumber(ctx, result));
     try std.testing.expectEqual(@as(f64, 2), JSValueToNumber(ctx, result, null));
+}
+
+test "C-API: ZJSGlobalContextCreateThreaded(parallel) evaluates JS + exposes Thread" {
+    // gil=false is the parallel (GIL-free) context — usable directly from the
+    // creating thread, since parallel contexts have no owner-GIL. (gil=true is the
+    // serialized model; like JSC, the embedder manages the GIL around its use, so
+    // it isn't exercised through the bare C entry point here.)
+    const ctx = ZJSGlobalContextCreateThreaded(false) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const script = JSStringCreateWithUTF8CString("let s = 0; for (let i = 0; i < 50; i++) s += i; s") orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 1225), JSValueToNumber(ctx, result, null));
+    // The threaded context exposes the Thread constructor.
+    const probe = JSStringCreateWithUTF8CString("typeof Thread === 'function'") orelse return error.StringInitFailed;
+    defer JSStringRelease(probe);
+    const tv = JSEvaluateScript(ctx, probe, null, null, 0, null) orelse return error.EvalFailed;
+    try std.testing.expect(JSValueToBoolean(ctx, tv));
 }
 
 test "C-API: object property get/set" {
