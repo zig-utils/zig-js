@@ -24243,7 +24243,7 @@ fn moduleNsIndex(ns: *ModuleNs, name: []const u8) ?usize {
 /// [[Get]] for a module namespace: live binding read; an uninitialized (TDZ)
 /// binding throws ReferenceError.
 fn moduleNsGet(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!Value {
-    if (std.mem.eql(u8, key, ns.tag_key)) return Value.str("Module");
+    if (std.mem.eql(u8, key, ns.tag_key)) return Value.str(if (ns.deferred) "Deferred Module" else "Module");
     // On a deferred namespace, "then" is symbol-like: it reads as absent
     // (OrdinaryGet), never the export binding — so it can't throw a TDZ error.
     if (ns.deferred and std.mem.eql(u8, key, "then")) return Value.undef();
@@ -24291,7 +24291,7 @@ pub fn moduleNsDesc(self: *Interpreter, o: *value.Object, key: []const u8) EvalE
     if (ns.deferred and std.mem.eql(u8, key, "then")) return Value.undef();
     if (std.mem.eql(u8, key, ns.tag_key)) {
         const d = (try self.newObject()).asObj();
-        try self.setProp(d, "value", Value.str("Module"));
+        try self.setProp(d, "value", Value.str(if (ns.deferred) "Deferred Module" else "Module"));
         try self.setProp(d, "writable", Value.boolVal(false));
         try self.setProp(d, "enumerable", Value.boolVal(false));
         try self.setProp(d, "configurable", Value.boolVal(false));
