@@ -1131,9 +1131,12 @@ pub const Parser = struct {
             }
             if (std.mem.eql(u8, t.text, "function")) return self.parseFunctionDecl(false);
             // `async function …` declaration (contextual keyword: `async`
-            // immediately followed by `function`). `async` followed by anything
-            // else is an ordinary expression statement (async arrow / identifier).
-            if (std.mem.eql(u8, t.text, "async") and !t.escaped_identifier and self.peekIsKeyword(1, "function")) return self.parseFunctionDecl(true);
+            // immediately followed by `function`). `async [no LineTerminator here]
+            // function` — a newline after `async` ends the statement, so `async`
+            // becomes an ordinary identifier expression and `function …` is a
+            // separate declaration. `async` followed by anything else is also an
+            // ordinary expression statement (async arrow / identifier).
+            if (std.mem.eql(u8, t.text, "async") and !t.escaped_identifier and self.peekIsKeyword(1, "function") and self.noNewlineBefore(1)) return self.parseFunctionDecl(true);
             if (std.mem.eql(u8, t.text, "return")) return self.parseReturn();
             if (std.mem.eql(u8, t.text, "throw")) return self.parseThrow();
             if (std.mem.eql(u8, t.text, "try")) return self.parseTry();
@@ -3758,7 +3761,10 @@ pub const Parser = struct {
             if (self.isEscapedReservedWord(self.cur())) return ParseError.UnexpectedToken;
             const w = self.cur().text;
             if (std.mem.eql(u8, w, "function")) return self.parseFunctionExpr(false);
-            if (std.mem.eql(u8, w, "async") and !self.cur().escaped_identifier and self.peekIsKeyword(1, "function")) return self.parseFunctionExpr(true);
+            // `async [no LineTerminator here] function` — a newline after `async`
+            // breaks the async-function-expression form (`async` is then a plain
+            // identifier reference).
+            if (std.mem.eql(u8, w, "async") and !self.cur().escaped_identifier and self.peekIsKeyword(1, "function") and self.noNewlineBefore(1)) return self.parseFunctionExpr(true);
             if (std.mem.eql(u8, w, "new")) return self.parseNew();
             if (std.mem.eql(u8, w, "class")) return self.parseClassExpr();
             if (std.mem.eql(u8, w, "super")) return self.parseSuper();
