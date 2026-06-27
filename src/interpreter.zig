@@ -3987,6 +3987,11 @@ pub const Interpreter = struct {
         const proto = try self.protoObject(class_obj);
         // A class's `prototype` is non-writable, non-enumerable, non-configurable.
         try class_obj.setAttr(self.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        // The `constructor` back-link is created BEFORE the class element methods,
+        // so a same-named element — e.g. a *computed* `['constructor']() {}`, which
+        // is an ordinary method, not the class constructor — overrides it.
+        try self.setProp(proto, "constructor", class_val);
+        try proto.setAttr(self.arena, "constructor", .{ .writable = true, .enumerable = false, .configurable = true });
 
         // Link the prototype chains for inheritance.
         if (super_obj) |so| {
@@ -4160,9 +4165,6 @@ pub const Interpreter = struct {
             if (value.isPrivateKey(key)) try self.addPrivateBrandChecked(class_obj, key);
             try self.setProp(class_obj, key, fv2);
         }
-
-        try self.setProp(proto, "constructor", class_val);
-        try proto.setAttr(self.arena, "constructor", .{ .writable = true, .enumerable = false, .configurable = true });
         return class_val;
     }
 
