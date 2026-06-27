@@ -1866,7 +1866,10 @@ pub const Interpreter = struct {
                     if (try self.assignWithObject(name)) |wo| {
                         const v = try self.eval(a.value);
                         try self.maybeNameAnon(v, a.value, name);
-                        if (self.strict and !(try self.hasPropertyResult(wo, name)))
+                        // SetMutableBinding: step 2 HasProperty (always — observable
+                        // on a proxy env), step 3 throws only if absent and strict.
+                        const still = try self.hasPropertyResult(wo, name);
+                        if (!still and self.strict)
                             return self.throwError("ReferenceError", "binding is no longer defined");
                         try self.setMember(Value.obj(wo), name, v);
                         break :blk v;
@@ -8600,6 +8603,15 @@ pub const Interpreter = struct {
     /// them): a `const` reassignment throws; a function-expression name throws in
     /// strict code and is a no-op in sloppy code.
     pub fn assignVarVM(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
+        // A `with` object that provides this name takes the write (its
+        // SetMutableBinding: HasProperty re-check, then Set) — the VM store path
+        // must consult it just like the tree-walker's assignTo, or the write
+        // wrongly falls through to a fresh global.
+        if (try self.assignWithObject(name)) |o| {
+            const still = try self.hasPropertyResult(o, name); // SetMutableBinding step 2
+            if (!still and self.strict) return self.throwError("ReferenceError", name);
+            return self.setMember(Value.obj(o), name, v);
+        }
         if (self.env.isAlias(name)) return self.throwError("TypeError", "Assignment to constant variable.");
         if (self.env.isConst(name)) |c| {
             if (c) return self.throwError("TypeError", "Assignment to constant variable.");
