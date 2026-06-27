@@ -1336,13 +1336,21 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
 
     const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
         if (e != error.Throw) return e;
-        const reason = vm.exception;
+        var reason = vm.exception;
         vm.exception = Value.undef();
+        // DisposeResources for the body's `using` resources, threading the error.
+        if (g.env.disposables.items.len > 0) {
+            if (vm.disposeScope(g.env, reason) catch null) |de| reason = de;
+        }
         return .{ .threw = reason };
     };
     if (g.suspended) {
         g.suspended = false;
         return if (g.suspend_kind == .await) .{ .awaited = v } else .{ .yielded = v };
+    }
+    // DisposeResources for the body's top-level `using` resources at completion.
+    if (g.env.disposables.items.len > 0) {
+        if (vm.disposeScope(g.env, null) catch null) |de| return .{ .threw = de };
     }
     return .{ .returned = v };
 }
