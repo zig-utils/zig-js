@@ -1533,7 +1533,7 @@ pub const Interpreter = struct {
     /// Register a `using`/`await using` resource on the current scope. Validates
     /// it has a [Symbol.dispose] / [Symbol.asyncDispose] method (null/undefined is
     /// a permitted no-op resource).
-    fn addDisposable(self: *Interpreter, val: Value, is_async: bool) EvalError!void {
+    pub fn addDisposable(self: *Interpreter, val: Value, is_async: bool) EvalError!void {
         if (val.isNull() or val.isUndefined()) return;
         if (!val.isObject()) return self.throwError("TypeError", "a 'using' declaration value must be an object or null/undefined");
         var method: Value = Value.undef();
@@ -1557,7 +1557,7 @@ pub const Interpreter = struct {
     /// `body_err` (the scope body's thrown value, if any). A disposal error
     /// becomes the pending completion, wrapping any earlier one in a
     /// SuppressedError. Returns the value to re-throw, or null on clean exit.
-    fn disposeScope(self: *Interpreter, env: *Environment, body_err: ?Value) EvalError!?Value {
+    pub fn disposeScope(self: *Interpreter, env: *Environment, body_err: ?Value) EvalError!?Value {
         var pending = body_err;
         var i = env.disposables.items.len;
         while (i > 0) {

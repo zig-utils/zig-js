@@ -501,6 +501,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const flags = chunk.names.items[inst.b];
                 try stack.append(stack_alloc, try vm.makeRegex(pattern, flags));
             },
+            .register_disposable => {
+                // `using x = v;` / `await using x = v;` — register `v` for disposal
+                // at the end of the current variable scope (run by the body-exit
+                // DisposeResources pass). `a == 1` selects [Symbol.asyncDispose].
+                try vm.addDisposable(stack.pop().?, inst.a == 1);
+            },
             .set_prop => {
                 const v = stack.pop().?;
                 const obj = stack.pop().?;
@@ -941,6 +947,11 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
 
     const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
         g.done = true; // a thrown generator is finished
+        // DisposeResources for the body's `using` resources, threading the thrown value.
+        if (e == error.Throw and g.env.disposables.items.len > 0) {
+            const body_err = vm.exception;
+            if (vm.disposeScope(g.env, body_err) catch null) |de| vm.exception = de;
+        }
         return e;
     };
     if (g.suspended) {
@@ -951,6 +962,13 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
         return makeIterResult(vm, v, false);
     }
     g.done = true;
+    // DisposeResources for the body's top-level `using` resources at generator end.
+    if (g.env.disposables.items.len > 0) {
+        if (try vm.disposeScope(g.env, null)) |de| {
+            vm.exception = de;
+            return error.Throw;
+        }
+    }
     return makeIterResult(vm, v, true); // `v` is the body's return value
 }
 

@@ -329,7 +329,11 @@ pub const Compiler = struct {
                 } else {
                     _ = try self.chunk.emit(.load_undefined, 0);
                 }
+                // `using x = v;` / `await using x = v;`: keep a copy of the resource
+                // to register for DisposeResources at the variable scope's exit.
+                if (d.dispose != 0) _ = try self.chunk.emit(.dup, 0);
                 try self.emitDefineKind(d.name, d.kind);
+                if (d.dispose != 0) _ = try self.chunk.emit(.register_disposable, if (d.dispose == 2) 1 else 0);
             },
             .func_decl => |fnode| {
                 const fi = try self.compileFunction(fnode, false);
