@@ -676,6 +676,12 @@ pub const Function = struct {
     /// provided `this` (a `.call`/`.apply`/`.bind` thisArg, or the receiver of a
     /// method/bare call). Only meaningful when `is_arrow` is set.
     arrow_this: Value = Value.undef(),
+    /// Arrow functions also capture `new.target` lexically at creation: an arrow
+    /// has no own new.target, so every call resolves it to the value that was in
+    /// effect where the arrow was defined — F's new.target if defined inside a
+    /// `new F()` activation, even when the arrow is called later. Only meaningful
+    /// when `is_arrow` is set.
+    arrow_new_target: Value = Value.undef(),
     /// Class constructors have [[FunctionKind]] "classConstructor": they cannot
     /// be called without [[Construct]], and derived constructors must initialize
     /// `this` through `super()` before completing normally.
@@ -3291,6 +3297,7 @@ pub const Interpreter = struct {
             func.home_object = self.home_object;
             func.super_ctor = self.super_ctor;
             func.arrow_this = self.this_value; // captured lexically; used on every call
+            func.arrow_new_target = self.new_target; // new.target is lexical for arrows too
             func.field_init_ctx = self.in_field_initializer; // field-init eval restrictions are lexical
         }
         // Compile a generator body up front for the suspendable VM. Bodies
@@ -4550,7 +4557,7 @@ pub const Interpreter = struct {
         } else this_val;
         self.home_object = func.home_object;
         self.super_ctor = func.super_ctor;
-        self.new_target = if (func.is_arrow) saved_nt else new_target; // arrows inherit lexically
+        self.new_target = if (func.is_arrow) func.arrow_new_target else new_target; // arrows capture lexically at creation
         self.direct_eval_new_target_allowed = !func.is_arrow;
         // A non-arrow function call is a fresh context that is not a field
         // initializer; an arrow carries the field-initializer context LEXICALLY from
