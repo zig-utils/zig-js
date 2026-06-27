@@ -24206,10 +24206,18 @@ fn triggerDeferModule(self: *Interpreter, ns: *ModuleNs) EvalError!void {
     if (self.defer_trigger) |f| try f(self.defer_trigger_ctx.?, self, mod);
 }
 
-/// A deferred-namespace access of a *string* key triggers evaluation; symbol /
-/// private keys (incl. @@toStringTag) never do.
+/// IsSymbolLikeNamespaceKey: a symbol/private key, or — on a *deferred*
+/// namespace — the key "then" (so `await`-ing a deferred namespace neither
+/// triggers evaluation nor reads an export). Such keys behave as absent.
+fn isSymbolLikeNsKey(ns: *ModuleNs, key: []const u8) bool {
+    return value.isSymbolKey(key) or value.isPrivateKey(key) or
+        (ns.deferred and std.mem.eql(u8, key, "then"));
+}
+
+/// A deferred-namespace access of a *string* key triggers evaluation; a
+/// symbol-like key (symbol/private, or "then") never does.
 fn triggerDeferIfString(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!void {
-    if (value.isSymbolKey(key) or value.isPrivateKey(key)) return;
+    if (isSymbolLikeNsKey(ns, key)) return;
     try triggerDeferModule(self, ns);
 }
 
@@ -24236,6 +24244,9 @@ fn moduleNsIndex(ns: *ModuleNs, name: []const u8) ?usize {
 /// binding throws ReferenceError.
 fn moduleNsGet(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!Value {
     if (std.mem.eql(u8, key, ns.tag_key)) return Value.str("Module");
+    // On a deferred namespace, "then" is symbol-like: it reads as absent
+    // (OrdinaryGet), never the export binding — so it can't throw a TDZ error.
+    if (ns.deferred and std.mem.eql(u8, key, "then")) return Value.undef();
     if (moduleNsIndex(ns, key)) |i| {
         const v = ns.envs[i].get(ns.locals[i]) orelse Value.undef();
         if (self.tdz_marker) |tz| if (v.isObject() and v.asObj() == tz)
@@ -24245,8 +24256,10 @@ fn moduleNsGet(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!Val
     return Value.undef();
 }
 
-/// [[HasProperty]]: a string export, or the @@toStringTag key.
+/// [[HasProperty]]: a string export, or the @@toStringTag key. On a deferred
+/// namespace, "then" is symbol-like and reads as absent.
 fn moduleNsHas(ns: *ModuleNs, key: []const u8) bool {
+    if (ns.deferred and std.mem.eql(u8, key, "then")) return false;
     return std.mem.eql(u8, key, ns.tag_key) or moduleNsIndex(ns, key) != null;
 }
 
@@ -24274,6 +24287,8 @@ pub fn moduleNsEnumerable(o: *value.Object, key: []const u8) bool {
 /// @@toStringTag is a frozen string.
 pub fn moduleNsDesc(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!Value {
     const ns = moduleNsOf(o) orelse return Value.undef();
+    // On a deferred namespace, "then" is symbol-like → absent (no descriptor).
+    if (ns.deferred and std.mem.eql(u8, key, "then")) return Value.undef();
     if (std.mem.eql(u8, key, ns.tag_key)) {
         const d = (try self.newObject()).asObj();
         try self.setProp(d, "value", Value.str("Module"));
