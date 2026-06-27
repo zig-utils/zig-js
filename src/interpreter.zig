@@ -2408,8 +2408,12 @@ pub const Interpreter = struct {
             // `for await`: the async iterator (Symbol.asyncIterator, else a sync
             // iterator) and each `next()` result is awaited.
             const iter_obj = if (is_await) try self.asyncIteratorOf(iter) else try self.iteratorOf(iter);
+            // GetIterator reads the iterator's `next` method exactly ONCE (it
+            // becomes the Iterator Record's [[NextMethod]]); IteratorNext reuses
+            // it. A `next` accessor must therefore not be re-read per iteration.
+            const next_method = try self.getProperty(iter_obj, "next");
             while (true) {
-                const res0 = try self.callMethod(iter_obj, "next", &.{});
+                const res0 = try self.callValueWithThis(next_method, &.{}, iter_obj);
                 const res = if (is_await) try self.awaitValue(res0) else res0;
                 // IteratorNext: the result of `next()` must be an Object (a Symbol
                 // or BigInt is object-tagged here but is not an Object per Type()).

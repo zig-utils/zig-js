@@ -640,12 +640,21 @@ pub const Compiler = struct {
         // a wrapped sync iterator) and awaits each `next()` result.
         _ = try self.chunk.emit(if (await_each) .async_iter_of else .iter_of, 0);
         try self.emitDefine(it_name);
+        // GetIterator reads the iterator's `next` method exactly ONCE (it becomes
+        // the Iterator Record's [[NextMethod]]); cache it so a `next` accessor is
+        // not re-read each iteration.
+        const next_name = try self.freshTemp();
+        try self.emitLoad(it_name);
+        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("next"));
+        try self.emitDefine(next_name);
 
         const loop = try self.pushLoop();
         const top = self.chunk.here();
-        // r = it.next()  (for-await: r = await it.next())
+        // r = it.next()  (for-await: r = await it.next()) — the cached `next`,
+        // invoked with this=it via call_with_this (no second property lookup).
+        try self.emitLoad(next_name);
         try self.emitLoad(it_name);
-        _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+        _ = try self.chunk.emitAB(.call_with_this, 0, 0);
         if (await_each) _ = try self.chunk.emit(.await_op, 0); // await the next() result
         if (!keys_first) _ = try self.chunk.emit(.assert_iter_result, 0); // IteratorNext: result must be an Object
         try self.emitDefine(r_name);
