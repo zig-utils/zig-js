@@ -1035,7 +1035,21 @@ pub const Compiler = struct {
             .call => |c| {
                 const spread = hasSpread(c.args);
                 if (spread and !self.in_generator) return error.Unsupported; // non-generator spread → tree-walk
-                if (c.callee.* == .member and c.callee.member.computed == null) {
+                if (c.callee.* == .super_member and !spread) {
+                    // `super.m(args)`: resolve `m` on the super base, then invoke it
+                    // with `this` = the current `this` (NOT the super base) via
+                    // call_with_this. (`yield super.m()` in a generator method.)
+                    const sm = c.callee.super_member;
+                    if (sm.computed) |ce| {
+                        try self.compileExpr(ce);
+                        _ = try self.chunk.emit(.super_get_index, 0);
+                    } else {
+                        _ = try self.chunk.emit(.super_get, try self.chunk.addName(sm.property));
+                    }
+                    _ = try self.chunk.emit(.load_this, 0);
+                    for (c.args) |arg| try self.compileExpr(arg);
+                    _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
+                } else if (c.callee.* == .member and c.callee.member.computed == null) {
                     // `recv.name(args)`: bind `this = recv` at the call site.
                     const m = c.callee.member;
                     try self.compileExpr(m.object);
@@ -1075,6 +1089,17 @@ pub const Compiler = struct {
                 } else {
                     const ni = try self.chunk.addName(m.property);
                     _ = try self.chunk.emit(.get_prop, ni);
+                }
+            },
+            .super_member => |m| {
+                // `super.x` / `super[e]` read: GetSuperBase + [[Get]] with `this`
+                // receiver, via the super_get opcodes (home_object is live in the
+                // generator frame). The call form is handled in the `.call` arm.
+                if (m.computed) |ce| {
+                    try self.compileExpr(ce);
+                    _ = try self.chunk.emit(.super_get_index, 0);
+                } else {
+                    _ = try self.chunk.emit(.super_get, try self.chunk.addName(m.property));
                 }
             },
             .new_expr => |n| {

@@ -7848,7 +7848,7 @@ pub const Interpreter = struct {
     /// Ordinary [[Get]] with the receiver kept separate from the object where
     /// lookup starts. Reflect.get and Proxy forwarding rely on this when an
     /// inherited accessor observes `this`.
-    fn getPropertyWithReceiver(self: *Interpreter, recv: Value, key: []const u8, receiver: Value) EvalError!Value {
+    pub fn getPropertyWithReceiver(self: *Interpreter, recv: Value, key: []const u8, receiver: Value) EvalError!Value {
         // PrivateGet is not OrdinaryGet: it resolves the PrivateElement directly
         // (a setter-only accessor read is a TypeError; an absent brand is a
         // TypeError, never `undefined`).

@@ -467,6 +467,20 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const obj = stack.pop().?;
                 try stack.append(stack_alloc, try vm.getProperty(obj, try propKey(vm, key)));
             },
+            .super_get => {
+                // `super.name`: GetSuperBase = home_object.[[Prototype]]; read with
+                // the current `this` as receiver (so an inherited getter sees it).
+                const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
+                const name = chunk.names.items[inst.a];
+                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), name, vm.this_value));
+            },
+            .super_get_index => {
+                const key = stack.pop().?;
+                const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
+                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), try propKey(vm, key), vm.this_value));
+            },
             .set_prop => {
                 const v = stack.pop().?;
                 const obj = stack.pop().?;

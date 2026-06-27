@@ -172,6 +172,8 @@ pub const Op = enum(u8) {
     array_append, // pop value, append to the array at top, leave array
     array_spread, // pop iterable, spread its elements into the array now at top, leave array
     get_prop, // operand a: name index; pop object -> push object[name]
+    super_get, // operand a: name index; push super.[name] (home_object.proto[name], receiver = this)
+    super_get_index, // pop key; push super[key] (home_object.proto[key], receiver = this)
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
     set_index, // pop value, pop key, pop object -> push value (after set)
