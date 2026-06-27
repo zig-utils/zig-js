@@ -8250,6 +8250,20 @@ pub const Interpreter = struct {
                     // property's value is read), landing as a plain data prop.
                     try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
                 }
+                // CopyDataProperties copies own enumerable *symbol* keys too,
+                // ordered after the string keys. `enumerableKeys` (above) drops
+                // them, so enumerate them here. (A Proxy source already surfaces
+                // its symbol keys through `objectOwnKeysList` in the loop above.)
+                if (!is_proxy) {
+                    outer_sym: for (try vo.ownKeys(self.arena)) |k| {
+                        if (!value.isSymbolKey(k) or !value.isRealSymbolKey(k)) continue;
+                        if (!vo.getAttr(k).enumerable) continue;
+                        for (consumed.items) |c| {
+                            if (std.mem.eql(u8, c, k)) continue :outer_sym;
+                        }
+                        try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
+                    }
+                }
             } else if (val.isString()) {
                 // ToObject(string): a String exotic object whose own *enumerable*
                 // properties are its UTF-16 index chars (`{...r} = "foo"` ⇒
