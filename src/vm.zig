@@ -93,6 +93,13 @@ pub const Exec = struct {
     stack: std.ArrayListUnmanaged(Value) = .empty,
     acc: Value = Value.undef(),
     ip: usize = 0,
+    /// The activation frame this Exec is running (null for env-mode bodies:
+    /// program/generator/async). Recorded so a mid-script collection can trace
+    /// the frame's `slots` (and its captured-frame parent chain) as precise GC
+    /// roots — like `stack`/`acc`, the slots are arena-backed and invisible to
+    /// both the precise object graph and the conservative native-stack scan, so
+    /// an object live only through a VM local would otherwise be swept.
+    frame: ?*Frame = null,
     /// Active try/catch handlers, innermost last. Lives in `Exec` so it persists
     /// across a generator's `yield`/resume (a `yield` can sit inside a `try`).
     handlers: std.ArrayListUnmanaged(Handler) = .empty,
@@ -255,6 +262,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     // mid-script collection at a step checkpoint traces its live `Value`s (the
     // operand stack is arena-backed, invisible to the conservative native-stack
     // scan). No-op when the GC is off.
+    exec.frame = frame; // so a mid-script collection roots this activation's slots
     vm.pushExecRoot(exec);
     defer vm.popExecRoot(exec);
     // Run the instruction stream; if a throw escapes and an active handler can
@@ -1814,7 +1822,7 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
     return vm.construct(callee, args);
 }
 
-fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value) EvalError!Value {
+pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value) EvalError!Value {
     if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
     vm.depth += 1;
     defer vm.depth -= 1;

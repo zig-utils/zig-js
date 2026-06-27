@@ -130,6 +130,33 @@ pub fn build(b: *std.Build) void {
     const threads_test_bin_step = b.step("threads-test-bin", "Build the threads-test exe only (no run)");
     threads_test_bin_step.dependOn(&threads_test_install.step);
 
+    // Concurrent-JS fuzzer: `zig build threadfuzz [-Dtsan] [-Dfuzz-iters=N] [-Dfuzz-seed=S]`.
+    // Generates random programs that share objects/arrays/closures/typed-arrays
+    // across JS Threads and runs each in a GIL-free parallel context. Under
+    // `-Dtsan` any unsynchronized engine access surfaces as a data race; it
+    // links the same TSan-instrumented `js` module as the corpus gate. The
+    // exe also installs to zig-out/bin so CI can shard seed ranges per-process
+    // (TSan shadow memory grows across a long single-process run).
+    const fuzz_iters = b.option(usize, "fuzz-iters", "threadfuzz: number of programs to generate") orelse 200;
+    const fuzz_seed = b.option(usize, "fuzz-seed", "threadfuzz: base RNG seed") orelse 1;
+    const threadfuzz = b.addExecutable(.{
+        .name = "threadfuzz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/threadfuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "js", .module = threads_js_mod }},
+        }),
+    });
+    const run_threadfuzz = b.addRunArtifact(threadfuzz);
+    run_threadfuzz.addArgs(&.{ b.fmt("{d}", .{fuzz_iters}), b.fmt("{d}", .{fuzz_seed}) });
+    const threadfuzz_step = b.step("threadfuzz", "Fuzz GIL-free parallel execution with random concurrent programs");
+    threadfuzz_step.dependOn(&run_threadfuzz.step);
+    const threadfuzz_install = b.addInstallArtifact(threadfuzz, .{});
+    const threadfuzz_bin_step = b.step("threadfuzz-bin", "Build the threadfuzz exe only (no run)");
+    threadfuzz_bin_step.dependOn(&threadfuzz_install.step);
+
     // test262 ingestion: `zig build test262 [-Dtest262=<root>]` runs the real
     // tc39/test262 corpus through the engine and reports the (partial) pass
     // rate. The default root is the pinned `test262` git submodule, so we always

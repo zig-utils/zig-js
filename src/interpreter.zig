@@ -4523,6 +4523,22 @@ pub const Interpreter = struct {
             }
             return Value.obj(result);
         }
+        // A VM-lowered plain function MUST run on the VM regardless of how it was
+        // *entered*: its body resolves captured variables as frame upvalues
+        // (`load_upval`), which only the VM's activation frames provide — the
+        // tree-walker's `callPlain` resolves names through the lexical
+        // `Environment` chain, where a frame-local upvalue does not exist. When
+        // such a closure is invoked from a tree-walker entry (e.g. a spawned
+        // `Thread`'s `callValueWithThis`, or any host call that lands here while
+        // the top-level ran on the VM), tree-walking the body raises a spurious
+        // `ReferenceError`. `vm.callValue` already dispatches chunk functions to
+        // the VM; mirror that here so the two entry paths agree. Constructors
+        // (`new_target` set) keep the tree-walk path — `construct` threads
+        // `new.target`, which `runFunction` does not. (A surfaced concurrent-JS
+        // fuzzer regression: a shared closure read across threads.)
+        if (new_target.isUndefined() and !func.is_generator and !func.is_async) {
+            if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val);
+        }
         return self.callPlain(func, args, this_val, new_target);
     }
 

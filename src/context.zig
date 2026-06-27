@@ -5751,6 +5751,48 @@ test "parallel: re-entrant getter + shared mutation across threads does not dead
     try std.testing.expect(!std.math.isNan(v.asNum()));
 }
 
+test "parallel: shared closure read across threads via the real Thread entry resolves upvalues" {
+    // Regression (concurrent-JS fuzzer find): a spawned `Thread` runs its body
+    // through `callValueWithThis` — the TREE-WALKER entry — whereas the main
+    // thread enters via the VM. A VM-lowered closure resolves a captured parent
+    // local as a frame upvalue (`load_upval`); the tree-walker's `callPlain`
+    // instead resolves names through the lexical Environment chain, where that
+    // frame slot does not exist — so entering such a closure from a thread
+    // raised a spurious `ReferenceError`. The fix dispatches plain chunk
+    // functions to the VM from the tree-walker entry too. The earlier upvalue
+    // test missed this because it called `vm.run` directly (VM entry), never the
+    // `new Thread(fn)` → `callValueWithThis` path this exercises.
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\var box = (function(){ var n = 41; return { peek(){ return n; } }; })();
+        \\function work() { let acc = 0; for (let i = 0; i < 2000; i++) acc += box.peek(); return acc | 0; }
+        \\let ts = []; for (let i = 0; i < 4; i++) ts.push(new Thread(work));
+        \\let total = 0; for (const t of ts) total += t.join();
+        \\(total | 0)
+    );
+    // Deterministic: 4 threads × 2000 reads × 41 = 328000. The read is pure
+    // (no mutation), so there is no race — only the entry-path resolution.
+    try std.testing.expectEqual(@as(f64, 4 * 2000 * 41), v.asNum());
+}
+
+test "tree-walker entry into a VM closure resolves frame upvalues (native callback)" {
+    // The same entry-path bug single-threaded: a native (`Array.prototype.map`)
+    // invokes a VM-lowered callback through `callValueWithThis`, the tree-walker
+    // entry. The callback reads a captured upvalue (`base`), which only the VM's
+    // activation frame holds — so the pre-fix tree-walk of the body could not
+    // resolve it. No threads involved; this guards the general dispatch fix.
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\function make() { var base = 10; return { cb(x) { return x + base; } }; }
+        \\var o = make();
+        \\[1, 2, 3].map(o.cb).join(",");
+    );
+    try std.testing.expect(v.isString());
+    try std.testing.expectEqualStrings("11,12,13", v.asStr());
+}
+
 test "Context threads run parallel by default; gil option opts into serialized mode" {
     // Default: enable_threads => true-parallel (no GIL), GC-managed cells.
     {

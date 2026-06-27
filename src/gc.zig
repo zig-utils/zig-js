@@ -447,6 +447,17 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     for (machine.gc_execs.items) |exec| {
         for (exec.stack.items) |s| markValue(v, s);
         markValue(v, exec.acc);
+        // The activation's frame slots (and its captured-frame parent chain for
+        // upvalues) are arena-backed locals — invisible to both the precise
+        // object graph and the native-stack scan, exactly like the operand stack
+        // above. A parked worker's slots are stable (it is at a safepoint), so an
+        // unlocked read is current. Without this an object live only through a VM
+        // local is swept mid-collection (a use-after-free that surfaces as a
+        // garbage `restricted_to` ⇒ spurious ConcurrentAccessError).
+        var fr: ?*vm.Frame = exec.frame;
+        while (fr) |f| : (fr = f.parent) {
+            for (f.slots) |slot| markValue(v, slot);
+        }
     }
     if (machine.microtasks) |q| {
         for (q.items) |mt| traceMicrotask(mt, v);
