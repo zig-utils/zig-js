@@ -109,11 +109,13 @@ jobs:
         run: zig build threads-test-bin -Dtsan=true
       - name: Sweep shard under parallel_js + TSan
         working-directory: zig-js
-        env:
-          # Halt each case at its first race so the report is the case-log tail.
-          TSAN_OPTIONS: halt_on_error=1
         run: |
           set -uo pipefail
+          # Halt each case at its first race so the report is the case-log tail;
+          # suppress the JS-defined intentional races on shared-buffer *program
+          # bytes* (see tsan-suppressions.txt) so the gate reports only
+          # engine-state races.
+          export TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/tsan-suppressions.txt"
           BIN=./zig-out/bin/threads-test
           # This shard's slice of the allowlist (NR % 4 == shard), each case run
           # in its own process. `timeout` caps a heavy stress case (the GC/CAS

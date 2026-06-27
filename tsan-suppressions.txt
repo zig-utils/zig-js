@@ -1,0 +1,40 @@
+# ThreadSanitizer suppressions for the no-GIL corpus gate.
+#
+# These suppress *intentional, JS-defined* data races on TypedArray /
+# SharedArrayBuffer **program bytes** — NOT engine-internal races. The ECMAScript
+# memory model explicitly permits unsynchronized concurrent access to a
+# SharedArrayBuffer's contents (it has defined, non-UB "racy" semantics, unlike
+# C/C++ where a data race is undefined behavior). TSan is a C++-level detector and
+# cannot know JS sanctions these, so it reports them as false positives — exactly
+# as V8/JSC/SpiderMonkey suppress the equivalent accesses.
+#
+# Each suppressed function reads/writes only the buffer's *data* bytes (always
+# bounds-checked against the live byte length, with the backing owned by the GC
+# finalizer so a concurrent detach/resize can never free bytes out from under a
+# reader — no UAF, no engine-state corruption). The slice header (ptr+len) itself
+# is read consistently via the `bytes()` seqlock, and detach is an atomic flag;
+# those engine-state accesses are NOT suppressed and must stay race-free.
+#
+# Scope is deliberately narrow (specific element-access functions), so a real
+# engine race that merely passes *through* these frames would still surface via
+# its other (unsuppressed) frame.
+
+# TypedArray plain element get/set (ta[i], fill, set, copyWithin, subarray copy):
+race:value.taWrite
+race:value.taRead
+race:value.taWriteBig
+race:value.taReadBig
+
+# Atomics.* on shared-buffer bytes. The raw op itself is hardware-atomic
+# (@atomicLoad/@atomicRmw on the byte), so TSan never flags atomic-vs-atomic; the
+# only races these participate in are vs a non-atomic access on the same bytes
+# (a plain ta[i], or resize's bulk byte copy) — a JS-level mixed-access race the
+# program chose, not an engine bug.
+race:value.taAtomicLoadRaw
+race:value.taAtomicStoreRaw
+race:value.taAtomicRmwRaw
+race:value.taAtomicCasRaw
+
+# Bulk byte moves between/within shared buffers (the bytes are program data):
+race:interpreter.Interpreter.taStoreInternal
+race:interpreter.Interpreter.taLoadInternal
