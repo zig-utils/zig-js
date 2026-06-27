@@ -11785,6 +11785,10 @@ pub const Interpreter = struct {
         // held error — so finally can run with a clean slate and override it.
         var result: Value = Value.undef();
         var held_err: ?EvalError = null;
+        // The pending exception *value* lives in `self.exception`; a finally
+        // block that internally throws-and-catches clobbers it, so hold it
+        // alongside `held_err` and restore it if the held throw resumes.
+        var held_exc: Value = Value.undef();
         if (self.eval(t.block)) |v| {
             result = v;
         } else |err| {
@@ -11808,9 +11812,11 @@ pub const Interpreter = struct {
                     result = v;
                 } else |cerr| {
                     held_err = cerr;
+                    held_exc = self.exception;
                 }
             } else {
                 held_err = err;
+                held_exc = self.exception;
             }
         }
         if (t.finally_block) |fb| {
@@ -11828,7 +11834,12 @@ pub const Interpreter = struct {
                 if (self.signal == .none) {
                     self.signal = saved_signal;
                     self.signal_label = saved_label;
-                    if (held_err) |e| return e;
+                    if (held_err) |e| {
+                        // Restore the held exception value: finally may have run
+                        // its own throw-and-catch, leaving `self.exception` stale.
+                        self.exception = held_exc;
+                        return e;
+                    }
                     return result;
                 }
                 // finally produced its own abrupt completion: it wins, and any
