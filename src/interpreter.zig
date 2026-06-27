@@ -1838,10 +1838,12 @@ pub const Interpreter = struct {
                     try self.maybeNameAnon(v, a.value.field_init_value, key);
                     if (obj.isObject()) {
                         const o = obj.asObj();
-                        if (o.proxy_handler != null or o.proxy_revoked) {
-                            // A Proxy receiver must observe the field through its
-                            // `defineProperty` trap (CreateDataPropertyOrThrow → an
-                            // own {w,e,c}=true data descriptor).
+                        if (o.proxy_handler != null or o.proxy_revoked or isModuleNs(o)) {
+                            // A Proxy / module-namespace receiver must observe the
+                            // field through [[DefineOwnProperty]] (the `defineProperty`
+                            // trap, or — for a deferred namespace — its evaluation
+                            // trigger), as a CreateDataPropertyOrThrow {w,e,c}=true
+                            // data descriptor.
                             const desc = (try self.newObject()).asObj();
                             try self.setProp(desc, "value", v);
                             try self.setProp(desc, "writable", Value.boolVal(true));
@@ -8919,6 +8921,11 @@ pub const Interpreter = struct {
             return try builtins.defineOneResult(self, ro, key, desc);
         }
         if (moduleNsOf(ro) != null) {
+            // OrdinarySetWithOwnDescriptor's [[GetOwnProperty]] on a namespace
+            // receiver (e.g. `super[k] = v` whose receiver is a namespace): a
+            // string key triggers a deferred module's evaluation. The define
+            // itself fails (exports are non-configurable).
+            try triggerDeferForKey(self, ro, key);
             _ = try moduleNsDesc(self, ro, key);
             return false;
         }
