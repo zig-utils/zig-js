@@ -1163,10 +1163,12 @@ pub const Context = struct {
         ns: ?*value.Object = null, // the namespace exotic object, if requested
         linked: bool = false,
         evaluated: bool = false,
-        // A JSON module (`import x from "m" with { type: "json" }`): its raw JSON
-        // text, parsed into the sole `default` export at evaluation time. Null
-        // for an ordinary JS module (`items` holds its AST instead).
-        json_source: ?[]const u8 = null,
+        // A synthetic module (`import x from "m" with { type: "json"|"text" }`):
+        // its raw source, turned into the sole `default` export at evaluation
+        // time per `syn_type` ("json" → JSON.parse, "text" → the string itself).
+        // Null for an ordinary JS module (`items` holds its AST instead).
+        syn_source: ?[]const u8 = null,
+        syn_type: []const u8 = "",
     };
 
     /// Load, link, and evaluate a module graph rooted at `entry_path`. The
@@ -1269,19 +1271,19 @@ pub const Context = struct {
         var dep_path: []const u8 = "";
         const dep_src = host.load(host.ctx, m.path, specifier, &dep_path) orelse
             return self.moduleError("Cannot resolve module specifier");
-        const dep = if (std.mem.eql(u8, module_type, "json"))
-            try self.loadJsonModule(dep_path, dep_src, cache)
+        const dep = if (std.mem.eql(u8, module_type, "json") or std.mem.eql(u8, module_type, "text"))
+            try self.loadSyntheticModule(dep_path, dep_src, module_type, cache)
         else
             try self.loadModule(dep_path, dep_src, host, cache);
         try m.deps.put(self.arena(), specifier, dep);
         return dep;
     }
 
-    /// Build a synthetic JSON module: no JS body, a single `default` export whose
-    /// value is `JSON.parse(source)` (computed at evaluation time, so a malformed
-    /// JSON body throws a SyntaxError when the module is evaluated). Cached by
-    /// path like an ordinary module.
-    fn loadJsonModule(self: *Context, path: []const u8, source: []const u8, cache: *std.StringHashMapUnmanaged(*Module)) RunError!*Module {
+    /// Build a synthetic module (JSON or text): no JS body, a single `default`
+    /// export materialized at evaluation time from the raw source (JSON.parse for
+    /// "json" — a malformed body throws SyntaxError then — or the string itself
+    /// for "text"). Cached by path like an ordinary module.
+    fn loadSyntheticModule(self: *Context, path: []const u8, source: []const u8, syn_type: []const u8, cache: *std.StringHashMapUnmanaged(*Module)) RunError!*Module {
         if (cache.get(path)) |m| return m;
         const a = self.arena();
         const env = try gc_mod.allocEnv(a);
@@ -1293,7 +1295,7 @@ pub const Context = struct {
             .fn_scope = true,
         };
         const m = try a.create(Module);
-        m.* = .{ .path = try a.dupe(u8, path), .items = &.{}, .env = env, .json_source = try a.dupe(u8, source) };
+        m.* = .{ .path = try a.dupe(u8, path), .items = &.{}, .env = env, .syn_source = try a.dupe(u8, source), .syn_type = syn_type };
         try m.exports.put(a, "default", .{ .local = "*default*" });
         try cache.put(a, m.path, m);
         return m;
@@ -1438,9 +1440,10 @@ pub const Context = struct {
         // runs, so observing them through the namespace (e.g. a circular or self
         // import) throws a ReferenceError until they are initialized.
         for (m.items) |item| self.instantiateLexical(m, item);
-        // A JSON module's sole `default` binding is in TDZ until its evaluation
-        // runs ParseJSONModule (so observing it before then is a ReferenceError).
-        if (m.json_source != null) m.env.put("*default*", Value.obj(self.tdz_marker)) catch {};
+        // A synthetic module's sole `default` binding is in TDZ until its
+        // evaluation materializes it (so observing it before then is a
+        // ReferenceError).
+        if (m.syn_source != null) m.env.put("*default*", Value.obj(self.tdz_marker)) catch {};
     }
 
     /// Pre-declare a statement's top-level lexical (`let`/`const`) bindings as
@@ -1469,11 +1472,15 @@ pub const Context = struct {
     fn evalModule(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
         if (m.evaluated) return;
         m.evaluated = true;
-        if (m.json_source) |src| {
-            // ParseJSONModule: the synthetic module's `default` export is
-            // JSON.parse(source); a malformed body throws a SyntaxError here.
-            const parsed = try builtins.jsonParse(machine, Value.undef(), &.{Value.str(src)});
-            try m.env.put("*default*", parsed);
+        if (m.syn_source) |src| {
+            // The synthetic module's `default` export: JSON.parse(source) for a
+            // JSON module (a malformed body throws SyntaxError here), or the raw
+            // source string for a text module.
+            const def = if (std.mem.eql(u8, m.syn_type, "json"))
+                try builtins.jsonParse(machine, Value.undef(), &.{Value.str(src)})
+            else
+                Value.str(src);
+            try m.env.put("*default*", def);
             return;
         }
         for (m.items) |item| switch (item.*) {
