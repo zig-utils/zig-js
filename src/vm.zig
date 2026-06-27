@@ -1122,8 +1122,12 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
         if (e != error.Throw) return e;
         g.done = true;
-        const reason = vm.exception;
+        var reason = vm.exception;
         vm.exception = Value.undef();
+        // DisposeResources for the body's `using` resources, threading the error.
+        if (g.env.disposables.items.len > 0) {
+            if (vm.disposeScope(g.env, reason) catch null) |de| reason = de;
+        }
         try promise.reject(vm, resultPromise(g), reason);
         return;
     };
@@ -1140,6 +1144,13 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         return;
     }
     g.done = true;
+    // DisposeResources for the body's top-level `using` resources at completion.
+    if (g.env.disposables.items.len > 0) {
+        if (vm.disposeScope(g.env, null) catch null) |de| {
+            try promise.reject(vm, resultPromise(g), de);
+            return;
+        }
+    }
     try promise.resolve(vm, resultPromise(g), v);
 }
 
