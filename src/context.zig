@@ -5634,6 +5634,26 @@ test "Atomics on plain properties: semantics, exact counter, wait/notify" {
     );
 }
 
+test "parallel: re-entrant getter + shared mutation across threads does not deadlock" {
+    // Robustness (#5): a getter re-reads its own object's properties (a deadlock
+    // if any per-object lock were held across the JS callback), while 6 threads
+    // hammer the same shared object's data + accessor properties in parallel.
+    // The test COMPLETING (no hang) is the no-deadlock proof; the result is racy
+    // (unsynchronized shared mutation is legal) but must stay a valid integer.
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\var shared = { a: 1, b: 2 };
+        \\Object.defineProperty(shared, 'sum', { get() { return this.a + this.b; } });
+        \\function work() { let acc = 0; for (let i = 0; i < 3000; i++) { acc += shared.sum; shared.a = (shared.a + 1) % 7; } return acc | 0; }
+        \\let ts = []; for (let i = 0; i < 6; i++) ts.push(new Thread(work));
+        \\let total = 0; for (const t of ts) total += t.join();
+        \\(total | 0)
+    );
+    try std.testing.expect(v.isNumber());
+    try std.testing.expect(!std.math.isNan(v.asNum()));
+}
+
 test "Context threads run parallel by default; gil option opts into serialized mode" {
     // Default: enable_threads => true-parallel (no GIL), GC-managed cells.
     {
