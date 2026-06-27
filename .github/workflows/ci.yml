@@ -49,6 +49,16 @@ jobs:
             cmd: zig build test -Dtsan=true
           - name: tsan-parallel-js
             cmd: zig build test -Dtsan=true -Dtest-filter=parallel_js
+          # Concurrent-JS fuzzer: random programs sharing objects/arrays/closures/
+          # typed-arrays across JS Threads in GIL-free parallel contexts. Seeded,
+          # so it is a deterministic gate (no flake): a throw/UAF fails the leg.
+          # It found the call-dispatch + frame-slot-rooting bugs (commit b462c90).
+          - name: threadfuzz
+            cmd: zig build threadfuzz -Dfuzz-iters=400
+          # A smaller batch under ThreadSanitizer surfaces any unsynchronized
+          # engine access the seeded programs exercise (TSan is ~10× slower).
+          - name: tsan-threadfuzz
+            cmd: zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
     steps:
       # build.zig.zon uses local-path deps (`../zig-regex`, `../zig-gc`), so the
       # sibling repos are checked out next to this one.
