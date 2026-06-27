@@ -868,6 +868,19 @@ pub const Object = struct {
         @constCast(self).property_lock.unlock();
     }
 
+    /// [[Prototype]], read/written atomically: `setPrototypeOf` (and internal
+    /// reparenting) writes `proto` on a shared object while peers walk its
+    /// prototype chain (no-GIL). A nullable pointer is one word, so `.monotonic`
+    /// is a plain load/store — zero perf cost, it just marks the access
+    /// synchronized for ThreadSanitizer. Object-creation struct-inits write the
+    /// raw field directly (the object isn't published yet → no race).
+    pub inline fn protoAtomic(self: *const Object) ?*Object {
+        return @atomicLoad(?*Object, &@constCast(self).proto, .monotonic);
+    }
+    pub inline fn setProtoAtomic(self: *Object, p: ?*Object) void {
+        @atomicStore(?*Object, &self.proto, p, .monotonic);
+    }
+
     /// Gate for the per-object `elements_lock`, mirroring
     /// `Environment.binding_locks_enabled`: set only for a `concurrent_gc` /
     /// `parallel_gc` context (mutators in parallel or a concurrent marker). The

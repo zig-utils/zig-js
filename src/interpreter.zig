@@ -662,7 +662,7 @@ pub const Function = struct {
     frame: ?*anyopaque = null,
     local_count: u32 = 0,
     /// Class method support: the object on which this method/constructor lives
-    /// (its [[HomeObject]]); `super.x` resolves on `home_object.proto`.
+    /// (its [[HomeObject]]); `super.x` resolves on `home_object.protoAtomic()`.
     home_object: ?*value.Object = null,
     /// For a derived class constructor: the superclass object, called by `super(...)`.
     super_ctor: ?*value.Object = null,
@@ -1424,7 +1424,7 @@ pub const Interpreter = struct {
         const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .prim = v };
         if (self.env.get(ctor_name)) |ctor| {
-            if (ctor.isObject()) o.proto = try self.protoObject(ctor.asObj());
+            if (ctor.isObject()) o.setProtoAtomic(try self.protoObject(ctor.asObj()));
         }
         return o;
     }
@@ -1627,11 +1627,11 @@ pub const Interpreter = struct {
         // Link to `<name>.prototype` so `name` (and `toString`) are inherited and
         // `instanceof` / `Object.getPrototypeOf` see a real chain.
         if (proto) |p| {
-            obj.proto = p;
+            obj.setProtoAtomic(p);
         } else if (self.env.get(name)) |ctor_v| {
             if (ctor_v.isObject()) {
                 if (ctor_v.asObj().getOwn("prototype")) |proto_v| {
-                    if (proto_v.isObject()) obj.proto = proto_v.asObj();
+                    if (proto_v.isObject()) obj.setProtoAtomic(proto_v.asObj());
                 }
             }
         }
@@ -2075,7 +2075,7 @@ pub const Interpreter = struct {
                 // can't change which base the lookup uses (RequireObjectCoercible:
                 // a null/absent prototype is a TypeError). The receiver is `this`,
                 // so an inherited accessor observes the current instance.
-                const parent = home.proto orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+                const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
                 const key = try self.memberKey(m.property, m.computed);
                 break :blk try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
             },
@@ -2496,7 +2496,7 @@ pub const Interpreter = struct {
                 } else o.getAttr(k).enumerable;
                 if (enumerable) try out.append(self.arena, k);
             }
-            cur = o.proto;
+            cur = o.protoAtomic();
         }
         return out.items;
     }
@@ -3848,12 +3848,12 @@ pub const Interpreter = struct {
 
         // Link the prototype chains for inheritance.
         if (super_obj) |so| {
-            proto.proto = super_proto;
-            class_obj.proto = so; // static methods inherit
+            proto.setProtoAtomic(super_proto);
+            class_obj.setProtoAtomic(so); // static methods inherit
         } else if (derived) {
             // `extends null`: the prototype object's [[Prototype]] is null; the
             // constructor's [[Prototype]] stays %Function.prototype%.
-            proto.proto = null;
+            proto.setProtoAtomic(null);
         }
         // The constructor's home object is the prototype; super(...) targets the superclass.
         if (funcOf(class_val)) |cf| {
@@ -4107,7 +4107,7 @@ pub const Interpreter = struct {
             // GetThisBinding precedes the key/lookup (see the super read path): a
             // derived-ctor `super.m()` before `super()` is a ReferenceError.
             if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-            const parent = home.proto orelse
+            const parent = home.protoAtomic() orelse
                 return self.throwError("TypeError", "no superclass method");
             const key = try self.memberKey(sm.property, sm.computed);
             const method = try self.getProperty(Value.obj(parent), key);
@@ -4734,9 +4734,9 @@ pub const Interpreter = struct {
     /// GC-owned backing stores to `dst`; otherwise both cells would finalize the
     /// same slots/elements/accessor storage.
     fn adoptInternalSlots(dst: *value.Object, src: *value.Object) void {
-        const keep_proto = dst.proto;
+        const keep_proto = dst.protoAtomic();
         dst.* = src.*;
-        dst.proto = keep_proto;
+        dst.setProtoAtomic(keep_proto);
         src.* = .{};
     }
 
@@ -4979,7 +4979,7 @@ pub const Interpreter = struct {
         const obj = try gc_mod.allocObject(self.gc, self.arena);
         // An ordinary object's [[Prototype]] is %Object.prototype%. Callers that
         // need a null-proto object (`Object.create(null)`, dictionary holders)
-        // overwrite `obj.proto` right after this returns.
+        // overwrite `obj.protoAtomic()` right after this returns.
         obj.* = .{ .proto = self.objectProto() };
         return Value.obj(obj);
     }
@@ -5515,7 +5515,7 @@ pub const Interpreter = struct {
 
     fn finishBigInt(self: *Interpreter, o: *value.Object) EvalError!void {
         if (self.env.get("BigInt")) |c| {
-            if (c.isObject()) o.proto = try self.protoObject(c.asObj());
+            if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
         }
     }
 
@@ -5585,7 +5585,7 @@ pub const Interpreter = struct {
                 .boolean => "Boolean",
                 else => "Object",
             };
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic);
+            o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic));
         }
         return Value.obj(o);
     }
@@ -5791,9 +5791,9 @@ pub const Interpreter = struct {
         if (self.new_target.isObject()) {
             // GetPrototypeFromConstructor: new.target.prototype, or new.target's
             // realm's %RegExp.prototype% when that is not an Object.
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "RegExp");
+            o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "RegExp"));
         } else if (self.env.get("RegExp")) |c| {
-            if (c.isObject()) o.proto = try self.protoObject(c.asObj());
+            if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
         }
         // Eagerly compile to validate the pattern — RegExp construction reports a
         // SyntaxError for an invalid pattern (the compiled form is discarded;
@@ -6277,7 +6277,7 @@ pub const Interpreter = struct {
         const it = try gc_mod.allocObj(self.arena);
         it.* = .{};
         if (self.env.get("\x00ReStrIterProto")) |p| {
-            if (p.isObject()) it.proto = p.asObj();
+            if (p.isObject()) it.setProtoAtomic(p.asObj());
         }
         try self.setProp(it, "__re", matcher);
         try self.setProp(it, "__str", Value.str(try self.arena.dupe(u8, s)));
@@ -6478,11 +6478,11 @@ pub const Interpreter = struct {
         // `Date.prototype.isPrototypeOf(d)` and `d.constructor` resolve. Date
         // methods still dispatch via the `is_date` branch in builtinMethod.
         if (self.new_target.isObject()) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Date");
+            o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Date"));
         } else if (self.env.get("Date")) |ctor| {
             if (ctor.isObject()) {
                 if (ctor.asObj().getOwn("prototype")) |p| {
-                    if (p.isObject()) o.proto = p.asObj();
+                    if (p.isObject()) o.setProtoAtomic(p.asObj());
                 }
             }
         }
@@ -6794,7 +6794,7 @@ pub const Interpreter = struct {
         const wp = cv.asObj().getOwn("prototype") orelse return false;
         if (!wp.isObject()) return false;
         var cur = start;
-        while (cur) |c| : (cur = c.proto) {
+        while (cur) |c| : (cur = c.protoAtomic()) {
             if (c == wp.asObj()) return true;
         }
         return false;
@@ -6812,15 +6812,15 @@ pub const Interpreter = struct {
         const o = (try self.newObject()).asObj();
         o.is_map = true;
         if (self.new_target.isObject()) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic);
+            o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic));
         } else if (self.env.get("Map")) |ctor| {
             if (ctor.isObject()) {
                 if (ctor.asObj().getOwn("prototype")) |p| {
-                    if (p.isObject()) o.proto = p.asObj();
+                    if (p.isObject()) o.setProtoAtomic(p.asObj());
                 }
             }
         }
-        o.is_weak = self.protoReachesCtorProto("WeakMap", o.proto);
+        o.is_weak = self.protoReachesCtorProto("WeakMap", o.protoAtomic());
         try self.addEntriesFromIterable(o, init_v, false);
         return Value.obj(o);
     }
@@ -6840,15 +6840,15 @@ pub const Interpreter = struct {
         // Proto from the in-flight constructor (`new Set`/`new WeakSet`), so a
         // WeakSet doesn't inherit Set.prototype; internal results default to Set.
         if (self.new_target.isObject()) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic);
+            o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic));
         } else if (self.env.get("Set")) |ctor| {
             if (ctor.isObject()) {
                 if (ctor.asObj().getOwn("prototype")) |p| {
-                    if (p.isObject()) o.proto = p.asObj();
+                    if (p.isObject()) o.setProtoAtomic(p.asObj());
                 }
             }
         }
-        o.is_weak = self.protoReachesCtorProto("WeakSet", o.proto);
+        o.is_weak = self.protoReachesCtorProto("WeakSet", o.protoAtomic());
         try self.addEntriesFromIterable(o, init_v, true);
         return Value.obj(o);
     }
@@ -7389,7 +7389,7 @@ pub const Interpreter = struct {
     /// honoring a target that is itself a Proxy.
     fn ordinaryProtoValue(self: *Interpreter, o: *value.Object) EvalError!Value {
         if (o.proxy_handler != null or o.proxy_revoked) return self.proxyGetProto(o);
-        return if (o.proto) |p| Value.obj(p) else Value.nul();
+        return if (o.protoAtomic()) |p| Value.obj(p) else Value.nul();
     }
 
     fn sameProtoValue(proto: ?*value.Object, v: Value) bool {
@@ -7397,7 +7397,7 @@ pub const Interpreter = struct {
     }
 
     fn ordinarySetPrototypeOf(self: *Interpreter, o: *value.Object, new_proto: ?*value.Object) EvalError!bool {
-        const current = if (o.proto) |p| Value.obj(p) else Value.nul();
+        const current = if (o.protoAtomic()) |p| Value.obj(p) else Value.nul();
         if (sameProtoValue(new_proto, current)) return true;
         if (self.objectProto()) |op| {
             if (o == op) return false;
@@ -7417,7 +7417,7 @@ pub const Interpreter = struct {
             _ = self.preparePrototypeUse(np);
             gc_mod.barrierCell(@ptrCast(np)); // proto reparent on a live object
         }
-        o.proto = new_proto;
+        o.setProtoAtomic(new_proto);
         return true;
     }
 
@@ -7803,7 +7803,7 @@ pub const Interpreter = struct {
             // instance is a Proxy (a base that `return`ed `new Proxy(this, …)`), the
             // method is reached through the proxy's target chain, not the proxy's
             // own [[Prototype]]. (Private access never invokes proxy traps.)
-            cur = if (c.proxy_handler != null) (c.proxy_target orelse c.proto) else c.proto;
+            cur = if (c.proxy_handler != null) (c.proxy_target orelse c.protoAtomic()) else c.protoAtomic();
         }
         return Value.undef(); // branded but value not yet present (TDZ-like); rare
     }
@@ -7836,7 +7836,7 @@ pub const Interpreter = struct {
             }
             // See privateGet: reach a Proxy instance's private accessor (on the
             // declaring class's prototype) through the proxy's target chain.
-            cur = if (c.proxy_handler != null) (c.proxy_target orelse c.proto) else c.proto;
+            cur = if (c.proxy_handler != null) (c.proxy_target orelse c.protoAtomic()) else c.protoAtomic();
         }
         // Branded, but the field's own slot has not been materialized yet (a field
         // written before its own initializer ran, e.g. `#a = (this.#b = 1)`).
@@ -8471,7 +8471,7 @@ pub const Interpreter = struct {
                 // GetSuperBase before ToPropertyKey of the computed key (see the
                 // read path), so a key `toString` that mutates the home prototype
                 // can't redirect the write.
-                const parent = home.proto orelse return self.throwError("TypeError", "Cannot set property of null (super)");
+                const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot set property of null (super)");
                 const key = try self.memberKey(m.property, m.computed);
                 if (!try self.setMemberResult(Value.obj(parent), key, v, self.this_value)) {
                     if (self.strict) return self.throwError("TypeError", "Cannot set property");
@@ -9051,7 +9051,7 @@ pub const Interpreter = struct {
         o.array_buffer = ab;
         errdefer o.array_buffer = null;
         if (self.env.get("ArrayBuffer")) |c| {
-            if (c.isObject()) o.proto = try self.protoObject(c.asObj());
+            if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
         }
         return o;
     }
@@ -9096,10 +9096,10 @@ pub const Interpreter = struct {
         // (a getter runs and may throw), or — when that is not an Object — the
         // *newTarget's realm's* typed-array prototype for this kind.
         if (self.new_target.isObject()) {
-            o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), kind.ctorName());
+            o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), kind.ctorName()));
         } else if (self.env.get(kind.ctorName())) |c| {
             if (c.isObject()) {
-                o.proto = try self.protoObject(c.asObj());
+                o.setProtoAtomic(try self.protoObject(c.asObj()));
             }
         }
     }
@@ -9366,7 +9366,7 @@ pub const Interpreter = struct {
             else => "\x00ArrIterProto",
         };
         if (self.env.get(proto_key)) |p| {
-            if (p.isObject()) it.proto = p.asObj();
+            if (p.isObject()) it.setProtoAtomic(p.asObj());
         } else {
             // Before %IteratorPrototype% exists (early bootstrap): a plain `next`.
             try setNative(self.arena, self.root_shape, it, "next", 0, cursorIterNext);
@@ -9531,7 +9531,7 @@ pub const Interpreter = struct {
                 const c = cur.asObj();
                 cur = if (c.proxy_handler != null or c.proxy_revoked)
                     try self.proxyGetProto(c)
-                else if (c.proto) |p| Value.obj(p) else Value.nul();
+                else if (c.protoAtomic()) |p| Value.obj(p) else Value.nul();
             }
             return Value.undef();
         }
@@ -9627,7 +9627,7 @@ pub const Interpreter = struct {
                             const c = cur.asObj();
                             cur = if (c.proxy_handler != null or c.proxy_revoked)
                                 try self.proxyGetProto(c)
-                            else if (c.proto) |p| Value.obj(p) else Value.nul();
+                            else if (c.protoAtomic()) |p| Value.obj(p) else Value.nul();
                         }
                         return Value.undef();
                     }
@@ -11417,7 +11417,7 @@ pub const Interpreter = struct {
     fn regexGroups(self: *Interpreter, re: *regex.Regex, m: regex.Match) EvalError!?*value.Object {
         if (re.named_capture_list.len == 0) return null;
         const o = (try self.newObject()).asObj();
-        o.proto = null; // RegExpBuiltinExec: the groups object is ObjectCreate(null)
+        o.setProtoAtomic(null); // RegExpBuiltinExec: the groups object is ObjectCreate(null)
         for (re.named_capture_list) |entry| {
             const v: Value = if (re.getNamedCapture(&m, entry.name)) |capture|
                 Value.str(try self.arena.dupe(u8, capture))
@@ -11472,7 +11472,7 @@ pub const Interpreter = struct {
         }
         if (re.named_capture_list.len > 0) {
             const g = (try self.newObject()).asObj();
-            g.proto = null; // MakeIndicesArray: groups is ObjectCreate(null)
+            g.setProtoAtomic(null); // MakeIndicesArray: groups is ObjectCreate(null)
             for (re.named_capture_list) |entry| {
                 const v: Value = if (namedCaptureSpan(re, m, entry.name)) |span|
                     try self.indexPair(
@@ -11770,7 +11770,7 @@ pub const Interpreter = struct {
                     has = true;
                     break;
                 }
-                cur = c.proto;
+                cur = c.protoAtomic();
             }
             return Value.boolVal(has);
         }
@@ -11826,7 +11826,7 @@ pub const Interpreter = struct {
             // built-in coercion below (calling them would loop through dispatch).
             var method: ?Value = null;
             var cur: ?*value.Object = o;
-            while (cur) |c| : (cur = c.proto) {
+            while (cur) |c| : (cur = c.protoAtomic()) {
                 if (c.getAccessor(m)) |acc| {
                     if (acc.get) |g| {
                         if (!g.isUndefined()) method = try self.callValueWithThis(g, &.{}, v);
@@ -11921,7 +11921,7 @@ pub const Interpreter = struct {
     /// none, so ToPrimitive uses the built-in coercion instead.
     fn userMethodOf(o: *value.Object, name: []const u8) ?Value {
         var cur: ?*value.Object = o;
-        while (cur) |c| : (cur = c.proto) {
+        while (cur) |c| : (cur = c.protoAtomic()) {
             if (c.getOwn(name)) |fv| {
                 return if (fv.isObject() and fv.asObj().js_func != null) fv else null;
             }
@@ -12296,7 +12296,7 @@ pub const Interpreter = struct {
     /// (native/bound) function that was never given one — %Function.prototype%,
     /// which every function inherits.
     pub fn effectiveProto(self: *Interpreter, o: *value.Object) ?*value.Object {
-        if (o.proto) |p| return p;
+        if (o.protoAtomic()) |p| return p;
         if (o.native != null or o.js_func != null or o.bound != null) return self.functionProto();
         return null;
     }
@@ -12524,7 +12524,7 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const executor = if (args.len > 0) args[0] else Value.undef();
     if (!executor.isCallable()) return self.throwError("TypeError", "Promise resolver is not a function");
     const pobj = try promise.newPromise(self);
-    if (self.new_target.isObject()) pobj.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Promise");
+    if (self.new_target.isObject()) pobj.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Promise"));
     const pp = pobj.promise.?;
     const resolving = try self.arena.create(promise.Resolving);
     resolving.* = .{ .promise = @ptrCast(@alignCast(pp)) };
@@ -12739,7 +12739,7 @@ fn objectGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     if (!cb.isCallable()) return self.throwError("TypeError", "Object.groupBy: callback is not a function");
     const elems = try collectIterable(self, if (args.len > 0) args[0] else Value.undef());
     const obj = (try self.newObject()).asObj();
-    obj.proto = null; // groupBy result has a null prototype
+    obj.setProtoAtomic(null); // groupBy result has a null prototype
     for (elems, 0..) |el, i| {
         const kv = try self.callValue(cb, &.{ el, Value.num(@floatFromInt(i)) });
         const key = try self.keyOf(kv);
@@ -12865,7 +12865,7 @@ fn combineSettle(self: *Interpreter, c: *promise.Combine) value.HostError!void {
         _ = try self.callValue(c.reject, &.{agg});
     } else if (c.keys) |keys| {
         const result = (try self.newObject()).asObj();
-        result.proto = null;
+        result.setProtoAtomic(null);
         for (keys, 0..) |key, i| {
             try self.setProp(result, key, c.values.elements.items[i]);
         }
@@ -14046,7 +14046,7 @@ fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
     }
     if (genv.get("Object")) |ov| if (ov.isObject()) {
         if (ov.asObj().getOwn("prototype")) |pv| {
-            if (pv.isObject()) gobj.proto = pv.asObj();
+            if (pv.isObject()) gobj.setProtoAtomic(pv.asObj());
         }
     };
     try genv.put("globalThis", Value.obj(gobj));
@@ -14097,7 +14097,7 @@ fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environme
     if (!v.isObject()) return v;
     const o = v.asObj();
     if (o.is_symbol) {
-        if (symbolProtoInRealm(wrap_env)) |p| o.proto = p;
+        if (symbolProtoInRealm(wrap_env)) |p| o.setProtoAtomic(p);
         return v;
     }
     if (o.is_bigint) return v;
@@ -14117,7 +14117,7 @@ fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environme
         // The wrapper's [[Prototype]] is the realm receiving the wrapped value.
         if (wrap_env.get("Function")) |fc| if (fc.isObject()) {
             if (fc.asObj().getOwn("prototype")) |fp| if (fp.isObject()) {
-                w.proto = fp.asObj();
+                w.setProtoAtomic(fp.asObj());
             };
         };
         // CopyNameAndLength(wrapped, target): a read that throws (a poisoned
@@ -14177,7 +14177,7 @@ fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const o = (try self.newObject()).asObj();
     o.is_shadow_realm = true;
     o.private_data = @ptrCast(genv);
-    if (self.new_target.isObject()) o.proto = try self.protoObject(self.new_target.asObj());
+    if (self.new_target.isObject()) o.setProtoAtomic(try self.protoObject(self.new_target.asObj()));
     return Value.obj(o);
 }
 
@@ -14646,7 +14646,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         view_len = @intCast(vl);
     }
     const o = (try self.newObject()).asObj();
-    if (self.new_target.isObject()) o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "DataView");
+    if (self.new_target.isObject()) o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "DataView"));
     // The detached/out-of-bounds re-check after OrdinaryCreateFromConstructor is
     // spec'd: reading newTarget.prototype can run user code that detaches or
     // resizes the buffer.
@@ -14815,7 +14815,7 @@ fn makeIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Kind, f
     }
     o.iter_helper = h;
     if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
-        o.proto = p.asObj();
+        o.setProtoAtomic(p.asObj());
     };
     return Value.obj(o);
 }
@@ -15063,7 +15063,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             // key (CreateDataPropertyOrThrow → writable/enumerable/configurable).
             const keys = h.func.asObj().elements.items;
             const obj = (try self.newObject()).asObj();
-            obj.proto = null;
+            obj.setProtoAtomic(null);
             var k: usize = 0;
             while (k < keys.len and k < results.elements.items.len) : (k += 1) {
                 try self.setProp(obj, keys[k].asStr(), results.elements.items[k]);
@@ -15413,7 +15413,7 @@ fn iteratorFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     if (self.env.get("Iterator")) |ic| if (ic.isObject()) {
         if (ic.asObj().getOwn("prototype")) |ip| if (ip.isObject()) {
             var cur: ?*value.Object = iterator.asObj().proto;
-            while (cur) |c| : (cur = c.proto) if (c == ip.asObj()) return iterator;
+            while (cur) |c| : (cur = c.protoAtomic()) if (c == ip.asObj()) return iterator;
         };
     };
     return makeIterHelper(self, iterator, .wrap, Value.undef(), 0);
@@ -15642,7 +15642,7 @@ fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.
     h.* = .{ .src = Value.obj(iters), .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = Value.obj(flags), .padding = padding };
     o.iter_helper = h;
     if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
-        o.proto = p.asObj();
+        o.setProtoAtomic(p.asObj());
     };
     return Value.obj(o);
 }
@@ -15659,7 +15659,7 @@ fn iteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
             return self.throwError("TypeError", "Abstract class Iterator not directly constructable");
     }
     const o = (try self.newObject()).asObj();
-    o.proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Iterator");
+    o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Iterator"));
     return Value.obj(o);
 }
 
@@ -16010,7 +16010,7 @@ fn makeAsyncIterHelper(self: *Interpreter, src: Value, kind: value.IterHelper.Ki
     h.* = .{ .src = src, .kind = kind, .func = func, .limit = limit, .is_async = true };
     o.iter_helper = h;
     if (self.env.get("\x00AsyncIterHelperProto")) |p| if (p.isObject()) {
-        o.proto = p.asObj();
+        o.setProtoAtomic(p.asObj());
     };
     return Value.obj(o);
 }
@@ -16175,7 +16175,7 @@ fn asyncIteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value)
             return self.throwError("TypeError", "Abstract class AsyncIterator not directly constructable");
     }
     const o = (try self.newObject()).asObj();
-    o.proto = try self.protoObject(self.new_target.asObj());
+    o.setProtoAtomic(try self.protoObject(self.new_target.asObj()));
     return Value.obj(o);
 }
 
@@ -16441,7 +16441,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const o = (try self.newObject()).asObj();
     o.is_weak_ref = true;
     o.weak_ref_target = target.asObj();
-    if (try self.protoFromCtor("WeakRef")) |pr| o.proto = pr;
+    if (try self.protoFromCtor("WeakRef")) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
 }
 
@@ -16462,7 +16462,7 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     const o = (try self.newObject()).asObj();
     o.is_finalization_registry = true;
     o.finalization_callback = cb;
-    if (try self.protoFromCtor("FinalizationRegistry")) |pr| o.proto = pr;
+    if (try self.protoFromCtor("FinalizationRegistry")) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
 }
 
@@ -16544,7 +16544,7 @@ fn disposableStackConstructorFn(comptime is_async: bool) value.NativeFn {
             const name = if (is_async) "AsyncDisposableStack" else "DisposableStack";
             if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor " ++ name ++ " requires 'new'");
             const o = (try self.newObject()).asObj();
-            if (try self.protoFromCtor(name)) |pr| o.proto = pr;
+            if (try self.protoFromCtor(name)) |pr| o.setProtoAtomic(pr);
             try dsHidden(self, o, "\x00ds_res", try self.newArray());
             try dsHidden(self, o, "\x00ds_done", Value.boolVal(false));
             try dsHidden(self, o, "\x00ds_async", Value.boolVal(is_async));
@@ -16629,7 +16629,7 @@ fn dispMoveFn(comptime is_async: bool) value.NativeFn {
             const name = if (is_async) "AsyncDisposableStack" else "DisposableStack";
             const o = (try self.newObject()).asObj();
             if (self.env.get(name)) |c| if (c.isObject()) {
-                o.proto = try self.protoObject(c.asObj());
+                o.setProtoAtomic(try self.protoObject(c.asObj()));
             };
             try dsHidden(self, o, "\x00ds_res", this.asObj().getOwn("\x00ds_res").?);
             try dsHidden(self, o, "\x00ds_done", Value.boolVal(false));
@@ -16943,7 +16943,7 @@ fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*
     ta.* = .{ .buffer = try self.makeArrayBuffer(len * kind.byteSize()), .byte_offset = 0, .length = len, .kind = kind };
     o.typed_array = ta;
     if (self.env.get(kind.ctorName())) |c| {
-        if (c.isObject()) o.proto = try self.protoObject(c.asObj());
+        if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
     }
     return o;
 }
@@ -17788,7 +17788,7 @@ fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (len > 0x7fffffff) return self.throwError("RangeError", "Invalid ArrayBuffer length");
     const o = try self.makeArrayBuffer(@intCast(len));
     o.array_buffer.?.max_byte_length = max;
-    if (proto) |pr| o.proto = pr;
+    if (proto) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
 }
 
@@ -18888,7 +18888,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     }
 
     const o = (try self.newObject()).asObj();
-    if (self.new_target.isObject()) o.proto = try self.ctorRealmProto(self.new_target.asObj(), "Locale");
+    if (self.new_target.isObject()) o.setProtoAtomic(try self.ctorRealmProto(self.new_target.asObj(), "Locale"));
     try self.setProp(o, "\x00locale", Value.str(canon));
     try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
     return Value.obj(o);
@@ -19014,7 +19014,7 @@ fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
             try buf.appendSlice(a, tail);
             const canon = canonicalizeLocaleTag(a, buf.items) orelse return self.throwError("RangeError", "Incorrect locale information provided");
             const o = (try self.newObject()).asObj();
-            o.proto = this.asObj().proto;
+            o.setProtoAtomic(this.asObj().proto);
             try self.setProp(o, "\x00locale", Value.str(canon));
             try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
             return Value.obj(o);
@@ -19578,7 +19578,7 @@ fn isWellFormedUnitIdentifier(u: []const u8) bool {
 /// exactly once and bad values throw at construction).
 fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     const ro = (try self.newObject()).asObj();
-    ro.proto = null; // an internal record — not affected by Object.prototype
+    ro.setProtoAtomic(null); // an internal record — not affected by Object.prototype
     // CoerceOptionsToObject: undefined → none; null → TypeError; primitive → boxed.
     if (raw_in.isUndefined()) return ro;
     const raw: Value = Value.obj(try self.toObject(raw_in));
@@ -19804,7 +19804,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             const o = blk: {
                 if (self.new_target.isObject()) {
                     const oo = (try self.newObject()).asObj();
-                    oo.proto = try self.ctorRealmProto(self.new_target.asObj(), service);
+                    oo.setProtoAtomic(try self.ctorRealmProto(self.new_target.asObj(), service));
                     break :blk oo;
                 }
                 if (!can_call) return self.throwError("TypeError", "Constructor Intl." ++ service ++ " requires 'new'");
@@ -19814,7 +19814,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 if (self.global_object) |g| if (g.getOwn("Intl")) |iv| if (iv.isObject()) {
                     if (iv.asObj().getOwn(service)) |cv| if (cv.isObject()) {
                         if (cv.asObj().getOwn("prototype")) |pv| if (pv.isObject()) {
-                            oo.proto = pv.asObj();
+                            oo.setProtoAtomic(pv.asObj());
                             // OrdinaryHasInstance(service, this): is the service
                             // prototype in `this`'s prototype chain? Only
                             // NumberFormat/DateTimeFormat have the legacy
@@ -19822,7 +19822,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                             const can_chain = comptime (std.mem.eql(u8, service, "NumberFormat") or std.mem.eql(u8, service, "DateTimeFormat"));
                             if (can_chain and this.isObject()) {
                                 var p: ?*value.Object = this.asObj().proto;
-                                while (p) |pp| : (p = pp.proto) if (pp == pv.asObj()) {
+                                while (p) |pp| : (p = pp.protoAtomic()) if (pp == pv.asObj()) {
                                     chain_this = this.asObj();
                                     break;
                                 };
@@ -22422,7 +22422,7 @@ fn intlSegmenterSegmentFn(ctx: *anyopaque, this: Value, args: []const Value) val
     };
     const o = (try self.newObject()).asObj();
     if (self.env.get("\x00SegmentsProto")) |p| if (p.isObject()) {
-        o.proto = p.asObj();
+        o.setProtoAtomic(p.asObj());
     };
     try self.setProp(o, "\x00segstr", Value.str(str));
     try o.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -22463,7 +22463,7 @@ fn intlSegmentsIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (!segmentsBrandOk(this)) return self.throwError("TypeError", "Segments.prototype[@@iterator] on incompatible receiver");
     const it = (try self.newObject()).asObj();
     if (self.env.get("\x00SegIterProto")) |p| if (p.isObject()) {
-        it.proto = p.asObj();
+        it.setProtoAtomic(p.asObj());
     };
     try self.setProp(it, "\x00segstr", this.asObj().getOwn("\x00segstr").?);
     try it.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -23361,7 +23361,7 @@ fn sharedArrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     const storage = shared_buffer.SharedBufferStorage.create(@intCast(len), max) catch
         return self.throwError("RangeError", "SharedArrayBuffer allocation failed");
     const o = try makeSharedArrayBufferWrapper(self, storage);
-    if (proto) |pr| o.proto = pr;
+    if (proto) |pr| o.setProtoAtomic(pr);
     return Value.obj(o);
 }
 
@@ -23482,7 +23482,7 @@ pub fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.
     o.array_buffer = ab;
     errdefer o.array_buffer = null;
     if (self.env.get("SharedArrayBuffer")) |c| if (c.isObject()) {
-        o.proto = try self.protoObject(c.asObj());
+        o.setProtoAtomic(try self.protoObject(c.asObj()));
     };
     tracked = false;
     return o;
@@ -24110,7 +24110,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     promise_proto.* = .{};
     if (env.get("Object")) |ov| if (ov.isObject()) {
         if (ov.asObj().getOwn("prototype")) |op| {
-            if (op.isObject()) promise_proto.proto = op.asObj();
+            if (op.isObject()) promise_proto.setProtoAtomic(op.asObj());
         }
     };
     try setNative(a, root_shape, promise_proto, "then", 2, promiseThenFn);
@@ -24330,7 +24330,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         const ctor_v = env.get(ename) orelse continue;
         const ctor = ctor_v.asObj();
         const is_base = std.mem.eql(u8, ename, "Error");
-        if (is_base) error_ctor_obj = ctor else ctor.proto = error_ctor_obj; // NativeError [[Prototype]] is %Error%
+        if (is_base) error_ctor_obj = ctor else ctor.setProtoAtomic(error_ctor_obj); // NativeError [[Prototype]] is %Error%
         const proto = if (is_base) error_proto else blk: {
             const p = try gc_mod.allocObj(a);
             p.* = .{ .proto = error_proto };
@@ -24371,7 +24371,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     func_proto.* = .{ .proto = object_proto, .native = funcProtoNoop };
     // The base `Error` constructor is a function, so its [[Prototype]] is
     // %Function.prototype% (`Object.getPrototypeOf(Error) === Function.prototype`).
-    if (error_ctor_obj) |eo| eo.proto = func_proto;
+    if (error_ctor_obj) |eo| eo.setProtoAtomic(func_proto);
     inline for (.{
         .{ "call", 1 }, .{ "apply", 2 }, .{ "bind", 1 }, .{ "toString", 0 },
     }) |s| try setNativeWithData(a, root_shape, func_proto, s[0], s[1], funcProtoMethod(s[0]), @ptrCast(env));
@@ -24503,7 +24503,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // brand-checked methods (`Number.prototype.toString(radix)`, `valueOf()`,
     // `toFixed(...)`) accept it as a Number and return "0"/0 rather than throw.
     number_proto.* = .{ .proto = object_proto, .prim = Value.num(0) };
-    number_ns.proto = func_proto;
+    number_ns.setProtoAtomic(func_proto);
     inline for (.{
         .{ "toString", 1 },      .{ "toFixed", 1 },     .{ "valueOf", 0 }, .{ "toLocaleString", 0 },
         .{ "toExponential", 1 }, .{ "toPrecision", 1 },
@@ -24578,8 +24578,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // `Math`/`JSON` are ordinary objects with [[Prototype]] %Object.prototype%.
     // Wired here, once Object.prototype exists.
-    math_obj.proto = object_proto;
-    json_ns.proto = object_proto;
+    math_obj.setProtoAtomic(object_proto);
+    json_ns.setProtoAtomic(object_proto);
     if (symbol_ns.getOwn("toStringTag")) |mtt| if (mtt.isObject() and mtt.asObj().is_symbol) {
         try math_obj.setOwn(a, root_shape, mtt.asObj().sym_key, Value.str("Math"));
         try math_obj.setAttr(a, mtt.asObj().sym_key, .{ .writable = false, .enumerable = false, .configurable = true });
@@ -26403,7 +26403,7 @@ fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []
     t.* = .{ .kind = kind };
     o.temporal = t;
     if (self.env.get(proto_key)) |p| if (p.isObject()) {
-        o.proto = p.asObj();
+        o.setProtoAtomic(p.asObj());
     };
     return o;
 }
@@ -26411,7 +26411,7 @@ fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []
 fn applyTemporalNewTargetProto(self: *Interpreter, o: *value.Object) EvalError!void {
     if (!self.new_target.isObject()) return;
     const p = try self.getProperty(self.new_target, "prototype");
-    if (p.isObject() and !p.asObj().is_symbol) o.proto = p.asObj();
+    if (p.isObject() and !p.asObj().is_symbol) o.setProtoAtomic(p.asObj());
 }
 
 /// ToIntegerWithTruncation, rejecting non-finite.
@@ -32605,7 +32605,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
             if (c.typed_array) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
             if (c.prim) |p| if (p.isString() and idx < Interpreter.utf16LenOfString(p.asStr())) return true;
         }
-        cur = c.proto;
+        cur = c.protoAtomic();
     }
     return false;
 }
