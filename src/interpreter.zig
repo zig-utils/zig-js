@@ -1675,7 +1675,11 @@ pub const Interpreter = struct {
             .null_lit => Value.nul(),
             .undefined_lit => Value.undef(),
             .elision => Value.undef(), // only meaningful inside an array literal
-            .this_expr => self.this_value,
+            // GetThisBinding: in a derived constructor, `this` is in its TDZ until
+            // `super()` initializes it — reading it (e.g. `super(this.x)`) is a
+            // ReferenceError. `this_initialized` is true everywhere else (base
+            // ctors, methods, ordinary functions), so this only fires before super().
+            .this_expr => if (self.this_initialized) self.this_value else return self.throwError("ReferenceError", "Must call super constructor before using 'this'"),
             // A class field initializer / static block is run as a method-like
             // function (it is [[Call]]ed, never [[Construct]]ed), so `new.target`
             // inside it — including inside a direct `eval` in it — is undefined.
@@ -4099,7 +4103,11 @@ pub const Interpreter = struct {
         // but invoke it with the current `this`.
         if (callee_node.* == .super_member) {
             const sm = callee_node.super_member;
-            const parent = (self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method")).proto orelse
+            const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+            // GetThisBinding precedes the key/lookup (see the super read path): a
+            // derived-ctor `super.m()` before `super()` is a ReferenceError.
+            if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+            const parent = home.proto orelse
                 return self.throwError("TypeError", "no superclass method");
             const key = try self.memberKey(sm.property, sm.computed);
             const method = try self.getProperty(Value.obj(parent), key);
