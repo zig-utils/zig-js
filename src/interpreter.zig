@@ -2674,7 +2674,16 @@ pub const Interpreter = struct {
                 self.env = le;
                 loop_env = le;
             }
-            _ = try self.eval(ini);
+            // A later initializer in the head can throw after an earlier `using`
+            // resource was registered (`for (using a = x, b = throws(); …)`); the
+            // already-acquired resources are disposed before the error propagates.
+            _ = self.eval(ini) catch |e| {
+                if (e == error.Throw) if (loop_env) |le| if (le.disposables.items.len > 0) {
+                    const body_err = self.exception;
+                    if (self.disposeScope(le, body_err) catch null) |de| self.exception = de;
+                };
+                return e;
+            };
         }
         // CreatePerIterationEnvironment (initial copy, before the first test).
         if (lexical) self.env = try self.perIterEnv(outer, names.items, self.env);
