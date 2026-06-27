@@ -1904,6 +1904,27 @@ pub const Interpreter = struct {
                         break :blk v;
                     }
                 }
+                // PutValue resolves the LHS reference BEFORE the RHS runs: a
+                // strict assignment to an unresolvable bare identifier is a
+                // ReferenceError even when the RHS then creates a same-named
+                // global (`undeclared = (this.undeclared = 5)`) — the reference
+                // was already unresolvable. assignTo's own check runs post-RHS and
+                // would miss this. (Skip when a `with` is in scope: its object-env
+                // HasBinding is observable and assignTo handles it; running it here
+                // too would double-fire a proxy `has` trap.)
+                if (a.target.* == .identifier and self.strict) {
+                    const name = a.target.identifier;
+                    var has_with = false;
+                    var we: ?*Environment = self.env;
+                    while (we) |env| : (we = env.parent) if (env.with_object != null) {
+                        has_with = true;
+                        break;
+                    };
+                    if (!has_with and self.env.get(name) == null and !self.globalHasOwn(name)) {
+                        _ = try self.eval(a.value); // RHS still runs for its side effects
+                        return self.throwError("ReferenceError", name);
+                    }
+                }
                 const v = try self.eval(a.value);
                 // NamedEvaluation: `f = function(){}` names the function "f"
                 // (only a bare, *unparenthesized* identifier target — a
