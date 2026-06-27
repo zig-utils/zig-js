@@ -311,12 +311,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // `Symbol.unscopables`); identical to `env.get` when no `with` is on
                 // the chain, so this is a no-op for ordinary generator/async bodies.
                 const name = chunk.names.items[inst.a];
-                const v = (try vm.lookupIdent(name)) orelse vm.globalProp(name) orelse return vm.throwError("ReferenceError", name);
+                const v = (try vm.lookupIdent(name)) orelse (try vm.globalProp(name)) orelse return vm.throwError("ReferenceError", name);
                 try stack.append(stack_alloc, v);
             },
             .load_var_or_undef => {
                 const name = chunk.names.items[inst.a];
-                try stack.append(stack_alloc, (try vm.lookupIdent(name)) orelse vm.globalProp(name) orelse Value.undef());
+                try stack.append(stack_alloc, (try vm.lookupIdent(name)) orelse (try vm.globalProp(name)) orelse Value.undef());
             },
             .store_var => {
                 const name = chunk.names.items[inst.a];

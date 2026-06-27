@@ -1389,9 +1389,23 @@ pub const Interpreter = struct {
         return self.global_object;
     }
 
-    pub fn globalProp(self: *Interpreter, name: []const u8) ?Value {
+    /// A bare global reference's value: a proper [[Get]] on the global object —
+    /// invoking an accessor's getter — when `name` is an own property (data or
+    /// accessor), else null (the name is unresolved). Mirrors the tree-walker's
+    /// identifier global fallback so the VM's `load_var` resolves global
+    /// accessor properties, not just data ones.
+    pub fn globalProp(self: *Interpreter, name: []const u8) EvalError!?Value {
         const g = self.currentGlobalObject() orelse return null;
-        return g.getOwn(name);
+        if (objectHasOwn(g, name)) return try self.getProperty(Value.obj(g), name);
+        return null;
+    }
+
+    /// Whether the global object has an own binding `name` (data OR accessor),
+    /// without invoking a getter — the existence test behind strict
+    /// "assignment to an undeclared global" and `typeof <unresolved>`.
+    pub fn globalHasOwn(self: *Interpreter, name: []const u8) bool {
+        const g = self.currentGlobalObject() orelse return false;
+        return objectHasOwn(g, name);
     }
 
     fn globalBindingObject(self: *Interpreter, name: []const u8) ?*value.Object {
@@ -8499,7 +8513,7 @@ pub const Interpreter = struct {
             return;
         }
         if (self.env.get(name) == null) {
-            if (self.strict and self.globalProp(name) == null)
+            if (self.strict and !self.globalHasOwn(name))
                 return self.throwError("ReferenceError", name);
             if (self.currentGlobalObject()) |g| return self.setMember(Value.obj(g), name, v);
         }
@@ -8546,7 +8560,7 @@ pub const Interpreter = struct {
                 // undeclared binding. Sloppy mode creates/configures a global
                 // object property, not a non-deletable `var` binding.
                 if (self.env.get(name) == null) {
-                    if (self.strict and self.globalProp(name) == null)
+                    if (self.strict and !self.globalHasOwn(name))
                         return self.throwError("ReferenceError", name);
                     if (self.global_object) |g| return self.setMember(Value.obj(g), name, v);
                 }
@@ -11832,7 +11846,7 @@ pub const Interpreter = struct {
     fn evalUnary(self: *Interpreter, op: ast.UnaryOp, operand: *Node) EvalError!Value {
         // `typeof <unresolved identifier>` is "undefined" rather than a thrown
         // ReferenceError — the one context where an unbound name doesn't throw.
-        if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null and self.globalProp(operand.identifier) == null)
+        if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null and !self.globalHasOwn(operand.identifier))
             return Value.str("undefined");
         const v = try self.eval(operand);
         // `-`/`+`/`~` begin with ToNumeric: reduce a wrapper object to a numeric
