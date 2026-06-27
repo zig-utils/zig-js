@@ -184,9 +184,15 @@ jobs:
           OK_FRAMES='ta(Write|Read|AtomicLoadRaw|AtomicStoreRaw|AtomicRmwRaw|AtomicCasRaw|StoreInternal|LoadInternal)|__tsan_memcpy|arrayBufferResizeFn|arrayBufferTransfer'
           fail=0; any_raced=0
           for c in $CASES; do
-            # WITHOUT suppressions, report all races (no halt).
-            TSAN_OPTIONS="halt_on_error=0 exitcode=0" timeout 600 "$BIN" parallel-js one "$c" > raw.log 2>&1 || true
-            if grep -q "SUMMARY: ThreadSanitizer: data race" raw.log; then
+            # WITHOUT suppressions, report all races (no halt). Retry a few times:
+            # these races are timing-dependent (~50%+ per run), so a handful of
+            # attempts reliably surfaces one without making the job flaky.
+            raced=0
+            for attempt in 1 2 3 4 5; do
+              TSAN_OPTIONS="halt_on_error=0 exitcode=0" timeout 600 "$BIN" parallel-js one "$c" > raw.log 2>&1 || true
+              if grep -q "SUMMARY: ThreadSanitizer: data race" raw.log; then raced=1; break; fi
+            done
+            if [ "$raced" -eq 1 ]; then
               any_raced=1
               # Narrowness: every reported race must name a program-byte frame.
               if grep "SUMMARY: ThreadSanitizer: data race" raw.log | grep -qvE "$OK_FRAMES"; then
@@ -197,7 +203,7 @@ jobs:
                 echo "$c: raced, and every race is program-byte (narrow) ✓"
               fi
             else
-              echo "$c: did not race this run (timing-dependent)"
+              echo "$c: did not race in 5 attempts (timing-dependent)"
             fi
             # WITH suppressions, the case must pass.
             if ! TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/tsan-suppressions.txt" timeout 600 "$BIN" parallel-js one "$c" > supp.log 2>&1; then
