@@ -285,14 +285,16 @@ pub const Context = struct {
         /// thread *concurrently* with the mutator at safepoints. Single-mutator
         /// only (no `enable_threads`); default off. See docs/threads/P7-gc-design.md.
         concurrent_gc: bool = false,
-        /// Run spawned `Thread`s with TRUE parallelism — drop the per-context GIL
-        /// so JS executes concurrently across threads (issue #1 Layer C). Requires
-        /// `enable_threads`; implies `enable_gc` (cells must be GC-managed and
-        /// thread-safe). DEFAULT OFF: the GIL keeps single-threaded throughput
-        /// maximal (the parallel sync protocols are no-ops when off). Correctness
-        /// is gated by the whole-corpus no-GIL ThreadSanitizer CI gate (zero
-        /// engine-state races) plus the serial-perf gate; see P7-gil-removal.md.
-        parallel: bool = false,
+        /// Serialize spawned `Thread`s behind the per-context GIL instead of the
+        /// DEFAULT true-parallel execution (issue #1 Layer C). Only meaningful with
+        /// `enable_threads`. Default off → threads run concurrently (no GIL), which
+        /// implies the GC-managed, thread-safe cell path; its correctness is gated
+        /// by the whole-corpus no-GIL ThreadSanitizer CI (zero engine-state races)
+        /// plus the serial-perf gate (see P7-gil-removal.md). Set this for the old
+        /// GIL-serialized semantics (e.g. strict determinism, or to keep a
+        /// thread-using context on the arena allocator). A context with no
+        /// `enable_threads` is single-threaded either way and pays nothing.
+        gil: bool = false,
     };
 
     /// Test/conformance-only creation knobs. These model harness flags such as
@@ -342,16 +344,18 @@ pub const Context = struct {
     }
 
     pub fn createWith(gpa: std.mem.Allocator, options: Options) !*Context {
-        // `parallel` is the public face of the GIL-free vertical slice; it implies
-        // GC-managed (thread-safe) cells and the parallel-GC backing. It requires
-        // `enable_threads` — createWithTestingOptions validates that and errors if
-        // it's missing.
+        // Threads run TRUE-parallel (no GIL) by default; `gil` opts back into the
+        // serialized path. Parallel execution implies GC-managed, thread-safe cells
+        // (enable_gc + parallel_gc). A non-threaded context is single-threaded
+        // either way, so it stays on whatever allocator it asked for and pays none
+        // of the parallel sync cost.
+        const want_parallel = options.enable_threads and !options.gil;
         return createWithTestingOptions(gpa, .{
             .enable_threads = options.enable_threads,
-            .enable_gc = options.enable_gc or options.parallel,
+            .enable_gc = options.enable_gc or want_parallel,
             .concurrent_gc = options.concurrent_gc,
-            .parallel_gc = options.parallel,
-            .parallel_js = options.parallel,
+            .parallel_gc = want_parallel,
+            .parallel_js = want_parallel,
         });
     }
 
@@ -5630,14 +5634,29 @@ test "Atomics on plain properties: semantics, exact counter, wait/notify" {
     );
 }
 
-test "Context.createWith parallel option yields a working GIL-free context" {
-    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .parallel = true });
-    defer ctx.destroy();
-    const v = try ctx.evaluate("let s = 0; for (let i = 0; i < 100; i++) s += i; s");
-    try std.testing.expectEqual(@as(f64, 4950), v.asNum());
-    // `parallel` implies the GC-managed/thread-safe path and requires
-    // `enable_threads`; without it the option set is rejected.
-    try std.testing.expectError(error.InvalidThreadTestingOptions, Context.createWith(std.testing.allocator, .{ .parallel = true }));
+test "Context threads run parallel by default; gil option opts into serialized mode" {
+    // Default: enable_threads => true-parallel (no GIL), GC-managed cells.
+    {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+        defer ctx.destroy();
+        const v = try ctx.evaluate("let s = 0; for (let i = 0; i < 100; i++) s += i; s");
+        try std.testing.expectEqual(@as(f64, 4950), v.asNum());
+        try std.testing.expect(ctx.parallel_js); // parallel is the default
+    }
+    // Opt-out: gil => the serialized (GIL) path.
+    {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = true });
+        defer ctx.destroy();
+        const v = try ctx.evaluate("1 + 2");
+        try std.testing.expectEqual(@as(f64, 3), v.asNum());
+        try std.testing.expect(!ctx.parallel_js); // GIL serializes instead
+    }
+    // No threads => single-threaded, neither path engaged.
+    {
+        const ctx = try Context.createWith(std.testing.allocator, .{});
+        defer ctx.destroy();
+        try std.testing.expect(!ctx.parallel_js);
+    }
 }
 
 test "Thread blocking APIs respect the main can-block gate" {
@@ -7438,6 +7457,7 @@ test "$vm exposes only supported shell hooks" {
     const threaded = try Context.createWith(std.testing.allocator, .{
         .enable_threads = true,
         .enable_gc = true,
+        .gil = true, // this hook check asserts the GIL-serialized mode specifically
     });
     defer threaded.destroy();
 
