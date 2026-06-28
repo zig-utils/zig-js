@@ -5,6 +5,8 @@ Thread support is verified with Zig `0.17-dev`. The package declares this in
 
 ## Required Checks
 
+Run the fast local gates before changing thread behavior or docs:
+
 ```sh
 zig build test
 zig build threads-test
@@ -12,398 +14,142 @@ zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
 zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
 zig build test -Dtsan=true
 zig build test -Dtsan=true -Dtest-filter=parallel_js
+zig build threadfuzz -Dfuzz-iters=20
+zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
 bun run docs:build
 ```
 
-`zig build test` runs the unit and C-API suite, including focused tests for
-agents, workers, shared buffers, property-mode Atomics, `Thread`, `Lock`,
-`Condition`, `ThreadLocal`, and the main can-block gate.
+CI additionally runs heavier no-GIL production gates on every pull request and
+push to `main`:
+
+```sh
+zig build threadfuzz -Dfuzz-iters=400
+zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
+zig build threadfuzz -Dfuzz-amplify=true -Dfuzz-iters=30
+zig build threadfuzz -Doptimize=ReleaseSafe -Dfuzz-iters=400
+zig build threads-test-bin -Dtsan=true
+./zig-out/bin/threads-test parallel-js one <allowlisted-case>
+```
+
+The corpus TSan sweep is sharded in CI and runs each allowlisted case in its own
+process to avoid TSan shadow-memory growth across a single long run. It fails on
+engine-state races. JS-defined program-byte races are covered by narrow
+suppressions plus a suppression witness that proves the suppressions are both
+load-bearing and not hiding engine-state frames.
+
+## What Each Gate Covers
+
+`zig build test` runs unit and C-API tests, including agents, workers, shared
+buffers, property-mode Atomics, `Thread`, `Lock`, `Condition`, `ThreadLocal`,
+parallel-GC witnesses, C embedder threading, and the main can-block gate.
 
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
-`reference/webkit-249/threads-tests`. The current allowlist is 209/209 and
+`reference/webkit-249/threads-tests`. The current allowlist is 219/219 and
 covers:
 
-- `smoke.js`: the root shared-realm sanity check.
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor
   errors, exceptions, restriction, return values, join semantics, blocking
   gates, lock/condition basics, async lock/condition behavior, thread-local
-  storage, `Thread.restrict` foreign-access `ConcurrentAccessError`, and
-  termination watchdog cases.
-- `arrays/` and `shared-objects/`: shared identity, array elements, holes,
+  storage, termination watchdogs, and `Thread.restrict`.
+- `arrays/` and `shared-objects/`: shared identity, dense elements, holes,
   push/resize interleavings, typed arrays over `SharedArrayBuffer`, property
   reads/writes/adds/deletes, accessors, prototype chains, frozen/sealed
-  objects, and dictionary-mode objects under the context GIL.
-- `bench/`: deterministic benchmark checksum coverage for inline property
-  reads/writes, array-element reads/writes, flat-butterfly reads/writes,
-  megamorphic access, and transition-heavy construction. The corpus runner
-  validates correctness only; `zig build bench` owns timing baselines.
-- `cve/`: the green GIL-compatible safety subset for code invalidation windows,
-  data-format transitions, SAB lifetime churn, handler/teardown ordering,
-  generator/async-generator claims, re-entrant coercion order, missing-indexed
-  define races, date/rope tear checks, atom identity, LLInt cache churn,
-  multislot clone behavior, property-wait lost-wakeup protection, waiter-table
-  reclamation under async microtask GC, watchdog delivery under notify storms,
-  blocked-native-root GC coverage, spawned-conductor FinalizationRegistry
-  cleanup delivery, thread-shell finalizer storms,
-  resizable-tail quarantine checks, TID recycle storms, and Wasm-class
-  premise/refusal witnesses for this engine's no-WebAssembly configuration.
-- `gc-stress/`: the green GIL-compatible GC stress subset for parked-frame
-  liveness, indexed-prototype bad-time transitions, watchpoint/prototype churn,
-  and zombie-canary reuse checks. These use the supported `$vm.gc` /
-  `$vm.edenGC` shell hooks, which request the same quiescent M1 collection as
-  global `gc()`.
-- `jit/`: the green tree-walker-compatible JIT audit subset, including
-  deterministic constructor/fire benchmark checksums plus thread semantics for
-  tail-call data-IC argument preservation, direct-call relink churn,
-  fire-vs-execute, epoch-reclaim, and stop-budget smoke coverage, fixed
-  golden-disasm workload execution, tag-discipline workload execution,
-  jettison-vs-execute smoke coverage, OSR/catch-loop amplification,
-  spawned-thread butterfly stress, TID-tag three-thread behavior, and the
-  shared-ArrayStorage stress witness. `$vm.ensureArrayStorage` is implemented
-  for this corpus as an explicit request to keep an array on zig-js's generic
-  element backing and report that mode through `$vm.indexingMode`; real `$vm`
-  JIT artifact counters, stop counters, and disassembly controls remain outside
-  the default corpus until backed by real engine behavior.
-- `atomics/`: property load/store, RMW, SameValueZero compare-exchange, errors,
-  CAS delete/race/storm cases, missing-property store races, wait/notify,
-  wait termination, waitAsync timeout behavior, waiter-table isolation, and
-  typed-array lane guardrails.
-- `sync/`: mutex-style counters, asyncHold callback/release behavior, condition
-  handshakes, notify-all behavior, and thread-local isolation.
-- `races/`: GIL-valid counter, join-storm, transition/read/write interleavings,
-  enumerator-cache invalidation, and wait/notify stress cases.
-- Top-level heap witnesses: the full set of `heap-*.js` drivers is promoted.
-  `heap-bench-allocation.js` provides deterministic allocation-churn checksum
-  coverage, `heap-option-off.js` covers the option-off shell-mode guardrail, and
-  the JSC `$vm.sharedHeapTest` harness drivers self-skip cleanly because that
-  C-level shared-heap hook is intentionally absent here.
-- `invariants/`: all current delete quarantine, lost-property/element,
-  time-travel, and torn-shape invariant tests.
-- `objectmodel/`: the green GIL-compatible subset of array resize/CAS,
-  same-shape add storms, first-install races, shared-double writes,
-  single-thread flag-on/off identity, stale-spine growth, convert/grow reads
-  across requested GC, delete-quarantine re-adds across requested GC, visit-range
-  out-of-line coverage, forced-storage stress workloads, and named-vs-indexed
-  first-install coverage.
-- `semantics/`: atom/string/date/regexp/symbol shared-state checks, private
-  field/method brand identity across threads, plus the green IC-vs-transition
-  matrix entries.
-- `scaling/`: checksum-correct independent-work workloads plus the lock
-  fairness/starvation envelope. The default corpus validates correctness and
-  liveness; the external scaling gate still owns speedup thresholds.
-- `vmstate/`: flag-off / VMLite / all-thread-flags identity, per-thread
-  exception state, microtask ordering, regexp churn, stack limits, and
-  structure churn/lock identity checks.
+  objects, and dictionary-mode objects.
+- `atomics/` and `sync/`: property load/store/RMW/CAS, wait/notify,
+  waitAsync timeout behavior, typed-array lane guardrails, mutex-style
+  counters, condition handshakes, notify-all behavior, and thread-local
+  isolation.
+- `races/`, `invariants/`, `objectmodel/`, and `semantics/`: transition
+  interleavings, lost-property/element prevention, shape/storage invariants,
+  private fields, regexp/date/string/symbol shared state, IC-vs-transition
+  cases, and termination storms.
+- `heap-*`, `gc-stress/`, and `cve/`: heap option/epoch/deferral/stress
+  drivers, parked-frame/root witnesses, teardown/lifecycle hazards,
+  waiter-table reclamation, FinalizationRegistry delivery, buffer/SAB lifetime,
+  and no-WebAssembly premise/refusal witnesses.
+- `bench/`, `scaling/`, `jit/`, and `vmstate/`: deterministic checksum
+  coverage, independent-work scaling witnesses, tree-walker-compatible JIT audit
+  files, per-thread exception/regexp/stack/structure state, and flag identity
+  checks.
 
-`zig build test -Dtsan=true` builds the unit suite under ThreadSanitizer. This
-is the concurrency gate for shared-buffer storage, agent waiters, workers, and
-the shared-realm GIL path. The narrower
-`zig build test -Dtsan=true -Dtest-filter=parallel_js` gate covers the current
-test-only execution-path GIL-removal slice: real shared-realm `Thread` workers
-running without the context GIL while contending one production
-`Atomics.Mutex` and while registering/delivering `Lock.asyncHold` grants through
-the realm task queue, plus property-mode `Atomics.wait`/`notify` waiter-table
-contention guarded by `Gil.prop_mutex`, and `Condition.wait` / `notifyAll`
-waiter-queue contention guarded by `CondRecord.mutex`.
+`zig build threads-test -Dthreads-parallel-js=true` runs the allowlist through
+the same no-GIL path that `enable_threads` uses by default. CI's TSan sweep uses
+`threads-test-bin -Dtsan=true` and invokes each case with `parallel-js one`.
 
-The runner models PR-249 command-line options with
-`Context.createWithTestingOptions` and `Context.TestingOptions`:
-`blocking-gate.js` runs with `.main_can_block = false`,
-`thread-id-bounds.js` runs with `.max_js_threads = 4`, and
-`*-termination.js` cases run with a 500 ms watchdog whose termination throw is
-the passing outcome. Benchmark files preload `bench/harness.js` with
-runner-local sizing so the default corpus checks deterministic results without
-turning into a timing benchmark. Files that explicitly call the test-shell
-`gc()` helper run with `.enable_gc = true`; the helper requests a collection and
-the Context services that request at the next quiescent entry point, matching
-the M1 collector's root-completeness boundary. During a microtask drain, a
-pending shell GC request is also serviced between jobs once the previous job has
-unwound, the remaining jobs are rooted by the queue, and the active
-Interpreter's checkpoint fields are registered as roots, including the current
-environment cell and engine-owned Promise/VM native closure side records.
-Shared-realm contexts still skip collection while any spawned JS thread is
-actively running or parked inside native code. `$vm.gc` and `$vm.edenGC` are
-aliases for that same shell request, `$vm.useThreadGIL()` reports whether the
-current interpreter is using the shared-realm GIL, `$vm.indexingMode()` reports the
-engine's array/typed-array mode witness, and `$vm.ensureArrayStorage(array)`
-forces the array-mode witness used by the PR-249 shared-ArrayStorage stress
-file. Other JSC `$vm` hooks, such as `sharedHeapTest`, dictionary conversion,
-and code/disassembly controls, are left absent until backed by real engine
-behavior.
-The shell-compatible `quit()` helper throws a runner-recognized early-exit
-sentinel, used by premise-skip tests after printing their skip marker.
+`zig build threadfuzz` generates random programs that share objects, arrays,
+closures, constructors, Maps/Sets, accessors, and typed arrays across JS
+`Thread`s in a parallel context. The default oracle is "no unexpected throw,
+deadlock, UAF, or engine race"; `-Dtsan=true` turns unsynchronized engine access
+into a race report; `-Dfuzz-amplify=true` raises contention; `-Doptimize=ReleaseSafe`
+keeps safety checks under optimization; `-Dfuzz-verify=true` generates
+deterministic atomic programs whose exact result is predicted.
 
-Successful top-level scripts keep the shell alive until spawned shared-realm
-`Thread`s finish, because their completion may settle `asyncJoin` promises and
-queue microtasks. Abrupt top-level failure is different: the context requests
-thread termination before the keepalive wait, so a main-thread exception cannot
-strand parked child threads and hang runner teardown. The unit suite includes a
-parked-thread regression for that path.
+`zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
+GIL-free parallel contexts. The full corpus is too slow for every PR, so CI
+uses a curated representative slice and asserts no new failures versus the
+baseline arena engine.
 
 ## Focused Runs
 
-Use `-Dthreads-case=<path>` to run a single vendored thread test. A
-comma-separated list runs a mini-sequence in one runner process, which is useful
-when investigating order-dependent teardown or scheduler behavior:
+Use `-Dthreads-case=<path>` to run one vendored thread test. A comma-separated
+list runs a mini-sequence in one runner process, useful for order-dependent
+teardown or scheduler debugging:
 
 ```sh
 zig build threads-test -Dthreads-case=api/thread-basic.js
 zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
+zig build threads-test -Dthreads-case=api/lock-basic.js,atomics/property-wait-notify.js
 ```
 
-Use this when developing one behavior or debugging a regression. The path is
-relative to `reference/webkit-249/threads-tests`.
-
-Add `-Dthreads-parallel-js=true` to run threaded corpus files through the
-test-only Layer-C execution mode. Threaded files get
-`Context.TestingOptions.parallel_js = true` together with the required
-`enable_gc` / `parallel_gc` pair; the few corpus files that intentionally
-exercise `Thread`-off behavior still run without a `Thread` global:
+Add `-Dthreads-parallel-js=true` to force the no-GIL path explicitly:
 
 ```sh
 zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
-zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=api/lock-basic.js,atomics/property-wait-notify.js
 ```
 
-This is the bridge between focused unit witnesses and the future whole-corpus
-GIL-free campaign. Promote a file to the regular allowlist only when both the
-normal mode and the relevant `parallel_js` probe are green.
-
-Full promoted-allowlist `parallel_js` mode is intentionally exploratory today:
-
-```sh
-zig build threads-test -Dthreads-parallel-js=true
-```
-
-It currently exposes real Layer-C blockers rather than serving as a required
-green gate. Named property-mode Atomics RMW/CAS/load/store, typed-array
-`Atomics.wait`, property wait lost-wakeup coverage, `smoke.js`, and
-`api/condition-async-wait.js`, lifecycle join semantics, async joins, return
-values, nested joins, cross-thread exception joins, contended dense-array
-push/resize, and property-mode Atomics on dense array elements now have focused
-green `parallel_js` probes. A full
-`zig build threads-test -Dthreads-parallel-js=true` probe now skips
-`cve/mc-df-segmented-length.js` as a known no-GIL budget frontier, because the
-file is green in normal mode but can spend minutes in dense-array shrink/regrow
-contention under the current interpreter lock granularity. The skip applies only
-to the broad promoted-allowlist probe; targeted
-`-Dthreads-case=cve/mc-df-segmented-length.js` still runs the file and remains
-the repro for that performance frontier. This mode remains exploratory and is
-not a green gate.
-
-The no-GIL CVE tail has also moved forward: `cve/mc-int-resizable-tail-quarantine.js`,
-`cve/mc-life-detach-quarantine-storm.js`, `cve/mc-life-sab-refchurn.js`,
-`cve/mc-life-wasm-grow-relocate.js`, `cve/mc-lock-cow-materialize-race.js`,
-and `cve/mc-val-llint-cache-storm.js` are focused-green under `parallel_js`.
-The buffer and SAB lifetime files were fixed by serializing non-shared
-ArrayBuffer resize/typed-array backing-slice borrows and the per-realm
-SharedArrayBuffer retain list. The COW file's shutdown handshake no longer
-publishes a fake work round, and the LLInt-cache storm keeps the original
-30,000 iterations in GIL mode while using a smaller no-GIL stress budget. A
-broad promoted probe also reaches through
-`gc-stress/havebadtime-vs-indexed-fastpath.js`: the normal GIL-mode witness
-keeps the original 3-worker, 512-element, 160-round stress size, while
-`parallel_js` runs the same indexed-prototype bad-time invariants with a smaller
-interpreter stress budget so the oracle remains semantic rather than a pure
-throughput test. `races/counter-atomics.js` is likewise focused-green under
-`parallel_js`: it keeps the 8-worker lost-update and CAS-loop oracle, preserves
-the original 100,000-add/1,000-CAS amplifier in GIL mode, and uses a smaller
-no-GIL budget so the file remains a correctness witness instead of a serial
-throughput cliff. `races/counter-lock.js` follows the same pattern for
-contended `Lock.hold`: the GIL-mode file keeps its 100,000-hold amplifier,
-while no-GIL keeps the 8-worker lost-increment oracle at a smaller budget. The
-promoted race block is now focused-green under `parallel_js` through
-`races/wait-notify-storm.js`. The full promoted heap block is also
-focused-green under `parallel_js`, from `heap-access-blocking.js` through
-`heap-stop-interleavings.js`. The promoted invariants block is focused-green
-7/7, and the promoted objectmodel block is focused-green in
-verified slices through `objectmodel/i08-named-vs-indexed-first-install.js`.
-The heavy objectmodel stress files now carry no-GIL budgets so the broad
-probe is not throttled by their serial-performance amplifiers:
-`i03-stale-spine-reader-vs-grow.js`, `i03-stress-force-segmented.js`,
-`i03-stress-force-sw.js`, `i03-t1-vs-sw-flip.js`, `i03-t5-racing-growers.js`,
-`i03-visit-range-outofline.js`, and `i08-named-vs-indexed-first-install.js`
-keep their full round/element/churn amplifiers in GIL mode while `parallel_js`
-runs the same I21/I25/I27/I33/AB18-S3 race oracles at smaller round, range,
-churn, and sample budgets. All seven stay focused-green under `parallel_js`
-and unchanged in GIL mode.
-The full promoted semantics block is focused-green 15/15 under `parallel_js`.
-The IC transition files keep their original GIL-mode pass counts; no-GIL uses
-smaller pass budgets so the files remain transition-correctness witnesses
-rather than 45-second watchdog trips. The remaining heavy semantics files now
-carry no-GIL budgets too — `atom-rope-torture.js` (names/rope segments),
-`date-cache-churn.js` (rounds), `frozen-seal-race.js` (objects),
-`private-fields-shared.js` (per-thread increments), `proto-cycle-race.js`
-(rounds), `regexp-lastindex-shared.js` (rounds), and
-`symbol-registry-cross-thread.js` (churn rounds) keep their full GIL-mode
-amplifiers while `parallel_js` runs the same shared-atom/DateCache/integrity/
-private-brand/proto-cycle/regexp-lastIndex/symbol-registry oracles at smaller
-budgets. All eight stay focused-green under `parallel_js` and 8/8 in GIL mode.
-The full promoted scaling block is also
-focused-green 6/6 under `parallel_js`; `scaling/raytrace-like.js` and
-`scaling/richards-like.js` keep their normal corpus/gate workloads while using
-smaller no-GIL standalone budgets. The VM-state block is focused-green 10/10
-under `parallel_js`; the four ROUNDS-amplified churn files
-(`exception-state-per-thread.js` 200→40, `regexp-churn-threads.js` 100→24,
-`structure-churn-dictionary.js` 60→16, `structure-churn-threads.js` 200→40) now
-carry no-GIL round budgets while keeping the full GIL-mode amplifiers and the
-same I8/I9/I15 per-round oracles (the fixed-digest `runVMStateWorkload` files
-are left intact, since their digest pins the workload size). The promoted CVE
-tail after
-`cve/mc-int-resizable-tail-quarantine.js` is now focused-green in slices through
-`cve/mc-wait-property-wait-lost-wakeup.js`; this includes the async-generator
-resume-head claim case `cve/mc-prim-async-generator-resume-claim.js`, which is
-also TSan-clean as a focused `threads-test` probe. The sync generator
-resume-claim case `cve/mc-prim-generator-resume-claim.js` is also
-focused-green and TSan-clean under `parallel_js`: the generator resume path now
-uses a per-generator claim mutex so racing `.next()` calls cannot both drive
-the same suspended execution frame. The thread teardown/settlement tail is
-focused-green through `cve/mc-tdwn-vm-teardown-unjoined.js`; pending
-`asyncJoin` queue rebasing is guarded by the thread registry API lock and each
-target record's join mutex, so exiting thread inbox handoff does not race
-nested `Thread` creation or completion publication. The GC-stress block is
-focused-green 4/4, the promoted Atomics block is focused-green 15/15, and the
-promoted JIT-audit subset is focused-green in verified slices from
-constructor/fire benchmark checksums through the tailcall, OSR/catch-loop,
-golden-disasm, int-gate, shared-ArrayStorage, spawned-thread butterfly,
-tag-discipline, and TID-tag witnesses. The normal GIL-mode JIT files keep their
-original audit sizes; `parallel_js` uses smaller loop counts in the tailcall,
-OSR/catch-loop, golden-disasm, stop-budget, shared-ArrayStorage,
-spawned-thread butterfly, tag-discipline, and TID-tag files so the exploratory
-probe remains a semantic witness rather than a serial-performance gate. The
-bench checksum files use the same split: normal mode keeps the serial
-performance protocol counts, while `parallel_js` caps harness and inner-loop
-iterations so the broad probe remains a correctness pass instead of a timing
-gate. The monolithic full promoted-allowlist probe is still exploratory rather
-than a required green gate, but it now **runs the whole 209-file allowlist to
-completion** within a 32-minute cap (it no longer times out): a single run
-reaches the final `vmstate/vmlite-single-thread-identity.js` PASS line after the
-objectmodel/semantics/vmstate no-GIL budgets removed the last cumulative-budget
-walls. An earlier full run scored **208 PASS / 1 FAIL** — the one failure,
-`api/blocking-gate.js: async completions not reached` (~1/27, no-GIL only), is
-now **fixed**, and it was a GIL-specific corpus assumption rather than an engine
-bug: the test asserted `shouldThrow(() => inner.join())` / `t.join()`, expecting
-the joinee to still be Running so the `can-block-is-false` gate throws — true
-under the GIL (joining thread holds the lock), but under `parallel_js` the joinee
-can finish first (~1/27) so `join()` takes the allowed finished-thread fast path
-and doesn't throw, cascading into a rejected `asyncJoin` chain. Pinned with a
-non-perturbing engine-side per-path counter (`reg=1` not 2; thread threw
-"expected an exception but none was thrown"). `assertJoinGated()` keeps the
-strict throw under the GIL and accepts either outcome under no-GIL — no wait
-primitive (all blocking waits are gated here) and no busy-spin (which starves the
-GIL-free runner). Verified GIL PASS, `parallel_js` 0/250. Two genuine no-GIL
-correctness fixes were made en route (neither was this flake's cause but both are
-correct, 406/406, regression-free): the cross-thread microtask-queue data race is
-serialized by `Context.microtask_lock` (TSan-validated), and asyncJoin settlement
-reactions for a spawned-thread joiner route to the realm queue instead of the
-joiner's abandoned local queue. The GIL-mode rope-resolve publication flake
-(`cve/mc-tear-rope-resolve-race.js`) is fixed (seqlock). The remaining genuine
-*data-race* candidate for the whole-corpus TSan campaign is the rare
-`StringHashMap`-grow panic seen once in the semantics batch. That gate is now
-wired: `zig build test -Dtsan=true` / `zig build threads-test -Dtsan=true` build
-the engine (and the corpus it links) under ThreadSanitizer (via a dedicated
-TSan-instrumented copy of the `js` module, so the default build is
-byte-identical). This now runs **locally on macOS** with the pinned toolchain
-`0.17.0-dev.956+2dca73595`. (The older `0.17.0-dev.131+73c51c142` could not:
-its bundled libcxx failed the TSan runtime sub-compilation on darwin with `use
-of undeclared identifier 'INFINITY'`, so TSan was Linux-CI-only. Bumping the
-pin to dev.956 fixed it — TSan is part of the local dev loop again.)
-
-Two `threads-test -Dtsan=true` frontiers are **build-shape**, not data races:
-
-- *Deep native recursion (fixed).* The tree-walker recurses natively for JS
-  calls; under TSan, frames are ~10× larger, so the native stack used to
-  overflow before the logical `max_call_depth` (128) and segfault — e.g.
-  `cve/mc-prim-generator-claim-leak-stack-overflow.js`, which requires a
-  *catchable* stack-overflow `RangeError`. `Interpreter.stackGuard` now also
-  probes the native stack pointer against the thread's registered OS stack
-  bound (`stack_scan.nearLimit`, a 1 MiB redzone) once a call chain is deep
-  (`stack_check_floor`), throwing `RangeError` before the guard page faults.
-  The probe is skipped on shallow calls, and in a normal build small frames
-  keep the SP far from the limit so the depth limit is still hit first —
-  behavior and serial throughput are unchanged. A deep-recursing `Thread` now
-  throws on its own thread instead of crashing the process.
-- *GC-storm timeout (TSan-perf frontier).*
-  `gc-stress/conservative-scan-register.js` parks a peer on a 60 s
-  `Atomics.wait` while the main thread runs an 8-round `$vm.gc()` storm; under
-  TSan's ~10× slowdown the 8 full collections exceed 60 s, so the peer reports
-  `park timed out` rather than `checksum wrong`. The conservative parked-frame
-  scan is correct (it passes non-TSan, 209/209); the fixed timeout is simply
-  tuned for the non-TSan runtime. Treat as a known TSan-perf frontier, not a
-  correctness signal.
-
-## Sweep Runs
-
-Use `-Dthreads-sweep=true` to run every vendored file in the original
-default-gate directories (`api/`, `arrays/`, `atomics/`, `bench/`,
-`lifecycle/`, `races/`, `scaling/`, `shared-objects/`, and `sync/`). Harness
-libraries such as `bench/harness.js` and `scaling/harness.js` are preloaded when
-needed and are skipped as standalone sweep entries:
+Use `-Dthreads-sweep=true` to run every file in the original default-gate
+directories (`api/`, `arrays/`, `atomics/`, `bench/`, `lifecycle/`, `races/`,
+`scaling/`, `shared-objects/`, and `sync/`). Sweep mode is narrower than the
+promoted allowlist because it does not scan root files or promoted
+invariants/objectmodel/semantics/vmstate subsets:
 
 ```sh
 zig build threads-test -Dthreads-sweep=true
 zig build threads-test -Dthreads-sweep=true -Dthreads-parallel-js=true
 ```
 
-Sweep mode is exploratory and intentionally narrower than the promoted
-allowlist because it does not scan root files or promoted
-invariants/objectmodel/semantics/vmstate subsets. A file can fail because it
-requires machinery outside today's GIL'd tree-walker support, or because it
-targets a future Layer-C object-model invariant. Keep the default allowlist
-green; promote files only when their behavior is implemented and stable.
+For fuzzer reproduction:
+
+```sh
+zig build threadfuzz-bin
+./zig-out/bin/threadfuzz file /path/to/repro.js
+```
 
 ## Remaining Reference-Only Areas
 
 The default corpus is intentionally not a "run every file" mode. Remaining
-PR-249 files are held back for specific, observed reasons:
+PR-249 files stay reference-only for concrete reasons:
 
-- As of 2026-06-15, the allowlist is 209 promoted files and 19 standalone
-  reference-only files. Helper/preload files such as `harness.js`,
-  `bench/harness.js`, `scaling/harness.js`, `resources/assert.js`, and
-  `vmstate/resources/workload.js` are not counted as standalone remaining
-  tests.
-- WebAssembly CVE files that can prove the current no-WebAssembly/refusal
-  premise are promoted; files that require real WebAssembly construction,
-  compilation, and relocating grow behavior remain reference-only until those
-  surfaces exist in this engine.
-- Post-UNGIL JIT/CVE files require true GIL-off parallel mutation, ASAN or JIT
-  artifact hooks, stop-the-world counters, or JSC-specific shell controls. They
-  are not valid witnesses while the shared realm is serialized by the context
-  GIL.
-- The remaining post-UNGIL CVE/JIT set is:
-  `cve/mc-aint-poll-resume-stale-elided.js`,
-  `cve/mc-code-calllink-writer-writer.js`,
-  `cve/mc-dos-retired-artifact-churn.js`,
-  `cve/mc-grow-buffer-storm.js`,
-  `cve/mc-init-butterfly-grow-slack.js`,
-  `cve/mc-init-cloned-arguments-specials.js`,
-  `cve/mc-init-direct-arguments-override.js`,
-  `cve/mc-jit-delete-reuse-stale-offset.js`,
-  `cve/mc-jit-double-relabel-stale-shape.js`,
-  `cve/mc-jit-stale-base-grow-oob.js`,
-  `cve/mc-jit-ta-resize-hoisted-base.js`,
-  `cve/mc-lock-stop-vs-park.js`,
-  `cve/mc-safe-gcwait-vs-classa-stop.js`,
-  `cve/mc-tear-typedarray-detach-grow-shrink.js`,
-  `cve/mc-val-fire-vs-link.js`, and `jit/ic-publish-reset-loops.js`.
-  Focused probes of the two arguments-publication files
-  (`mc-init-cloned-arguments-specials.js` and
-  `mc-init-direct-arguments-override.js`) timed out under the serialized
-  Debug runner rather than producing a semantic failure; they remain
-  reference-only because their publication-order race is a post-GIL witness.
-- `jit/ic-publish-reset-loops.js` currently stalls under the tree-walker and
-  scheduler envelope; keep it reference-only until it completes reliably.
-- `semantics/stack-overflow-per-thread.js` expects 2000-deep recursion before
-  overflow storming. The tree-walker's native recursion cannot safely meet that
-  by raising `max_call_depth` alone; Zig `0.17-dev` probes at 2048 and 4096
-  both overflowed the host stack before producing catchable JS `RangeError`
-  objects. This needs iterative or trampolined calls, or a VM-stack execution
-  path.
+- WebAssembly-required CVE files remain out until this engine has the matching
+  WebAssembly construction, compilation, relocation, and grow behavior.
+- JIT/CVE files that require JSC-specific code artifact hooks, ASAN controls,
+  stop counters, disassembly controls, or retired-artifact machinery remain out
+  until real engine behavior backs those hooks.
+- `semantics/stack-overflow-per-thread.js` expects thousands of recursive calls
+  before catchable overflow. The tree-walker still uses native recursion, so
+  this needs iterative/trampolined calls or a VM-stack execution path.
 - `cve/mc-spec-timer-capability.js` needs SharedArrayBuffer-off option modeling
-  and true parallel property-Atomics timing. Under the context GIL it is not a
-  meaningful timing witness.
+  and timing semantics beyond today's shell surface.
 - `semantics/oom-one-thread.js` remains out until there is a real heap cap and
   per-thread OOM handling contract.
+- Helper/preload files such as `harness.js`, `bench/harness.js`,
+  `scaling/harness.js`, `resources/assert.js`, and
+  `vmstate/resources/workload.js` are not counted as standalone remaining
+  tests.
+
+Promote a reference-only file only when the engine implements the behavior, the
+file passes reliably under Zig `0.17-dev`, and the docs/issue counts are updated
+in the same change.
 
 ## Docs Checks
 
@@ -412,19 +158,21 @@ bun run docs:build
 rg '[2]7/[2]7|[3]0/[3]0|[5]4/[5]4|[6]9/[6]9|13[0]/13[0]|14[0]/14[0]|16[8]/16[8]|17[6]/17[6]|18[2]/18[2]|18[3]/18[3]|18[4]/18[4]|18[6]/18[6]|18[7]/18[7]|18[8]/18[8]|19[347]/19[347]|20[3]/20[3]|threads-test -[-]' README.md docs bunpress.config.ts
 ```
 
-The search should find no stale 27-of-27, 30-of-30, 54-of-54, 69-of-69,
-130-of-130, 140-of-140, 168-of-168, 176-of-176, 182-of-182, 183-of-183,
-184-of-184, 186-of-186, 187-of-187, 188-of-188, 193-of-193, 194-of-194,
-197-of-197, or 203-of-203 counts and no removed thread-test pass-through
-command syntax. Use the `-Dthreads-case` and `-Dthreads-sweep` options instead.
+The search should find no stale partial allowlist counts and no removed
+thread-test pass-through command syntax. Use `-Dthreads-case` and
+`-Dthreads-sweep`.
 
 ## When Adding Thread Work
 
-- Add or update unit tests for narrow engine behavior.
-- Add a WebKit PR-249 corpus file to the allowlist only after it passes
-  consistently.
+- Add or update focused unit tests for narrow engine behavior.
+- Add or update PR-249 corpus coverage when the behavior is externally
+  observable.
+- Add fuzzer generation or deterministic fuzzer oracles when the behavior can
+  be randomized.
 - Update [bindings.md](./bindings.md) for every new file-scope mutable `var`,
   `pub var`, `threadlocal`, or container-scope mutable static.
-- Re-run the ThreadSanitizer suite before merging any change that affects
-  waiters, shared buffers, workers, GIL ownership, or cross-thread task
-  delivery.
+- Re-run ThreadSanitizer before merging changes that affect waiters, shared
+  buffers, workers, GC roots/barriers, task queues, C handles, or cross-thread
+  value/state publication.
+- Keep [GitHub issue #1](https://github.com/zig-utils/zig-js/issues/1) and these
+  docs aligned whenever behavior, counts, or blockers change.

@@ -4,7 +4,7 @@ Status: sync-primitive alignment implemented; shared structs deferred. Trigger
 condition met: Phases 1–3 are green (refcounted SAB storage, real concurrent
 agents, blocking + async Atomics), so per the issue this is the point to
 re-evaluate https://github.com/tc39/proposal-structs against the engine and
-decide whether Layer B's API stays engine-specific (Bun-style
+decide whether the shared-realm API stays engine-specific (Bun-style
 `Thread`/`Lock`/`Condition`) or aligns with the proposal's names.
 
 ## What the proposal is (Stage 2)

@@ -1,134 +1,100 @@
 # Limits & Roadmap
 
-The current supported shared-realm thread model is Layer B: real OS threads
-with one shared JavaScript realm and one context GIL. It is useful for testing
-thread APIs, blocking semantics, waiter behavior, and shared object identity,
-but it is not true parallel JavaScript heap mutation.
+The core JavaScript multithreading architecture for issue #1 is implemented:
+isolated agents/workers, shared memory, structured clone, Workers, and
+shared-realm `Thread`s are all present, and shared-realm threads run
+true-parallel by default. The remaining work is production hardening:
+performance, documentation, stress breadth, and promotion of reference-only
+tests as the matching engine features land.
 
 ## Supported Today
 
 - Agent and worker isolation: one `Context` per OS thread, values crossing by
   structured clone or retained `SharedArrayBuffer` storage.
 - Shared-realm `Thread`: one `Context`, one heap, one global object, real OS
-  threads, and serialized JS execution under the GIL.
-- Blocking points release the GIL so other JS threads can run while one thread
-  is parked.
-- Successful shell evaluations keep the realm alive until spawned
-  shared-realm `Thread`s finish. Abrupt top-level failures request thread
-  termination before teardown so parked child threads cannot strand the
-  context.
-- Typed-array `Atomics.wait` / `notify` / `waitAsync` use the process-wide
-  agent waiter table.
-- Property-mode `Atomics.wait` / `notify` / `waitAsync` use per-context waiter
-  queues on `Gil`.
-- `Atomics.Mutex` and `Atomics.Condition` share the shipped `Lock` and
-  `Condition` constructors in threaded contexts and expose proposal-style
-  static token APIs on top of those records.
-- Host/test knobs that used to be process-global are now per-context
-  `Context.TestingOptions` controls for the conformance runners:
-  `main_can_block` and `max_js_threads`.
-- `Context.TestingOptions.parallel_js` is a test-only Layer-C bring-up switch,
-  not a public embedder API. It currently validates the sync `Atomics.Mutex` /
-  `Lock` path, `Lock.asyncHold` grant delivery, `Condition` waiters,
-  property-mode waiter tables, named property-mode Atomics RMW/CAS/load/store,
-  and typed-array `Atomics.wait` with real `Thread` workers running without the
-  context GIL.
-- Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`,
-  `noInline`, `gc`, and the supported `$vm` compatibility hooks (`gc`,
-  `edenGC`, `indexingMode`, `useThreadGIL`, `noInline`) exist for conformance
-  coverage and corpus compatibility. In GC-enabled contexts, `gc()` /
-  `$vm.gc()` request a collection that is serviced at the next safe quiescent
-  point, including between microtask jobs after the previous job has unwound.
+  threads, same-realm identity, and no-GIL parallel execution by default.
+- Serialized shared-realm fallback:
+  `Context.createWith(.{ .enable_threads = true, .gil = true })`.
+- C embedder surface: `ZJSGlobalContextCreateThreaded(gil)`.
+- Typed-array `Atomics.wait` / `notify` / `waitAsync` over shared buffers.
+- Property-mode `Atomics.load` / `store` / `exchange` /
+  `compareExchange` / RMW / `wait` / `waitAsync` / `notify`.
+- `Thread`, `Lock`, `Condition`, `ThreadLocal`, `ConcurrentAccessError`,
+  `Atomics.Mutex`, and `Atomics.Condition`.
+- GC-managed parallel contexts with thread-safe allocation, write barriers,
+  root tracing for active VM frames, conservative stack scanning where sound,
+  and abort-safe mid-script collection experiments.
+- Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`, `gc`,
+  and supported `$vm` compatibility hooks for conformance coverage.
 
-## Not Supported Today
+## Explicit Non-Goals / Not Stable
 
-- True parallel mutation of ordinary JS objects.
-- Dropping the GIL around arbitrary heap, array, collection, microtask, async
-  waiter, or non-atomic `Value` mutation.
 - Sharing ordinary JS values between isolated agents or workers without
   structured clone.
-- Treating `Context.TestingOptions` as a general embedder API with a long-term
-  compatibility contract.
-- Treating `parallel_js` as supported application behavior. It is a focused
-  synchronization test mode, not the shipped `enable_threads` model.
 - Treating test-shell helpers or `$vm` as an embedder event-loop/API surface.
+- Treating `Context.TestingOptions.parallel_js`,
+  `Context.TestingOptions.parallel_midscript_gc`, or other testing knobs as
+  public API.
 - Assuming unsupported JSC `$vm` hooks exist: `sharedHeapTest`, dictionary
-  conversion, code deletion, disassembly, and related JIT artifact controls are
-  intentionally absent until backed by real engine behavior. Supported
-  compatibility hooks are deliberately narrow: `gc`, `edenGC`, `noInline`,
-  `useThreadGIL`, `indexingMode`, and `ensureArrayStorage`.
-- Depending on shell GC while a spawned shared-realm JS thread is actively
-  running or parked inside a native call. Active interpreter fields are traced
-  at quiescent checkpoints, including the current environment cell and
-  engine-owned Promise/VM native closure side records. The collecting thread and
-  every parked peer now also have their native stacks rooted conservatively:
-  `stack_scan.registerThreadBounds` records each thread's OS stack bounds
-  (`[limit, base]`) the first time it enters JS, and the `zig-gc`
-  conservative-word marking helper scans `[sp, frame]` for the live thread and
-  each parked peer's published range, both clamped to those bounds so the pass
-  can never read outside the real stack mapping. The remaining root-completeness
-  blocker is narrower: a *running* (non-parked) parallel mutator has no
-  safepoint at which the collector can sample its stack. That non-blocking
-  handshake is M3 (`src/root_handshake.zig`), so mid-script collection still
-  requires every peer to be parked.
-- Treating deep recursive call tests as an implemented VM-stack feature. The
-  tree-walker still uses native recursion for calls, so PR-249 stack-overflow
-  tests that require thousands of pre-overflow calls remain future work.
-- Treating remaining PR-249 unpromoted high-pressure JIT, WebAssembly-required
-  CVE, and semantic files as part of the default green suite.
+  conversion, code deletion, disassembly, stop counters, and related JIT
+  artifact controls are absent until backed by real engine behavior.
+- Treating JavaScript-level data races as engine-level synchronization. For
+  example, racing accesses to shared buffer program bytes are JS program races;
+  ThreadSanitizer suppressions are deliberately limited to those program-byte
+  frames and are guarded by a suppression-narrowness witness. See
+  [Memory Model](./memory-model.md).
+- Treating deep recursive call behavior as a finished VM-stack feature. The
+  tree-walker still uses native recursion for calls, so tests requiring
+  thousands of pre-overflow calls remain future work.
+- Treating remaining WebAssembly/JIT-specific PR-249 files as implemented when
+  the required WebAssembly surface, JIT artifact hooks, or JSC shell controls do
+  not exist in this engine.
 
 ## C-API and Context Affinity
 
-The C API keeps the Phase-0 rule: handles are affine to the thread that owns
-their `JSContextRef`. A `Context` created without `enable_threads` must only be
-touched from its creator thread.
+The C API keeps the original rule for non-threaded contexts: handles are
+affine to the thread that owns their `JSContextRef`.
 
-For an `enable_threads` context, the debug invariant changes from creator-thread
-affinity to GIL ownership. Internal thread entry points acquire the GIL before
-touching shared context state. Embedders should still treat the C-API handles as
-thread-affine unless a future API explicitly says otherwise.
+Threaded contexts should be created with `ZJSGlobalContextCreateThreaded(gil)`.
+With `gil == false`, the context uses the same no-GIL parallel path as
+`Context.createWith(.{ .enable_threads = true })`. With `gil == true`, the
+context uses the serialized fallback and embedders must respect the GIL model.
 
-## Why the GIL Stays
+`JSStringRef` values are immutable and use atomic retain/release. GC-enabled
+`JSValueRef` wrappers use counted `JSValueProtect` / `JSValueUnprotect` roots.
+Do not infer cross-thread handle semantics beyond the documented threaded
+context APIs.
 
-The GC is still M1: it collects only at quiescent points. Running thread
-stacks and ordinary heap mutation also do not yet have the barriers/locks
-needed for parallel mutators. Shape transition maps have a per-shape lock now,
-ordinary named-property helper paths plus VM plain-property inline caches hold
-`Object.property_lock` around shape/slot/accessor/attribute state, including
-named-property delete/rebuild, and Promise settlement/reaction lists have a
-per-promise lock. Dense-array helper paths and Map/Set helper/cursor paths now
-use `Object.elements_lock`, but remaining direct `elements` side doors still
-rely on the GIL. Arena allocation, remaining direct collection/tuple element
-stores, microtask queues, async waiter arrays, and non-atomic `Value` slots
-still rely on the GIL. The GIL protects:
+## Remaining Roadmap
 
-- arena allocation and teardown,
-- remaining direct `Object.elements` side doors,
-- microtask queues and async waiter arrays,
-- non-atomic `Value` slots.
-
-Removing the GIL before those have complete root, synchronization, barrier, and
-lifetime stories would turn ordinary property access into data races or
-use-after-free bugs.
-
-## Layer-C Blockers
-
-GIL removal is blocked on:
-
-- conservative or precise stack roots for arbitrary running/parked threads,
-- object and shape synchronization,
-- safe slot and element storage under concurrent readers and writers,
-- an atomic representation story for `Value`,
-- stress coverage that can run under real parallel mutation with
-  ThreadSanitizer clean.
-
-C-API string and handle lifetime is no longer a Layer-C blocker in this list:
-`JSStringRef` retain/release is atomic, and GC-enabled `JSValueRef` wrappers use
-counted `JSValueProtect` / `JSValueUnprotect` roots. C-API access remains
-context-affine unless a future public API explicitly says otherwise.
-
-The detailed prerequisite record lives in [P7-gil-removal.md](./P7-gil-removal.md),
-and the GC foundation is tracked in [P7-gc-design.md](./P7-gc-design.md).
+- **GC allocation fast path / nursery.** Correctness is gated, but tight-loop
+  block-scope allocation and create/destroy-heavy context lifecycles are still
+  much slower under the GC path than under the old arena model.
+- **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
+  teardown costs, but create-per-unit-of-work embedders need either cheaper
+  context lifecycle or clearer guidance.
+- **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
+  is sub-linear. Profile contention in global/environment bindings,
+  property/element locks, collection helpers, and GC allocation before choosing
+  finer-grained or lock-free paths.
+- **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
+  with the TSan suppression witness, new synchronization primitives, and any
+  promoted PR-249 coverage that exercises JS-defined races.
+- **Mid-script parallel GC maturity.** The abort-safe collector is correct, but
+  sync waits that periodically pump tasks are not a simple "frozen parked peer"
+  case. Keep quiescent collection as the correctness fallback and improve
+  mid-script collection only when the wait/park protocol can publish roots
+  without races or deadlocks.
+- **Fuzzer breadth.** Keep expanding `threadfuzz` beyond shared
+  object/array/closure/typed-array programs into exception, termination,
+  cleanup, waiter, FinalizationRegistry, and cross-thread lifecycle patterns.
+- **Reference-only PR-249 files.** Promote only when the engine implements the
+  behavior and the file is reliable under Zig `0.17-dev`, especially the
+  WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow
+  cases, and real heap cap / per-thread OOM semantics.
+- **TC39 structs tracking.** Keep `proposal-structs` tracking in
+  [P8-structs.md](./P8-structs.md) and this issue; do not split it into a
+  parallel tracker.
 
 ## Contribution Rule
 

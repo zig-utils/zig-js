@@ -1,26 +1,30 @@
-# Phase 7: GIL removal (Layer C) — prerequisites audit
+# Phase 7: GIL Removal — Historical Prerequisites Audit
 
-Status: charter + prerequisites note (Phase 7 is **not scheduled** — it is
-blocked on a real tracing GC, which is tier-5 engine work). Per the issue:
-"Record the prerequisites now so earlier phases don't paint us into corners."
-This note audits the *current* architecture (grounded in `src/` as of this
-writing) so the eventual GC + ungil work has an accurate blocker map rather
-than discovering each one by crashing.
+Status: historical design record. The shared-realm `Thread` API is now
+true-parallel by default under `Context.createWith(.{ .enable_threads = true })`,
+with `.gil = true` as the serialized fallback. Current status lives in
+[`index.md`](./index.md), [`production-readiness.md`](./production-readiness.md),
+[`limits.md`](./limits.md), and the canonical
+[issue #1](https://github.com/zig-utils/zig-js/issues/1).
+
+This file preserves the prerequisite audit that guided the GC/no-GIL work. Some
+milestone counts and "blocked" wording below refer to the checkpoint where that
+section was written, not the current shipping state.
 
 Reference design for the end state: Pizlo, "Concurrent JavaScript: It Can
 Work!" (https://webkit.org/blog/7846/) — but it presupposes a GC, which is the
 gating prerequisite below.
 
-## Where Layer B leaves us
+## Historical Serialized Baseline
 
-Phases 1–6 ship a **GIL'd** shared heap (`src/gil.zig`): exactly one thread
-runs JS at a time, so arena allocation, remaining direct element side doors,
-and every existing invariant are safe even before their final per-structure
-synchronization exists. Threads interleave only at the step
+Phases 1-6 originally shipped a **GIL'd** shared heap (`src/gil.zig`): exactly
+one thread ran JS at a time, so arena allocation, remaining direct element side
+doors, and every existing invariant were safe even before their final
+per-structure synchronization existed. Threads interleaved only at the step
 checkpoints (`(steps & 1023) == 0` in `src/interpreter.zig` `eval` and
 `src/vm.zig` `execLoop`, both calling `Gil.yieldIfContended`) and release the
 lock at every blocking point. Removing the GIL means every one of the
-structures the GIL currently protects needs its own correctness story. The
+structures the GIL protected needed its own correctness story. The
 shape transition **map** and ordinary named-property helper paths now have that
 first story: `Shape.transition` locks the per-shape transition table, and
 `Object.property_lock` serializes helper-routed shape, slot, accessor,
@@ -118,7 +122,7 @@ and run the TSan campaign + serial-perf gate.
 
 ## Bring-up ladder (when a GC lands)
 
-Mirror PR-249's phase-2 ladder, already proven for Layer B:
+Mirror PR-249's phase-2 ladder, already proven for the serialized baseline:
 1. Per-shape + per-object locks (coarse), GIL still present, prove correctness.
 2. Drop the GIL; run the vendored corpus + test262 SAB/Atomics under **real**
    parallelism with TSan; drive unsuppressed races to zero.

@@ -1,14 +1,20 @@
-# Phase 7 GC design: `zig-gc`, a precise non-moving collector
+# Phase 7 GC Design: `zig-gc`, a Precise Non-Moving Collector
 
-Status: M1 foundation implemented behind `Context.Options.enable_gc`; arbitrary
-mid-script collection and Layer-C GIL removal remain future work. This is the
-concrete plan for the tracing GC that gates Phase 7 (GIL removal / Layer C),
-per the prerequisites audit in [`P7-gil-removal.md`](P7-gil-removal.md). It also
-delivers value *before* Phase 7: opt-in contexts already reclaim unreachable GC
-cells at quiescent points and clear `WeakRef` targets when their referent dies.
-`WeakMap` / `WeakSet` weak-key cleanup uses the same ephemeron/weak-slot pass,
-and `FinalizationRegistry` records are made available to `cleanupSome()` and to
-automatic cleanup jobs after quiescent collection.
+Status: historical design record plus GC implementation notes. The shared-realm
+`Thread` API is now true-parallel by default; current shipping status lives in
+[`index.md`](./index.md), [`production-readiness.md`](./production-readiness.md),
+[`limits.md`](./limits.md), and issue
+[#1](https://github.com/zig-utils/zig-js/issues/1).
+
+Older milestone counts in this file, including `threads-test` 209/209
+checkpoints, are preserved as checkpoint history. The current PR-249 allowlist
+status is documented in [`testing.md`](./testing.md).
+
+This is the concrete plan and implementation record for the tracing GC that
+enabled no-GIL shared-realm work. GC contexts reclaim unreachable cells, clear
+`WeakRef` targets, run `WeakMap` / `WeakSet` weak-key cleanup through the
+ephemeron/weak-slot pass, and make `FinalizationRegistry` records available to
+`cleanupSome()` and automatic cleanup jobs after quiescent collection.
 
 ## Decisions (and why)
 

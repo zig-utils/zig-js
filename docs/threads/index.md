@@ -1,68 +1,87 @@
 # Threads
 
-zig-js supports two different thread stories. They are intentionally separate:
-one isolates JavaScript heaps across OS threads, and the other shares one realm
-behind a VM lock.
-
-## Start Here
+zig-js supports two complementary thread models:
 
 | Model | What shares | What crosses | Primary docs |
 |---|---|---|---|
-| Agent / worker isolation | Nothing JS-heap-owned; each OS thread owns a `Context`, arena, global object, shapes, jobs, and exception state. | Structured-clone bytes and retained `SharedArrayBuffer` storage. | [Agents](./P2-agents.md), [Workers](./P5-workers.md) |
-| Shared-realm `Thread` | One `Context`, one global object, one heap, one shape tree, and object identity. | Function arguments and return values stay in the same realm; access is serialized by the context GIL. | [Thread API](./api.md), [Phase 6](./P6-thread-api.md) |
+| Agent / worker isolation | No JS heap state; each OS thread owns a `Context`, global object, jobs, allocator state, and exception state. | Structured-clone bytes and retained `SharedArrayBuffer` storage. | [Agents](./P2-agents.md), [Workers](./P5-workers.md) |
+| Shared-realm `Thread` | One `Context`, global object, heap, shape tree, and object identity. | Same-realm function arguments and return values. | [Thread API](./api.md), [Phase 6](./P6-thread-api.md), [GIL removal](./P7-gil-removal.md) |
 
-The shared-realm model is concurrent, not parallel. `Thread` runs on real OS
-threads, but only one thread executes JS or mutates the shared heap at a time.
-The context GIL is what makes arena allocation, remaining direct `elements`
-side doors, microtask queues, and async waiter arrays safe in today's engine.
-Shape transition maps carry their own per-shape lock, ordinary named-property
-helper paths carry an object-level property lock, dense-array helper paths use
-an element-store lock, Map/Set helper and cursor paths use the same
-element-store lock, and Promise settlement/reaction lists carry a per-promise
-lock so concurrent same-name transitions, helper-routed property writes,
-named-property deletes, array element operations, collection helper operations,
-and shared promise settlement converge on one state path.
+The shared-realm model is now true-parallel by default:
+
+```zig
+const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
+```
+
+That installs `Thread`, `Lock`, `Condition`, `ThreadLocal`,
+`ConcurrentAccessError`, property-mode `Atomics.*`, and proposal-aligned
+`Atomics.Mutex` / `Atomics.Condition`. Spawned `Thread`s run JavaScript
+concurrently on real OS threads over the GC-managed, thread-safe heap.
+
+The serialized fallback is still supported when deterministic GIL interleavings
+or legacy compatibility are useful:
+
+```zig
+const ctx = try js.Context.createWith(gpa, .{
+    .enable_threads = true,
+    .gil = true,
+});
+```
+
+The C API exposes the same choice with `ZJSGlobalContextCreateThreaded(gil)`.
+Non-threaded contexts remain single-threaded and keep the original affinity
+rules.
 
 ## Shipping Surface
 
 | Area | Status | Verification |
 |---|---|---|
-| Refcounted `SharedArrayBuffer` storage | Implemented in `src/shared_buffer.zig` and typed-array storage in `src/value.zig`. | Unit tests and test262 SAB / Atomics shards. |
-| `$262.agent` and typed-array `Atomics.wait` / `notify` / `waitAsync` | Implemented in `src/agent.zig` with hooks in `src/interpreter.zig`. | Unit tests and real test262 agent cases. |
-| Structured clone | Implemented in `src/structured_clone.zig`. | Unit tests, workers, and agents. |
-| Embedder `Worker` API | Implemented in `src/worker.zig` with C-API hooks in `src/c_api.zig`. | Worker unit tests and C-API round trip. |
-| Shared-realm `Thread` API | Implemented in `src/gil.zig`, `src/jsthread.zig`, and `src/context.zig`. | `zig build threads-test` green allowlist: 209/209. |
+| Refcounted `SharedArrayBuffer` storage | Implemented in `src/shared_buffer.zig` and typed-array storage in `src/value.zig`. | Unit tests, test262 SAB / Atomics shards, TSan gates. |
+| `$262.agent` and typed-array `Atomics.wait` / `notify` / `waitAsync` | Implemented in `src/agent.zig` with hooks in the interpreter and VM. | Unit tests and real test262 agent cases. |
+| Structured clone and ArrayBuffer transfer/detach | Implemented in `src/structured_clone.zig`. | Unit tests, workers, and agents. |
+| Embedder `Worker` API | Implemented in `src/worker.zig` with C-API hooks in `src/c_api.zig`. | Worker unit tests and C-API round trips. |
+| Shared-realm `Thread` API | Implemented in `src/jsthread.zig`, `src/gil.zig`, and `src/context.zig`; parallel by default, GIL opt-out available. | `zig build threads-test` green allowlist: 219/219; no-GIL TSan corpus sweep; fuzzer gates. |
+| Concurrent GC / root safety | GC-managed parallel contexts use thread-safe allocation, write barriers, per-structure locks, precise VM frame roots, and conservative native-stack rooting where applicable. | Unit tests, `parallel_gc` soak, no-GIL corpus TSan, test262-parallel. |
 
 ## Core Rules
 
-- `Context.createWith(.{ .enable_threads = false })` keeps the original
-  single-thread affinity rule and installs no `Thread` globals.
-- `Context.createWith(.{ .enable_threads = true })` installs `Thread`, `Lock`,
-  `Condition`, `ThreadLocal`, `ConcurrentAccessError`, property-mode
-  `Atomics.*`, and proposal-aligned `Atomics.Mutex` / `Atomics.Condition`
-  static methods.
-- Blocking points release the GIL: `Thread.join`, contended `Lock.hold`,
-  `Condition.wait`, property-mode `Atomics.wait`, and typed-array
-  `Atomics.wait`.
-- Promise settlement and reaction-list state is locked per promise. Microtask
-  queues are still per running interpreter / thread; shared promises can settle
-  from another thread, and `await` yields at the GIL boundary until the
-  settlement is observable.
+- `Context.createWith(.{ .enable_threads = false })` installs no `Thread`
+  globals and keeps the original single-thread affinity rule.
+- `Context.createWith(.{ .enable_threads = true })` runs shared-realm
+  `Thread`s in parallel by default and implies the GC-managed, thread-safe cell
+  path.
+- `Context.createWith(.{ .enable_threads = true, .gil = true })` keeps the same
+  JavaScript API but serializes execution behind the context GIL.
+- Blocking APIs (`join`, `Lock`, `Condition`, typed-array Atomics wait, and
+  property-mode Atomics wait) use their own synchronization paths in no-GIL
+  mode and release the context GIL in serialized mode.
+- Object shapes, named properties, elements/collections, environments, promises,
+  microtasks, inline caches, thread records, waiter queues, and shared-buffer
+  storage each have explicit synchronization. New mutable shared state must
+  follow that pattern.
+- JavaScript program races are distinct from engine-state races. See
+  [Memory Model](./memory-model.md) for the public contract and the
+  ThreadSanitizer suppression boundary.
+- Test-only knobs such as `parallel_js` and `parallel_midscript_gc` remain
+  internal harness controls. They are not stable embedder APIs.
 - Process-global mutable state must be listed in [bindings.md](./bindings.md)
   with a `per-thread`, `locked`, or `refused` ruling.
 
 ## Reading Order
 
-- [Thread API](./api.md) - the supported shared-realm JavaScript surface.
-- [Testing](./testing.md) - exact Zig `0.17-dev` verification commands.
-- [Limits & Roadmap](./limits.md) - GIL semantics, host knobs, and Layer-C
-  blockers.
+- [Thread API](./api.md) - supported shared-realm JavaScript surface.
+- [Testing](./testing.md) - exact Zig `0.17-dev` verification commands and
+  CI gates.
+- [Memory Model](./memory-model.md) - JS program races, engine-state races, and
+  the TSan suppression boundary.
+- [Production Readiness](./production-readiness.md) - current no-GIL status and
+  remaining hardening work.
+- [Limits & Roadmap](./limits.md) - unsupported surfaces, test-only knobs, and
+  remaining performance/coverage goals.
 - [bindings.md](./bindings.md) - mutable-state audit and contribution rule.
-- [GitHub issue #1](https://github.com/zig-utils/zig-js/issues/1) - the single
-  canonical tracker for thread work; do not split status across duplicate
-  roadmap issues.
+- [GitHub issue #1](https://github.com/zig-utils/zig-js/issues/1) - canonical
+  tracker for thread work; do not split status across duplicate roadmap issues.
 - [P2-agents.md](./P2-agents.md), [P5-workers.md](./P5-workers.md), and
   [P6-thread-api.md](./P6-thread-api.md) - implementation design records.
 - [P7-gc-design.md](./P7-gc-design.md), [P7-gil-removal.md](./P7-gil-removal.md),
-  and [P8-structs.md](./P8-structs.md) - future shared-heap prerequisites and
-  proposal tracking.
+  and [P8-structs.md](./P8-structs.md) - GC, no-GIL, and TC39 structs planning.

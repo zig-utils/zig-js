@@ -124,7 +124,7 @@ pub fn build(b: *std.Build) void {
     // it, so CI's whole-corpus no-GIL TSan sweep can invoke it directly at a
     // stable path — `zig build threads-test-bin -Dtsan=true` then
     // `./zig-out/bin/threads-test parallel-js one <path>` per case. Per-case
-    // isolation sidesteps the cumulative-load OOM of a single 209-in-one-process
+    // isolation sidesteps the cumulative-load OOM of a single allowlist-in-one-process
     // TSan run (TSan shadow memory grows across the whole allowlist).
     const threads_test_install = b.addInstallArtifact(threads_test, .{});
     const threads_test_bin_step = b.step("threads-test-bin", "Build the threads-test exe only (no run)");

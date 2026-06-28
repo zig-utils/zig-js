@@ -1403,13 +1403,31 @@ pub const Object = struct {
         // alias the current `key_order`'s key strings (the `deleteNamedDataOwn`
         // rebuild passes its surviving keys, which point into this very table), so
         // deiniting before copying frees the bytes `dupe` then reads - a
-        // use-after-free. Copying first makes the new list self-owned, after which
-        // releasing the old storage is safe.
+        // use-after-free. Copying first makes the new list self-owned. Do not
+        // call `deinitKeyOrderUnlocked` for the swap: it deactivates the backing
+        // flag, but the replacement list uses that same backing store and still
+        // needs to be visible to the GC finalizer.
+        const old_key_order = self.key_order;
+        const old_uses_backing = self.backing_flags.key_order;
+        const old_backing_allocator = self.backing_allocator;
         const alloc = self.keyOrderAllocator(arena);
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
         ko.* = .empty;
+        errdefer {
+            for (ko.items) |key| alloc.free(key);
+            ko.deinit(alloc);
+            alloc.destroy(ko);
+            if (!old_uses_backing and self.backing_flags.key_order) self.deactivateBacking("key_order");
+        }
         for (names) |name| try ko.append(alloc, try alloc.dupe(u8, name));
-        self.deinitKeyOrderUnlocked();
+        if (old_key_order) |ord| {
+            if (old_uses_backing) {
+                const a = old_backing_allocator.?;
+                for (ord.items) |key| a.free(key);
+                ord.deinit(a);
+                a.destroy(ord);
+            }
+        }
         self.key_order = ko;
     }
 

@@ -6,33 +6,53 @@ This page describes the shared-realm thread API installed by:
 const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
 ```
 
+`enable_threads` now means shared-realm JavaScript threads run true-parallel by
+default over the GC-managed, thread-safe heap. The serialized fallback is an
+explicit opt-out:
+
+```zig
+const ctx = try js.Context.createWith(gpa, .{
+    .enable_threads = true,
+    .gil = true,
+});
+```
+
 Without `enable_threads`, the context keeps the original single-thread affinity
-rule and none of the globals below are installed.
+rule and none of the globals below are installed. The C API exposes the same
+choice with `ZJSGlobalContextCreateThreaded(gil)`.
 
 ## Model
 
 `new Thread(fn, ...args)` runs `fn` on a real OS thread in the same realm as the
 creator. That means:
 
-- `globalThis`, ordinary objects, functions, symbols, arrays, and closures keep
-  identity across `join`.
+- `globalThis`, ordinary objects, functions, symbols, arrays, closures,
+  promises, and collections keep identity across `join`.
 - There is no structured clone between shared-realm threads.
-- All JS execution and heap access is serialized by the context GIL.
-- Each running thread has its own interpreter instance, microtask queue, async
-  waiter list, call-depth counter, and exception slot.
+- Parallel mode uses synchronized engine structures: shape transitions,
+  named-property metadata and slots, indexed storage, environments, promises,
+  microtasks, inline caches, waiter queues, and thread records are protected by
+  dedicated locks or atomics.
+- GIL mode runs the same JavaScript surface but serializes execution behind the
+  context GIL.
+- Each running thread has its own interpreter instance, call-depth counter,
+  exception slot, and thread-local state.
 
-The model gives blocking and interleaving semantics today without claiming true
-parallel JavaScript heap mutation.
+The shared-realm API exposes parallel JavaScript execution, not automatic
+program-level data-race freedom. Unsynchronized user writes to shared objects or
+shared buffers can still be racy at the JavaScript level; the engine guarantee
+is that those races do not corrupt engine state.
 
 ## `Thread`
 
 ```js
-const t = new Thread((box) => {
-  box.n += 1;
-  return box;
-}, sharedBox);
+const box = { n: 0 };
+const t = new Thread((shared) => {
+  shared.n += 1;
+  return shared;
+}, box);
 
-if (t.join() !== sharedBox) throw new Error("identity changed");
+if (t.join() !== box) throw new Error("identity changed");
 ```
 
 Supported behavior:
@@ -42,18 +62,16 @@ Supported behavior:
 - Arguments are same-realm values, not clones.
 - `thread.id` is a numeric id; the main thread is `0`.
 - `Thread.current` returns the current thread wrapper.
-- `thread.join()` blocks until the target function returns and its own
-  microtask queue drains.
+- `thread.join()` blocks until the target function returns and its own pending
+  completion work drains.
 - `join()` returns the target's value by identity, or rethrows the actual
   exception object.
 - `thread.asyncJoin()` returns a promise for the same completion. If the thread
-  is still running, the finishing thread settles the promise.
+  is still running, the finishing thread settles the promise through the realm
+  queue.
 - Joining the current thread throws.
-- The test-shell `drainMicrotasks()` helper drains only the current
-  interpreter's promise jobs. The conformance runner uses an internal
-  `$drainRunLoop()` host tick to pump pending threaded grants such as
-  `Lock.asyncHold`, expire property `Atomics.waitAsync` deadlines, and run ready
-  FinalizationRegistry cleanup jobs between top-level turns.
+- Abrupt top-level failure requests spawned-thread termination before teardown
+  so parked child threads cannot strand the context.
 
 `Thread.restrict(obj)` pins a plain object or plain array to the calling OS
 thread. Enforced foreign access throws `ConcurrentAccessError`. Exotic objects
@@ -67,10 +85,9 @@ refused.
 when a restricted object is touched from an OS thread other than the owner
 recorded by `Thread.restrict(obj)`.
 
-The restriction is a defensive tool for tests and host-owned objects that must
-not be shared accidentally. It is not a substitute for true parallel JS object
-mutation; ordinary shared-realm objects still rely on the context GIL for
-safety.
+Restriction is a defensive tool for tests and host-owned objects that must not
+be shared accidentally. It is not a replacement for locks or Atomics around
+ordinary shared mutable data.
 
 ## `Lock`
 
@@ -78,21 +95,24 @@ safety.
 the lock even when `fn` throws.
 
 `Atomics.Mutex` is the proposal-aligned constructor in threaded contexts. It is
-the same constructor as `Lock`, so `new Atomics.Mutex()` creates the existing
-non-recursive lock record, while static `Atomics.Mutex.*` methods expose the
-proposal-style unlock-token API.
+the same constructor as `Lock`, while static `Atomics.Mutex.*` methods expose
+the proposal-style unlock-token API.
 
 ```js
 const lock = new Lock();
 const counter = { n: 0 };
 
-new Thread(() => {
-  for (let i = 0; i < 1000; i++) {
-    lock.hold(() => {
-      counter.n = counter.n + 1;
-    });
-  }
-}).join();
+const ts = [];
+for (let i = 0; i < 4; i++) {
+  ts.push(new Thread(() => {
+    for (let j = 0; j < 1000; j++) {
+      lock.hold(() => {
+        counter.n = counter.n + 1;
+      });
+    }
+  }));
+}
+for (const t of ts) t.join();
 ```
 
 Supported behavior:
@@ -101,7 +121,7 @@ Supported behavior:
 - `lock.hold(fn)` requires a callable.
 - A nested `hold` on the same lock from the same thread throws instead of
   deadlocking.
-- Contended `hold` releases the GIL while parked.
+- Contended `hold` parks on the lock's own synchronization record.
 - `lock.locked` reports whether the lock is currently held or synchronously
   granted.
 - `lock.asyncHold(fn?)` grants the lock through the realm task queue. With a
@@ -187,10 +207,8 @@ The main thread's `value` and each spawned thread's `value` are independent.
 
 In an `enable_threads` context, `Atomics.*` also accepts ordinary objects when
 the first argument is an object that is not a typed array. This path is scoped to
-own data properties and is serialized by the GIL in the supported Layer-B model.
-Named own data properties also take the object's property lock for each
-load/store/exchange/compare-exchange/RMW step, which is the Layer-C bring-up path
-used by the test-only `parallel_js` probes.
+own data properties and is synchronized by the object's property lock and the
+per-context waiter tables where applicable.
 
 Supported operations:
 
@@ -217,4 +235,10 @@ Important rules:
 - Finite `waitAsync` tickets keep the shell/event-loop drain alive until they
   settle, including timeout settlement when no notifier arrives.
 - Waiters are keyed by object identity plus property key and live on the owning
-  context's `Gil`, so independent threaded contexts cannot cross-notify.
+  context, so independent threaded contexts cannot cross-notify.
+
+## Test-Only Controls
+
+`Context.TestingOptions.parallel_js`, `parallel_midscript_gc`, shell helpers,
+and `$vm` compatibility hooks exist for the conformance runners and bring-up
+tests. They are intentionally not stable embedder APIs.

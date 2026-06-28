@@ -142,7 +142,7 @@ double n = JSValueToNumber(ctx, result, NULL); // 2.0
 
 Implemented C-API symbols:
 
-- **Context lifecycle** — `JSGlobalContextCreate`/`Release`/`Retain`, `JSContextGetGlobalObject`, `JSEvaluateScript`, `JSGarbageCollect`.
+- **Context lifecycle** — `JSGlobalContextCreate`, `ZJSGlobalContextCreateThreaded(gil)`, `JSGlobalContextRelease`/`Retain`, `JSContextGetGlobalObject`, `JSEvaluateScript`, `JSGarbageCollect`.
 - **Value inspection** — `JSValueGetType`, `JSValueIs*`, `JSValueIsEqual`/`StrictEqual`.
 - **Constructors & coercion** — `JSValueMake*`, `JSValueTo*`, `JSValueProtect`/`Unprotect`.
 - **Objects** — `JSObjectMake`, `JSObjectMakeArray`, `JSObjectGet`/`SetProperty`, `JSObjectGetPropertyAtIndex`, `JSObjectCallAsFunction`, `JSObjectCallAsConstructor`, `JSObjectMakeFunctionWithCallback`, `JSObjectIsFunction`/`IsConstructor`.
@@ -189,7 +189,9 @@ Requires Zig **0.17.0-dev**.
 zig build                       # builds libzig-js.a (the JSC drop-in)
 zig build test                  # runs the unit + C-API test suite
 zig build conformance           # runs the always-green smoke suite (33/33)
-zig build threads-test          # runs the green WebKit PR-249 threads corpus (209/209)
+zig build threads-test          # runs the green WebKit PR-249 threads corpus (219/219)
+zig build test -Dtsan=true      # unit suite under ThreadSanitizer
+zig build threadfuzz            # seeded concurrent-JS fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -199,19 +201,59 @@ The test262 corpus is vendored as the `test262/` git submodule (`git submodule u
 
 ## Multithreading roadmap
 
-`Context.createWith(.{ .enable_threads = true })` now exposes an experimental shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and property-`Atomics.wait` surface. That path is serialized by a VM lock and is tracked against the vendored WebKit PR-249 threads corpus; the current green allowlist is **209/209**.
+`Context.createWith(.{ .enable_threads = true })` installs the shared-realm
+`Thread`, `Lock`, `Condition`, `ThreadLocal`, `ConcurrentAccessError`,
+property-mode `Atomics.*`, and proposal-aligned `Atomics.Mutex` /
+`Atomics.Condition` surface. Shared-realm `Thread`s now run true-parallel by
+default on the GC-managed, thread-safe heap:
 
-That is a useful host-threading layer, but full JavaScript multithreading needs a broader agent model:
+```zig
+const parallel = try js.Context.createWith(gpa, .{ .enable_threads = true });
+const serialized = try js.Context.createWith(gpa, .{ .enable_threads = true, .gil = true });
+```
 
-- **Agent boundaries** — make ordinary `Context` ownership explicit, keep C-API handles agent-local, and define which values can cross threads.
-- **Worker agents** — one `Context` per OS thread with its own global object, realms, job queues, allocator state, module loader hooks, cancellation, and teardown.
-- **Structured clone & transfer** — implement `structuredClone`, message passing, ArrayBuffer transfer/detach, and host hooks for worker lifecycle.
-- **Shared-memory baseline** — finish `SharedArrayBuffer`, typed-array views over shared storage, `Atomics`, `Atomics.wait`/`notify`, and the real test262 `$262.agent` harness.
-- **Scheduler & queues** — keep per-agent microtask queues separate from host task queues, define blocking behavior for waits, and preserve deterministic promise-job ordering.
-- **Heap & lifetime model** — replace or contain the arena before shared lifetimes leak between agents; a future GC needs roots, write barriers, and cross-agent ownership rules.
-- **Concurrency tests** — grow the PR-249 corpus, then stress transfer/detach races, shared typed-array atomics, worker teardown, and host callback reentrancy before optimizing.
+The `.gil = true` path remains a supported opt-out for strict serialized
+interleavings and compatibility testing. The C API exposes the same choice with
+`ZJSGlobalContextCreateThreaded(gil)`.
 
-The [TC39 structs proposal](https://github.com/tc39/proposal-structs) is worth tracking. Fixed-layout structs, shared structs, `Atomics.Mutex`, and `Atomics.Condition` could become a natural data model for parallel JS because shared structs are designed to cross agents without copying. They should layer on top of the worker, structured clone, `SharedArrayBuffer`, and `Atomics` foundation rather than replace it.
+Thread support is tracked in the canonical
+[issue #1](https://github.com/zig-utils/zig-js/issues/1) and the design/status
+docs under `docs/threads`. Current coverage includes isolated agents, retained
+`SharedArrayBuffer` storage, typed-array and property-mode `Atomics.wait` /
+`notify` / `waitAsync`, structured clone, ArrayBuffer transfer/detach, Worker
+message passing, and the shared-realm `Thread` API. The vendored WebKit PR-249
+allowlist is **219/219** green.
+
+Correctness is now gated by the ordinary unit/corpus suite plus no-GIL coverage:
+ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
+suppression-narrowness witness for JS-defined program-byte races,
+`test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
+fuzzing, amplified fuzzing, ReleaseSafe fuzzing, and deterministic-result
+verification).
+
+Remaining work is concentrated in production hardening rather than the core
+threading architecture:
+
+- **GC performance** - add an allocation fast path / nursery and reduce
+  create/destroy overhead for context-heavy embedders.
+- **Parallel scaling** - profile and reduce lock contention in shared global
+  bindings, object/element storage, and GC allocation under high thread counts.
+- **Memory-model maintenance** - keep
+  [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
+  TSan suppression witness, synchronization primitives, and promoted corpus
+  coverage.
+- **Mid-script parallel GC** - keep the abort-safe collector correct and improve
+  the known limitation around sync-wait peers that periodically pump tasks.
+- **Stress breadth** - keep expanding fuzzing for exceptions, termination,
+  cleanup, waiters, and cross-thread lifecycle edges.
+- **Reference-only PR-249 files** - promote only when the needed engine feature
+  exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack
+  behavior, heap caps/OOM semantics, and unsupported `$vm` controls.
+
+The [TC39 structs proposal](https://github.com/tc39/proposal-structs) remains a
+tracked future layer. Shared structs, `Atomics.Mutex`, and
+`Atomics.Condition` should build on this existing worker, structured clone,
+`SharedArrayBuffer`, Atomics, and shared-realm thread foundation.
 
 ## License
 

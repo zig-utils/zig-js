@@ -213,6 +213,7 @@ export default {
             { text: 'Architecture', link: '/architecture' },
             { text: 'Threading', link: '/threads/' },
             { text: 'Thread API Reference', link: '/threads/api' },
+            { text: 'Thread Memory Model', link: '/threads/memory-model' },
             { text: 'Thread Testing', link: '/threads/testing' },
             { text: 'Limits & Roadmap', link: '/threads/limits' },
             { text: 'Thread API Design', link: '/threads/P6-thread-api' },

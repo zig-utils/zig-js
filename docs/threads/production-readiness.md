@@ -1,84 +1,114 @@
-# No-GIL parallelism: production-readiness status
+# No-GIL Parallelism: Production-Readiness Status
 
-GIL-free parallel execution is **correct, the default, and CI-gated**. What
-remains is largely *performance* (GC + scaling) and *breadth of coverage*, not
-new correctness architecture. This tracks the six work items.
+GIL-free shared-realm execution is correct, the default, and CI-gated. What
+remains is mostly performance, documentation, and broader stress coverage rather
+than new correctness architecture.
 
 ## Summary
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Broaden no-GIL correctness coverage | Largely done; ongoing |
-| 2 | GC maturity | Correct; perf work remaining |
+| 1 | Broaden no-GIL correctness coverage | Done; ongoing expansion |
+| 2 | GC maturity | Correct; performance and pause-time work remaining |
 | 3 | Parallel performance validation | Benchmarked; optimization remaining |
-| 4 | Embedder API | Done (C + Zig) |
-| 5 | Robustness | Covered; fuzzing remaining |
+| 4 | Embedder API | Done (Zig + C) |
+| 5 | Robustness | Fuzzed and gated; continue broadening |
 | 6 | CI gating on every PR/push | Done |
 
 ## 1. Coverage
 
-- **VM shared-state audit + fix.** `load_upval`/`store_upval` and
-  `load_local`/`store_local` on a frame captured by a closure that escapes to
-  another thread now serialize on a per-Frame `slot_lock` (gated on the parallel
-  flag, escaped-only — non-captured frames pay nothing). This closed a race the
-  tree-walker `lookupIdent` fix had missed.
-- **`-Dtest262-parallel-js`** runs the whole test262 corpus (the entire language
-  surface) in GIL-free parallel contexts, exercising the parallel-mode locked
-  paths + the GC allocator across every feature. A CI leg asserts a curated
-  cross-section introduces **no new failures vs the baseline arena engine**.
-- *Remaining:* more concurrent-JS stress patterns (the VM upvalue race shows the
-  threads corpus is a narrow slice); the full test262-parallel sweep is too slow
-  per-context under GC to gate (see #2) so only a representative slice runs.
+- VM shared-state audits closed the known escaped-frame races:
+  `load_local` / `store_local` / `load_upval` / `store_upval` on
+  closure-escaped frames serialize on a gated per-frame lock.
+- Tree-walker entry into VM-compiled closures now dispatches through the VM,
+  so spawned `Thread` entry and normal calls agree on upvalue resolution.
+- Active VM frame slots are traced as GC roots, not only operand stacks, closing
+  the mid-script parallel-GC use-after-free found by the fuzzer.
+- `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free
+  parallel contexts and asserts no new failures versus the baseline.
+- The PR-249 allowlist remains 219/219 in normal mode and is covered by the
+  sharded no-GIL ThreadSanitizer corpus gate.
 
-## 2. GC maturity
+Remaining: keep widening generated and hand-written stress toward exceptions,
+termination, cleanup, waiters, and cross-thread lifecycle.
 
-The GC is **correct** under parallel mutation (validated by the test262-parallel
-"no new failures" leg + the `parallel_gc` / mid-script-collector tests). The gaps
-are performance:
+## 2. GC Maturity
 
-- **Tight-loop allocation is pathologically slow.** A per-iteration block-scoped
-  `let` allocates a GC cell each iteration; under the GC engine a 4M-iteration
-  loop took ~66 s (the arena engine bulk-frees, so it's fine there). Needs a
-  tight-loop allocation fast path (nursery / generational, or an engine
-  optimization to reuse non-captured per-iteration bindings).
-- **Context lifecycle is ~100× the arena engine** (GC cell setup + per-cell
-  teardown/finalizers vs bulk arena free). Amortized for real embedders (one
-  long-lived context) but slow for create-per-unit-of-work patterns.
-- *Remaining:* the allocation fast path, mid-script collection promoted from
-  opt-in to default (so long parallel workloads collect without unbounded heap
-  growth), and a sustained-load soak for leaks/UAF.
+The GC is correct under parallel mutation. Current coverage includes
+test262-parallel, `parallel_gc` tests, mid-script collector tests, and a
+sustained `parallel_gc soak` that checks retained graphs survive and the live
+set stays bounded across rounds.
 
-## 3. Parallel performance
+Known performance/maturity work:
 
-- **Scaling benchmark added** (`zig build bench`): N JS `Thread`s each run an
-  independent compute loop in one GIL-free context. Measured **~1.8× at 2
-  threads, ~2.5× at 4** — real parallelism (a GIL gives ~1.0×).
-- *Remaining:* scaling is sub-linear and falls off at high thread counts —
-  profile lock contention (shared global-env bindings, the GC backing lock) and
-  decide finer-grained vs lock-free where it bottlenecks.
+- Tight-loop block-scoped allocation is still pathological under the GC path
+  compared with arena bulk allocation. This needs a nursery/generational
+  strategy or an engine optimization for non-captured per-iteration bindings.
+- Context create/destroy is much more expensive than the arena model because
+  every GC cell has setup/teardown work. Long-lived contexts amortize this;
+  create-per-task embedders need either a faster lifecycle path or guidance.
+- Mid-script parallel GC is abort-safe, but a peer blocked in sync wait/lock/
+  condition paths may periodically pump tasks and allocate. That makes it
+  different from a frozen parked peer; quiescent collection remains the
+  correctness fallback for those cases.
+
+## 3. Parallel Performance
+
+- `zig build bench` includes a scaling benchmark where N JS `Thread`s run
+  independent compute loops in one GIL-free context.
+- Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
+  at 4 threads in the recorded checkpoint.
+
+Remaining: profile lock contention and GC allocation under high thread counts.
+Likely hotspots are global/environment bindings, property/element locks,
+collection helpers, and GC allocation paths.
 
 ## 4. Embedder API
 
-- **`Context.Options.parallel`/`.gil`** (Zig) and **`ZJSGlobalContextCreateThreaded(gil)`**
-  (C) expose the parallel/GIL choice. The parallel path is usable directly from C
-  (parallel contexts have no owner-GIL); GIL-mode contexts, like JSC, expect the
-  embedder to hold the GIL around use.
-- *Remaining:* document the memory model (Atomics / SharedArrayBuffer
-  happens-before, which races are JS-defined vs bugs — the TSan suppression
-  rationale is the seed).
+- Zig: `Context.createWith(.{ .enable_threads = true })` is parallel by
+  default; `.gil = true` opts into serialized execution.
+- C: `ZJSGlobalContextCreateThreaded(gil)` exposes the same choice.
+- Non-threaded contexts remain single-threaded and avoid the parallel
+  synchronization protocols.
+- The public memory-model contract is documented in
+  [Memory Model](./memory-model.md): JS-defined program races remain program
+  races, while engine-state races are bugs and remain TSan-gated.
+
+Remaining: keep C-API context-affinity guidance and memory-model wording current
+as embedders exercise more threaded host patterns.
 
 ## 5. Robustness
 
-- A re-entrant-getter + shared-object-mutation test proves no re-entrant-lock
-  deadlock (per-object locks are released before JS callbacks) and stays
-  TSan-clean (property access is serialized) under 6 threads.
-- The `cve/` corpus covers many lifecycle/lock/teardown hazards, gated TSan-clean.
-- *Remaining:* a concurrent-JS fuzzer; exhaustive cross-thread exception /
-  termination / cleanup coverage.
+- Re-entrant getter/shared-mutation tests prove per-object locks are not held
+  across JS callbacks in a way that deadlocks.
+- The `cve/` PR-249 subset covers teardown, waiters, lifecycle, GC, and
+  synchronization hazards.
+- `threadfuzz` generates random shared object / array / closure / typed-array
+  programs in GIL-free contexts and supports single-file reproduction.
+- CI runs the fuzzer in several modes: default seeded, TSan, high-contention
+  amplified, ReleaseSafe, and deterministic-result verification.
 
-## 6. CI gating
+Remaining: add generators for exception propagation, termination races,
+FinalizationRegistry cleanup, sync/async waiter interactions, and worker/thread
+lifecycle overlaps.
 
-The whole-corpus no-GIL ThreadSanitizer sweep (4 shards), the suppression-narrowness
-witness, and the test262-parallel leg run on **every pull request and main push**
-(not just nightly), and the corpus gate **hard-blocks** (it is at zero engine-state
-races, so a TSan report fails the run).
+## 6. CI Gating
+
+Every pull request and push to `main` runs:
+
+- unit tests,
+- GIL-mode PR-249 corpus,
+- focused no-GIL thread witness,
+- TSan unit gates,
+- TSan `parallel_js` unit slice,
+- `threadfuzz`,
+- TSan `threadfuzz`,
+- amplified `threadfuzz`,
+- ReleaseSafe `threadfuzz`,
+- deterministic-result `threadfuzz-verify`,
+- sharded no-GIL PR-249 corpus TSan sweep,
+- TSan suppression-narrowness witness,
+- test262-parallel representative slice.
+
+The no-GIL corpus TSan gate hard-blocks on engine-state races. The suppression
+witness proves the program-byte suppressions are both load-bearing and narrow.

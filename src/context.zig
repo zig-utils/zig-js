@@ -1394,32 +1394,42 @@ pub const Context = struct {
         ambiguous,
     };
 
-    fn sameExportResolution(a: interp.Environment.Alias, b: interp.Environment.Alias) bool {
-        return a.env == b.env and std.mem.eql(u8, a.name, b.name);
+    fn sameExportResolution(self: *Context, a: interp.Environment.Alias, b: interp.Environment.Alias) bool {
+        if (a.env == b.env and std.mem.eql(u8, a.name, b.name)) return true;
+        const left = a.env.get(a.name) orelse return false;
+        const right = b.env.get(b.name) orelse return false;
+        if (!left.isObject() or !right.isObject()) return false;
+        const lo = left.asObj();
+        if (lo == self.tdz_marker) return false;
+        return lo == right.asObj();
     }
 
     /// Resolve an export `name` of `module`, chasing re-exports and `export *`
     /// sources. Distinguishes the spec's "ambiguous" result from "not found",
     /// because indirect exports/imports must reject both while namespace objects
     /// merely omit ambiguous star names.
-    fn resolveExport(module: *Module, name: []const u8, depth: u32) ExportResolution {
+    fn resolveExport(self: *Context, module: *Module, name: []const u8, depth: u32) ExportResolution {
         if (depth > 64) return .not_found;
         if (module.exports.get(name)) |kind| switch (kind) {
-            .local => |local| return .{ .found = .{ .env = module.env, .name = local } },
+            .local => |local| {
+                if (module.env.aliases.get(local)) |alias|
+                    return .{ .found = alias };
+                return .{ .found = .{ .env = module.env, .name = local } };
+            },
             .indirect => |ind| {
                 if (std.mem.eql(u8, ind.name, "*namespace*")) return .not_found; // namespace handled separately
-                return resolveExport(ind.module, ind.name, depth + 1);
+                return self.resolveExport(ind.module, ind.name, depth + 1);
             },
         };
         // `export *` sources: a name not directly exported may come from one.
         var star_resolution: ?interp.Environment.Alias = null;
         for (module.star_sources.items) |src| {
-            switch (resolveExport(src, name, depth + 1)) {
+            switch (self.resolveExport(src, name, depth + 1)) {
                 .not_found => {},
                 .ambiguous => return .ambiguous,
                 .found => |r| {
                     if (star_resolution) |existing| {
-                        if (!sameExportResolution(existing, r)) return .ambiguous;
+                        if (!self.sameExportResolution(existing, r)) return .ambiguous;
                     } else {
                         star_resolution = r;
                     }
@@ -1455,7 +1465,7 @@ pub const Context = struct {
             .local => {},
             .indirect => |ind| {
                 if (std.mem.eql(u8, ind.name, "*namespace*")) continue;
-                switch (resolveExport(ind.module, ind.name, 0)) {
+                switch (self.resolveExport(ind.module, ind.name, 0)) {
                     .found => {},
                     .not_found, .ambiguous => return self.moduleError("does not provide an export"),
                 }
@@ -1472,7 +1482,7 @@ pub const Context = struct {
                         const nsobj = if (imp.deferred) try self.deferredNamespaceObject(dep.?) else try self.namespaceObject(dep.?);
                         try m.env.putConst(entry.local, Value.obj(nsobj));
                     } else {
-                        switch (resolveExport(dep.?, entry.imported, 0)) {
+                        switch (self.resolveExport(dep.?, entry.imported, 0)) {
                             .found => |res| try m.env.putAlias(entry.local, res.env, res.name),
                             .not_found, .ambiguous => return self.moduleError("does not provide an export"),
                         }
@@ -1760,7 +1770,7 @@ pub const Context = struct {
         }.f;
         var it = module.exports.iterator();
         while (it.next()) |e| {
-            switch (resolveExport(module, e.key_ptr.*, 0)) {
+            switch (self.resolveExport(module, e.key_ptr.*, 0)) {
                 .found => |res| try add(a, &names, &envs, &locals, &ambiguous, e.key_ptr.*, res),
                 .not_found, .ambiguous => {},
             }
@@ -1771,7 +1781,7 @@ pub const Context = struct {
                 const name = e.key_ptr.*;
                 if (std.mem.eql(u8, name, "default")) continue;
                 if (module.exports.contains(name)) continue;
-                switch (resolveExport(src, name, 0)) {
+                switch (self.resolveExport(src, name, 0)) {
                     .found => |res| try add(a, &names, &envs, &locals, &ambiguous, name, res),
                     .not_found, .ambiguous => {},
                 }
@@ -1999,6 +2009,38 @@ test "modules omit ambiguous star exports from namespace objects" {
         .{ .path = "barrel.js", .source = "export * from './one.js'; export * from './two.js';" },
         .{ .path = "one.js", .source = "export var first = 1; export var both = 1;" },
         .{ .path = "two.js", .source = "export var second = 2; export var both = 2;" },
+    });
+}
+
+test "modules treat repeated star exports of the same namespace object as unambiguous" {
+    try evaluateModuleWithFixtures(
+        \\import { foo } from "./barrel.js";
+        \\if (typeof foo !== "object") throw new Error("bad namespace re-export");
+        \\if (foo.marker !== 1) throw new Error("bad namespace binding");
+    , &.{
+        .{ .path = "barrel.js", .source = "export * from './one.js'; export * from './two.js';" },
+        .{ .path = "one.js", .source = "export * as foo from './dep.js';" },
+        .{ .path = "two.js", .source = "export * as foo from './dep.js';" },
+        .{ .path = "dep.js", .source = "export var marker = 1;" },
+    });
+
+    try evaluateModuleWithFixtures(
+        \\import * as ns from "./barrel.js";
+        \\if ("foo" in ns) throw new Error("distinct ordinary bindings stayed visible");
+    , &.{
+        .{ .path = "barrel.js", .source = "export * from './one.js'; export * from './two.js';" },
+        .{ .path = "one.js", .source = "export var foo = 1;" },
+        .{ .path = "two.js", .source = "export var foo = 1;" },
+    });
+
+    try evaluateModuleWithFixtures(
+        \\import { foo } from "./barrel.js";
+        \\if (foo !== 2) throw new Error("bad imported re-export");
+    , &.{
+        .{ .path = "barrel.js", .source = "export * from './direct.js'; export * from './via-import.js';" },
+        .{ .path = "direct.js", .source = "export { foo } from './dep.js';" },
+        .{ .path = "via-import.js", .source = "import { foo } from './dep.js'; export { foo };" },
+        .{ .path = "dep.js", .source = "export const foo = 2;" },
     });
 }
 

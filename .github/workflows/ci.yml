@@ -102,7 +102,7 @@ jobs:
   # off as the default). Runs EVERY allowlist case under `parallel_js` + TSan,
   # each in its OWN process: per-case isolation sidesteps the cumulative-load OOM
   # of a single all-in-one-process TSan run (TSan shadow memory grows across the
-  # whole 209-case allowlist). Sharded 4 ways so the ~5h serial sweep fits the
+  # whole allowlist). Sharded 4 ways so the ~5h serial sweep fits the
   # runner time limit. Both *named* no-GIL frontier races are now closed — the
   # api/blocking-gate settlement race (re-derived its GIL-specific assertion) and
   # the semantics-batch StringHashMap-grow panic (accessor-snapshot in seal/freeze
