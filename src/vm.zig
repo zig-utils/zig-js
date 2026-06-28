@@ -939,9 +939,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
 
-    const args_obj = try vm.newArray(); // generators are never arrow functions
-    for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
-    try genv.put("arguments", args_obj);
+    try genv.put("arguments", try vm.createArgumentsObject(func, args, genv));
 
     const bound_this = try bindThisForCall(vm, func, this_val);
 
@@ -1391,9 +1389,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
         return vm.throwError("TypeError", "async generator body uses syntax not yet supported by the VM");
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
-    const args_obj = try vm.newArray();
-    for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
-    try genv.put("arguments", args_obj);
+    try genv.put("arguments", try vm.createArgumentsObject(func, args, genv));
     const saved_env = vm.env;
     vm.env = genv;
     defer vm.env = saved_env;

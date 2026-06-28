@@ -9421,7 +9421,19 @@ pub const Interpreter = struct {
                 if (o.is_set or o.is_map) return self.makeCursorIterator(v);
                 return self.throwError("TypeError", "value is not iterable");
             },
-            .string => return self.makeCursorIterator(v),
+            .string, .number, .boolean => {
+                if (self.symbolIteratorKey()) |ik| {
+                    const itfn = try self.getProperty(v, ik);
+                    if (!itfn.isUndefined() and !itfn.isNull()) {
+                        if (itfn.isObject() and itfn.asObj().isCallableObject())
+                            return try self.callValueWithThis(itfn, &.{}, v);
+                        return self.throwError("TypeError", "value is not iterable");
+                    }
+                    return self.throwError("TypeError", "value is not iterable");
+                }
+                if (v.isString()) return self.makeCursorIterator(v);
+                return self.throwError("TypeError", "value is not iterable");
+            },
             else => return self.throwError("TypeError", "value is not iterable"),
         }
     }

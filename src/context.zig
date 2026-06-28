@@ -4537,6 +4537,17 @@ test "generators: yield* delegates to arrays, strings, and generators" {
         \\function* outer() { var r = yield* inner(); yield r; }
         \\var it = outer(); it.next(); it.next().value
     )).asNum());
+    // `yield*` uses GetIterator, so primitive delegates can inherit @@iterator.
+    try expectEvalStr("true,false",
+        \\var obj = { hit: true };
+        \\Boolean.prototype[Symbol.iterator] = function* () { yield this.valueOf(); };
+        \\function* g() {
+        \\  yield * 'hit' in obj;
+        \\  yield * 'miss' in obj;
+        \\}
+        \\var it = g();
+        \\String(it.next().value) + "," + String(it.next().value)
+    );
     // GetIterator captures the delegate iterator's `next` method once.
     try expectEvalStr("first,second:1",
         \\var gets = 0;
@@ -4554,6 +4565,21 @@ test "generators: yield* delegates to arrays, strings, and generators" {
         \\function* g() { return yield* obj; }
         \\var it = g();
         \\it.next().value + "," + it.next("sent").value + ":" + gets
+    );
+}
+
+test "generators: sloppy arguments object maps to parameters" {
+    try expectEvalStr("32,23,42",
+        \\function* g(a, b, c, d) {
+        \\  arguments[0] = 32;
+        \\  yield a;
+        \\  a = 23;
+        \\  yield arguments[0];
+        \\  b = 42;
+        \\  yield arguments[1];
+        \\}
+        \\var it = g(23, 17, 42, 0);
+        \\it.next().value + "," + it.next().value + "," + it.next().value
     );
 }
 
