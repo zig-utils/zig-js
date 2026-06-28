@@ -5866,24 +5866,14 @@ pub const Interpreter = struct {
     }
 
     /// `import(specifier [, options])` — returns a promise for the module
-    /// namespace. Per IfAbruptRejectPromise, evaluating/coercing the specifier
-    /// abruptly rejects the returned promise rather than throwing.
+    /// namespace. Abrupt evaluation of the specifier/options expressions throws
+    /// synchronously; later coercion/validation failures reject the promise.
     fn evalImportCall(self: *Interpreter, spec_node: *Node, options_node: ?*Node, phase: []const u8) EvalError!Value {
+        const specv = try self.eval(spec_node);
+        const optionsv: Value = if (options_node) |on| try self.eval(on) else Value.undef();
+
         const pobj = try promise.newPromise(self);
         const p = promise.promiseOf(Value.obj(pobj)).?;
-        // Evaluate specifier then options (their side effects are observable),
-        // routing any abrupt completion into a rejection.
-        const specv = self.eval(spec_node) catch {
-            try promise.reject(self, p, self.exception);
-            return Value.obj(pobj);
-        };
-        var optionsv: Value = Value.undef();
-        if (options_node) |on| {
-            optionsv = self.eval(on) catch {
-                try promise.reject(self, p, self.exception);
-                return Value.obj(pobj);
-            };
-        }
         const spec = self.toStringV(specv) catch {
             try promise.reject(self, p, self.exception);
             return Value.obj(pobj);

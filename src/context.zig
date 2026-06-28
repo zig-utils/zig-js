@@ -3669,6 +3669,25 @@ test "new import(...) is an early error" {
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("new Array(1, 2, 3).length")).asNum());
 }
 
+test "dynamic import expression evaluation abrupt completions throw synchronously" {
+    try expectEvalStr("1:0:1:0",
+        \\var specBefore = 0, specAfter = 0, optionsBefore = 0, optionsAfter = 0;
+        \\var obj = { get err() { throw new Error("specifier"); } };
+        \\function boom() { throw new Error("options"); }
+        \\try {
+        \\  specBefore += 1, import(obj.err), specAfter += 1;
+        \\} catch (e) {
+        \\  if (e.message !== "specifier") throw e;
+        \\}
+        \\try {
+        \\  optionsBefore += 1, import("", boom()), optionsAfter += 1;
+        \\} catch (e) {
+        \\  if (e.message !== "options") throw e;
+        \\}
+        \\specBefore + ":" + specAfter + ":" + optionsBefore + ":" + optionsAfter
+    );
+}
+
 test "delete of a private member is an early error" {
     try expectParseError("({}).#x");
     try expectParseError("class C { #x = 1; m() { delete this.#x; } }");
