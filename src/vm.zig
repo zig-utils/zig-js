@@ -361,9 +361,16 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // the object Environment Record (honoring `@@unscopables`) shadows
                 // the hoisted var binding, which is left untouched. Mirrors the
                 // tree-walker's `assignWithObject` capture. A bare `var x;` (b == 0)
-                // never redirects.
+                // never redirects or overwrites an existing binding; force
+                // definitions (b == 2, function declarations/internal temps) do.
                 const wo: ?*value.Object = if (inst.b == 1) try vm.assignWithObject(name) else null;
-                if (wo) |o| try vm.setMember(Value.obj(o), name, val) else try vm.globalDefine(name, val);
+                if (wo) |o| {
+                    try vm.setMember(Value.obj(o), name, val);
+                } else if (inst.b == 0 and vm.env.varScope().vars.contains(name)) {
+                    // `var f; function f(){}` preserves the hoisted function value.
+                } else {
+                    try vm.globalDefine(name, val);
+                }
             },
             .def_lex => {
                 const name = chunk.names.items[inst.a];
@@ -1184,11 +1191,6 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const chunk = func.async_chunk.?;
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
-    if (!func.is_arrow) {
-        const args_obj = try vm.newArray();
-        for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
-        try genv.put("arguments", args_obj);
-    }
     const bound_this = bindThisForCall(vm, func, this_val) catch |err| {
         if (err != error.Throw) return err;
         const result = try promise.newPromise(vm);
@@ -1220,6 +1222,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     // rejection, not propagate out of the call.
     const result = try promise.newPromise(vm);
     const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+    if (!func.is_arrow) try genv.put("arguments", try vm.createArgumentsObject(func, args, genv));
     vm.bindParams2(func.params, args, func.is_arrow) catch |err| {
         if (err != error.Throw) return err;
         const reason = vm.exception;

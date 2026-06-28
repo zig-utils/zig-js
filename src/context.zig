@@ -2938,6 +2938,19 @@ test "function name + length own properties" {
     try std.testing.expectEqual(@as(f64, 2), (try evalIn("function f(a, b, c) {} f.bind(null, 1).length")).asNum());
 }
 
+test "function declarations survive later bare var declarations" {
+    try expectEvalStr("function",
+        \\var f;
+        \\function f() {}
+        \\typeof f
+    );
+    try expectEvalStr("second",
+        \\function f() { return "first"; }
+        \\function f() { return "second"; }
+        \\f()
+    );
+}
+
 test "sloppy function calls bind this through the callee realm" {
     try std.testing.expect((try evalIn(
         \\var touchedNumber = Function("this.touched = true; return this;").call(1);
@@ -4769,6 +4782,21 @@ test "async/await: suspendable runtime with spec ordering" {
             \\});
         );
         try std.testing.expect((try ctx.evaluate("result")).asBool());
+    }
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var result = "";
+            \\async function f(a) {
+            \\  arguments[0] = 2;
+            \\  result += a;
+            \\  a = 3;
+            \\  result += ":" + arguments[0];
+            \\}
+            \\f(1);
+        );
+        try std.testing.expectEqualStrings("2:3", (try ctx.evaluate("result")).asStr());
     }
     try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).asBool());
     try std.testing.expect((try evalIn(

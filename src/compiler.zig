@@ -278,7 +278,21 @@ pub const Compiler = struct {
     /// Emit a definition of `name` (var/let/const/function decl) with its value
     /// already on the stack; consumes the value.
     fn emitDefine(self: *Compiler, name: []const u8) CompileError!void {
-        try self.emitDefineKind(name, .@"var", false);
+        try self.emitDefineForce(name);
+    }
+
+    fn emitDefineForce(self: *Compiler, name: []const u8) CompileError!void {
+        switch (self.resolve(name)) {
+            .local => |slot| {
+                _ = try self.chunk.emit(.store_local, slot);
+                _ = try self.chunk.emit(.pop, 0);
+            },
+            .upval => |u| {
+                _ = try self.chunk.emitAB(.store_upval, u.depth, u.slot);
+                _ = try self.chunk.emit(.pop, 0);
+            },
+            .global => _ = try self.chunk.emitAB(.def_var, try self.chunk.addName(name), 2),
+        }
     }
 
     /// `has_init` marks a `var x = init` (vs a bare `var x;`): only the
@@ -323,7 +337,7 @@ pub const Compiler = struct {
             .func_decl => |fnode| {
                 const fi = try self.compileFunction(fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
-                try self.emitDefine(fnode.name);
+                try self.emitDefineForce(fnode.name);
             },
             else => {},
         };
@@ -350,7 +364,7 @@ pub const Compiler = struct {
             .func_decl => |fnode| {
                 const fi = try self.compileFunction(fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
-                try self.emitDefine(fnode.name);
+                try self.emitDefineForce(fnode.name);
             },
             .return_stmt => |maybe| {
                 // A `return` lexically inside a `try`/`catch`/`finally` must run

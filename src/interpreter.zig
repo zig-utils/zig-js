@@ -4905,7 +4905,6 @@ pub const Interpreter = struct {
             }
             try call_env.put("arguments", args_obj);
         }
-
         // Bind parameters in `call_env` (so a default can reference earlier
         // params). A non-arrow parameter scope owns `arguments`, so a direct eval
         // in a default expression may not redeclare it (checked in evalFn).
@@ -5021,6 +5020,68 @@ pub const Interpreter = struct {
             else => {},
         }
         return false;
+    }
+
+    pub fn createArgumentsObject(self: *Interpreter, func: *Function, args: []const Value, call_env: *Environment) EvalError!Value {
+        const args_obj = try self.newArray();
+        args_obj.asObj().is_arguments = true;
+        // The arguments exotic object's [[Prototype]] is %Object.prototype%
+        // (not Array.prototype): it has no inherited array methods, and
+        // `arguments.toString()` is Object.prototype.toString -> "[object
+        // Arguments]". Index storage and for-of still use the `is_array` path.
+        if (self.objectProto()) |op| args_obj.asObj().proto = op;
+        // It does have an own @@iterator = %Array.prototype.values% (so
+        // `arguments[Symbol.iterator]()` yields an Array Iterator).
+        if (self.arrayProtoObj()) |ap| if (self.symbolIteratorKey()) |ik| {
+            if (ap.getOwn(ik)) |it| {
+                try args_obj.asObj().setOwn(self.arena, self.root_shape, ik, it);
+                try args_obj.asObj().setAttr(self.arena, ik, .{ .writable = true, .enumerable = false, .configurable = true });
+            }
+        };
+        try args_obj.asObj().setOwn(self.arena, self.root_shape, "length", Value.num(@floatFromInt(args.len)));
+        try args_obj.asObj().setAttr(self.arena, "length", .{ .writable = true, .enumerable = false, .configurable = true });
+        for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(self.arena), av);
+
+        // Strict mode's `arguments.callee` is a poison-pill accessor whose get
+        // and set are both `%ThrowTypeError%`. Non-simple sloppy formals also
+        // use an unmapped arguments object with the poison pill.
+        var non_simple_params = false;
+        for (func.params) |p| {
+            if (p.default != null or p.is_rest or p.pattern != null) {
+                non_simple_params = true;
+                break;
+            }
+        }
+        if (func.is_strict or non_simple_params) {
+            if (self.throwTypeError()) |tte| {
+                try args_obj.asObj().setAccessor(self.arena, "callee", Value.obj(tte), Value.obj(tte));
+                try args_obj.asObj().setAttr(self.arena, "callee", .{ .enumerable = false, .configurable = false });
+            }
+        } else if (func.obj) |fo| {
+            // A mapped (sloppy, simple-parameter) arguments object's `callee` is
+            // an own data property = the callee function itself.
+            try args_obj.asObj().setOwn(self.arena, self.root_shape, "callee", Value.obj(fo));
+            try args_obj.asObj().setAttr(self.arena, "callee", .{ .writable = true, .enumerable = false, .configurable = true });
+        }
+
+        // Mapped arguments [[ParameterMap]]: in sloppy mode with simple
+        // parameters, each in-range index aliases its parameter binding.
+        if (!func.is_strict and !non_simple_params and func.params.len > 0) {
+            const n = @min(args.len, func.params.len);
+            const names = try args_obj.asObj().argMapNamesAllocator(self.arena).alloc([]const u8, n);
+            for (names, 0..) |*nm, i| nm.* = func.params[i].name;
+            // A duplicated parameter name maps only its last index.
+            for (names, 0..) |nm, i| {
+                var j = i + 1;
+                while (j < n) : (j += 1) if (std.mem.eql(u8, nm, names[j])) {
+                    names[i] = "";
+                    break;
+                };
+            }
+            args_obj.asObj().arg_map_env = @ptrCast(call_env);
+            args_obj.asObj().arg_map_names = names;
+        }
+        return args_obj;
     }
 
     pub fn bindParams2(self: *Interpreter, params: []const ast.Param, args: []const Value, is_arrow: bool) EvalError!void {
