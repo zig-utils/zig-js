@@ -640,6 +640,10 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const l = stack.pop().?;
                 try stack.append(stack_alloc, Value.boolVal(try vm.instanceOf(l, r)));
             },
+            .private_in => {
+                const r = stack.pop().?;
+                try stack.append(stack_alloc, Value.boolVal(try vm.privateIn(chunk.names.items[inst.a], r)));
+            },
 
             .make_closure => try stack.append(stack_alloc, try makeClosure(vm, chunk.fns.items[inst.a], frame)),
             .call => {

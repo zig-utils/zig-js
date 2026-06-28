@@ -184,6 +184,7 @@ pub const Op = enum(u8) {
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
     set_index, // pop value, pop key, pop object -> push value (after set)
     instance_of, // pop rhs, pop lhs -> push (lhs instanceof rhs)
+    private_in, // operand a: private-name index; pop rhs object -> push (#name in rhs)
 
     // --- functions ---
     make_closure, // operand: fn-template index; push a Function value capturing env

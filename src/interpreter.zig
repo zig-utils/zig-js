@@ -2017,13 +2017,20 @@ pub const Interpreter = struct {
                         // If a `with` object owns the binding, get AND set go to it
                         // (even a self-deleting getter writes back to that object).
                         if (try self.assignWithObject(name)) |wo| {
-                            const old = try self.getProperty(Value.obj(wo), name);
+                            const old = blk_old: {
+                                if (!try self.hasPropertyResult(wo, name)) {
+                                    if (self.strict) return self.throwError("ReferenceError", name);
+                                    break :blk_old Value.undef();
+                                }
+                                break :blk_old try self.getProperty(Value.obj(wo), name);
+                            };
                             const rhs = try self.eval(oa.value);
                             const new = try self.applyBinary(oa.op, old, rhs);
                             // Object env record SetMutableBinding: in strict mode a
                             // binding the getter deleted no longer exists → ReferenceError.
-                            if (self.strict and !(try self.hasPropertyResult(wo, name)))
-                                return self.throwError("ReferenceError", "binding is no longer defined");
+                            if (!try self.hasPropertyResult(wo, name)) {
+                                if (self.strict) return self.throwError("ReferenceError", "binding is no longer defined");
+                            }
                             try self.setMember(Value.obj(wo), name, new);
                             break :blk new;
                         }
@@ -12214,26 +12221,25 @@ pub const Interpreter = struct {
         // evaluated as an ordinary value.
         if (op == .in_op and left_node.* == .identifier and value.isPrivateKey(left_node.identifier)) {
             const robj = try self.eval(right_node);
-            if (!robj.isObject())
-                return self.throwError("TypeError", "Cannot use 'in' to search for a private name in a non-object");
-            // Private elements are hidden from ordinary reflection, so look them
-            // up directly. A field is an own data slot; a method/accessor lives on
-            // the class prototype, so walk the prototype chain too.
-            const key = left_node.identifier;
-            var cur: ?*value.Object = robj.asObj();
-            var has = false;
-            while (cur) |c| {
-                if (c.getOwn(key) != null or c.getAccessor(key) != null) {
-                    has = true;
-                    break;
-                }
-                cur = c.protoAtomic();
-            }
-            return Value.boolVal(has);
+            return Value.boolVal(try self.privateIn(left_node.identifier, robj));
         }
         const l = try self.eval(left_node);
         const r = try self.eval(right_node);
         return self.applyBinary(op, l, r);
+    }
+
+    pub fn privateIn(self: *Interpreter, key: []const u8, robj: Value) EvalError!bool {
+        if (!robj.isObject())
+            return self.throwError("TypeError", "Cannot use 'in' to search for a private name in a non-object");
+        // Private elements are hidden from ordinary reflection, so look them up
+        // directly. A field is an own data slot; a method/accessor lives on the
+        // class prototype, so walk the prototype chain too.
+        var cur: ?*value.Object = robj.asObj();
+        while (cur) |c| {
+            if (c.getOwn(key) != null or c.getAccessor(key) != null) return true;
+            cur = c.protoAtomic();
+        }
+        return false;
     }
 
     /// Apply a binary operator to two already-evaluated operands. Shared by the

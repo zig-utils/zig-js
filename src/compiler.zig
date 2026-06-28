@@ -21,7 +21,8 @@ const bc = @import("bytecode.zig");
 
 const Node = ast.Node;
 const Chunk = bc.Chunk;
-const Value = @import("value.zig").Value;
+const value_mod = @import("value.zig");
+const Value = value_mod.Value;
 
 pub const CompileError = error{ Unsupported, OutOfMemory };
 
@@ -1010,6 +1011,11 @@ pub const Compiler = struct {
                     .shr => .shr,
                     .ushr => .ushr,
                 };
+                if (b.op == .in_op and b.left.* == .identifier and value_mod.isPrivateKey(b.left.identifier)) {
+                    try self.compileExpr(b.right);
+                    _ = try self.chunk.emit(.private_in, try self.chunk.addName(b.left.identifier));
+                    return;
+                }
                 try self.compileExpr(b.left);
                 try self.compileExpr(b.right);
                 _ = try self.chunk.emit(op, 0);

@@ -4582,6 +4582,38 @@ test "generators: class computed names can yield" {
     );
 }
 
+test "generators and async functions: private-in RHS can suspend" {
+    try std.testing.expect((try evalIn(
+        \\class C {
+        \\  #x;
+        \\  static *g() { return #x in (yield); }
+        \\}
+        \\var it = C.g();
+        \\it.next();
+        \\var it2 = C.g();
+        \\it2.next();
+        \\it.next(new C()).value === true && it2.next({}).value === false
+    )).asBool());
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var out = "";
+            \\class C {
+            \\  #x;
+            \\  static async has(value) { return #x in await value; }
+            \\}
+            \\C.has(new C()).then(function(v) {
+            \\  out += v ? "yes" : "no";
+            \\  return C.has({});
+            \\}).then(function(v) {
+            \\  out += v ? ":yes" : ":no";
+            \\});
+        );
+        try std.testing.expectEqualStrings("yes:no", (try ctx.evaluate("out")).asStr());
+    }
+}
+
 test "generators: BigInt literal yields feed BigInt typed arrays" {
     try std.testing.expect((try evalIn(
         \\function* g() { yield 7n; yield 42n; }
