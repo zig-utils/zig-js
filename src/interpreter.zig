@@ -28409,7 +28409,7 @@ fn constrainInvalidLeapMonthCode(cal: []const u8, year: i64, max_month: u8, mc: 
         return if (mc.month == 5 and mc.month < max_month) mc.month + 1 else null;
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
         return calMonthFromCodeMaybe(cal, year, .{ .month = mc.month, .leap = false, .iso_suitable = mc.iso_suitable });
-    return @min(mc.month, max_month);
+    return null;
 }
 
 /// Whether a date-bearing Temporal value uses the Gregorian calendar (which, for
@@ -28496,10 +28496,8 @@ fn bagIsoYear(self: *Interpreter, bag: Value, cal: []const u8) EvalError!?i64 {
     // fields; for iso8601 (and ids that collapse to it) era/eraYear are ignored,
     // exactly as the spec's iso8601 field list omits them.
     const has_era = calEraOf(cal, 0, 1, 1).era != null;
-    const raw_ev = try self.getProperty(bag, "era");
-    const raw_eyv = try self.getProperty(bag, "eraYear");
-    const ev = if (has_era) raw_ev else Value.undef();
-    const eyv = if (has_era) raw_eyv else Value.undef();
+    const ev = if (has_era) try self.getProperty(bag, "era") else Value.undef();
+    const eyv = if (has_era) try self.getProperty(bag, "eraYear") else Value.undef();
     var from_era: ?i64 = null;
     if (!ev.isUndefined() or !eyv.isUndefined()) {
         if (ev.isUndefined() or eyv.isUndefined())
@@ -28722,7 +28720,7 @@ fn isTemporalIsoString(self: *Interpreter, s: []const u8) bool {
     const ann = stripTemporalAnnotations(self, s) catch return false;
     const b = ann.body;
     if (b.len == 0) return false;
-    if (parseTemporalBody(self, b)) |_| return true else |_| {}
+    if (parseTemporalBody(self, b, true)) |_| return true else |_| {}
     // Bare time (leading 'T' designator or "HH:MM").
     if (b[0] == 'T' or b[0] == 't')
         return b.len >= 3 and std.ascii.isDigit(b[1]) and std.ascii.isDigit(b[2]);
@@ -28898,7 +28896,7 @@ const TBody = struct {
 /// The whole input must be consumed; a fraction is permitted only on seconds;
 /// a negative six-digit zero year is rejected. (Date separators are required, as
 /// in the strings the engine already accepts.)
-fn parseTemporalBody(self: *Interpreter, s: []const u8) EvalError!TBody {
+fn parseTemporalBody(self: *Interpreter, s: []const u8, enforce_range: bool) EvalError!TBody {
     var i: usize = 0;
     var neg = false;
     var has_sign = false;
@@ -28933,7 +28931,10 @@ fn parseTemporalBody(self: *Interpreter, s: []const u8) EvalError!TBody {
         d = twoDigits(s, i + 2) orelse return self.throwError("RangeError", "invalid ISO date");
         i += 4;
     }
-    try checkIsoDate(self, @floatFromInt(y), @floatFromInt(mo), @floatFromInt(d));
+    if (mo < 1 or mo > 12) return self.throwError("RangeError", "month out of range");
+    const dim = isoDaysInMonth(y, mo);
+    if (d < 1 or d > dim) return self.throwError("RangeError", "day out of range");
+    if (enforce_range) try checkIsoDate(self, @floatFromInt(y), @floatFromInt(mo), @floatFromInt(d));
     var out: TBody = .{ .y = y, .mo = mo, .d = d };
     // Optional time.
     if (i < s.len and (s[i] == 'T' or s[i] == 't' or s[i] == ' ')) {
@@ -29048,7 +29049,7 @@ fn parseOffset(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalEr
 /// a UTC ("Z") designator (which would make it an exact-time string).
 fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
     const ann = try stripTemporalAnnotations(self, s_in);
-    const b = try parseTemporalBody(self, ann.body);
+    const b = try parseTemporalBody(self, ann.body, true);
     if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainDate");
     const cal = if (ann.cal) |c| canonCalendarId(self, c) else "iso8601";
     const cd = calendarDateFromIso(cal, b.y, b.mo, b.d);
@@ -29063,7 +29064,7 @@ const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, 
 /// that forbid an exact-time string check `.z`/`.has_offset` themselves.
 fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
     const ann = try stripTemporalAnnotations(self, s_in);
-    const b = try parseTemporalBody(self, ann.body);
+    const b = try parseTemporalBody(self, ann.body, true);
     const cal = if (ann.cal) |c| canonCalendarId(self, c) else "iso8601";
     const cd = calendarDateFromIso(cal, b.y, b.mo, b.d);
     const epoch_days = tDaysFromCivil(b.y, b.mo, b.d);
@@ -29639,6 +29640,7 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
         const cal = if (ann.cal) |c| canonCalendarId(self, c) else "iso8601";
         const s = ann.body;
         if (s.len == 7 and s[4] == '-' and std.ascii.isDigit(s[0])) {
+            if (!std.mem.eql(u8, cal, "iso8601")) return self.throwError("RangeError", "calendar annotation requires a full ISO date");
             const y = std.fmt.parseInt(i64, s[0..4], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
             const m = std.fmt.parseInt(u8, s[5..7], 10) catch return self.throwError("RangeError", "invalid ISO month");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
@@ -29646,6 +29648,7 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             return .{ .y = y, .m = m, .cal = cal };
         }
         if (s.len == 6 and std.ascii.isDigit(s[0]) and std.ascii.isDigit(s[1]) and std.ascii.isDigit(s[2]) and std.ascii.isDigit(s[3]) and std.ascii.isDigit(s[4]) and std.ascii.isDigit(s[5])) {
+            if (!std.mem.eql(u8, cal, "iso8601")) return self.throwError("RangeError", "calendar annotation requires a full ISO date");
             const y = std.fmt.parseInt(i64, s[0..4], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
             const m = std.fmt.parseInt(u8, s[4..6], 10) catch return self.throwError("RangeError", "invalid ISO month");
             if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
@@ -29653,6 +29656,7 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             return .{ .y = y, .m = m, .cal = cal };
         }
         if (s.len == 9 and (s[0] == '+' or s[0] == '-') and std.ascii.isDigit(s[1]) and std.ascii.isDigit(s[2]) and std.ascii.isDigit(s[3]) and std.ascii.isDigit(s[4]) and std.ascii.isDigit(s[5]) and std.ascii.isDigit(s[6]) and std.ascii.isDigit(s[7]) and std.ascii.isDigit(s[8])) {
+            if (!std.mem.eql(u8, cal, "iso8601")) return self.throwError("RangeError", "calendar annotation requires a full ISO date");
             const yraw = std.fmt.parseInt(i64, s[1..7], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
             if (s[0] == '-' and yraw == 0) return self.throwError("RangeError", "minus zero is not a valid extended year");
             const y = if (s[0] == '-') -yraw else yraw;
@@ -29662,6 +29666,7 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             return .{ .y = y, .m = m, .cal = cal };
         }
         if (s.len == 10 and (s[0] == '+' or s[0] == '-') and s[7] == '-') {
+            if (!std.mem.eql(u8, cal, "iso8601")) return self.throwError("RangeError", "calendar annotation requires a full ISO date");
             const yraw = std.fmt.parseInt(i64, s[1..7], 10) catch return self.throwError("RangeError", "invalid ISO year-month");
             if (s[0] == '-' and yraw == 0) return self.throwError("RangeError", "minus zero is not a valid extended year");
             const y = if (s[0] == '-') -yraw else yraw;
@@ -29670,14 +29675,14 @@ fn toYearMonthFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             try checkIsoYearMonth(self, y, m);
             return .{ .y = y, .m = m, .cal = cal };
         }
-        const b = try parseTemporalBody(self, s);
+        const b = try parseTemporalBody(self, s, false);
         if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainYearMonth");
         try checkIsoYearMonth(self, b.y, b.mo);
         if (!std.mem.eql(u8, cal, "iso8601")) {
             const cd = calendarDateFromIso(cal, b.y, b.mo, b.d);
             return .{ .y = cd.y, .m = cd.m, .d = cd.d, .cal = cal };
         }
-        return .{ .y = b.y, .m = b.mo, .d = b.d, .cal = cal };
+        return .{ .y = b.y, .m = b.mo, .d = 1, .cal = cal };
     }
     return self.throwError("TypeError", "cannot convert to a PlainYearMonth");
 }
@@ -30206,7 +30211,7 @@ fn toMonthDayFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Iso
                 try checkIsoDate(self, @floatFromInt(y), @floatFromInt(m), @floatFromInt(d));
             return monthDayFromIsoStringDate(self, cal, y, m, d);
         }
-        const b = try parseTemporalBody(self, ann.body);
+        const b = try parseTemporalBody(self, ann.body, true);
         if (b.z) return self.throwError("RangeError", "a UTC designator is not valid for a PlainMonthDay");
         return monthDayFromIsoStringDate(self, cal, b.y, b.mo, b.d);
     }
@@ -31007,7 +31012,7 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
             if (i != s.len) return self.throwError("RangeError", "trailing characters in ISO time");
         } else if (s.len >= 10 and s[4] == '-' and s[7] == '-') {
             // A full date-time string: parse it and take the time portion.
-            tb = try parseTemporalBody(self, s);
+            tb = try parseTemporalBody(self, s, true);
             if (!tb.has_time) return self.throwError("RangeError", "PlainTime string has no time component");
         } else {
             var i: usize = 0;
@@ -32187,7 +32192,7 @@ fn parseTimeZone(self: *Interpreter, s: []const u8) EvalError!TimeZone {
     // annotation is used; e.g. "-000000-..." is invalid even with "[UTC]".
     if (std.ascii.isDigit(s[0]) or ((s[0] == '+' or s[0] == '-') and std.mem.indexOfScalar(u8, s, 'T') != null)) {
         const ann = try stripTemporalAnnotations(self, s);
-        const b = try parseTemporalBody(self, ann.body);
+        const b = try parseTemporalBody(self, ann.body, true);
         if (ann.has_tz) {
             if (try timeZoneAnnotation(self, s)) |tz| return tz;
         }
