@@ -32908,6 +32908,7 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 }
 
 fn zdtMake(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i64) EvalError!Value {
+    try checkInstantEpochNs(self, epoch_ns);
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
     o.temporal.?.epoch_ns = epoch_ns;
     o.temporal.?.tz_name = tz_name;
@@ -32916,6 +32917,7 @@ fn zdtMake(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i
 }
 
 fn zdtMakeWithCalendar(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i64, calendar: []const u8) EvalError!Value {
+    try checkInstantEpochNs(self, epoch_ns);
     const actual_offset = timeZoneOffsetAtEpoch(tz_name, epoch_ns, tz_offset);
     const v = try zdtMake(self, epoch_ns, tz_name, actual_offset);
     const t = v.asObj().temporal.?;
