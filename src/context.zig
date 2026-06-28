@@ -4825,6 +4825,44 @@ test "async generators: yield* captures sync iterator next once" {
     try std.testing.expectEqualStrings("first:false|done:true:1", (try ctx.evaluate("out")).asStr());
 }
 
+test "async generators: yield* awaits return resume value before delegate return lookup" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var actual = [];
+        \\var asyncIter = {
+        \\  [Symbol.asyncIterator]() {
+        \\    return this;
+        \\  },
+        \\  next() {
+        \\    return { done: false };
+        \\  },
+        \\  get return() {
+        \\    actual.push("get return");
+        \\  }
+        \\};
+        \\async function* g() {
+        \\  actual.push("start");
+        \\  yield* asyncIter;
+        \\}
+        \\Promise.resolve()
+        \\  .then(function() { actual.push("tick 1"); })
+        \\  .then(function() { actual.push("tick 2"); })
+        \\  .then(function() { actual.push("tick 3"); });
+        \\var it = g();
+        \\it.next();
+        \\it.return({
+        \\  get then() {
+        \\    actual.push("get then");
+        \\  }
+        \\});
+    );
+    try std.testing.expectEqualStrings(
+        "start|tick 1|get then|tick 2|get return|get then|tick 3",
+        (try ctx.evaluate("actual.join('|')")).asStr(),
+    );
+}
+
 test "class static block rejects arguments in nested computed class names" {
     try expectParseError(
         \\class C {

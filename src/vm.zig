@@ -1447,7 +1447,7 @@ pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKin
     return Value.obj(rp);
 }
 
-const AgStep = union(enum) { awaited: Value, yielded: Value, returned: Value, threw: Value };
+const AgStep = union(enum) { awaited: Value, yielded: Value, returned: Value, returned_await: Value, threw: Value };
 
 /// Resume the async-generator body once and report why it stopped.
 fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!AgStep {
@@ -1482,7 +1482,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
                     try g.exec.stack.append(g.stackAllocator(vm.arena), val);
                     try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@intFromEnum(Completion.ret))));
                     g.exec.ip = fpc;
-                } else return .{ .returned = val };
+                } else return .{ .returned_await = val };
             },
         }
     } else switch (kind) {
@@ -1491,7 +1491,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
         .send => {},
         .return_ => {
             g.done = true;
-            return .{ .returned = val };
+            return .{ .returned_await = val };
         },
         .throw_ => {
             g.done = true;
@@ -1576,19 +1576,28 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
     const front = front_req.result;
     switch (step) {
         .awaited => |awaited| {
-            const ap = try promise.newPromise(vm);
-            try promise.resolve(vm, @ptrCast(@alignCast(ap.promise.?)), awaited);
+            const wrapped = interp.promiseResolveValue(vm, awaited) catch |err| {
+                if (err != error.Throw) return err;
+                const reason = vm.exception;
+                vm.exception = Value.undef();
+                return agStep(vm, g, .throw_, reason);
+            };
             const onf = try gc_mod.allocObj(vm.arena);
             onf.* = .{ .native = agOnFulfill, .private_data = @ptrCast(g) };
             const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agOnReject, .private_data = @ptrCast(g) };
-            _ = try promise.then(vm, @ptrCast(@alignCast(ap.promise.?)), Value.obj(onf), Value.obj(onr));
+            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
         },
         .yielded => |v| {
             try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, false));
             try agRemoveFrontAndContinue(vm, g);
         },
         .returned => |v| {
+            g.done = true;
+            try promise.resolve(vm, @ptrCast(@alignCast(front.promise.?)), try makeIterResult(vm, v, true));
+            try agRemoveFrontAndContinue(vm, g);
+        },
+        .returned_await => |v| {
             // AsyncGeneratorAwaitReturn: await the return value, then resolve the
             // request as a done result (the front request stays queued until the
             // await callback settles it).

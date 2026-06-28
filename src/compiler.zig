@@ -359,10 +359,16 @@ pub const Compiler = struct {
                 // completion, and returns once they finish (only reachable inside
                 // a generator, since compileTry is generator-only).
                 if (self.finally_depth > 0) {
-                    if (maybe) |e| try self.compileExpr(e) else _ = try self.chunk.emit(.load_undefined, 0);
+                    if (maybe) |e| {
+                        try self.compileExpr(e);
+                        if (self.in_generator and self.in_async) _ = try self.chunk.emit(.await_op, 0);
+                    } else {
+                        _ = try self.chunk.emit(.load_undefined, 0);
+                    }
                     _ = try self.chunk.emit(.abrupt_return, 0);
                 } else if (maybe) |e| {
                     try self.compileExpr(e);
+                    if (self.in_generator and self.in_async) _ = try self.chunk.emit(.await_op, 0);
                     _ = try self.chunk.emit(.ret, 0);
                 } else {
                     _ = try self.chunk.emit(.ret_undef, 0);
@@ -1484,15 +1490,15 @@ pub const Compiler = struct {
         // --- yield, then resume with [recv_v, recv_k] and loop ---
         // A *sync* generator's `yield*` yields the inner result object itself
         // (`GeneratorYield(innerResult)`), so its own `value`/`done` pass through
-        // to the consumer untouched. An *async* generator instead yields
-        // `Await(IteratorValue(innerResult))` (`AsyncGeneratorYield`), which the
-        // async driver re-wraps into a fresh `{ value, done:false }`.
+        // to the consumer untouched. An *async* generator yields IteratorValue
+        // directly here; AsyncFromSyncIteratorContinuation already unwraps sync
+        // iterator values, while a real async iterator's yielded promise value
+        // must not be unwrapped.
         ch.patchToHere(to_yield);
         ch.patchToHere(to_return_yield);
         if (async_d) {
             try self.emitLoad(r);
             _ = try ch.emit(.get_prop, value_n);
-            _ = try ch.emit(.await_op, 0); // AsyncGeneratorYield awaits before yielding
         } else {
             try self.emitLoad(r); // yield the inner result object as-is
         }
@@ -1501,6 +1507,15 @@ pub const Compiler = struct {
         _ = try ch.emit(.pop, 0);
         try self.emitStore(recv_v);
         _ = try ch.emit(.pop, 0);
+        if (async_d) {
+            // AsyncGeneratorYield resumes through
+            // AsyncGeneratorUnwrapYieldResumption, which awaits the completion
+            // value before yield* forwards it to next/throw/return handling.
+            try self.emitLoad(recv_v);
+            _ = try ch.emit(.await_op, 0);
+            try self.emitStore(recv_v);
+            _ = try ch.emit(.pop, 0);
+        }
         _ = try ch.emit(.jump, @intCast(top));
 
         // yield* evaluates to the final `r.value` when the inner iterator is done.
