@@ -156,6 +156,37 @@ fn stmtCanEscapeAbruptly(node: *const ast.Node) bool {
     };
 }
 
+fn stmtHasDisposableDecl(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .var_decl => |d| d.dispose != 0,
+        .decl_group => |stmts| stmtListHasDisposableDecl(stmts),
+        else => false,
+    };
+}
+
+fn stmtListHasDisposableDecl(stmts: []*Node) bool {
+    for (stmts) |s| if (stmtHasDisposableDecl(s)) return true;
+    return false;
+}
+
+fn stmtHasAwaitUsingDecl(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .var_decl => |d| d.dispose == 2,
+        .decl_group => |stmts| stmtListHasAwaitUsingDecl(stmts),
+        else => false,
+    };
+}
+
+fn stmtListHasAwaitUsingDecl(stmts: []*Node) bool {
+    for (stmts) |s| if (stmtHasAwaitUsingDecl(s)) return true;
+    return false;
+}
+
+fn stmtListCanEscapeAbruptly(stmts: []*Node) bool {
+    for (stmts) |s| if (stmtCanEscapeAbruptly(s)) return true;
+    return false;
+}
+
 /// Where a referenced name lives.
 const Resolved = union(enum) {
     local: u32, // slot in the current frame
@@ -392,7 +423,26 @@ pub const Compiler = struct {
                 try self.compileExpr(e);
                 _ = try self.chunk.emit(if (self.mode == .program) .set_acc else .pop, 0);
             },
-            .block => |stmts| try self.compileStmtList(stmts),
+            .block => |stmts| {
+                const disposable_scope = self.scope == null and stmtListHasDisposableDecl(stmts);
+                if (disposable_scope) {
+                    // This first VM block-disposal slice handles normal completion.
+                    // Abrupt exits stay on the tree-walker until they can unwind
+                    // block resources like `finally`.
+                    if (stmtListCanEscapeAbruptly(stmts)) return error.Unsupported;
+                    _ = try self.chunk.emit(.enter_block, 0);
+                }
+                try self.compileStmtList(stmts);
+                if (disposable_scope) {
+                    _ = try self.chunk.emit(.dispose_scope, 0);
+                    if (self.in_async and stmtListHasAwaitUsingDecl(stmts)) {
+                        _ = try self.chunk.emit(.load_undefined, 0);
+                        _ = try self.chunk.emit(.await_op, 0);
+                        _ = try self.chunk.emit(.pop, 0);
+                    }
+                    _ = try self.chunk.emit(.exit_block, 0);
+                }
+            },
             .decl_group => |stmts| try self.compileStmtList(stmts),
             .if_stmt => |s| try self.compileIf(s.cond, s.consequent, s.alternate),
             .while_stmt => |s| try self.compileWhile(s.cond, s.body),
@@ -584,6 +634,11 @@ pub const Compiler = struct {
     }
 
     fn compileFor(self: *Compiler, init_node: ?*Node, cond: ?*Node, update: ?*Node, body: *Node) CompileError!void {
+        const disposable_scope = self.scope == null and init_node != null and stmtHasDisposableDecl(init_node.?);
+        if (disposable_scope) {
+            if (stmtCanEscapeAbruptly(body)) return error.Unsupported;
+            _ = try self.chunk.emit(.enter_block, 0);
+        }
         if (init_node) |ini| {
             // The init clause is a declaration statement (var_decl, or a group of
             // them for multiple declarators) or a bare expression.
@@ -613,6 +668,15 @@ pub const Compiler = struct {
         for (loop.continues.items) |j| self.chunk.patchTo(j, update_at);
         for (loop.breaks.items) |j| self.chunk.patchToHere(j);
         self.popLoop();
+        if (disposable_scope) {
+            _ = try self.chunk.emit(.dispose_scope, 0);
+            if (self.in_async and init_node != null and stmtHasAwaitUsingDecl(init_node.?)) {
+                _ = try self.chunk.emit(.load_undefined, 0);
+                _ = try self.chunk.emit(.await_op, 0);
+                _ = try self.chunk.emit(.pop, 0);
+            }
+            _ = try self.chunk.emit(.exit_block, 0);
+        }
     }
 
     /// `for (x of iterable) body` — drive the iterator protocol via `iter_of` +

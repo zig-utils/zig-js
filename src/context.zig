@@ -4851,6 +4851,46 @@ test "async/await: suspendable runtime with spec ordering" {
         );
         try std.testing.expectEqualStrings("true|true,true,true,true,true", (try ctx.evaluate("result")).asStr());
     }
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var result = "";
+            \\var sameTurn = true;
+            \\async function f() {
+            \\  {
+            \\    result += sameTurn ? "pre" : "bad";
+            \\    await using _ = null;
+            \\    result += sameTurn ? ":body" : ":bad";
+            \\  }
+            \\  result += sameTurn ? ":bad" : ":after";
+            \\}
+            \\f();
+            \\sameTurn = false;
+        );
+        try std.testing.expectEqualStrings("pre:body:after", (try ctx.evaluate("result")).asStr());
+    }
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var result = "";
+            \\var outer = { [Symbol.dispose]() { result += "O"; } };
+            \\var inner = { [Symbol.dispose]() { result += "I"; } };
+            \\async function f() {
+            \\  {
+            \\    await using x = outer;
+            \\    var i = 0;
+            \\    for (await using x = inner; i < 1; i++) {
+            \\      result += x === inner ? "inner" : "bad";
+            \\    }
+            \\    result += x === outer ? "outer" : "bad";
+            \\  }
+            \\}
+            \\f();
+        );
+        try std.testing.expectEqualStrings("innerIouterO", (try ctx.evaluate("result")).asStr());
+    }
 }
 
 test "async generators: yield* captures sync iterator next once" {

@@ -174,6 +174,9 @@ pub const Op = enum(u8) {
     get_prop, // operand a: name index; pop object -> push object[name]
     super_get, // operand a: name index; push super.[name] (home_object.proto[name], receiver = this)
     super_get_index, // pop key; push super[key] (home_object.proto[key], receiver = this)
+    enter_block, // push a declarative block Environment Record onto vm.env
+    exit_block, // pop the innermost block/with environment off vm.env
+    dispose_scope, // DisposeResources for the current Environment Record
     enter_with, // pop object; push an object Environment Record (with_object = ToObject(it)) onto vm.env
     exit_with, // pop the innermost with/block environment off vm.env (restore its parent)
     make_regex, // operands a: pattern name index, b: flags name index; push a fresh RegExp object

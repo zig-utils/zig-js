@@ -578,6 +578,24 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
                 try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), try propKey(vm, key), vm.this_value));
             },
+            .enter_block => {
+                const benv = try gc_mod.allocEnv(vm.arena);
+                vm.initEnvironment(benv, vm.env, false);
+                vm.env = benv;
+                if (gen) |g| g.env = benv;
+            },
+            .exit_block => {
+                vm.env = vm.env.parent.?;
+                if (gen) |g| g.env = vm.env;
+            },
+            .dispose_scope => {
+                if (vm.env.disposables.items.len > 0) {
+                    if (try vm.disposeScope(vm.env, null)) |err| {
+                        vm.exception = err;
+                        return error.Throw;
+                    }
+                }
+            },
             .enter_with => {
                 // `with (obj)`: push an object Environment Record. ToObject(obj)
                 // boxes a primitive; null/undefined throw (only those, not every
@@ -587,8 +605,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 vm.initEnvironment(wenv, vm.env, false);
                 wenv.with_object = obj;
                 vm.env = wenv;
+                if (gen) |g| g.env = wenv;
             },
-            .exit_with => vm.env = vm.env.parent.?,
+            .exit_with => {
+                vm.env = vm.env.parent.?;
+                if (gen) |g| g.env = vm.env;
+            },
             .make_regex => {
                 // A regex literal is a fresh RegExp object on each evaluation.
                 const pattern = chunk.names.items[inst.a];
