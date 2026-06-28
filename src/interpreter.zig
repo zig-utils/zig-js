@@ -2427,7 +2427,7 @@ pub const Interpreter = struct {
                         // (and its own name, when present, for self-reference).
                         .func_decl => |fnode| try self.makeFunction(fnode, self.env),
                         .class_expr => |c| try self.evalClass(
-                            if (e.default_name.len > 0) c.name else "default",
+                            if (c.name.len > 0) c.name else "default",
                             c.superclass,
                             c.members,
                             c.source,

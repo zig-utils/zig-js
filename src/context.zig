@@ -1957,6 +1957,15 @@ test "modules keep self-imported default expressions in TDZ" {
     , &.{});
 }
 
+test "modules initialize parenthesized named default class expressions" {
+    try evaluateSelfModule(
+        \\export default (class cName { valueOf() { return 45; } });
+        \\import C from "./entry.js";
+        \\if (new C().valueOf() !== 45) throw new Error("bad default class value");
+        \\if (C.name !== "cName") throw new Error(C.name);
+    );
+}
+
 test "modules omit ambiguous star exports from namespace objects" {
     try evaluateModuleWithFixtures(
         \\import * as ns from "./barrel.js";
