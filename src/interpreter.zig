@@ -28372,9 +28372,11 @@ fn calMonthFromCode(self: *Interpreter, cal: []const u8, year: i64, mc: MonthCod
     return calMonthFromCodeMaybe(cal, year, mc) orelse self.throwError("RangeError", "bad monthCode");
 }
 
-fn constrainInvalidLeapMonthCode(cal: []const u8, max_month: u8, mc: MonthCodeInfo) ?u8 {
+fn constrainInvalidLeapMonthCode(cal: []const u8, year: i64, max_month: u8, mc: MonthCodeInfo) ?u8 {
     if (std.mem.eql(u8, cal, "hebrew"))
         return if (mc.month == 5 and mc.month < max_month) mc.month + 1 else null;
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
+        return calMonthFromCodeMaybe(cal, year, .{ .month = mc.month, .leap = false, .iso_suitable = mc.iso_suitable });
     return @min(mc.month, max_month);
 }
 
@@ -28750,7 +28752,7 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
                 const max_month = calMonthsInYear(bag_cal, cal_year.?);
                 const month_code = calMonthFromCodeMaybe(bag_cal, cal_year.?, info) orelse
                     if (constrain and info.leap)
-                        (constrainInvalidLeapMonthCode(bag_cal, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+                        (constrainInvalidLeapMonthCode(bag_cal, cal_year.?, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
                     else
                         return self.throwError("RangeError", "bad monthCode");
                 if (@as(i64, @intFromFloat(m)) != @as(i64, month_code))
@@ -28762,7 +28764,7 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
             const max_month = calMonthsInYear(bag_cal, cal_year.?);
             const month_code = calMonthFromCodeMaybe(bag_cal, cal_year.?, info) orelse
                 if (constrain and info.leap)
-                    (constrainInvalidLeapMonthCode(bag_cal, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+                    (constrainInvalidLeapMonthCode(bag_cal, cal_year.?, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
                 else
                     return self.throwError("RangeError", "bad monthCode");
             m = @floatFromInt(month_code);
@@ -29370,7 +29372,7 @@ fn withMonthField(self: *Interpreter, bag: Value, cal: []const u8, year: i64, cu
         const max_month = calMonthsInYear(cal, year);
         const month_code = calMonthFromCodeMaybe(cal, year, info) orelse
             if (constrain and info.leap)
-                (constrainInvalidLeapMonthCode(cal, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+                (constrainInvalidLeapMonthCode(cal, year, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
             else
                 return self.throwError("RangeError", "bad monthCode");
         const mv = try self.getProperty(bag, "month");
@@ -29395,7 +29397,7 @@ fn withCalendarMonthField(self: *Interpreter, bag: Value, cal: []const u8, year:
     const max_month = calMonthsInYear(cal, year);
     return calMonthFromCodeMaybe(cal, year, info) orelse
         if (constrain and info.leap)
-            (constrainInvalidLeapMonthCode(cal, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+            (constrainInvalidLeapMonthCode(cal, year, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
         else
             return self.throwError("RangeError", "bad monthCode");
 }
@@ -29563,11 +29565,11 @@ fn validateYearMonthRaw(self: *Interpreter, raw: RawYM, constrain: bool) EvalErr
     const max_month = calMonthsInYear(raw.cal, y);
     var m = raw.m orelse if (raw.month_code) |mc| blk: {
         if (calMonthFromCodeMaybe(raw.cal, y, mc)) |resolved| break :blk @as(i64, resolved);
-        if (constrain and mc.leap) if (constrainInvalidLeapMonthCode(raw.cal, max_month, mc)) |resolved| break :blk @as(i64, resolved);
+        if (constrain and mc.leap) if (constrainInvalidLeapMonthCode(raw.cal, y, max_month, mc)) |resolved| break :blk @as(i64, resolved);
         return self.throwError("RangeError", "bad monthCode");
     } else return self.throwError("TypeError", "PlainYearMonth fields require month or monthCode");
     if (raw.month_code) |mc| {
-        const code_month = calMonthFromCodeMaybe(raw.cal, y, mc) orelse if (constrain and mc.leap) (constrainInvalidLeapMonthCode(raw.cal, max_month, mc) orelse return self.throwError("RangeError", "bad monthCode")) else return self.throwError("RangeError", "bad monthCode");
+        const code_month = calMonthFromCodeMaybe(raw.cal, y, mc) orelse if (constrain and mc.leap) (constrainInvalidLeapMonthCode(raw.cal, y, max_month, mc) orelse return self.throwError("RangeError", "bad monthCode")) else return self.throwError("RangeError", "bad monthCode");
         if (m != @as(i64, code_month)) return self.throwError("RangeError", "month and monthCode mismatch");
     }
     if (constrain) {
