@@ -473,6 +473,9 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 // Object-literal property init is CreateDataPropertyOrThrow — a
                 // direct own data property, NOT [[Set]] (so an own `__proto__`
                 // shorthand/method/computed key does not trip the prototype setter).
+                if (Interpreter.funcOf(v)) |f| {
+                    if (f.is_method) f.home_object = obj.asObj();
+                }
                 try vm.setProp(obj.asObj(), chunk.names.items[inst.a], v);
             },
             .init_proto => {
@@ -488,6 +491,9 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const key = stack.pop().?;
                 const v = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
+                if (Interpreter.funcOf(v)) |f| {
+                    if (f.is_method) f.home_object = obj.asObj();
+                }
                 try vm.setProp(obj.asObj(), try propKey(vm, key), v); // CreateDataProperty (a computed `__proto__` is a normal own prop)
             },
             .init_spread => {
@@ -892,15 +898,31 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
     try genv.put("arguments", args_obj);
 
+    const bound_this = try bindThisForCall(vm, func, this_val);
+
     // Bind params into the generator's environment (handles default/rest/
     // destructuring). `bindParams` binds into `vm.env`, so point it at `genv`
-    // for the duration — defaults are evaluated now, at generator creation,
-    // per spec. Restore the caller's env afterward.
+    // for the duration. Defaults evaluate in the callee's this/super context, so
+    // a generator method parameter can read `super.x`. Restore the caller state
+    // afterward.
     const saved_env = vm.env;
+    const saved_this = vm.this_value;
+    const saved_home = vm.home_object;
+    const saved_super = vm.super_ctor;
+    const saved_this_initialized = vm.this_initialized;
     vm.env = genv;
-    defer vm.env = saved_env;
+    vm.this_value = bound_this;
+    vm.home_object = func.home_object;
+    vm.super_ctor = func.super_ctor;
+    vm.this_initialized = true;
+    defer {
+        vm.env = saved_env;
+        vm.this_value = saved_this;
+        vm.home_object = saved_home;
+        vm.super_ctor = saved_super;
+        vm.this_initialized = saved_this_initialized;
+    }
     try vm.bindParams2(func.params, args, func.is_arrow);
-    const bound_this = try bindThisForCall(vm, func, this_val);
 
     // A generator whose parameter list contains an expression (a default value)
     // gets a body variable environment distinct from the parameter environment, so
@@ -1753,6 +1775,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
         .local_count = tmpl.local_count,
+        .is_method = tmpl.is_method,
         // An arrow captures `this`/`new.target`/`super`/field-init context
         // LEXICALLY at creation — exactly like the tree-walker's makeFunction.
         .is_arrow = tmpl.is_arrow,

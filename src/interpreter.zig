@@ -3487,7 +3487,7 @@ pub const Interpreter = struct {
         return Value.obj(obj);
     }
 
-    fn funcOf(v: Value) ?*Function {
+    pub fn funcOf(v: Value) ?*Function {
         if (v.isObject()) {
             if (v.asObj().js_func) |e| return @ptrCast(@alignCast(e));
         }
@@ -3497,11 +3497,11 @@ pub const Interpreter = struct {
     pub fn jsFunctionHasOwnPrototypeSlot(o: *value.Object) bool {
         const erased = o.js_func orelse return false;
         const f: *Function = @ptrCast(@alignCast(erased));
-        // Ordinary functions expose a constructor `.prototype`; generator and
-        // async-generator functions expose one for the yielded iterator
-        // prototype. Arrows, concise methods/accessors, and plain async
-        // functions do not have an own `prototype` property.
-        return !f.is_method and !f.is_arrow and (!f.is_async or f.is_generator);
+        // Ordinary functions expose a constructor `.prototype`. Generator and
+        // async-generator functions, including concise methods, expose one for
+        // the yielded iterator prototype. Arrows, non-generator concise methods,
+        // accessors, and plain async functions do not.
+        return !f.is_arrow and (f.is_generator or (!f.is_method and !f.is_async));
     }
 
     /// `Function.prototype.toString`. A user function returns its exact captured

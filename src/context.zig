@@ -4549,6 +4549,17 @@ test "generators: BigInt literal yields feed BigInt typed arrays" {
     )).asBool());
 }
 
+test "generators: generator methods expose GeneratorPrototype-backed prototype" {
+    try std.testing.expect((try evalIn(
+        \\var GeneratorPrototype = Object.getPrototypeOf(function* () {}).prototype;
+        \\var method = { *method() {} }.method;
+        \\Object.getPrototypeOf(method.prototype) === GeneratorPrototype &&
+        \\Object.getOwnPropertyDescriptor(method, "prototype").writable === true &&
+        \\Object.getOwnPropertyDescriptor(method, "prototype").enumerable === false &&
+        \\Object.getOwnPropertyDescriptor(method, "prototype").configurable === false
+    )).asBool());
+}
+
 test "identifiers: unicode escapes decode to the canonical name" {
     // \uXXXX in an identifier resolves to the same name written literally.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("var \\u0061 = 1; a")).asNum());
@@ -4969,6 +4980,12 @@ test "generators with destructuring / default / rest parameters" {
         \\var o = { *m([a, b]) { yield a + b; } };
         \\o.m([10, 20]).next().value
     )).asNum());
+    // Generator method defaults evaluate with the method's super binding.
+    try std.testing.expect((try evalIn(
+        \\var o = { *m(a = super.toString) { yield a; } };
+        \\o.toString = null;
+        \\o.m().next().value === Object.prototype.toString
+    )).asBool());
 }
 
 test "Set/Map are iterable: for-of, spread, Array.from, destructuring" {
