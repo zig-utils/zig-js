@@ -232,6 +232,12 @@ pub const Context = struct {
     /// actually reclaimed while peers ran, rather than always falling back to
     /// quiescent collection.
     gc_par_collections: std.atomic.Value(u64) = .init(0),
+    /// Internal observability for the abort-safe mid-script parallel collector:
+    /// attempts count elected collector cycles; aborts count cycles that chose
+    /// not to sweep because root publication or heap stability did not converge.
+    /// These are test/profiling counters, not embedder API.
+    gc_par_attempts: std.atomic.Value(u64) = .init(0),
+    gc_par_aborts: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
     /// `async_waiters`, `c_api_handles`, `finalization_cleanup_jobs` — so the
     /// mid-script parallel collector can read them while peers mutate. Taken by
@@ -872,6 +878,7 @@ pub const Context = struct {
             self.publishParallelRoots(machine);
             return;
         }
+        _ = self.gc_par_attempts.fetchAdd(1, .monotonic);
         defer self.gc_par_collector.store(null, .release);
         self.driveParallelCollection(h, machine);
         // NOTE: `gc_par_request` is monotonic and is NOT reset here. Each cycle's
@@ -946,6 +953,7 @@ pub const Context = struct {
                     self.gc_scan_native_stack = true;
                     h.abortConcurrentMarkParallel();
                     self.gc_scan_native_stack = false;
+                    _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
                     return;
                 }
                 // Yield so peers get scheduled to reach their safepoints and
@@ -984,6 +992,7 @@ pub const Context = struct {
         self.gc_scan_native_stack = true;
         h.abortConcurrentMarkParallel();
         self.gc_scan_native_stack = false;
+        _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
     }
 
     pub fn queueFinalizationRegistryCleanup(self: *Context, registry: *value.Object) void {
@@ -7876,6 +7885,56 @@ test "parallel_js (M3): mid-script parallel collector reclaims garbage while thr
         if (ctx.gc_par_collections.load(.monotonic) > 0) break;
     }
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > 0);
+}
+
+test "parallel_js (M3): sync wait peer makes mid-script parallel GC abort safely" {
+    // A sync property-mode Atomics.wait peer is not a frozen `gc_parked` joiner:
+    // it periodically pumps tasks between short parks, so the collector must not
+    // trace it as a stable parked stack. Instead, at least one root-publication
+    // attempt should fail to converge and abort without sweeping; after the peer
+    // wakes, later cycles may legitimately finish.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    });
+    defer ctx.destroy();
+
+    const src =
+        \\(() => {
+        \\  const gate = { state: 0, ready: 0 };
+        \\  const waiter = new Thread(() => {
+        \\    Atomics.store(gate, 'ready', 1);
+        \\    Atomics.notify(gate, 'ready');
+        \\    return Atomics.wait(gate, 'state', 0, 2000);
+        \\  });
+        \\  while (Atomics.load(gate, 'ready') === 0)
+        \\    Atomics.wait(gate, 'ready', 0, 1);
+        \\  const keep = [];
+        \\  for (let round = 0; round < 12; round++) {
+        \\    for (let i = 0; i < 900; i++)
+        \\      keep.push({ round: round, i: i, nested: { v: i + round } });
+        \\    let spin = 0;
+        \\    for (let j = 0; j < 8000; j++) spin = (spin + j) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({ never: true });
+        \\  }
+        \\  Atomics.store(gate, 'state', 1);
+        \\  Atomics.notify(gate, 'state');
+        \\  const wr = waiter.join();
+        \\  if (wr !== 'ok' && wr !== 'timed-out') throw new Error('bad wait result: ' + wr);
+        \\  return keep.length;
+        \\})();
+    ;
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_aborts = ctx.gc_par_aborts.load(.monotonic);
+    const result = try ctx.evaluate(src);
+    try std.testing.expectEqual(@as(f64, 10800), result.asNum());
+    try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
+    try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
 }
 
 test "parallel_gc soak: sustained parallel allocation reclaims across rounds, no leak/UAF" {
