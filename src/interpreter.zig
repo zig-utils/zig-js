@@ -31050,10 +31050,21 @@ fn temporalInstantExtraEpochGetter(comptime div: i128) value.NativeFn {
 /// Coerce a value to an Instant's epoch nanoseconds (an Instant or an ISO
 /// instant string with a `Z`/offset).
 fn toInstantArg(self: *Interpreter, v: Value) EvalError!i128 {
-    if (tIsTemporal(v, .instant)) return v.asObj().temporal.?.epoch_ns;
-    if (tIsTemporal(v, .zoned_date_time)) return v.asObj().temporal.?.epoch_ns;
-    if (v.isString()) return parseInstantString(self, v.asStr());
-    return self.throwError("TypeError", "value is not an Instant");
+    const ns = if (tIsTemporal(v, .instant)) v.asObj().temporal.?.epoch_ns else if (tIsTemporal(v, .zoned_date_time)) v.asObj().temporal.?.epoch_ns else if (v.isString()) try parseInstantString(self, v.asStr()) else return self.throwError("TypeError", "value is not an Instant");
+    try checkInstantEpochNs(self, ns);
+    return ns;
+}
+
+fn checkInstantEpochNs(self: *Interpreter, ns: i128) EvalError!void {
+    if (ns < -max_temporal_instant_ns or ns > max_temporal_instant_ns)
+        return self.throwError("RangeError", "epoch nanoseconds out of range");
+}
+
+fn makeInstantFromEpochNs(self: *Interpreter, ns: i128) EvalError!*value.Object {
+    try checkInstantEpochNs(self, ns);
+    const o = try makeTemporal(self, .instant, "\x00T.Instant");
+    o.temporal.?.epoch_ns = ns;
+    return o;
 }
 
 /// Parse "YYYY-MM-DDTHH:MM:SS[.fff]Z|±HH:MM" to epoch nanoseconds.
@@ -31067,8 +31078,7 @@ fn temporalInstantFromFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const v = if (args.len > 0) args[0] else Value.undef();
     const ns = try toInstantArg(self, v);
-    const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = ns;
+    const o = try makeInstantFromEpochNs(self, ns);
     return Value.obj(o);
 }
 
@@ -31958,8 +31968,7 @@ fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Temporal.Instant requires 'new'");
     const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), false);
-    const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = bv.asObj().bigint;
+    const o = try makeInstantFromEpochNs(self, bv.asObj().bigint);
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -31975,6 +31984,29 @@ fn temporalInstantEpochGetter(comptime ms: bool) value.NativeFn {
             return self.makeBigInt(ns);
         }
     }.call;
+}
+
+fn appendInstantIsoUtcString(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), epoch_ns: i128, precision: TemporalStringPrecision) EvalError!void {
+    const rounded_epoch = roundNsForString(epoch_ns, precision);
+    const days = @divFloor(rounded_epoch, 86_400_000_000_000);
+    const c = tCivilFromDays(@intCast(days));
+    try isoYearStr(self, buf, c.y);
+    try buf.append(self.arena, '-');
+    try tfmtPad(self, buf, c.m, 2);
+    try buf.append(self.arena, '-');
+    try tfmtPad(self, buf, c.d, 2);
+    try buf.append(self.arena, 'T');
+    try appendIsoTimeFromNs(self, buf, rounded_epoch, precision);
+    try buf.append(self.arena, 'Z');
+}
+
+fn temporalInstantToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try appendInstantIsoUtcString(self, &buf, this.asObj().temporal.?.epoch_ns, .{});
+    return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
 fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -32018,16 +32050,17 @@ fn temporalInstantFromEpochFn(comptime unit_ns: i128) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = this;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const o = try makeTemporal(self, .instant, "\x00T.Instant");
+            var ns: i128 = 0;
             if (unit_ns == 1) {
                 const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), false);
-                o.temporal.?.epoch_ns = bv.asObj().bigint;
+                ns = bv.asObj().bigint;
             } else {
                 const n = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
                 const max_units: f64 = @floatFromInt(@divFloor(max_temporal_instant_ns, unit_ns));
                 if (!std.math.isFinite(n) or @trunc(n) != n or @abs(n) > max_units) return self.throwError("RangeError", "epoch value out of range");
-                o.temporal.?.epoch_ns = @as(i128, @intFromFloat(@trunc(n))) * unit_ns;
+                ns = @as(i128, @intFromFloat(@trunc(n))) * unit_ns;
             }
+            const o = try makeInstantFromEpochNs(self, ns);
             return Value.obj(o);
         }
     }.call;
@@ -33310,7 +33343,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalInstantToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalInstantToJSONFn);
         try setNative(a, rs, p, "add", 1, temporalInstantAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalInstantAddFn(-1));
         try setNative(a, rs, p, "until", 1, temporalInstantUntilFn(1));
