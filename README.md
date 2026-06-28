@@ -238,9 +238,10 @@ Remaining work is concentrated in production hardening rather than the core
 threading architecture:
 
 - **GC performance** - `zig build gc-profile` compares arena, explicit-GC,
-  no-GIL threaded GC, and `.gil = true` lifecycle/allocation costs; use it to
-  add an allocation fast path / nursery and reduce create/destroy overhead for
-  context-heavy embedders.
+  no-GIL threaded GC, and `.gil = true` lifecycle/allocation costs. GC cells now
+  allocate through a reusable size-class slab backing instead of one backing
+  allocator call per cell; keep using the profile to drive nursery/generational
+  work and context lifecycle reductions for create-per-task embedders.
 - **Parallel scaling** - `zig build threads-profile` compares the no-GIL
   default against `.gil = true` across independent compute, shared object
   properties, array append, typed-array Atomics, and lifecycle churn; use it to

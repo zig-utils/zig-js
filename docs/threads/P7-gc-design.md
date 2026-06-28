@@ -149,7 +149,10 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
 - **Allocation:** segregated free lists by size class over `mmap`/page-allocator
   blocks (e.g. 16 KiB). Small cells bump within a block; large cells get
   dedicated blocks. Per-`Kind` size is mostly fixed (`Object` is one size), so
-  size classes are few.
+  size classes are few. In zig-js this first ships as `Context.GcCellBacking`:
+  the `zig-gc` heap still sees a normal allocator, while 16-byte-aligned cell
+  slabs are recycled from 64 KiB size-class chunks and non-cell heap side storage
+  delegates unchanged.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron

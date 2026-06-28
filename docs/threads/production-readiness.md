@@ -45,12 +45,17 @@ set stays bounded across rounds.
 
 Known performance/maturity work:
 
-- Tight-loop block-scoped allocation is still pathological under the GC path
-  compared with arena bulk allocation. This needs a nursery/generational
-  strategy or an engine optimization for non-captured per-iteration bindings.
-- Context create/destroy is much more expensive than the arena model because
-  every GC cell has setup/teardown work. Long-lived contexts amortize this;
-  create-per-task embedders need either a faster lifecycle path or guidance.
+- GC cells now use `Context.GcCellBacking`, a reusable size-class slab backing
+  that recycles 16-byte-aligned cell allocations and delegates non-cell heap side
+  storage unchanged. This cuts the old one-general-allocator-call-per-cell
+  profile without changing the collector API.
+- Tight-loop block-scoped allocation is still slower under the GC path compared
+  with arena bulk allocation. This still needs a nursery/generational strategy
+  or an engine optimization for non-captured per-iteration bindings.
+- Context create/destroy remains more expensive than the arena model because
+  global setup and GC finalization still touch many cells. Long-lived contexts
+  amortize this; create-per-task embedders need either a faster lifecycle path or
+  guidance.
 - `zig build gc-profile` is the local baseline for those costs. It compares
   arena, explicit-GC, no-GIL threaded GC, and `.gil = true` contexts across
   create/destroy, object-heavy allocation, block-scoped `let` allocation, and
@@ -72,7 +77,7 @@ Known performance/maturity work:
   at 4 threads in the recorded checkpoint.
 
 Remaining: use the contention and GC profiles to drive targeted lock reductions,
-allocation fast paths, lifecycle pooling, or nursery/generational work.
+context lifecycle pooling, and nursery/generational work.
 
 ## 4. Embedder API
 

@@ -77,6 +77,165 @@ pub const LockedArena = struct {
     }
 };
 
+/// Reusable backing allocator for GC cells. `zig-gc` asks its backing allocator
+/// for one 16-byte-aligned slab per managed cell; routing every object through
+/// the page/general allocator made GC-mode object allocation and context teardown
+/// pay an OS/general-allocator round trip per cell. This allocator intercepts
+/// those fixed-shape cell slabs, serves them from size-class chunks, and recycles
+/// freed cells for later allocations/collections. Non-cell heap side storage
+/// (weak-slot arrays, address indexes, etc.) delegates to `inner` unchanged.
+pub const GcCellBacking = struct {
+    const bucket_count = 6;
+    const bucket_sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
+    const chunk_bytes: usize = 64 * 1024;
+    const FreeNode = extern struct {
+        next: ?*FreeNode,
+    };
+
+    inner: std.mem.Allocator,
+    parallel: bool = false,
+    lock: std.atomic.Value(u32) = .init(0),
+    chunks: std.ArrayListUnmanaged([]align(16) u8) = .empty,
+    free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
+
+    inline fn acquire(self: *GcCellBacking) void {
+        if (!self.parallel) return;
+        while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    }
+    inline fn unlock(self: *GcCellBacking) void {
+        if (self.parallel) self.lock.store(0, .release);
+    }
+
+    fn bucketIndex(len: usize, alignment: std.mem.Alignment) ?usize {
+        if (alignment != .@"16") return null;
+        inline for (bucket_sizes, 0..) |size, idx| {
+            if (len <= size) return idx;
+        }
+        return null;
+    }
+
+    fn addChunk(self: *GcCellBacking, idx: usize) bool {
+        const slot_size = bucket_sizes[idx];
+        const slots = @max(@as(usize, 1), chunk_bytes / slot_size);
+        const chunk_len = slots * slot_size;
+        const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
+        self.chunks.append(self.inner, chunk) catch {
+            self.inner.free(chunk);
+            return false;
+        };
+        var off: usize = 0;
+        while (off < chunk.len) : (off += slot_size) {
+            const node: *FreeNode = @ptrCast(@alignCast(chunk.ptr + off));
+            node.next = self.free_lists[idx];
+            self.free_lists[idx] = node;
+        }
+        return true;
+    }
+
+    fn ownsPtrLocked(self: *GcCellBacking, ptr: [*]u8) bool {
+        const addr = @intFromPtr(ptr);
+        for (self.chunks.items) |chunk| {
+            const start = @intFromPtr(chunk.ptr);
+            const end = start + chunk.len;
+            if (addr >= start and addr < end) return true;
+        }
+        return false;
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
+        if (bucketIndex(len, alignment)) |idx| {
+            self.acquire();
+            defer self.unlock();
+            if (self.free_lists[idx] == null and !self.addChunk(idx)) return null;
+            const node = self.free_lists[idx].?;
+            self.free_lists[idx] = node.next;
+            return @ptrCast(node);
+        }
+        self.acquire();
+        defer self.unlock();
+        return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
+    }
+
+    fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
+        if (bucketIndex(mem.len, alignment)) |idx| {
+            self.acquire();
+            defer self.unlock();
+            if (self.ownsPtrLocked(mem.ptr)) return new_len <= bucket_sizes[idx];
+        }
+        self.acquire();
+        defer self.unlock();
+        return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
+    }
+
+    fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
+        if (bucketIndex(mem.len, alignment)) |idx| {
+            self.acquire();
+            defer self.unlock();
+            if (self.ownsPtrLocked(mem.ptr)) {
+                if (new_len <= bucket_sizes[idx]) return mem.ptr;
+                return null;
+            }
+        }
+        self.acquire();
+        defer self.unlock();
+        return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
+    }
+
+    fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
+        if (bucketIndex(mem.len, alignment)) |idx| {
+            self.acquire();
+            defer self.unlock();
+            if (self.ownsPtrLocked(mem.ptr)) {
+                const node: *FreeNode = @ptrCast(@alignCast(mem.ptr));
+                node.next = self.free_lists[idx];
+                self.free_lists[idx] = node;
+                return;
+            }
+        }
+        self.acquire();
+        defer self.unlock();
+        self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+
+    pub fn allocator(self: *GcCellBacking) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    pub fn deinit(self: *GcCellBacking) void {
+        for (self.chunks.items) |chunk| self.inner.free(chunk);
+        self.chunks.deinit(self.inner);
+        self.free_lists = .{ null, null, null, null, null, null };
+    }
+};
+
+test "GC cell backing recycles aligned cell slabs and delegates side storage" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const cell = try a.alignedAlloc(u8, .@"16", 200);
+    const first_ptr = cell.ptr;
+    a.free(cell);
+    const reused = try a.alignedAlloc(u8, .@"16", 200);
+    try std.testing.expectEqual(first_ptr, reused.ptr);
+    a.free(reused);
+
+    const side = try a.alignedAlloc(u8, .@"8", 200);
+    try std.testing.expect(@intFromPtr(side.ptr) != @intFromPtr(first_ptr));
+    a.free(side);
+}
+
 /// An isolated engine instance — the homegrown analogue of a JSC
 /// Enable (or disable) the process-wide parallel/concurrent synchronization
 /// protocols as ONE unit, so they can never drift: Environment binding locks,
@@ -100,10 +259,11 @@ pub const Context = struct {
     /// (null otherwise → raw arena). Makes parallel shape/string/AST/binding
     /// allocation safe once the GIL is gone (#1). See `LockedArena`.
     locked_arena: ?*LockedArena = null,
-    /// Thread-safe wrapper over `gpa` used as the GC heap's cell backing under
-    /// `parallel_gc`, so multiple mutators can allocate cells concurrently. Freed
-    /// after `gc.deinit()` in `destroy`. Null unless `parallel_gc`.
-    gc_backing_lock: ?*LockedArena = null,
+    /// Reusable allocator used as the GC heap's cell backing. It recycles
+    /// per-cell slabs for allocation/lifecycle performance and becomes
+    /// internally locked under `parallel_gc`, so multiple mutators can allocate
+    /// cells concurrently. Freed after `gc.deinit()` in `destroy`.
+    gc_cell_backing: ?*GcCellBacking = null,
     /// A Context is single-thread-affine: every mutating entry point (evaluate,
     /// evaluateModule, the C API) must run on the thread that created it. The
     /// arena, environments, shapes, and microtask queue are unsynchronized by
@@ -417,16 +577,14 @@ pub const Context = struct {
             const bind = try gpa.create(GcBinding);
             bind.* = .{ .context = self };
             const h = try gpa.create(GcHeap);
-            // Under parallel_gc the cell backing must be thread-safe (multiple
-            // mutators allocate at once): wrap gpa in a lock and route every cell
-            // slab alloc/free through it, consistently for the heap's lifetime.
-            var cell_backing = gpa;
-            if (options.parallel_gc) {
-                const bl = try gpa.create(LockedArena);
-                bl.* = .{ .inner = gpa };
-                self.gc_backing_lock = bl;
-                cell_backing = bl.allocator();
-            }
+            // GC cells are individually collectable, but their allocation shape
+            // is regular: one 16-byte-aligned slab per cell. Use the reusable
+            // size-class backing for every GC mode. Under parallel_gc it locks
+            // internally, so multiple no-GIL mutators can allocate cells at once.
+            const cell_backing_state = try gpa.create(GcCellBacking);
+            cell_backing_state.* = .{ .inner = gpa, .parallel = options.parallel_gc };
+            self.gc_cell_backing = cell_backing_state;
+            const cell_backing = cell_backing_state.allocator();
             h.* = GcHeap.init(cell_backing, bind);
             if (options.parallel_gc) h.setParallel(true);
             // GC scratch (`mark_stack`/`barrier_buf`) is touched by both a
@@ -597,13 +755,14 @@ pub const Context = struct {
         // there when GC is enabled.
         self.finishConcurrentGCIfActive(); // join any marker before heap teardown
         if (self.gc) |h| {
-            h.deinit(); // frees cells via heap.backing (the gc_backing_lock wrapper under parallel_gc)
+            h.deinit(); // frees logical cells back into gc_cell_backing
             self.gpa.destroy(h);
             self.gc = null;
         }
-        if (self.gc_backing_lock) |bl| {
-            self.gpa.destroy(bl); // safe now: heap.deinit() is done using it
-            self.gc_backing_lock = null;
+        if (self.gc_cell_backing) |backing| {
+            backing.deinit(); // safe now: heap.deinit() is done using it
+            self.gpa.destroy(backing);
+            self.gc_cell_backing = null;
         }
         if (self.gc_binding) |b| {
             self.gpa.destroy(b);

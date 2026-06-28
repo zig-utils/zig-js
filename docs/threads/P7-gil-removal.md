@@ -142,12 +142,14 @@ is the execution-path GIL drop, specified next.
 The GC half of M3 is complete and the heap-mutation foundations for GIL removal
 are done and validated:
 
-- **Thread-safe allocation.** GC cell slabs: `zig-gc` `Heap.setParallel` (all-list
-  prepend + counters + born hand-off under `alloc_lock`). Arena (shapes, strings,
+- **Thread-safe allocation.** GC cell slabs: `Context.GcCellBacking` recycles
+  16-byte-aligned cell slabs from size-class chunks and locks internally under
+  no-GIL `parallel_gc`; `zig-gc` `Heap.setParallel` still serializes all-list
+  prepend + counters + born hand-off under `alloc_lock`. Arena (shapes, strings,
   AST, binding tables): `Context.LockedArena`, installed **before** the
   create-time arena is captured, so `root_shape`/`env` and `Shape.transition`
-  (which reuses the root shape's captured allocator) are thread-safe. Backing-store
-  accounting counters are atomic.
+  (which reuses the root shape's captured allocator) are thread-safe.
+  Backing-store accounting counters are atomic.
 - **Per-structure locks** (the object model + collections): `Object.property_lock`
   / `elements_lock`, `Shape.transition_lock`, `Environment.binding_lock`,
   `Promise.lock`; weak collections use isMarked-based clearing.
