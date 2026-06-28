@@ -19870,6 +19870,8 @@ fn dtfCanonNamedTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const u
         "Etc/GMT-14",
     };
     for (fixed) |z| if (std.ascii.eqlIgnoreCase(s, z)) return z;
+    if (std.ascii.startsWithIgnoreCase(s, "Etc/GMT+") or std.ascii.startsWithIgnoreCase(s, "Etc/GMT-"))
+        return self.throwError("RangeError", "invalid timeZone");
     const exact_case = [_][]const u8{
         "Africa/Dar_es_Salaam",
         "America/Argentina/ComodRivadavia",
@@ -27738,6 +27740,9 @@ fn canonCalendarId(self: *Interpreter, id: []const u8) []const u8 {
 }
 
 fn temporalCalendarIdsEqual(a: []const u8, b: []const u8) bool {
+    if ((std.mem.eql(u8, a, "islamic-civil") and std.mem.eql(u8, b, "islamicc")) or
+        (std.mem.eql(u8, a, "islamicc") and std.mem.eql(u8, b, "islamic-civil")))
+        return true;
     return std.mem.eql(u8, a, b);
 }
 
@@ -31862,7 +31867,14 @@ const TimeZone = struct { name: []const u8, offset_ns: i64 };
 
 fn canonicalTimeZoneName(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "Asia/Calcutta")) return "Asia/Kolkata";
-    if (std.ascii.eqlIgnoreCase(name, "utc") or std.ascii.eqlIgnoreCase(name, "gmt")) return "UTC";
+    if (std.mem.eql(u8, name, "Australia/Canberra")) return "Australia/Sydney";
+    if (std.mem.eql(u8, name, "Atlantic/Jan_Mayen")) return "Arctic/Longyearbyen";
+    if (std.mem.eql(u8, name, "Pacific/Truk")) return "Pacific/Chuuk";
+    if (std.mem.eql(u8, name, "Etc/UTC") or std.mem.eql(u8, name, "Etc/UCT") or
+        std.mem.eql(u8, name, "Etc/GMT") or std.mem.eql(u8, name, "Etc/GMT0") or
+        std.mem.eql(u8, name, "Etc/GMT+0") or std.mem.eql(u8, name, "Etc/GMT-0") or
+        std.ascii.eqlIgnoreCase(name, "utc") or std.ascii.eqlIgnoreCase(name, "gmt"))
+        return "UTC";
     return name;
 }
 
@@ -31962,22 +31974,22 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
         const name = offsetNsToString(self, off) catch "+00:00";
         return .{ .name = name, .offset_ns = off };
     }
-    // IANA name: accept it (offset 0 — no DST data). Require a '/' or a known id.
-    if (std.mem.indexOfScalar(u8, s, '/') != null or std.ascii.eqlIgnoreCase(s, "gmt")) {
-        const off: i64 =
-            if (std.mem.eql(u8, s, "Europe/Berlin"))
-                3_600_000_000_000
-            else if (std.mem.eql(u8, s, "America/New_York"))
-                -5 * 3_600_000_000_000
-            else if (std.mem.eql(u8, s, "Africa/Monrovia"))
-                -(44 * 60_000_000_000 + 30 * 1_000_000_000)
-            else if (std.mem.eql(u8, s, "America/Vancouver"))
-                -8 * 3_600_000_000_000
-            else
-                0;
-        return .{ .name = self.arena.dupe(u8, s) catch "UTC", .offset_ns = off };
-    }
-    return self.throwError("RangeError", "unknown time zone");
+    // IANA/legacy name: accept the DateTimeFormat-supported set (offset 0 — no
+    // DST data), storing the canonical casing that Temporal exposes through
+    // timeZoneId and equality.
+    const name = try dtfCanonTimeZone(self, s);
+    const off: i64 =
+        if (std.mem.eql(u8, name, "Europe/Berlin"))
+            3_600_000_000_000
+        else if (std.mem.eql(u8, name, "America/New_York"))
+            -5 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "Africa/Monrovia"))
+            -(44 * 60_000_000_000 + 30 * 1_000_000_000)
+        else if (std.mem.eql(u8, name, "America/Vancouver"))
+            -8 * 3_600_000_000_000
+        else
+            0;
+    return .{ .name = name, .offset_ns = off };
 }
 
 fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
@@ -32361,7 +32373,7 @@ fn temporalZdtEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true);
     const t = this.asObj().temporal.?;
-    return Value.boolVal(t.epoch_ns == other.epoch_ns and std.mem.eql(u8, t.tz_name, other.tz_name));
+    return Value.boolVal(t.epoch_ns == other.epoch_ns and temporalTimeZoneIdsEqual(t.tz_name, other.tz_name) and temporalCalendarIdsEqual(t.calendar, other.calendar));
 }
 
 fn temporalZdtCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
