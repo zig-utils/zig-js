@@ -80,6 +80,40 @@ fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocato
     try buf.appendSlice(gpa, "var total = 0; for (const t of ts) total += t.join();\n(total | 0)\n");
 }
 
+/// A *deterministic* program: N workers each apply `per` `Atomics.add`s to two
+/// shared slots, so the final slot values are exactly computable. Returns the
+/// expected encoded result; a lost/torn atomic update makes the engine return a
+/// different number — a correctness bug the "no-throw" oracle can't see. (The
+/// default fuzzer's shared writes are intentionally racy, so their result is not
+/// checkable; only synchronized atomics give a verifiable oracle.)
+fn genVerify(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !f64 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const nworkers = 2 + r.uintLessThan(usize, 7); // 2..8
+    const per = 200 + r.uintLessThan(usize, 1800); // 200..1999
+    try buf.appendSlice(gpa,
+        \\var vbuf = new ArrayBuffer(32); var via = new Int32Array(vbuf);
+        \\
+    );
+    const head = try std.fmt.allocPrint(gpa,
+        "function w(){{ for (var i = 0; i < {d}; i++) {{ Atomics.add(via, 0, 1); Atomics.add(via, 1, 3); }} }}\n",
+        .{per},
+    );
+    defer gpa.free(head);
+    try buf.appendSlice(gpa, head);
+    try buf.appendSlice(gpa, "var ts = [];\n");
+    var w: usize = 0;
+    while (w < nworkers) : (w += 1) try buf.appendSlice(gpa, "ts.push(new Thread(w));\n");
+    try buf.appendSlice(gpa,
+        \\for (const t of ts) t.join();
+        \\(Atomics.load(via, 0) + Atomics.load(via, 1) * 100000)
+        \\
+    );
+    // slot0 = nworkers*per, slot1 = nworkers*per*3 → encoded:
+    const total: f64 = @floatFromInt(nworkers * per);
+    return total + total * 3.0 * 100000.0;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var iters: usize = 200;
@@ -99,8 +133,10 @@ pub fn main(init: std.process.Init) !void {
         };
         const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
         defer ctx.destroy();
-        if (ctx.evaluate(src)) |_| {
-            std.debug.print("ok: {s} completed\n", .{path});
+        if (ctx.evaluate(src)) |v| {
+            var machine = ctx.interpreter();
+            const rendered = machine.toStringV(v) catch "<unstringifiable>";
+            std.debug.print("ok: {s} => {s}\n", .{ path, rendered });
         } else |e| {
             const msg = if (ctx.exception) |ex| blk: {
                 var machine = ctx.interpreter();
@@ -109,6 +145,40 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("throw {s}: {s}\n", .{ @errorName(e), msg });
             std.process.exit(1);
         }
+        return;
+    };
+    // `threadfuzz verify <iters> <seed>`: deterministic-correctness mode — each
+    // generated program's exact result is predicted and checked, catching
+    // wrong-value (lost/torn atomic) bugs the no-throw oracle misses.
+    if (first) |a| if (std.mem.eql(u8, a, "verify")) {
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch 200;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var vfail: usize = 0;
+        var vi: usize = 0;
+        while (vi < iters) : (vi += 1) {
+            const seed = base_seed +% vi;
+            var vbuf: std.ArrayListUnmanaged(u8) = .empty;
+            defer vbuf.deinit(gpa);
+            const expected = try genVerify(seed, &vbuf, gpa);
+            const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+                std.debug.print("seed {d}: context creation failed\n", .{seed});
+                vfail += 1;
+                continue;
+            };
+            defer ctx.destroy();
+            if (ctx.evaluate(vbuf.items)) |v| {
+                const got = if (v.isNumber()) v.asNum() else -1;
+                if (got != expected) {
+                    std.debug.print("seed {d}: WRONG RESULT got {d} expected {d} (lost atomic update)\n", .{ seed, got, expected });
+                    vfail += 1;
+                }
+            } else |e| {
+                std.debug.print("seed {d}: unexpected throw {s}\n", .{ seed, @errorName(e) });
+                vfail += 1;
+            }
+        }
+        std.debug.print("threadfuzz verify: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, vfail });
+        if (vfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz amplify <iters> <seed>`: high-contention profile (more threads,

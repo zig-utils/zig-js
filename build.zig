@@ -140,6 +140,7 @@ pub fn build(b: *std.Build) void {
     const fuzz_iters = b.option(usize, "fuzz-iters", "threadfuzz: number of programs to generate") orelse 200;
     const fuzz_seed = b.option(usize, "fuzz-seed", "threadfuzz: base RNG seed") orelse 1;
     const fuzz_amplify = b.option(bool, "fuzz-amplify", "threadfuzz: high-contention profile (more threads, longer loops)") orelse false;
+    const fuzz_verify = b.option(bool, "fuzz-verify", "threadfuzz: deterministic-correctness mode (predict + check each result)") orelse false;
     const threadfuzz = b.addExecutable(.{
         .name = "threadfuzz",
         .root_module = b.createModule(.{
@@ -151,7 +152,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_threadfuzz = b.addRunArtifact(threadfuzz);
-    if (fuzz_amplify) run_threadfuzz.addArg("amplify");
+    if (fuzz_verify) run_threadfuzz.addArg("verify") else if (fuzz_amplify) run_threadfuzz.addArg("amplify");
     run_threadfuzz.addArgs(&.{ b.fmt("{d}", .{fuzz_iters}), b.fmt("{d}", .{fuzz_seed}) });
     const threadfuzz_step = b.step("threadfuzz", "Fuzz GIL-free parallel execution with random concurrent programs");
     threadfuzz_step.dependOn(&run_threadfuzz.step);
