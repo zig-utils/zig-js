@@ -4617,6 +4617,18 @@ test "async/await: suspendable runtime with spec ordering" {
         \\f();
         \\result
     )).asNum());
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var result = "";
+            \\var sup = { method() { return "sup"; } };
+            \\var child = { async method(x = super.method()) { result = await x; } };
+            \\Object.setPrototypeOf(child, sup);
+            \\child.method();
+        );
+        try std.testing.expectEqualStrings("sup", (try ctx.evaluate("result")).asStr());
+    }
     try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).asBool());
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
@@ -4638,6 +4650,16 @@ test "async/await: suspendable runtime with spec ordering" {
         \\Promise.race(iter);
         \\returnCount
     )).asNum());
+}
+
+test "class static block rejects arguments in nested computed class names" {
+    try expectParseError(
+        \\class C {
+        \\  static {
+        \\    (class { [arguments]() {} });
+        \\  }
+        \\}
+    );
 }
 
 test "array destructuring over the iterator protocol (generator, Set, string, rest)" {

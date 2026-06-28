@@ -63,6 +63,11 @@ pub const Parser = struct {
     /// `super` at all (a direct eval from a field initializer leaves this false,
     /// since `super.prop` is permitted there).
     scan_forbid_super_property: bool = false,
+    /// When true, `scanSuperAndArgs` descends into the eagerly evaluated pieces
+    /// of nested class expressions (heritage, computed names, field initializers,
+    /// and static blocks). Global/method scans leave this false so a class body
+    /// remains its own syntactic context.
+    scan_descend_class_expr: bool = false,
     /// When true, `scanSuperAndArgs` flags a YieldExpression — used to enforce
     /// the early error "FormalParameters of a generator must not contain a
     /// YieldExpression" (e.g. `function* g(a = yield) {}`).
@@ -3230,8 +3235,13 @@ pub const Parser = struct {
                 const block = try self.parseBlock();
                 // No super()/arguments, and no AwaitExpression (ContainsAwait).
                 const saved_fa = self.scan_forbid_await;
+                const saved_class_scan = self.scan_descend_class_expr;
                 self.scan_forbid_await = true;
-                defer self.scan_forbid_await = saved_fa;
+                self.scan_descend_class_expr = true;
+                defer {
+                    self.scan_forbid_await = saved_fa;
+                    self.scan_descend_class_expr = saved_class_scan;
+                }
                 for (block.block) |s| try self.scanSuperAndArgs(s);
                 try self.checkLexicalDupes(block.block, true); // own lexical scope
                 try members.append(self.arena, .{ .is_static = true, .static_block = block });
@@ -3283,7 +3293,12 @@ pub const Parser = struct {
                     return ParseError.UnexpectedToken;
                 // Early error (15.7.1): a field Initializer may not contain a
                 // SuperCall or an `arguments` reference.
-                if (init_expr) |ie| try self.scanSuperAndArgs(ie);
+                if (init_expr) |ie| {
+                    const saved_class_scan = self.scan_descend_class_expr;
+                    self.scan_descend_class_expr = true;
+                    defer self.scan_descend_class_expr = saved_class_scan;
+                    try self.scanSuperAndArgs(ie);
+                }
                 try members.append(self.arena, .{ .key = pn.key, .key_expr = pn.expr, .field_init = init_expr, .is_static = is_static, .is_field = true });
             }
         }
@@ -3401,9 +3416,11 @@ pub const Parser = struct {
     pub fn scanEvalContext(self: *Parser, stmts: []const *Node, allow_arguments: bool, forbid_super_property: bool) ParseError!void {
         self.scan_allow_arguments = allow_arguments;
         self.scan_forbid_super_property = forbid_super_property;
+        self.scan_descend_class_expr = !allow_arguments and !forbid_super_property;
         defer {
             self.scan_allow_arguments = false;
             self.scan_forbid_super_property = false;
+            self.scan_descend_class_expr = false;
         }
         for (stmts) |s| try self.scanSuperAndArgs(s);
     }
@@ -3490,6 +3507,14 @@ pub const Parser = struct {
                 for (f.params) |p| if (p.default) |d| try self.scanSuperAndArgs(d);
                 try self.scanSuperAndArgs(f.body);
             },
+            .class_expr => |c| if (self.scan_descend_class_expr) {
+                if (c.superclass) |sc| try self.scanSuperAndArgs(sc);
+                for (c.members) |m| {
+                    if (m.key_expr) |key_expr| try self.scanSuperAndArgs(key_expr);
+                    if (m.field_init) |field_init| try self.scanSuperAndArgs(field_init);
+                    if (m.static_block) |static_block| try self.scanSuperAndArgs(static_block);
+                }
+            },
             // Statement nodes (an arrow's block body):
             .block => |stmts| for (stmts) |s| try self.scanSuperAndArgs(s),
             .expr_stmt => |e| try self.scanSuperAndArgs(e),
@@ -3534,9 +3559,10 @@ pub const Parser = struct {
                     for (cs.body) |s| try self.scanSuperAndArgs(s);
                 }
             },
-            // .func_decl/.class_expr and any other node: stop. A nested ordinary
-            // function/class has its own `arguments`/`super`; descending could
-            // only produce false positives.
+            // .func_decl and any other node: stop. Nested ordinary functions and
+            // class bodies have their own `arguments`/`super`; descending outside
+            // the explicit class-expression scan mode could only produce false
+            // positives.
             else => {},
         }
     }

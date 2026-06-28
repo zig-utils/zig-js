@@ -1171,22 +1171,38 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const args_obj = try vm.newArray();
     for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
     try genv.put("arguments", args_obj);
+    const bound_this = bindThisForCall(vm, func, this_val) catch |err| {
+        if (err != error.Throw) return err;
+        const result = try promise.newPromise(vm);
+        const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
+        const reason = vm.exception;
+        vm.exception = Value.undef();
+        try promise.reject(vm, rp, reason);
+        return Value.obj(result);
+    };
     const saved_env = vm.env;
+    const saved_this = vm.this_value;
+    const saved_home = vm.home_object;
+    const saved_super = vm.super_ctor;
+    const saved_this_initialized = vm.this_initialized;
     vm.env = genv;
-    defer vm.env = saved_env;
+    vm.this_value = bound_this;
+    vm.home_object = func.home_object;
+    vm.super_ctor = func.super_ctor;
+    vm.this_initialized = true;
+    defer {
+        vm.env = saved_env;
+        vm.this_value = saved_this;
+        vm.home_object = saved_home;
+        vm.super_ctor = saved_super;
+        vm.this_initialized = saved_this_initialized;
+    }
     // An error thrown synchronously while evaluating parameter defaults (or
     // binding `this`) of an async function must settle the result promise as a
     // rejection, not propagate out of the call.
     const result = try promise.newPromise(vm);
     const rp: *promise.Promise = @ptrCast(@alignCast(result.promise.?));
     vm.bindParams2(func.params, args, func.is_arrow) catch |err| {
-        if (err != error.Throw) return err;
-        const reason = vm.exception;
-        vm.exception = Value.undef();
-        try promise.reject(vm, rp, reason);
-        return Value.obj(result);
-    };
-    const bound_this = bindThisForCall(vm, func, this_val) catch |err| {
         if (err != error.Throw) return err;
         const reason = vm.exception;
         vm.exception = Value.undef();
