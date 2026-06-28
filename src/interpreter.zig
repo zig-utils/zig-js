@@ -12992,11 +12992,13 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
 
     // Eval inherits the caller's syntactic restrictions as *early errors* — they
     // must reject the code before any of it runs. Indirect eval is global code:
-    // a top-level SuperCall or SuperProperty is a SyntaxError. Direct eval from a
-    // class field initializer forbids a top-level SuperCall and `arguments`
-    // (`super.prop` stays legal). Both scan only the eval program's top level
-    // (descending into arrows but not nested functions/classes), so `super`
-    // legitimately inside a nested class/method is unaffected.
+    // a top-level SuperCall or SuperProperty is a SyntaxError. Direct eval outside
+    // methods has the same `super` restriction, while a direct eval inside a
+    // method but outside a derived constructor permits SuperProperty and rejects
+    // only SuperCall. A class field initializer also forbids `arguments`. These
+    // scans only cover the eval program's top level (descending into arrows but
+    // not nested ordinary functions/classes), so `super` legitimately inside a
+    // nested class/method is unaffected.
     if (prog.* == .program) {
         if (!self.direct_eval_call) {
             parser.scanEvalContext(prog.program, true, true) catch
@@ -13004,6 +13006,12 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         } else if (self.in_field_initializer) {
             parser.scanEvalContext(prog.program, false, false) catch
                 return self.throwError("SyntaxError", "eval: 'super()'/'arguments' not allowed in a field initializer");
+        } else if (self.home_object == null) {
+            parser.scanEvalContext(prog.program, true, true) catch
+                return self.throwError("SyntaxError", "eval: 'super' is only valid inside a method");
+        } else if (!self.in_derived_ctor) {
+            parser.scanEvalContext(prog.program, true, false) catch
+                return self.throwError("SyntaxError", "eval: 'super()' is only valid inside a derived constructor");
         }
         // A direct eval in a non-arrow function's parameter scope may not declare
         // `arguments` (the parameter environment already binds the arguments
@@ -33730,6 +33738,47 @@ test "interpreter direct eval new target early errors" {
         \\f();
         \\name
     )).asStr());
+}
+
+test "interpreter direct eval super early errors run before side effects" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\let executed = false;
+        \\function f() {
+        \\  try { eval('executed = true; super();'); } catch (e) { return e instanceof SyntaxError; }
+        \\}
+        \\f() && executed === false
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let evaluated = false;
+        \\let obj = { method() {
+        \\  try { eval('super(evaluated = true);'); } catch (e) { return e instanceof SyntaxError; }
+        \\} };
+        \\obj.method() && evaluated === false
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let executed = false;
+        \\class Base {
+        \\  constructor() {
+        \\    try { eval('executed = true; super();'); } catch (e) { this.name = e.name; }
+        \\  }
+        \\}
+        \\let base = new Base();
+        \\base.name === 'SyntaxError' && executed === false
+    )).asBool());
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
+        \\class Base { constructor(v) { this.v = v; } }
+        \\class Derived extends Base { constructor() { eval('super(42);'); } }
+        \\new Derived().v
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 7), (try evalSource(a,
+        \\class Base { get value() { return 7; } }
+        \\class Derived extends Base { method() { return eval('super.value;'); } }
+        \\new Derived().method()
+    )).asNum());
 }
 
 test "interpreter higher-order with closure counter" {
