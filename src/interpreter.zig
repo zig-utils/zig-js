@@ -30567,7 +30567,7 @@ fn balanceTimeNs(total: i128, largest: TUnit) [10]f64 {
     return out;
 }
 
-const RoundOpts = struct { largest: TUnit, smallest: TUnit, mode: RoundMode, increment: f64 };
+const RoundOpts = struct { largest: TUnit, smallest: TUnit, mode: RoundMode, increment: f64, smallest_set: bool = false };
 const DurationRoundRead = struct { opts: RoundOpts, relative_to: ?RelTo, has_unit: bool };
 const RoundMode = enum { ceil, floor, expand, trunc, half_ceil, half_floor, half_expand, half_trunc, half_even };
 
@@ -30638,6 +30638,38 @@ fn roundNs(total: i128, smallest: TUnit, increment: f64, mode: RoundMode) i128 {
     const step = unit * @as(i128, @intFromFloat(increment));
     if (step == 0) return total;
     const rounded = applyRounding(total, step, mode);
+    return rounded * step;
+}
+
+fn applyRoundingAsIfPositive(val: i128, divisor: i128, mode: RoundMode) i128 {
+    if (divisor == 0) return val;
+    const q = @divFloor(val, divisor);
+    const r = val - q * divisor;
+    if (r == 0) return q;
+    const upper = q + 1;
+    return switch (mode) {
+        .floor, .trunc => q,
+        .ceil, .expand => upper,
+        else => blk: {
+            const twice = r * 2;
+            if (twice < divisor) break :blk q;
+            if (twice > divisor) break :blk upper;
+            break :blk switch (mode) {
+                .half_floor, .half_trunc => q,
+                .half_ceil, .half_expand => upper,
+                .half_even => if (@mod(q, 2) == 0) q else upper,
+                else => upper,
+            };
+        },
+    };
+}
+
+fn roundInstantNs(total: i128, smallest: TUnit, increment: f64, mode: RoundMode) i128 {
+    const unit = nsPerUnit(smallest);
+    if (unit == 0) return total;
+    const step = unit * @as(i128, @intFromFloat(increment));
+    if (step == 0) return total;
+    const rounded = applyRoundingAsIfPositive(total, step, mode);
     return rounded * step;
 }
 
@@ -30755,6 +30787,17 @@ fn roundNsForString(ns: i128, p: TemporalStringPrecision) i128 {
     return applyRounding(ns, step, p.mode) * step;
 }
 
+fn roundInstantNsForString(ns: i128, p: TemporalStringPrecision) i128 {
+    if (p.auto) return ns;
+    const step: i128 = if (p.unit == .minute)
+        nsPerUnit(.minute)
+    else if (p.digits) |d|
+        pow10u(i128, 9 - d)
+    else
+        nsPerUnit(p.unit);
+    return applyRoundingAsIfPositive(ns, step, p.mode) * step;
+}
+
 fn appendIsoTimeFromNs(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), ns_in: i128, p: TemporalStringPrecision) EvalError!void {
     var ns = @mod(ns_in, 86_400_000_000_000);
     if (ns < 0) ns += 86_400_000_000_000;
@@ -30806,6 +30849,7 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
         // require an options object (GetOptionsObject → TypeError otherwise).
         if (!allow_string) return self.throwError("TypeError", "options must be an object or undefined");
         r.smallest = tUnitFromStr(opts.asStr()) orelse return self.throwError("RangeError", "invalid smallestUnit");
+        r.smallest_set = true;
         return r;
     }
     if (!opts.isObject() or opts.asObj().is_symbol or opts.asObj().is_bigint) return self.throwError("TypeError", "options must be an object or undefined");
@@ -30836,6 +30880,7 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
         if (!su.isUndefined()) {
             r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
             smallest_set = true;
+            r.smallest_set = true;
         }
     } else {
         const lu = try self.getProperty(opts, "largestUnit");
@@ -30860,6 +30905,7 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
         if (!su.isUndefined()) {
             r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
             smallest_set = true;
+            r.smallest_set = true;
         }
     }
     // ValidateTemporalUnitRange: a larger TUnit has a smaller enum value, so an
@@ -30928,6 +30974,15 @@ fn validateDurationRoundingIncrement(self: *Interpreter, unit: TUnit, increment:
         if (inc >= m or @mod(m, inc) != 0)
             return self.throwError("RangeError", "roundingIncrement must divide evenly into the next larger unit");
     }
+}
+
+fn validateInstantRoundingIncrement(self: *Interpreter, unit: TUnit, increment: f64) EvalError!void {
+    const unit_ns = nsPerUnit(unit);
+    if (unit_ns == 0) return self.throwError("RangeError", "invalid smallestUnit");
+    const units_per_day = @divExact(DAY_NS, unit_ns);
+    const inc: i128 = @intFromFloat(increment);
+    if (inc > units_per_day or @mod(units_per_day, inc) != 0)
+        return self.throwError("RangeError", "roundingIncrement must divide evenly into a solar day");
 }
 
 /// Build a Temporal.Duration object from raw components (CreateTemporalDuration,
@@ -31011,10 +31066,13 @@ fn temporalInstantUntilFn(comptime sign: f64) value.NativeFn {
 fn temporalInstantRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
-    const opts = try readRoundOpts(self, if (args.len > 0) args[0] else Value.undef(), .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
+    const opts_v = if (args.len > 0) args[0] else Value.undef();
+    if (opts_v.isUndefined()) return self.throwError("TypeError", "options must be an object or string");
+    const opts = try readRoundOpts(self, opts_v, .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
+    if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant.round smallestUnit must be hour or smaller");
-    const o = try makeTemporal(self, .instant, "\x00T.Instant");
-    o.temporal.?.epoch_ns = roundNs(this.asObj().temporal.?.epoch_ns, opts.smallest, opts.increment, opts.mode);
+    try validateInstantRoundingIncrement(self, opts.smallest, opts.increment);
+    const o = try makeInstantFromEpochNs(self, roundInstantNs(this.asObj().temporal.?.epoch_ns, opts.smallest, opts.increment, opts.mode));
     return Value.obj(o);
 }
 
@@ -32023,7 +32081,7 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
             z_suffix = false;
         }
     }
-    const rounded_epoch = roundNsForString(this.asObj().temporal.?.epoch_ns, precision);
+    const rounded_epoch = roundInstantNsForString(this.asObj().temporal.?.epoch_ns, precision);
     const render_offset = timeZoneOffsetAtEpoch(tz.name, rounded_epoch, tz.offset_ns);
     const ns = rounded_epoch + @as(i128, render_offset);
     const days = @divFloor(ns, 86_400_000_000_000);
