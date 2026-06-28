@@ -28684,6 +28684,19 @@ fn temporalPlainDateToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
+fn temporalPlainDateToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
+    const t = this.asObj().temporal.?;
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoYearStr(self, &buf, iso.y);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}", .{ iso.m, iso.d });
+    try appendCalAnnotation(self, &buf, .auto, t.calendar);
+    return Value.str(try buf.toOwnedSlice(self.arena));
+}
+
 /// Validate a `calendar` property in a Temporal fields bag (ToTemporalCalendar
 /// identifier). Only the ISO 8601 calendar is supported: a non-string/non-object
 /// value is a TypeError; a string must be a syntactically valid, recognised
@@ -29347,6 +29360,15 @@ fn temporalPlainTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
+fn temporalPlainTimeToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    _ = try appendIsoTimeString(self, &buf, this.asObj().temporal.?, .{});
+    return Value.str(try buf.toOwnedSlice(self.arena));
+}
+
 // ---- Temporal.PlainDateTime -----------------------------------------
 
 fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -29393,6 +29415,20 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ c.m, c.d });
     try appendIsoTimeFromNs(self, &buf, rounded_time, precision);
     try appendCalAnnotation(self, &buf, cal, t.calendar);
+    return Value.str(try buf.toOwnedSlice(self.arena));
+}
+
+fn temporalPlainDateTimeToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.asObj().temporal.?;
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoYearStr(self, &buf, iso.y);
+    try tfmt(self, &buf, "-{d:0>2}-{d:0>2}T", .{ iso.m, iso.d });
+    _ = try appendIsoTimeString(self, &buf, t, .{});
+    try appendCalAnnotation(self, &buf, .auto, t.calendar);
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
@@ -33127,7 +33163,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalPlainDateToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalPlainDateToJSONFn);
         try setNative(a, rs, p, "equals", 1, temporalPlainDateEqualsFn);
         try setNative(a, rs, p, "add", 1, temporalPlainDateAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalPlainDateAddFn(-1));
@@ -33156,7 +33192,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalPlainTimeToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalPlainTimeToJSONFn);
         try setNative(a, rs, p, "with", 1, temporalPlainTimeWithFn);
         try setNative(a, rs, p, "add", 1, temporalPlainTimeAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalPlainTimeAddFn(-1));
@@ -33197,7 +33233,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalPlainDateTimeToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalPlainDateTimeToJSONFn);
         try setNative(a, rs, p, "with", 1, temporalPlainDateTimeWithFn);
         try setNative(a, rs, p, "add", 1, temporalPlainDateTimeAddFn(1));
         try setNative(a, rs, p, "subtract", 1, temporalPlainDateTimeAddFn(-1));
