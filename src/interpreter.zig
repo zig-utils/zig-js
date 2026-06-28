@@ -32020,6 +32020,12 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             -8 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "Asia/Calcutta") or std.mem.eql(u8, name, "Asia/Kolkata"))
             5 * 3_600_000_000_000 + 30 * 60_000_000_000
+        else if (std.mem.eql(u8, name, "Asia/Tokyo"))
+            9 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "Europe/Moscow"))
+            3 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "America/Sao_Paulo"))
+            -3 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "Africa/Monrovia"))
             -(44 * 60_000_000_000 + 30 * 1_000_000_000)
         else if (std.mem.eql(u8, name, "America/Vancouver"))
@@ -32030,6 +32036,22 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
 }
 
 fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
+    if (std.mem.eql(u8, name, "Europe/London")) {
+        const bst_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 31)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const bst_end_2019 = (@as(i128, tDaysFromCivil(2019, 10, 27)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        if (epoch_ns >= bst_start_2019 and epoch_ns < bst_end_2019)
+            return 3_600_000_000_000;
+        const permanent_bst_start = (@as(i128, tDaysFromCivil(1968, 10, 27)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const permanent_bst_end = (@as(i128, tDaysFromCivil(1971, 10, 31)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        if (epoch_ns >= permanent_bst_start and epoch_ns < permanent_bst_end)
+            return 3_600_000_000_000;
+        return 0;
+    }
+    if (std.mem.eql(u8, name, "America/Sao_Paulo")) {
+        const dst_end_2019 = (@as(i128, tDaysFromCivil(2019, 2, 17)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        if (epoch_ns < dst_end_2019) return -2 * 3_600_000_000_000;
+        return -3 * 3_600_000_000_000;
+    }
     if (std.mem.eql(u8, name, "America/Vancouver")) {
         const standard_time_start_1883 = -2_717_650_800_000_000_000; // 1883-11-18T17:00:00Z
         if (epoch_ns < standard_time_start_1883)
@@ -32040,6 +32062,10 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
             return -7 * 3_600_000_000_000;
     }
     return fallback;
+}
+
+fn zdtOffsetAt(t: *const value.TemporalData) i64 {
+    return timeZoneOffsetAtEpoch(t.tz_name, t.epoch_ns, t.tz_offset_ns);
 }
 
 /// Render a UTC offset (ns) as "±HH:MM" or "±HH:MM:SS".
@@ -32083,7 +32109,7 @@ fn zdtLocal(t: *const value.TemporalData) value.TemporalData {
         out.calendar = t.calendar;
         return out;
     }
-    const local = t.epoch_ns + t.tz_offset_ns;
+    const local = t.epoch_ns + zdtOffsetAt(t);
     const days = @divFloor(local, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
     const cd = calendarDateFromIso(t.calendar, c.y, c.m, c.d);
@@ -32163,7 +32189,7 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
                 .days_in_week => Value.num(7),
                 .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, l.year)),
                 .hours_in_day => Value.num(24),
-                .offset_ns => Value.num(@floatFromInt(t.tz_offset_ns)),
+                .offset_ns => Value.num(@floatFromInt(zdtOffsetAt(t))),
                 .week_of_year => Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).week)),
                 .year_of_week => Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).year)),
             };
@@ -32204,7 +32230,7 @@ fn temporalZdtOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    return Value.str(try offsetNsToString(self, this.asObj().temporal.?.tz_offset_ns));
+    return Value.str(try offsetNsToString(self, zdtOffsetAt(this.asObj().temporal.?)));
 }
 
 fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
