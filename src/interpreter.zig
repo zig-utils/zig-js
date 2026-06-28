@@ -639,6 +639,17 @@ pub const Environment = struct {
     }
 };
 
+/// The shared, mutable `this` binding of a derived constructor activation. A
+/// derived ctor starts uninitialized and is bound exactly once by `super()`;
+/// arrows defined lexically inside it share THIS cell (not the interpreter's
+/// ambient this-state), so an arrow's `super()` initializes the enclosing ctor's
+/// `this` even when the arrow is invoked from an unrelated dynamic context (e.g.
+/// an iterator's `return()` running during the ctor's IteratorClose).
+pub const ThisCell = struct {
+    value: Value = Value.undef(),
+    initialized: bool = false,
+};
+
 /// A JS-defined function value: parameter names, body AST, and the environment
 /// captured at definition (the closure). Stored type-erased on `Object.js_func`.
 pub const Function = struct {
@@ -682,6 +693,16 @@ pub const Function = struct {
     /// `new F()` activation, even when the arrow is called later. Only meaningful
     /// when `is_arrow` is set.
     arrow_new_target: Value = Value.undef(),
+    // Whether this arrow is lexically inside a derived constructor — so `super()`
+    // is legal in it (captured at creation; an arrow's super()-validity is
+    // lexical, not the dynamic caller's, e.g. an arrow invoked by an iterator's
+    // `return()` during the constructor's IteratorClose).
+    arrow_in_derived_ctor: bool = false,
+    /// For an arrow defined lexically inside a derived constructor: a pointer to
+    /// that ctor activation's shared `this` cell, so the arrow's `super()` /
+    /// `this` reads target the enclosing ctor's binding. Null for non-arrows and
+    /// for arrows not inside a derived ctor. Captured at creation.
+    this_cell: ?*ThisCell = null,
     /// Class constructors have [[FunctionKind]] "classConstructor": they cannot
     /// be called without [[Construct]], and derived constructors must initialize
     /// `this` through `super()` before completing normally.
@@ -951,6 +972,14 @@ pub const Interpreter = struct {
     /// Scoped flag for a running derived class constructor. `super()` flips this
     /// from false to true; completion reads it to implement GetThisBinding.
     this_initialized: bool = true,
+    /// The shared `this` cell of the derived constructor activation currently in
+    /// scope (set on entry to a derived ctor, and inherited by its lexical arrows
+    /// via their captured `Function.this_cell`). Null outside a derived ctor. The
+    /// cell is the source of truth for the binding across nested calls: `super()`
+    /// writes it, the ctor's completion reads it, and every call's epilogue
+    /// re-syncs the ambient this-state from it (so an arrow's `super()` invoked
+    /// during an intervening ordinary call still initializes the ctor's `this`).
+    this_cell: ?*ThisCell = null,
     /// Whether the most recently completed statement list produced an EMPTY
     /// completion (only declarations / empty statements / empty blocks ran), so
     /// the eval/program completion value carries the last non-empty value forward
@@ -2125,6 +2154,13 @@ pub const Interpreter = struct {
                 // is discarded); the field initializers / private brands below target it.
                 self.this_value = sup_ret;
                 self.this_initialized = true;
+                // Persist the binding into the shared cell so it survives past this
+                // activation — the enclosing derived ctor (and any sibling arrow)
+                // reads `this` through the cell.
+                if (self.this_cell) |c| {
+                    c.value = sup_ret;
+                    c.initialized = true;
+                }
                 // InitializeInstanceElements: a derived class brands `this` with
                 // its private names and runs its field initializers now, once
                 // `super()` has returned and `this` exists. Clear the pending sets
@@ -3388,6 +3424,8 @@ pub const Interpreter = struct {
             func.super_ctor = self.super_ctor;
             func.arrow_this = self.this_value; // captured lexically; used on every call
             func.arrow_new_target = self.new_target; // new.target is lexical for arrows too
+            func.arrow_in_derived_ctor = self.in_derived_ctor; // super()-legality is lexical
+            func.this_cell = self.this_cell; // share the enclosing derived ctor's `this` binding
             func.field_init_ctx = self.in_field_initializer; // field-init eval restrictions are lexical
         }
         // Compile a generator body up front for the suspendable VM. Bodies
@@ -4634,6 +4672,7 @@ pub const Interpreter = struct {
         const saved_strict = self.strict;
         const saved_global = self.global_object;
         const saved_this_initialized = self.this_initialized;
+        const saved_this_cell = self.this_cell;
         const saved_eval_nt = self.direct_eval_new_target_allowed;
         const saved_fi = self.in_field_initializer;
         const saved_pe = self.in_param_expr;
@@ -4684,12 +4723,32 @@ pub const Interpreter = struct {
         self.in_field_initializer = func.is_arrow and func.field_init_ctx;
         // Arrows inherit the enclosing super()-call legality; a non-arrow function
         // establishes it (only a derived constructor permits `super()`).
-        if (!func.is_arrow) self.in_derived_ctor = func.is_derived_constructor;
+        // `super()`-legality is lexical: an arrow uses the value captured where it
+        // was defined (so it stays legal even when invoked from a non-constructor
+        // context, e.g. an iterator's `return()`); a non-arrow establishes it.
+        self.in_derived_ctor = if (func.is_arrow) func.arrow_in_derived_ctor else func.is_derived_constructor;
         if (!func.is_arrow) self.in_default_ctor = func.is_default_ctor;
         // An arrow has no own `this` binding: it inherits the enclosing function's
         // this-initialization state (a non-arrow establishes it — only a derived
         // constructor starts uninitialized).
         if (!func.is_arrow) self.this_initialized = !func.is_derived_constructor;
+        // The `this` binding is a shared cell so an arrow's `super()` reaches the
+        // enclosing derived ctor's binding across intervening calls. A derived ctor
+        // opens a fresh cell; an arrow adopts its captured one (the enclosing ctor's)
+        // and reads the live binding through it; every other call clears it.
+        if (func.is_arrow) {
+            self.this_cell = func.this_cell;
+            if (func.this_cell) |c| {
+                self.this_value = c.value;
+                self.this_initialized = c.initialized;
+            }
+        } else if (func.is_derived_constructor) {
+            const cell = try self.arena.create(ThisCell);
+            cell.* = .{ .value = self.this_value, .initialized = false };
+            self.this_cell = cell;
+        } else {
+            self.this_cell = null;
+        }
         defer {
             self.env = saved_env;
             self.signal = saved_signal;
@@ -4699,15 +4758,17 @@ pub const Interpreter = struct {
             self.new_target = saved_nt;
             self.strict = saved_strict;
             self.global_object = saved_global;
-            // An arrow's `super()` initializes its *enclosing* derived
-            // constructor's `this` (they share the binding), so that result must
-            // persist past the arrow call rather than be restored to the prior
-            // uninitialized state.
-            const keep_this = func.is_arrow and self.this_initialized and !saved_this_initialized;
-            if (!keep_this) {
-                self.this_value = saved_this;
-                self.this_initialized = saved_this_initialized;
-            }
+            self.this_value = saved_this;
+            self.this_initialized = saved_this_initialized;
+            self.this_cell = saved_this_cell;
+            // Re-sync the ambient this-state from the (restored) enclosing derived
+            // ctor's shared cell: a `super()` that ran during this call — possibly
+            // via an arrow invoked from an unrelated context — initialized the
+            // cell, and that binding must remain visible to the enclosing ctor.
+            if (self.this_cell) |c| if (c.initialized) {
+                self.this_value = c.value;
+                self.this_initialized = true;
+            };
             self.direct_eval_new_target_allowed = saved_eval_nt;
             self.in_field_initializer = saved_fi;
             self.in_param_expr = saved_pe;
@@ -4849,14 +4910,19 @@ pub const Interpreter = struct {
                     return self.throwError("TypeError", "Derived constructors may only return object or undefined");
                 }
             }
-            if (!self.this_initialized) {
+            // GetThisBinding reads the shared cell: `super()` may have run during
+            // an intervening call (e.g. an iterator `return()` handler invoking a
+            // `() => super()` arrow as the abrupt `return` was processed), so the
+            // cell — not the ambient flag — is authoritative.
+            const inited = if (self.this_cell) |c| c.initialized else self.this_initialized;
+            if (!inited) {
                 self.env = saved_env;
                 self.global_object = saved_global;
                 return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
             }
             // The bound `this` (the object `super()` produced) is what `new`
             // yields — not the discarded eager placeholder.
-            return self.this_value;
+            return if (self.this_cell) |c| c.value else self.this_value;
         }
         return if (self.signal == .ret) self.ret_value else Value.undef();
     }

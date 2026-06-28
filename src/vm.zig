@@ -1758,6 +1758,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .is_arrow = tmpl.is_arrow,
         .arrow_this = if (tmpl.is_arrow) vm.this_value else Value.undef(),
         .arrow_new_target = if (tmpl.is_arrow) vm.new_target else Value.undef(),
+        .arrow_in_derived_ctor = tmpl.is_arrow and vm.in_derived_ctor,
         .home_object = if (tmpl.is_arrow) vm.home_object else null,
         .super_ctor = if (tmpl.is_arrow) vm.super_ctor else null,
         .field_init_ctx = tmpl.is_arrow and vm.in_field_initializer,
