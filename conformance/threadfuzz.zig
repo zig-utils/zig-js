@@ -40,6 +40,26 @@ fn op(r: std.Random) []const u8 {
     };
 }
 
+/// Broader, still self-contained operations for the production-hardening fuzzer
+/// profile. These deliberately exercise exception/finally paths, nested thread
+/// lifecycle, asyncJoin settlement, short waiter parks, restrict ownership, and
+/// FinalizationRegistry registration. Each snippet catches its own expected
+/// abrupt completions so the fuzzer oracle remains "no unexpected throw".
+fn broadOp(r: std.Random) []const u8 {
+    return switch (r.uintLessThan(u8, 10)) {
+        0 => "try { if ((i & 31) === 0) throw new Error('fuzz-' + i); } catch (e) { acc += e.message.length; } finally { sObj.finallyCount = (sObj.finallyCount || 0) + 1; } ",
+        1 => "if ((i & 255) === 0) { var nt = new Thread(function(x){ return x + 1; }, i & 7); acc += nt.join(); } ",
+        2 => "if ((i & 255) === 1) { var ft = new Thread(function(){ throw 'xfuzz'; }); try { ft.join(); } catch (e) { acc += (e === 'xfuzz') ? 1 : 0; } } ",
+        3 => "if ((i & 127) === 2) { var at = new Thread(function(x){ return x * 2; }, i & 3); at.asyncJoin().then(function(v){ sObj.asyncSeen = (sObj.asyncSeen || 0) + v; }, function(){ sObj.asyncErr = 1; }); acc += at.join(); } ",
+        4 => "if ((i & 63) === 3) { Atomics.store(waitBox, 'flag', 1); Atomics.notify(waitBox, 'flag'); } ",
+        5 => "if ((i & 63) === 4) { var wr = Atomics.wait(waitBox, 'flag', 0, 1); if (wr === 'ok' || wr === 'timed-out' || wr === 'not-equal') acc += 1; } ",
+        6 => "if ((i & 127) === 5) { var wa = Atomics.waitAsync(waitBox, 'async', 0, 0); if (wa && wa.async && wa.value && wa.value.then) wa.value.then(function(){ sObj.waitAsyncSeen = 1; }); } ",
+        7 => "if ((i & 127) === 6) { var local = { x: i }; Thread.restrict(local); acc += local.x & 3; } ",
+        8 => "if ((i & 63) === 7 && registry) { (function(){ var target = { i: i, pad: 'x' + i }; registry.register(target, i & 7); })(); if ((i & 511) === 7 && typeof gc === 'function') gc(); } ",
+        else => "if ((i & 255) === 8) { lifeLock.hold(function(){ lifeBox.count = (lifeBox.count || 0) + 1; }); lifeCond.notifyAll(); } ",
+    };
+}
+
 /// Generation knobs. The amplified profile raises thread count + loop length and
 /// adds extra shared closures (the upvalue surface the first bug lived in), so
 /// rare interleavings the default profile misses get many more chances to race.
@@ -47,8 +67,11 @@ const Cfg = struct {
     min_workers: usize,
     worker_span: usize, // workers = min_workers + rand(worker_span)
     loop_iters: usize,
+    broad_profile: bool = false,
+    enable_gc: bool = false,
     pub const default: Cfg = .{ .min_workers = 2, .worker_span = 5, .loop_iters = 1200 };
     pub const amplified: Cfg = .{ .min_workers = 6, .worker_span = 9, .loop_iters = 5000 };
+    pub const broad: Cfg = .{ .min_workers = 3, .worker_span = 4, .loop_iters = 700, .broad_profile = true, .enable_gc = true };
 };
 
 fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator, cfg: Cfg) !void {
@@ -63,6 +86,10 @@ fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocato
         \\var sCtr = (function(){ var k = 100; return function Box(x){ this.v = x + k; }; })();
         \\var sMap = new Map(); var sSet = new Set();
         \\var sObj_gs = 0; Object.defineProperty(sObj, 'gs', { get(){ return sObj_gs; }, set(x){ sObj_gs = x; }, configurable: true });
+        \\var waitBox = { flag: 0, async: 0, ready: 0 };
+        \\var lifeLock = new Lock(); var lifeCond = new Condition(); var lifeBox = { count: 0 };
+        \\var cleanupSeen = 0;
+        \\var registry = (typeof FinalizationRegistry === 'function') ? new FinalizationRegistry(function(held){ cleanupSeen += held; }) : null;
         \\
     );
     const nworkers = cfg.min_workers + r.uintLessThan(usize, cfg.worker_span);
@@ -74,6 +101,11 @@ fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocato
         const nops = 3 + r.uintLessThan(usize, 7);
         var o: usize = 0;
         while (o < nops) : (o += 1) try buf.appendSlice(gpa, op(r));
+        if (cfg.broad_profile) {
+            const nbroad = 2 + r.uintLessThan(usize, 4);
+            var bo: usize = 0;
+            while (bo < nbroad) : (bo += 1) try buf.appendSlice(gpa, broadOp(r));
+        }
         try buf.appendSlice(gpa, "} return acc; }\n");
     }
     try buf.appendSlice(gpa, "var ts = [];\n");
@@ -83,7 +115,63 @@ fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocato
         defer gpa.free(sp);
         try buf.appendSlice(gpa, sp);
     }
-    try buf.appendSlice(gpa, "var total = 0; for (const t of ts) total += t.join();\n(total | 0)\n");
+    try buf.appendSlice(gpa, "var total = 0; for (const t of ts) total += t.join();\n");
+    if (cfg.broad_profile) try appendBroadSidecars(buf, gpa);
+    try buf.appendSlice(gpa, "(total | 0)\n");
+}
+
+fn appendBroadSidecars(buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !void {
+    try buf.appendSlice(gpa,
+        \\// Broad-profile sidecars: deterministic lifecycle/waiter/cleanup
+        \\// witnesses attached to each random program.
+        \\{
+        \\  var waiterBox = { flag: 0, ready: 0 };
+        \\  var wt = new Thread(function(){
+        \\    Atomics.store(waiterBox, 'ready', 1);
+        \\    Atomics.notify(waiterBox, 'ready');
+        \\    return Atomics.wait(waiterBox, 'flag', 0, 20);
+        \\  });
+        \\  while (Atomics.load(waiterBox, 'ready') === 0)
+        \\    Atomics.wait(waiterBox, 'ready', 0, 1);
+        \\  Atomics.store(waiterBox, 'flag', 1);
+        \\  Atomics.notify(waiterBox, 'flag');
+        \\  var wr = wt.join();
+        \\  if (wr !== 'ok' && wr !== 'not-equal' && wr !== 'timed-out')
+        \\    throw new Error('bad property wait result: ' + wr);
+        \\}
+        \\{
+        \\  var lk = new Lock();
+        \\  var cv = new Condition();
+        \\  var box = { ready: 0, entered: 0, sleep: 0 };
+        \\  var nt = new Thread(function(){
+        \\    while (Atomics.load(box, 'entered') === 0)
+        \\      Atomics.wait(box, 'sleep', 0, 1);
+        \\    lk.hold(function(){ box.ready = 1; });
+        \\    return cv.notifyAll();
+        \\  });
+        \\  lk.hold(function(){
+        \\    Atomics.store(box, 'entered', 1);
+        \\    while (!box.ready) cv.wait(lk);
+        \\  });
+        \\  var nw = nt.join();
+        \\  if (nw !== 1 && nw !== 0) throw new Error('bad condition wake count');
+        \\}
+        \\{
+        \\  var done = 0;
+        \\  var aj = new Thread(function(){ return { value: 17 }; });
+        \\  aj.asyncJoin().then(function(v){ done += v.value; }, function(){ done = -1000; });
+        \\  var joined = aj.join();
+        \\  if (joined.value !== 17) throw new Error('bad asyncJoin identity result');
+        \\}
+        \\if (registry && typeof gc === 'function') {
+        \\  (function(){
+        \\    for (var k = 0; k < 24; k++) registry.register({ k: k, p: 'cleanup' + k }, 1);
+        \\  })();
+        \\  gc();
+        \\  registry.cleanupSome(function(held){ cleanupSeen += held; });
+        \\}
+        \\
+    );
 }
 
 /// A *deterministic* program: N workers each apply `per` `Atomics.add`s to two
@@ -101,7 +189,8 @@ fn genVerify(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator
         \\var vbuf = new ArrayBuffer(32); var via = new Int32Array(vbuf);
         \\
     );
-    const head = try std.fmt.allocPrint(gpa,
+    const head = try std.fmt.allocPrint(
+        gpa,
         "function w(){{ for (var i = 0; i < {d}; i++) {{ Atomics.add(via, 0, 1); Atomics.add(via, 1, 3); }} }}\n",
         .{per},
     );
@@ -189,11 +278,18 @@ pub fn main(init: std.process.Init) !void {
     };
     // `threadfuzz amplify <iters> <seed>`: high-contention profile (more threads,
     // longer loops) — the stress-amplification mode for surfacing rare races.
+    // `threadfuzz broad <iters> <seed>`: wider semantic profile — exceptions,
+    // lifecycle/asyncJoin, waiters, FinalizationRegistry cleanup, and lock/cond
+    // edges. It is intentionally cheaper than amplify but enables GC.
     var cfg = Cfg.default;
     var rest = first;
     if (first) |a| if (std.mem.eql(u8, a, "amplify")) {
         cfg = Cfg.amplified;
         iters = 60; // amplified programs are heavier; fewer per run
+        rest = args.next();
+    } else if (std.mem.eql(u8, a, "broad")) {
+        cfg = Cfg.broad;
+        iters = 80; // broader programs include sidecars + GC; keep the gate cheap
         rest = args.next();
     };
     if (rest) |a| iters = std.fmt.parseInt(usize, a, 10) catch iters;
@@ -206,7 +302,7 @@ pub fn main(init: std.process.Init) !void {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(gpa);
         try genProgram(seed, &buf, gpa, cfg);
-        const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
+        const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = cfg.enable_gc }) catch {
             std.debug.print("seed {d}: context creation failed\n", .{seed});
             failures += 1;
             continue;

@@ -244,8 +244,10 @@ threading architecture:
   coverage.
 - **Mid-script parallel GC** - keep the abort-safe collector correct and improve
   the known limitation around sync-wait peers that periodically pump tasks.
-- **Stress breadth** - keep expanding fuzzing for exceptions, termination,
-  cleanup, waiters, and cross-thread lifecycle edges.
+- **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
+  cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
+  keep extending it toward deterministic termination and Worker/thread overlap
+  oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature
   exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack
   behavior, heap caps/OOM semantics, and unsupported `$vm` controls.

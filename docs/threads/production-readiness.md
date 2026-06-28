@@ -84,13 +84,17 @@ as embedders exercise more threaded host patterns.
 - The `cve/` PR-249 subset covers teardown, waiters, lifecycle, GC, and
   synchronization hazards.
 - `threadfuzz` generates random shared object / array / closure / typed-array
-  programs in GIL-free contexts and supports single-file reproduction.
+  programs in GIL-free contexts and supports single-file reproduction. Its
+  broad profile now adds caught exceptions/finally, nested thread lifecycle,
+  `asyncJoin`, property `wait` / `waitAsync`, `Condition`, `Thread.restrict`,
+  and `FinalizationRegistry` cleanup coverage under GC-backed parallel
+  contexts.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
-  amplified, ReleaseSafe, and deterministic-result verification.
+  amplified, broad semantic, ReleaseSafe, and deterministic-result
+  verification.
 
-Remaining: add generators for exception propagation, termination races,
-FinalizationRegistry cleanup, sync/async waiter interactions, and worker/thread
-lifecycle overlaps.
+Remaining: add VM termination-storm and Worker/thread lifecycle-overlap
+generators once a deterministic termination hook and worker-stress oracle exist.
 
 ## 6. CI Gating
 
@@ -104,6 +108,7 @@ Every pull request and push to `main` runs:
 - `threadfuzz`,
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
+- broad semantic `threadfuzz`,
 - ReleaseSafe `threadfuzz`,
 - deterministic-result `threadfuzz-verify`,
 - sharded no-GIL PR-249 corpus TSan sweep,

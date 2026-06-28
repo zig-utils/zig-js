@@ -26,6 +26,7 @@ push to `main`:
 zig build threadfuzz -Dfuzz-iters=400
 zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
 zig build threadfuzz -Dfuzz-amplify=true -Dfuzz-iters=30
+zig build threadfuzz -Dfuzz-broad=true -Dfuzz-iters=80
 zig build threadfuzz -Doptimize=ReleaseSafe -Dfuzz-iters=400
 zig build threads-test-bin -Dtsan=true
 ./zig-out/bin/threads-test parallel-js one <allowlisted-case>
@@ -82,7 +83,10 @@ closures, constructors, Maps/Sets, accessors, and typed arrays across JS
 deadlock, UAF, or engine race"; `-Dtsan=true` turns unsynchronized engine access
 into a race report; `-Dfuzz-amplify=true` raises contention; `-Doptimize=ReleaseSafe`
 keeps safety checks under optimization; `-Dfuzz-verify=true` generates
-deterministic atomic programs whose exact result is predicted.
+deterministic atomic programs whose exact result is predicted. The broad profile
+(`-Dfuzz-broad=true`) enables GC and adds caught exception/finally paths, nested
+thread lifecycle, `asyncJoin`, property `wait` / `waitAsync`, `Condition`
+wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
 GIL-free parallel contexts. The full corpus is too slow for every PR, so CI

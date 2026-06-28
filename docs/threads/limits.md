@@ -85,9 +85,12 @@ context APIs.
   case. Keep quiescent collection as the correctness fallback and improve
   mid-script collection only when the wait/park protocol can publish roots
   without races or deadlocks.
-- **Fuzzer breadth.** Keep expanding `threadfuzz` beyond shared
-  object/array/closure/typed-array programs into exception, termination,
-  cleanup, waiter, FinalizationRegistry, and cross-thread lifecycle patterns.
+- **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught
+  exceptions/finally, nested thread lifecycle, `asyncJoin`, property
+  `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and
+  `FinalizationRegistry` cleanup under GC-backed parallel contexts. Keep
+  extending it toward deterministic termination storms and Worker/thread
+  lifecycle-overlap oracles.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow

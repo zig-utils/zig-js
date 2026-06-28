@@ -66,6 +66,12 @@ jobs:
           # `tsan-threadfuzz` above covers race detection).
           - name: threadfuzz-amplified
             cmd: zig build threadfuzz -Dfuzz-amplify=true -Dfuzz-iters=30
+          # Breadth profile: cheaper than amplified, but deliberately covers
+          # caught exceptions/finally, nested thread lifecycle, asyncJoin,
+          # property wait/waitAsync, Condition wakeups, Thread.restrict, and
+          # FinalizationRegistry cleanup under GC-backed parallel contexts.
+          - name: threadfuzz-broad
+            cmd: zig build threadfuzz -Dfuzz-broad=true -Dfuzz-iters=80
           # Sanitizer combo: ReleaseSafe keeps Zig's safety checks (UB, bounds,
           # overflow, unreachable) on but under the optimizer, catching codegen-
           # dependent faults the Debug build hides — a different bug class than TSan.
