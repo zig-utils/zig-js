@@ -28588,7 +28588,7 @@ fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
 
 /// ToTemporalCalendarIdentifier for constructor/withCalendar arguments: a
 /// date-bearing Temporal instance contributes its own calendar, and a string is
-/// either a bare calendar id or a Temporal ISO string carrying `[u-ca=...]`.
+/// a bare calendar id. Temporal ISO strings are not calendar identifiers here.
 /// Other values are TypeError; malformed or unknown ids are RangeError.
 fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
     if (v.isObject() and v.asObj().temporal != null) {
@@ -28601,10 +28601,6 @@ fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
     if (isCalendarId(s)) {
         if (isKnownCalendar(s)) return canonCalendarId(self, s);
         return self.throwError("RangeError", "unknown calendar");
-    }
-    if (isTemporalIsoString(self, s)) {
-        const ann = stripTemporalAnnotations(self, s) catch return self.throwError("RangeError", "invalid calendar string");
-        return if (ann.cal) |cal| canonCalendarId(self, cal) else "iso8601";
     }
     return self.throwError("RangeError", "invalid calendar string");
 }
@@ -29588,6 +29584,22 @@ fn temporalYearMonthToStringFn(ctx: *anyopaque, this: Value, args: []const Value
     // ISO string ("YYYY-MM-DD[u-ca=iso8601]").
     if (!std.mem.eql(u8, t.calendar, "iso8601") or calShowsAnnotation(cal, t.calendar)) try tfmt(self, &buf, "-{d:0>2}", .{iso.d});
     try appendCalAnnotation(self, &buf, cal, t.calendar);
+    return Value.str(try buf.toOwnedSlice(self.arena));
+}
+
+fn temporalYearMonthToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!tIsTemporal(this, .plain_year_month)) return self.throwError("TypeError", "non-PlainYearMonth");
+    const t = this.asObj().temporal.?;
+    const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try isoYearStr(self, &buf, iso.y);
+    try tfmt(self, &buf, "-{d:0>2}", .{iso.m});
+    if (!std.mem.eql(u8, t.calendar, "iso8601")) {
+        try tfmt(self, &buf, "-{d:0>2}", .{iso.d});
+        try appendCalAnnotation(self, &buf, .auto, t.calendar);
+    }
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
@@ -33222,7 +33234,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalYearMonthToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalYearMonthToJSONFn);
         try setNative(a, rs, p, "with", 1, temporalYearMonthWithFn);
         try setNative(a, rs, p, "equals", 1, temporalYearMonthEqualsFn);
         try setNative(a, rs, p, "add", 1, temporalYearMonthAddFn(1));
