@@ -4318,7 +4318,15 @@ pub const Interpreter = struct {
         if (optional and (callee.isNull() or callee.isUndefined())) return error.OptShortCircuit;
         const args = try self.evalArgs(arg_nodes);
         const saved_direct_eval = self.direct_eval_call;
-        self.direct_eval_call = !optional and callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
+        // A direct eval requires the callee to be THIS realm's %eval% intrinsic.
+        // A syntactic `eval(...)` whose binding resolves to another realm's eval
+        // (or a reassigned `eval`) is an *indirect* eval — it runs as global code
+        // in that eval's own realm, not in the caller's scope.
+        const eval_named = !optional and callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
+        self.direct_eval_call = eval_named and callee.isObject() and blk: {
+            const realm_eval = rootEnv(self.env).get("eval") orelse break :blk false;
+            break :blk realm_eval.isObject() and realm_eval.asObj() == callee.asObj();
+        };
         defer self.direct_eval_call = saved_direct_eval;
         if (with_this) |wo| return self.callValueWithThis(callee, args, Value.obj(wo));
         return self.callValue(callee, args);
