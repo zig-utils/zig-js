@@ -262,7 +262,7 @@ pub const FnTemplate = struct {
     /// Threaded to the closure so the VM's this-binding matches the tree-walker:
     /// a sloppy bare call substitutes the global `this`, a strict one keeps undefined.
     is_strict: bool = false,
-    chunk: *Chunk,
+    chunk: ?*Chunk,
     /// Number of frame slots (params + function-scoped declarations) the VM
     /// allocates per call.
     local_count: u32,

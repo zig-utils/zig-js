@@ -1588,25 +1588,43 @@ pub const Compiler = struct {
         const scope = try self.arena.create(FnScope);
         scope.* = .{ .parent = self.scope };
 
-        const sub = if (fnode.is_generator) blk: {
+        const sub: ?*Chunk = if (fnode.is_generator) blk: {
             break :blk try Compiler.compileGenerator(self.arena, fnode);
         } else blk: {
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
             for (fnode.params) |p| {
                 // Default values and rest params need a runtime prologue the VM
-                // doesn't emit yet — fall back to the tree-walker for those.
-                if (p.default != null or p.is_rest or p.pattern != null) return error.Unsupported;
+                // doesn't emit yet. Generator-body env-mode closures can fall
+                // back to the tree-walker because their names live in Environment
+                // records; top-level programs must still fall back wholesale so
+                // unsupported statement forms stay on the tree-walker.
+                if (p.default != null or p.is_rest or p.pattern != null) {
+                    if (self.in_generator and self.scope == null) break :blk null;
+                    return error.Unsupported;
+                }
                 _ = try scope.addLocal(self.arena, p.name);
             }
             if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope };
             if (fnode.is_expr_body) {
-                try sub_c.compileExpr(fnode.body);
+                sub_c.compileExpr(fnode.body) catch |e| switch (e) {
+                    error.Unsupported => {
+                        if (self.in_generator and self.scope == null) break :blk null;
+                        return error.Unsupported;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
                 _ = try compiled.emit(.ret, 0);
             } else {
-                try sub_c.compileStmt(fnode.body); // body is a block
+                sub_c.compileStmt(fnode.body) catch |e| switch (e) {
+                    error.Unsupported => {
+                        if (self.in_generator and self.scope == null) break :blk null;
+                        return error.Unsupported;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                }; // body is a block
                 _ = try compiled.emit(.ret_undef, 0);
             }
             try compiled.finalize();

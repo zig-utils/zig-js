@@ -1802,8 +1802,8 @@ fn binOp(op: bc.Op) @import("ast.zig").BinaryOp {
 }
 
 /// Build a Function value from a template, capturing the current `frame` as the
-/// closure's upvalue source. Tagged with the compiled `chunk` so calls take the
-/// VM path; `closure` (the global env) is kept only to satisfy the shared type.
+/// closure's upvalue source. Templates with a compiled `chunk` take the VM path;
+/// env-mode templates may leave it null and use the tree-walker body fallback.
 fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
     const func = try gc_mod.allocFunction(vm.arena);
     // A named function expression binds its own name as an immutable binding in

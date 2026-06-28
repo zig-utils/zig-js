@@ -5249,6 +5249,21 @@ test "generators with destructuring / default / rest parameters" {
     )).asBool());
 }
 
+test "generators: yield is an identifier in nested sloppy function parameter defaults" {
+    try std.testing.expectEqual(@as(f64, 23), (try evalIn(
+        \\var yield = 23;
+        \\var paramValue;
+        \\function* g() {
+        \\  function f(x = yield) {
+        \\    paramValue = x;
+        \\  }
+        \\  f();
+        \\}
+        \\g().next();
+        \\paramValue
+    )).asNum());
+}
+
 test "Set/Map are iterable: for-of, spread, Array.from, destructuring" {
     // for-of over a Set.
     try std.testing.expectEqual(@as(f64, 6), (try evalIn(
