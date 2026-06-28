@@ -1949,6 +1949,24 @@ pub const Interpreter = struct {
                         break :blk v;
                     }
                 }
+                // `super[key] = value`: the SuperReference is created before the
+                // RHS, so GetThisBinding/GetSuperBase and the computed expression
+                // run first. ToPropertyKey(key) is part of PutValue, so it remains
+                // after the RHS.
+                if (a.target.* == .super_member) {
+                    const m = a.target.super_member;
+                    const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                    if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                    const parent = home.protoAtomic();
+                    const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
+                    const v = try self.eval(a.value);
+                    const parent_obj = parent orelse return self.throwError("TypeError", "Cannot set property of null (super)");
+                    const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
+                    if (!try self.setMemberResult(Value.obj(parent_obj), key, v, self.this_value)) {
+                        if (self.strict) return self.throwError("TypeError", "Cannot set property");
+                    }
+                    break :blk v;
+                }
                 // PutValue resolves the LHS reference BEFORE the RHS runs: a
                 // strict assignment to an unresolvable bare identifier is a
                 // ReferenceError even when the RHS then creates a same-named
@@ -34378,6 +34396,39 @@ test "interpreter class extends and super" {
         \\class P { static sq(n) { return n * n; } }
         \\class C extends P {}
         \\C.sq(4)
+    )).asNum());
+    try std.testing.expectEqualStrings("prop", (try evalSource(a,
+        \\var log = "";
+        \\class B {}
+        \\class C extends B {
+        \\  m() {
+        \\    function prop() { log += "prop"; throw "stop"; }
+        \\    function rhs() { log += "rhs"; }
+        \\    try { super[prop()] = rhs(); } catch (e) {}
+        \\  }
+        \\}
+        \\new C().m();
+        \\log
+    )).asStr());
+    try std.testing.expectEqualStrings("rhs,key", (try evalSource(a,
+        \\var log = "";
+        \\var key = { toString() { log += ",key"; return "x"; } };
+        \\class B {}
+        \\class C extends B {
+        \\  m() {
+        \\    function rhs() { log += "rhs"; return 1; }
+        \\    super[key] = rhs();
+        \\  }
+        \\}
+        \\new C().m();
+        \\log
+    )).asStr());
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a,
+        \\var count = 0;
+        \\class C { static m() { super.x = count += 1; } }
+        \\Object.setPrototypeOf(C, null);
+        \\try { C.m(); } catch (e) {}
+        \\count
     )).asNum());
     try std.testing.expectError(error.Throw, evalSource(a, "class C {} C()"));
     try std.testing.expectError(error.Throw, evalSource(a,
