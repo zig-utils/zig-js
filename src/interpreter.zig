@@ -650,6 +650,10 @@ pub const ThisCell = struct {
     initialized: bool = false,
 };
 
+pub const ImportMetaSlot = struct {
+    obj: ?*value.Object = null,
+};
+
 /// A JS-defined function value: parameter names, body AST, and the environment
 /// captured at definition (the closure). Stored type-erased on `Object.js_func`.
 pub const Function = struct {
@@ -751,6 +755,9 @@ pub const Function = struct {
     /// A concise method (object/class method, get/set) — has no [[Construct]], so
     /// it is not a constructor (e.g. `%TypedArray%.from.call(method)` is a TypeError).
     is_method: bool = false,
+    /// The module-local `import.meta` cell captured at function creation. Null in
+    /// Script code, where `import.meta` is a syntax error.
+    import_meta_slot: ?*ImportMetaSlot = null,
     /// The `with`-scope chain captured at definition (object environment records
     /// enclosing the function). A function called from inside a `with` does NOT
     /// see the caller's `with` object — only the ones lexically enclosing its own
@@ -928,14 +935,19 @@ pub const Interpreter = struct {
     /// script evaluation (where `import(...)` rejects).
     cur_module: []const u8 = "",
     dyn_import_ctx: ?*anyopaque = null,
-    dyn_import: ?*const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, out: *Value) bool = null,
+    dyn_import: ?*const fn (ctx: *anyopaque, self: *Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, module_type: []const u8, out: *Value) bool = null,
     /// Deferred-evaluation trigger (set by the module driver): evaluates the
     /// `import defer` module identified by `module` (an opaque `*Context.Module`)
     /// the first time a binding of its deferred namespace is accessed. Idempotent
     /// (the module's own `evaluated` flag makes a re-trigger a no-op).
     defer_trigger_ctx: ?*anyopaque = null,
     defer_trigger: ?*const fn (ctx: *anyopaque, self: *Interpreter, module: *anyopaque) EvalError!void = null,
-    /// The surrounding module's `import.meta` object, created lazily and cached.
+    /// The active module's `import.meta` cell. Functions capture this at creation
+    /// so `import.meta` remains lexical when an exported function is called by a
+    /// different module.
+    import_meta_slot: ?*ImportMetaSlot = null,
+    /// Script fallback for `import.meta` storage. Module code uses
+    /// `import_meta_slot`; this keeps the existing root for non-module internals.
     import_meta_obj: ?*value.Object = null,
     /// Legacy static RegExp match state (Annex B): updated after a successful
     /// match, read by `RegExp.input`/`$_`/`lastMatch`/`$&`/`lastParen`/`$+`/
@@ -3491,6 +3503,7 @@ pub const Interpreter = struct {
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
             .is_method = fnode.is_method,
+            .import_meta_slot = self.import_meta_slot,
         };
         // A `with` block's object Environment Record is part of the lexical chain
         // (`Environment.with_object`), so a function defined inside a `with`
@@ -4769,6 +4782,8 @@ pub const Interpreter = struct {
         const saved_nt = self.new_target;
         const saved_strict = self.strict;
         const saved_global = self.global_object;
+        const saved_import_meta_slot = self.import_meta_slot;
+        const saved_import_meta_obj = self.import_meta_obj;
         const saved_this_initialized = self.this_initialized;
         const saved_this_cell = self.this_cell;
         const saved_active_function = self.active_function;
@@ -4793,6 +4808,8 @@ pub const Interpreter = struct {
         self.env = call_env;
         self.signal = .none;
         self.strict = func.is_strict;
+        self.import_meta_slot = func.import_meta_slot;
+        self.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
         if (self.env.get("globalThis")) |gt| {
             if (gt.isObject()) self.global_object = gt.asObj();
         }
@@ -4858,6 +4875,8 @@ pub const Interpreter = struct {
             self.new_target = saved_nt;
             self.strict = saved_strict;
             self.global_object = saved_global;
+            self.import_meta_slot = saved_import_meta_slot;
+            self.import_meta_obj = saved_import_meta_obj;
             self.this_value = saved_this;
             self.this_initialized = saved_this_initialized;
             self.this_cell = saved_this_cell;
@@ -5831,6 +5850,14 @@ pub const Interpreter = struct {
     /// `import.meta` — the surrounding module's meta-object (an ordinary
     /// extensible object with a null [[Prototype]]), created once and cached.
     fn evalImportMeta(self: *Interpreter) EvalError!Value {
+        if (self.import_meta_slot) |slot| {
+            if (slot.obj) |o| return Value.obj(o);
+            const o = try gc_mod.allocObj(self.arena);
+            o.* = .{ .proto = null };
+            slot.obj = o;
+            self.import_meta_obj = o;
+            return Value.obj(o);
+        }
         if (self.import_meta_obj) |o| return Value.obj(o);
         const o = try gc_mod.allocObj(self.arena);
         o.* = .{ .proto = null };
@@ -5865,15 +5892,15 @@ pub const Interpreter = struct {
         // argument. A non-undefined options that is not an Object, a non-Object
         // `with`, or a non-String attribute value all reject with a TypeError.
         // (Attributes are otherwise ignored — every module is the host's source.)
-        if (self.validateImportOptions(optionsv)) |_| {} else |_| {
+        const module_type = self.validateImportOptions(optionsv) catch {
             try promise.reject(self, p, self.exception);
             return Value.obj(pobj);
-        }
+        };
         // Resolve+load the module synchronously through the host (set by the
         // module driver). With no host (plain script), reject with a TypeError.
         if (self.dyn_import) |f| {
             var out: Value = Value.undef();
-            if (f(self.dyn_import_ctx.?, self, self.cur_module, spec, phase, &out)) {
+            if (f(self.dyn_import_ctx.?, self, self.cur_module, spec, phase, module_type, &out)) {
                 try promise.resolve(self, p, out);
             } else {
                 try promise.reject(self, p, self.exception);
@@ -5888,20 +5915,27 @@ pub const Interpreter = struct {
     /// Validate the second argument of `import(specifier, options)` per
     /// EvaluateImportCall: options (when present) must be an Object; its `with`
     /// attribute (when present) must be an Object whose every own enumerable
-    /// value is a String. Throws a TypeError otherwise.
-    fn validateImportOptions(self: *Interpreter, options: Value) EvalError!void {
-        if (options.isUndefined()) return;
+    /// value is a String. Throws a TypeError otherwise. Returns the `type`
+    /// attribute value when present.
+    fn validateImportOptions(self: *Interpreter, options: Value) EvalError![]const u8 {
+        if (options.isUndefined()) return "";
         if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)
             return self.throwError("TypeError", "import() options must be an object");
         const attrs = try self.getProperty(options, "with");
-        if (attrs.isUndefined()) return;
+        if (attrs.isUndefined()) return "";
         if (!attrs.isObject() or attrs.asObj().is_symbol or attrs.asObj().is_bigint)
             return self.throwError("TypeError", "import() 'with' attributes must be an object");
-        const keys = try attrs.asObj().enumerableKeys(self.arena);
+        var module_type: []const u8 = "";
+        const attrs_obj = attrs.asObj();
+        const keys = try self.objectOwnKeysList(attrs_obj);
         for (keys) |k| {
+            if (value.isSymbolKey(k)) continue;
+            if (!try self.objectProtoPropertyIsEnumerable(attrs_obj, k)) continue;
             const v = try self.getProperty(attrs, k);
             if (!v.isString()) return self.throwError("TypeError", "import attribute values must be strings");
+            if (std.mem.eql(u8, k, "type")) module_type = v.asStr();
         }
+        return module_type;
     }
 
     /// `await v` on an already-evaluated value (synchronous-settling): perform

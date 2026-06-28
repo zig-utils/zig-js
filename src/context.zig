@@ -1164,6 +1164,7 @@ pub const Context = struct {
         star_sources: std.ArrayListUnmanaged(*Module) = .empty, // `export * from`
         ns: ?*value.Object = null, // the namespace exotic object, if requested
         deferred_ns: ?*value.Object = null, // the `import defer` namespace, if requested (distinct, cached)
+        import_meta_slot: interp.ImportMetaSlot = .{},
         linked: bool = false,
         eval_started: bool = false, // [[Status]] reached ~evaluating~
         evaluated: bool = false, // [[Status]] reached ~evaluated~ (completed, even if it threw)
@@ -1506,13 +1507,19 @@ pub const Context = struct {
         const saved_env = machine.env;
         const saved_this = machine.this_value;
         const saved_mod = machine.cur_module;
+        const saved_import_meta_slot = machine.import_meta_slot;
+        const saved_import_meta_obj = machine.import_meta_obj;
         machine.env = m.env;
         machine.this_value = Value.undef(); // module top-level `this` is undefined
         machine.cur_module = m.path; // referrer for runtime import()
+        machine.import_meta_slot = &m.import_meta_slot;
+        machine.import_meta_obj = m.import_meta_slot.obj;
         defer {
             machine.env = saved_env;
             machine.this_value = saved_this;
             machine.cur_module = saved_mod;
+            machine.import_meta_slot = saved_import_meta_slot;
+            machine.import_meta_obj = saved_import_meta_obj;
         }
         _ = try machine.evalStatements(m.items);
     }
@@ -1569,14 +1576,17 @@ pub const Context = struct {
     /// link, and evaluate the target module, writing its namespace into `out`.
     /// Returns false (leaving the reason in `machine.exception`) on any failure,
     /// so the caller rejects the dynamic-import promise.
-    fn dynImportHook(ctx: *anyopaque, machine: *interp.Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, out: *value.Value) bool {
+    fn dynImportHook(ctx: *anyopaque, machine: *interp.Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, module_type: []const u8, out: *value.Value) bool {
         const self: *Context = @ptrCast(@alignCast(ctx));
         const host = self.mod_host orelse return self.dynImportFail(machine, "dynamic import is not available");
         const cache = self.mod_cache orelse return self.dynImportFail(machine, "dynamic import is not available");
         var dep_path: []const u8 = "";
         const src = host.load(host.ctx, referrer, specifier, &dep_path) orelse
             return self.dynImportFail(machine, "Cannot resolve module specifier");
-        const dep = self.loadModule(dep_path, src, host, cache) catch return self.surfaceFail(machine);
+        const dep = if (std.mem.eql(u8, module_type, "json") or std.mem.eql(u8, module_type, "text"))
+            self.loadSyntheticModule(dep_path, src, module_type, cache) catch return self.surfaceFail(machine)
+        else
+            self.loadModule(dep_path, src, host, cache) catch return self.surfaceFail(machine);
         self.linkModule(dep) catch return self.surfaceFail(machine);
         // `import.defer(x)`: resolve the promise with the deferred namespace
         // without evaluating — evaluation is triggered lazily on first access.
@@ -1818,6 +1828,20 @@ test "modules expose namespace re-exports and evaluate dependencies in source or
         \\if (val !== 2) throw new Error("default binding did not update");
     , &.{
         .{ .path = "dep.js", .source = "export default function fn() { fn = 2; return 1; }" },
+    });
+}
+
+test "modules keep import.meta distinct per declaring module" {
+    try evaluateModuleWithFixtures(
+        \\import { meta as depMeta, getMeta } from "./dep.js";
+        \\if (import.meta === depMeta) throw new Error("shared imported import.meta");
+        \\if (import.meta === getMeta()) throw new Error("shared called import.meta");
+        \\if (depMeta !== getMeta()) throw new Error("fixture import.meta was not stable");
+    , &.{
+        .{ .path = "dep.js", .source =
+        \\export var meta = import.meta;
+        \\export function getMeta() { return import.meta; }
+        },
     });
 }
 

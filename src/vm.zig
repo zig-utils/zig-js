@@ -164,6 +164,7 @@ pub const Generator = struct {
     this_value: Value = Value.undef(),
     home_object: ?*value.Object = null,
     super_ctor: ?*value.Object = null,
+    import_meta_slot: ?*interp.ImportMetaSlot = null,
     started: bool = false,
     done: bool = false,
     suspended: bool = false,
@@ -983,6 +984,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
+        .import_meta_slot = func.import_meta_slot,
     };
     gc_mod.initGeneratorBacking(g);
     const obj = try gc_mod.allocObj(vm.arena);
@@ -1111,15 +1113,21 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     const s_this = vm.this_value;
     const s_home = vm.home_object;
     const s_super = vm.super_ctor;
+    const s_import_meta_slot = vm.import_meta_slot;
+    const s_import_meta_obj = vm.import_meta_obj;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
     vm.super_ctor = g.super_ctor;
+    vm.import_meta_slot = g.import_meta_slot;
+    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.obj else null;
     defer {
         vm.env = s_env;
         vm.this_value = s_this;
         vm.home_object = s_home;
         vm.super_ctor = s_super;
+        vm.import_meta_slot = s_import_meta_slot;
+        vm.import_meta_obj = s_import_meta_obj;
     }
 
     if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
@@ -1406,6 +1414,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
+        .import_meta_slot = func.import_meta_slot,
         .is_async_gen = true,
     };
     gc_mod.initGeneratorBacking(g);
@@ -1525,15 +1534,21 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     const s_this = vm.this_value;
     const s_home = vm.home_object;
     const s_super = vm.super_ctor;
+    const s_import_meta_slot = vm.import_meta_slot;
+    const s_import_meta_obj = vm.import_meta_obj;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
     vm.super_ctor = g.super_ctor;
+    vm.import_meta_slot = g.import_meta_slot;
+    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.obj else null;
     defer {
         vm.env = s_env;
         vm.this_value = s_this;
         vm.home_object = s_home;
         vm.super_ctor = s_super;
+        vm.import_meta_slot = s_import_meta_slot;
+        vm.import_meta_obj = s_import_meta_obj;
     }
     if (vm.depth >= interp.max_call_depth) return vm.throwError("RangeError", "Maximum call stack size exceeded");
     vm.depth += 1;
@@ -1843,6 +1858,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .is_generator = tmpl.is_generator,
         .is_async = tmpl.is_async,
         .is_strict = tmpl.is_strict,
+        .import_meta_slot = vm.import_meta_slot,
         .chunk = if (tmpl.is_generator or tmpl.is_async) null else tmpl.chunk,
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
@@ -1947,6 +1963,8 @@ pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     const saved_this = vm.this_value;
     const saved_strict = vm.strict;
     const saved_env = vm.env;
+    const saved_import_meta_slot = vm.import_meta_slot;
+    const saved_import_meta_obj = vm.import_meta_obj;
     const saved_pm = vm.current_private_map;
     if (!func.is_arrow) vm.current_private_map = func.private_map; // a direct eval here resolves the class's private names
     vm.strict = func.is_strict;
@@ -1956,10 +1974,14 @@ pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     // For ordinary functions `func.closure` is the global env (unchanged).
     vm.env = func.closure;
     vm.this_value = try bindThisForCall(vm, func, this_val);
+    vm.import_meta_slot = func.import_meta_slot;
+    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
     defer {
         vm.this_value = saved_this;
         vm.strict = saved_strict;
         vm.env = saved_env;
+        vm.import_meta_slot = saved_import_meta_slot;
+        vm.import_meta_obj = saved_import_meta_obj;
         vm.current_private_map = saved_pm;
     }
     return run(vm, fchunk, frame);

@@ -343,6 +343,7 @@ pub fn traceFunction(f: *interp.Function, v: anytype) void {
     v.mark(f.home_object);
     v.mark(f.super_ctor);
     v.mark(f.obj);
+    if (f.import_meta_slot) |slot| if (slot.obj) |o| v.mark(o);
     markValue(v, f.arrow_this);
     // `params`/`body`/`source`/`chunk` are immutable arena/AST — not cells.
 }
@@ -434,6 +435,7 @@ pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.M
         const m = mp.*;
         v.mark(m.env);
         if (m.ns) |ns| v.mark(ns);
+        if (m.import_meta_slot.obj) |o| v.mark(o);
     }
 }
 
@@ -473,7 +475,9 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     if (machine.global_object) |o| v.mark(o);
     var sym_it = machine.symbols.valueIterator();
     while (sym_it.next()) |sym| v.mark(sym.*);
-    if (machine.import_meta_obj) |o| v.mark(o);
+    if (machine.import_meta_slot) |slot| {
+        if (slot.obj) |o| v.mark(o);
+    } else if (machine.import_meta_obj) |o| v.mark(o);
     markValue(v, machine.ret_value);
     markValue(v, machine.this_value);
     markValue(v, machine.exception);
