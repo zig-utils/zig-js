@@ -880,6 +880,10 @@ pub const Interpreter = struct {
     /// native call), so a native can reach its own `private_data` — used by
     /// Promise executor resolve/reject closures.
     active_native: ?*value.Object = null,
+    /// The non-arrow JS function currently being invoked. `super()` needs this
+    /// function object's current [[Prototype]] (GetSuperConstructor), which can
+    /// be mutated after class definition.
+    active_function: ?*value.Object = null,
     /// Context-owned buffer the global `print` appends to (the async harness's
     /// `$DONE` reports completion through `print`).
     print_buffer: ?*std.ArrayListUnmanaged(u8) = null,
@@ -2193,7 +2197,16 @@ pub const Interpreter = struct {
                 // constructor is `class … extends null`: GetSuperConstructor yields
                 // %Function.prototype%, not a constructor → a runtime TypeError.
                 if (!self.in_derived_ctor) return self.throwError("SyntaxError", "'super' keyword unexpected here");
-                const sup = self.super_ctor orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
+                const sup = blk2: {
+                    if (self.active_function) |fn_obj| if (fn_obj.js_func) |erased| {
+                        const active: *Function = @ptrCast(@alignCast(erased));
+                        if (active.is_derived_constructor) {
+                            break :blk2 self.effectiveProto(fn_obj) orelse
+                                return self.throwError("TypeError", "Super constructor null is not a constructor");
+                        }
+                    };
+                    break :blk2 self.super_ctor orelse return self.throwError("TypeError", "Super constructor null is not a constructor");
+                };
                 // A synthesized default derived constructor forwards its arguments
                 // to the super constructor DIRECTLY — its `super(...args)` does not
                 // run a user-observable spread, so a hijacked Array.prototype
@@ -4533,6 +4546,9 @@ pub const Interpreter = struct {
             const saved_native = self.active_native;
             self.active_native = obj;
             defer self.active_native = saved_native;
+            const saved_nt = self.new_target;
+            if (!self.direct_eval_call) self.new_target = Value.undef();
+            defer self.new_target = saved_nt;
             return nf(@ptrCast(self), this_val, args);
         }
         if (obj.js_func) |erased| {
@@ -4755,6 +4771,7 @@ pub const Interpreter = struct {
         const saved_global = self.global_object;
         const saved_this_initialized = self.this_initialized;
         const saved_this_cell = self.this_cell;
+        const saved_active_function = self.active_function;
         const saved_eval_nt = self.direct_eval_new_target_allowed;
         const saved_fi = self.in_field_initializer;
         const saved_pe = self.in_param_expr;
@@ -4766,6 +4783,7 @@ pub const Interpreter = struct {
         const saved_dfc = self.in_default_ctor;
         const saved_pm = self.current_private_map;
         if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
+        if (!func.is_arrow) self.active_function = func.obj;
         const saved_pfi = self.pending_field_inits;
         const saved_pbn = self.pending_brand_names;
         // A derived constructor's field initializers + private brands wait for its
@@ -4843,6 +4861,7 @@ pub const Interpreter = struct {
             self.this_value = saved_this;
             self.this_initialized = saved_this_initialized;
             self.this_cell = saved_this_cell;
+            self.active_function = saved_active_function;
             // Re-sync the ambient this-state from the (restored) enclosing derived
             // ctor's shared cell: a `super()` that ran during this call — possibly
             // via an arrow invoked from an unrelated context — initialized the
@@ -34572,6 +34591,25 @@ test "interpreter class extends and super" {
         \\class C extends P {}
         \\C.sq(4)
     )).asNum());
+    try std.testing.expect((try evalSource(a,
+        \\var evaluated = false;
+        \\var caught;
+        \\class C extends Object {
+        \\  constructor() {
+        \\    try { super(evaluated = true); } catch (e) { caught = e; }
+        \\  }
+        \\}
+        \\Object.setPrototypeOf(C, parseInt);
+        \\try { new C(); } catch (e) {}
+        \\evaluated && caught instanceof TypeError
+    )).asBool());
+    try std.testing.expectEqualStrings("Symbol(foo)", (try evalSource(a,
+        \\class Base { constructor(v) { this.v = v; } }
+        \\class C extends Base {
+        \\  constructor() { super(Symbol("foo")); }
+        \\}
+        \\new C().v.toString()
+    )).asStr());
     try std.testing.expectEqualStrings("prop", (try evalSource(a,
         \\var log = "";
         \\class B {}
