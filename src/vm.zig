@@ -775,6 +775,18 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 const it = stack.pop().?;
                 try vm.iteratorClose(it);
             },
+            .eval_class => {
+                const node = chunk.classes.items[inst.a];
+                const c = node.class_expr;
+                const count: usize = inst.b;
+                const keys = try vm.arena.alloc(Value, count);
+                var i = count;
+                while (i > 0) {
+                    i -= 1;
+                    keys[i] = stack.pop().?;
+                }
+                try stack.append(stack_alloc, try vm.evalClassWithComputedKeys(c.name, c.superclass, c.members, c.source, keys));
+            },
             .array_spread => {
                 const iterable = stack.pop().?;
                 // The array stays on the stack (peeked); append the iterable's

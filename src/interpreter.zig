@@ -2370,7 +2370,12 @@ pub const Interpreter = struct {
                         // declaration whose value binds to the synthetic "*default*"
                         // (and its own name, when present, for self-reference).
                         .func_decl => |fnode| try self.makeFunction(fnode, self.env),
-                        .class_expr => |c| try self.evalClass(c.name, c.superclass, c.members, c.source),
+                        .class_expr => |c| try self.evalClass(
+                            if (e.default_name.len > 0) c.name else "default",
+                            c.superclass,
+                            c.members,
+                            c.source,
+                        ),
                         else => try self.eval(dx),
                     };
                     if (e.default_name.len > 0) {
@@ -3935,6 +3940,10 @@ pub const Interpreter = struct {
     /// `extends`, the prototypes are linked and methods get a home object so
     /// `super.x` / `super(...)` resolve. (Accessors are still deferred.)
     fn evalClass(self: *Interpreter, name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8) EvalError!Value {
+        return self.evalClassWithComputedKeys(name, superclass, members, source, null);
+    }
+
+    pub fn evalClassWithComputedKeys(self: *Interpreter, name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8, computed_keys: ?[]const Value) EvalError!Value {
         var super_obj: ?*value.Object = null;
         var super_proto: ?*value.Object = null;
         // A class with ClassHeritage is a *derived* class even when the heritage
@@ -3978,10 +3987,10 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "class extends value is not a constructor");
             }
         }
-        return self.buildClass(name, members, super_obj, super_proto, source, derived, class_env);
+        return self.buildClass(name, members, super_obj, super_proto, source, derived, class_env, computed_keys);
     }
 
-    fn buildClass(self: *Interpreter, name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment) EvalError!Value {
+    fn buildClass(self: *Interpreter, name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment, computed_keys: ?[]const Value) EvalError!Value {
         // A class with private names is rewritten (`#x` → a unique storage key) in
         // place. Deep-copy the member ASTs first so EACH evaluation rewrites its
         // own copy — two evaluations of the same class source then have distinct
@@ -4158,11 +4167,21 @@ pub const Interpreter = struct {
         // are deferred. Static field names/displaynames are stashed for pass 2.
         const static_keys = try self.arena.alloc([]const u8, members.len);
         const static_names = try self.arena.alloc([]const u8, members.len);
+        var computed_i: usize = 0;
         for (members, 0..) |m, i| {
             // A `static { ... }` block has no name to evaluate; it runs in pass 2
             // (step 34), interleaved with static-field initializers in source order.
             if (m.static_block != null) continue;
-            const kv: ?Value = if (m.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
+            const kv: ?Value = if (m.key_expr) |ke| blk: {
+                if (computed_keys) |keys| {
+                    if (computed_i >= keys.len)
+                        return self.throwError("TypeError", "missing computed class name");
+                    const key = try self.toPropertyKeyValue(keys[computed_i]);
+                    computed_i += 1;
+                    break :blk key;
+                }
+                break :blk try self.toPropertyKeyValue(try self.eval(ke));
+            } else null;
             const key = if (kv) |k| try self.keyOf(k) else m.key;
             // The name an anonymous field/method initializer takes from this key.
             // A private name (`#x`) was rewritten to the `#x\x00<serial>` storage
@@ -4227,6 +4246,8 @@ pub const Interpreter = struct {
             // unlike object-literal properties.
             try home.setAttr(self.arena, key, .{ .writable = !(value.isPrivateKey(key) and m.accessor == .none), .enumerable = false, .configurable = true });
         }
+        if (computed_keys) |keys| if (computed_i != keys.len)
+            return self.throwError("TypeError", "too many computed class names");
 
         // Pass 2 (step 34): run the static elements — `static { }` blocks and
         // static-field initializers — in source order, now that EVERY computed

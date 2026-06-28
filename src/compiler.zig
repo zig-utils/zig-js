@@ -1108,6 +1108,14 @@ pub const Compiler = struct {
                 const fi = try self.compileFunction(fnode, true);
                 _ = try self.chunk.emit(.make_closure, fi);
             },
+            .class_expr => |c| {
+                // Generator bodies may suspend while evaluating computed class
+                // element names. Lower those key expressions in source order, then
+                // let the VM delegate class construction to the shared interpreter.
+                if (c.superclass != null) return error.Unsupported;
+                const computed_count = try self.compileClassComputedKeys(c.members);
+                _ = try self.chunk.emitAB(.eval_class, try self.chunk.addClass(node), computed_count);
+            },
             .call => |c| {
                 const spread = hasSpread(c.args);
                 if (spread and !self.in_generator) return error.Unsupported; // non-generator spread → tree-walk
@@ -1138,7 +1146,18 @@ pub const Compiler = struct {
                         _ = try self.chunk.emitAB(.call_method, ni, @intCast(c.args.len));
                     }
                 } else if (c.callee.* == .member) {
-                    return error.Unsupported; // computed method call → fallback
+                    if (spread) return error.Unsupported;
+                    const m = c.callee.member;
+                    if (m.optional or m.computed == null) return error.Unsupported;
+                    const recv = try self.freshTemp();
+                    try self.compileExpr(m.object);
+                    try self.emitDefine(recv);
+                    try self.emitLoad(recv);
+                    try self.compileExpr(m.computed.?);
+                    _ = try self.chunk.emit(.get_index, 0);
+                    try self.emitLoad(recv);
+                    for (c.args) |arg| try self.compileExpr(arg);
+                    _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
                 } else {
                     // A direct `eval(...)` inside a slot-based function must see the
                     // function's locals (and correct `this`/private names), which
@@ -1494,6 +1513,18 @@ pub const Compiler = struct {
     fn hasSpread(args: []const *Node) bool {
         for (args) |a| if (a.* == .spread) return true;
         return false;
+    }
+
+    fn compileClassComputedKeys(self: *Compiler, members: []const ast.ClassMember) CompileError!u32 {
+        var count: u32 = 0;
+        for (members) |m| {
+            if (m.static_block != null) continue;
+            if (m.key_expr) |ke| {
+                try self.compileExpr(ke);
+                count += 1;
+            }
+        }
+        return count;
     }
 
     /// Build a fresh array holding a call/new's argument list, expanding any

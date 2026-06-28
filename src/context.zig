@@ -4559,6 +4559,29 @@ test "generators: locals persist across yields, closures captured" {
     )).asNum());
 }
 
+test "generators: class computed names can yield" {
+    try expectEvalStr("method,static,field,staticField,get:set",
+        \\var saved;
+        \\function* g() {
+        \\  class C {
+        \\    [yield "m"]() { return "method"; }
+        \\    static [yield "sm"]() { return "static"; }
+        \\    [yield "f"] = "field";
+        \\    static [yield "sf"] = "staticField";
+        \\    get [yield "g"]() { return "get"; }
+        \\    set [yield "s"](v) { saved = v; }
+        \\  }
+        \\  var c = new C();
+        \\  c[yield "s"] = "set";
+        \\  return c[yield "m"]() + "," + C[yield "sm"]() + "," + c[yield "f"] + "," + C[yield "sf"] + "," + c[yield "g"] + ":" + saved;
+        \\}
+        \\var it = g();
+        \\var r;
+        \\while (!(r = it.next(r && r.value)).done) {}
+        \\r.value
+    );
+}
+
 test "generators: BigInt literal yields feed BigInt typed arrays" {
     try std.testing.expect((try evalIn(
         \\function* g() { yield 7n; yield 42n; }

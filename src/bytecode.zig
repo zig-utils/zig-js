@@ -209,6 +209,7 @@ pub const Op = enum(u8) {
     async_iter_of, // pop iterable -> push its async iterator (Symbol.asyncIterator, else a sync iterator); for `for await`
     enum_keys, // pop object -> push an array of its for-in keys (own enumerable + array indices)
     iter_close, // pop iterator; normal-completion IteratorClose (call return() if present, validate result is Object)
+    eval_class, // operand a: class AST index, b: computed-name count; pop raw computed-name values, evaluate the class
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)
 
@@ -277,6 +278,10 @@ pub const Chunk = struct {
     /// Destructuring-pattern AST nodes referenced by `bind_pattern` (the VM
     /// reuses the tree-walker's `bindPattern` over the live environment).
     patterns: std.ArrayListUnmanaged(*ast.Node) = .empty,
+    /// Class-expression AST nodes referenced by `eval_class`; the compiler
+    /// evaluates any suspendable computed names first, then the VM delegates the
+    /// actual class construction back to the interpreter.
+    classes: std.ArrayListUnmanaged(*ast.Node) = .empty,
     /// One inline cache per instruction, allocated by `finalize` once the code
     /// stream is complete. Warm across runs of the same chunk.
     ics: []InlineCache = &.{},
@@ -326,6 +331,12 @@ pub const Chunk = struct {
     pub fn addPattern(self: *Chunk, node: *ast.Node) std.mem.Allocator.Error!u32 {
         const idx: u32 = @intCast(self.patterns.items.len);
         try self.patterns.append(self.arena, node);
+        return idx;
+    }
+
+    pub fn addClass(self: *Chunk, node: *ast.Node) std.mem.Allocator.Error!u32 {
+        const idx: u32 = @intCast(self.classes.items.len);
+        try self.classes.append(self.arena, node);
         return idx;
     }
 
