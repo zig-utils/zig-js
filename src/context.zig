@@ -1378,22 +1378,45 @@ pub const Context = struct {
         return error.Throw;
     }
 
-    /// Resolve an export `name` of `module` to a concrete `(env, local)` binding,
-    /// chasing re-exports and `export *` sources. Returns null if not found.
-    fn resolveExport(module: *Module, name: []const u8, depth: u32) ?interp.Environment.Alias {
-        if (depth > 64) return null;
+    const ExportResolution = union(enum) {
+        not_found,
+        found: interp.Environment.Alias,
+        ambiguous,
+    };
+
+    fn sameExportResolution(a: interp.Environment.Alias, b: interp.Environment.Alias) bool {
+        return a.env == b.env and std.mem.eql(u8, a.name, b.name);
+    }
+
+    /// Resolve an export `name` of `module`, chasing re-exports and `export *`
+    /// sources. Distinguishes the spec's "ambiguous" result from "not found",
+    /// because indirect exports/imports must reject both while namespace objects
+    /// merely omit ambiguous star names.
+    fn resolveExport(module: *Module, name: []const u8, depth: u32) ExportResolution {
+        if (depth > 64) return .not_found;
         if (module.exports.get(name)) |kind| switch (kind) {
-            .local => |local| return .{ .env = module.env, .name = local },
+            .local => |local| return .{ .found = .{ .env = module.env, .name = local } },
             .indirect => |ind| {
-                if (std.mem.eql(u8, ind.name, "*namespace*")) return null; // namespace handled separately
+                if (std.mem.eql(u8, ind.name, "*namespace*")) return .not_found; // namespace handled separately
                 return resolveExport(ind.module, ind.name, depth + 1);
             },
         };
         // `export *` sources: a name not directly exported may come from one.
+        var star_resolution: ?interp.Environment.Alias = null;
         for (module.star_sources.items) |src| {
-            if (resolveExport(src, name, depth + 1)) |r| return r;
+            switch (resolveExport(src, name, depth + 1)) {
+                .not_found => {},
+                .ambiguous => return .ambiguous,
+                .found => |r| {
+                    if (star_resolution) |existing| {
+                        if (!sameExportResolution(existing, r)) return .ambiguous;
+                    } else {
+                        star_resolution = r;
+                    }
+                },
+            }
         }
-        return null;
+        return if (star_resolution) |r| .{ .found = r } else .not_found;
     }
 
     /// Link a module: load-order recursion that wires every `import` binding in
@@ -1417,6 +1440,18 @@ pub const Context = struct {
         var dit = m.deps.valueIterator();
         while (dit.next()) |dep| try self.linkModule(dep.*);
 
+        var eit = m.exports.iterator();
+        while (eit.next()) |entry| switch (entry.value_ptr.*) {
+            .local => {},
+            .indirect => |ind| {
+                if (std.mem.eql(u8, ind.name, "*namespace*")) continue;
+                switch (resolveExport(ind.module, ind.name, 0)) {
+                    .found => {},
+                    .not_found, .ambiguous => return self.moduleError("does not provide an export"),
+                }
+            },
+        };
+
         for (m.items) |item| switch (item.*) {
             .import_decl => |imp| {
                 const dep = if (m.deps.get(imp.specifier)) |d| d else null;
@@ -1426,10 +1461,11 @@ pub const Context = struct {
                     } else if (std.mem.eql(u8, entry.imported, "*")) {
                         const nsobj = if (imp.deferred) try self.deferredNamespaceObject(dep.?) else try self.namespaceObject(dep.?);
                         try m.env.putConst(entry.local, Value.obj(nsobj));
-                    } else if (resolveExport(dep.?, entry.imported, 0)) |res| {
-                        try m.env.putAlias(entry.local, res.env, res.name);
                     } else {
-                        return self.moduleError("does not provide an export");
+                        switch (resolveExport(dep.?, entry.imported, 0)) {
+                            .found => |res| try m.env.putAlias(entry.local, res.env, res.name),
+                            .not_found, .ambiguous => return self.moduleError("does not provide an export"),
+                        }
                     }
                 }
             },
@@ -1682,7 +1718,10 @@ pub const Context = struct {
         }.f;
         var it = module.exports.iterator();
         while (it.next()) |e| {
-            if (resolveExport(module, e.key_ptr.*, 0)) |res| try add(a, &names, &envs, &locals, &ambiguous, e.key_ptr.*, res);
+            switch (resolveExport(module, e.key_ptr.*, 0)) {
+                .found => |res| try add(a, &names, &envs, &locals, &ambiguous, e.key_ptr.*, res),
+                .not_found, .ambiguous => {},
+            }
         }
         for (module.star_sources.items) |src| {
             var sit = src.exports.iterator();
@@ -1690,7 +1729,10 @@ pub const Context = struct {
                 const name = e.key_ptr.*;
                 if (std.mem.eql(u8, name, "default")) continue;
                 if (module.exports.contains(name)) continue;
-                if (resolveExport(src, name, 0)) |res| try add(a, &names, &envs, &locals, &ambiguous, name, res);
+                switch (resolveExport(src, name, 0)) {
+                    .found => |res| try add(a, &names, &envs, &locals, &ambiguous, name, res),
+                    .not_found, .ambiguous => {},
+                }
             }
         }
         var write_i: usize = 0;
@@ -3777,6 +3819,30 @@ test "dynamic import source phase rejects source text modules" {
     , &.{.{ .path = "dep.js", .source = "export const value = 1;" }});
 
     try std.testing.expectEqualStrings("SyntaxError", (try ctx.evaluate("dynamicImportSourcePhaseCheck")).asStr());
+}
+
+test "dynamic import rejects invalid indirect exports" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    try evaluateModuleWithFixturesInContext(ctx,
+        \\globalThis.dynamicImportBadIndirect = "";
+        \\import("./ambiguous-export.js").catch(function(error) {
+        \\  globalThis.dynamicImportBadIndirect += error.name + ":ambiguous;";
+        \\});
+        \\import("./circular-1.js").catch(function(error) {
+        \\  globalThis.dynamicImportBadIndirect += error.name + ":circular;";
+        \\});
+    , &.{
+        .{ .path = "ambiguous-export.js", .source = "export { x } from './ambiguous.js';" },
+        .{ .path = "ambiguous.js", .source = "export * from './one.js'; export * from './two.js';" },
+        .{ .path = "one.js", .source = "export var x;" },
+        .{ .path = "two.js", .source = "export var x;" },
+        .{ .path = "circular-1.js", .source = "export { x } from './circular-2.js';" },
+        .{ .path = "circular-2.js", .source = "export { x } from './circular-1.js';" },
+    });
+
+    try std.testing.expectEqualStrings("SyntaxError:ambiguous;SyntaxError:circular;", (try ctx.evaluate("dynamicImportBadIndirect")).asStr());
 }
 
 test "delete of a private member is an early error" {
