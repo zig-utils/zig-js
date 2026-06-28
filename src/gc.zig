@@ -471,6 +471,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     if (machine.finalization_cleanup_jobs) |jobs| {
         for (jobs.items) |registry| v.mark(registry);
     }
+    for (machine.gc_temp_roots.items) |root| markValue(v, root);
     if (machine.tdz_marker) |o| v.mark(o);
     if (machine.global_object) |o| v.mark(o);
     var sym_it = machine.symbols.valueIterator();

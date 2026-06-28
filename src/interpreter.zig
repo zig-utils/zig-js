@@ -876,6 +876,10 @@ pub const Interpreter = struct {
     /// during a mid-script collection. Populated only when the GC is on; the
     /// list itself is gpa-backed and freed on interpreter teardown.
     gc_execs: std.ArrayListUnmanaged(*vm.Exec) = .empty,
+    /// Tree-walker temporaries that must survive calls/checkpoints while they
+    /// live only in Zig locals. VM values are covered by `gc_execs`; this stack
+    /// covers interpreter paths such as iterator records/results in `for...of`.
+    gc_temp_roots: std.ArrayListUnmanaged(Value) = .empty,
     /// Context-owned serial used to mint per-class private-name storage keys.
     /// Null only in isolated interpreter unit helpers.
     private_name_serial: ?*u64 = null,
@@ -2586,13 +2590,21 @@ pub const Interpreter = struct {
             // `for await`: the async iterator (Symbol.asyncIterator, else a sync
             // iterator) and each `next()` result is awaited.
             const iter_obj = if (is_await) try self.asyncIteratorOf(iter) else try self.iteratorOf(iter);
+            const iter_root = try self.pushTempRoot(iter_obj);
+            defer self.restoreTempRoots(iter_root);
             // GetIterator reads the iterator's `next` method exactly ONCE (it
             // becomes the Iterator Record's [[NextMethod]]); IteratorNext reuses
             // it. A `next` accessor must therefore not be re-read per iteration.
             const next_method = try self.getProperty(iter_obj, "next");
+            const next_root = try self.pushTempRoot(next_method);
+            defer self.restoreTempRoots(next_root);
             while (true) {
                 const res0 = try self.callValueWithThis(next_method, &.{}, iter_obj);
+                const res0_root = try self.pushTempRoot(res0);
+                defer self.restoreTempRoots(res0_root);
                 const res = if (is_await) try self.awaitValue(res0) else res0;
+                const res_root = try self.pushTempRoot(res);
+                defer self.restoreTempRoots(res_root);
                 // IteratorNext: the result of `next()` must be an Object (a Symbol
                 // or BigInt is object-tagged here but is not an Object per Type()).
                 if (!builtins.isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
@@ -5738,6 +5750,16 @@ pub const Interpreter = struct {
                 return;
             }
         }
+    }
+
+    fn pushTempRoot(self: *Interpreter, v: Value) EvalError!usize {
+        const mark = self.gc_temp_roots.items.len;
+        try self.gc_temp_roots.append(self.arena, v);
+        return mark;
+    }
+
+    fn restoreTempRoots(self: *Interpreter, mark: usize) void {
+        self.gc_temp_roots.shrinkRetainingCapacity(mark);
     }
 
     /// Run a guarded mid-script collection at a step checkpoint. The Context
