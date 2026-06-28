@@ -1753,6 +1753,14 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
         .local_count = tmpl.local_count,
+        // An arrow captures `this`/`new.target`/`super`/field-init context
+        // LEXICALLY at creation — exactly like the tree-walker's makeFunction.
+        .is_arrow = tmpl.is_arrow,
+        .arrow_this = if (tmpl.is_arrow) vm.this_value else Value.undef(),
+        .arrow_new_target = if (tmpl.is_arrow) vm.new_target else Value.undef(),
+        .home_object = if (tmpl.is_arrow) vm.home_object else null,
+        .super_ctor = if (tmpl.is_arrow) vm.super_ctor else null,
+        .field_init_ctx = tmpl.is_arrow and vm.in_field_initializer,
     };
     // The closure can reach `frame` and all its ancestors via the upvalue walk,
     // so their slots may now be touched concurrently — mark the chain escaped so

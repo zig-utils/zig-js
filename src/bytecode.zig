@@ -251,6 +251,9 @@ pub const FnTemplate = struct {
     source: []const u8 = "",
     is_generator: bool = false,
     is_async: bool = false,
+    /// An arrow function: it captures `this`/`new.target`/`super`/the
+    /// field-initializer context lexically at closure creation (see makeClosure).
+    is_arrow: bool = false,
     /// Strict-mode function (own `"use strict"` prologue or lexically inherited).
     /// Threaded to the closure so the VM's this-binding matches the tree-walker:
     /// a sloppy bare call substitutes the global `this`, a strict one keeps undefined.

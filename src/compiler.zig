@@ -1557,6 +1557,7 @@ pub const Compiler = struct {
             .source = fnode.source,
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
+            .is_arrow = fnode.is_arrow,
             .is_strict = fnode.is_strict,
             .chunk = sub,
             .local_count = scope.count,
