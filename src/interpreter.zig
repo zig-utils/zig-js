@@ -1382,6 +1382,18 @@ pub const Interpreter = struct {
         try o.addPrivateBrand(self.arena, name);
     }
 
+    fn addPrivateMethodOrAccessorChecked(self: *Interpreter, o: *value.Object, home: ?*value.Object, name: []const u8) EvalError!void {
+        try self.addPrivateBrandChecked(o, name);
+        const h = home orelse return;
+        if (h.getAccessor(name)) |acc| {
+            try o.setAccessor(self.arena, name, acc.get, acc.set);
+            try o.setAttr(self.arena, name, .{ .enumerable = false, .configurable = false });
+        } else if (h.getOwn(name)) |v| {
+            try o.setOwn(self.arena, self.root_shape, name, v);
+            try o.setAttr(self.arena, name, .{ .writable = false, .enumerable = false, .configurable = false });
+        }
+    }
+
     /// Pre-bind every identifier in a destructuring pattern to the TDZ sentinel.
     fn tdzBindPattern(self: *Interpreter, target: *Node, tdz: Value) void {
         switch (target.*) {
@@ -2186,7 +2198,7 @@ pub const Interpreter = struct {
                 const bns = self.pending_brand_names;
                 self.pending_brand_names = &.{};
                 if (self.this_value.isObject())
-                    for (bns) |bn| try self.addPrivateBrandChecked(self.this_value.asObj(), bn);
+                    for (bns) |bn| try self.addPrivateMethodOrAccessorChecked(self.this_value.asObj(), self.home_object, bn);
                 const fis = self.pending_field_inits;
                 self.pending_field_inits = &.{};
                 for (fis) |fi| _ = try self.eval(fi);
@@ -4874,7 +4886,7 @@ pub const Interpreter = struct {
         // A base class brands `this` with its private names at the start of the
         // constructor (a derived class does so when `super()` returns).
         if (func.is_class_constructor and !func.is_derived_constructor and self.this_value.isObject()) {
-            for (func.private_brand_names) |bn| try self.addPrivateBrandChecked(self.this_value.asObj(), bn);
+            for (func.private_brand_names) |bn| try self.addPrivateMethodOrAccessorChecked(self.this_value.asObj(), func.home_object, bn);
         }
 
         // Async generator: params have now bound (propagating any side-effect
@@ -34319,6 +34331,23 @@ test "interpreter class private fields/methods and static blocks" {
         \\var Inner = new Outer().f();
         \\new Inner().g()
     )).asNum());
+    try std.testing.expectEqual(@as(f64, 42), (try evalSource(a,
+        \\class Base { constructor(obj) { return obj; } }
+        \\class C extends Base {
+        \\  constructor(obj) { super(obj); }
+        \\  #m() { return 42; }
+        \\  static val(obj) { return obj.#m(); }
+        \\}
+        \\C.val(new C({}))
+    )).asNum());
+    try std.testing.expectError(error.Throw, evalSource(a,
+        \\class Base { constructor(obj) { return obj; } }
+        \\class C extends Base {
+        \\  constructor(obj) { super(obj); }
+        \\  #m() { return 42; }
+        \\}
+        \\new C(Object.preventExtensions({}))
+    ));
 }
 
 test "interpreter getters and setters" {
