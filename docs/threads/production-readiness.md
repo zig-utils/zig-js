@@ -56,12 +56,16 @@ Known performance/maturity work:
 
 - `zig build bench` includes a scaling benchmark where N JS `Thread`s run
   independent compute loops in one GIL-free context.
+- `zig build threads-profile` is the dedicated contention harness. It compares
+  the no-GIL default with `.gil = true` across independent compute, shared
+  object properties, shared array append, typed-array Atomics, and thread
+  lifecycle churn.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 
-Remaining: profile lock contention and GC allocation under high thread counts.
-Likely hotspots are global/environment bindings, property/element locks,
-collection helpers, and GC allocation paths.
+Remaining: use the contention profile to drive targeted lock reductions and add
+GC allocation/context-lifecycle probes before choosing nursery, pooling, or
+finer-grained synchronization work.
 
 ## 4. Embedder API
 

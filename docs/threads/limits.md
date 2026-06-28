@@ -74,9 +74,11 @@ context APIs.
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
-  is sub-linear. Profile contention in global/environment bindings,
-  property/element locks, collection helpers, and GC allocation before choosing
-  finer-grained or lock-free paths.
+  is sub-linear. `zig build threads-profile` now provides a repeatable baseline
+  against the `.gil = true` fallback for independent compute, shared object
+  properties, shared array append, typed-array Atomics, and lifecycle churn. Use
+  it to drive contention reductions in global/environment bindings,
+  property/element locks, collection helpers, and GC allocation.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

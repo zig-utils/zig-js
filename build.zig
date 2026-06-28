@@ -210,16 +210,41 @@ pub fn build(b: *std.Build) void {
 
     // Benchmarks: `zig build bench` times the VM against the tree-walker.
     // ReleaseFast so the numbers reflect real performance, not Debug overhead.
+    const bench_js_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "regex", .module = regex_mod },
+            .{ .name = "gc", .module = gc_mod },
+        },
+    });
     const bench = b.addExecutable(.{
         .name = "bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/main.zig"),
             .target = target,
             .optimize = .ReleaseFast,
-            .imports = &.{.{ .name = "js", .module = mod }},
+            .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
     const run_bench = b.addRunArtifact(bench);
     const bench_step = b.step("bench", "Benchmark the bytecode VM against the tree-walker");
     bench_step.dependOn(&run_bench.step);
+
+    // Thread contention profile: compare the no-GIL shared-realm default against
+    // the `.gil = true` fallback across hot shared structures. This is a local
+    // performance tool, not a correctness gate.
+    const threads_profile = b.addExecutable(.{
+        .name = "threads-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/threads.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "js", .module = bench_js_mod }},
+        }),
+    });
+    const run_threads_profile = b.addRunArtifact(threads_profile);
+    const threads_profile_step = b.step("threads-profile", "Profile no-GIL Thread contention against the .gil fallback");
+    threads_profile_step.dependOn(&run_threads_profile.step);
 }

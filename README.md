@@ -195,6 +195,7 @@ zig build threadfuzz            # seeded concurrent-JS fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
+zig build threads-profile       # profiles no-GIL Thread scaling/lock contention
 ```
 
 The test262 corpus is vendored as the `test262/` git submodule (`git submodule update --init`); `zig build test262` uses it by default and skips cleanly if it isn't present. For speed it runs `ReleaseFast` under subprocess isolation, so a single pathological test can't abort the run.
@@ -236,8 +237,11 @@ threading architecture:
 
 - **GC performance** - add an allocation fast path / nursery and reduce
   create/destroy overhead for context-heavy embedders.
-- **Parallel scaling** - profile and reduce lock contention in shared global
-  bindings, object/element storage, and GC allocation under high thread counts.
+- **Parallel scaling** - `zig build threads-profile` compares the no-GIL
+  default against `.gil = true` across independent compute, shared object
+  properties, array append, typed-array Atomics, and lifecycle churn; use it to
+  reduce lock contention in shared global bindings, object/element storage, and
+  GC allocation under high thread counts.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

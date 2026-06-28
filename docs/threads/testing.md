@@ -19,6 +19,16 @@ zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
 bun run docs:build
 ```
 
+For performance work, also run:
+
+```sh
+zig build threads-profile
+```
+
+`threads-profile` is not a correctness gate; it is the local contention
+baseline for comparing the no-GIL default against `.gil = true` across the hot
+shared structures named in the production roadmap.
+
 CI additionally runs heavier no-GIL production gates on every pull request and
 push to `main`:
 
