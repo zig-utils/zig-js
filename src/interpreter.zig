@@ -28968,6 +28968,8 @@ fn parseOffset(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalEr
     const oh = twoDigits(s, i.*) orelse return self.throwError("RangeError", "invalid UTC offset");
     i.* += 2;
     var om: u8 = 0;
+    var os: u8 = 0;
+    var ofrac: u32 = 0;
     var minute_had_colon = false;
     if (i.* < s.len and s[i.*] == ':') {
         minute_had_colon = true;
@@ -28986,18 +28988,26 @@ fn parseOffset(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalEr
         }
         if (parse_seconds and twoDigits(s, i.*) != null) {
             out.offset_has_seconds = true;
+            os = twoDigits(s, i.*).?;
             i.* += 2;
             if (i.* < s.len and (s[i.*] == '.' or s[i.*] == ',')) {
                 i.* += 1;
                 const fs = i.*;
-                while (i.* < s.len and std.ascii.isDigit(s[i.*])) i.* += 1;
+                var fbuf: [9]u8 = .{ '0', '0', '0', '0', '0', '0', '0', '0', '0' };
+                var k: usize = 0;
+                while (i.* < s.len and std.ascii.isDigit(s[i.*])) : (i.* += 1) {
+                    if (k < 9) fbuf[k] = s[i.*];
+                    k += 1;
+                }
                 if (i.* == fs or i.* - fs > 9) return self.throwError("RangeError", "invalid UTC offset");
+                ofrac = std.fmt.parseInt(u32, &fbuf, 10) catch 0;
             }
         }
     }
-    if (oh > 23 or om > 59) return self.throwError("RangeError", "UTC offset out of range");
+    if (oh > 23 or om > 59 or os > 59) return self.throwError("RangeError", "UTC offset out of range");
     out.has_offset = true;
-    out.off_ns = (@as(i128, oh) * nsPerUnit(.hour) + @as(i128, om) * nsPerUnit(.minute)) * (if (oneg) @as(i128, -1) else 1);
+    out.off_ns = (@as(i128, oh) * nsPerUnit(.hour) + @as(i128, om) * nsPerUnit(.minute) +
+        @as(i128, os) * nsPerUnit(.second) + @as(i128, ofrac)) * (if (oneg) @as(i128, -1) else 1);
 }
 
 /// Parse a Plain* date string: strips annotations, parses the body, and rejects
@@ -29012,7 +29022,7 @@ fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
 }
 
 /// Parsed ISO date-time with its epoch nanoseconds (offset/`Z` applied).
-const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_offset: bool = false, offset_ns: i128 = 0, cal: []const u8 = "iso8601" };
+const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_offset: bool = false, offset_has_seconds: bool = false, offset_ns: i128 = 0, cal: []const u8 = "iso8601" };
 
 /// Parse "YYYY-MM-DD[T ]HH:MM[:SS[.fraction]][Z|±HH:MM]" (annotations stripped,
 /// time optional). The epoch is the local fields minus any UTC offset; callers
@@ -29039,6 +29049,7 @@ fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
         .epoch_ns = local_ns - b.off_ns,
         .z = b.z,
         .has_offset = b.has_offset,
+        .offset_has_seconds = b.offset_has_seconds,
         .offset_ns = b.off_ns,
         .cal = cal,
     };
@@ -31897,6 +31908,57 @@ fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
 // offset isn't.
 
 const TimeZone = struct { name: []const u8, offset_ns: i64 };
+const ZdtOffsetBehavior = enum { use, ignore, prefer, reject };
+
+fn readZdtOffsetBehavior(self: *Interpreter, options: Value) EvalError!ZdtOffsetBehavior {
+    if (options.isUndefined()) return .reject;
+    if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)
+        return self.throwError("TypeError", "options must be an object or undefined");
+    const v = try self.getProperty(options, "offset");
+    if (v.isUndefined()) return .reject;
+    const s = try self.toStringV(v);
+    if (std.mem.eql(u8, s, "use")) return .use;
+    if (std.mem.eql(u8, s, "ignore")) return .ignore;
+    if (std.mem.eql(u8, s, "prefer")) return .prefer;
+    if (std.mem.eql(u8, s, "reject")) return .reject;
+    return self.throwError("RangeError", "invalid offset option");
+}
+
+fn roundOffsetToMinute(ns: i128) i128 {
+    const neg = ns < 0;
+    const mag: i128 = if (neg) -ns else ns;
+    var minutes = @divFloor(mag, nsPerUnit(.minute));
+    if (@mod(mag, nsPerUnit(.minute)) >= 30 * nsPerUnit(.second)) minutes += 1;
+    const rounded = minutes * nsPerUnit(.minute);
+    return if (neg) -rounded else rounded;
+}
+
+fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
+    const candidate_epoch = local_ns - @as(i128, tz.offset_ns);
+    return timeZoneOffsetAtEpoch(tz.name, candidate_epoch, tz.offset_ns);
+}
+
+fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: ZdtOffsetBehavior) EvalError!i128 {
+    if (p.z) return p.epoch_ns;
+    const local_ns = p.epoch_ns + p.offset_ns;
+    const actual = if (p.has_offset and p.offset_has_seconds)
+        timeZoneOffsetAtEpoch(tz.name, p.epoch_ns, tz.offset_ns)
+    else
+        zdtActualOffsetForLocal(tz, local_ns);
+    if (!p.has_offset) return local_ns - @as(i128, actual);
+    if (isFixedTimeZone(tz)) {
+        if (p.offset_ns != @as(i128, tz.offset_ns))
+            return self.throwError("RangeError", "offset does not match time zone");
+        return local_ns - @as(i128, tz.offset_ns);
+    }
+    const exact_match = p.offset_ns == @as(i128, actual);
+    const rounded_match = !p.offset_has_seconds and p.offset_ns == roundOffsetToMinute(@as(i128, actual));
+    return switch (behavior) {
+        .use => local_ns - p.offset_ns,
+        .ignore, .prefer => local_ns - @as(i128, actual),
+        .reject => if (exact_match or rounded_match) local_ns - @as(i128, actual) else self.throwError("RangeError", "offset does not match time zone"),
+    };
+}
 
 fn canonicalTimeZoneName(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "Asia/Calcutta")) return "Asia/Kolkata";
@@ -32018,7 +32080,7 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             -5 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "America/Los_Angeles"))
             -8 * 3_600_000_000_000
-        else if (std.mem.eql(u8, name, "Asia/Calcutta") or std.mem.eql(u8, name, "Asia/Kolkata"))
+        else if (std.mem.eql(u8, name, "Asia/Calcutta") or std.mem.eql(u8, name, "Asia/Kolkata") or std.mem.eql(u8, name, "Asia/Colombo"))
             5 * 3_600_000_000_000 + 30 * 60_000_000_000
         else if (std.mem.eql(u8, name, "Asia/Tokyo"))
             9 * 3_600_000_000_000
@@ -32026,6 +32088,8 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             3 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "America/Sao_Paulo"))
             -3 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "Pacific/Niue"))
+            -(11 * 3_600_000_000_000 + 19 * 60_000_000_000 + 40 * 1_000_000_000)
         else if (std.mem.eql(u8, name, "Africa/Monrovia"))
             -(44 * 60_000_000_000 + 30 * 1_000_000_000)
         else if (std.mem.eql(u8, name, "America/Vancouver"))
@@ -32051,6 +32115,11 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         const dst_end_2019 = (@as(i128, tDaysFromCivil(2019, 2, 17)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         if (epoch_ns < dst_end_2019) return -2 * 3_600_000_000_000;
         return -3 * 3_600_000_000_000;
+    }
+    if (std.mem.eql(u8, name, "Pacific/Niue")) {
+        const standard_time_start = -543_069_601_000_000_000; // 1952-10-15T23:59:59-11:20:00
+        if (epoch_ns >= standard_time_start) return -(11 * 3_600_000_000_000 + 20 * 60_000_000_000);
+        return -(11 * 3_600_000_000_000 + 19 * 60_000_000_000 + 40 * 1_000_000_000);
     }
     if (std.mem.eql(u8, name, "America/Vancouver")) {
         const standard_time_start_1883 = -2_717_650_800_000_000_000; // 1883-11-18T17:00:00Z
@@ -32383,7 +32452,7 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-            const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true);
+            const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true, .reject);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             const t = this.asObj().temporal.?;
             if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
@@ -32434,7 +32503,7 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 fn temporalZdtEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true);
+    const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true, .reject);
     const t = this.asObj().temporal.?;
     return Value.boolVal(t.epoch_ns == other.epoch_ns and temporalTimeZoneIdsEqual(t.tz_name, other.tz_name) and temporalCalendarIdsEqual(t.calendar, other.calendar));
 }
@@ -32442,8 +32511,8 @@ fn temporalZdtEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn temporalZdtCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const a = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true);
-    const b = try toZdtArg(self, if (args.len > 1) args[1] else Value.undef(), true);
+    const a = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true, .reject);
+    const b = try toZdtArg(self, if (args.len > 1) args[1] else Value.undef(), true, .reject);
     return Value.num(if (a.epoch_ns < b.epoch_ns) -1 else if (a.epoch_ns > b.epoch_ns) 1 else 0);
 }
 
@@ -32521,9 +32590,9 @@ fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
 }
 
 /// Coerce to ZonedDateTime data (an instance or a "…[TimeZone]" string).
-fn toZdtArg(self: *Interpreter, v: Value, constrain: bool) EvalError!value.TemporalData {
+fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtOffsetBehavior) EvalError!value.TemporalData {
     if (tIsZdt(v)) return v.asObj().temporal.?.*;
-    if (v.isString()) return parseZdtString(self, v.asStr());
+    if (v.isString()) return parseZdtString(self, v.asStr(), offset_behavior);
     if (v.isObject()) {
         // A fields bag with timeZone.
         if (!(try self.getProperty(v, "calendar")).isUndefined()) _ = try readCalendarField(self, v);
@@ -32532,6 +32601,8 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool) EvalError!value.Tempo
             const tz = try parseTimeZone(self, tzv.asStr());
             const f = try toPlainDateFields(self, v, constrain);
             const tm = try toPlainTimeDataOpt(self, v, false, false);
+            const offv = try self.getProperty(v, "offset");
+            const offset_ns: ?i128 = if (!offv.isUndefined()) try validateRelativeOffset(self, offv) else null;
             var l: value.TemporalData = .{ .kind = .plain_date_time };
             l.year = @intCast(f.y);
             l.month = f.m;
@@ -32545,7 +32616,18 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool) EvalError!value.Tempo
             const iso = calendarDateToIso(f.cal, l.year, l.month, l.day);
             const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
             var out: value.TemporalData = .{ .kind = .zoned_date_time };
-            out.epoch_ns = local_ns - tz.offset_ns;
+            const epoch_offset: i128 = if (offset_ns) |off| blk: {
+                if (isFixedTimeZone(tz)) {
+                    if (off != @as(i128, tz.offset_ns)) return self.throwError("RangeError", "offset does not match time zone");
+                    break :blk @as(i128, tz.offset_ns);
+                }
+                break :blk switch (offset_behavior) {
+                    .use => off,
+                    .ignore, .prefer => @as(i128, tz.offset_ns),
+                    .reject => if (off == @as(i128, tz.offset_ns)) @as(i128, tz.offset_ns) else return self.throwError("RangeError", "offset does not match time zone"),
+                };
+            } else @as(i128, tz.offset_ns);
+            out.epoch_ns = local_ns - epoch_offset;
             out.tz_name = tz.name;
             out.tz_offset_ns = tz.offset_ns;
             out.year = @intCast(f.y);
@@ -32565,11 +32647,11 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool) EvalError!value.Tempo
 }
 
 /// Parse "YYYY-MM-DDTHH:MM:SS±OO:OO[Zone]" into ZonedDateTime data.
-fn parseZdtString(self: *Interpreter, s: []const u8) EvalError!value.TemporalData {
+fn parseZdtString(self: *Interpreter, s: []const u8, offset_behavior: ZdtOffsetBehavior) EvalError!value.TemporalData {
     const tz = (try timeZoneAnnotation(self, s)) orelse return self.throwError("RangeError", "ZonedDateTime string requires a [TimeZone] annotation");
     const p = try parseDateTimeNs(self, s);
     var out: value.TemporalData = .{ .kind = .zoned_date_time };
-    out.epoch_ns = p.epoch_ns;
+    out.epoch_ns = try zdtEpochFromParsed(self, tz, p, offset_behavior);
     out.tz_name = tz.name;
     out.tz_offset_ns = tz.offset_ns;
     out.year = @intCast(p.y);
@@ -32588,8 +32670,10 @@ fn parseZdtString(self: *Interpreter, s: []const u8) EvalError!value.TemporalDat
 fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
-    const d = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), !reject);
+    const options = if (args.len > 1) args[1] else Value.undef();
+    const reject = try readOverflowReject(self, options);
+    const offset_behavior = try readZdtOffsetBehavior(self, options);
+    const d = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), !reject, offset_behavior);
     const o = try zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
     const t = o.asObj().temporal.?;
     t.year = d.year;
