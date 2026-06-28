@@ -28907,6 +28907,57 @@ fn stripTemporalAnnotations(self: *Interpreter, s: []const u8) EvalError!AnnResu
     return .{ .body = s[0..lb], .cal = cal, .has_tz = tz_count > 0 };
 }
 
+fn stripInstantAnnotations(self: *Interpreter, s: []const u8) EvalError![]const u8 {
+    const lb = std.mem.indexOfScalar(u8, s, '[') orelse return s;
+    var cal_count: usize = 0;
+    var cal_critical = false;
+    var tz_count: usize = 0;
+    var i: usize = lb;
+    while (i < s.len) {
+        if (s[i] != '[') return self.throwError("RangeError", "invalid annotation");
+        const close = std.mem.indexOfScalarPos(u8, s, i, ']') orelse return self.throwError("RangeError", "unterminated annotation");
+        var content = s[i + 1 .. close];
+        i = close + 1;
+        var critical = false;
+        if (content.len > 0 and content[0] == '!') {
+            critical = true;
+            content = content[1..];
+        }
+        if (std.mem.indexOfScalar(u8, content, '=')) |eqpos| {
+            const key = content[0..eqpos];
+            const val = content[eqpos + 1 ..];
+            if (key.len == 0) return self.throwError("RangeError", "empty annotation key");
+            for (key) |c| {
+                if (!((c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-' or c == '_'))
+                    return self.throwError("RangeError", "annotation keys must be lowercase");
+            }
+            if (std.mem.eql(u8, key, "u-ca")) {
+                if (val.len == 0) return self.throwError("RangeError", "empty string is not a valid calendar ID");
+                for (val) |c| {
+                    if (!((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '-'))
+                        return self.throwError("RangeError", "invalid calendar ID");
+                }
+                cal_count += 1;
+                if (critical) cal_critical = true;
+            } else {
+                if (critical) return self.throwError("RangeError", "reject unknown annotation with critical flag");
+            }
+        } else {
+            tz_count += 1;
+            if (tz_count > 1) return self.throwError("RangeError", "reject more than one time zone annotation");
+            if (content.len > 0 and (content[0] == '+' or content[0] == '-')) {
+                var body: TBody = .{ .y = 1970, .mo = 1, .d = 1 };
+                var oi: usize = 0;
+                try parseOffset(self, content, &oi, &body);
+                if (oi != content.len) return self.throwError("RangeError", "invalid time zone annotation");
+                if (body.offset_has_seconds) return self.throwError("RangeError", "sub-minute time zone offsets are not valid");
+            }
+        }
+    }
+    if (cal_count > 1 and cal_critical) return self.throwError("RangeError", "reject more than one calendar annotation if any critical");
+    return s[0..lb];
+}
+
 /// A fully-parsed Temporal ISO date/time body (annotations already stripped).
 const TBody = struct {
     y: i64,
@@ -31108,7 +31159,16 @@ fn temporalInstantExtraEpochGetter(comptime div: i128) value.NativeFn {
 /// Coerce a value to an Instant's epoch nanoseconds (an Instant or an ISO
 /// instant string with a `Z`/offset).
 fn toInstantArg(self: *Interpreter, v: Value) EvalError!i128 {
-    const ns = if (tIsTemporal(v, .instant)) v.asObj().temporal.?.epoch_ns else if (tIsTemporal(v, .zoned_date_time)) v.asObj().temporal.?.epoch_ns else if (v.isString()) try parseInstantString(self, v.asStr()) else return self.throwError("TypeError", "value is not an Instant");
+    const ns = if (tIsTemporal(v, .instant))
+        v.asObj().temporal.?.epoch_ns
+    else if (tIsTemporal(v, .zoned_date_time))
+        v.asObj().temporal.?.epoch_ns
+    else if (v.isString())
+        try parseInstantString(self, v.asStr())
+    else if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint)
+        try parseInstantString(self, try self.toStringV(v))
+    else
+        return self.throwError("TypeError", "value is not an Instant");
     try checkInstantEpochNs(self, ns);
     return ns;
 }
@@ -31127,8 +31187,15 @@ fn makeInstantFromEpochNs(self: *Interpreter, ns: i128) EvalError!*value.Object 
 
 /// Parse "YYYY-MM-DDTHH:MM:SS[.fff]Z|±HH:MM" to epoch nanoseconds.
 fn parseInstantString(self: *Interpreter, s: []const u8) EvalError!i128 {
-    const dt = try parseDateTimeNs(self, s);
-    return dt.epoch_ns;
+    const body = try stripInstantAnnotations(self, s);
+    const b = try parseTemporalBody(self, body, true);
+    if (!b.has_time or (!b.z and !b.has_offset))
+        return self.throwError("RangeError", "Instant string requires an exact time");
+    const epoch_days = tDaysFromCivil(b.y, b.mo, b.d);
+    const local_ns = @as(i128, epoch_days) * 86_400_000_000_000 +
+        @as(i128, b.h) * nsPerUnit(.hour) + @as(i128, b.mi) * nsPerUnit(.minute) +
+        @as(i128, b.s) * nsPerUnit(.second) + @as(i128, b.frac_ns);
+    return local_ns - b.off_ns;
 }
 
 fn temporalInstantFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
