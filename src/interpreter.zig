@@ -354,7 +354,7 @@ pub const EvalError = error{ OutOfMemory, Throw, OptShortCircuit };
 /// outlive the source buffer of any single evaluation.
 /// A `using`/`await using` resource registered for disposal at scope exit:
 /// its value and the (pre-resolved) `[Symbol.dispose]`/`[Symbol.asyncDispose]`
-/// method.
+/// method. `method == undefined` is the async null/undefined no-op sentinel.
 pub const Disposable = struct { value: Value, method: Value, is_async: bool };
 
 pub const Environment = struct {
@@ -1610,7 +1610,13 @@ pub const Interpreter = struct {
     /// it has a [Symbol.dispose] / [Symbol.asyncDispose] method (null/undefined is
     /// a permitted no-op resource).
     pub fn addDisposable(self: *Interpreter, val: Value, is_async: bool) EvalError!void {
-        if (val.isNull() or val.isUndefined()) return;
+        if (val.isNull() or val.isUndefined()) {
+            if (!is_async) return;
+            self.env.lockBindings(); // traceEnv reads disposables; serialize the append
+            defer self.env.unlockBindings();
+            try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = Value.undef(), .method = Value.undef(), .is_async = true });
+            return;
+        }
         if (!val.isObject()) return self.throwError("TypeError", "a 'using' declaration value must be an object or null/undefined");
         var method: Value = Value.undef();
         if (is_async) {
@@ -1639,12 +1645,30 @@ pub const Interpreter = struct {
         while (i > 0) {
             i -= 1;
             const d = env.disposables.items[i];
-            const r = self.callValueWithThis(d.method, &.{}, d.value);
-            if (r) |rv| {
-                if (d.is_async) _ = self.awaitValue(rv) catch {};
+            var dispose_err: ?Value = null;
+            if (d.method.isUndefined()) {
+                if (d.is_async) {
+                    const tick = try promiseResolveAfterTick(self, Value.undef());
+                    _ = self.awaitValue(tick) catch |e| {
+                        if (e != error.Throw) return e;
+                        dispose_err = self.exception;
+                        self.exception = Value.undef();
+                    };
+                }
+            } else if (self.callValueWithThis(d.method, &.{}, d.value)) |rv| {
+                if (d.is_async) {
+                    _ = self.awaitValue(rv) catch |e| {
+                        if (e != error.Throw) return e;
+                        dispose_err = self.exception;
+                        self.exception = Value.undef();
+                    };
+                }
             } else |e| {
                 if (e != error.Throw) return e;
-                const this_err = self.exception;
+                dispose_err = self.exception;
+                self.exception = Value.undef();
+            }
+            if (dispose_err) |this_err| {
                 pending = if (pending) |prev|
                     (self.makeErrorWithArgs("SuppressedError", &.{ this_err, prev }) catch this_err)
                 else

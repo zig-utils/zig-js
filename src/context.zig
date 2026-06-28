@@ -4819,6 +4819,38 @@ test "async/await: suspendable runtime with spec ordering" {
         \\Promise.race(iter);
         \\returnCount
     )).asNum());
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var result = "";
+            \\var e1 = new Error("one");
+            \\var e2 = new Error("two");
+            \\var e3 = new Error("three");
+            \\async function onlyDisposeFails() {
+            \\  await using _ = { async [Symbol.asyncDispose]() { throw e1; } };
+            \\}
+            \\async function bodyAndDisposeFail() {
+            \\  await using _1 = { async [Symbol.asyncDispose]() { throw e1; } };
+            \\  await using _2 = { [Symbol.dispose]() { throw e2; } };
+            \\  throw e3;
+            \\}
+            \\async function main() {
+            \\  try { await onlyDisposeFails(); } catch (e) { result += e === e1; }
+            \\  try { await bodyAndDisposeFail(); } catch (e) {
+            \\    result += "|" + [
+            \\      e instanceof SuppressedError,
+            \\      e.error === e1,
+            \\      e.suppressed instanceof SuppressedError,
+            \\      e.suppressed.error === e2,
+            \\      e.suppressed.suppressed === e3
+            \\    ].join(",");
+            \\  }
+            \\}
+            \\main();
+        );
+        try std.testing.expectEqualStrings("true|true,true,true,true,true", (try ctx.evaluate("result")).asStr());
+    }
 }
 
 test "async generators: yield* captures sync iterator next once" {
