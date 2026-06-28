@@ -1168,6 +1168,7 @@ pub const Context = struct {
         linked: bool = false,
         eval_started: bool = false, // [[Status]] reached ~evaluating~
         evaluated: bool = false, // [[Status]] reached ~evaluated~ (completed, even if it threw)
+        eval_error: ?Value = null, // cached evaluation error for repeated Evaluate()
         // A synthetic module (`import x from "m" with { type: "json"|"text" }`):
         // its raw source, turned into the sole `default` export at evaluation
         // time per `syn_type` ("json" → JSON.parse, "text" → the string itself).
@@ -1514,9 +1515,27 @@ pub const Context = struct {
     /// Evaluate a module (and its not-yet-evaluated dependencies first), running
     /// its top-level items in its own environment with `this === undefined`.
     fn evalModule(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
+        if (m.evaluated) {
+            if (m.eval_error) |err| {
+                machine.exception = err;
+                self.exception = err;
+                return error.Throw;
+            }
+            return;
+        }
         if (m.eval_started) return;
         m.eval_started = true;
         defer m.evaluated = true; // reaches ~evaluated~ on completion, even on a throw
+        self.evalModuleBody(machine, m) catch |err| {
+            if (err == error.Throw) {
+                m.eval_error = machine.exception;
+                self.exception = machine.exception;
+            }
+            return err;
+        };
+    }
+
+    fn evalModuleBody(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
         if (m.syn_source) |src| {
             // The synthetic module's `default` export: JSON.parse(source) for a
             // JSON module (a malformed body throws SyntaxError here), or the raw
@@ -3843,6 +3862,29 @@ test "dynamic import rejects invalid indirect exports" {
     });
 
     try std.testing.expectEqualStrings("SyntaxError:ambiguous;SyntaxError:circular;", (try ctx.evaluate("dynamicImportBadIndirect")).asStr());
+}
+
+test "dynamic import rejects repeated imports of an errored module" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    try evaluateModuleWithFixturesInContext(ctx,
+        \\globalThis.dynamicImportErroredModule = "";
+        \\import("./bad.js").then(
+        \\  function() { globalThis.dynamicImportErroredModule += "fulfilled:first;"; },
+        \\  function(error) {
+        \\    globalThis.dynamicImportErroredModule += error.message + ":first;";
+        \\    return import("./bad.js").then(
+        \\      function() { globalThis.dynamicImportErroredModule += "fulfilled:second;"; },
+        \\      function(error) { globalThis.dynamicImportErroredModule += error.message + ":second;"; }
+        \\    );
+        \\  }
+        \\);
+    , &.{
+        .{ .path = "bad.js", .source = "throw new Error('boom');" },
+    });
+
+    try std.testing.expectEqualStrings("boom:first;boom:second;", (try ctx.evaluate("dynamicImportErroredModule")).asStr());
 }
 
 test "delete of a private member is an early error" {
