@@ -31183,6 +31183,15 @@ fn checkInstantEpochNs(self: *Interpreter, ns: i128) EvalError!void {
         return self.throwError("RangeError", "epoch nanoseconds out of range");
 }
 
+fn checkedEpochNsFromBigInt(self: *Interpreter, v: Value) EvalError!i128 {
+    const bv = try self.toBigIntValueImpl(v, false);
+    const big = bv.asObj();
+    if (big.bigint_text != null)
+        return self.throwError("RangeError", "epoch nanoseconds out of range");
+    try checkInstantEpochNs(self, big.bigint);
+    return big.bigint;
+}
+
 fn makeInstantFromEpochNs(self: *Interpreter, ns: i128) EvalError!*value.Object {
     try checkInstantEpochNs(self, ns);
     const o = try makeTemporal(self, .instant, "\x00T.Instant");
@@ -32098,8 +32107,8 @@ fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Temporal.Instant requires 'new'");
-    const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), false);
-    const o = try makeInstantFromEpochNs(self, bv.asObj().bigint);
+    const ns = try checkedEpochNsFromBigInt(self, if (args.len > 0) args[0] else Value.undef());
+    const o = try makeInstantFromEpochNs(self, ns);
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -32226,8 +32235,7 @@ fn temporalInstantFromEpochFn(comptime unit_ns: i128) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             var ns: i128 = 0;
             if (unit_ns == 1) {
-                const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), false);
-                ns = bv.asObj().bigint;
+                ns = try checkedEpochNsFromBigInt(self, if (args.len > 0) args[0] else Value.undef());
             } else {
                 const n = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
                 const max_units: f64 = @floatFromInt(@divFloor(max_temporal_instant_ns, unit_ns));
@@ -32759,13 +32767,13 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Temporal.ZonedDateTime requires 'new'");
-    const bv = try self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), false);
+    const epoch_ns = try checkedEpochNsFromBigInt(self, if (args.len > 0) args[0] else Value.undef());
     if (args.len < 2 or args[1].isUndefined()) return self.throwError("TypeError", "ZonedDateTime requires a time zone");
     if (!args[1].isString()) return self.throwError("TypeError", "time zone must be a string");
     const tz = try parseTimeZone(self, args[1].asStr());
     const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2]) else "iso8601";
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
-    o.temporal.?.epoch_ns = bv.asObj().bigint;
+    o.temporal.?.epoch_ns = epoch_ns;
     o.temporal.?.tz_name = tz.name;
     o.temporal.?.tz_offset_ns = tz.offset_ns;
     o.temporal.?.calendar = cal;
