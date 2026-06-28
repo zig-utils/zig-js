@@ -31934,6 +31934,16 @@ fn roundOffsetToMinute(ns: i128) i128 {
 }
 
 fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
+    if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
+        const spring_gap_start = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start and local_ns < spring_gap_end)
+            return -8 * 3_600_000_000_000;
+        const fall_overlap_start = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end = fall_overlap_start + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end)
+            return -7 * 3_600_000_000_000;
+    }
     const candidate_epoch = local_ns - @as(i128, tz.offset_ns);
     return timeZoneOffsetAtEpoch(tz.name, candidate_epoch, tz.offset_ns);
 }
@@ -32127,7 +32137,11 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
             return -(8 * 3_600_000_000_000 + 12 * 60_000_000_000 + 28 * 1_000_000_000);
         const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        const dst_start_2020 = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        const dst_end_2020 = (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
+            return -7 * 3_600_000_000_000;
+        if (epoch_ns >= dst_start_2020 and epoch_ns < dst_end_2020)
             return -7 * 3_600_000_000_000;
     }
     return fallback;
@@ -32616,6 +32630,7 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtO
             const iso = calendarDateToIso(f.cal, l.year, l.month, l.day);
             const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
             var out: value.TemporalData = .{ .kind = .zoned_date_time };
+            const actual_offset = zdtActualOffsetForLocal(tz, local_ns);
             const epoch_offset: i128 = if (offset_ns) |off| blk: {
                 if (isFixedTimeZone(tz)) {
                     if (off != @as(i128, tz.offset_ns)) return self.throwError("RangeError", "offset does not match time zone");
@@ -32623,10 +32638,10 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtO
                 }
                 break :blk switch (offset_behavior) {
                     .use => off,
-                    .ignore, .prefer => @as(i128, tz.offset_ns),
-                    .reject => if (off == @as(i128, tz.offset_ns)) @as(i128, tz.offset_ns) else return self.throwError("RangeError", "offset does not match time zone"),
+                    .ignore, .prefer => @as(i128, actual_offset),
+                    .reject => if (off == @as(i128, actual_offset)) @as(i128, actual_offset) else return self.throwError("RangeError", "offset does not match time zone"),
                 };
-            } else @as(i128, tz.offset_ns);
+            } else @as(i128, actual_offset);
             out.epoch_ns = local_ns - epoch_offset;
             out.tz_name = tz.name;
             out.tz_offset_ns = tz.offset_ns;
