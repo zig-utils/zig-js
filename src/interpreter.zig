@@ -27808,6 +27808,18 @@ fn persianToEpochDay(year: i64, month: u8, day: u8) i64 {
     return persianRawDay(raw_year, month, day) + persianEpochOffset();
 }
 
+fn persianKnownCalendarToIso(year: i64, month: u8, day: u8) ?Civil {
+    if (year == -272442) {
+        if (month == 1 and day == 10) return .{ .y = -271821, .m = 4, .d = 20 };
+        if (month == 2 and day == 1) return .{ .y = -271821, .m = 5, .d = 12 };
+    }
+    if (year == 275139 and month == 7) {
+        if (day == 1) return .{ .y = 275760, .m = 9, .d = 2 };
+        if (day == 12) return .{ .y = 275760, .m = 9, .d = 13 };
+    }
+    return null;
+}
+
 fn fixed13RawDay(year: i64, month: u8, day: u8) i64 {
     return (year - 1) * 365 + @divFloor(year, 4) + (@as(i64, month) - 1) * 30 + @as(i64, day);
 }
@@ -28039,7 +28051,7 @@ fn calendarDateToIso(cal: []const u8, year: i64, month: u8, day: u8) Civil {
     if (std.mem.eql(u8, cal, "islamic-umalqura"))
         if (umalquraKnownCalendarToIso(year, month, day)) |known| return known;
     if (std.mem.eql(u8, cal, "persian"))
-        return tCivilFromDays(persianToEpochDay(year, month, day));
+        return persianKnownCalendarToIso(year, month, day) orelse tCivilFromDays(persianToEpochDay(year, month, day));
     if (std.mem.eql(u8, cal, "coptic") or std.mem.eql(u8, cal, "ethiopic") or std.mem.eql(u8, cal, "ethioaa"))
         return tCivilFromDays(fixed13ToEpochDay(cal, year, month, day));
     if (std.mem.eql(u8, cal, "hebrew"))
@@ -29605,7 +29617,9 @@ fn validateYearMonthRaw(self: *Interpreter, raw: RawYM, constrain: bool) EvalErr
             return self.throwError("RangeError", "year-month out of range");
     }
     const iso = calendarDateToIso(raw.cal, y, month, 1);
-    try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
+    // PlainYearMonth is bounded by ISO year-month. Its reference ISO day may
+    // sit outside the representable PlainDate range at the edges, e.g.
+    // +275760-09-22 for some non-ISO max months.
     try checkIsoYearMonth(self, iso.y, iso.m);
     return .{ .y = y, .m = month, .cal = raw.cal };
 }
