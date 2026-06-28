@@ -9648,6 +9648,14 @@ pub const Interpreter = struct {
         return o;
     }
 
+    pub fn makeImmutableUint8ArrayFromBytes(self: *Interpreter, bytes: []const u8) EvalError!*value.Object {
+        const o = try newTypedArray(self, .u8, bytes.len);
+        const ab = o.typed_array.?.buffer.array_buffer.?;
+        if (bytes.len > 0) @memcpy(ab.bytes()[0..bytes.len], bytes);
+        ab.immutable = true;
+        return o;
+    }
+
     fn allocArrayBufferBytes(self: *Interpreter, len: usize) EvalError![]u8 {
         if (len == 0) return &.{};
         const data = if (self.gc_backing) |a| blk: {

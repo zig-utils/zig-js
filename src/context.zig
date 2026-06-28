@@ -1177,6 +1177,16 @@ pub const Context = struct {
         syn_type: []const u8 = "",
     };
 
+    fn isSyntheticModuleType(module_type: []const u8) bool {
+        return std.mem.eql(u8, module_type, "json") or
+            std.mem.eql(u8, module_type, "text") or
+            std.mem.eql(u8, module_type, "bytes");
+    }
+
+    fn syntheticModuleCacheKey(self: *Context, path: []const u8, syn_type: []const u8) RunError![]const u8 {
+        return try std.fmt.allocPrint(self.arena(), "{s}\x00{s}", .{ path, syn_type });
+    }
+
     /// Load, link, and evaluate a module graph rooted at `entry_path`. The
     /// completion is the entry module having run; an uncaught throw leaves the
     /// reason in `self.exception` and returns `error.Throw`.
@@ -1279,7 +1289,7 @@ pub const Context = struct {
         var dep_path: []const u8 = "";
         const dep_src = host.load(host.ctx, m.path, specifier, &dep_path) orelse
             return self.moduleError("Cannot resolve module specifier");
-        const dep = if (std.mem.eql(u8, module_type, "json") or std.mem.eql(u8, module_type, "text"))
+        const dep = if (isSyntheticModuleType(module_type))
             try self.loadSyntheticModule(dep_path, dep_src, module_type, cache)
         else
             try self.loadModule(dep_path, dep_src, host, cache);
@@ -1287,13 +1297,12 @@ pub const Context = struct {
         return dep;
     }
 
-    /// Build a synthetic module (JSON or text): no JS body, a single `default`
-    /// export materialized at evaluation time from the raw source (JSON.parse for
-    /// "json" — a malformed body throws SyntaxError then — or the string itself
-    /// for "text"). Cached by path like an ordinary module.
+    /// Build a synthetic module (JSON, text, or bytes): no JS body, a single
+    /// `default` export materialized at evaluation time from the raw source.
     fn loadSyntheticModule(self: *Context, path: []const u8, source: []const u8, syn_type: []const u8, cache: *std.StringHashMapUnmanaged(*Module)) RunError!*Module {
-        if (cache.get(path)) |m| return m;
         const a = self.arena();
+        const cache_key = try self.syntheticModuleCacheKey(path, syn_type);
+        if (cache.get(cache_key)) |m| return m;
         const env = try gc_mod.allocEnv(a);
         env.* = .{
             .arena = a,
@@ -1303,7 +1312,7 @@ pub const Context = struct {
             .fn_scope = true,
         };
         const m = try a.create(Module);
-        m.* = .{ .path = try a.dupe(u8, path), .items = &.{}, .env = env, .syn_source = try a.dupe(u8, source), .syn_type = syn_type };
+        m.* = .{ .path = cache_key, .items = &.{}, .env = env, .syn_source = try a.dupe(u8, source), .syn_type = syn_type };
         try m.exports.put(a, "default", .{ .local = "*default*" });
         try cache.put(a, m.path, m);
         return m;
@@ -1538,10 +1547,12 @@ pub const Context = struct {
     fn evalModuleBody(self: *Context, machine: *interp.Interpreter, m: *Module) interp.EvalError!void {
         if (m.syn_source) |src| {
             // The synthetic module's `default` export: JSON.parse(source) for a
-            // JSON module (a malformed body throws SyntaxError here), or the raw
-            // source string for a text module.
+            // JSON module, the raw source string for text, or an immutable
+            // Uint8Array view for bytes.
             const def = if (std.mem.eql(u8, m.syn_type, "json"))
                 try builtins.jsonParse(machine, Value.undef(), &.{Value.str(src)})
+            else if (std.mem.eql(u8, m.syn_type, "bytes"))
+                Value.obj(try machine.makeImmutableUint8ArrayFromBytes(src))
             else
                 Value.str(src);
             try m.env.put("*default*", def);
@@ -1640,7 +1651,7 @@ pub const Context = struct {
         var dep_path: []const u8 = "";
         const src = host.load(host.ctx, referrer, specifier, &dep_path) orelse
             return self.dynImportFail(machine, "Cannot resolve module specifier");
-        const dep = if (std.mem.eql(u8, module_type, "json") or std.mem.eql(u8, module_type, "text"))
+        const dep = if (isSyntheticModuleType(module_type))
             self.loadSyntheticModule(dep_path, src, module_type, cache) catch return self.surfaceFail(machine)
         else
             self.loadModule(dep_path, src, host, cache) catch return self.surfaceFail(machine);
@@ -2035,6 +2046,32 @@ test "modules namespace exotica observe TDZ and integrity semantics" {
         \\if (setterValue !== 14) throw new Error("super setter not called");
         \\export let foo = 42;
     );
+}
+
+test "modules keep typed synthetic module cache entries distinct" {
+    try evaluateSelfModule(
+        \\import value from "./entry.js" with { type: "text" };
+        \\if (typeof value !== "string") throw new Error("bad text self import");
+    );
+}
+
+test "modules import bytes as immutable Uint8Array" {
+    const raw = [_]u8{ 0, 65, 255 };
+    try evaluateModuleWithFixtures(
+        \\import bytes from "./blob.bin" with { type: "bytes" };
+        \\if (!(bytes instanceof Uint8Array)) throw new Error("not a Uint8Array");
+        \\if (!(bytes.buffer instanceof ArrayBuffer)) throw new Error("not an ArrayBuffer");
+        \\if (bytes.length !== 3 || bytes[0] !== 0 || bytes[1] !== 65 || bytes[2] !== 255) {
+        \\  throw new Error("bad bytes");
+        \\}
+        \\if (bytes.buffer.byteLength !== 3 || bytes.buffer.immutable !== true) throw new Error("buffer not immutable");
+        \\try {
+        \\  bytes.buffer.transfer();
+        \\  throw new Error("immutable transfer did not throw");
+        \\} catch (e) {
+        \\  if (!(e instanceof TypeError)) throw e;
+        \\}
+    , &.{.{ .path = "blob.bin", .source = raw[0..] }});
 }
 
 test "Date basics" {
