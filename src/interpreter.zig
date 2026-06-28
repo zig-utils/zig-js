@@ -31037,6 +31037,12 @@ fn validateInstantRoundingIncrement(self: *Interpreter, unit: TUnit, increment: 
         return self.throwError("RangeError", "roundingIncrement must divide evenly into a solar day");
 }
 
+fn validateZonedDateTimeRoundingIncrement(self: *Interpreter, unit: TUnit, increment: f64) EvalError!void {
+    if (unit == .day and increment != 1)
+        return self.throwError("RangeError", "roundingIncrement must divide evenly into the next larger unit");
+    try validateDurationRoundingIncrement(self, unit, increment);
+}
+
 /// Build a Temporal.Duration object from raw components (CreateTemporalDuration,
 /// which rejects an out-of-range duration).
 fn makeDuration(self: *Interpreter, dur: [10]f64) EvalError!Value {
@@ -33046,6 +33052,7 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
             const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true, .reject, .compatible);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
+            try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
             const t = this.asObj().temporal.?;
             if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
             if (!temporalTimeZoneIdsEqual(t.tz_name, other.tz_name)) return self.throwError("RangeError", "time zone mismatch");
@@ -33084,7 +33091,9 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "ZonedDateTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
+    if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "ZonedDateTime.round smallestUnit must be day or smaller");
+    try validateZonedDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
     const t = this.asObj().temporal.?;
     // Round the local wall-clock, then re-apply the offset.
     const local = t.epoch_ns + t.tz_offset_ns;
