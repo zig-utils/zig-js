@@ -701,6 +701,11 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
+            .import_call => {
+                const optionsv = stack.pop().?;
+                const specv = stack.pop().?;
+                try stack.append(stack_alloc, try vm.finishImportCall(specv, optionsv, chunk.names.items[inst.a]));
+            },
             .call_method => {
                 const argc = inst.b;
                 const base = stack.items.len - argc;

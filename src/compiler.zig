@@ -73,6 +73,7 @@ fn nodeHasYield(node: *const ast.Node) bool {
         .logical_assign => |a| nodeHasYield(a.target) or nodeHasYield(a.value),
         .conditional => |c| nodeHasYield(c.cond) or nodeHasYield(c.consequent) or nodeHasYield(c.alternate),
         .await_expr => |a| nodeHasYield(a.argument),
+        .import_call => |ic| nodeHasYield(ic.specifier) or (ic.options != null and nodeHasYield(ic.options.?)),
         .optional_chain => |c| nodeHasYield(c),
         .spread => |s| nodeHasYield(s),
         .member => |m| nodeHasYield(m.object) or (m.computed != null and nodeHasYield(m.computed.?)),
@@ -1376,6 +1377,14 @@ pub const Compiler = struct {
                 if (!self.in_async) return error.Unsupported;
                 try self.compileExpr(a.argument);
                 _ = try self.chunk.emit(.await_op, 0);
+            },
+            .import_call => |ic| {
+                try self.compileExpr(ic.specifier);
+                if (ic.options) |options|
+                    try self.compileExpr(options)
+                else
+                    _ = try self.chunk.emit(.load_undefined, 0);
+                _ = try self.chunk.emit(.import_call, try self.chunk.addName(ic.phase));
             },
             // Statement-only nodes never appear in expression position.
             else => return error.Unsupported,

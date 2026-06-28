@@ -3688,6 +3688,18 @@ test "dynamic import expression evaluation abrupt completions throw synchronousl
     );
 }
 
+test "dynamic import options can suspend in generator bodies" {
+    try expectEvalStr("true:595:1:0",
+        \\var beforeCount = 0, afterCount = 0;
+        \\var iter = (function*() {
+        \\  beforeCount += 1, import("", yield), afterCount += 1;
+        \\}());
+        \\iter.next();
+        \\var result = iter.return(595);
+        \\result.done + ":" + result.value + ":" + beforeCount + ":" + afterCount
+    );
+}
+
 test "delete of a private member is an early error" {
     try expectParseError("({}).#x");
     try expectParseError("class C { #x = 1; m() { delete this.#x; } }");

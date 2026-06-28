@@ -5872,6 +5872,14 @@ pub const Interpreter = struct {
         const specv = try self.eval(spec_node);
         const optionsv: Value = if (options_node) |on| try self.eval(on) else Value.undef();
 
+        return self.finishImportCall(specv, optionsv, phase);
+    }
+
+    /// Finish `import(specifier [, options])` after the argument expressions have
+    /// already evaluated. Shared by the tree-walker and the bytecode VM so a
+    /// `yield` inside a generator argument suspends before the import promise is
+    /// created, while later coercion/validation failures still reject it.
+    pub fn finishImportCall(self: *Interpreter, specv: Value, optionsv: Value, phase: []const u8) EvalError!Value {
         const pobj = try promise.newPromise(self);
         const p = promise.promiseOf(Value.obj(pobj)).?;
         const spec = self.toStringV(specv) catch {
