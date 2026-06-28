@@ -31924,7 +31924,8 @@ fn dtLocalNs(t: *const value.TemporalData) i128 {
 fn resolveTimeZoneArg(self: *Interpreter, v: Value) value.HostError!TimeZone {
     if (v.isObject()) if (v.asObj().temporal) |t| if (t.kind == .zoned_date_time)
         return TimeZone{ .name = t.tz_name, .offset_ns = t.tz_offset_ns };
-    return parseTimeZone(self, try self.toStringV(v));
+    if (!v.isString()) return self.throwError("TypeError", "invalid timeZone");
+    return parseTimeZone(self, v.asStr());
 }
 
 /// `Temporal.PlainDateTime.prototype.toZonedDateTime(timeZone, options)`.
@@ -32067,22 +32068,65 @@ fn temporalInstantToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) va
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
+const InstantToStringOptions = struct { precision: TemporalStringPrecision, tz: TimeZone, z_suffix: bool };
+
+fn readInstantToStringOptions(self: *Interpreter, options: Value) EvalError!InstantToStringOptions {
+    var out = InstantToStringOptions{
+        .precision = .{},
+        .tz = .{ .name = "UTC", .offset_ns = 0 },
+        .z_suffix = true,
+    };
+    if (options.isUndefined()) return out;
+    if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)
+        return self.throwError("TypeError", "options must be an object or undefined");
+
+    const fdv = try self.getProperty(options, "fractionalSecondDigits");
+    if (!fdv.isUndefined()) {
+        if (try readFractionalSecondDigits(self, fdv)) |d| {
+            out.precision.digits = d;
+            out.precision.unit = digitUnit(d);
+            out.precision.auto = false;
+        }
+    }
+
+    const rmv = try self.getProperty(options, "roundingMode");
+    if (!rmv.isUndefined())
+        out.precision.mode = roundModeFromStr(try self.toStringV(rmv)) orelse
+            return self.throwError("RangeError", "invalid roundingMode");
+
+    const suv = try self.getProperty(options, "smallestUnit");
+    const su_name: ?[]const u8 = if (!suv.isUndefined()) try self.toStringV(suv) else null;
+
+    const tzv = try self.getProperty(options, "timeZone");
+    if (!tzv.isUndefined()) {
+        out.tz = try resolveTimeZoneArg(self, tzv);
+        out.z_suffix = false;
+    }
+
+    if (su_name) |name| {
+        const su = tUnitFromStr(name) orelse return self.throwError("RangeError", "invalid smallestUnit");
+        if (@intFromEnum(su) < @intFromEnum(TUnit.minute))
+            return self.throwError("RangeError", "invalid smallestUnit");
+        out.precision.unit = su;
+        out.precision.auto = false;
+        out.precision.digits = switch (su) {
+            .minute, .second => 0,
+            .millisecond => 3,
+            .microsecond => 6,
+            .nanosecond => 9,
+            else => unreachable,
+        };
+    }
+    return out;
+}
+
 fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
     const options = if (args.len > 0) args[0] else Value.undef();
-    const precision = try readTemporalStringPrecision(self, options, .minute);
-    var tz = TimeZone{ .name = "UTC", .offset_ns = 0 };
-    var z_suffix = true;
-    if (!options.isUndefined()) {
-        const tzv = try self.getProperty(options, "timeZone");
-        if (!tzv.isUndefined()) {
-            tz = try resolveTimeZoneArg(self, tzv);
-            z_suffix = false;
-        }
-    }
-    const rounded_epoch = roundInstantNsForString(this.asObj().temporal.?.epoch_ns, precision);
-    const render_offset = timeZoneOffsetAtEpoch(tz.name, rounded_epoch, tz.offset_ns);
+    const opts = try readInstantToStringOptions(self, options);
+    const rounded_epoch = roundInstantNsForString(this.asObj().temporal.?.epoch_ns, opts.precision);
+    const render_offset = timeZoneOffsetAtEpoch(opts.tz.name, rounded_epoch, opts.tz.offset_ns);
     const ns = rounded_epoch + @as(i128, render_offset);
     const days = @divFloor(ns, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
@@ -32093,10 +32137,10 @@ fn temporalInstantToStringFn(ctx: *anyopaque, this: Value, args: []const Value) 
     try buf.append(self.arena, '-');
     try tfmtPad(self, &buf, c.d, 2);
     try buf.append(self.arena, 'T');
-    try appendIsoTimeFromNs(self, &buf, ns, precision);
-    if (z_suffix)
+    try appendIsoTimeFromNs(self, &buf, ns, opts.precision);
+    if (opts.z_suffix)
         try buf.append(self.arena, 'Z')
-    else if (std.mem.eql(u8, tz.name, "Africa/Monrovia"))
+    else if (std.mem.eql(u8, opts.tz.name, "Africa/Monrovia"))
         try buf.appendSlice(self.arena, "-00:45")
     else
         try buf.appendSlice(self.arena, try offsetNsToString(self, render_offset));
