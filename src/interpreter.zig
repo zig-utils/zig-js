@@ -32478,7 +32478,8 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool) EvalError!value.Tempo
             l.millisecond = tm.millisecond;
             l.microsecond = tm.microsecond;
             l.nanosecond = tm.nanosecond;
-            const local_ns = @as(i128, tDaysFromCivil(l.year, l.month, l.day)) * 86_400_000_000_000 + timeToNs(&l);
+            const iso = calendarDateToIso(f.cal, l.year, l.month, l.day);
+            const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
             var out: value.TemporalData = .{ .kind = .zoned_date_time };
             out.epoch_ns = local_ns - tz.offset_ns;
             out.tz_name = tz.name;
