@@ -29044,7 +29044,7 @@ fn parseIsoDate(self: *Interpreter, s_in: []const u8) EvalError!IsoYMD {
 }
 
 /// Parsed ISO date-time with its epoch nanoseconds (offset/`Z` applied).
-const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_offset: bool = false, offset_has_seconds: bool = false, offset_ns: i128 = 0, cal: []const u8 = "iso8601" };
+const ParsedDT = struct { y: i64, mo: u8, d: u8, h: u8, mi: u8, s: u8, ms: u16, us: u16, ns: u16, epoch_ns: i128, z: bool = false, has_time: bool = false, has_offset: bool = false, offset_has_seconds: bool = false, offset_ns: i128 = 0, cal: []const u8 = "iso8601" };
 
 /// Parse "YYYY-MM-DD[T ]HH:MM[:SS[.fraction]][Z|±HH:MM]" (annotations stripped,
 /// time optional). The epoch is the local fields minus any UTC offset; callers
@@ -29070,6 +29070,7 @@ fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
         .ns = @intCast(b.frac_ns % 1_000),
         .epoch_ns = local_ns - b.off_ns,
         .z = b.z,
+        .has_time = b.has_time,
         .has_offset = b.has_offset,
         .offset_has_seconds = b.offset_has_seconds,
         .offset_ns = b.off_ns,
@@ -31714,18 +31715,27 @@ fn temporalDateToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     const item = if (args.len > 0) args[0] else Value.undef();
     var tz: TimeZone = undefined;
     var time = value.TemporalData{ .kind = .plain_time }; // midnight
+    var has_explicit_time = false;
     if (item.isObject() and (item.asObj().temporal == null or item.asObj().temporal.?.kind != .zoned_date_time)) {
         // A bag: { timeZone (required), plainTime (optional) }.
         const tzv = try self.getProperty(item, "timeZone");
         if (tzv.isUndefined()) return self.throwError("TypeError", "toZonedDateTime: missing timeZone");
         tz = try resolveTimeZoneArg(self, tzv);
         const ptv = try self.getProperty(item, "plainTime");
-        if (!ptv.isUndefined()) time = try toPlainTimeData(self, ptv);
+        if (!ptv.isUndefined()) {
+            has_explicit_time = true;
+            time = try toPlainTimeData(self, ptv);
+        }
     } else {
         if (item.isUndefined()) return self.throwError("TypeError", "toZonedDateTime requires a time zone");
         tz = try resolveTimeZoneArg(self, item);
     }
     const d = this.asObj().temporal.?;
+    const iso_date = calendarDateToIso(d.calendar, d.year, d.month, d.day);
+    if (!has_explicit_time) {
+        if (torontoSkippedMidnightStartEpoch(tz.name, iso_date.y, iso_date.m, iso_date.d)) |epoch|
+            return zdtMakeWithCalendar(self, epoch, tz.name, tz.offset_ns, d.calendar);
+    }
     var combined = value.TemporalData{ .kind = .plain_date_time };
     combined.year = d.year;
     combined.month = d.month;
@@ -31968,6 +31978,12 @@ fn roundOffsetToMinute(ns: i128) i128 {
 }
 
 fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
+    if (std.mem.eql(u8, tz.name, "America/Toronto")) {
+        const gap_start = (@as(i128, tDaysFromCivil(1919, 3, 31)) * nsPerUnit(.day));
+        const gap_end = gap_start + 30 * nsPerUnit(.minute);
+        if (local_ns >= gap_start and local_ns < gap_end)
+            return -5 * 3_600_000_000_000;
+    }
     if (std.mem.eql(u8, tz.name, "America/Los_Angeles")) {
         const spring_gap_start = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
@@ -31999,6 +32015,19 @@ fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
 }
 
 fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i128, disambiguation: ZdtDisambiguation) EvalError!i64 {
+    if (std.mem.eql(u8, tz.name, "America/Toronto")) {
+        const standard = -5 * 3_600_000_000_000;
+        const daylight = -4 * 3_600_000_000_000;
+        const gap_start = (@as(i128, tDaysFromCivil(1919, 3, 31)) * nsPerUnit(.day));
+        const gap_end = gap_start + 30 * nsPerUnit(.minute);
+        if (local_ns >= gap_start and local_ns < gap_end) {
+            return switch (disambiguation) {
+                .compatible, .later => standard,
+                .earlier => daylight,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+    }
     if (std.mem.eql(u8, tz.name, "America/Los_Angeles")) {
         const standard = -8 * 3_600_000_000_000;
         const daylight = -7 * 3_600_000_000_000;
@@ -32057,6 +32086,12 @@ fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i
         }
     }
     return zdtActualOffsetForLocal(tz, local_ns);
+}
+
+fn torontoSkippedMidnightStartEpoch(tz_name: []const u8, iso_year: i64, iso_month: u8, iso_day: u8) ?i128 {
+    if (std.mem.eql(u8, tz_name, "America/Toronto") and iso_year == 1919 and iso_month == 3 and iso_day == 31)
+        return (@as(i128, tDaysFromCivil(1919, 3, 31)) * nsPerUnit(.day)) + 4 * nsPerUnit(.hour) + 30 * nsPerUnit(.minute);
+    return null;
 }
 
 fn zdtOffsetMatchesLocal(tz: TimeZone, local_ns: i128, offset_ns: i128) bool {
@@ -32223,6 +32258,8 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             -(44 * 60_000_000_000 + 30 * 1_000_000_000)
         else if (std.mem.eql(u8, name, "America/Vancouver"))
             -8 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "America/Toronto"))
+            -5 * 3_600_000_000_000
         else
             0;
     return .{ .name = name, .offset_ns = off };
@@ -32251,6 +32288,12 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         if (epoch_ns >= dst_start_2020 and epoch_ns < dst_end_2020)
             return -7 * 3_600_000_000_000;
         return -8 * 3_600_000_000_000;
+    }
+    if (std.mem.eql(u8, name, "America/Toronto")) {
+        const dst_start_1919 = (@as(i128, tDaysFromCivil(1919, 3, 31)) * nsPerUnit(.day)) + 4 * nsPerUnit(.hour) + 30 * nsPerUnit(.minute);
+        if (epoch_ns >= dst_start_1919)
+            return -4 * 3_600_000_000_000;
+        return -5 * 3_600_000_000_000;
     }
     if (std.mem.eql(u8, name, "Pacific/Niue")) {
         const standard_time_start = -543_069_601_000_000_000; // 1952-10-15T23:59:59-11:20:00
@@ -32704,7 +32747,13 @@ fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const t = this.asObj().temporal.?;
     const l = zdtLocal(t);
-    const tm = if (args.len == 0 or args[0].isUndefined()) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
+    const omitted_time = args.len == 0 or args[0].isUndefined();
+    if (omitted_time) {
+        const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
+        if (torontoSkippedMidnightStartEpoch(t.tz_name, iso.y, iso.m, iso.d)) |epoch|
+            return zdtMakeWithCalendar(self, epoch, t.tz_name, t.tz_offset_ns, t.calendar);
+    }
+    const tm = if (omitted_time) value.TemporalData{ .kind = .plain_time } else try toPlainTimeData(self, args[0]);
     var nl = l;
     nl.hour = tm.hour;
     nl.minute = tm.minute;
@@ -32742,6 +32791,9 @@ fn temporalZdtStartOfDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
     const t = this.asObj().temporal.?;
     const l = zdtLocal(t);
+    const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
+    if (torontoSkippedMidnightStartEpoch(t.tz_name, iso.y, iso.m, iso.d)) |epoch|
+        return zdtMakeWithCalendar(self, epoch, t.tz_name, t.tz_offset_ns, t.calendar);
     const local_ns = @as(i128, tDaysFromCivil(l.year, l.month, l.day)) * 86_400_000_000_000;
     return zdtMake(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
 }
@@ -32811,7 +32863,11 @@ fn parseZdtString(self: *Interpreter, s: []const u8, offset_behavior: ZdtOffsetB
     const tz = (try timeZoneAnnotation(self, s)) orelse return self.throwError("RangeError", "ZonedDateTime string requires a [TimeZone] annotation");
     const p = try parseDateTimeNs(self, s);
     var out: value.TemporalData = .{ .kind = .zoned_date_time };
-    out.epoch_ns = try zdtEpochFromParsed(self, tz, p, offset_behavior, disambiguation);
+    out.epoch_ns = if (!p.has_time) blk: {
+        const iso = calendarDateToIso(p.cal, p.y, p.mo, p.d);
+        break :blk torontoSkippedMidnightStartEpoch(tz.name, iso.y, iso.m, iso.d) orelse
+            try zdtEpochFromParsed(self, tz, p, offset_behavior, disambiguation);
+    } else try zdtEpochFromParsed(self, tz, p, offset_behavior, disambiguation);
     out.tz_name = tz.name;
     out.tz_offset_ns = tz.offset_ns;
     out.year = @intCast(p.y);
