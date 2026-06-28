@@ -10196,7 +10196,7 @@ pub const Interpreter = struct {
     /// Array uses its sparse `length`, an array-like reads ToLength(.length).
     /// A pathological 2**53-style length throws (instead of OOM-crashing).
     fn concatSpreadInto(self: *Interpreter, dst: Value, src: *value.Object, n: *usize) EvalError!void {
-        const slen: usize = if (src.is_array) src.arrayLength() else blk: {
+        const slen: usize = if (src.is_array and !src.is_arguments) src.arrayLength() else blk: {
             break :blk toArrayLikeLen((try self.toPrimitive(try self.getProperty(Value.obj(src), "length"), .number)).toNumber());
         };
         const max_safe_len: usize = 9007199254740991;

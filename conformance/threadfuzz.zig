@@ -18,7 +18,7 @@ const js = @import("js");
 /// One random shared-state operation, emitted into a worker's loop body. Every
 /// op targets the shared structures declared by `genProgram` and cannot throw.
 fn op(r: std.Random) []const u8 {
-    return switch (r.uintLessThan(u8, 14)) {
+    return switch (r.uintLessThan(u8, 18)) {
         0 => "sObj.a = i; ", // named-property write
         1 => "acc += sObj.b; ", // named-property read
         2 => "sObj.c = sObj.a + 1; ", // read+write
@@ -32,6 +32,10 @@ fn op(r: std.Random) []const u8 {
         10 => "delete sObj.c; sObj.c = 0; ", // delete + re-add (shape churn)
         11 => "sObj['k' + (i & 3)] = i; ", // dynamic property add (shape transition)
         12 => "acc += (new sCtr(i)).v; ", // shared constructor reading an upvalue
+        13 => "sMap.set(i & 7, i); ", // shared Map insert/update
+        14 => "acc += (sMap.get(i & 3) || 0); ", // shared Map read
+        15 => "sSet.add(i & 7); acc += sSet.size; ", // shared Set mutate + size
+        16 => "sObj.gs = i; acc += sObj.gs; ", // accessor property (getter/setter funnel)
         else => "acc += sArr.length; ", // length read
     };
 }
@@ -57,6 +61,8 @@ fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocato
         \\var sI32 = new Int32Array(sBuf);
         \\var sClo = (function(){ var n = 0; return { bump(){ return ++n; }, peek(){ return n; } }; })();
         \\var sCtr = (function(){ var k = 100; return function Box(x){ this.v = x + k; }; })();
+        \\var sMap = new Map(); var sSet = new Set();
+        \\var sObj_gs = 0; Object.defineProperty(sObj, 'gs', { get(){ return sObj_gs; }, set(x){ sObj_gs = x; }, configurable: true });
         \\
     );
     const nworkers = cfg.min_workers + r.uintLessThan(usize, cfg.worker_span);

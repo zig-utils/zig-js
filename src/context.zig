@@ -4202,6 +4202,13 @@ test "Array.prototype.concat honors Symbol.isConcatSpreadable" {
     try expectEvalStr("1", "[].concat({ length: 2, 0: 'a' }).length.toString()");
     // An array-like with isConcatSpreadable = true is spread by ToLength(length).
     try expectEvalStr("a,b", "var o = { length: 2, 0: 'a', 1: 'b' }; o[Symbol.isConcatSpreadable] = true; [].concat(o).join(',')");
+    try expectEvalStr("6:1:2:3:false:false:false",
+        \\var args = (function(a, b, c) { "use strict"; return arguments; })(1, 2, 3);
+        \\args[Symbol.isConcatSpreadable] = true;
+        \\Object.defineProperty(args, "length", { value: 6 });
+        \\var out = [].concat(args);
+        \\out.length + ":" + out[0] + ":" + out[1] + ":" + out[2] + ":" + (3 in out) + ":" + (4 in out) + ":" + (5 in out)
+    );
     // An array with isConcatSpreadable = false is appended as a single element.
     try std.testing.expectEqual(@as(f64, 1), (try evalIn(
         \\var a = [1, 2, 3]; a[Symbol.isConcatSpreadable] = false;
@@ -5791,6 +5798,28 @@ test "tree-walker entry into a VM closure resolves frame upvalues (native callba
     );
     try std.testing.expect(v.isString());
     try std.testing.expectEqualStrings("11,12,13", v.asStr());
+}
+
+test "deleting a data property from an object that has accessors does not use-after-free" {
+    // Regression (broadened concurrent fuzzer, but single-threaded): when an object
+    // carries an accessor, `deleteNamedDataOwn` rebuilds its key order through
+    // `replaceKeyOrderUnlocked`, which used to free the old key_order *before*
+    // copying the surviving key names - and those names alias the freed storage, so
+    // the copy read freed memory (a segfault under churn). The fix copies first,
+    // then frees. Many delete+re-add cycles on an accessor-bearing object must stay
+    // correct and not crash.
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const v = try ctx.evaluate(
+        \\var o = { c: 0 };
+        \\var gs = 0;
+        \\Object.defineProperty(o, 'gs', { get(){ return gs; }, set(x){ gs = x; }, configurable: true });
+        \\o.k0 = 1; o.k1 = 2;
+        \\for (var i = 0; i < 20000; i++) { delete o.c; o.c = i; o['k' + (i & 3)] = i; o.gs = i; }
+        \\o.c + ":" + o.gs + ":" + o.k3;
+    );
+    try std.testing.expect(v.isString());
+    try std.testing.expectEqualStrings("19999:19999:19999", v.asStr()); // i=19999: c, gs, and k3 (19999&3==3)
 }
 
 test "Context threads run parallel by default; gil option opts into serialized mode" {

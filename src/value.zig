@@ -1399,11 +1399,17 @@ pub const Object = struct {
     }
 
     fn replaceKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator, names: []const []const u8) std.mem.Allocator.Error!void {
-        self.deinitKeyOrderUnlocked();
+        // Build the replacement list FIRST, then free the old one: `names` may
+        // alias the current `key_order`'s key strings (the `deleteNamedDataOwn`
+        // rebuild passes its surviving keys, which point into this very table), so
+        // deiniting before copying frees the bytes `dupe` then reads - a
+        // use-after-free. Copying first makes the new list self-owned, after which
+        // releasing the old storage is safe.
         const alloc = self.keyOrderAllocator(arena);
         const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
         ko.* = .empty;
         for (names) |name| try ko.append(alloc, try alloc.dupe(u8, name));
+        self.deinitKeyOrderUnlocked();
         self.key_order = ko;
     }
 
