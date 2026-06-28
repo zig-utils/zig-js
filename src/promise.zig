@@ -158,7 +158,8 @@ pub fn newPromise(self: *Interpreter) EvalError!*Object {
     p.* = .{ .gc_owned = self.gc_backing != null };
     const obj = try gc_mod.allocObj(self.arena);
     obj.* = .{ .promise = @ptrCast(p) };
-    if (self.env.get("Promise")) |ctor| {
+    const promise_ctor = self.env.get("\x00Promise") orelse self.env.get("Promise");
+    if (promise_ctor) |ctor| {
         if (ctor.isObject()) obj.proto = try self.protoObject(ctor.asObj());
     }
     return obj;

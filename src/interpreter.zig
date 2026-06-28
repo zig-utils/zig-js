@@ -12425,6 +12425,15 @@ pub const Interpreter = struct {
         var builtin_to_string = false;
         var builtin_to_string_method: ?Value = null;
         outer: for (names) |m| {
+            if (moduleNsOf(o) != null) {
+                const method = try self.getProperty(v, m);
+                if (method.isUndefined() or method.isNull()) continue;
+                if (!method.isCallable()) break :outer;
+                user_tried += 1;
+                const res = try self.callValueWithThis(method, &.{}, v);
+                if (!res.isObject() or res.asObj().is_bigint or res.asObj().is_symbol) return res;
+                continue;
+            }
             // OrdinaryToPrimitive resolves each method via `Get(O, name)`, so an
             // *accessor* `valueOf`/`toString` getter is run (and its abrupt
             // completion must propagate — `{ get valueOf() { throw } }`). A data
@@ -24836,6 +24845,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try promise_ns.setOwn(a, root_shape, "prototype", Value.obj(promise_proto));
     try promise_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, promise_proto, promise_ns);
+    try env.put("\x00Promise", Value.obj(promise_ns));
     try env.put("Promise", Value.obj(promise_ns));
 
     // String — callable, with statics.

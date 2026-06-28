@@ -1744,6 +1744,10 @@ fn evaluateModuleWithFixtures(source: []const u8, fixtures: []const ModuleFixtur
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
 
+    try evaluateModuleWithFixturesInContext(ctx, source, fixtures);
+}
+
+fn evaluateModuleWithFixturesInContext(ctx: *Context, source: []const u8, fixtures: []const ModuleFixture) !void {
     const Host = struct {
         source: []const u8,
         fixtures: []const ModuleFixture,
@@ -3698,6 +3702,48 @@ test "dynamic import options can suspend in generator bodies" {
         \\var result = iter.return(595);
         \\result.done + ":" + result.value + ":" + beforeCount + ":" + afterCount
     );
+}
+
+test "dynamic import returns the intrinsic Promise" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    try evaluateModuleWithFixturesInContext(ctx,
+        \\const originalPromise = Promise;
+        \\globalThis.Promise = function() { throw new Error("global Promise called"); };
+        \\const p = import("./dep.js");
+        \\globalThis.dynamicImportPromiseCheck =
+        \\  p.constructor === originalPromise &&
+        \\  Object.getPrototypeOf(p) === originalPromise.prototype &&
+        \\  p.then === originalPromise.prototype.then &&
+        \\  p.catch === originalPromise.prototype.catch &&
+        \\  p.finally === originalPromise.prototype.finally &&
+        \\  !Object.prototype.hasOwnProperty.call(p, "then") &&
+        \\  !Object.prototype.hasOwnProperty.call(p, "catch") &&
+        \\  !Object.prototype.hasOwnProperty.call(p, "finally");
+    , &.{.{ .path = "dep.js", .source = "export const value = 1;" }});
+
+    try std.testing.expect((try ctx.evaluate("dynamicImportPromiseCheck")).asBool());
+}
+
+test "dynamic import namespace primitive conversion uses exported methods" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    try evaluateModuleWithFixturesInContext(ctx,
+        \\globalThis.dynamicImportPrimitiveCheck = "";
+        \\import("./to-string.js").then(function(ns) {
+        \\  globalThis.dynamicImportPrimitiveCheck += String(ns) + ":" + Number(ns) + ";";
+        \\});
+        \\import("./value-of.js").then(function(ns) {
+        \\  globalThis.dynamicImportPrimitiveCheck += Number(ns) + ":" + String(ns) + ";";
+        \\});
+    , &.{
+        .{ .path = "to-string.js", .source = "export function toString() { return '1612'; }" },
+        .{ .path = "value-of.js", .source = "export function valueOf() { return 42; }" },
+    });
+
+    try std.testing.expectEqualStrings("1612:1612;42:42;", (try ctx.evaluate("dynamicImportPrimitiveCheck")).asStr());
 }
 
 test "delete of a private member is an early error" {
