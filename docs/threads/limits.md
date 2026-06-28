@@ -69,7 +69,10 @@ context APIs.
 
 - **GC allocation fast path / nursery.** Correctness is gated, but tight-loop
   block-scope allocation and create/destroy-heavy context lifecycles are still
-  much slower under the GC path than under the old arena model.
+  much slower under the GC path than under the old arena model. `zig build
+  gc-profile` is the repeatable baseline for arena, explicit-GC, no-GIL
+  threaded GC, and `.gil = true` context modes before nursery or lifecycle
+  pooling work lands.
 - **Context lifecycle cost.** Long-lived embedders amortize the GC setup and
   teardown costs, but create-per-unit-of-work embedders need either cheaper
   context lifecycle or clearer guidance.

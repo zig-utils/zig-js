@@ -47,6 +47,10 @@ Known performance/maturity work:
 - Context create/destroy is much more expensive than the arena model because
   every GC cell has setup/teardown work. Long-lived contexts amortize this;
   create-per-task embedders need either a faster lifecycle path or guidance.
+- `zig build gc-profile` is the local baseline for those costs. It compares
+  arena, explicit-GC, no-GIL threaded GC, and `.gil = true` contexts across
+  create/destroy, object-heavy allocation, block-scoped `let` allocation, and
+  explicit `collectGarbage()`.
 - Mid-script parallel GC is abort-safe, but a peer blocked in sync wait/lock/
   condition paths may periodically pump tasks and allocate. That makes it
   different from a frozen parked peer; quiescent collection remains the
@@ -63,9 +67,8 @@ Known performance/maturity work:
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 
-Remaining: use the contention profile to drive targeted lock reductions and add
-GC allocation/context-lifecycle probes before choosing nursery, pooling, or
-finer-grained synchronization work.
+Remaining: use the contention and GC profiles to drive targeted lock reductions,
+allocation fast paths, lifecycle pooling, or nursery/generational work.
 
 ## 4. Embedder API
 

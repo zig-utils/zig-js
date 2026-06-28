@@ -247,4 +247,19 @@ pub fn build(b: *std.Build) void {
     const run_threads_profile = b.addRunArtifact(threads_profile);
     const threads_profile_step = b.step("threads-profile", "Profile no-GIL Thread contention against the .gil fallback");
     threads_profile_step.dependOn(&run_threads_profile.step);
+
+    // GC allocation/lifecycle profile: compare arena, explicit-GC, no-GIL
+    // threaded GC, and `.gil = true` lifecycle costs. Local performance tool.
+    const gc_profile = b.addExecutable(.{
+        .name = "gc-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/gc.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "js", .module = bench_js_mod }},
+        }),
+    });
+    const run_gc_profile = b.addRunArtifact(gc_profile);
+    const gc_profile_step = b.step("gc-profile", "Profile GC allocation and Context lifecycle costs");
+    gc_profile_step.dependOn(&run_gc_profile.step);
 }
