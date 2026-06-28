@@ -29724,13 +29724,72 @@ fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be an object");
-    try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
+    if (bag.asObj().temporal != null) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be a partial object");
+
+    if (!(try self.getProperty(bag, "calendar")).isUndefined())
+        return self.throwError("TypeError", "calendar is not allowed in PlainYearMonth.with");
+    if (!(try self.getProperty(bag, "timeZone")).isUndefined())
+        return self.throwError("TypeError", "timeZone is not allowed in PlainYearMonth.with");
+
+    const mv = try self.getProperty(bag, "month");
+    const maybe_month: ?i64 = if (!mv.isUndefined()) @intFromFloat(try temporalIntArg(self, mv, "month")) else null;
+    if (maybe_month) |raw_m| if (raw_m < 1) return self.throwError("RangeError", "month out of range");
+
+    const mcv = try self.getProperty(bag, "monthCode");
+    const maybe_month_code: ?MonthCodeInfo = if (!mcv.isUndefined()) try readMonthCodeInfo(self, mcv) else null;
+
+    const yv = try self.getProperty(bag, "year");
+    const maybe_year: ?i64 = if (!yv.isUndefined()) @intFromFloat(try temporalIntArg(self, yv, "year")) else null;
+
+    const has_era = calEraOf(t.calendar, 0, 1, 1).era != null;
+    const ev = if (has_era) try self.getProperty(bag, "era") else Value.undef();
+    const eyv = if (has_era) try self.getProperty(bag, "eraYear") else Value.undef();
+    var era_year: ?i64 = null;
+    if (maybe_year == null and (!ev.isUndefined() or !eyv.isUndefined())) {
+        if (ev.isUndefined() or eyv.isUndefined())
+            return self.throwError("TypeError", "era and eraYear must be provided together");
+        if (!ev.isString()) return self.throwError("RangeError", "era must be a string");
+        const ey = try temporalIntArg(self, eyv, "eraYear");
+        const iso_year = calIsoFromEra(t.calendar, ev.asStr(), @intFromFloat(ey)) orelse
+            return self.throwError("RangeError", "invalid era for this calendar");
+        era_year = calDisplayYear(t.calendar, iso_year);
+    }
+
+    if (maybe_month == null and maybe_month_code == null and maybe_year == null and era_year == null)
+        return self.throwError("TypeError", "PlainYearMonth.with requires a year, month, or monthCode");
+
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
-    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
-    const m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, !reject);
+    const y = maybe_year orelse era_year orelse t.year;
     const max_month = calMonthsInYear(t.calendar, y);
-    if (reject and (m < 1 or m > max_month)) return self.throwError("RangeError", "month out of range");
-    const mc: u8 = @max(1, @min(max_month, m)); // constrain
+
+    var m: i64 = maybe_month orelse blk: {
+        if (maybe_month_code) |info| {
+            const code_month = calMonthFromCodeMaybe(t.calendar, y, info) orelse
+                if (!reject and info.leap)
+                    (constrainInvalidLeapMonthCode(t.calendar, y, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+                else
+                    return self.throwError("RangeError", "bad monthCode");
+            break :blk code_month;
+        }
+        const info = calMonthCodeInfo(t.calendar, t.year, t.month);
+        const code_month = calMonthFromCodeMaybe(t.calendar, y, info) orelse
+            if (!reject and info.leap)
+                (constrainInvalidLeapMonthCode(t.calendar, y, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+            else
+                return self.throwError("RangeError", "bad monthCode");
+        break :blk code_month;
+    };
+    if (maybe_month_code) |info| if (maybe_month != null) {
+        const code_month = calMonthFromCodeMaybe(t.calendar, y, info) orelse
+            if (!reject and info.leap)
+                (constrainInvalidLeapMonthCode(t.calendar, y, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+            else
+                return self.throwError("RangeError", "bad monthCode");
+        if (m != @as(i64, code_month)) return self.throwError("RangeError", "month and monthCode mismatch");
+    };
+    if (reject and m > max_month) return self.throwError("RangeError", "month out of range");
+    m = @min(@as(i64, max_month), m);
+    const mc: u8 = @intCast(m);
     const iso = calendarDateToIso(t.calendar, y, mc, t.day);
     try checkIsoYearMonth(self, iso.y, iso.m);
     return makeYearMonth(self, y, mc, t.calendar, t.day);
@@ -29830,9 +29889,10 @@ fn temporalYearMonthToPlainDateFn(ctx: *anyopaque, this: Value, args: []const Va
     const dv = try self.getProperty(bag, "day");
     if (dv.isUndefined()) return self.throwError("TypeError", "toPlainDate requires a day");
     const d = try temporalIntArg(self, dv, "day");
-    if (d < 1 or d > @as(f64, @floatFromInt(calDaysInMonth(t.calendar, t.year, t.month))))
+    if (d < 1)
         return self.throwError("RangeError", "day out of range");
-    const di: u8 = @intFromFloat(d);
+    const max_day: f64 = @floatFromInt(calDaysInMonth(t.calendar, t.year, t.month));
+    const di: u8 = @intFromFloat(@min(d, max_day));
     const iso = calendarDateToIso(t.calendar, t.year, t.month, di);
     try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
