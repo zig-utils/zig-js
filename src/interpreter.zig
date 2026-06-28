@@ -30618,7 +30618,7 @@ fn balanceTimeNs(total: i128, largest: TUnit) [10]f64 {
     return out;
 }
 
-const RoundOpts = struct { largest: TUnit, smallest: TUnit, mode: RoundMode, increment: f64, smallest_set: bool = false };
+const RoundOpts = struct { largest: TUnit, smallest: TUnit, mode: RoundMode, increment: f64, largest_set: bool = false, smallest_set: bool = false };
 const DurationRoundRead = struct { opts: RoundOpts, relative_to: ?RelTo, has_unit: bool };
 const RoundMode = enum { ceil, floor, expand, trunc, half_ceil, half_floor, half_expand, half_trunc, half_even };
 
@@ -30940,6 +30940,7 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
             if (std.mem.eql(u8, s, "auto")) {} else {
                 r.largest = tUnitFromStr(s) orelse return self.throwError("RangeError", "invalid largestUnit");
                 largest_set = true;
+                r.largest_set = true;
             }
         }
         const ri = try self.getProperty(opts, "roundingIncrement");
@@ -31105,8 +31106,12 @@ fn temporalInstantUntilFn(comptime sign: f64) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
             const other = try toInstantArg(self, if (args.len > 0) args[0] else Value.undef());
-            const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .second, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
+            var opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .second, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant difference largestUnit must be hour or smaller");
+            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant difference smallestUnit must be hour or smaller");
+            if (!opts.largest_set and opts.smallest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.second))
+                opts.largest = opts.smallest;
+            try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
             var diff = @as(i128, @intFromFloat(sign)) * (other - this.asObj().temporal.?.epoch_ns);
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
             return makeDuration(self, balanceTimeNs(diff, opts.largest));
