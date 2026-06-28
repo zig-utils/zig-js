@@ -2597,6 +2597,19 @@ pub const Interpreter = struct {
                     if (o.getAttr(key).enumerable) try out.append(self.arena, key);
                 }
             }
+            // A TypedArray's integer-indexed elements are own enumerable keys
+            // (outside the shape); enumerate the current length (which a resizable
+            // backing buffer may have shrunk or grown).
+            if (o.typed_array) |ta| {
+                var i: usize = 0;
+                const len = ta.currentLength() orelse 0;
+                while (i < len) : (i += 1) {
+                    const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                    if (visited.contains(key)) continue;
+                    try visited.put(self.arena, key, {});
+                    try out.append(self.arena, key);
+                }
+            }
             const own_keys = if (o.proxy_handler != null or o.proxy_revoked or o.module_ns != null)
                 try self.objectOwnKeysList(o)
             else
