@@ -4524,6 +4524,24 @@ test "generators: yield* delegates to arrays, strings, and generators" {
         \\function* outer() { var r = yield* inner(); yield r; }
         \\var it = outer(); it.next(); it.next().value
     )).asNum());
+    // GetIterator captures the delegate iterator's `next` method once.
+    try expectEvalStr("first,second:1",
+        \\var gets = 0;
+        \\var iter = {
+        \\  get next() {
+        \\    gets++;
+        \\    var n = 0;
+        \\    return function(v) {
+        \\      n++;
+        \\      return n === 1 ? { value: "first", done: false } : { value: "second", done: true };
+        \\    };
+        \\  }
+        \\};
+        \\var obj = { [Symbol.iterator]() { return iter; } };
+        \\function* g() { return yield* obj; }
+        \\var it = g();
+        \\it.next().value + "," + it.next("sent").value + ":" + gets
+    );
 }
 
 test "generators: a return value finishes with done:true" {
@@ -4669,6 +4687,38 @@ test "async/await: suspendable runtime with spec ordering" {
         \\Promise.race(iter);
         \\returnCount
     )).asNum());
+}
+
+test "async generators: yield* captures sync iterator next once" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var out = "";
+        \\var gets = 0;
+        \\var sync = {
+        \\  get next() {
+        \\    gets++;
+        \\    var n = 0;
+        \\    return function(v) {
+        \\      n++;
+        \\      return n === 1 ? { value: "first", done: false } : { value: "done", done: true };
+        \\    };
+        \\  }
+        \\};
+        \\var obj = {
+        \\  get [Symbol.asyncIterator]() { return null; },
+        \\  [Symbol.iterator]() { return sync; }
+        \\};
+        \\async function* g() { return yield* obj; }
+        \\var it = g();
+        \\it.next().then(function(v) {
+        \\  out += v.value + ":" + v.done;
+        \\  return it.next("sent");
+        \\}).then(function(v) {
+        \\  out += "|" + v.value + ":" + v.done + ":" + gets;
+        \\});
+    );
+    try std.testing.expectEqualStrings("first:false|done:true:1", (try ctx.evaluate("out")).asStr());
 }
 
 test "class static block rejects arguments in nested computed class names" {

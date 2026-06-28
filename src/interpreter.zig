@@ -9741,6 +9741,7 @@ pub const Interpreter = struct {
     fn makeAsyncFromSyncIterator(self: *Interpreter, sync_iter: Value) EvalError!Value {
         const it = (try self.newObject()).asObj();
         try self.setProp(it, "__sync", sync_iter);
+        try self.setProp(it, "__next", try self.getProperty(sync_iter, "next"));
         try setNative(self.arena, self.root_shape, it, "next", 1, asyncFromSyncNextFn);
         try setNative(self.arena, self.root_shape, it, "return", 1, asyncFromSyncReturnFn);
         try setNative(self.arena, self.root_shape, it, "throw", 1, asyncFromSyncThrowFn);
@@ -12922,8 +12923,9 @@ fn asyncFromSyncContinuation(self: *Interpreter, sync_iter: Value, result: Value
 fn asyncFromSyncNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const sync_iter = try asyncFromSyncUnderlying(self, this);
+    const next = this.asObj().getOwn("__next") orelse return promiseRejectValue(self, try self.makeError("TypeError", "Async-from-Sync iterator missing next method"));
     const call_args = if (args.len > 0) args[0..1] else args[0..0];
-    const result = self.callMethod(sync_iter, "next", call_args) catch |err| return promiseRejectAbrupt(self, err);
+    const result = self.callValueWithThis(next, call_args, sync_iter) catch |err| return promiseRejectAbrupt(self, err);
     return asyncFromSyncContinuation(self, sync_iter, result, true);
 }
 

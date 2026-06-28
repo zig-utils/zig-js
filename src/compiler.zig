@@ -1328,6 +1328,7 @@ pub const Compiler = struct {
         const r = try self.freshTemp(); // the last `{value, done}` result
         const recv_v = try self.freshTemp(); // value carried by the resume
         const recv_k = try self.freshTemp(); // resume kind: 0 next / 1 throw / 2 return
+        const next_m = try self.freshTemp(); // the iterator's captured `next` method
         const m = try self.freshTemp(); // a GetMethod(it, throw|return) result
         const ch = self.chunk;
         const done_n = try ch.addName("done");
@@ -1337,6 +1338,9 @@ pub const Compiler = struct {
         try self.compileExpr(arg);
         _ = try ch.emit(if (async_d) .async_iter_of else .iter_of, 0);
         try self.emitDefine(it);
+        try self.emitLoad(it);
+        _ = try ch.emit(.get_prop, try ch.addName("next"));
+        try self.emitDefine(next_m);
         _ = try ch.emit(.load_undefined, 0);
         try self.emitDefine(recv_v);
         _ = try ch.emit(.load_const, try ch.addConst(Value.num(0)));
@@ -1349,10 +1353,11 @@ pub const Compiler = struct {
         _ = try ch.emit(.eq_strict, 0);
         const to_nonnext = try ch.emit(.jump_if_false, 0);
 
-        // --- next branch: r = it.next(recv_v) ---
+        // --- next branch: r = next.call(it, recv_v) ---
+        try self.emitLoad(next_m);
         try self.emitLoad(it);
         try self.emitLoad(recv_v);
-        _ = try ch.emitAB(.call_method, try ch.addName("next"), 1);
+        _ = try ch.emitAB(.call_with_this, 1, 0);
         if (async_d) _ = try ch.emit(.await_op, 0);
         try self.emitDefine(r);
         const to_join_a = try ch.emit(.jump, 0); // -> normal/throw join
