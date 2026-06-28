@@ -28277,8 +28277,14 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
         return if (month == 12 and calInLeapYear(cal, year)) 30 else if (month >= 1 and month <= 12) (if ((month % 2) == 1) 30 else 29) else 0;
     if (std.mem.eql(u8, cal, "islamic-umalqura")) {
         if (umalquraKnownDaysInMonth(year, month)) |known| return known;
+        const y1442 = [_]u8{ 29, 30, 29, 30, 29, 30, 29, 30, 30, 29, 30, 29 };
+        const y1443 = [_]u8{ 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 30 };
+        const y1444 = [_]u8{ 29, 30, 29, 30, 30, 29, 29, 30, 29, 30, 29, 30 };
         const y1390 = [_]u8{ 29, 30, 29, 30, 30, 30, 29, 30, 29, 30, 29, 30 };
         const y1391 = [_]u8{ 29, 29, 30, 29, 30, 30, 29, 30, 30, 29, 30, 29 };
+        if (year == 1442 and month <= y1442.len) return y1442[month - 1];
+        if (year == 1443 and month <= y1443.len) return y1443[month - 1];
+        if (year == 1444 and month <= y1444.len) return y1444[month - 1];
         return tableMonthDays(year, month, 1390, &y1390, 1391, &y1391) orelse
             (if (month == 12 and islamicTabularLeapYear(year)) 30 else if (month >= 1 and month <= 12) (if ((month % 2) == 1) 30 else 29) else 0);
     }
@@ -28293,10 +28299,24 @@ fn calDaysInMonth(cal: []const u8, year: i64, month: u8) u8 {
         for (known_30_day_months) |entry| {
             if (entry.y == year and entry.m == month) return entry.d;
         }
+        const y2001_chinese = [_]u8{ 30, 30, 29, 30, 29, 30, 29, 29, 30, 29, 30, 29, 30 };
+        const y2001_dangi = [_]u8{ 30, 30, 30, 29, 29, 30, 29, 29, 30, 29, 30, 29, 30 };
+        const y2012_dangi = [_]u8{ 30, 29, 30, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29 };
+        const y2018 = [_]u8{ 29, 30, 29, 30, 29, 29, 30, 29, 30, 29, 30, 30 };
+        const y2019_chinese = [_]u8{ 30, 29, 30, 29, 30, 29, 29, 30, 29, 29, 30, 30 };
+        const y2019_dangi = [_]u8{ 30, 29, 30, 29, 30, 29, 29, 30, 29, 30, 29, 30 };
+        const y2021 = [_]u8{ 29, 30, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29 };
+        const y2025_chinese = [_]u8{ 29, 30, 29, 30, 30, 29, 29, 30, 29, 30, 29, 30, 30 };
         const y1971 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, 30, 29 };
         const y1972 = [_]u8{ 29, 30, 29, 29, 30, 29, 30, 29, 30, 30, if (std.mem.eql(u8, cal, "chinese")) 29 else 30, if (std.mem.eql(u8, cal, "chinese")) 30 else 29 };
         const y2020 = [_]u8{ 30, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29 };
         const y2022 = [_]u8{ 30, 29, 30, 29, 30, 30, 29, 30, 29, 30, 29, 30 };
+        if (year == 2001 and month <= y2001_chinese.len) return (if (std.mem.eql(u8, cal, "chinese")) y2001_chinese else y2001_dangi)[month - 1];
+        if (year == 2012 and std.mem.eql(u8, cal, "dangi") and month <= y2012_dangi.len) return y2012_dangi[month - 1];
+        if (year == 2018 and month <= y2018.len) return y2018[month - 1];
+        if (year == 2019 and month <= y2019_chinese.len) return (if (std.mem.eql(u8, cal, "chinese")) y2019_chinese else y2019_dangi)[month - 1];
+        if (year == 2021 and month <= y2021.len) return y2021[month - 1];
+        if (year == 2025 and std.mem.eql(u8, cal, "chinese") and month <= y2025_chinese.len) return y2025_chinese[month - 1];
         if (year == 2020 and month <= y2020.len) return y2020[month - 1];
         if (year == 2022 and month <= y2022.len) return y2022[month - 1];
         return tableMonthDays(year, month, 1971, &y1971, 1972, &y1972) orelse
@@ -31911,6 +31931,7 @@ fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value)
 
 const TimeZone = struct { name: []const u8, offset_ns: i64 };
 const ZdtOffsetBehavior = enum { use, ignore, prefer, reject };
+const ZdtDisambiguation = enum { compatible, earlier, later, reject };
 
 fn readZdtOffsetBehavior(self: *Interpreter, options: Value) EvalError!ZdtOffsetBehavior {
     if (options.isUndefined()) return .reject;
@@ -31924,6 +31945,17 @@ fn readZdtOffsetBehavior(self: *Interpreter, options: Value) EvalError!ZdtOffset
     if (std.mem.eql(u8, s, "prefer")) return .prefer;
     if (std.mem.eql(u8, s, "reject")) return .reject;
     return self.throwError("RangeError", "invalid offset option");
+}
+
+fn readZdtDisambiguation(self: *Interpreter, options: Value) EvalError!ZdtDisambiguation {
+    if (options.isUndefined()) return .compatible;
+    if (!options.isObject() or options.asObj().is_symbol or options.asObj().is_bigint)
+        return self.throwError("TypeError", "options must be an object or undefined");
+    const s = (try dtfGetStr(self, options, "disambiguation", &.{ "compatible", "earlier", "later", "reject" }, "compatible")).?;
+    if (std.mem.eql(u8, s, "compatible")) return .compatible;
+    if (std.mem.eql(u8, s, "earlier")) return .earlier;
+    if (std.mem.eql(u8, s, "later")) return .later;
+    return .reject;
 }
 
 fn roundOffsetToMinute(ns: i128) i128 {
@@ -31948,6 +31980,32 @@ fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
     }
     const candidate_epoch = local_ns - @as(i128, tz.offset_ns);
     return timeZoneOffsetAtEpoch(tz.name, candidate_epoch, tz.offset_ns);
+}
+
+fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i128, disambiguation: ZdtDisambiguation) EvalError!i64 {
+    if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
+        const standard = -8 * 3_600_000_000_000;
+        const daylight = -7 * 3_600_000_000_000;
+        const spring_gap_start = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start and local_ns < spring_gap_end) {
+            return switch (disambiguation) {
+                .compatible, .later => standard,
+                .earlier => daylight,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+        const fall_overlap_start = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end = fall_overlap_start + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end) {
+            return switch (disambiguation) {
+                .compatible, .earlier => daylight,
+                .later => standard,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+    }
+    return zdtActualOffsetForLocal(tz, local_ns);
 }
 
 fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: ZdtOffsetBehavior) EvalError!i128 {
@@ -32543,6 +32601,7 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const options = if (args.len > 1) args[1] else Value.undef();
     const reject = try readOverflowReject(self, options);
     const offset_behavior = try readZdtOffsetBehavior(self, options);
+    const disambiguation = try readZdtDisambiguation(self, options);
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse l.year;
     const m = try withCalendarMonthField(self, bag, t.calendar, y, l.year, l.month, !reject);
     const d = try withIntField(self, bag, "day", l.day);
@@ -32558,7 +32617,7 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
     const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
     const tz = TimeZone{ .name = t.tz_name, .offset_ns = t.tz_offset_ns };
-    const actual_offset = zdtActualOffsetForLocal(tz, local_ns);
+    const actual_offset = try zdtOffsetForLocalDisambiguation(self, tz, local_ns, disambiguation);
     const offv = try self.getProperty(bag, "offset");
     const epoch_offset: i128 = if (!offv.isUndefined()) blk: {
         const off = try validateRelativeOffset(self, offv);
