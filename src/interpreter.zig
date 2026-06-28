@@ -29851,6 +29851,12 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
             if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference smallestUnit must be year or month");
             if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
             const a = this.asObj().temporal.?;
+            if (a.year == other.y and a.month == other.m and temporalCalendarIdsEqual(a.calendar, other.cal)) {
+                const zero: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                return makeDuration(self, zero);
+            }
+            try checkIsoDate(self, @floatFromInt(a.year), @floatFromInt(a.month), 1);
+            try checkIsoDate(self, @floatFromInt(other.y), @floatFromInt(other.m), 1);
             const earlier_first = (@as(i64, a.year) * 12 + a.month) <= (other.y * 12 + other.m);
             const e_y = if (earlier_first) a.year else other.y;
             const e_m: u8 = if (earlier_first) a.month else other.m;
@@ -29868,12 +29874,26 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
                 const q = applyRounding(total_months, 12 * incr, opts.mode);
                 years = @floatFromInt(q * incr);
             } else {
-                const q = applyRounding(total_months, incr, opts.mode);
-                const m_total = q * incr;
                 if (opts.largest == .year) {
-                    years = @floatFromInt(@divTrunc(m_total, 12));
-                    months = @floatFromInt(@rem(m_total, 12));
+                    const whole_years = @divTrunc(total_months, 12);
+                    const month_remainder = total_months - whole_years * 12;
+                    const probe_total = whole_years * 12 + (if (month_remainder >= 0) incr else -incr);
+                    const probe_abs = @as(i64, a.month) - 1 + probe_total;
+                    const probe_y = a.year + @divFloor(probe_abs, 12);
+                    const probe_m: u8 = @intCast(@mod(probe_abs, 12) + 1);
+                    try checkIsoDate(self, @floatFromInt(probe_y), @floatFromInt(probe_m), 1);
+                    years = @floatFromInt(whole_years);
+                    months = @floatFromInt(applyRounding(month_remainder, incr, opts.mode) * incr);
+                    years += @floatFromInt(@divTrunc(@as(i64, @intFromFloat(months)), 12));
+                    months = @floatFromInt(@rem(@as(i64, @intFromFloat(months)), 12));
                 } else {
+                    const q = applyRounding(total_months, incr, opts.mode);
+                    const m_total = q * incr;
+                    const probe_total = if (total_months >= 0) incr else -incr;
+                    const probe_abs = @as(i64, a.month) - 1 + probe_total;
+                    const probe_y = a.year + @divFloor(probe_abs, 12);
+                    const probe_m: u8 = @intCast(@mod(probe_abs, 12) + 1);
+                    try checkIsoDate(self, @floatFromInt(probe_y), @floatFromInt(probe_m), 1);
                     months = @floatFromInt(m_total);
                 }
             }
