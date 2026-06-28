@@ -4629,6 +4629,25 @@ test "async/await: suspendable runtime with spec ordering" {
         );
         try std.testing.expectEqualStrings("sup", (try ctx.evaluate("result")).asStr());
     }
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var result = false;
+            \\var obj = {
+            \\  async method(x) {
+            \\    let a = arguments;
+            \\    return async () => a === arguments;
+            \\  }
+            \\};
+            \\obj.method(1).then(function(retFn) {
+            \\  return retFn();
+            \\}).then(function(value) {
+            \\  result = value;
+            \\});
+        );
+        try std.testing.expect((try ctx.evaluate("result")).asBool());
+    }
     try std.testing.expect((try evalIn("Promise.resolve(1) instanceof Promise")).asBool());
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;

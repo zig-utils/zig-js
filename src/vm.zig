@@ -1168,9 +1168,11 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const chunk = func.async_chunk.?;
     const genv = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(genv, func.closure, true);
-    const args_obj = try vm.newArray();
-    for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
-    try genv.put("arguments", args_obj);
+    if (!func.is_arrow) {
+        const args_obj = try vm.newArray();
+        for (args) |av| try args_obj.asObj().elements.append(args_obj.asObj().elementsAllocator(vm.arena), av);
+        try genv.put("arguments", args_obj);
+    }
     const bound_this = bindThisForCall(vm, func, this_val) catch |err| {
         if (err != error.Throw) return err;
         const result = try promise.newPromise(vm);
