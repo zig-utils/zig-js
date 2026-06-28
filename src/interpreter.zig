@@ -4686,18 +4686,28 @@ pub const Interpreter = struct {
         // establishes it (only a derived constructor permits `super()`).
         if (!func.is_arrow) self.in_derived_ctor = func.is_derived_constructor;
         if (!func.is_arrow) self.in_default_ctor = func.is_default_ctor;
-        self.this_initialized = !func.is_derived_constructor;
+        // An arrow has no own `this` binding: it inherits the enclosing function's
+        // this-initialization state (a non-arrow establishes it — only a derived
+        // constructor starts uninitialized).
+        if (!func.is_arrow) self.this_initialized = !func.is_derived_constructor;
         defer {
             self.env = saved_env;
             self.signal = saved_signal;
             self.ret_value = saved_ret;
-            self.this_value = saved_this;
             self.home_object = saved_home;
             self.super_ctor = saved_super;
             self.new_target = saved_nt;
             self.strict = saved_strict;
             self.global_object = saved_global;
-            self.this_initialized = saved_this_initialized;
+            // An arrow's `super()` initializes its *enclosing* derived
+            // constructor's `this` (they share the binding), so that result must
+            // persist past the arrow call rather than be restored to the prior
+            // uninitialized state.
+            const keep_this = func.is_arrow and self.this_initialized and !saved_this_initialized;
+            if (!keep_this) {
+                self.this_value = saved_this;
+                self.this_initialized = saved_this_initialized;
+            }
             self.direct_eval_new_target_allowed = saved_eval_nt;
             self.in_field_initializer = saved_fi;
             self.in_param_expr = saved_pe;
