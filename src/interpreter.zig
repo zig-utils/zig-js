@@ -31092,8 +31092,8 @@ fn temporalInstantAddFn(comptime sign: f64) value.NativeFn {
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             try ensureNoCalendarUnits(self, dur);
             if (dur[3] != 0 or dur[2] != 0) return self.throwError("RangeError", "Instant arithmetic does not allow day/week units");
-            const o = try makeTemporal(self, .instant, "\x00T.Instant");
-            o.temporal.?.epoch_ns = this.asObj().temporal.?.epoch_ns + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            const target_ns = this.asObj().temporal.?.epoch_ns + @as(i128, @intFromFloat(sign)) * durationTimeNs(dur);
+            const o = try makeInstantFromEpochNs(self, target_ns);
             return Value.obj(o);
         }
     }.call;
