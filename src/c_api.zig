@@ -73,8 +73,12 @@ pub const JSObjectCallAsFunctionCallback = *const fn (
 
 // ---- internal helpers --------------------------------------------------
 
+fn ctxRawFrom(ref: JSContextRef) ?*Context {
+    return @ptrCast(@alignCast(ref orelse return null));
+}
+
 fn ctxFrom(ref: JSContextRef) ?*Context {
-    const c: *Context = @ptrCast(@alignCast(ref orelse return null));
+    const c = ctxRawFrom(ref) orelse return null;
     // Single funnel for every C-API entry point: enforce context thread
     // affinity in debug builds (see "Threading rules" above).
     c.assertOwnerThread();
@@ -128,7 +132,9 @@ export fn ZJSGlobalContextCreateThreaded(gil: bool) callconv(.c) JSContextRef {
 }
 
 export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
-    const c = ctxFrom(ctx) orelse return;
+    // A `.gil = true` threaded context is released from outside JS execution;
+    // `Context.destroy()` performs the serialized teardown itself.
+    const c = ctxRawFrom(ctx) orelse return;
     c.destroy();
 }
 
@@ -152,7 +158,10 @@ export fn JSEvaluateScript(
     _ = this_object;
     _ = source_url;
     _ = starting_line_number;
-    const c = ctxFrom(ctx) orelse return null;
+    // `Context.evaluate()` acquires/releases the per-context GIL for serialized
+    // threaded contexts. Fetch raw here so `ZJSGlobalContextCreateThreaded(true)`
+    // is usable through the public C API in Debug builds too.
+    const c = ctxRawFrom(ctx) orelse return null;
     const s = strFrom(script) orelse return null;
     const result = c.evaluate(s.bytes) catch |err| {
         // A JS `throw` surfaces the actual thrown value; host failures (parse
@@ -598,10 +607,6 @@ test "C-API: JSEvaluateScript computes 1 + 1 === 2" {
 }
 
 test "C-API: ZJSGlobalContextCreateThreaded(parallel) evaluates JS + exposes Thread" {
-    // gil=false is the parallel (GIL-free) context — usable directly from the
-    // creating thread, since parallel contexts have no owner-GIL. (gil=true is the
-    // serialized model; like JSC, the embedder manages the GIL around its use, so
-    // it isn't exercised through the bare C entry point here.)
     const ctx = ZJSGlobalContextCreateThreaded(false) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
     const script = JSStringCreateWithUTF8CString("let s = 0; for (let i = 0; i < 50; i++) s += i; s") orelse return error.StringInitFailed;
@@ -615,6 +620,19 @@ test "C-API: ZJSGlobalContextCreateThreaded(parallel) evaluates JS + exposes Thr
     defer JSStringRelease(probe);
     const tv = JSEvaluateScript(ctx, probe, null, null, 0, null) orelse return error.EvalFailed;
     try std.testing.expect(JSValueToBoolean(ctx, tv));
+}
+
+test "C-API: ZJSGlobalContextCreateThreaded(serialized) evaluates JS + exposes Thread" {
+    const ctx = ZJSGlobalContextCreateThreaded(true) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+
+    const script = JSStringCreateWithUTF8CString("typeof Thread === 'function' && (1 + 2 + 3) === 6") orelse return error.StringInitFailed;
+    defer JSStringRelease(script);
+
+    var exception: JSValueRef = null;
+    const result = JSEvaluateScript(ctx, script, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, result));
 }
 
 test "C-API: object property get/set" {

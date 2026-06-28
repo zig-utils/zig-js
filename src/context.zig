@@ -6603,6 +6603,16 @@ test "Context threads run parallel by default; gil option opts into serialized m
     }
 }
 
+test "Context public Options expose only stable thread controls" {
+    try std.testing.expect(@hasField(Context.Options, "enable_threads"));
+    try std.testing.expect(@hasField(Context.Options, "gil"));
+    try std.testing.expect(!@hasField(Context.Options, "parallel_js"));
+    try std.testing.expect(!@hasField(Context.Options, "parallel_midscript_gc"));
+    try std.testing.expect(!@hasField(Context.Options, "parallel_gc"));
+    try std.testing.expect(@hasField(Context.TestingOptions, "parallel_js"));
+    try std.testing.expect(@hasField(Context.TestingOptions, "parallel_midscript_gc"));
+}
+
 test "Thread blocking APIs respect the main can-block gate" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,
