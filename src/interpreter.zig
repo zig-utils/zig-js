@@ -28093,6 +28093,7 @@ fn chineseLikeKnownMonthStartEpochDay(cal: []const u8, year: i64, month: u8) ?i6
     const MonthStart = struct { y: i64, m: u8, iy: i64, im: u8, id: u8 };
     const chinese = [_]MonthStart{
         .{ .y = 1900, .m = 1, .iy = 1900, .im = 1, .id = 31 },
+        .{ .y = 1969, .m = 11, .iy = 1969, .im = 12, .id = 9 },
         .{ .y = 1984, .m = 11, .iy = 1984, .im = 11, .id = 23 },
         .{ .y = 1993, .m = 4, .iy = 1993, .im = 4, .id = 22 },
         .{ .y = 1995, .m = 9, .iy = 1995, .im = 9, .id = 25 },
@@ -32015,6 +32016,10 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             3_600_000_000_000
         else if (std.mem.eql(u8, name, "America/New_York"))
             -5 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "America/Los_Angeles"))
+            -8 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "Asia/Calcutta") or std.mem.eql(u8, name, "Asia/Kolkata"))
+            5 * 3_600_000_000_000 + 30 * 60_000_000_000
         else if (std.mem.eql(u8, name, "Africa/Monrovia"))
             -(44 * 60_000_000_000 + 30 * 1_000_000_000)
         else if (std.mem.eql(u8, name, "America/Vancouver"))
@@ -32856,7 +32861,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalZdtToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalToLocaleStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalZdtToStringFn);
         try setNative(a, rs, p, "toInstant", 0, temporalZdtToInstantFn);
         try setNative(a, rs, p, "toPlainDateTime", 0, temporalZdtToPlainDateTimeFn);
         try setNative(a, rs, p, "toPlainDate", 0, temporalZdtToPlainDateFn);
