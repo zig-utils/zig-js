@@ -29340,12 +29340,27 @@ fn withIntField(self: *Interpreter, bag: Value, name: []const u8, cur: i64) Eval
     return @intFromFloat(try temporalIntArg(self, v, name));
 }
 
+fn hasBagField(self: *Interpreter, bag: Value, name: []const u8) EvalError!bool {
+    return !(try self.getProperty(bag, name)).isUndefined();
+}
+
+fn rejectUnsupportedEraFieldsForWith(self: *Interpreter, bag: Value, cal: []const u8) EvalError!void {
+    if (calEraOf(cal, 0, 1, 1).era != null) return;
+    if (try hasBagField(self, bag, "era") or try hasBagField(self, bag, "eraYear"))
+        return self.throwError("TypeError", "era/eraYear invalid for this calendar");
+}
+
 /// `monthCode` override → month number, falling back to the `month` field.
-fn withMonthField(self: *Interpreter, bag: Value, cal: []const u8, year: i64, cur: u8) EvalError!u8 {
+fn withMonthField(self: *Interpreter, bag: Value, cal: []const u8, year: i64, cur: u8, constrain: bool) EvalError!u8 {
     const mc = try self.getProperty(bag, "monthCode");
     if (!mc.isUndefined()) {
         const info = try readMonthCodeInfo(self, mc);
-        const month_code = try calMonthFromCode(self, cal, year, info);
+        const max_month = calMonthsInYear(cal, year);
+        const month_code = calMonthFromCodeMaybe(cal, year, info) orelse
+            if (constrain and info.leap)
+                (constrainInvalidLeapMonthCode(cal, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+            else
+                return self.throwError("RangeError", "bad monthCode");
         const mv = try self.getProperty(bag, "month");
         if (!mv.isUndefined()) {
             const month: i64 = @intFromFloat(try temporalIntArg(self, mv, "month"));
@@ -29359,16 +29374,31 @@ fn withMonthField(self: *Interpreter, bag: Value, cal: []const u8, year: i64, cu
     return @intCast(@max(0, @min(255, raw)));
 }
 
+fn withCalendarMonthField(self: *Interpreter, bag: Value, cal: []const u8, year: i64, cur_year: i64, cur_month: u8, constrain: bool) EvalError!u8 {
+    if (try hasBagField(self, bag, "month") or try hasBagField(self, bag, "monthCode"))
+        return withMonthField(self, bag, cal, year, cur_month, constrain);
+    if (!(try hasBagField(self, bag, "year")) and !(try hasBagField(self, bag, "era")) and !(try hasBagField(self, bag, "eraYear")))
+        return cur_month;
+    const info = calMonthCodeInfo(cal, cur_year, cur_month);
+    const max_month = calMonthsInYear(cal, year);
+    return calMonthFromCodeMaybe(cal, year, info) orelse
+        if (constrain and info.leap)
+            (constrainInvalidLeapMonthCode(cal, max_month, info) orelse return self.throwError("RangeError", "bad monthCode"))
+        else
+            return self.throwError("RangeError", "bad monthCode");
+}
+
 fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: argument must be an object");
-    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
-    const m = try withMonthField(self, bag, t.calendar, y, t.month);
-    const d = try withIntField(self, bag, "day", t.day);
+    try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
+    const m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, !reject);
+    const d = try withIntField(self, bag, "day", t.day);
     const r = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, m)), @floatFromInt(d), !reject);
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intCast(r.y);
@@ -29405,10 +29435,11 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be an object");
-    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
-    const m = try withMonthField(self, bag, t.calendar, y, t.month);
-    const d = try withIntField(self, bag, "day", t.day);
+    try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
+    const m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, !reject);
+    const d = try withIntField(self, bag, "day", t.day);
     const r = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, m)), @floatFromInt(d), !reject);
     const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
     const maxes = [_]i64{ 23, 59, 59, 999, 999, 999 };
@@ -29639,9 +29670,10 @@ fn temporalYearMonthWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainYearMonth.prototype.with: argument must be an object");
-    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
-    const m = try withMonthField(self, bag, t.calendar, y, t.month);
+    try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
+    const m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, !reject);
     const max_month = calMonthsInYear(t.calendar, y);
     if (reject and (m < 1 or m > max_month)) return self.throwError("RangeError", "month out of range");
     const mc: u8 = @max(1, @min(max_month, m)); // constrain
@@ -32391,10 +32423,11 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: argument must be an object");
     var l = zdtLocal(t);
-    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse l.year;
-    const m = try withMonthField(self, bag, t.calendar, y, l.month);
-    const d = try withIntField(self, bag, "day", l.day);
+    try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse l.year;
+    const m = try withCalendarMonthField(self, bag, t.calendar, y, l.year, l.month, !reject);
+    const d = try withIntField(self, bag, "day", l.day);
     const r = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, m)), @floatFromInt(d), !reject);
     const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
     const cur = [_]i64{ l.hour, l.minute, l.second, l.millisecond, l.microsecond, l.nanosecond };
