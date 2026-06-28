@@ -59,6 +59,18 @@ jobs:
           # engine access the seeded programs exercise (TSan is ~10× slower).
           - name: tsan-threadfuzz
             cmd: zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
+          # Stress amplification: the high-contention profile (6–14 threads,
+          # 5000-iter loops) drives rare interleavings far harder — a throw, UAF,
+          # hang, or torn read fails the leg. Run without TSan (its ~10× slowdown
+          # makes amplified contention impractical; the default-profile
+          # `tsan-threadfuzz` above covers race detection).
+          - name: threadfuzz-amplified
+            cmd: zig build threadfuzz -Dfuzz-amplify=true -Dfuzz-iters=30
+          # Sanitizer combo: ReleaseSafe keeps Zig's safety checks (UB, bounds,
+          # overflow, unreachable) on but under the optimizer, catching codegen-
+          # dependent faults the Debug build hides — a different bug class than TSan.
+          - name: releasesafe-threadfuzz
+            cmd: zig build threadfuzz -Doptimize=ReleaseSafe -Dfuzz-iters=400
     steps:
       # build.zig.zon uses local-path deps (`../zig-regex`, `../zig-gc`), so the
       # sibling repos are checked out next to this one.

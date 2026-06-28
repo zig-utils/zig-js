@@ -18,7 +18,7 @@ const js = @import("js");
 /// One random shared-state operation, emitted into a worker's loop body. Every
 /// op targets the shared structures declared by `genProgram` and cannot throw.
 fn op(r: std.Random) []const u8 {
-    return switch (r.uintLessThan(u8, 13)) {
+    return switch (r.uintLessThan(u8, 14)) {
         0 => "sObj.a = i; ", // named-property write
         1 => "acc += sObj.b; ", // named-property read
         2 => "sObj.c = sObj.a + 1; ", // read+write
@@ -31,11 +31,23 @@ fn op(r: std.Random) []const u8 {
         9 => "acc += sClo.peek(); ", // closure upvalue read
         10 => "delete sObj.c; sObj.c = 0; ", // delete + re-add (shape churn)
         11 => "sObj['k' + (i & 3)] = i; ", // dynamic property add (shape transition)
+        12 => "acc += (new sCtr(i)).v; ", // shared constructor reading an upvalue
         else => "acc += sArr.length; ", // length read
     };
 }
 
-fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !void {
+/// Generation knobs. The amplified profile raises thread count + loop length and
+/// adds extra shared closures (the upvalue surface the first bug lived in), so
+/// rare interleavings the default profile misses get many more chances to race.
+const Cfg = struct {
+    min_workers: usize,
+    worker_span: usize, // workers = min_workers + rand(worker_span)
+    loop_iters: usize,
+    pub const default: Cfg = .{ .min_workers = 2, .worker_span = 5, .loop_iters = 1200 };
+    pub const amplified: Cfg = .{ .min_workers = 6, .worker_span = 9, .loop_iters = 5000 };
+};
+
+fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator, cfg: Cfg) !void {
     var prng = std.Random.DefaultPrng.init(seed);
     const r = prng.random();
     try buf.appendSlice(gpa,
@@ -44,12 +56,13 @@ fn genProgram(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocato
         \\var sBuf = new ArrayBuffer(64);
         \\var sI32 = new Int32Array(sBuf);
         \\var sClo = (function(){ var n = 0; return { bump(){ return ++n; }, peek(){ return n; } }; })();
+        \\var sCtr = (function(){ var k = 100; return function Box(x){ this.v = x + k; }; })();
         \\
     );
-    const nworkers = 2 + r.uintLessThan(usize, 5); // 2..6 threads
+    const nworkers = cfg.min_workers + r.uintLessThan(usize, cfg.worker_span);
     var w: usize = 0;
     while (w < nworkers) : (w += 1) {
-        const head = try std.fmt.allocPrint(gpa, "function w{d}(){{ var acc = 0; for (var i = 0; i < 1200; i++) {{ ", .{w});
+        const head = try std.fmt.allocPrint(gpa, "function w{d}(){{ var acc = 0; for (var i = 0; i < {d}; i++) {{ ", .{ w, cfg.loop_iters });
         defer gpa.free(head);
         try buf.appendSlice(gpa, head);
         const nops = 3 + r.uintLessThan(usize, 7);
@@ -98,7 +111,16 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     };
-    if (first) |a| iters = std.fmt.parseInt(usize, a, 10) catch 200;
+    // `threadfuzz amplify <iters> <seed>`: high-contention profile (more threads,
+    // longer loops) — the stress-amplification mode for surfacing rare races.
+    var cfg = Cfg.default;
+    var rest = first;
+    if (first) |a| if (std.mem.eql(u8, a, "amplify")) {
+        cfg = Cfg.amplified;
+        iters = 60; // amplified programs are heavier; fewer per run
+        rest = args.next();
+    };
+    if (rest) |a| iters = std.fmt.parseInt(usize, a, 10) catch iters;
     if (args.next()) |a| base_seed = std.fmt.parseInt(u64, a, 10) catch 1;
 
     var failures: usize = 0;
@@ -107,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
         const seed = base_seed +% i;
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(gpa);
-        try genProgram(seed, &buf, gpa);
+        try genProgram(seed, &buf, gpa, cfg);
         const ctx = js.Context.createWith(gpa, .{ .enable_threads = true }) catch {
             std.debug.print("seed {d}: context creation failed\n", .{seed});
             failures += 1;
