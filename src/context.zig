@@ -1623,16 +1623,28 @@ pub const Context = struct {
         return ns;
     }
 
+    fn readyForSyncExecution(module: *Module, seen: *std.ArrayListUnmanaged(*Module), a: std.mem.Allocator) !bool {
+        for (seen.items) |m| if (m == module) return true;
+        try seen.append(a, module);
+        if (module.evaluated) return true;
+        if (module.eval_started) return false;
+        var dit = module.deps.valueIterator();
+        while (dit.next()) |dep| {
+            if (!try readyForSyncExecution(dep.*, seen, a)) return false;
+        }
+        return true;
+    }
+
     /// `defer_trigger` hook: evaluate the `import defer` module on first
     /// string-keyed access of its deferred namespace (idempotent via `evaluated`).
     fn deferTriggerHook(ctx: *anyopaque, machine: *interp.Interpreter, module: *anyopaque) interp.EvalError!void {
         const self: *Context = @ptrCast(@alignCast(ctx));
         const m: *Module = @ptrCast(@alignCast(module));
-        // EnsureDeferredNamespaceEvaluation / ReadyForSyncExecution: a module that
-        // is already evaluating (its own deferred namespace observed mid-evaluation,
-        // directly or via a dependency) cannot trigger its own evaluation — a
-        // TypeError, rather than re-entering or reading a half-initialized binding.
-        if (m.eval_started and !m.evaluated)
+        // EnsureDeferredNamespaceEvaluation / ReadyForSyncExecution: a deferred
+        // module cannot be triggered while it, or any of its transitive required
+        // modules, is still evaluating.
+        var seen: std.ArrayListUnmanaged(*Module) = .empty;
+        if (!try readyForSyncExecution(m, &seen, self.arena()))
             return machine.throwError("TypeError", "Cannot trigger evaluation of a module that is already evaluating");
         try self.evalModule(machine, m);
     }
@@ -2072,6 +2084,29 @@ test "modules import bytes as immutable Uint8Array" {
         \\  if (!(e instanceof TypeError)) throw e;
         \\}
     , &.{.{ .path = "blob.bin", .source = raw[0..] }});
+}
+
+test "modules reject deferred namespace trigger when dependency graph is evaluating" {
+    try evaluateModuleWithFixtures(
+        \\import "./dep1.js";
+        \\if (!(globalThis.deferReadyError instanceof TypeError)) throw new Error("missing TypeError");
+        \\if (globalThis.dep3evaluated) throw new Error("evaluated blocked dependency");
+    , &.{
+        .{ .path = "dep1.js", .source =
+        \\import defer * as dep2 from "./dep2.js";
+        \\globalThis.dep3evaluated = false;
+        \\try {
+        \\  dep2.foo;
+        \\} catch (error) {
+        \\  globalThis.deferReadyError = error;
+        \\}
+        },
+        .{ .path = "dep2.js", .source =
+        \\import "./dep3.js";
+        \\import "./entry.js";
+        },
+        .{ .path = "dep3.js", .source = "globalThis.dep3evaluated = true;" },
+    });
 }
 
 test "Date basics" {
