@@ -32829,7 +32829,13 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, l.year))),
                 .days_in_week => Value.num(7),
                 .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, l.year)),
-                .hours_in_day => Value.num(24),
+                .hours_in_day => blk: {
+                    const today_ns = try zdtStartOfDayEpochNs(self, t, l.year, l.month, l.day);
+                    const tomorrow = addCalendarDate(t.calendar, l.year, l.month, l.day, 0, 0, 0, 1, 1, true) orelse
+                        return self.throwError("RangeError", "date overflow");
+                    const tomorrow_ns = try zdtStartOfDayEpochNs(self, t, @intCast(tomorrow.y), tomorrow.m, tomorrow.d);
+                    break :blk Value.num(@as(f64, @floatFromInt(tomorrow_ns - today_ns)) / @as(f64, @floatFromInt(DAY_NS)) * 24);
+                },
                 .offset_ns => Value.num(@floatFromInt(zdtOffsetAt(t))),
                 .week_of_year => Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).week)),
                 .year_of_week => Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).year)),
@@ -32931,6 +32937,18 @@ fn zdtMakeWithCalendar(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, 
     t.calendar = calendar;
     nsToTime(t, local);
     return v;
+}
+
+fn zdtStartOfDayEpochNs(self: *Interpreter, t: *const value.TemporalData, year: i32, month: u8, day: u8) EvalError!i128 {
+    const iso = calendarDateToIso(t.calendar, year, month, day);
+    if (torontoSkippedMidnightStartEpoch(t.tz_name, iso.y, iso.m, iso.d)) |epoch| {
+        try checkInstantEpochNs(self, epoch);
+        return epoch;
+    }
+    const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * DAY_NS;
+    const epoch_ns = local_ns - @as(i128, t.tz_offset_ns);
+    try checkInstantEpochNs(self, epoch_ns);
+    return epoch_ns;
 }
 
 fn temporalZdtToInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
