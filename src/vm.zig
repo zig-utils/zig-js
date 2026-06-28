@@ -1305,15 +1305,23 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         return;
     };
     if (g.suspended) {
-        // `await v`: resume when `Promise.resolve(v)` settles.
+        // `await v`: Await first performs PromiseResolve(%Promise%, v), which is
+        // observable through a promise's `.constructor` getter, then resumes when
+        // that wrapper settles.
         g.suspended = false;
-        const awaited = try promise.newPromise(vm);
-        try promise.resolve(vm, @ptrCast(@alignCast(awaited.promise.?)), v);
+        const awaited = interp.promiseResolveValue(vm, v) catch |err| {
+            if (err != error.Throw) return err;
+            const reason = vm.exception;
+            vm.exception = Value.undef();
+            g.done = true;
+            try promise.reject(vm, resultPromise(g), reason);
+            return;
+        };
         const onf = try gc_mod.allocObj(vm.arena);
         onf.* = .{ .native = asyncOnFulfill, .private_data = @ptrCast(g) };
         const onr = try gc_mod.allocObj(vm.arena);
         onr.* = .{ .native = asyncOnReject, .private_data = @ptrCast(g) };
-        _ = try promise.then(vm, @ptrCast(@alignCast(awaited.promise.?)), Value.obj(onf), Value.obj(onr));
+        _ = try promise.then(vm, @ptrCast(@alignCast(awaited.asObj().promise.?)), Value.obj(onf), Value.obj(onr));
         return;
     }
     g.done = true;

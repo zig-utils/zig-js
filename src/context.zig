@@ -4614,6 +4614,55 @@ test "generators and async functions: private-in RHS can suspend" {
     }
 }
 
+test "for-await: Await observes PromiseResolve constructor lookups" {
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var log = [];
+            \\Object.defineProperty(Promise.prototype, "constructor", {
+            \\  get() { log.push("constructor"); return Promise; },
+            \\  configurable: true
+            \\});
+            \\function toAsyncIterator(iterable) {
+            \\  return {
+            \\    [Symbol.asyncIterator]() {
+            \\      var iter = iterable[Symbol.iterator]();
+            \\      return { next() { return Promise.resolve(iter.next()); } };
+            \\    }
+            \\  };
+            \\}
+            \\async function f() {
+            \\  var p = Promise.resolve(0);
+            \\  log.push("pre");
+            \\  for await (var x of toAsyncIterator([p])) log.push("loop");
+            \\  log.push("post");
+            \\}
+            \\f();
+        );
+        try std.testing.expectEqualStrings("pre,constructor,loop,constructor,post", (try ctx.evaluate("log.join(',')")).asStr());
+    }
+    {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var log = [];
+            \\Object.defineProperty(Promise.prototype, "constructor", {
+            \\  get() { log.push("constructor"); return Promise; },
+            \\  configurable: true
+            \\});
+            \\async function f() {
+            \\  var p = Promise.resolve(0);
+            \\  log.push("pre");
+            \\  for await (var x of [p]) log.push("loop");
+            \\  log.push("post");
+            \\}
+            \\f();
+        );
+        try std.testing.expectEqualStrings("pre,constructor,constructor,loop,constructor,post", (try ctx.evaluate("log.join(',')")).asStr());
+    }
+}
+
 test "generators: BigInt literal yields feed BigInt typed arrays" {
     try std.testing.expect((try evalIn(
         \\function* g() { yield 7n; yield 42n; }

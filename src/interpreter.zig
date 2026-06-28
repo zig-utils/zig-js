@@ -5800,18 +5800,14 @@ pub const Interpreter = struct {
         }
     }
 
-    /// `await v` on an already-evaluated value (synchronous-settling): if `v` is
-    /// a promise, drive the microtask queue until it settles, then return its
-    /// value (or throw its rejection). A thenable is first assimilated through an
-    /// intrinsic promise so `Await` observes its `then` hook exactly once.
+    /// `await v` on an already-evaluated value (synchronous-settling): perform
+    /// Await's `PromiseResolve(%Promise%, v)` step, then drive the microtask
+    /// queue until the promise settles and return its value (or throw its
+    /// rejection). The PromiseResolve step is observable for promises through a
+    /// `.constructor` lookup and assimilates thenables exactly once.
     pub fn awaitValue(self: *Interpreter, v: Value) EvalError!Value {
-        const p = promise.promiseOf(v) orelse blk: {
-            if (!v.isObject() or v.asObj().is_array) return v;
-            const pobj = try promise.newPromise(self);
-            const pp = promise.promiseOf(Value.obj(pobj)).?;
-            try promise.resolve(self, pp, v);
-            break :blk pp;
-        };
+        const wrapped = try promiseResolveValue(self, v);
+        const p = promise.promiseOf(wrapped).?;
         const q = self.microtasks;
         while (promise.snapshot(p).state == .pending) {
             const queue = q orelse break;
@@ -12921,11 +12917,20 @@ fn asyncFromSyncUnderlying(self: *Interpreter, this: Value) value.HostError!Valu
     return this.asObj().getOwn("__sync") orelse self.throwError("TypeError", "Async-from-Sync iterator missing underlying iterator");
 }
 
+const AsyncFromSyncData = struct {
+    sync_iter: Value,
+    promise: *promise.Promise,
+    done: bool,
+    close_on_rejection: bool,
+};
+
 fn asyncFromSyncContinuation(self: *Interpreter, sync_iter: Value, result: Value, close_on_rejection: bool) value.HostError!Value {
     if (!result.isObject())
         return promiseRejectValue(self, try self.makeError("TypeError", "iterator result is not an object"));
     const done = (self.getProperty(result, "done") catch |err| return promiseRejectAbrupt(self, err)).toBoolean();
     const value_v = self.getProperty(result, "value") catch |err| return promiseRejectAbrupt(self, err);
+    const out = try promise.newPromise(self);
+    const out_p: *promise.Promise = @ptrCast(@alignCast(out.promise.?));
     const wrapped = promiseResolveValue(self, value_v) catch |err| {
         if (err != error.Throw) return err;
         const reason = self.exception;
@@ -12933,18 +12938,38 @@ fn asyncFromSyncContinuation(self: *Interpreter, sync_iter: Value, result: Value
             self.iteratorCloseKeepingThrow(sync_iter);
         }
         self.exception = Value.undef();
-        return promiseRejectValue(self, reason);
+        try promise.reject(self, out_p, reason);
+        return Value.obj(out);
     };
-    const unwrapped = self.awaitValue(wrapped) catch |err| {
-        if (err != error.Throw) return err;
-        const reason = self.exception;
-        if (close_on_rejection and !done) {
-            self.iteratorCloseKeepingThrow(sync_iter);
-        }
-        self.exception = Value.undef();
-        return promiseRejectValue(self, reason);
-    };
-    return promiseResolveValue(self, try self.iterResultObj(unwrapped, done));
+    const data = try self.arena.create(AsyncFromSyncData);
+    data.* = .{ .sync_iter = sync_iter, .promise = out_p, .done = done, .close_on_rejection = close_on_rejection };
+    const onf = try gc_mod.allocObj(self.arena);
+    onf.* = .{ .native = asyncFromSyncFulfillFn, .private_data = @ptrCast(data) };
+    try installNativeProps(self.arena, self.root_shape, onf, "", 1);
+    const onr = try gc_mod.allocObj(self.arena);
+    onr.* = .{ .native = asyncFromSyncRejectFn, .private_data = @ptrCast(data) };
+    try installNativeProps(self.arena, self.root_shape, onr, "", 1);
+    _ = try promise.then(self, promise.promiseOf(wrapped).?, Value.obj(onf), Value.obj(onr));
+    return Value.obj(out);
+}
+
+fn asyncFromSyncFulfillFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const data: *AsyncFromSyncData = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    const value_v = if (args.len > 0) args[0] else Value.undef();
+    try promise.resolve(self, data.promise, try self.iterResultObj(value_v, data.done));
+    return Value.undef();
+}
+
+fn asyncFromSyncRejectFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const data: *AsyncFromSyncData = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    const reason = if (args.len > 0) args[0] else Value.undef();
+    if (data.close_on_rejection and !data.done) self.iteratorCloseKeepingThrow(data.sync_iter);
+    try promise.reject(self, data.promise, reason);
+    return Value.undef();
 }
 
 fn asyncFromSyncNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -13377,6 +13402,13 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
         const data: *FinallyData = @ptrCast(@alignCast(pd));
         tracePrivateValue(v, data.on_finally);
         tracePrivateValue(v, data.captured);
+        return;
+    }
+
+    if (nf == asyncFromSyncFulfillFn or nf == asyncFromSyncRejectFn) {
+        const data: *AsyncFromSyncData = @ptrCast(@alignCast(pd));
+        tracePrivateValue(v, data.sync_iter);
+        v.mark(data.promise);
         return;
     }
 
