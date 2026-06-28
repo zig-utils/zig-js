@@ -32538,7 +32538,9 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: argument must be an object");
     var l = zdtLocal(t);
     try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
+    const options = if (args.len > 1) args[1] else Value.undef();
+    const reject = try readOverflowReject(self, options);
+    const offset_behavior = try readZdtOffsetBehavior(self, options);
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse l.year;
     const m = try withCalendarMonthField(self, bag, t.calendar, y, l.year, l.month, !reject);
     const d = try withIntField(self, bag, "day", l.day);
@@ -32553,7 +32555,21 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     setTimeFields(&l, vals);
     const iso = calendarDateToIso(t.calendar, l.year, l.month, l.day);
     const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
-    return zdtMakeWithCalendar(self, local_ns - t.tz_offset_ns, t.tz_name, t.tz_offset_ns, t.calendar);
+    const tz = TimeZone{ .name = t.tz_name, .offset_ns = t.tz_offset_ns };
+    const actual_offset = zdtActualOffsetForLocal(tz, local_ns);
+    const offv = try self.getProperty(bag, "offset");
+    const epoch_offset: i128 = if (!offv.isUndefined()) blk: {
+        const off = try validateRelativeOffset(self, offv);
+        break :blk switch (offset_behavior) {
+            .use => off,
+            .ignore, .prefer => @as(i128, actual_offset),
+            .reject => if (off == @as(i128, actual_offset)) @as(i128, actual_offset) else return self.throwError("RangeError", "offset does not match time zone"),
+        };
+    } else switch (offset_behavior) {
+        .ignore => @as(i128, actual_offset),
+        .use, .prefer, .reject => @as(i128, zdtOffsetAt(t)),
+    };
+    return zdtMakeWithCalendar(self, local_ns - epoch_offset, t.tz_name, t.tz_offset_ns, t.calendar);
 }
 
 fn temporalZdtWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
