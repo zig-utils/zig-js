@@ -15,6 +15,8 @@
 const std = @import("std");
 const js = @import("js");
 
+const Worker = js.Worker;
+
 /// One random shared-state operation, emitted into a worker's loop body. Every
 /// op targets the shared structures declared by `genProgram` and cannot throw.
 fn op(r: std.Random) []const u8 {
@@ -209,6 +211,235 @@ fn genVerify(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator
     return total + total * 3.0 * 100000.0;
 }
 
+/// Teardown stress: every spawned Thread publishes that it reached a blocking or
+/// long-running state, then the main script throws without joining. Context
+/// teardown must request termination, wake parked peers, and join abandoned OS
+/// threads without deadlock or UAF.
+fn genTerminationStorm(seed: u64, buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 5);
+    try buf.appendSlice(gpa,
+        \\var gate = { go: 0, ready: 0 };
+        \\var lock = new Lock();
+        \\var cond = new Condition();
+        \\var box = { open: false };
+        \\var ts = [];
+        \\function ready() {
+        \\  Atomics.add(gate, 'ready', 1);
+        \\  Atomics.notify(gate, 'ready');
+        \\}
+        \\
+    );
+    var i: usize = 0;
+    while (i < nthreads) : (i += 1) {
+        try buf.appendSlice(gpa, switch (r.uintLessThan(u8, 3)) {
+            0 =>
+            \\ts.push(new Thread(function(){
+            \\  ready();
+            \\  while (Atomics.load(gate, 'go') === 0)
+            \\    Atomics.wait(gate, 'go', 0, 10000);
+            \\  return 1;
+            \\}));
+            \\
+            ,
+            1 =>
+            \\ts.push(new Thread(function(){
+            \\  ready();
+            \\  lock.hold(function(){
+            \\    while (!box.open) cond.wait(lock);
+            \\  });
+            \\  return 2;
+            \\}));
+            \\
+            ,
+            else =>
+            \\ts.push(new Thread(function(){
+            \\  ready();
+            \\  for (;;) {}
+            \\}));
+            \\
+            ,
+        });
+    }
+    const tail = try std.fmt.allocPrint(
+        gpa,
+        \\while (Atomics.load(gate, 'ready') < {d})
+        \\  Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 1);
+        \\throw new Error('threadfuzz termination storm {d}');
+        \\
+    ,
+        .{ nthreads, seed },
+    );
+    defer gpa.free(tail);
+    try buf.appendSlice(gpa, tail);
+}
+
+fn runTerminationStorm(gpa: std.mem.Allocator, seed: u64) !bool {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(gpa);
+    try genTerminationStorm(seed, &buf, gpa);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    if (ctx.evaluate(buf.items)) |_| {
+        std.debug.print("seed {d}: termination storm returned normally\n", .{seed});
+        return false;
+    } else |err| {
+        if (err != error.Throw) {
+            std.debug.print("seed {d}: termination storm failed with {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }
+    }
+    return true;
+}
+
+fn runWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    const nworkers = 2 + r.uintLessThan(usize, 4);
+    const nthreads = 2 + r.uintLessThan(usize, 5);
+    const worker_iters = 200 + r.uintLessThan(usize, 500);
+    const thread_iters = 200 + r.uintLessThan(usize, 700);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const msg = ctx.evaluate("globalThis.__msg = { sab: new SharedArrayBuffer(16) }; globalThis.__msg") catch |err| {
+        std.debug.print("seed {d}: cannot create lifecycle SAB: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const worker_src = try std.fmt.allocPrint(
+        gpa,
+        \\globalThis.onmessage = (e) => {{
+        \\  const v = new Int32Array(e.data.sab);
+        \\  Atomics.add(v, 2, 1);
+        \\  Atomics.notify(v, 2);
+        \\  while (Atomics.load(v, 1) === 0)
+        \\    Atomics.wait(v, 1, 0, 100);
+        \\  for (let i = 0; i < {d}; i++)
+        \\    Atomics.add(v, 0, 1);
+        \\  postMessage({{ done: true }});
+        \\  close();
+        \\}};
+        \\
+    ,
+        .{worker_iters},
+    );
+    defer gpa.free(worker_src);
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawn(worker_src) catch {
+            std.debug.print("seed {d}: worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: worker postMessage failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const js_src = try std.fmt.allocPrint(
+        gpa,
+        \\const v = new Int32Array(globalThis.__msg.sab);
+        \\const ts = [];
+        \\for (let t = 0; t < {d}; t++) {{
+        \\  ts.push(new Thread(function(){{
+        \\    const local = new Int32Array(globalThis.__msg.sab);
+        \\    while (Atomics.load(local, 1) === 0)
+        \\      ;
+        \\    for (let i = 0; i < {d}; i++)
+        \\      Atomics.add(local, 0, 1);
+        \\    return 1;
+        \\  }}));
+        \\}}
+        \\let spins = 0;
+        \\while (Atomics.load(v, 2) < {d} && spins++ < 10000000)
+        \\  ;
+        \\if (Atomics.load(v, 2) < {d})
+        \\  throw new Error('workers not ready for overlap');
+        \\Atomics.store(v, 1, 1);
+        \\Atomics.notify(v, 1, {d});
+        \\let joined = 0;
+        \\for (const t of ts) joined += t.join();
+        \\joined;
+        \\
+    ,
+        .{ nthreads, thread_iters, nworkers, nworkers, nworkers + nthreads + 4 },
+    );
+    defer gpa.free(js_src);
+
+    const joined = ctx.evaluate(js_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: overlap JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: overlap joined {d} threads, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, nthreads });
+        return false;
+    }
+
+    for (workers.items) |w| {
+        const reply = (w.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: worker receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }) orelse {
+            std.debug.print("seed {d}: worker receive timed out\n", .{seed});
+            return false;
+        };
+        const done = machine.getProperty(reply, "done") catch |err| {
+            std.debug.print("seed {d}: cannot read worker reply: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!done.isBoolean() or !done.asBool()) {
+            std.debug.print("seed {d}: bad worker reply\n", .{seed});
+            return false;
+        }
+    }
+
+    for (workers.items) |w| {
+        w.join();
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const count = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__msg.sab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read overlap counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const expected: f64 = @floatFromInt(nworkers * worker_iters + nthreads * thread_iters);
+    if (!count.isNumber() or count.asNum() != expected) {
+        std.debug.print("seed {d}: overlap counter got {d}, expected {d}\n", .{ seed, if (count.isNumber()) count.asNum() else -1, expected });
+        return false;
+    }
+    return true;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var iters: usize = 200;
@@ -274,6 +505,25 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("threadfuzz verify: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, vfail });
         if (vfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms
+    // and Worker/thread SAB overlap. The oracle is not "no throw": termination
+    // storms must throw from the main script and still tear down cleanly, while
+    // Worker/thread overlap must produce the exact synchronized counter value.
+    if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
+        iters = 60;
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var lfail: usize = 0;
+        var li: usize = 0;
+        while (li < iters) : (li += 1) {
+            const seed = base_seed +% li;
+            if (!(try runTerminationStorm(gpa, seed))) lfail += 1;
+            if (!(try runWorkerThreadOverlap(gpa, seed))) lfail += 1;
+        }
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 2, base_seed, lfail });
+        if (lfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz amplify <iters> <seed>`: high-contention profile (more threads,

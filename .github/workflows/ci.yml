@@ -72,6 +72,11 @@ jobs:
           # FinalizationRegistry cleanup under GC-backed parallel contexts.
           - name: threadfuzz-broad
             cmd: zig build threadfuzz -Dfuzz-broad=true -Dfuzz-iters=80
+          # Lifecycle profile: deterministic termination storms (main throws
+          # with parked/unjoined Threads) and cross-realm Worker + shared-realm
+          # Thread overlap on one SharedArrayBuffer with an exact counter oracle.
+          - name: threadfuzz-lifecycle
+            cmd: zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=60
           # Sanitizer combo: ReleaseSafe keeps Zig's safety checks (UB, bounds,
           # overflow, unreachable) on but under the optimizer, catching codegen-
           # dependent faults the Debug build hides — a different bug class than TSan.

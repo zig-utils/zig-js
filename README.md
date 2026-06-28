@@ -231,8 +231,8 @@ Correctness is now gated by the ordinary unit/corpus suite plus no-GIL coverage:
 ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
 suppression-narrowness witness for JS-defined program-byte races,
 `test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
-fuzzing, amplified fuzzing, ReleaseSafe fuzzing, and deterministic-result
-verification).
+fuzzing, amplified fuzzing, broad semantic fuzzing, lifecycle fuzzing,
+ReleaseSafe fuzzing, and deterministic-result verification).
 
 Remaining work is concentrated in production hardening rather than the core
 threading architecture:
@@ -254,8 +254,9 @@ threading architecture:
   the known limitation around sync-wait peers that periodically pump tasks.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
-  keep extending it toward deterministic termination and Worker/thread overlap
-  oracles.
+  the lifecycle profile adds deterministic termination storms and Worker/thread
+  overlap over retained `SharedArrayBuffer` storage; keep extending both toward
+  more teardown and cross-realm scheduling oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature
   exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack
   behavior, heap caps/OOM semantics, and unsupported `$vm` controls.

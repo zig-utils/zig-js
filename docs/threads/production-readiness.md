@@ -100,12 +100,16 @@ as embedders exercise more threaded host patterns.
   `asyncJoin`, property `wait` / `waitAsync`, `Condition`, `Thread.restrict`,
   and `FinalizationRegistry` cleanup coverage under GC-backed parallel
   contexts.
+- The lifecycle fuzzer profile adds deterministic termination storms where main
+  JS throws with parked/unjoined `Thread`s, and an exact-counter oracle for
+  embedder `Worker`s and shared-realm `Thread`s mutating one retained
+  `SharedArrayBuffer` concurrently.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
-  amplified, broad semantic, ReleaseSafe, and deterministic-result
+  amplified, broad semantic, lifecycle, ReleaseSafe, and deterministic-result
   verification.
 
-Remaining: add VM termination-storm and Worker/thread lifecycle-overlap
-generators once a deterministic termination hook and worker-stress oracle exist.
+Remaining: keep extending the lifecycle profile toward more teardown ordering,
+worker module-graph overlap, and mixed terminate/close/postMessage races.
 
 ## 6. CI Gating
 
@@ -120,6 +124,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
+- lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,
 - deterministic-result `threadfuzz-verify`,
 - sharded no-GIL PR-249 corpus TSan sweep,

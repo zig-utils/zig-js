@@ -93,9 +93,11 @@ context APIs.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught
   exceptions/finally, nested thread lifecycle, `asyncJoin`, property
   `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and
-  `FinalizationRegistry` cleanup under GC-backed parallel contexts. Keep
-  extending it toward deterministic termination storms and Worker/thread
-  lifecycle-overlap oracles.
+  `FinalizationRegistry` cleanup under GC-backed parallel contexts. The
+  lifecycle profile now adds deterministic termination storms and
+  Worker/thread retained-`SharedArrayBuffer` overlap with an exact Atomics
+  counter oracle. Keep extending it toward more teardown ordering,
+  module-worker overlap, and mixed terminate/close/postMessage races.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow
