@@ -119,7 +119,8 @@ Every pull request and push to `main` runs:
 - ReleaseSafe `threadfuzz`,
 - deterministic-result `threadfuzz-verify`,
 - sharded no-GIL PR-249 corpus TSan sweep,
-- TSan suppression-narrowness witness,
+- TSan suppression-narrowness witness
+  (`tools/tsan-suppression-witness.sh`),
 - test262-parallel representative slice.
 
 The no-GIL corpus TSan gate hard-blocks on engine-state races. The suppression

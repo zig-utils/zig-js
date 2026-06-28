@@ -107,10 +107,12 @@ The suppression file must not cover:
   lifetime metadata,
 - C-API handle ownership, protection counters, or string refcounts.
 
-CI includes a suppression witness that proves the suppressions are
+CI runs `tools/tsan-suppression-witness.sh` to prove the suppressions are
 load-bearing and narrow. The selected cases must race without the suppression
 file, every reported race must name only approved program-byte frames, and the
-same cases must pass with suppressions enabled.
+same cases must pass with suppressions enabled. The script owns the executable
+approved-frame regex; keep it in sync with `tsan-suppressions.txt` whenever a
+new program-byte access helper is added.
 
 ## C-API Rules
 
@@ -146,7 +148,8 @@ The public contract is checked by:
 - `zig build test -Dtsan=true`,
 - `zig build test -Dtsan=true -Dtest-filter=parallel_js`,
 - the sharded no-GIL PR-249 corpus TSan sweep,
-- the TSan suppression-narrowness witness,
+- the TSan suppression-narrowness witness
+  (`tools/tsan-suppression-witness.sh`),
 - `test262-parallel`,
 - `threadfuzz`, including TSan and deterministic-result verifier modes.
 

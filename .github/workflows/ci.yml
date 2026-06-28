@@ -204,51 +204,7 @@ jobs:
         run: zig build threads-test-bin -Dtsan=true
       - name: Witness suppressions are load-bearing and narrow
         working-directory: zig-js
-        run: |
-          set -uo pipefail
-          BIN=./zig-out/bin/threads-test
-          # Cases whose ONLY no-GIL races are on shared-buffer program bytes (the
-          # accesses the suppressions target). Their races are timing-dependent, so
-          # we don't require each to manifest every run — only that, across the set,
-          # at least one races (suppressions aren't inert), no manifested race is
-          # outside the program-byte frames (suppressions are narrow), and each
-          # passes WITH suppressions.
-          CASES="cve/mc-df-ta-detach-resize.js cve/mc-prim-arraybuffer-transfer-vs-atomics.js"
-          # The only frames that touch a buffer's data bytes; anything else in a
-          # suppressed race means the suppression is hiding an engine-state race.
-          OK_FRAMES='ta(Write|Read|AtomicLoadRaw|AtomicStoreRaw|AtomicRmwRaw|AtomicCasRaw|StoreInternal|LoadInternal)|__tsan_memcpy|arrayBufferResizeFn|arrayBufferTransfer'
-          fail=0; any_raced=0
-          for c in $CASES; do
-            # WITHOUT suppressions, report all races (no halt). Retry a few times:
-            # these races are timing-dependent (~50%+ per run), so a handful of
-            # attempts reliably surfaces one without making the job flaky.
-            raced=0
-            for attempt in 1 2 3 4 5; do
-              TSAN_OPTIONS="halt_on_error=0 exitcode=0" timeout 600 "$BIN" parallel-js one "$c" > raw.log 2>&1 || true
-              if grep -q "SUMMARY: ThreadSanitizer: data race" raw.log; then raced=1; break; fi
-            done
-            if [ "$raced" -eq 1 ]; then
-              any_raced=1
-              # Narrowness: every reported race must name a program-byte frame.
-              if grep "SUMMARY: ThreadSanitizer: data race" raw.log | grep -qvE "$OK_FRAMES"; then
-                echo "::error::$c: a suppressed race is NOT purely program-byte — suppression would mask an engine race:"
-                grep "SUMMARY: ThreadSanitizer: data race" raw.log | grep -vE "$OK_FRAMES"
-                fail=1
-              else
-                echo "$c: raced, and every race is program-byte (narrow) ✓"
-              fi
-            else
-              echo "$c: did not race in 5 attempts (timing-dependent)"
-            fi
-            # WITH suppressions, the case must pass.
-            if ! TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/tsan-suppressions.txt" timeout 600 "$BIN" parallel-js one "$c" > supp.log 2>&1; then
-              echo "::error::$c still fails WITH suppressions"; tail -8 supp.log; fail=1
-            fi
-          done
-          if [ "$any_raced" -eq 0 ]; then
-            echo "::error::no suppressed case raced without suppressions — the suppressions may be inert"; fail=1
-          fi
-          [ "$fail" -eq 0 ]
+        run: tools/tsan-suppression-witness.sh
 
   # Runs a curated test262 cross-section in GIL-free parallel contexts and asserts
   # it introduces no NEW failures vs the baseline (arena) engine — i.e. the

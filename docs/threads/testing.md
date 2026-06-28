@@ -49,7 +49,10 @@ The corpus TSan sweep is sharded in CI and runs each allowlisted case in its own
 process to avoid TSan shadow-memory growth across a single long run. It fails on
 engine-state races. JS-defined program-byte races are covered by narrow
 suppressions plus a suppression witness that proves the suppressions are both
-load-bearing and not hiding engine-state frames.
+load-bearing and not hiding engine-state frames. The witness is
+`tools/tsan-suppression-witness.sh`; run it after building
+`threads-test-bin -Dtsan=true` when changing `tsan-suppressions.txt`, raw
+TypedArray/shared-buffer access helpers, or the memory-model boundary.
 
 ## What Each Gate Covers
 
