@@ -28,6 +28,10 @@ than new correctness architecture.
   parallel contexts and asserts no new failures versus the baseline.
 - The PR-249 allowlist remains 219/219 in normal mode and is covered by the
   sharded no-GIL ThreadSanitizer corpus gate.
+- The reference-only PR-249 tail is checked by
+  `zig build threads-reference-audit`, so unsupported shell hooks, JIT,
+  WebAssembly, deep-stack, and heap-cap/OOM witnesses stay explicit instead of
+  becoming accidental no-op passes.
 
 Remaining: keep widening generated and hand-written stress toward exceptions,
 termination, cleanup, waiters, and cross-thread lifecycle.

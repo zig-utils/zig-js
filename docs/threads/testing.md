@@ -109,6 +109,11 @@ GIL-free parallel contexts. The full corpus is too slow for every PR, so CI
 uses a curated representative slice and asserts no new failures versus the
 baseline arena engine.
 
+`zig build threads-reference-audit` scans the vendored PR-249 corpus and fails
+if any non-allowlisted executable file lacks an explicit reference-only blocker
+classification. This keeps shell-hook, WebAssembly, JIT, deep-stack, and
+heap-cap gaps visible without inflating the green allowlist with no-op passes.
+
 ## Focused Runs
 
 Use `-Dthreads-case=<path>` to run one vendored thread test. A comma-separated
@@ -170,6 +175,13 @@ PR-249 files stay reference-only for concrete reasons:
 Promote a reference-only file only when the engine implements the behavior, the
 file passes reliably under Zig `0.17-dev`, and the docs/issue counts are updated
 in the same change.
+
+Run the reference audit after promotion attempts:
+
+```sh
+zig build threads-reference-audit
+python3 tools/threads-reference-audit.py --format markdown
+```
 
 ## Docs Checks
 

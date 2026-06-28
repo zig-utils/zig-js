@@ -130,6 +130,14 @@ pub fn build(b: *std.Build) void {
     const threads_test_bin_step = b.step("threads-test-bin", "Build the threads-test exe only (no run)");
     threads_test_bin_step.dependOn(&threads_test_install.step);
 
+    const threads_reference_audit_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/threads-reference-audit.py",
+        "--fail-on-uncategorized",
+    });
+    const threads_reference_audit_step = b.step("threads-reference-audit", "Audit remaining reference-only PR-249 files");
+    threads_reference_audit_step.dependOn(&threads_reference_audit_cmd.step);
+
     // Concurrent-JS fuzzer: `zig build threadfuzz [-Dtsan] [-Dfuzz-iters=N] [-Dfuzz-seed=S]`.
     // Generates random programs that share objects/arrays/closures/typed-arrays
     // across JS Threads and runs each in a GIL-free parallel context. Under

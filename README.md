@@ -190,6 +190,7 @@ zig build                       # builds libzig-js.a (the JSC drop-in)
 zig build test                  # runs the unit + C-API test suite
 zig build conformance           # runs the always-green smoke suite (33/33)
 zig build threads-test          # runs the green WebKit PR-249 threads corpus (219/219)
+zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
@@ -258,6 +259,8 @@ threading architecture:
 - **Reference-only PR-249 files** - promote only when the needed engine feature
   exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack
   behavior, heap caps/OOM semantics, and unsupported `$vm` controls.
+  `zig build threads-reference-audit` keeps every non-promoted file tied to one
+  of those blocker categories.
 
 The [TC39 structs proposal](https://github.com/tc39/proposal-structs) remains a
 tracked future layer. Shared structs, `Atomics.Mutex`, and
