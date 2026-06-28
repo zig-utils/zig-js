@@ -1578,6 +1578,8 @@ pub const Context = struct {
     /// so the caller rejects the dynamic-import promise.
     fn dynImportHook(ctx: *anyopaque, machine: *interp.Interpreter, referrer: []const u8, specifier: []const u8, phase: []const u8, module_type: []const u8, out: *value.Value) bool {
         const self: *Context = @ptrCast(@alignCast(ctx));
+        if (std.mem.eql(u8, phase, "source"))
+            return self.dynImportFailKind(machine, "SyntaxError", "source phase dynamic import is not available");
         const host = self.mod_host orelse return self.dynImportFail(machine, "dynamic import is not available");
         const cache = self.mod_cache orelse return self.dynImportFail(machine, "dynamic import is not available");
         var dep_path: []const u8 = "";
@@ -1603,8 +1605,12 @@ pub const Context = struct {
     }
 
     fn dynImportFail(self: *Context, machine: *interp.Interpreter, msg: []const u8) bool {
+        return self.dynImportFailKind(machine, "TypeError", msg);
+    }
+
+    fn dynImportFailKind(self: *Context, machine: *interp.Interpreter, kind: []const u8, msg: []const u8) bool {
         _ = self;
-        machine.throwError("TypeError", msg) catch {};
+        machine.throwError(kind, msg) catch {};
         return false;
     }
 
@@ -1972,6 +1978,19 @@ test "Date basics" {
     try expectEvalStr("number", "typeof Date.now()");
     try expectEvalStr("1970-01-01T00:00:00.000Z", "new Date(0).toISOString()");
     try std.testing.expect((try evalIn("typeof new Date() === 'object'")).asBool());
+}
+
+test "Date.now progresses for host timers" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\var start = Date.now();
+        \\setTimeout(function() {
+        \\  globalThis.dateNowProgressed = Date.now() >= start;
+        \\}, 1);
+    );
+    try std.testing.expect((try ctx.evaluate("dateNowProgressed")).asBool());
 }
 
 test "String generics + .constructor + match/search" {
@@ -3744,6 +3763,20 @@ test "dynamic import namespace primitive conversion uses exported methods" {
     });
 
     try std.testing.expectEqualStrings("1612:1612;42:42;", (try ctx.evaluate("dynamicImportPrimitiveCheck")).asStr());
+}
+
+test "dynamic import source phase rejects source text modules" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    try evaluateModuleWithFixturesInContext(ctx,
+        \\globalThis.dynamicImportSourcePhaseCheck = "";
+        \\import.source("./dep.js").catch(function(error) {
+        \\  globalThis.dynamicImportSourcePhaseCheck = error.name;
+        \\});
+    , &.{.{ .path = "dep.js", .source = "export const value = 1;" }});
+
+    try std.testing.expectEqualStrings("SyntaxError", (try ctx.evaluate("dynamicImportSourcePhaseCheck")).asStr());
 }
 
 test "delete of a private member is an early error" {

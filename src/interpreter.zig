@@ -33141,17 +33141,14 @@ fn dateUTCFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     return Value.num(Interpreter.dateTimeFromArgs(buf[0..len]));
 }
 
-/// `Date.now()` — v1 uses a deterministic epoch (no wall clock wired).
+/// `Date.now()` — monotonic milliseconds for progress-sensitive code. `new Date()`
+/// and `Date()` remain deterministic epoch-based until wall-clock Date objects
+/// are wired more broadly.
 fn dateNow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    // Threads mode gets a real clock: the corpus harness computes rendezvous
-    // deadlines from Date.now(), and a frozen epoch turns every stuck
-    // rendezvous into a silent hang instead of a loud 30s failure. The
-    // deterministic epoch stays for everything else (test262 reproducibility).
-    if (self.gil != null) return Value.num(agent.monotonicNowMs());
-    return Value.num(0);
+    _ = ctx;
+    return Value.num(agent.monotonicNowMs());
 }
 
 /// `Symbol([description])` — returns a fresh unique symbol. It has [[Construct]]
