@@ -29821,11 +29821,16 @@ fn temporalYearMonthAddFn(comptime sign: f64) value.NativeFn {
             const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             _ = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef()); // validates the overflow option
+            if (!durInRange(dur)) return self.throwError("RangeError", "duration out of range");
+            if (dur[2] != 0 or dur[3] != 0 or dur[4] != 0 or dur[5] != 0 or dur[6] != 0 or dur[7] != 0 or dur[8] != 0 or dur[9] != 0)
+                return self.throwError("RangeError", "PlainYearMonth arithmetic only accepts years and months");
+            try checkIsoDate(self, @floatFromInt(t.year), @floatFromInt(t.month), 1);
             var total: i64 = (@as(i64, t.year) * 12 + (t.month - 1)) + @as(i64, @intFromFloat(sign * (dur[0] * 12 + dur[1])));
             const ny = @divFloor(total, 12);
             total = @mod(total, 12);
             const nm: u8 = @intCast(total + 1);
             try checkIsoYearMonth(self, ny, nm);
+            try checkIsoDate(self, @floatFromInt(ny), @floatFromInt(nm), 1);
             return makeYearMonth(self, ny, nm, t.calendar, t.day);
         }
     }.call;
