@@ -795,6 +795,10 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
                 break :blk @min(@as(u64, @intCast(d - now)), 5 * std.time.ns_per_ms);
             } else 5 * std.time.ns_per_ms;
             rec.mutex.unlock(io);
+            // No waiter/lock state is held here. Under the experimental
+            // parallel mid-script collector, service any root-publication
+            // request before this waiter re-enters its bounded native park.
+            self.serviceGcSafepoint();
             pumpTasks(self);
             const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
             rec.mutex.lockUncancelable(io);
@@ -1046,6 +1050,11 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
             }
         }
         rec.mutex.unlock(io);
+        // Publish roots at the wait loop's lock-free pump point. The sync waiter
+        // is not a frozen parked peer; it periodically runs tasks, so it must
+        // cooperate with the parallel collector instead of being traced as
+        // parked.
+        self.serviceGcSafepoint();
         pumpTasks(self);
         const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
         rec.mutex.lockUncancelable(io);
@@ -1732,6 +1741,10 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
         null;
     while (!ticket.woken) {
         g.unlockPropWaiters();
+        // Property waiters pump between short parks; service the safepoint hook
+        // while the waiter table is unlocked so a concurrent collector can get
+        // this interpreter's roots without racing the waiter table.
+        self.serviceGcSafepoint();
         pumpTasks(self);
         const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
         g.lockPropWaiters();

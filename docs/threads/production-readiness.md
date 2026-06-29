@@ -62,10 +62,12 @@ Known performance/maturity work:
   arena, explicit-GC, no-GIL threaded GC, and `.gil = true` contexts across
   create/destroy, object-heavy allocation, block-scoped `let` allocation, and
   explicit `collectGarbage()`.
-- Mid-script parallel GC is abort-safe, but a peer blocked in sync wait/lock/
-  condition paths may periodically pump tasks and allocate. That makes it
-  different from a frozen parked peer; quiescent collection remains the
-  correctness fallback for those cases.
+- Mid-script parallel GC remains abort-safe. Sync wait/lock/condition peers are
+  not treated as frozen parked stacks; their lock-free pump points now service
+  root publication, and the collector waits long enough for one bounded park
+  wake. This lets property `Atomics.wait`, `Condition.wait`, and contended
+  `Lock` acquisition converge under the mid-script collector while preserving
+  quiescent collection as the fallback for heavier non-converging cycles.
 
 ## 3. Parallel Performance
 

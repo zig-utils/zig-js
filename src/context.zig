@@ -1105,13 +1105,15 @@ pub const Context = struct {
         self.gc_scan_native_stack = false;
 
         const max_rounds: u32 = 32;
-        // Per-round bound on how many mark-and-poll iterations to spend waiting
-        // for every running peer to publish before giving up and aborting. Each
-        // iteration drains marker work, so this is not pure spinning; a peer
-        // reaches its safepoint within ~1024 JS steps. The loop also yields the
-        // CPU periodically so peers can run to their safepoints (important when
-        // threads outnumber cores, and under TSan's ~10× slowdown).
+        // Per-round bound on how long to spend waiting for every running peer to
+        // publish before giving up and aborting. Each iteration drains marker
+        // work, so this is not pure spinning; a peer reaches its safepoint
+        // within ~1024 JS steps, and sync-wait peers now service the same hook at
+        // their pump points between bounded 5ms parks. The time floor gives
+        // those waiters at least one wake/publish opportunity under local load,
+        // TSan slowdown, or core oversubscription.
         const wait_budget: u64 = 50_000;
+        const wait_floor_ns: i96 = 25 * std.time.ns_per_ms;
         var prev_born: usize = h.bornPendingLen();
         var round: u32 = 0;
         while (round < max_rounds) : (round += 1) {
@@ -1119,13 +1121,15 @@ pub const Context = struct {
             // safepoints. Mark concurrently while we wait (the collector is also
             // the marker here — no separate marker thread).
             const gen = self.gc_par_request.fetchAdd(1, .acq_rel) + 1;
+            const deadline_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + wait_floor_ns;
             var waited: u64 = 0;
             while (!self.allParallelPublished(gen, machine)) {
                 self.gc_scan_native_stack = true;
                 _ = h.concurrentMarkRound();
                 self.gc_scan_native_stack = false;
                 waited += 1;
-                if (waited >= wait_budget) {
+                const now_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+                if (waited >= wait_budget and now_ns >= deadline_ns) {
                     self.gc_scan_native_stack = true;
                     h.abortConcurrentMarkParallel();
                     self.gc_scan_native_stack = false;
@@ -8063,12 +8067,12 @@ test "parallel_js (M3): mid-script parallel collector reclaims garbage while thr
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > 0);
 }
 
-test "parallel_js (M3): sync wait peer makes mid-script parallel GC abort safely" {
-    // A sync property-mode Atomics.wait peer is not a frozen `gc_parked` joiner:
-    // it periodically pumps tasks between short parks, so the collector must not
-    // trace it as a stable parked stack. Instead, at least one root-publication
-    // attempt should fail to converge and abort without sweeping; after the peer
-    // wakes, later cycles may legitimately finish.
+test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC" {
+    // Sync property waits, Condition waits, and contended Lock acquisition are
+    // not frozen `gc_parked` joiners: they periodically pump tasks between
+    // short parks. Those pump points now service the root-publication hook, so
+    // an in-flight collector can converge while the waiters remain blocked
+    // instead of treating them as an abort-only case.
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,
@@ -8081,14 +8085,46 @@ test "parallel_js (M3): sync wait peer makes mid-script parallel GC abort safely
 
     const src =
         \\(() => {
-        \\  const gate = { state: 0, ready: 0 };
-        \\  const waiter = new Thread(() => {
-        \\    Atomics.store(gate, 'ready', 1);
-        \\    Atomics.notify(gate, 'ready');
+        \\  const gate = { state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0 };
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const heldLock = new Lock();
+        \\  const propWaiter = new Thread(() => {
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
         \\    return Atomics.wait(gate, 'state', 0, 2000);
         \\  });
-        \\  while (Atomics.load(gate, 'ready') === 0)
-        \\    Atomics.wait(gate, 'ready', 0, 1);
+        \\  const condWaiter = new Thread(() => {
+        \\    condLock.hold(() => {
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (Atomics.load(gate, 'state') === 0) cond.wait(condLock);
+        \\    });
+        \\    return 1;
+        \\  });
+        \\  const holder = new Thread(() => {
+        \\    heldLock.hold(() => {
+        \\      Atomics.store(gate, 'holderReady', 1);
+        \\      Atomics.notify(gate, 'holderReady');
+        \\      while (Atomics.load(gate, 'releaseLock') === 0)
+        \\        Atomics.wait(gate, 'releaseLock', 0, 2000);
+        \\    });
+        \\    return 1;
+        \\  });
+        \\  while (Atomics.load(gate, 'holderReady') === 0)
+        \\    Atomics.wait(gate, 'holderReady', 0, 1);
+        \\  const lockWaiter = new Thread(() => {
+        \\    Atomics.store(gate, 'lockReady', 1);
+        \\    Atomics.notify(gate, 'lockReady');
+        \\    heldLock.hold(() => { gate.lockDone = 1; });
+        \\    return 1;
+        \\  });
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\  while (Atomics.load(gate, 'lockReady') === 0)
+        \\    Atomics.wait(gate, 'lockReady', 0, 1);
         \\  const keep = [];
         \\  for (let round = 0; round < 12; round++) {
         \\    for (let i = 0; i < 900; i++)
@@ -8097,20 +8133,28 @@ test "parallel_js (M3): sync wait peer makes mid-script parallel GC abort safely
         \\    for (let j = 0; j < 8000; j++) spin = (spin + j) & 0x3fffffff;
         \\    if (spin < 0) keep.push({ never: true });
         \\  }
-        \\  Atomics.store(gate, 'state', 1);
-        \\  Atomics.notify(gate, 'state');
-        \\  const wr = waiter.join();
+        \\  condLock.hold(() => {
+        \\    Atomics.store(gate, 'state', 1);
+        \\    Atomics.notify(gate, 'state');
+        \\    cond.notifyAll();
+        \\  });
+        \\  Atomics.store(gate, 'releaseLock', 1);
+        \\  Atomics.notify(gate, 'releaseLock');
+        \\  const wr = propWaiter.join();
         \\  if (wr !== 'ok' && wr !== 'timed-out') throw new Error('bad wait result: ' + wr);
+        \\  if (condWaiter.join() !== 1) throw new Error('bad cond waiter');
+        \\  if (holder.join() !== 1) throw new Error('bad lock holder');
+        \\  if (lockWaiter.join() !== 1 || gate.lockDone !== 1) throw new Error('bad lock waiter');
         \\  return keep.length;
         \\})();
     ;
 
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
-    const before_aborts = ctx.gc_par_aborts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
     const result = try ctx.evaluate(src);
     try std.testing.expectEqual(@as(f64, 10800), result.asNum());
     try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
-    try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
 }
 
 test "parallel_gc soak: sustained parallel allocation reclaims across rounds, no leak/UAF" {

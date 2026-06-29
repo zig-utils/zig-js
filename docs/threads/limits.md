@@ -87,11 +87,12 @@ context APIs.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.
-- **Mid-script parallel GC maturity.** The abort-safe collector is correct, but
-  sync waits that periodically pump tasks are not a simple "frozen parked peer"
-  case. Keep quiescent collection as the correctness fallback and improve
-  mid-script collection only when the wait/park protocol can publish roots
-  without races or deadlocks.
+- **Mid-script parallel GC maturity.** The abort-safe collector now has
+  cooperative root publication at sync-wait pump points, covering property
+  `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition without
+  tracing those peers as frozen parked stacks. Keep quiescent collection as the
+  fallback for cycles that still cannot converge, and keep widening wait/cleanup
+  stress around this protocol.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught
   exceptions/finally, nested thread lifecycle, `asyncJoin`, property
   `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and

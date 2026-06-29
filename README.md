@@ -255,8 +255,10 @@ threading architecture:
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus
   coverage.
-- **Mid-script parallel GC** - keep the abort-safe collector correct and improve
-  the known limitation around sync-wait peers that periodically pump tasks.
+- **Mid-script parallel GC** - sync-wait pump points now publish roots for
+  property `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition,
+  so the abort-safe collector can finish while those peers are blocked. Keep
+  maturing convergence and stress coverage for heavier wait/cleanup mixes.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the lifecycle profile adds deterministic termination storms, script and module

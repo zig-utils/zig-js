@@ -245,30 +245,20 @@ per-thread before threads stop holding the GIL):
      flagged `gc_parked` and traced directly (frozen). The redundant park-record
      conservative scan is skipped under a parallel collection (it raced the
      joiner's `beginPark`/`endPark` and is covered precisely by `gc_parked`).
-     *Open:* a peer blocked on `Atomics.wait`/`Lock`/`Condition` under
-     `parallel_js` is not `gc_parked`, so it makes the collector abort (safe)
-     rather than collect. This is **not** the same easy case as `join`, and
-     investigation shows the frozen-trace approach does not fit: unlike `join`
-     (which truly blocks until `rec.done`), these sync-wait loops are *not
-     frozen* — `propWait`/`acquireLock`/`condWaitCore` wake every ~5 ms to
-     `pumpTasks` and re-park (`jsthread.zig` `while (!ticket.woken) { … pumpTasks
-     … waitPropTicketTimeout … }`). So a "blocked" peer actually cycles
-     park→pump→park, running JS (microtasks) and allocating born-grey cells on
-     each pump. Setting `gc_parked` only around the inner `conditionWait` would
-     need a `gc_park_lock` to serialize the wake against the collector's root
-     read (a real race), and even then the collector would rarely catch a peer
-     mid-park, while the per-pump born-cell allocation keeps defeating the
-     finish-convergence check — so it would abort anyway. A naive attempt
-     (gc_parked at the sync sites without this understanding) regressed: when the
-     *host* thread was the collector it swept its own captured-env vars and threw
-     `ConcurrentAccessError`. Conclusion: blocked-peer mid-script collection is
-     not a quick wiring follow-up; it needs either a genuinely-parked wait
-     primitive (no periodic pump) under `parallel_midscript_gc`, or to be left to
-     the quiescent fallback (current behavior, which is correct). Recorded here so
-     this stays a known maturity item rather than a rediscovered bug, not
-     re-attempted as low-hanging fruit. `zig build threads-profile` now reports
-     wait/pump `parks` and logical contention `events`, which gives this work an
-     executable baseline when the sync-wait protocol changes.
+     Peers blocked on property `Atomics.wait`, `Condition.wait`, or contended
+     `Lock` acquisition under `parallel_js` are deliberately **not** flagged
+     `gc_parked`: unlike `join`, those loops wake every ~5 ms to `pumpTasks` and
+     can run JS/microtasks before re-parking. Instead, their lock-free pump
+     points service the same root-publication hook as ordinary bytecode
+     safepoints, before re-entering the bounded native park. The collector's
+     per-generation wait now has a short time floor so those peers get at least
+     one wake/publish opportunity under load. The regression case from the
+     earlier naive approach (marking sync waits as frozen and sweeping the host's
+     captured-env vars) stays guarded by
+     `parallel_js (M3): sync wait peers publish roots for mid-script parallel GC`,
+     which exercises property waits, `Condition.wait`, and contended `Lock`
+     acquisition while requiring a finishing mid-script sweep. Non-converging
+     cycles still abort safely and fall back to quiescent collection.
    - **Terminate or abort.** The collector drives root-publication generations,
      marking between, until a *born-cell-stable, nothing-deferred* quiescent
      window, then attempts `finishConcurrentMarkParallel`. That fold-traces the
