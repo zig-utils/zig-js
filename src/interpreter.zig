@@ -913,6 +913,10 @@ pub const Interpreter = struct {
     /// updates a var-scoped binding when its block is evaluated; one absent from
     /// the set stays purely block-scoped (the "skip" cases). Null in strict code.
     annexb_legacy: ?*std.StringHashMapUnmanaged(void) = null,
+    /// The specific function-declaration nodes eligible for the legacy copy.
+    /// Names are used to pre-create var bindings; nodes decide whether a
+    /// particular same-named declaration updates that binding at runtime.
+    annexb_legacy_nodes: ?*std.AutoHashMapUnmanaged(*const Node, void) = null,
     /// The formal-parameter names of the current function activation (used by the
     /// Annex B B.3.3 eligibility analysis to exclude parameter-shadowing names).
     cur_params: []const []const u8 = &.{},
@@ -1122,6 +1126,30 @@ pub const Interpreter = struct {
             // environment is a fresh deletable binding (no global object backs it).
             try vs.markDeletable(name);
         }
+    }
+
+    /// Create a `var`-style binding if declaration instantiation needs one,
+    /// without reinitializing an existing global object binding. In the spec, a
+    /// Global Environment Record's object binding continues to read/write the
+    /// property; in this interpreter, leaving `vars` empty for an existing
+    /// global property lets identifier resolution fall through to that property.
+    fn createVarBinding(self: *Interpreter, name: []const u8) EvalError!void {
+        const vs = self.env.varScope();
+        if (vs.vars.contains(name)) return; // param / hoisted function / earlier var
+        if (vs.parent == null) {
+            if (self.global_object) |g| {
+                if (objectHasOwn(g, name)) return;
+                if (!g.extensible)
+                    return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
+                try vs.put(name, Value.undef());
+                try self.setProp(g, name, Value.undef());
+                try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
+                return;
+            }
+        }
+        try vs.put(name, Value.undef());
+        if (vs.parent != null and self.eval_decl_deletable)
+            try vs.markDeletable(name);
     }
 
     /// A top-level function declaration (script GlobalDeclarationInstantiation or
@@ -2438,8 +2466,8 @@ pub const Interpreter = struct {
                 defer self.env = saved_env;
                 const fnv = try self.makeFunction(fnode, block_env);
                 try block_env.put(fnode.name, fnv);
-                if (self.annexb_legacy) |set| {
-                    if (set.contains(fnode.name)) try self.globalDefineDeletable(fnode.name, fnv);
+                if (self.annexb_legacy_nodes) |set| {
+                    if (set.contains(node)) try self.globalDefineDeletable(fnode.name, fnv);
                 }
                 break :blk Value.undef();
             },
@@ -2851,7 +2879,7 @@ pub const Interpreter = struct {
             .func_decl => |fnode| {
                 const fnv = try self.makeFunction(fnode, self.env);
                 try self.env.put(fnode.name, fnv);
-                if (self.annexb_legacy) |set| if (set.contains(fnode.name)) try self.globalDefineDeletable(fnode.name, fnv);
+                if (self.annexb_legacy_nodes) |set| if (set.contains(s)) try self.globalDefineDeletable(fnode.name, fnv);
             },
             else => {},
         };
@@ -3207,27 +3235,7 @@ pub const Interpreter = struct {
     }
 
     fn hoistOneVar(self: *Interpreter, name: []const u8) EvalError!void {
-        const vs = self.env.varScope();
-        if (vs.vars.contains(name)) return; // param / hoisted function / earlier var
-        try vs.put(name, Value.undef());
-        if (vs.parent == null) {
-            if (self.global_object) |g| {
-                // CreateGlobalVarBinding: define the global object property only
-                // when it is ABSENT; an existing own property (e.g. one installed
-                // via defineProperty) is left untouched — value and attributes
-                // preserved — rather than reset by the declaration.
-                if (g.getOwn(name) == null and g.getAccessor(name) == null) {
-                    if (!g.extensible)
-                        return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
-                    try self.setProp(g, name, Value.undef());
-                    // A script's GlobalDeclarationInstantiation makes a global var
-                    // non-configurable; a sloppy eval's makes it deletable.
-                    try g.setAttr(self.arena, name, .{ .writable = true, .enumerable = true, .configurable = self.eval_decl_deletable });
-                }
-            }
-        } else if (self.eval_decl_deletable) {
-            try vs.markDeletable(name); // a sloppy eval's top-level var in a function var-env is deletable
-        }
+        try self.createVarBinding(name);
     }
 
     fn hoistPatternVars(self: *Interpreter, pat: *Node) EvalError!void {
@@ -3294,14 +3302,20 @@ pub const Interpreter = struct {
     /// Entry point: collect the eligible legacy-binding function names of a
     /// variable scope's statement list. `stack` is seeded with parameter names
     /// and "arguments" (both block the legacy binding).
-    fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
-        var stack: NameStack = .empty;
-        for (self.cur_params) |pn| try stack.append(self.arena, pn);
-        try stack.append(self.arena, "arguments");
-        try self.annexbScanList(stmts, &stack, depth, out);
+    fn annexbAddCandidate(self: *Interpreter, node: *const Node, name: []const u8, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+        try out.put(self.arena, name, {});
+        try nodes.put(self.arena, node, {});
     }
 
-    fn annexbScanList(self: *Interpreter, stmts: []*Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
+    fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+        var stack: NameStack = .empty;
+        if (!self.eval_decl_deletable)
+            for (self.cur_params) |pn| try stack.append(self.arena, pn);
+        try stack.append(self.arena, "arguments");
+        try self.annexbScanList(stmts, &stack, depth, out, nodes);
+    }
+
+    fn annexbScanList(self: *Interpreter, stmts: []*Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         const base = stack.items.len;
         // This block's own let/const/class names shadow the legacy binding.
         for (stmts) |s| try self.annexbPushLexical(s, stack);
@@ -3313,7 +3327,7 @@ pub const Interpreter = struct {
         // function declaration does not block, hence the depth >= 1 gate.
         if (depth >= 1) {
             for (stmts) |s| switch (s.*) {
-                .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try out.put(self.arena, f.name, {}),
+                .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try self.annexbAddCandidate(s, f.name, out, nodes),
                 else => {},
             };
             for (stmts) |s| switch (s.*) {
@@ -3321,69 +3335,69 @@ pub const Interpreter = struct {
                 else => {},
             };
         }
-        for (stmts) |s| try self.annexbScanStmt(s, stack, depth, out);
+        for (stmts) |s| try self.annexbScanStmt(s, stack, depth, out, nodes);
         stack.shrinkRetainingCapacity(base);
     }
 
     /// Scan a single statement that is the *body* of an if/loop/label — a block,
     /// a bare function declaration (treated as a one-statement block), or other.
-    fn annexbScanBranch(self: *Interpreter, node: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
+    fn annexbScanBranch(self: *Interpreter, node: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         switch (node.*) {
-            .block => |b| try self.annexbScanList(b, stack, depth + 1, out),
-            .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try out.put(self.arena, f.name, {}),
-            else => try self.annexbScanStmt(node, stack, depth, out),
+            .block => |b| try self.annexbScanList(b, stack, depth + 1, out, nodes),
+            .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try self.annexbAddCandidate(node, f.name, out, nodes),
+            else => try self.annexbScanStmt(node, stack, depth, out, nodes),
         }
     }
 
-    fn annexbScanStmt(self: *Interpreter, s: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void)) EvalError!void {
+    fn annexbScanStmt(self: *Interpreter, s: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         switch (s.*) {
-            .block => |b| try self.annexbScanList(b, stack, depth + 1, out),
+            .block => |b| try self.annexbScanList(b, stack, depth + 1, out, nodes),
             .if_stmt => |i| {
-                try self.annexbScanBranch(i.consequent, stack, depth, out);
-                if (i.alternate) |a| try self.annexbScanBranch(a, stack, depth, out);
+                try self.annexbScanBranch(i.consequent, stack, depth, out, nodes);
+                if (i.alternate) |a| try self.annexbScanBranch(a, stack, depth, out, nodes);
             },
-            .while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out),
-            .do_while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out),
+            .while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out, nodes),
+            .do_while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out, nodes),
             .for_stmt => |f| {
                 const base = stack.items.len;
                 if (f.init) |ini| try self.annexbPushLexical(ini, stack);
-                try self.annexbScanBranch(f.body, stack, depth, out);
+                try self.annexbScanBranch(f.body, stack, depth, out, nodes);
                 stack.shrinkRetainingCapacity(base);
             },
             .for_in => |f| {
                 const base = stack.items.len;
                 if (f.decl_kind) |k| if (k != .@"var") try appendPatternNames(self.arena, f.target, stack);
-                try self.annexbScanBranch(f.body, stack, depth, out);
+                try self.annexbScanBranch(f.body, stack, depth, out, nodes);
                 stack.shrinkRetainingCapacity(base);
             },
-            .labeled_stmt => |l| try self.annexbScanStmt(l.body, stack, depth, out),
+            .labeled_stmt => |l| try self.annexbScanStmt(l.body, stack, depth, out, nodes),
             .switch_stmt => |sw| {
                 const base = stack.items.len;
                 // The whole switch is one lexical (CaseBlock) scope across all cases.
                 for (sw.cases) |c| for (c.body) |cs| try self.annexbPushLexical(cs, stack);
                 for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
-                    .func_decl => |fd| if (!fd.is_generator and !fd.is_async and !annexbStackHas(stack.*, fd.name)) try out.put(self.arena, fd.name, {}),
+                    .func_decl => |fd| if (!fd.is_generator and !fd.is_async and !annexbStackHas(stack.*, fd.name)) try self.annexbAddCandidate(cs, fd.name, out, nodes),
                     else => {},
                 };
                 for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
                     .func_decl => |fd| if (!fd.is_generator and !fd.is_async) try stack.append(self.arena, fd.name),
                     else => {},
                 };
-                for (sw.cases) |c| for (c.body) |cs| try self.annexbScanStmt(cs, stack, depth + 1, out);
+                for (sw.cases) |c| for (c.body) |cs| try self.annexbScanStmt(cs, stack, depth + 1, out, nodes);
                 stack.shrinkRetainingCapacity(base);
             },
             .try_stmt => |t| {
-                try self.annexbScanBranch(t.block, stack, depth, out);
+                try self.annexbScanBranch(t.block, stack, depth, out, nodes);
                 if (t.catch_block) |cb| {
                     const cbase = stack.items.len;
                     // A *simple* (identifier) catch parameter does not block the
                     // legacy binding (Annex B B.3.5 allows `catch(e){var e}`); a
                     // destructuring catch parameter does.
                     if (t.catch_param) |cp| if (cp.* != .identifier) try appendPatternNames(self.arena, cp, stack);
-                    try self.annexbScanBranch(cb, stack, depth, out);
+                    try self.annexbScanBranch(cb, stack, depth, out, nodes);
                     stack.shrinkRetainingCapacity(cbase);
                 }
-                if (t.finally_block) |fb| try self.annexbScanBranch(fb, stack, depth, out);
+                if (t.finally_block) |fb| try self.annexbScanBranch(fb, stack, depth, out, nodes);
             },
             else => {},
         }
@@ -3399,15 +3413,19 @@ pub const Interpreter = struct {
         // as `undefined`. Sloppy code only (strict block functions stay purely
         // block-scoped). The set stays live for nested blocks via `annexb_legacy`.
         var annexb_set: std.StringHashMapUnmanaged(void) = .empty;
+        var annexb_nodes: std.AutoHashMapUnmanaged(*const Node, void) = .empty;
         const saved_annexb = self.annexb_legacy;
+        const saved_annexb_nodes = self.annexb_legacy_nodes;
         defer self.annexb_legacy = saved_annexb;
+        defer self.annexb_legacy_nodes = saved_annexb_nodes;
         if (at_fn_top and !self.strict) {
-            try self.collectAnnexBLegacy(stmts, 0, &annexb_set);
+            try self.collectAnnexBLegacy(stmts, 0, &annexb_set, &annexb_nodes);
             self.annexb_legacy = &annexb_set;
+            self.annexb_legacy_nodes = &annexb_nodes;
             const vs = self.env.varScope();
             var it = annexb_set.keyIterator();
             while (it.next()) |k| {
-                if (!vs.vars.contains(k.*)) try self.globalDefineDeletable(k.*, Value.undef());
+                if (!vs.vars.contains(k.*)) try self.createVarBinding(k.*);
             }
         }
         // Hoist function declarations to the top of the scope so forward
@@ -3423,8 +3441,8 @@ pub const Interpreter = struct {
                     // Block-scoped function declaration: bind in this block...
                     try self.env.put(fnode.name, fnv);
                     // ...and (Annex B) copy to the var scope when eligible.
-                    if (self.annexb_legacy) |set| {
-                        if (set.contains(fnode.name)) try self.globalDefineDeletable(fnode.name, fnv);
+                    if (self.annexb_legacy_nodes) |set| {
+                        if (set.contains(s)) try self.globalDefineDeletable(fnode.name, fnv);
                     }
                 }
             },
