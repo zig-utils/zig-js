@@ -119,13 +119,14 @@ context APIs.
   profile now hammers sync-wait root publication during finishing
   `parallel_midscript_gc` sweeps, executes an async-hold grant from those pump
   points, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
-  afterward. The lifecycle profile now adds deterministic termination storms and
-  Worker/thread retained-`SharedArrayBuffer` overlap with an exact Atomics
-  counter oracle, mixed terminate/close/postMessage races, and worker
-  handler-exception recovery plus Thread exception identity through `join()` /
-  `asyncJoin()` while property and condition waiters are parked, and cross-thread
-  `FinalizationRegistry` cleanup count/sum oracles. Keep extending it toward
-  more teardown ordering, module-worker overlap, and richer cleanup/finalization
+  afterward. The lifecycle profile now adds deterministic termination storms,
+  script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import and
+  graph-shaped module Worker/thread overlap with exact Atomics counter oracles,
+  mixed terminate/close/postMessage races, and worker handler-exception recovery
+  plus Thread exception identity through `join()` / `asyncJoin()` while property
+  and condition waiters are parked, and cross-thread `FinalizationRegistry`
+  cleanup count/sum oracles. Keep extending it toward more teardown ordering,
+  additional module-worker graph shapes, and richer cleanup/finalization
   interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the

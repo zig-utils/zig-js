@@ -64,6 +64,86 @@ const ModuleFuzzHost = struct {
     }
 };
 
+const ModuleGraphFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "core.js",
+            .source =
+            \\export function addSlot(sab, slot, n) {
+            \\  const v = new Int32Array(sab);
+            \\  for (let i = 0; i < n; i++) Atomics.add(v, slot, 1);
+            \\  return n;
+            \\}
+            ,
+        },
+        .{
+            .path = "left.js",
+            .source =
+            \\import { addSlot } from "./core.js";
+            \\export function left(sab, n) {
+            \\  const ran = addSlot(sab, 0, n);
+            \\  Atomics.add(new Int32Array(sab), 3, ran);
+            \\  return ran;
+            \\}
+            ,
+        },
+        .{
+            .path = "right.js",
+            .source =
+            \\import { addSlot } from "./core.js";
+            \\export function right(sab, n) {
+            \\  const ran = addSlot(sab, 0, n + 1);
+            \\  Atomics.add(new Int32Array(sab), 3, ran);
+            \\  return ran;
+            \\}
+            ,
+        },
+        .{
+            .path = "join.js",
+            .source =
+            \\import { left } from "./left.js";
+            \\import { right } from "./right.js";
+            \\export function runGraph(sab, n) {
+            \\  return left(sab, n) + right(sab, n);
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { runGraph } from "./join.js";
+            \\globalThis.onmessage = (e) => {
+            \\  const v = new Int32Array(e.data.sab);
+            \\  Atomics.add(v, 2, 1);
+            \\  Atomics.notify(v, 2);
+            \\  while (Atomics.load(v, 1) === 0)
+            \\    Atomics.wait(v, 1, 0, 100);
+            \\  const score = runGraph(e.data.sab, e.data.iters);
+            \\  postMessage({ done: true, graph: true, score });
+            \\  close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 /// One random shared-state operation, emitted into a worker's loop body. Every
 /// op targets the shared structures declared by `genProgram` and cannot throw.
 fn op(r: std.Random) []const u8 {
@@ -607,6 +687,149 @@ fn runModuleWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
     const expected: f64 = @floatFromInt(nworkers * worker_iters + nthreads * thread_iters);
     if (!count.isNumber() or count.asNum() != expected) {
         std.debug.print("seed {d}: module overlap counter got {d}, expected {d}\n", .{ seed, if (count.isNumber()) count.asNum() else -1, expected });
+        return false;
+    }
+    return true;
+}
+
+fn runModuleWorkerGraphOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6eed_5eed_914d_a7a5);
+    const r = prng.random();
+    const nworkers = 1 + r.uintLessThan(usize, 3);
+    const nthreads = 1 + r.uintLessThan(usize, 4);
+    const worker_iters = 80 + r.uintLessThan(usize, 220);
+    const thread_iters = 90 + r.uintLessThan(usize, 260);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: module graph context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const msg_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__moduleGraphMsg = {{ sab: new SharedArrayBuffer(16), iters: {d} }}; globalThis.__moduleGraphMsg",
+        .{worker_iters},
+    );
+    defer gpa.free(msg_src);
+    const msg = ctx.evaluate(msg_src) catch |err| {
+        std.debug.print("seed {d}: cannot create module graph SAB: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawnModule("entry.js", ModuleGraphFuzzHost.entries[4].source, ModuleGraphFuzzHost.host()) catch {
+            std.debug.print("seed {d}: graph module worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: graph module postMessage failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const js_src = try std.fmt.allocPrint(
+        gpa,
+        \\const gv = new Int32Array(globalThis.__moduleGraphMsg.sab);
+        \\const gts = [];
+        \\for (let t = 0; t < {d}; t++) {{
+        \\  gts.push(new Thread(function(){{
+        \\    const local = new Int32Array(globalThis.__moduleGraphMsg.sab);
+        \\    while (Atomics.load(local, 1) === 0) ;
+        \\    for (let i = 0; i < {d}; i++) Atomics.add(local, 0, 1);
+        \\    return 1;
+        \\  }}));
+        \\}}
+        \\let spins = 0;
+        \\while (Atomics.load(gv, 2) < {d} && spins++ < 10000000) ;
+        \\if (Atomics.load(gv, 2) < {d}) throw new Error('graph module workers not ready');
+        \\Atomics.store(gv, 1, 1);
+        \\Atomics.notify(gv, 1, {d});
+        \\let joined = 0;
+        \\for (const t of gts) joined += t.join();
+        \\joined;
+        \\
+    ,
+        .{ nthreads, thread_iters, nworkers, nworkers, nworkers + nthreads + 4 },
+    );
+    defer gpa.free(js_src);
+
+    const joined = ctx.evaluate(js_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module graph JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: module graph joined {d} threads, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, nthreads });
+        return false;
+    }
+
+    const worker_score: f64 = @floatFromInt(2 * worker_iters + 1);
+    for (workers.items) |w| {
+        const reply = (w.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: graph module receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }) orelse {
+            std.debug.print("seed {d}: graph module receive timed out\n", .{seed});
+            return false;
+        };
+        const done = machine.getProperty(reply, "done") catch |err| {
+            std.debug.print("seed {d}: cannot read graph module done: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const graph = machine.getProperty(reply, "graph") catch |err| {
+            std.debug.print("seed {d}: cannot read graph module flag: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const score = machine.getProperty(reply, "score") catch |err| {
+            std.debug.print("seed {d}: cannot read graph module score: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!done.isBoolean() or !done.asBool() or !graph.isBoolean() or !graph.asBool() or !score.isNumber() or score.asNum() != worker_score) {
+            std.debug.print("seed {d}: bad graph module reply\n", .{seed});
+            return false;
+        }
+    }
+
+    for (workers.items) |w| {
+        w.join();
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const count = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleGraphMsg.sab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read module graph counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const module_only = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleGraphMsg.sab), 3)") catch |err| {
+        std.debug.print("seed {d}: cannot read module graph score counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const expected_worker: f64 = @floatFromInt(nworkers * (2 * worker_iters + 1));
+    const expected_total = expected_worker + @as(f64, @floatFromInt(nthreads * thread_iters));
+    if (!count.isNumber() or count.asNum() != expected_total) {
+        std.debug.print("seed {d}: module graph counter got {d}, expected {d}\n", .{ seed, if (count.isNumber()) count.asNum() else -1, expected_total });
+        return false;
+    }
+    if (!module_only.isNumber() or module_only.asNum() != expected_worker) {
+        std.debug.print("seed {d}: module graph module-only counter got {d}, expected {d}\n", .{ seed, if (module_only.isNumber()) module_only.asNum() else -1, expected_worker });
         return false;
     }
     return true;
@@ -1518,11 +1741,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
-    // Worker/thread SAB overlap, module-worker/thread overlap, mixed
-    // close/terminate/postMessage ordering, worker handler exception recovery,
-    // Thread exception identity across join/asyncJoin while waiters are parked,
-    // cross-thread FinalizationRegistry cleanup, and ThreadLocal isolation across
-    // nested threads plus throwing and async-joined workers. The oracle is not "no
+    // Worker/thread SAB overlap, simple and graph-shaped module-worker/thread
+    // overlap, mixed close/terminate/postMessage ordering, worker handler
+    // exception recovery, Thread exception identity across join/asyncJoin while
+    // waiters are parked, cross-thread FinalizationRegistry cleanup, and
+    // ThreadLocal isolation across nested threads plus throwing and async-joined
+    // workers. The oracle is not "no
     // throw":
     // termination storms must throw from the main script and still tear down
     // cleanly, overlap must produce exact synchronized counter values, and
@@ -1543,13 +1767,14 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runTerminationStorm(gpa, seed))) lfail += 1;
             if (!(try runWorkerThreadOverlap(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerThreadOverlap(gpa, seed))) lfail += 1;
+            if (!(try runModuleWorkerGraphOverlap(gpa, seed))) lfail += 1;
             if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 8, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 9, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

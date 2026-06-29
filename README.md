@@ -283,14 +283,14 @@ threading architecture:
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing
   mid-script sweeps plus deterministic cleanup count/sum delivery; the lifecycle
-  profile adds deterministic termination storms, script and module Worker/thread
-  overlap over retained
-  `SharedArrayBuffer` storage, and mixed `close` / `terminate` / `postMessage`
-  ordering plus worker handler-exception recovery, Thread exception identity
-  through `join()` / `asyncJoin()` while property and condition waiters are
-  parked, cross-thread `FinalizationRegistry` cleanup count/sum oracles, and
-  `ThreadLocal` isolation across normal, throwing, nested, and async-joined
-  thread lifecycles.
+  profile adds deterministic termination storms, script Worker/thread overlap
+  and both simple-import and graph-shaped module Worker/thread overlap over
+  retained `SharedArrayBuffer` storage, and mixed `close` / `terminate` /
+  `postMessage` ordering plus worker handler-exception recovery, Thread
+  exception identity through `join()` / `asyncJoin()` while property and
+  condition waiters are parked, cross-thread `FinalizationRegistry` cleanup
+  count/sum oracles, and `ThreadLocal` isolation across normal, throwing,
+  nested, and async-joined thread lifecycles.
   Keep extending the fuzzers toward more teardown and cross-realm scheduling
   oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature
