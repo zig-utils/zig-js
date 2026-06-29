@@ -108,6 +108,8 @@ Known performance/maturity work:
   length. Task pumps now copy bounded FIFO bursts under the shared threading API
   lock and run every grant outside it, reducing delivery lock acquisitions from
   one per job to one per burst.
+- Condition notify/notifyAll use the same FIFO head-cursor pattern for the
+  mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 

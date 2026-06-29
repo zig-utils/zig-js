@@ -268,8 +268,10 @@ threading architecture:
   per-lock pending list and the realm task queue through FIFO head cursors
   instead of front-shifting task lists. Realm task pumps also copy bounded FIFO
   bursts under the shared API lock before running grants outside it, so delivery
-  no longer takes that lock once per job; continue using the profile for the
-  remaining contended-lock and lifecycle hot spots.
+  no longer takes that lock once per job. `Condition.notify` / `notifyAll` now
+  use the same FIFO head-cursor shape for their mixed sync/async waiter queue,
+  avoiding one front shift per notified waiter; continue using the profile for
+  the remaining contended-lock and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

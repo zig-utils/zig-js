@@ -104,7 +104,9 @@ context APIs.
   head cursors for both per-lock pending grants and realm task delivery, and
   copies bounded FIFO bursts under the shared API lock before running grants
   outside it, so queue drains do not front-shift remaining jobs or lock once per
-  delivered job.
+  delivered job. Condition notify/notifyAll also dequeues the mixed sync/async
+  waiter queue through a FIFO head cursor instead of shifting every notified
+  waiter.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

@@ -620,7 +620,49 @@ const CondRecord = struct {
     /// ONE FIFO domain for sync and async waiters (4.3: notify wakes them
     /// uniformly in arrival order — cross-kind).
     queue: std.ArrayListUnmanaged(CondEntry) = .empty,
+    queue_head: usize = 0,
+
+    fn appendWaiter(self: *CondRecord, arena: std.mem.Allocator, entry: CondEntry) !void {
+        try self.queue.append(arena, entry);
+    }
+
+    fn popWaiter(self: *CondRecord) ?CondEntry {
+        if (self.queue_head >= self.queue.items.len) {
+            self.queue.clearRetainingCapacity();
+            self.queue_head = 0;
+            return null;
+        }
+        const entry = self.queue.items[self.queue_head];
+        self.queue.items[self.queue_head] = undefined;
+        self.queue_head += 1;
+        if (self.queue_head == self.queue.items.len) {
+            self.queue.clearRetainingCapacity();
+            self.queue_head = 0;
+        }
+        return entry;
+    }
 };
+
+test "condition queue head cursor preserves FIFO and removal" {
+    var rec = CondRecord{ .gil = undefined };
+    defer rec.queue.deinit(std.testing.allocator);
+
+    var t0 = SyncCondTicket{};
+    var t1 = SyncCondTicket{};
+    var t2 = SyncCondTicket{};
+    try rec.appendWaiter(std.testing.allocator, .{ .sync = &t0 });
+    try rec.appendWaiter(std.testing.allocator, .{ .sync = &t1 });
+    try rec.appendWaiter(std.testing.allocator, .{ .sync = &t2 });
+
+    const first = rec.popWaiter() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@intFromPtr(&t0), @intFromPtr(first.sync));
+    removeSyncCondTicketLocked(&rec, &t1);
+    const second = rec.popWaiter() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(second.sync));
+    try std.testing.expectEqual(@as(?CondEntry, null), rec.popWaiter());
+    try std.testing.expectEqual(@as(usize, 0), rec.queue_head);
+    try std.testing.expectEqual(@as(usize, 0), rec.queue.items.len);
+}
 
 const TLRecord = struct {
     brand: SyncBrand = sync_brand_thread_local,
@@ -671,7 +713,7 @@ fn traceLockRecordRoots(rec: *LockRecord, v: anytype) void {
 fn traceCondRecordRoots(rec: *CondRecord, v: anytype) void {
     rec.mutex.lockUncancelable(agent.engineIo());
     defer rec.mutex.unlock(agent.engineIo());
-    for (rec.queue.items) |entry| switch (entry) {
+    for (rec.queue.items[rec.queue_head..]) |entry| switch (entry) {
         .sync => {},
         .asynchronous => |w| v.mark(w.outer),
     };
@@ -1101,10 +1143,16 @@ fn removeSyncCondTicket(rec: *CondRecord, ticket: *SyncCondTicket) void {
 }
 
 fn removeSyncCondTicketLocked(rec: *CondRecord, ticket: *SyncCondTicket) void {
-    for (rec.queue.items, 0..) |entry, i| {
+    var i = rec.queue_head;
+    while (i < rec.queue.items.len) : (i += 1) {
+        const entry = rec.queue.items[i];
         switch (entry) {
             .sync => |t| if (t == ticket) {
                 _ = rec.queue.orderedRemove(i);
+                if (rec.queue_head >= rec.queue.items.len) {
+                    rec.queue.clearRetainingCapacity();
+                    rec.queue_head = 0;
+                }
                 return;
             },
             else => {},
@@ -1153,7 +1201,7 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
         return err;
     };
     ticket.* = .{};
-    rec.queue.append(self.arena, .{ .sync = ticket }) catch |err| {
+    rec.appendWaiter(self.arena, .{ .sync = ticket }) catch |err| {
         lock.mutex.unlock(io);
         rec.mutex.unlock(io);
         return err;
@@ -1252,8 +1300,8 @@ fn condNotify(self: *Interpreter, rec: *CondRecord, count: usize) value.HostErro
     defer woken_sync.deinit(self.arena);
     rec.mutex.lockUncancelable(io);
     defer rec.mutex.unlock(io);
-    while (rec.queue.items.len > 0 and n < count) {
-        const entry = rec.queue.orderedRemove(0);
+    while (n < count) {
+        const entry = rec.popWaiter() orelse break;
         switch (entry) {
             .sync => |t| {
                 t.woken = true;
@@ -2365,7 +2413,7 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
         rec.mutex.unlock(io);
         return self.throwError("TypeError", "Condition.prototype.asyncWait requires the lock to be held");
     }
-    rec.queue.append(self.arena, .{ .asynchronous = w }) catch |err| {
+    rec.appendWaiter(self.arena, .{ .asynchronous = w }) catch |err| {
         lock.mutex.unlock(io);
         rec.mutex.unlock(io);
         return err;
