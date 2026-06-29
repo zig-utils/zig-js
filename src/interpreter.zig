@@ -31347,6 +31347,8 @@ fn temporalPlainTimeUntilFn(comptime sign: f64) value.NativeFn {
             const other = try toPlainTimeData(self, if (args.len > 0) args[0] else Value.undef());
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference largestUnit must be hour or smaller");
+            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference smallestUnit must be hour or smaller");
+            try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
             var diff = @as(i128, @intFromFloat(sign)) * (timeToNs(&other) - timeToNs(this.asObj().temporal.?));
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
             return makeDuration(self, balanceTimeNs(diff, opts.largest));
