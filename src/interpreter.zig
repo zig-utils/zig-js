@@ -32846,7 +32846,8 @@ fn zdtOffsetMatchesLocal(tz: TimeZone, local_ns: i128, offset_ns: i128) bool {
 
 fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: ZdtOffsetBehavior, disambiguation: ZdtDisambiguation) EvalError!i128 {
     const local_ns = p.epoch_ns + p.offset_ns;
-    try checkZdtLocalDateTimeNs(self, local_ns);
+    const skip_wall_range = p.has_offset and (behavior == .use or (behavior == .ignore and isFixedTimeZone(tz)));
+    if (!skip_wall_range) try checkZdtLocalDateTimeNs(self, local_ns);
     const epoch_ns: i128 = if (p.z) p.epoch_ns else blk: {
         const actual = if (p.has_offset and p.offset_has_seconds)
             timeZoneOffsetAtEpoch(tz.name, p.epoch_ns, tz.offset_ns)
