@@ -308,6 +308,8 @@ threading architecture:
   `join()` / `asyncJoin()` while property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise
   assimilation through `join()` / `asyncJoin()` while waiters are parked,
+  deterministic `Lock.asyncHold()` barging where a sync hold legally overtakes
+  a queued no-fn async ticket before `await` delivers its release function,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
   delivery interleaved with `join()` / `asyncJoin()` and unregister-token
   suppression, cleanup delivery after parked property/condition waiters resume,

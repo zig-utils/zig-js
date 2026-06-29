@@ -2549,6 +2549,80 @@ fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool 
     return true;
 }
 
+fn runAsyncHoldBargingLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    }) catch {
+        std.debug.print("seed {d}: asyncHold barging lifecycle context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(async () => {{
+        \\  const marker = {d};
+        \\  const lock = new Lock();
+        \\  let ticket;
+        \\  let score = 0;
+        \\  lock.hold(() => {{
+        \\    const t = new Thread(() => lock.asyncHold());
+        \\    ticket = t.join();
+        \\    if (!(ticket instanceof Promise))
+        \\      throw new Error('asyncHold barging join did not return a Promise');
+        \\    score += 1;
+        \\  }});
+        \\  let barged = false;
+        \\  lock.hold(() => {{
+        \\    barged = true;
+        \\    score += 10;
+        \\  }});
+        \\  if (!barged)
+        \\    throw new Error('sync hold did not barge before async ticket delivery');
+        \\  const release = await ticket;
+        \\  if (typeof release !== 'function')
+        \\    throw new Error('asyncHold barging ticket did not resolve to release function');
+        \\  if (!lock.locked)
+        \\    throw new Error('asyncHold barging ticket was not granted');
+        \\  release();
+        \\  if (lock.locked)
+        \\    throw new Error('asyncHold barging release did not unlock');
+        \\  return marker + score + 100;
+        \\}})()
+        \\
+    ,
+        .{seed},
+    );
+    defer gpa.free(src);
+
+    const promise_value = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold barging lifecycle JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    var machine = ctx.interpreter();
+    const result = machine.awaitValue(promise_value) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: asyncHold barging await failed {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const expected = seed + 111;
+    if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected))) {
+        std.debug.print("seed {d}: asyncHold barging got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_635f_7761);
     const r = prng.random();
@@ -2938,6 +3012,7 @@ pub fn main(init: std.process.Init) !void {
     // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
     // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume,
+    // asyncHold barging delivery after a deterministic queued ticket,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
     // nested threads plus throwing and async-joined workers. The oracle is not "no
     // throw":
@@ -2952,7 +3027,8 @@ pub fn main(init: std.process.Init) !void {
     // while waiters resume cleanly, cleanup delivery must match exact count/sum
     // oracles when thread results are observed through both join paths, when
     // unregister tokens suppress some records, and after parked property and
-    // condition waiters resume; ThreadLocal values must stay
+    // condition waiters resume; asyncHold barging must deliver a pending
+    // no-fn grant after a sync hold legally overtakes it; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, and async-joined lifecycles.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
@@ -2975,10 +3051,11 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runAsyncHoldBargingLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 15, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 16, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

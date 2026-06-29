@@ -146,7 +146,9 @@ context APIs.
   condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /
   `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
-  cleanup count/sum oracles, and cleanup delivery interleaved with `join()` /
+  cleanup count/sum oracles, deterministic `Lock.asyncHold()` barging where a
+  sync hold legally overtakes a queued no-fn async ticket before `await`
+  delivers its release function, and cleanup delivery interleaved with `join()` /
   `asyncJoin()` plus unregister-token suppression, plus cleanup delivery after
   parked property/condition waiters resume. Keep extending it toward more
   teardown ordering, broader cross-realm scheduling, and richer

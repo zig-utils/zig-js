@@ -178,8 +178,10 @@ as embedders exercise more threaded host patterns.
   `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
   cleanup count/sum oracles, cleanup delivery interleaved with `join()` /
   `asyncJoin()` and unregister-token suppression, cleanup delivery after parked
-  property/condition waiters resume, and `ThreadLocal` isolation across normal,
-  throwing, nested, and async-joined thread lifecycles.
+  property/condition waiters resume, deterministic `Lock.asyncHold()` barging
+  where a sync hold legally overtakes a queued no-fn async ticket before
+  `await` delivers its release function, and `ThreadLocal` isolation across
+  normal, throwing, nested, and async-joined thread lifecycles.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic, mid-script GC wait-pump, lifecycle, ReleaseSafe,
   and deterministic-result verification.
