@@ -29229,8 +29229,16 @@ fn parseDateTimeNs(self: *Interpreter, s_in: []const u8) EvalError!ParsedDT {
 fn temporalPlainDateFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
-    const f = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), !reject);
+    const item = if (args.len > 0) args[0] else Value.undef();
+    const options = if (args.len > 1) args[1] else Value.undef();
+    const f = if (isObjectLike(item) and !isAnyTemporal(item)) blk: {
+        const reject = try readOverflowReject(self, options);
+        break :blk try toPlainDateFields(self, item, !reject);
+    } else blk: {
+        const parsed = try toPlainDateFields(self, item, true);
+        _ = try readOverflowReject(self, options);
+        break :blk parsed;
+    };
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intCast(f.y);
     o.temporal.?.month = f.m;
@@ -31864,8 +31872,16 @@ fn temporalDateTimeWithPlainDateFn(ctx: *anyopaque, this: Value, args: []const V
 fn temporalDateTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
-    const t = try toPlainDateTimeData(self, if (args.len > 0) args[0] else Value.undef(), !reject);
+    const item = if (args.len > 0) args[0] else Value.undef();
+    const options = if (args.len > 1) args[1] else Value.undef();
+    const t = if (isObjectLike(item) and !isAnyTemporal(item)) blk: {
+        const reject = try readOverflowReject(self, options);
+        break :blk try toPlainDateTimeData(self, item, !reject);
+    } else blk: {
+        const parsed = try toPlainDateTimeData(self, item, true);
+        _ = try readOverflowReject(self, options);
+        break :blk parsed;
+    };
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.* = t;
     o.temporal.?.kind = .plain_date_time;
