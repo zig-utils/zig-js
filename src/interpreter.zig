@@ -27345,6 +27345,27 @@ fn durSame(a: [10]f64, b: [10]f64) bool {
     return true;
 }
 
+fn durationLargestPresentUnit(dur: [10]f64) TUnit {
+    inline for (.{
+        .{ 3, TUnit.day },
+        .{ 4, TUnit.hour },
+        .{ 5, TUnit.minute },
+        .{ 6, TUnit.second },
+        .{ 7, TUnit.millisecond },
+        .{ 8, TUnit.microsecond },
+        .{ 9, TUnit.nanosecond },
+    }) |field| {
+        if (dur[field[0]] != 0) return field[1];
+    }
+    return .nanosecond;
+}
+
+fn durationLargestPresentUnit2(a: [10]f64, b: [10]f64) TUnit {
+    const au = durationLargestPresentUnit(a);
+    const bu = durationLargestPresentUnit(b);
+    return if (@intFromEnum(au) < @intFromEnum(bu)) au else bu;
+}
+
 /// IsValidDuration's magnitude bounds: every field finite, the calendar fields
 /// (years/months/weeks) below 2^32, and the days+time portion (expressed in
 /// seconds) below 2^53.
@@ -27395,9 +27416,8 @@ fn temporalDurationAddImpl(comptime sign: f64) value.NativeFn {
             const b = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             if (durHasCalendar(a) or durHasCalendar(b))
                 return self.throwError("RangeError", "Temporal.Duration add/subtract with calendar units requires relativeTo");
-            var out: [10]f64 = undefined;
-            for (0..10) |i| out[i] = a[i] + sign * b[i];
-            out = balanceTimeNs(durationTimeNs(out), .day);
+            const total_ns = durationDayTimeNs(a) + @as(i128, @intFromFloat(sign)) * durationDayTimeNs(b);
+            const out = balanceTimeNs(total_ns, durationLargestPresentUnit2(a, b));
             return makeDuration(self, out);
         }
     }.call;
