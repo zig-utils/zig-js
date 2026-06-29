@@ -82,6 +82,7 @@ jobs:
           # Lifecycle profile: deterministic termination storms (main throws
           # with parked/unjoined Threads), cross-realm Worker + shared-realm
           # Thread overlap on one SharedArrayBuffer with an exact counter oracle,
+          # Worker/thread/finalization scheduling on one retained SAB,
           # Worker handler exception recovery, Thread.restrict lifecycle
           # isolation, and cross-thread finalization cleanup count/sum oracles
           # including parked-waiter delivery and unregister-token suppression.

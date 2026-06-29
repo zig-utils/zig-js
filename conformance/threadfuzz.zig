@@ -1381,6 +1381,236 @@ fn runWorkerExceptionRecovery(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runWorkerThreadFinalizationInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6372_6f73_735f_6669);
+    const r = prng.random();
+    const nworkers = 1 + r.uintLessThan(usize, 3);
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const worker_iters = 90 + r.uintLessThan(usize, 180);
+    const per_thread = 8 + r.uintLessThan(usize, 10);
+
+    var expected_join_sum: usize = 0;
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 30_000;
+        expected_join_sum += base + per_thread + id;
+        expected_cleanup_count += per_thread;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) expected_cleanup_sum += base + i;
+    }
+    const expected_counter = nworkers * worker_iters + nthreads * per_thread;
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: worker/thread finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const msg_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__workerThreadFinMsg = {{ sab: new SharedArrayBuffer(32), iters: {d}, close: true }}; globalThis.__workerThreadFinMsg",
+        .{worker_iters},
+    );
+    defer gpa.free(msg_src);
+    const msg = ctx.evaluate(msg_src) catch |err| {
+        std.debug.print("seed {d}: cannot create worker/thread finalization message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const worker_src =
+        \\globalThis.onmessage = (e) => {
+        \\  const v = new Int32Array(e.data.sab);
+        \\  Atomics.add(v, 2, 1);
+        \\  Atomics.notify(v, 2);
+        \\  while (Atomics.load(v, 1) === 0)
+        \\    Atomics.wait(v, 1, 0, 100);
+        \\  for (let i = 0; i < e.data.iters; i++)
+        \\    Atomics.add(v, 0, 1);
+        \\  postMessage({ done: true, after: Atomics.add(v, 3, 1) + 1 });
+        \\  if (e.data.close) close();
+        \\};
+    ;
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawn(worker_src) catch {
+            std.debug.print("seed {d}: worker/thread finalization worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: worker/thread finalization postMessage failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const js_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__workerThreadFinCleanupCount = 0;
+        \\  globalThis.__workerThreadFinCleanupSum = 0;
+        \\  globalThis.__workerThreadFinOracle = 0;
+        \\  globalThis.__workerThreadFinRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__workerThreadFinCleanupCount++;
+        \\    globalThis.__workerThreadFinCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__workerThreadFinRegistry;
+        \\  const v = new Int32Array(globalThis.__workerThreadFinMsg.sab);
+        \\  const threads = [];
+        \\  let asyncSum = 0;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per) => {{
+        \\      const local = new Int32Array(globalThis.__workerThreadFinMsg.sab);
+        \\      const base = (id + 1) * 30000;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        Atomics.add(local, 0, 1);
+        \\        let target = {{ id, i, payload: 'worker-thread-fin-' + id + '-' + i }};
+        \\        registry.register(target, base + i);
+        \\        target = null;
+        \\      }}
+        \\      Atomics.add(local, 4, 1);
+        \\      return base + per + id;
+        \\    }}, id, {d});
+        \\    t.asyncJoin().then(
+        \\      (value) => {{ asyncSum += value; }},
+        \\      () => {{ asyncSum = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  while (Atomics.load(v, 2) < {d})
+        \\    Atomics.wait(v, 2, Atomics.load(v, 2), 1);
+        \\  Atomics.store(v, 1, 1);
+        \\  Atomics.notify(v, 1, {d});
+        \\  let joinSum = 0;
+        \\  for (const t of threads) joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad worker/thread finalization join sum ' + joinSum);
+        \\  if (Atomics.load(v, 4) !== {d})
+        \\    throw new Error('bad worker/thread finalization thread done count ' + Atomics.load(v, 4));
+        \\  threads.length = 0;
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncSum !== {d})
+        \\      throw new Error('bad worker/thread finalization async sum ' + asyncSum);
+        \\    globalThis.__workerThreadFinOracle = 1;
+        \\  }});
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, per_thread, nworkers, nworkers + nthreads + 4, expected_join_sum, nthreads, expected_join_sum },
+    );
+    defer gpa.free(js_src);
+
+    const joined = ctx.evaluate(js_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker/thread finalization JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: worker/thread finalization joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+    const oracle = ctx.evaluate("globalThis.__workerThreadFinOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read worker/thread finalization oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: worker/thread finalization oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+
+    var replies: usize = 0;
+    while (replies < nworkers) : (replies += 1) {
+        const reply = (workers.items[replies].receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: worker/thread finalization receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }) orelse {
+            std.debug.print("seed {d}: worker/thread finalization receive timed out\n", .{seed});
+            return false;
+        };
+        const done = machine.getProperty(reply, "done") catch |err| {
+            std.debug.print("seed {d}: cannot read worker/thread finalization done: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const after = machine.getProperty(reply, "after") catch |err| {
+            std.debug.print("seed {d}: cannot read worker/thread finalization after: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!done.isBoolean() or !done.asBool() or !after.isNumber() or after.asNum() < 1 or after.asNum() > @as(f64, @floatFromInt(nworkers))) {
+            std.debug.print("seed {d}: bad worker/thread finalization reply\n", .{seed});
+            return false;
+        }
+    }
+    for (workers.items) |w| {
+        w.join();
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const counter = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__workerThreadFinMsg.sab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read worker/thread finalization counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!counter.isNumber() or counter.asNum() != @as(f64, @floatFromInt(expected_counter))) {
+        std.debug.print("seed {d}: worker/thread finalization counter got {d}, expected {d}\n", .{ seed, if (counter.isNumber()) counter.asNum() else -1, expected_counter });
+        return false;
+    }
+    const worker_done = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__workerThreadFinMsg.sab), 3)") catch |err| {
+        std.debug.print("seed {d}: cannot read worker/thread finalization worker done: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!worker_done.isNumber() or worker_done.asNum() != @as(f64, @floatFromInt(nworkers))) {
+        std.debug.print("seed {d}: worker/thread finalization worker done got {d}, expected {d}\n", .{ seed, if (worker_done.isNumber()) worker_done.asNum() else -1, nworkers });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__workerThreadFinRegistry.cleanupSome();
+        \\  if (globalThis.__workerThreadFinCleanupCount !== {d})
+        \\    throw new Error('bad worker/thread finalization cleanup count: ' + globalThis.__workerThreadFinCleanupCount);
+        \\  if (globalThis.__workerThreadFinCleanupSum !== {d})
+        \\    throw new Error('bad worker/thread finalization cleanup sum: ' + globalThis.__workerThreadFinCleanupSum);
+        \\  return globalThis.__workerThreadFinCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: worker/thread finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: worker/thread finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runThreadExceptionWaiterInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7468_7265_6164_6578);
     const r = prng.random();
@@ -2702,10 +2932,11 @@ pub fn main(init: std.process.Init) !void {
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
     // Worker/thread SAB overlap, simple, diamond, and fanout/rejoin
     // module-worker/thread overlap, mixed close/terminate/postMessage ordering,
-    // worker handler exception recovery, Thread exception identity and returned
-    // waitAsync promise assimilation across join/asyncJoin while waiters are
-    // parked, cross-thread FinalizationRegistry cleanup, FinalizationRegistry
-    // cleanup interleaved with join/asyncJoin and unregister tokens, cleanup
+    // worker handler exception recovery, Worker/thread/finalization scheduling,
+    // Thread exception identity and returned waitAsync promise assimilation
+    // across join/asyncJoin while waiters are parked, cross-thread
+    // FinalizationRegistry cleanup, FinalizationRegistry cleanup interleaved
+    // with join/asyncJoin and unregister tokens, cleanup
     // delivery after parked property/condition waiters resume,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
     // nested threads plus throwing and async-joined workers. The oracle is not "no
@@ -2714,7 +2945,9 @@ pub fn main(init: std.process.Init) !void {
     // cleanly, overlap must produce exact synchronized counter values, and
     // close/terminate races must drain/drop messages according to channel
     // lifetime rules, thrown worker handlers must not poison later deliveries,
-    // thread exceptions must keep identity through blocking and async joiners,
+    // Worker/thread/finalization scheduling must preserve the retained-SAB
+    // counter plus exact cleanup delivery, thread exceptions must keep identity
+    // through blocking and async joiners,
     // thread-returned waitAsync promises must settle through join/asyncJoin
     // while waiters resume cleanly, cleanup delivery must match exact count/sum
     // oracles when thread results are observed through both join paths, when
@@ -2736,6 +2969,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runModuleWorkerFanoutOverlap(gpa, seed))) lfail += 1;
             if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
+            if (!(try runWorkerThreadFinalizationInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
@@ -2744,7 +2978,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 14, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 15, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

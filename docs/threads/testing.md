@@ -124,10 +124,11 @@ lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
 parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script
 `Worker` plus simple-import, diamond-shaped, and fanout/rejoin module `Worker`
-overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`, and
-mixed `close` / `terminate` / `postMessage` ordering coverage plus worker
-handler-exception recovery after a thrown `onmessage`, `Thread.restrict`
-lifecycle isolation, Thread exception identity through `join()` / `asyncJoin()`
+overlap with shared-realm `Thread`s on one retained `SharedArrayBuffer`,
+Worker/thread/finalization scheduling on one retained SAB, and mixed `close` /
+`terminate` / `postMessage` ordering coverage plus worker handler-exception
+recovery after a thrown `onmessage`, `Thread.restrict` lifecycle isolation,
+Thread exception identity through `join()` / `asyncJoin()`
 while property and condition waiters are parked, thread-returned typed-array
 `waitAsync` promise assimilation through
 `join()` / `asyncJoin()` while waiters are parked, and cross-thread
@@ -135,7 +136,7 @@ while property and condition waiters are parked, thread-returned typed-array
 with `join()` / `asyncJoin()` and unregister-token suppression, cleanup delivery
 after parked property/condition waiters resume, plus `ThreadLocal` isolation
 across normal, throwing, nested, and async-joined thread lifecycles. Each seed
-currently runs 14 deterministic lifecycle subprograms.
+currently runs 15 deterministic lifecycle subprograms.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
 GIL-free parallel contexts. The full corpus is too slow for every PR, so CI

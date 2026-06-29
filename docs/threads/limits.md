@@ -137,8 +137,9 @@ context APIs.
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
   diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
-  Atomics counter oracles, mixed terminate/close/postMessage races, and worker
-  handler-exception recovery plus `Thread.restrict` lifecycle isolation, Thread
+  Atomics counter oracles, Worker/thread/finalization scheduling on one retained
+  SAB, mixed terminate/close/postMessage races, and worker handler-exception
+  recovery plus `Thread.restrict` lifecycle isolation, Thread
   exception identity through `join()` / `asyncJoin()` while property and
   condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /

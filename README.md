@@ -299,8 +299,9 @@ threading architecture:
   cleanup count/sum delivery; the lifecycle
   profile adds deterministic termination storms, script Worker/thread overlap
   plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
-  overlap over retained `SharedArrayBuffer` storage, and mixed `close` /
-  `terminate` / `postMessage` ordering plus worker handler-exception recovery,
+  overlap over retained `SharedArrayBuffer` storage, Worker/thread/finalization
+  scheduling on one retained SAB, and mixed `close` / `terminate` /
+  `postMessage` ordering plus worker handler-exception recovery,
   `Thread.restrict` lifecycle isolation, Thread exception identity through
   `join()` / `asyncJoin()` while property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise
