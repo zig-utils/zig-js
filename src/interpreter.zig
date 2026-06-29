@@ -29535,6 +29535,7 @@ fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const V
     const precision = try readTemporalStringPrecision(self, options, .minute);
     const t = this.asObj().temporal.?;
     const rounded_time = roundNsForString(timeToNs(t), precision);
+    try checkPlainDateTimeNs(self, @as(i128, calendarEpochDay(t.calendar, t.year, t.month, t.day)) * 86_400_000_000_000 + rounded_time);
     const day_delta = @divFloor(rounded_time, 86_400_000_000_000);
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     const c = tCivilFromDays(tDaysFromCivil(iso.y, iso.m, iso.d) + @as(i64, @intCast(day_delta)));
@@ -31767,6 +31768,7 @@ fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Valu
     const t = this.asObj().temporal.?;
     const total = dateTimeToNs(t);
     const rounded = roundNs(total, opts.smallest, opts.increment, opts.mode);
+    try checkPlainDateTimeNs(self, rounded);
     const days = @divFloor(rounded, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
