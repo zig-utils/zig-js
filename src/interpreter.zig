@@ -29502,6 +29502,16 @@ fn setTimeFields(t: *value.TemporalData, vals: [6]f64) void {
     t.nanosecond = @intFromFloat(vals[5]);
 }
 
+fn regulateTimeFields(self: *Interpreter, vals: *[6]f64, reject: bool) EvalError!void {
+    const max = [_]f64{ 23, 59, 59, 999, 999, 999 };
+    for (vals, max) |*v, hi| {
+        if (v.* < 0 or v.* > hi) {
+            if (reject) return self.throwError("RangeError", "time component out of range");
+            v.* = @min(hi, @max(0, v.*));
+        }
+    }
+}
+
 const PlainTimeField = enum { hour, minute, second, millisecond, microsecond, nanosecond };
 fn temporalPlainTimeGetter(comptime f: PlainTimeField) value.NativeFn {
     return struct {
@@ -29659,6 +29669,11 @@ fn hasPlainDateTimeLikeField(self: *Interpreter, bag: Value) EvalError!bool {
         if (try hasBagField(self, bag, name)) return true;
     }
     return false;
+}
+
+fn hasZonedDateTimeWithField(self: *Interpreter, bag: Value) EvalError!bool {
+    if (try hasPlainDateTimeLikeField(self, bag)) return true;
+    return try hasBagField(self, bag, "offset");
 }
 
 /// `monthCode` override → month number, falling back to the `month` field.
@@ -33481,7 +33496,10 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: argument must be an object");
     var l = zdtLocal(t);
+    try rejectObjectWithCalendarOrTimeZone(self, bag);
     try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
+    if (!(try hasZonedDateTimeWithField(self, bag)))
+        return self.throwError("TypeError", "Temporal.ZonedDateTime.prototype.with: property bag must contain at least one valid field");
     const options = if (args.len > 1) args[1] else Value.undef();
     const reject = try readOverflowReject(self, options);
     const offset_behavior = try readZdtOffsetBehavior(self, options);
@@ -33494,6 +33512,7 @@ fn temporalZdtWithFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const cur = [_]i64{ l.hour, l.minute, l.second, l.millisecond, l.microsecond, l.nanosecond };
     var vals: [6]f64 = undefined;
     for (names, 0..) |nm, i| vals[i] = @floatFromInt(try withIntField(self, bag, nm, cur[i]));
+    try regulateTimeFields(self, &vals, reject);
     l.year = @intCast(r.y);
     l.month = r.m;
     l.day = r.d;
