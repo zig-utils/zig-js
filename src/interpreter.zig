@@ -26904,7 +26904,7 @@ fn differenceISODate(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: 
 }
 
 /// A resolved `relativeTo` anchor: an ISO date plus its time-of-day in ns.
-const RelTo = struct { y: i64, m: u8, d: u8, time_ns: i128 };
+const RelTo = struct { y: i64, m: u8, d: u8, time_ns: i128, zoned: bool = false, epoch_ns: i128 = 0 };
 
 /// Resolve the `relativeTo` option (a Temporal date/dateTime/zonedDateTime, an
 /// ISO string, or a property bag). Null when absent.
@@ -26917,7 +26917,11 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         const t = rv.asObj().temporal.?;
         switch (t.kind) {
             .plain_date => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = 0 },
-            .plain_date_time, .zoned_date_time => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = timeToNs(t) },
+            .plain_date_time => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = timeToNs(t) },
+            .zoned_date_time => {
+                const local = zdtLocal(t);
+                return .{ .y = local.year, .m = local.month, .d = local.day, .time_ns = timeToNs(&local), .zoned = true, .epoch_ns = t.epoch_ns };
+            },
             else => return self.throwError("TypeError", "relativeTo must be a PlainDate, PlainDateTime, or ZonedDateTime"),
         }
     }
@@ -26934,7 +26938,7 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         const tod: i128 = @as(i128, p.h) * nsPerUnit(.hour) + @as(i128, p.mi) * nsPerUnit(.minute) +
             @as(i128, p.s) * nsPerUnit(.second) + @as(i128, p.ms) * nsPerUnit(.millisecond) +
             @as(i128, p.us) * nsPerUnit(.microsecond) + @as(i128, p.ns);
-        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod };
+        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod, .zoned = ann.has_tz, .epoch_ns = p.epoch_ns };
     }
     if (rv.isObject()) {
         const cv = try self.getProperty(rv, "calendar");
@@ -26986,16 +26990,22 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
                 return self.throwError("RangeError", "offset does not match time zone");
         };
         try checkIsoDate(self, y.?, m.?, d.?);
+        const time_ns = @as(i128, @intFromFloat(vals[0])) * nsPerUnit(.hour) +
+            @as(i128, @intFromFloat(vals[1])) * nsPerUnit(.minute) +
+            @as(i128, @intFromFloat(vals[2])) * nsPerUnit(.second) +
+            @as(i128, @intFromFloat(vals[3])) * nsPerUnit(.millisecond) +
+            @as(i128, @intFromFloat(vals[4])) * nsPerUnit(.microsecond) +
+            @as(i128, @intFromFloat(vals[5]));
+        const local_ns = @as(i128, tDaysFromCivil(@intFromFloat(y.?), @intFromFloat(m.?), @intFromFloat(d.?))) * DAY_NS + time_ns;
+        const zoned = time_zone != null;
+        const epoch_ns = if (time_zone) |tz| local_ns - @as(i128, tz.offset_ns) else 0;
         return .{
             .y = @intFromFloat(y.?),
             .m = @intFromFloat(m.?),
             .d = @intFromFloat(d.?),
-            .time_ns = @as(i128, @intFromFloat(vals[0])) * nsPerUnit(.hour) +
-                @as(i128, @intFromFloat(vals[1])) * nsPerUnit(.minute) +
-                @as(i128, @intFromFloat(vals[2])) * nsPerUnit(.second) +
-                @as(i128, @intFromFloat(vals[3])) * nsPerUnit(.millisecond) +
-                @as(i128, @intFromFloat(vals[4])) * nsPerUnit(.microsecond) +
-                @as(i128, @intFromFloat(vals[5])),
+            .time_ns = time_ns,
+            .zoned = zoned,
+            .epoch_ns = epoch_ns,
         };
     }
     return self.throwError("TypeError", "invalid relativeTo");
@@ -27003,8 +27013,8 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
 
 fn relativeTimeField(self: *Interpreter, v: Value, name: []const u8, max: f64) EvalError!f64 {
     const n = try temporalIntArg(self, v, name);
-    if (n < 0 or n > max) return self.throwError("RangeError", "time component out of range");
-    return n;
+    if (n < 0) return self.throwError("RangeError", "time component out of range");
+    return @min(n, max);
 }
 
 fn relativeTimeZoneField(self: *Interpreter, v: Value) EvalError!TimeZone {
@@ -27048,17 +27058,20 @@ fn durTimeOnlyNs(dur: [10]f64) i128 {
 
 /// The absolute end nanoseconds of `rel + dur` (calendar part added on the date,
 /// time part added on top), and the start nanoseconds of `rel`.
-fn durEndpointsNs(dur: [10]f64, rel: RelTo) struct { start: i128, end: i128 } {
+fn durEndpointsNs(self: *Interpreter, dur: [10]f64, rel: RelTo) EvalError!struct { start: i128, end: i128 } {
     const end_date = isoDateAdd(rel.y, rel.m, rel.d, @intFromFloat(dur[0]), @intFromFloat(dur[1]), @intFromFloat(dur[2]), @intFromFloat(dur[3]));
+    try checkIsoDate(self, @floatFromInt(end_date.y), @floatFromInt(end_date.m), @floatFromInt(end_date.d));
     const start = @as(i128, tDaysFromCivil(rel.y, rel.m, rel.d)) * DAY_NS + rel.time_ns;
     const end = @as(i128, tDaysFromCivil(end_date.y, end_date.m, end_date.d)) * DAY_NS + rel.time_ns + durTimeOnlyNs(dur);
+    try checkPlainDateTimeNs(self, end);
+    if (rel.zoned) try checkInstantEpochNs(self, rel.epoch_ns + (end - start));
     return .{ .start = start, .end = end };
 }
 
 /// Temporal.Duration.prototype.total with a `relativeTo` anchor (ISO calendar):
 /// the (fractional) total of the duration measured in `unit`.
 fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) EvalError!f64 {
-    const ep = durEndpointsNs(dur, rel);
+    const ep = try durEndpointsNs(self, dur, rel);
     // Day-and-smaller units (and weeks) have a fixed nanosecond length.
     if (unit == .day or @intFromEnum(unit) > @intFromEnum(TUnit.day)) {
         return decimalTotalFromNs(self, ep.end - ep.start, nsPerUnit(unit), 40);
@@ -27080,6 +27093,8 @@ fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) E
         isoDateAdd(rel.y, rel.m, rel.d, whole + sign, 0, 0, 0)
     else
         isoDateAdd(rel.y, rel.m, rel.d, 0, whole + sign, 0, 0);
+    try checkIsoDate(self, @floatFromInt(lo_date.y), @floatFromInt(lo_date.m), @floatFromInt(lo_date.d));
+    try checkIsoDate(self, @floatFromInt(hi_date.y), @floatFromInt(hi_date.m), @floatFromInt(hi_date.d));
     const lo_ns = @as(i128, tDaysFromCivil(lo_date.y, lo_date.m, lo_date.d)) * DAY_NS + rel.time_ns;
     const hi_ns = @as(i128, tDaysFromCivil(hi_date.y, hi_date.m, hi_date.d)) * DAY_NS + rel.time_ns;
     const span = hi_ns - lo_ns;
@@ -27089,7 +27104,7 @@ fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) E
 
 /// Temporal.Duration.prototype.round with a `relativeTo` anchor (ISO calendar).
 fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpts) EvalError![10]f64 {
-    const ep = durEndpointsNs(dur, rel);
+    const ep = try durEndpointsNs(self, dur, rel);
     const smallest = opts.smallest;
     const largest = opts.largest;
     // Case 1: smallestUnit is day or a time unit — round on the nanosecond span.
@@ -27493,8 +27508,8 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
     // With a relativeTo anchor, compare the two durations' absolute endpoints
     // (handles calendar units of differing real length).
     if (try resolveRelativeTo(self, options)) |rel| {
-        const ea = durEndpointsNs(a, rel);
-        const eb = durEndpointsNs(b, rel);
+        const ea = try durEndpointsNs(self, a, rel);
+        const eb = try durEndpointsNs(self, b, rel);
         return Value.num(if (ea.end < eb.end) -1 else if (ea.end > eb.end) 1 else 0);
     }
     if (durSame(a, b)) return Value.num(0);
