@@ -32900,7 +32900,7 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         time_zone_name = (try dtfGetStr(self, options, "timeZoneName", &.{ "auto", "never", "critical" }, "auto")).?;
     }
     const t = this.asObj().temporal.?;
-    const rounded_epoch = roundNsForString(t.epoch_ns, precision);
+    const rounded_epoch = roundInstantNsForString(t.epoch_ns, precision);
     const render_offset = timeZoneOffsetAtEpoch(t.tz_name, rounded_epoch, t.tz_offset_ns);
     const local_ns = rounded_epoch + @as(i128, render_offset);
     const days = @divFloor(local_ns, 86_400_000_000_000);
