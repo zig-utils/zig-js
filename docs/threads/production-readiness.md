@@ -152,9 +152,11 @@ as embedders exercise more threaded host patterns.
   shared-realm `Thread`s on one retained `SharedArrayBuffer`, and mixed
   `close` / `terminate` / `postMessage` ordering coverage plus worker
   handler-exception recovery, Thread exception identity through `join()` /
-  `asyncJoin()` while property and condition waiters are parked, cross-thread
-  `FinalizationRegistry` cleanup count/sum oracles, and `ThreadLocal` isolation
-  across normal, throwing, nested, and async-joined thread lifecycles.
+  `asyncJoin()` while property and condition waiters are parked,
+  thread-returned typed-array `waitAsync` promise assimilation through `join()` /
+  `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
+  cleanup count/sum oracles, and `ThreadLocal` isolation across normal,
+  throwing, nested, and async-joined thread lifecycles.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic, mid-script GC wait-pump, lifecycle, ReleaseSafe,
   and deterministic-result verification.
