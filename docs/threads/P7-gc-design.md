@@ -153,11 +153,12 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   the `zig-gc` heap still sees a normal allocator, while 16-byte-aligned cell
   slabs are recycled from 64 KiB size-class chunks and non-cell heap side storage
   delegates unchanged. Chunk ownership is tracked per size class, so free/remap
-  classification first rejects pointers outside the bucket address span and then
-  scans only the matching-size chunks instead of the entire backing. At context
-  teardown the backing switches to bulk-teardown mode: `zig-gc` still finalizes
-  every live cell, but owned cell frees skip freelist
-  rebuilds because the backing releases all chunks immediately afterward.
+  classification first rejects pointers outside the bucket address span, tries a
+  per-bucket recent-chunk hint, and only then scans the matching-size chunks
+  instead of the entire backing. At context teardown the backing switches to
+  bulk-teardown mode: `zig-gc` still finalizes every live cell, but owned cell
+  frees skip freelist rebuilds because the backing releases all chunks
+  immediately afterward.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron

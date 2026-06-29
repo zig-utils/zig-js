@@ -50,6 +50,8 @@ Known performance/maturity work:
   storage unchanged. Ownership classification is now bucket-local too, so
   collection and context teardown first reject pointers outside each bucket's
   address span and do not scan unrelated size-class chunks when freeing a cell.
+  A per-bucket recent-chunk hint keeps repeated frees/remaps from the same slab
+  on the fast path instead of restarting the bucket chunk walk each time.
   During `Context.destroy`, the backing enters bulk-teardown mode so `zig-gc`'s
   per-cell frees do not rebuild freelists immediately before the backing releases
   whole chunks. This cuts the old

@@ -98,6 +98,10 @@ pub const GcCellBacking = struct {
     lock: std.atomic.Value(u32) = .init(0),
     bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
+    /// Last chunk that classified an owned pointer for each bucket. GC frees
+    /// and teardown usually arrive in chunk-local runs, so this avoids restarting
+    /// the chunk walk for every cell while preserving exact ownership checks.
+    bucket_owns_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
     bucket_addr_min: [bucket_count]usize = .{
         std.math.maxInt(usize),
         std.math.maxInt(usize),
@@ -129,6 +133,7 @@ pub const GcCellBacking = struct {
         const slots = @max(@as(usize, 1), chunk_bytes / slot_size);
         const chunk_len = slots * slot_size;
         const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
+        const chunk_idx = self.bucket_chunks[idx].items.len;
         self.bucket_chunks[idx].append(self.inner, chunk) catch {
             self.inner.free(chunk);
             return false;
@@ -143,16 +148,27 @@ pub const GcCellBacking = struct {
             node.next = self.free_lists[idx];
             self.free_lists[idx] = node;
         }
+        self.bucket_owns_hint[idx] = chunk_idx;
         return true;
+    }
+
+    inline fn chunkOwnsPtr(chunk: []align(16) u8, addr: usize) bool {
+        const start = @intFromPtr(chunk.ptr);
+        return addr >= start and addr < start + chunk.len;
     }
 
     fn ownsPtrLocked(self: *GcCellBacking, idx: usize, ptr: [*]u8) bool {
         const addr = @intFromPtr(ptr);
         if (addr < self.bucket_addr_min[idx] or addr >= self.bucket_addr_max[idx]) return false;
-        for (self.bucket_chunks[idx].items) |chunk| {
-            const start = @intFromPtr(chunk.ptr);
-            const end = start + chunk.len;
-            if (addr >= start and addr < end) return true;
+        if (self.bucket_owns_hint[idx]) |hint| {
+            const chunks = self.bucket_chunks[idx].items;
+            if (hint < chunks.len and chunkOwnsPtr(chunks[hint], addr)) return true;
+        }
+        for (self.bucket_chunks[idx].items, 0..) |chunk, chunk_idx| {
+            if (chunkOwnsPtr(chunk, addr)) {
+                self.bucket_owns_hint[idx] = chunk_idx;
+                return true;
+            }
         }
         return false;
     }
@@ -248,6 +264,7 @@ pub const GcCellBacking = struct {
             self.bucket_addr_max[idx] = 0;
         }
         self.free_lists = .{ null, null, null, null, null, null };
+        self.bucket_owns_hint = .{ null, null, null, null, null, null };
         self.bulk_teardown = false;
     }
 };
@@ -301,6 +318,39 @@ test "GC cell backing rejects pointers outside bucket address spans before scann
     try std.testing.expect(!backing.ownsPtrLocked(idx, foreign.ptr));
     try std.testing.expect(@intFromPtr(cell.ptr) >= backing.bucket_addr_min[idx]);
     try std.testing.expect(@intFromPtr(cell.ptr) < backing.bucket_addr_max[idx]);
+}
+
+test "GC cell backing ownership hint avoids repeated bucket chunk scans" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const slots_per_chunk = GcCellBacking.chunk_bytes / GcCellBacking.bucket_sizes[idx];
+    var cells = try std.testing.allocator.alloc([]align(16) u8, slots_per_chunk + 1);
+    defer std.testing.allocator.free(cells);
+
+    var allocated: usize = 0;
+    errdefer for (cells[0..allocated]) |cell| a.free(cell);
+    for (cells) |*cell| {
+        cell.* = try a.alignedAlloc(u8, .@"16", 200);
+        allocated += 1;
+    }
+    defer {
+        for (cells[0..allocated]) |cell| a.free(cell);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_chunks[idx].items.len);
+
+    backing.acquire();
+    defer backing.unlock();
+    backing.bucket_owns_hint[idx] = null;
+    try std.testing.expect(backing.ownsPtrLocked(idx, cells[0].ptr));
+    const first_hint = backing.bucket_owns_hint[idx].?;
+    try std.testing.expect(backing.ownsPtrLocked(idx, cells[1].ptr));
+    try std.testing.expectEqual(first_hint, backing.bucket_owns_hint[idx].?);
+    try std.testing.expect(backing.ownsPtrLocked(idx, cells[cells.len - 1].ptr));
+    try std.testing.expect(backing.bucket_owns_hint[idx].? != first_hint);
 }
 
 test "GC cell backing bulk teardown skips freelist rebuilds and still delegates side storage" {
