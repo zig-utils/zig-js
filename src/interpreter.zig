@@ -29550,10 +29550,33 @@ fn hasBagField(self: *Interpreter, bag: Value, name: []const u8) EvalError!bool 
     return !(try self.getProperty(bag, name)).isUndefined();
 }
 
+fn isObjectLike(v: Value) bool {
+    return v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint;
+}
+
+fn isAnyTemporal(v: Value) bool {
+    return v.isObject() and v.asObj().temporal != null;
+}
+
 fn rejectUnsupportedEraFieldsForWith(self: *Interpreter, bag: Value, cal: []const u8) EvalError!void {
     if (calEraOf(cal, 0, 1, 1).era != null) return;
     if (try hasBagField(self, bag, "era") or try hasBagField(self, bag, "eraYear"))
         return self.throwError("TypeError", "era/eraYear invalid for this calendar");
+}
+
+fn rejectPlainTimeLikeInvalidFields(self: *Interpreter, bag: Value) EvalError!void {
+    if (try hasBagField(self, bag, "calendar"))
+        return self.throwError("TypeError", "calendar is not valid for a PlainTime-like bag");
+    if (try hasBagField(self, bag, "timeZone"))
+        return self.throwError("TypeError", "timeZone is not valid for a PlainTime-like bag");
+}
+
+fn hasPlainTimeField(self: *Interpreter, bag: Value) EvalError!bool {
+    const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
+    for (names) |name| {
+        if (try hasBagField(self, bag, name)) return true;
+    }
+    return false;
 }
 
 /// `monthCode` override → month number, falling back to the `month` field.
@@ -29619,14 +29642,17 @@ fn temporalPlainTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
-    if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainTime.prototype.with: argument must be an object");
+    if (!isObjectLike(bag) or isAnyTemporal(bag)) return self.throwError("TypeError", "Temporal.PlainTime.prototype.with: argument must be a PlainTime-like object");
+    try rejectPlainTimeLikeInvalidFields(self, bag);
+    if (!(try hasPlainTimeField(self, bag))) return self.throwError("TypeError", "Temporal.PlainTime.prototype.with: argument must contain a time field");
     const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
     const maxes = [_]i64{ 23, 59, 59, 999, 999, 999 };
     const cur = [_]i64{ t.hour, t.minute, t.second, t.millisecond, t.microsecond, t.nanosecond };
+    var raw: [6]i64 = undefined;
+    for (names, 0..) |nm, i| raw[i] = try withIntField(self, bag, nm, cur[i]);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
     var vals: [6]f64 = undefined;
-    for (names, 0..) |nm, i| {
-        const v = try withIntField(self, bag, nm, cur[i]);
+    for (raw, 0..) |v, i| {
         if (reject and (v < 0 or v > maxes[i])) return self.throwError("RangeError", "time component out of range");
         vals[i] = @floatFromInt(@max(0, @min(maxes[i], v))); // constrain
     }
@@ -29640,7 +29666,7 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
-    if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be an object");
+    if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be an object");
     try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
