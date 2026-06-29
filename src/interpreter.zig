@@ -1960,6 +1960,10 @@ pub const Interpreter = struct {
                     }
                     break :blk v;
                 }
+                if (a.target.* == .call) {
+                    _ = try self.eval(a.target);
+                    return self.throwError("ReferenceError", "invalid assignment target");
+                }
                 // Capture the target reference BEFORE the RHS: PutValue uses the
                 // initially-created Reference even if the RHS deletes the `with`
                 // binding or a direct eval introduces a closer one.
@@ -2136,6 +2140,10 @@ pub const Interpreter = struct {
                         break :blk new;
                     },
                     else => {
+                        if (oa.target.* == .call) {
+                            _ = try self.eval(oa.target);
+                            return self.throwError("ReferenceError", "invalid assignment target");
+                        }
                         // super.x etc.: the base is stable, so read + assignTo are safe.
                         const old = try self.eval(oa.target);
                         const rhs = try self.eval(oa.value);
@@ -3125,6 +3133,10 @@ pub const Interpreter = struct {
             const up = if (inc) o + 1 else o - 1;
             try self.setMember(recv, key, Value.num(up));
             return Value.num(if (prefix) up else o);
+        }
+        if (target.* == .call) {
+            _ = try self.eval(target);
+            return self.throwError("ReferenceError", "invalid assignment target");
         }
         var old_val = try self.eval(target);
         // ToNumeric: an object operand coerces via ToPrimitive(number); a BigInt
@@ -9094,6 +9106,10 @@ pub const Interpreter = struct {
                 if (!try self.setMemberResult(Value.obj(parent), key, v, self.this_value)) {
                     if (self.strict) return self.throwError("TypeError", "Cannot set property");
                 }
+            },
+            .call => {
+                _ = try self.eval(target);
+                return self.throwError("ReferenceError", "invalid assignment target");
             },
             // Assignment destructuring: `[a, b] = x` / `({a} = o)`.
             .obj_pattern, .arr_pattern => try self.bindPattern(target, v, false),

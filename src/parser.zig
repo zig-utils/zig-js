@@ -1701,6 +1701,7 @@ pub const Parser = struct {
         const node = try self.parsePostfix();
         return switch (node.*) {
             .identifier, .member, .super_member => node,
+            .call => if (!self.strict) node else null,
             else => null,
         };
     }
@@ -1895,6 +1896,10 @@ pub const Parser = struct {
 
     fn isEvalOrArguments(name: []const u8) bool {
         return std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
+    }
+
+    fn isAnnexBCallAssignmentTarget(node: *const Node) bool {
+        return node.* == .call;
     }
 
     /// A getter takes no parameters; a setter takes exactly one (non-rest)
@@ -2230,6 +2235,7 @@ pub const Parser = struct {
             // An array/object literal on the LHS is a destructuring pattern.
             const target = switch (left.*) {
                 .identifier, .member, .super_member => left,
+                .call => if (!self.strict and isAnnexBCallAssignmentTarget(left)) left else return ParseError.InvalidAssignmentTarget,
                 .array_lit, .object_lit => try self.litToPattern(left),
                 else => return ParseError.InvalidAssignmentTarget,
             };
@@ -2261,7 +2267,9 @@ pub const Parser = struct {
             else => null,
         };
         if (compound) |op| {
-            if (left.* != .identifier and left.* != .member and left.* != .super_member) return ParseError.InvalidAssignmentTarget;
+            if (left.* != .identifier and left.* != .member and left.* != .super_member and
+                (self.strict or !isAnnexBCallAssignmentTarget(left)))
+                return ParseError.InvalidAssignmentTarget;
             if (self.strict and left.* == .identifier and isEvalOrArguments(left.identifier))
                 return ParseError.UnexpectedToken;
             _ = self.advance();
@@ -2533,7 +2541,8 @@ pub const Parser = struct {
             // The operand of a prefix `++`/`--` must be a simple assignment
             // target (identifier or member access) — `++import(x)`, `++f()`,
             // `++1` are early SyntaxErrors.
-            if (operand.* != .identifier and operand.* != .member and operand.* != .super_member)
+            if (operand.* != .identifier and operand.* != .member and operand.* != .super_member and
+                (self.strict or !isAnnexBCallAssignmentTarget(operand)))
                 return ParseError.InvalidAssignmentTarget;
             // Strict mode forbids updating `eval`/`arguments` (they are not valid
             // assignment targets): `"use strict"; ++eval;` is a SyntaxError.
@@ -2591,7 +2600,8 @@ pub const Parser = struct {
         if ((self.check(.plus_plus) or self.check(.minus_minus)) and !self.hasLineTerminatorBefore(0)) {
             // A postfix `++`/`--` target must be a simple assignment target —
             // `import(x)++`, `f()++`, `1++` are early SyntaxErrors.
-            if (m.* != .identifier and m.* != .member and m.* != .super_member)
+            if (m.* != .identifier and m.* != .member and m.* != .super_member and
+                (self.strict or !isAnnexBCallAssignmentTarget(m)))
                 return ParseError.InvalidAssignmentTarget;
             // Strict mode forbids updating `eval`/`arguments`: `"use strict";
             // eval++;` is a SyntaxError.
