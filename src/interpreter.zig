@@ -27117,6 +27117,14 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
     const largest = opts.largest;
     // Case 1: smallestUnit is day or a time unit — round on the nanosecond span.
     if (@intFromEnum(smallest) >= @intFromEnum(TUnit.day)) {
+        if (rel.zoned and largest == .day and @intFromEnum(smallest) > @intFromEnum(TUnit.day) and
+            dur[0] == 0 and dur[1] == 0 and dur[2] == 0)
+        {
+            const date_part_ns = (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * DAY_NS;
+            const time_part_ns = durationDayTimeNs(dur) - date_part_ns;
+            const rounded_time = roundNs(time_part_ns, smallest, opts.increment, opts.mode);
+            return balanceTimeNs(date_part_ns + rounded_time, largest);
+        }
         const total_ns = ep.end - ep.start;
         const rounded_ns = roundNs(total_ns, smallest, opts.increment, opts.mode);
         // Express the rounded span balanced to largestUnit.
@@ -31575,6 +31583,8 @@ fn readDurationRoundOptions(self: *Interpreter, opts_v: Value, dur: [10]f64) Eva
 
     if (largest_set and smallest_set and @intFromEnum(r.largest) > @intFromEnum(r.smallest))
         return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
+    if (!largest_set and r.smallest == .week and r.increment != 1 and (dur[0] != 0 or dur[1] != 0))
+        return self.throwError("RangeError", "largestUnit is required when rounding calendar durations to week increments");
     if (largest_set and smallest_set and r.increment != 1 and @intFromEnum(r.largest) < @intFromEnum(r.smallest) and @intFromEnum(r.smallest) <= @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "roundingIncrement cannot be combined with calendar unit balancing");
     try validateDurationRoundingIncrement(self, r.smallest, r.increment);
