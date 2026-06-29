@@ -149,7 +149,7 @@ pub fn build(b: *std.Build) void {
     const fuzz_seed = b.option(usize, "fuzz-seed", "threadfuzz: base RNG seed") orelse 1;
     const fuzz_amplify = b.option(bool, "fuzz-amplify", "threadfuzz: high-contention profile (more threads, longer loops)") orelse false;
     const fuzz_broad = b.option(bool, "fuzz-broad", "threadfuzz: broad semantic profile (exceptions, waiters, cleanup, lifecycle)") orelse false;
-    const fuzz_lifecycle = b.option(bool, "fuzz-lifecycle", "threadfuzz: deterministic termination and Worker/thread lifecycle overlap profile") orelse false;
+    const fuzz_lifecycle = b.option(bool, "fuzz-lifecycle", "threadfuzz: deterministic termination, Worker/module-worker overlap, and close/terminate lifecycle profile") orelse false;
     const fuzz_verify = b.option(bool, "fuzz-verify", "threadfuzz: deterministic-correctness mode (predict + check each result)") orelse false;
     const threadfuzz = b.addExecutable(.{
         .name = "threadfuzz",

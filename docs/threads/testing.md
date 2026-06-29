@@ -108,9 +108,10 @@ deterministic atomic programs whose exact result is predicted. The broad profile
 thread lifecycle, `asyncJoin`, property `wait` / `waitAsync`, `Condition`
 wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars. The
 lifecycle profile (`-Dfuzz-lifecycle=true`) adds expected-throw termination
-storms for parked/unjoined shared-realm `Thread`s plus cross-realm embedder
-`Worker` and shared-realm `Thread` overlap on one retained `SharedArrayBuffer`
-with an exact Atomics counter oracle.
+storms for parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles
+for script and module `Worker` overlap with shared-realm `Thread`s on one
+retained `SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage`
+ordering coverage.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
 GIL-free parallel contexts. The full corpus is too slow for every PR, so CI

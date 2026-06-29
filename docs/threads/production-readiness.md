@@ -110,15 +110,16 @@ as embedders exercise more threaded host patterns.
   and `FinalizationRegistry` cleanup coverage under GC-backed parallel
   contexts.
 - The lifecycle fuzzer profile adds deterministic termination storms where main
-  JS throws with parked/unjoined `Thread`s, and an exact-counter oracle for
-  embedder `Worker`s and shared-realm `Thread`s mutating one retained
-  `SharedArrayBuffer` concurrently.
+  JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
+  and module `Worker`s overlapping shared-realm `Thread`s on one retained
+  `SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage`
+  ordering coverage.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
   amplified, broad semantic, lifecycle, ReleaseSafe, and deterministic-result
   verification.
 
-Remaining: keep extending the lifecycle profile toward more teardown ordering,
-worker module-graph overlap, and mixed terminate/close/postMessage races.
+Remaining: keep extending the lifecycle profile toward more cross-realm
+scheduling, worker module-graph shapes, and teardown race variants.
 
 ## 6. CI Gating
 

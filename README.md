@@ -257,8 +257,9 @@ threading architecture:
   the known limitation around sync-wait peers that periodically pump tasks.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
-  the lifecycle profile adds deterministic termination storms and Worker/thread
-  overlap over retained `SharedArrayBuffer` storage; keep extending both toward
+  the lifecycle profile adds deterministic termination storms, script and module
+  Worker/thread overlap over retained `SharedArrayBuffer` storage, and mixed
+  `close` / `terminate` / `postMessage` ordering; keep extending both toward
   more teardown and cross-realm scheduling oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature
   exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack

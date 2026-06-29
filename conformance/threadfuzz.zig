@@ -17,6 +17,53 @@ const js = @import("js");
 
 const Worker = js.Worker;
 
+const ModuleFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "helper.js",
+            .source =
+            \\export function addMany(sab, slot, n) {
+            \\  const v = new Int32Array(sab);
+            \\  for (let i = 0; i < n; i++) Atomics.add(v, slot, 1);
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { addMany } from "./helper.js";
+            \\globalThis.onmessage = (e) => {
+            \\  const v = new Int32Array(e.data.sab);
+            \\  Atomics.add(v, 2, 1);
+            \\  Atomics.notify(v, 2);
+            \\  while (Atomics.load(v, 1) === 0)
+            \\    Atomics.wait(v, 1, 0, 100);
+            \\  addMany(e.data.sab, 0, e.data.iters);
+            \\  postMessage({ done: true, module: true });
+            \\  close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 /// One random shared-state operation, emitted into a worker's loop body. Every
 /// op targets the shared structures declared by `genProgram` and cannot throw.
 fn op(r: std.Random) []const u8 {
@@ -440,6 +487,282 @@ fn runWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runModuleWorkerThreadOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x9e37_79b9_7f4a_7c15);
+    const r = prng.random();
+    const nworkers = 1 + r.uintLessThan(usize, 4);
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const worker_iters = 120 + r.uintLessThan(usize, 260);
+    const thread_iters = 150 + r.uintLessThan(usize, 320);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: module overlap context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const msg_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__moduleMsg = {{ sab: new SharedArrayBuffer(16), iters: {d} }}; globalThis.__moduleMsg",
+        .{worker_iters},
+    );
+    defer gpa.free(msg_src);
+    const msg = ctx.evaluate(msg_src) catch |err| {
+        std.debug.print("seed {d}: cannot create module overlap SAB: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawnModule("entry.js", ModuleFuzzHost.entries[1].source, ModuleFuzzHost.host()) catch {
+            std.debug.print("seed {d}: module worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: module worker postMessage failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const js_src = try std.fmt.allocPrint(
+        gpa,
+        \\const mv = new Int32Array(globalThis.__moduleMsg.sab);
+        \\const mts = [];
+        \\for (let t = 0; t < {d}; t++) {{
+        \\  mts.push(new Thread(function(){{
+        \\    const local = new Int32Array(globalThis.__moduleMsg.sab);
+        \\    while (Atomics.load(local, 1) === 0) ;
+        \\    for (let i = 0; i < {d}; i++) Atomics.add(local, 0, 1);
+        \\    return 1;
+        \\  }}));
+        \\}}
+        \\let spins = 0;
+        \\while (Atomics.load(mv, 2) < {d} && spins++ < 10000000) ;
+        \\if (Atomics.load(mv, 2) < {d}) throw new Error('module workers not ready');
+        \\Atomics.store(mv, 1, 1);
+        \\Atomics.notify(mv, 1, {d});
+        \\let joined = 0;
+        \\for (const t of mts) joined += t.join();
+        \\joined;
+        \\
+    ,
+        .{ nthreads, thread_iters, nworkers, nworkers, nworkers + nthreads + 4 },
+    );
+    defer gpa.free(js_src);
+
+    const joined = ctx.evaluate(js_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module overlap JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: module overlap joined {d} threads, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, nthreads });
+        return false;
+    }
+
+    for (workers.items) |w| {
+        const reply = (w.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: module worker receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }) orelse {
+            std.debug.print("seed {d}: module worker receive timed out\n", .{seed});
+            return false;
+        };
+        const done = machine.getProperty(reply, "done") catch |err| {
+            std.debug.print("seed {d}: cannot read module worker reply: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!done.isBoolean() or !done.asBool()) {
+            std.debug.print("seed {d}: bad module worker reply\n", .{seed});
+            return false;
+        }
+    }
+
+    for (workers.items) |w| {
+        w.join();
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const count = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleMsg.sab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read module overlap counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const expected: f64 = @floatFromInt(nworkers * worker_iters + nthreads * thread_iters);
+    if (!count.isNumber() or count.asNum() != expected) {
+        std.debug.print("seed {d}: module overlap counter got {d}, expected {d}\n", .{ seed, if (count.isNumber()) count.asNum() else -1, expected });
+        return false;
+    }
+    return true;
+}
+
+fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0xd1b5_4a32_d192_ed03);
+    const r = prng.random();
+    const extra_pings = 1 + r.uintLessThan(usize, 4);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_gc = true }) catch {
+        std.debug.print("seed {d}: worker race context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    _ = ctx.evaluate(
+        \\globalThis.__raceSab = new SharedArrayBuffer(16);
+        \\globalThis.__raceMsg = function(cmd, id) {
+        \\  return { sab: globalThis.__raceSab, cmd: cmd, id: id };
+        \\};
+    ) catch |err| {
+        std.debug.print("seed {d}: cannot create worker race messages: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    const worker_src =
+        \\globalThis.onmessage = (e) => {
+        \\  const v = new Int32Array(e.data.sab);
+        \\  if (e.data.cmd === 'spin') {
+        \\    Atomics.add(v, 1, 1);
+        \\    Atomics.notify(v, 1);
+        \\    for (;;) {}
+        \\  }
+        \\  Atomics.add(v, 0, 1);
+        \\  postMessage({ ack: e.data.id, cmd: e.data.cmd });
+        \\  if (e.data.cmd === 'close') close();
+        \\};
+    ;
+
+    const graceful = Worker.spawn(worker_src) catch {
+        std.debug.print("seed {d}: graceful worker spawn failed\n", .{seed});
+        return false;
+    };
+    var cleanup_graceful = true;
+    defer if (cleanup_graceful) {
+        graceful.terminate();
+        graceful.join();
+        graceful.destroy();
+    };
+    const terminator = Worker.spawn(worker_src) catch {
+        std.debug.print("seed {d}: terminator worker spawn failed\n", .{seed});
+        return false;
+    };
+    var cleanup_terminator = true;
+    defer if (cleanup_terminator) {
+        terminator.terminate();
+        terminator.join();
+        terminator.destroy();
+    };
+
+    var i: usize = 0;
+    while (i < extra_pings) : (i += 1) {
+        const src = try std.fmt.allocPrint(gpa, "__raceMsg('ping', {d})", .{i});
+        defer gpa.free(src);
+        const msg = ctx.evaluate(src) catch |err| {
+            std.debug.print("seed {d}: cannot make ping message: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        graceful.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: graceful post ping failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+    const close_msg = ctx.evaluate("__raceMsg('close', 1000)") catch |err| {
+        std.debug.print("seed {d}: cannot make close message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.postMessage(&machine, close_msg) catch |err| {
+        std.debug.print("seed {d}: graceful post close failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.close();
+    const dropped_msg = ctx.evaluate("__raceMsg('dropped', 2000)") catch |err| {
+        std.debug.print("seed {d}: cannot make dropped message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    graceful.postMessage(&machine, dropped_msg) catch |err| {
+        std.debug.print("seed {d}: graceful post after close failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    var replies: usize = 0;
+    while (true) {
+        const reply = graceful.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: graceful receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        } orelse break;
+        const ack = machine.getProperty(reply, "ack") catch |err| {
+            std.debug.print("seed {d}: cannot read graceful ack: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!ack.isNumber()) {
+            std.debug.print("seed {d}: graceful reply without numeric ack\n", .{seed});
+            return false;
+        }
+        replies += 1;
+    }
+    if (replies < extra_pings + 1) {
+        std.debug.print("seed {d}: graceful worker lost queued replies ({d} < {d})\n", .{ seed, replies, extra_pings + 1 });
+        return false;
+    }
+
+    const spin_msg = ctx.evaluate("__raceMsg('spin', 3000)") catch |err| {
+        std.debug.print("seed {d}: cannot make spin message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.postMessage(&machine, spin_msg) catch |err| {
+        std.debug.print("seed {d}: terminator post spin failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    _ = ctx.evaluate(
+        \\{
+        \\  const v = new Int32Array(globalThis.__raceSab);
+        \\  let spins = 0;
+        \\  while (Atomics.load(v, 1) === 0 && spins++ < 10000000) ;
+        \\  if (Atomics.load(v, 1) === 0) throw new Error('terminator worker did not enter spin');
+        \\}
+    ) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: terminator readiness failed {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    terminator.terminate();
+    const after_term = ctx.evaluate("__raceMsg('after-terminate', 4000)") catch |err| {
+        std.debug.print("seed {d}: cannot make after-terminate message: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.postMessage(&machine, after_term) catch |err| {
+        std.debug.print("seed {d}: terminator post after terminate failed: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    terminator.join();
+    terminator.destroy();
+    cleanup_terminator = false;
+    graceful.join();
+    graceful.destroy();
+    cleanup_graceful = false;
+
+    return true;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var iters: usize = 200;
@@ -507,10 +830,13 @@ pub fn main(init: std.process.Init) !void {
         if (vfail != 0) std.process.exit(1);
         return;
     };
-    // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms
-    // and Worker/thread SAB overlap. The oracle is not "no throw": termination
-    // storms must throw from the main script and still tear down cleanly, while
-    // Worker/thread overlap must produce the exact synchronized counter value.
+    // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
+    // Worker/thread SAB overlap, module-worker/thread overlap, and mixed
+    // close/terminate/postMessage ordering. The oracle is not "no throw":
+    // termination storms must throw from the main script and still tear down
+    // cleanly, overlap must produce exact synchronized counter values, and
+    // close/terminate races must drain/drop messages according to channel
+    // lifetime rules without deadlock or UAF.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -521,8 +847,10 @@ pub fn main(init: std.process.Init) !void {
             const seed = base_seed +% li;
             if (!(try runTerminationStorm(gpa, seed))) lfail += 1;
             if (!(try runWorkerThreadOverlap(gpa, seed))) lfail += 1;
+            if (!(try runModuleWorkerThreadOverlap(gpa, seed))) lfail += 1;
+            if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 2, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 4, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };
