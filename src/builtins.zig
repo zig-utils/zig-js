@@ -1626,10 +1626,10 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     // this generic path only for an accessor descriptor — is a redefinition of an
     // existing data property whose implicit attributes are all true, not the
     // creation of a brand-new (all-false) property.
-    var arr_elem_index: ?usize = null;
-    if (target.is_array and target.getAccessor(key) == null) {
+    var dense_elem_index: ?usize = null;
+    if (target.getAccessor(key) == null) {
         if (arrayIndexOf(key)) |i| {
-            if (i < target.elements.items.len and !target.isHole(i)) arr_elem_index = i;
+            if (i < target.elements.items.len and !target.isHole(i)) dense_elem_index = i;
         }
     }
     if (target.is_array and !std.mem.eql(u8, key, "length")) {
@@ -1638,7 +1638,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             if (i >= old_len and target.attrs != null and !target.getAttr("length").writable) return false;
         }
     }
-    const cur_data = target.getOwn(key) orelse (if (arr_elem_index) |i| target.elements.items[i] else null);
+    const cur_data = target.getOwn(key) orelse (if (dense_elem_index) |i| target.elements.items[i] else null);
     const cur_acc = target.getAccessor(key);
     const exists = cur_data != null or cur_acc != null;
     // ValidateAndApplyPropertyDescriptor: reject (TypeError) any change that the
@@ -1671,7 +1671,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         try target.setAccessor(self.arena, key, new_get, new_set);
         // A dense array element converted to an accessor must vacate the element
         // store (now an accessor index) so it isn't double-counted in own keys.
-        if (arr_elem_index) |i| try target.markHole(self.arena, i);
+        if (dense_elem_index) |i| try target.markHole(self.arena, i);
     } else if (has_data_field or cur_acc == null) {
         // A data property: either explicit data fields, or a generic descriptor on
         // a non-accessor (brand-new / existing data property).
@@ -1887,20 +1887,19 @@ fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
         a.configurable = false;
         try o.setAttr(self.arena, k, a);
     }
-    // An array's dense element indices live in `elements` (not the shape), so
-    // they aren't in `ownKeys` — lock each present one, plus `length` (which
-    // `freeze` additionally makes non-writable).
+    // Dense element indices live in `elements` (not the shape), so they aren't
+    // in `ownKeys` — lock each present one, plus Array `length` below.
+    var i: usize = 0;
+    while (i < o.elements.items.len) : (i += 1) {
+        if (o.isHole(i)) continue;
+        var kb: [24]u8 = undefined;
+        const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+        var a = o.getAttr(k);
+        a.configurable = false;
+        if (freeze) a.writable = false;
+        try o.setAttr(self.arena, k, a);
+    }
     if (o.is_array) {
-        var i: usize = 0;
-        while (i < o.elements.items.len) : (i += 1) {
-            if (o.isHole(i)) continue;
-            var kb: [24]u8 = undefined;
-            const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
-            var a = o.getAttr(k);
-            a.configurable = false;
-            if (freeze) a.writable = false;
-            try o.setAttr(self.arena, k, a);
-        }
         var la = o.getAttr("length");
         if (freeze) la.writable = false;
         la.configurable = false;
@@ -1942,19 +1941,19 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
         return true;
     }
     if (o.extensible) return false;
-    // An array's dense element indices must each be non-configurable (and, for
-    // frozen, non-writable). A frozen array additionally needs non-writable
-    // `length`. Holes carry no property, so they don't block.
+    // Dense element indices must each be non-configurable (and, for frozen,
+    // non-writable). A frozen array additionally needs non-writable `length`.
+    // Holes carry no property, so they don't block.
+    var i: usize = 0;
+    while (i < o.elements.items.len) : (i += 1) {
+        if (o.isHole(i)) continue;
+        var kb: [24]u8 = undefined;
+        const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
+        const a = o.getAttr(k);
+        if (a.configurable) return false;
+        if (frozen and a.writable) return false;
+    }
     if (o.is_array) {
-        var i: usize = 0;
-        while (i < o.elements.items.len) : (i += 1) {
-            if (o.isHole(i)) continue;
-            var kb: [24]u8 = undefined;
-            const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
-            const a = o.getAttr(k);
-            if (a.configurable) return false;
-            if (frozen and a.writable) return false;
-        }
         if (frozen and o.getAttr("length").writable) return false;
     }
     var s = o.shape;
@@ -2187,6 +2186,12 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         const a = o.getAttr(key);
         return dataDescriptor(self, v, a);
     }
+    if (!o.is_array) {
+        if (arrayIndexOf(key)) |i| {
+            if (i < o.elements.items.len and !o.isHole(i))
+                return dataDescriptor(self, o.elements.items[i], o.getAttr(key));
+        }
+    }
     if (o.is_array) {
         // A real Array's exotic `length`. An arguments object's `length` is an
         // ordinary own property handled by the getOwn path above (so a deleted
@@ -2224,7 +2229,9 @@ fn arrayIndexOf(key: []const u8) ?usize {
     var n: usize = 0;
     for (key) |c| {
         if (c < '0' or c > '9') return null;
-        n = n * 10 + (c - '0');
+        const d = c - '0';
+        if (n > 429496729 or (n == 429496729 and d > 4)) return null;
+        n = n * 10 + d;
     }
     return n;
 }

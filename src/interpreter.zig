@@ -8125,6 +8125,12 @@ pub const Interpreter = struct {
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                     try seen.put(self.arena, i, {});
                 }
+                var dense_i: usize = 0;
+                while (dense_i < t.elements.items.len) : (dense_i += 1) {
+                    if (t.isHole(dense_i) or seen.contains(dense_i)) continue;
+                    try seen.put(self.arena, dense_i, {});
+                    try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
+                }
                 var strings: std.ArrayListUnmanaged([]const u8) = .empty;
                 var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
                 for (try t.ownKeys(self.arena)) |k| {
@@ -8202,14 +8208,24 @@ pub const Interpreter = struct {
             return list.items;
         }
         var indices: std.ArrayListUnmanaged([]const u8) = .empty;
+        var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
+        var dense_i: usize = 0;
+        while (dense_i < t.elements.items.len) : (dense_i += 1) {
+            if (t.isHole(dense_i)) continue;
+            try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
+            try seen.put(self.arena, dense_i, {});
+        }
         var strings: std.ArrayListUnmanaged([]const u8) = .empty;
         var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
         for (try t.ownKeys(self.arena)) |k| {
             if (value.isPrivateKey(k)) continue;
             if (value.isSymbolKey(k)) {
                 if (value.isRealSymbolKey(k)) try symbols.append(self.arena, k);
-            } else if (value.canonicalIndex(k) != null) {
-                try indices.append(self.arena, k);
+            } else if (value.canonicalIndex(k)) |idx| {
+                if (!seen.contains(idx)) {
+                    try seen.put(self.arena, idx, {});
+                    try indices.append(self.arena, k);
+                }
             } else {
                 try strings.append(self.arena, k);
             }
@@ -8464,6 +8480,13 @@ pub const Interpreter = struct {
                         // else fall through: hole, accessor, or a sparse named property.
                     }
                 }
+                if (!o.is_array) {
+                    if (arrayElementIndex(key)) |i| {
+                        if (o.getOwn(key) == null and o.getAccessor(key) == null) {
+                            if (o.denseElement(i)) |v| return v;
+                        }
+                    }
+                }
                 // A String-wrapper object exposes `length` and indexed chars as
                 // own integer-keyed properties (`new String("ab").length === 2`,
                 // `[0] === "a"`).
@@ -8517,6 +8540,8 @@ pub const Interpreter = struct {
                             // append/realloc must not race this len/bounds/element read.
                             if (c.getAccessor(key) == null) if (c.denseElement(i)) |v| return v;
                         }
+                    } else if (arrayElementIndex(key)) |i| {
+                        if (c.getOwn(key) == null and c.getAccessor(key) == null) if (c.denseElement(i)) |v| return v;
                     }
                     if (c.prim) |p| {
                         if (p.isString()) {
@@ -9305,7 +9330,8 @@ pub const Interpreter = struct {
             return false;
         }
         if (ro.getAccessor(key) != null) return false;
-        const had_receiver_own = ro.getOwn(key) != null;
+        const had_receiver_own = ro.getOwn(key) != null or
+            (if (arrayElementIndex(key)) |i| ro.denseElementPresent(i) else false);
         if (had_receiver_own) {
             if (!ro.getAttr(key).writable) return false;
         } else if (!ro.extensible) return false;
@@ -9321,6 +9347,27 @@ pub const Interpreter = struct {
                     return true;
                 }
                 ro.extendArrayLengthFloor(i + 1);
+            }
+        } else if (arrayElementIndex(key)) |i| {
+            if (ro.attrs != null or ro.accessors != null or ro.has_indexed_property.load(.monotonic) or
+                ro.key_order != null or !self.arrayProtoChainCleanForIndexedSet(ro))
+            {
+                try self.setProp(ro, key, v);
+                if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {
+                    const root = rootEnv(self.env);
+                    if (!root.consts.contains(key)) {
+                        root.lockBindings();
+                        defer root.unlockBindings();
+                        if (root.vars.getPtr(key)) |slot| slot.* = v;
+                    }
+                }
+                return true;
+            }
+            const dense_cap: usize = 1 << 24;
+            const dense_len = ro.elementsLen();
+            if (i < dense_cap and i <= dense_len + 1024 and ro.getAccessor(key) == null) {
+                _ = try ro.growDenseElement(self.arena, i, v);
+                return true;
             }
         }
         try self.setProp(ro, key, v);
@@ -9391,24 +9438,22 @@ pub const Interpreter = struct {
             .deleted => return true,
             .removed_continue => {},
         }
-        // Dense array element → leave a hole (reads as absent), length unchanged.
+        // Dense indexed element → leave a hole (reads as absent), length unchanged.
         // A per-index descriptor may mark it non-configurable (delete fails).
-        if (o.is_array) {
-            if (std.mem.eql(u8, key, "length")) {
-                // A real Array's `length` is non-configurable (not deletable); an
-                // arguments object's is an ordinary own property → delete it,
-                // honoring [[Configurable]].
-                if (!o.is_arguments) return false;
-                return o.deleteNamedDataOwn(self.arena, self.root_shape, key);
-            }
-            if (arrayElementIndex(key)) |i| {
-                if (o.denseElementInBounds(i)) {
-                    if (o.attrs != null and !o.getAttr(key).configurable) return false;
-                    // Deleting a mapped arguments index severs its parameter link.
-                    if (o.is_arguments and i < o.arg_map_names.len) o.arg_map_names[i] = "";
-                    _ = try o.deleteDenseElement(self.arena, i);
-                    return true;
-                }
+        if (o.is_array and std.mem.eql(u8, key, "length")) {
+            // A real Array's `length` is non-configurable (not deletable); an
+            // arguments object's is an ordinary own property → delete it,
+            // honoring [[Configurable]].
+            if (!o.is_arguments) return false;
+            return o.deleteNamedDataOwn(self.arena, self.root_shape, key);
+        }
+        if (arrayElementIndex(key)) |i| {
+            if (o.getOwn(key) == null and o.denseElementInBounds(i)) {
+                if (o.attrs != null and !o.getAttr(key).configurable) return false;
+                // Deleting a mapped arguments index severs its parameter link.
+                if (o.is_arguments and i < o.arg_map_names.len) o.arg_map_names[i] = "";
+                _ = try o.deleteDenseElement(self.arena, i);
+                return true;
             }
         }
         if (std.mem.eql(u8, key, "prototype") and o.js_func != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
@@ -35084,6 +35129,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
         if (!o.is_arguments and std.mem.eql(u8, name, "length")) return true;
         if (Interpreter.arrayElementIndex(name)) |i| return o.denseElementPresent(i);
     }
+    if (Interpreter.arrayElementIndex(name)) |i| return o.denseElementPresent(i);
     return false;
 }
 
