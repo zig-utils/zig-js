@@ -31123,6 +31123,12 @@ fn validateZonedDateTimeRoundingIncrement(self: *Interpreter, unit: TUnit, incre
     try validateDurationRoundingIncrement(self, unit, increment);
 }
 
+fn validatePlainDateTimeRoundingIncrement(self: *Interpreter, unit: TUnit, increment: f64) EvalError!void {
+    if (unit == .day and increment != 1)
+        return self.throwError("RangeError", "roundingIncrement must divide evenly into the next larger unit");
+    try validateDurationRoundingIncrement(self, unit, increment);
+}
+
 /// Build a Temporal.Duration object from raw components (CreateTemporalDuration,
 /// which rejects an out-of-range duration).
 fn makeDuration(self: *Interpreter, dur: [10]f64) EvalError!Value {
@@ -31353,7 +31359,9 @@ fn temporalPlainTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "PlainTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
+    if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime.round smallestUnit must be hour or smaller");
+    try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
     const rounded = roundNs(timeToNs(this.asObj().temporal.?), opts.smallest, opts.increment, opts.mode);
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     nsToTime(o.temporal.?, rounded);
@@ -31682,7 +31690,9 @@ fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Valu
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "PlainDateTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
+    if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDateTime.round smallestUnit must be day or smaller");
+    try validatePlainDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
     const t = this.asObj().temporal.?;
     const total = dateTimeToNs(t);
     const rounded = roundNs(total, opts.smallest, opts.increment, opts.mode);
