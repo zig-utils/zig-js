@@ -386,14 +386,13 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     var threw = false;
     if (machine.callValueWithThis(fn_v, args, Value.undef())) |out| {
         machine.drainMicrotasks() catch {};
-        const returned_pending_promise = if (promise.promiseOf(out)) |pp|
-            promise.snapshot(pp).state == .pending
-        else
-            false;
-        if (!returned_pending_promise) {
-            pumpTasks(&machine);
-            machine.settleAsyncWaiters();
-        }
+        // Thread-local async waiters are owned by this interpreter. If a thread
+        // returns a pending Atomics.waitAsync promise, asyncJoin can assimilate
+        // the promise object but cannot harvest this soon-to-be-destroyed
+        // waiter list, so run the thread's final settlement checkpoint before
+        // publishing completion.
+        pumpTasks(&machine);
+        machine.settleAsyncWaiters();
         result = out;
     } else |_| {
         machine.drainMicrotasks() catch {};
@@ -544,9 +543,9 @@ const LockRecord = struct {
     /// Queued asyncHold jobs, granted FIFO at release time.
     pending: std.ArrayListUnmanaged(*HoldJob) = .empty,
     pending_head: usize = 0,
-    /// An async grant exists but its job hasn't run yet (D6: a
-    /// granted-but-UNDELIVERED hold is NOT "held" — consuming it would
-    /// unlock the lock under the not-yet-run fn).
+    /// An async grant exists but its job hasn't run yet. The grant already
+    /// excludes sync `hold`, but it is not delivered enough for
+    /// `Condition.asyncWait` to consume.
     grant_pending: bool = false,
     /// A delivered no-fn grant's live release() state (4.3(b): asyncWait may
     /// consume it, poisoning the release function).
@@ -596,11 +595,6 @@ const LockRecord = struct {
             self.pending_head = 0;
         }
         return job;
-    }
-
-    fn isUndeliveredAsyncGrant(self: *const LockRecord) bool {
-        return self.locked and self.grant_pending and self.holder == async_holder and
-            self.async_runner == 0 and self.active_release == null;
     }
 };
 
@@ -904,7 +898,7 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
         if (timeout_ns != null and timeout_ns.? == 0) return .timed_out;
         return self.throwError("TypeError", err_name);
     }
-    if ((rec.locked and !rec.isUndeliveredAsyncGrant()) or rec.sync_waiting > 0) {
+    if (rec.locked or rec.sync_waiting > 0) {
         if (timeout_ns != null and timeout_ns.? == 0) return .timed_out;
         if (!self.main_can_block)
             return self.throwError("TypeError", err_name);
@@ -916,7 +910,7 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
         const my_generation = rec.sync_generation;
         rec.sync_waiting += 1;
         errdefer rec.sync_waiting -= 1;
-        while ((rec.locked and !rec.isUndeliveredAsyncGrant()) or rec.sync_generation == my_generation) {
+        while (rec.locked or rec.sync_generation == my_generation) {
             if (deadline_ns) |d| {
                 const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
                 if (d <= now) {
@@ -942,7 +936,7 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
             rec.mutex.lockUncancelable(io);
             if (stopped)
                 return self.throwError("Error", "worker terminated");
-            if ((!rec.locked or rec.isUndeliveredAsyncGrant()) and rec.sync_generation != my_generation) break;
+            if (!rec.locked and rec.sync_generation != my_generation) break;
             bumpContention("lock_wait_parks");
             waitOnLockCond(self, rec, .{ .duration = .{
                 .raw = .fromNanoseconds(tick_ns),

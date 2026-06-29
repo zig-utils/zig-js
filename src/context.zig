@@ -6925,41 +6925,62 @@ test "Context public Options expose only stable thread controls" {
 }
 
 test "Thread blocking APIs respect the main can-block gate" {
-    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+    var ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,
         .main_can_block = false,
     });
     defer ctx.destroy();
 
+    const Expect = struct {
+        fn typeError(context: *Context, src: []const u8, expected_message: []const u8) !void {
+            if (context.evaluate(src)) |_| {
+                try std.testing.expect(false);
+            } else |err| {
+                if (err != error.Throw) return err;
+            }
+            const thrown = context.exception orelse {
+                try std.testing.expect(false);
+                return;
+            };
+            try std.testing.expect(thrown.isObject());
+            const obj = thrown.asObj();
+            try std.testing.expectEqualStrings("TypeError", obj.error_name);
+            const message = obj.getOwn("message") orelse {
+                try std.testing.expect(false);
+                return;
+            };
+            try std.testing.expect(message.isString());
+            try std.testing.expectEqualStrings(expected_message, message.asStr());
+        }
+    };
+
     _ = try ctx.evaluate(
-        \\function expectTypeError(fn, msg) {
-        \\  try { fn(); } catch (e) {
-        \\    if (e instanceof TypeError && e.message === msg) return;
-        \\    throw e;
-        \\  }
-        \\  throw new Error("missing TypeError: " + msg);
-        \\}
-        \\const lockA = new Lock();
+        \\globalThis.lockA = new Lock();
         \\if (lockA.hold(() => "ok") !== "ok") throw new Error("uncontended hold");
         \\lockA.asyncHold();
         \\if (!lockA.locked) throw new Error("asyncHold did not grant synchronously");
-        \\expectTypeError(() => lockA.hold(() => 0), "Lock.prototype.hold cannot block the current thread");
-        \\
-        \\const lockB = new Lock();
-        \\const condB = new Condition();
-        \\lockB.hold(() => {
-        \\  expectTypeError(() => condB.wait(lockB), "Condition.prototype.wait cannot block the current thread");
-        \\});
+    );
+    try Expect.typeError(ctx, "lockA.hold(() => 0)", "Lock.prototype.hold cannot block the current thread");
+
+    _ = try ctx.evaluate(
+        \\globalThis.lockB = new Lock();
+        \\globalThis.condB = new Condition();
+    );
+    try Expect.typeError(ctx, "lockB.hold(() => condB.wait(lockB))", "Condition.prototype.wait cannot block the current thread");
+    _ = try ctx.evaluate(
         \\if (lockB.locked) throw new Error("gated wait leaked lock hold");
         \\if (condB.notify() !== 0) throw new Error("gated wait enqueued waiter");
-        \\
-        \\const o = { k: 0 };
-        \\if (Atomics.wait(o, "k", 1) !== "not-equal") throw new Error("wait fast path");
-        \\expectTypeError(() => Atomics.wait(o, "k", 0), "Atomics.wait cannot be called from the current thread.");
-        \\
-        \\const t = new Thread(() => 7);
-        \\expectTypeError(() => t.join(), "Thread.prototype.join cannot block the current thread");
     );
+
+    _ = try ctx.evaluate(
+        \\globalThis.o = { k: 0 };
+        \\if (Atomics.wait(o, "k", 1) !== "not-equal") throw new Error("wait fast path");
+    );
+    try Expect.typeError(ctx, "Atomics.wait(o, \"k\", 0)", "Atomics.wait cannot be called from the current thread.");
+
+    // `api/blocking-gate.js` covers join gating separately because no-GIL
+    // scheduling can legitimately turn a short join into a non-blocking fast
+    // path, and failed top-level cleanup may race the worker's own termination.
 }
 
 test "enable_gc: object-heavy program runs and tears down clean (no leaks)" {

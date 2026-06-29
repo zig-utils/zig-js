@@ -108,8 +108,9 @@ context APIs.
   of the root set too: `Gil.tasks`, `LockRecord.pending`, async condition
   waiters, ThreadLocal maps, and thread completion results now trace or barrier
   their hidden JS values. The mid-GC fuzzer now queues a `Lock.asyncHold` grant
-  with captured JS roots and requires sync-wait pump points to execute it during
-  the same allocation-pressure window that produces a finishing parallel sweep.
+  plus an async `Condition.wait` reacquire path with captured JS roots, and
+  requires sync-wait pump points to execute them during the same
+  allocation-pressure window that produces a finishing parallel sweep.
   Keep quiescent collection as the fallback for cycles that still cannot
   converge, and keep widening wait/cleanup stress around this protocol.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught
@@ -117,9 +118,10 @@ context APIs.
   `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and
   `FinalizationRegistry` cleanup under GC-backed parallel contexts. The mid-GC
   profile now hammers sync-wait root publication during finishing
-  `parallel_midscript_gc` sweeps, executes an async-hold grant from those pump
-  points, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
-  afterward. The lifecycle profile now adds deterministic termination storms,
+  `parallel_midscript_gc` sweeps, executes async-hold and async condition
+  reacquire grants from those pump points, and verifies exact
+  `FinalizationRegistry` cleanup count/sum delivery afterward. The lifecycle
+  profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import and
   graph-shaped module Worker/thread overlap with exact Atomics counter oracles,
   mixed terminate/close/postMessage races, and worker handler-exception recovery
