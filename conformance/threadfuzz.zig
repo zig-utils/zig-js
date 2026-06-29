@@ -1724,6 +1724,176 @@ fn runFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6173_796e_635f_6669);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 10 + r.uintLessThan(usize, 10);
+
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var expected_success_sum: usize = 0;
+    var expected_reject_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 10_000;
+        var local_sum: usize = 0;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            if ((i & 3) == 0) continue;
+            local_sum += base + i;
+            expected_cleanup_sum += base + i;
+            expected_cleanup_count += 1;
+        }
+        if ((id & 1) == 0) {
+            expected_success_sum += local_sum + id;
+        } else {
+            expected_reject_sum += local_sum + id;
+        }
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: finalization asyncJoin context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__finAsyncCleanupCount = 0;
+        \\  globalThis.__finAsyncCleanupSum = 0;
+        \\  globalThis.__finAsyncJoinOracle = 0;
+        \\  globalThis.__finAsyncCleanupRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__finAsyncCleanupCount++;
+        \\    globalThis.__finAsyncCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__finAsyncCleanupRegistry;
+        \\  const threads = [];
+        \\  let asyncSuccess = 0;
+        \\  let asyncReject = 0;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per) => {{
+        \\      let localSum = 0;
+        \\      const base = (id + 1) * 10000;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        let target = {{ id, i, payload: 'fin-async-' + id + '-' + i }};
+        \\        let token = {{ id, i }};
+        \\        registry.register(target, base + i, token);
+        \\        if ((i & 3) === 0) {{
+        \\          if (!registry.unregister(token))
+        \\            throw new Error('unregister missed token ' + id + '/' + i);
+        \\        }} else {{
+        \\          localSum += base + i;
+        \\        }}
+        \\        target = null;
+        \\        token = null;
+        \\      }}
+        \\      if ((id & 1) === 1)
+        \\        throw {{ id, sum: localSum + id, tag: 'fin-async-reject' }};
+        \\      return localSum + id;
+        \\    }}, id, {d});
+        \\    t.asyncJoin().then(
+        \\      (v) => {{ asyncSuccess += v; }},
+        \\      (e) => {{
+        \\        if (e && e.tag === 'fin-async-reject')
+        \\          asyncReject += e.sum;
+        \\        else
+        \\          asyncReject = -1000000;
+        \\      }});
+        \\    threads.push(t);
+        \\  }}
+        \\  let joinSuccess = 0;
+        \\  let joinReject = 0;
+        \\  for (let id = 0; id < threads.length; id++) {{
+        \\    try {{
+        \\      const v = threads[id].join();
+        \\      if ((id & 1) !== 0)
+        \\        throw new Error('odd finalization worker returned');
+        \\      joinSuccess += v;
+        \\    }} catch (e) {{
+        \\      if ((id & 1) === 0)
+        \\        throw e;
+        \\      if (!e || e.id !== id || e.tag !== 'fin-async-reject')
+        \\        throw new Error('bad finalization rejection for ' + id);
+        \\      joinReject += e.sum;
+        \\    }}
+        \\  }}
+        \\  if (joinSuccess !== {d})
+        \\    throw new Error('bad finalization join success sum ' + joinSuccess);
+        \\  if (joinReject !== {d})
+        \\    throw new Error('bad finalization join reject sum ' + joinReject);
+        \\  threads.length = 0;
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncSuccess !== {d})
+        \\      throw new Error('bad finalization async success sum ' + asyncSuccess);
+        \\    if (asyncReject !== {d})
+        \\      throw new Error('bad finalization async reject sum ' + asyncReject);
+        \\    globalThis.__finAsyncJoinOracle = 1;
+        \\  }});
+        \\  return joinSuccess + joinReject;
+        \\}})();
+        \\
+    ,
+        .{ nthreads, per_thread, expected_success_sum, expected_reject_sum, expected_success_sum, expected_reject_sum },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: finalization asyncJoin JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const expected_joined = expected_success_sum + expected_reject_sum;
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_joined))) {
+        std.debug.print("seed {d}: finalization asyncJoin joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_joined });
+        return false;
+    }
+    const oracle = ctx.evaluate("globalThis.__finAsyncJoinOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read finalization asyncJoin oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: finalization asyncJoin oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  // Keep the registry reachable through cleanup delivery, but prove that
+        \\  // unregister-token records never become cleanup jobs.
+        \\  globalThis.__finAsyncCleanupRegistry.cleanupSome();
+        \\  if (globalThis.__finAsyncCleanupCount !== {d})
+        \\    throw new Error('bad finalization async cleanup count: ' + globalThis.__finAsyncCleanupCount);
+        \\  if (globalThis.__finAsyncCleanupSum !== {d})
+        \\    throw new Error('bad finalization async cleanup sum: ' + globalThis.__finAsyncCleanupSum);
+        \\  return globalThis.__finAsyncCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_sum },
+    );
+    defer gpa.free(check_src);
+    const cleaned = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: finalization async cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: finalization async cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x746c_735f_6c69_6665);
     const r = prng.random();
@@ -2188,8 +2358,9 @@ pub fn main(init: std.process.Init) !void {
     // worker handler
     // exception recovery, Thread exception identity and returned waitAsync
     // promise assimilation across join/asyncJoin while waiters are parked,
-    // cross-thread FinalizationRegistry cleanup, and ThreadLocal isolation
-    // across nested threads plus throwing and async-joined workers. The oracle
+    // cross-thread FinalizationRegistry cleanup, FinalizationRegistry cleanup
+    // interleaved with join/asyncJoin and unregister tokens, and ThreadLocal
+    // isolation across nested threads plus throwing and async-joined workers. The oracle
     // is not "no
     // throw":
     // termination storms must throw from the main script and still tear down
@@ -2199,8 +2370,9 @@ pub fn main(init: std.process.Init) !void {
     // thread exceptions must keep identity through blocking and async joiners,
     // thread-returned waitAsync promises must settle through join/asyncJoin
     // while waiters resume cleanly, cleanup delivery must match exact count/sum
-    // oracles, and ThreadLocal values must stay per-thread across normal,
-    // throwing, nested, and async-joined lifecycles.
+    // oracles even when thread results are observed through both join paths and
+    // unregister tokens suppress some records, and ThreadLocal values must stay
+    // per-thread across normal, throwing, nested, and async-joined lifecycles.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -2219,9 +2391,10 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 11, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 12, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

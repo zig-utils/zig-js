@@ -295,9 +295,10 @@ threading architecture:
   Thread exception identity through `join()` / `asyncJoin()` while property and
   condition waiters are parked, thread-returned typed-array `waitAsync` promise
   assimilation through `join()` / `asyncJoin()` while waiters are parked,
-  cross-thread `FinalizationRegistry` cleanup count/sum oracles, and
-  `ThreadLocal` isolation across normal, throwing, nested, and async-joined
-  thread lifecycles.
+  cross-thread `FinalizationRegistry` cleanup count/sum oracles, cleanup
+  delivery interleaved with `join()` / `asyncJoin()` and unregister-token
+  suppression, and `ThreadLocal` isolation across normal, throwing, nested, and
+  async-joined thread lifecycles.
   Keep extending the fuzzers toward more teardown and cross-realm scheduling
   oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature

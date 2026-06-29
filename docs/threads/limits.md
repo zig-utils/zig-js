@@ -133,9 +133,10 @@ context APIs.
   handler-exception recovery plus Thread exception identity through `join()` /
   `asyncJoin()` while property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /
-  `asyncJoin()` while waiters are parked, and cross-thread
-  `FinalizationRegistry` cleanup count/sum oracles. Keep extending it toward
-  more teardown ordering, broader cross-realm scheduling, and richer
+  `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
+  cleanup count/sum oracles, and cleanup delivery interleaved with `join()` /
+  `asyncJoin()` plus unregister-token suppression. Keep extending it toward more
+  teardown ordering, broader cross-realm scheduling, and richer
   cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
