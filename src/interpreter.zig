@@ -33387,32 +33387,42 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true, .reject, .compatible);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
+            const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) <= @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
             const t = this.asObj().temporal.?;
             if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
             if (!temporalTimeZoneIdsEqual(t.tz_name, other.tz_name)) return self.throwError("RangeError", "time zone mismatch");
-            if (@intFromEnum(opts.largest) >= @intFromEnum(TUnit.day)) {
+            if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
                 var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - t.epoch_ns);
+                if (opts.smallest == .day and opts.increment != 1) {
+                    const l = zdtLocal(t);
+                    const direction: f64 = if (diff < 0) -1 else 1;
+                    const c = addCalendarDate(t.calendar, l.year, l.month, l.day, 0, 0, 0, opts.increment, direction, false) orelse return self.throwError("RangeError", "date overflow");
+                    const local_ns = @as(i128, calendarEpochDay(t.calendar, c.y, c.m, c.d)) * DAY_NS + timeToNs(&l);
+                    try checkZdtLocalDateTimeNs(self, local_ns);
+                }
                 diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
-                return makeDuration(self, balanceTimeNs(diff, opts.largest));
+                return makeDuration(self, balanceTimeNs(diff, largest));
             }
-            // Calendar largestUnit: diff the local date-times in the requested
-            // direction. Month/day balancing is asymmetric, so a backward
-            // difference is not just the negated forward difference.
             const a = zdtLocal(t);
             const b = zdtLocal(&other);
-            const fwd = dateTimeToNs(&a) <= dateTimeToNs(&b);
-            var dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, b.year, b.month, b.day, opts.largest);
-            var time_diff = timeToNs(&b) - timeToNs(&a);
-            if (fwd and time_diff < 0) {
+            const a_ns = dateTimeToNs(&a);
+            const b_ns = dateTimeToNs(&b);
+            const earlier = if (a_ns <= b_ns) a else b;
+            const later = if (a_ns <= b_ns) b else a;
+            var dd = calendarDateDiff(earlier.calendar, earlier.year, earlier.month, earlier.day, later.year, later.month, later.day, largest);
+            var time_diff = timeToNs(&later) - timeToNs(&earlier);
+            if (time_diff < 0) {
                 time_diff += 86_400_000_000_000;
                 dd[3] -= 1;
-            } else if (!fwd and time_diff > 0) {
-                time_diff -= 86_400_000_000_000;
-                dd[3] += 1;
             }
             const tparts = balanceTimeNs(time_diff, .hour);
             for (4..10) |i| dd[i] = tparts[i];
-            if (sign < 0) for (&dd) |*c| {
+            const s2 = sign * (if (a_ns <= b_ns) @as(f64, 1) else -1);
+            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1) {
+                const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
+                dd = try roundDurationRel(self, dd, .{ .y = earlier.year, .m = earlier.month, .d = earlier.day, .time_ns = timeToNs(&earlier) }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+            }
+            if (s2 < 0) for (&dd) |*c| {
                 c.* = -c.*;
             };
             return makeDuration(self, dd);
