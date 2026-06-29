@@ -28814,13 +28814,14 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
     }
     if (v.isObject()) {
         const bag_cal = try readCalendarField(self, v);
+        const mcv = try self.getProperty(v, "monthCode");
+        if (!mcv.isUndefined()) _ = try readMonthCodeInfo(self, mcv);
         // The displayed `year` (or an `{era, eraYear}` pair) resolves to the
         // calendar year stored on Temporal date slots.
         const cal_year = try bagCalendarYear(self, v, bag_cal);
         const dv = try self.getProperty(v, "day");
         if (cal_year == null or dv.isUndefined()) return self.throwError("TypeError", "PlainDate fields require year and day");
         const mv = try self.getProperty(v, "month");
-        const mcv = try self.getProperty(v, "monthCode");
         var m: f64 = undefined;
         if (!mv.isUndefined()) {
             m = try temporalIntArg(self, mv, "month");
