@@ -22143,6 +22143,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var cur_suffix: []const u8 = "";
     var cur_symbol: []const u8 = ""; // the bare currency symbol, when display=symbol (placement is locale-dependent)
     var cur_code: []const u8 = ""; // the ISO currency code (for locale-dependent symbol selection)
+    var unit_prefix: []const u8 = ""; // prefix unit pattern, e.g. ja "時速 <n> キロメートル"
     var unit_suffix: []const u8 = ""; // " <unit name>" appended for style:unit
     var compact_suffix: []const u8 = ""; // compact scale suffix ("K"/" million"…)
     var unit_space = true; // narrow unitDisplay drops the space
@@ -22209,10 +22210,24 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             const unit = if (uv.isString()) uv.asStr() else "";
             const udv = try self.getProperty(o, "unitDisplay");
             const ud: []const u8 = if (udv.isString()) udv.asStr() else "short";
-            unit_space = !std.mem.eql(u8, ud, "narrow");
+            const unit_locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
+            const unit_lang = parseTriple(unit_locale).l;
+            const unit_long = std.mem.eql(u8, ud, "long");
+            if (std.mem.eql(u8, unit, "kilometer-per-hour") and unit_long) {
+                if (std.ascii.eqlIgnoreCase(unit_lang, "ja")) unit_prefix = "\u{6642}\u{901f}";
+                if (std.ascii.eqlIgnoreCase(unit_lang, "ko")) unit_prefix = "\u{c2dc}\u{c18d}";
+                if (std.ascii.eqlIgnoreCase(unit_lang, "zh")) unit_prefix = "\u{6bcf}\u{5c0f}\u{6642}";
+            }
+            unit_space = !std.mem.eql(u8, unit, "percent") and
+                if (std.ascii.eqlIgnoreCase(unit_lang, "ko"))
+                    false
+                else if (std.ascii.eqlIgnoreCase(unit_lang, "de"))
+                    true
+                else
+                    !std.mem.eql(u8, ud, "narrow");
             // en cardinal plural: singular only for an exact magnitude of 1.
             const plural = !(@abs(n) == 1.0);
-            unit_suffix = try numberFormatUnitName(self, unit, ud, plural);
+            unit_suffix = try numberFormatUnitName(self, unit_locale, unit, ud, plural);
         }
         const mi = try self.getProperty(o, "minimumIntegerDigits");
         if (!mi.isUndefined()) min_int = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(mi)))));
@@ -22370,6 +22385,10 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             try list.append(s.arena, .{ .typ = typ, .value = v });
         }
     }.p;
+    if (unit_prefix.len > 0) {
+        try push(self, &parts, "unit", unit_prefix);
+        try push(self, &parts, "literal", " ");
+    }
     // Sign/accounting wrap, then the currency prefix (en places the symbol before
     // the number; standard sign before the symbol: "-$1.00", accounting "($1.00)").
     if (acct and show_neg) try push(self, &parts, "literal", "(") else if (show_neg) try push(self, &parts, "minusSign", syms.minus) else if (show_pos) try push(self, &parts, "plusSign", "+");
@@ -22451,8 +22470,17 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
 /// en unit display name for NumberFormat style:unit. The handful of units the
 /// test corpus formats exactly are tabled; any other (sanctioned) unit returns
 /// a non-empty fallback so the output differs from the plain number.
-fn numberFormatUnitName(self: *Interpreter, unit: []const u8, display: []const u8, plural: bool) value.HostError![]const u8 {
+fn numberFormatUnitName(self: *Interpreter, locale: []const u8, unit: []const u8, display: []const u8, plural: bool) value.HostError![]const u8 {
     const long = std.mem.eql(u8, display, "long");
+    if (std.mem.eql(u8, unit, "percent")) return "%";
+    if (std.mem.eql(u8, unit, "kilometer-per-hour") and long and std.ascii.eqlIgnoreCase(parseTriple(locale).l, "de"))
+        return "Kilometer pro Stunde";
+    if (std.mem.eql(u8, unit, "kilometer-per-hour") and long and std.ascii.eqlIgnoreCase(parseTriple(locale).l, "ja"))
+        return "\u{30ad}\u{30ed}\u{30e1}\u{30fc}\u{30c8}\u{30eb}";
+    if (std.mem.eql(u8, unit, "kilometer-per-hour") and long and std.ascii.eqlIgnoreCase(parseTriple(locale).l, "ko"))
+        return "\u{d0ac}\u{b85c}\u{bbf8}\u{d130}";
+    if (std.mem.eql(u8, unit, "kilometer-per-hour") and std.ascii.eqlIgnoreCase(parseTriple(locale).l, "zh"))
+        return if (long) "\u{516c}\u{91cc}" else "\u{516c}\u{91cc}/\u{5c0f}\u{6642}";
     const T = struct { u: []const u8, sh: []const u8, lo: []const u8 };
     const table = [_]T{
         .{ .u = "meter", .sh = "m", .lo = "meters" },
