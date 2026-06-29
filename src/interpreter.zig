@@ -32713,6 +32713,8 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
             if (r.time_style.len > 0)
                 return self.throwError("TypeError", "Temporal toLocaleString does not accept timeStyle");
         }
+        if (t.kind == .plain_time and r.date_style.len > 0)
+            return self.throwError("TypeError", "Temporal.PlainTime.prototype.toLocaleString does not accept dateStyle");
         if (t.kind == .plain_date or t.kind == .plain_date_time or t.kind == .plain_month_day or t.kind == .plain_year_month) {
             const iso_ok = (t.kind == .plain_date or t.kind == .plain_date_time) and std.mem.eql(u8, t.calendar, "iso8601");
             if (!iso_ok and !std.mem.eql(u8, t.calendar, effective_calendar))
