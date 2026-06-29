@@ -2724,7 +2724,7 @@ pub const Interpreter = struct {
                     try out.append(self.arena, key);
                 }
             };
-            if (o.is_array) {
+            if (o.is_array or o.elements.items.len != 0) {
                 var i: usize = 0;
                 while (i < o.elementsLen()) : (i += 1) {
                     if (!o.denseElementPresent(i)) continue;
