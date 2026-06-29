@@ -29572,14 +29572,6 @@ fn rejectPlainTimeLikeInvalidFields(self: *Interpreter, bag: Value) EvalError!vo
         return self.throwError("TypeError", "timeZone is not valid for a PlainTime-like bag");
 }
 
-fn hasPlainTimeField(self: *Interpreter, bag: Value) EvalError!bool {
-    const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
-    for (names) |name| {
-        if (try hasBagField(self, bag, name)) return true;
-    }
-    return false;
-}
-
 /// `monthCode` override → month number, falling back to the `month` field.
 fn withMonthField(self: *Interpreter, bag: Value, cal: []const u8, year: i64, cur: u8, constrain: bool) EvalError!u8 {
     const mc = try self.getProperty(bag, "monthCode");
@@ -29645,20 +29637,12 @@ fn temporalPlainTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!isObjectLike(bag) or isAnyTemporal(bag)) return self.throwError("TypeError", "Temporal.PlainTime.prototype.with: argument must be a PlainTime-like object");
     try rejectPlainTimeLikeInvalidFields(self, bag);
-    if (!(try hasPlainTimeField(self, bag))) return self.throwError("TypeError", "Temporal.PlainTime.prototype.with: argument must contain a time field");
-    const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
-    const maxes = [_]i64{ 23, 59, 59, 999, 999, 999 };
     const cur = [_]i64{ t.hour, t.minute, t.second, t.millisecond, t.microsecond, t.nanosecond };
-    var raw: [6]i64 = undefined;
-    for (names, 0..) |nm, i| raw[i] = try withIntField(self, bag, nm, cur[i]);
+    const raw = try readPlainTimeRawFields(self, bag, cur, true);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
-    var vals: [6]f64 = undefined;
-    for (raw, 0..) |v, i| {
-        if (reject and (v < 0 or v > maxes[i])) return self.throwError("RangeError", "time component out of range");
-        vals[i] = @floatFromInt(@max(0, @min(maxes[i], v))); // constrain
-    }
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
-    setTimeFields(o.temporal.?, vals);
+    o.temporal.?.* = try regulatePlainTimeRawFields(self, raw, reject);
+    o.temporal.?.kind = .plain_time;
     return Value.obj(o);
 }
 
@@ -31377,6 +31361,39 @@ fn toPlainTimeData(self: *Interpreter, v: Value) EvalError!value.TemporalData {
     return toPlainTimeDataOpt(self, v, true, false);
 }
 
+fn readPlainTimeRawFields(self: *Interpreter, v: Value, defaults: [6]i64, require_any: bool) EvalError![6]i64 {
+    // PrepareTemporalFields reads the bag's properties in ALPHABETICAL order;
+    // `slot` maps each alphabetical read back into the semantic vals layout
+    // {hour, minute, second, ms, us, ns} that setTimeFields expects, so only
+    // the observable Get order changes, not the stored values.
+    const names = [_][]const u8{ "hour", "microsecond", "millisecond", "minute", "nanosecond", "second" };
+    const slot = [_]usize{ 0, 4, 3, 1, 5, 2 };
+    var any = false;
+    var vals = defaults;
+    for (names, 0..) |nm, i| {
+        const pv = try self.getProperty(v, nm);
+        if (pv.isUndefined()) continue;
+        any = true;
+        vals[slot[i]] = @intFromFloat(try temporalIntArg(self, pv, nm));
+    }
+    if (!any and require_any) return self.throwError("TypeError", "invalid PlainTime fields");
+    return vals;
+}
+
+fn regulatePlainTimeRawFields(self: *Interpreter, raw: [6]i64, reject: bool) EvalError!value.TemporalData {
+    const maxes = [_]i64{ 23, 59, 59, 999, 999, 999 };
+    var vals: [6]i64 = undefined;
+    for (raw, 0..) |n, i| {
+        // RegulateTime: overflow "reject" throws on an out-of-range field;
+        // "constrain" (the default) clamps it (so `{ second: 60 }` => 59).
+        if (reject and (n < 0 or n > maxes[i])) return self.throwError("RangeError", "time component out of range");
+        vals[i] = @max(0, @min(maxes[i], n));
+    }
+    var t: value.TemporalData = .{ .kind = .plain_time };
+    setTimeFields(&t, .{ @floatFromInt(vals[0]), @floatFromInt(vals[1]), @floatFromInt(vals[2]), @floatFromInt(vals[3]), @floatFromInt(vals[4]), @floatFromInt(vals[5]) });
+    return t;
+}
+
 /// As `toPlainTimeData`, but when `require_any` is false a fields bag with no
 /// recognised time fields yields all-zero time (used by PlainDateTime, where the
 /// time portion is optional and defaults to midnight).
@@ -31386,28 +31403,7 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
     }
     var t: value.TemporalData = .{ .kind = .plain_time };
     if (v.isObject()) {
-        // PrepareTemporalFields reads the bag's properties in ALPHABETICAL order;
-        // `slot` maps each alphabetical read back into the semantic vals layout
-        // {hour, minute, second, ms, us, ns} that setTimeFields expects, so only
-        // the observable Get order changes, not the stored values.
-        const names = [_][]const u8{ "hour", "microsecond", "millisecond", "minute", "nanosecond", "second" };
-        const maxes = [_]i64{ 23, 999, 999, 59, 999, 59 };
-        const slot = [_]usize{ 0, 4, 3, 1, 5, 2 };
-        var any = false;
-        var vals: [6]i64 = .{ 0, 0, 0, 0, 0, 0 };
-        for (names, 0..) |nm, i| {
-            const pv = try self.getProperty(v, nm);
-            if (pv.isUndefined()) continue;
-            any = true;
-            const n: i64 = @intFromFloat(try temporalIntArg(self, pv, nm));
-            // RegulateTime: overflow "reject" throws on an out-of-range field;
-            // "constrain" (the default) clamps it (so `{ second: 60 }` ⇒ 59).
-            if (reject and (n < 0 or n > maxes[i])) return self.throwError("RangeError", "time component out of range");
-            vals[slot[i]] = @max(0, @min(maxes[i], n));
-        }
-        if (!any and require_any) return self.throwError("TypeError", "invalid PlainTime fields");
-        setTimeFields(&t, .{ @floatFromInt(vals[0]), @floatFromInt(vals[1]), @floatFromInt(vals[2]), @floatFromInt(vals[3]), @floatFromInt(vals[4]), @floatFromInt(vals[5]) });
-        return t;
+        return regulatePlainTimeRawFields(self, try readPlainTimeRawFields(self, v, .{ 0, 0, 0, 0, 0, 0 }, require_any), reject);
     }
     if (v.isString()) {
         // A bare time ("HH:MM:SS.fff"), or the time portion of a full date-time
@@ -31446,8 +31442,21 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
 fn temporalPlainTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
-    const t = try toPlainTimeDataOpt(self, if (args.len > 0) args[0] else Value.undef(), true, reject);
+    const item = if (args.len > 0) args[0] else Value.undef();
+    const options = if (args.len > 1) args[1] else Value.undef();
+    const t = if (tIsTemporal(item, .plain_time) or tIsTemporal(item, .plain_date_time) or item.isString()) blk: {
+        const parsed = try toPlainTimeDataOpt(self, item, true, false);
+        _ = try readOverflowReject(self, options);
+        break :blk parsed;
+    } else if (item.isObject()) blk: {
+        const raw = try readPlainTimeRawFields(self, item, .{ 0, 0, 0, 0, 0, 0 }, true);
+        const reject = try readOverflowReject(self, options);
+        break :blk try regulatePlainTimeRawFields(self, raw, reject);
+    } else blk: {
+        const parsed = try toPlainTimeDataOpt(self, item, true, false);
+        _ = try readOverflowReject(self, options);
+        break :blk parsed;
+    };
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     o.temporal.?.* = t;
     o.temporal.?.kind = .plain_time;
