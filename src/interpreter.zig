@@ -33444,13 +33444,14 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-            const other = try toZdtArg(self, if (args.len > 0) args[0] else Value.undef(), true, .reject, .compatible);
+            const other_arg = if (args.len > 0) args[0] else Value.undef();
+            const other = try toZdtArg(self, other_arg, true, .reject, .compatible);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
             const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) <= @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
             const t = this.asObj().temporal.?;
             if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
-            if (!temporalTimeZoneIdsEqual(t.tz_name, other.tz_name)) return self.throwError("RangeError", "time zone mismatch");
+            if (!other_arg.isString() and !temporalTimeZoneIdsEqual(t.tz_name, other.tz_name)) return self.throwError("RangeError", "time zone mismatch");
             if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
                 var diff = @as(i128, @intFromFloat(sign)) * (other.epoch_ns - t.epoch_ns);
                 if (opts.smallest == .day and opts.increment != 1) {
