@@ -273,6 +273,12 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   fields such as `import.meta`. This promotes
   `cve/mc-dos-waiter-table-storm.js`, whose reclamation arm depends on
   WeakRefs clearing across async microtask turns.
+  *Thread host-queue roots landed:* shared-realm threading queues now participate
+  in the root policy rather than relying on incidental JS references. Queued
+  `Lock.asyncHold` tasks in `Gil.tasks`, per-lock pending grant jobs, async
+  condition waiters, ThreadLocal stored values, and thread completion results
+  trace or barrier their hidden JS values, covering callbacks/promises that live
+  only in native side records.
   *Dependency root helper landed:* `zig-gc` now exposes optional conservative
   word marking for native stack or register-spill ranges, with dependency-local
   tests covering exact and interior payload pointers. zig-js still needs

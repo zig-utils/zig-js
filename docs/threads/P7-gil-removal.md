@@ -254,7 +254,11 @@ per-thread before threads stop holding the GIL):
      points service the same root-publication hook as ordinary bytecode
      safepoints, before re-entering the bounded native park. The collector's
      per-generation wait now has a short time floor so those peers get at least
-     one wake/publish opportunity under load. The regression case from the
+     one wake/publish opportunity under load. The root set also includes
+     host-side thread queues that can hide JS values from ordinary object
+     tracing: `Gil.tasks`, `LockRecord.pending`, async condition waiters,
+     ThreadLocal maps, and thread completion results are traced or insertion-
+     barriered when populated. The regression case from the
      earlier naive approach (marking sync waits as frozen and sweeping the host's
      captured-env vars) stays guarded by
      `parallel_js (M3): sync wait peers publish roots for mid-script parallel GC`,

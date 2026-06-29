@@ -269,10 +269,13 @@ threading architecture:
   coverage.
 - **Mid-script parallel GC** - sync-wait pump points now publish roots for
   property `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition,
-  so the abort-safe collector can finish while those peers are blocked. Keep
-  maturing convergence and stress coverage for heavier wait/cleanup mixes; the
-  mid-GC fuzzer now also verifies exact `FinalizationRegistry` cleanup count/sum
-  delivery after those wait-pump sweeps.
+  so the abort-safe collector can finish while those peers are blocked. The GC
+  root set now also covers host-side thread queues such as `Gil.tasks`,
+  per-lock async grants, async condition waiters, ThreadLocal values, and thread
+  completion results. Keep maturing convergence and stress coverage for heavier
+  wait/cleanup mixes; the mid-GC fuzzer now also verifies exact
+  `FinalizationRegistry` cleanup count/sum delivery after those wait-pump
+  sweeps.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing

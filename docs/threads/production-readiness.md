@@ -132,6 +132,10 @@ as embedders exercise more threaded host patterns.
   drives `parallel_midscript_gc`; every seed must complete exactly and finish at
   least one parallel sweep, then deliver the expected `FinalizationRegistry`
   cleanup count/sum after a quiescent collect.
+- Host-side thread queues are now explicit GC roots: queued `Lock.asyncHold`
+  tasks in `Gil.tasks`, per-lock pending grants, async condition waiters,
+  ThreadLocal values, and thread completion results trace or barrier their
+  hidden JS values instead of relying on a JS property path.
 - The lifecycle fuzzer profile adds deterministic termination storms where main
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   and module `Worker`s overlapping shared-realm `Thread`s on one retained
@@ -147,7 +151,8 @@ as embedders exercise more threaded host patterns.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
 scheduling, worker module-graph shapes, richer cleanup/finalization
-interleavings, and additional teardown race variants.
+interleavings, async-grant execution during active mid-script GC windows, and
+additional teardown race variants.
 
 ## 6. CI Gating
 

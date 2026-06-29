@@ -133,6 +133,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (o.arg_map_env) |p| v.mark(p); // *Environment (kind .environment)
     promise.traceNativePrivateData(o, v);
     interp.traceNativePrivateData(o, v);
+    jsthread.traceNativePrivateData(o, v);
     vm.traceNativePrivateData(o, v);
     // The viewed ArrayBuffer object keeps a TypedArray/DataView's storage alive.
     if (o.typed_array) |ta| v.mark(ta.buffer);
@@ -599,6 +600,8 @@ pub const Binding = struct {
             markValue(v, vp.*);
         }
         ctx.realmUnlock();
+
+        if (ctx.gil) |g| jsthread.traceGilTaskRoots(g, v);
 
         if (par != null) if (ctx.gil) |g| g.lockApi();
         for (ctx.js_threads.items) |rec| {

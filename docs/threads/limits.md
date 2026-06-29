@@ -102,9 +102,13 @@ context APIs.
 - **Mid-script parallel GC maturity.** The abort-safe collector now has
   cooperative root publication at sync-wait pump points, covering property
   `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition without
-  tracing those peers as frozen parked stacks. Keep quiescent collection as the
-  fallback for cycles that still cannot converge, and keep widening wait/cleanup
-  stress around this protocol.
+  tracing those peers as frozen parked stacks. Host-side thread queues are part
+  of the root set too: `Gil.tasks`, `LockRecord.pending`, async condition
+  waiters, ThreadLocal maps, and thread completion results now trace or barrier
+  their hidden JS values. Keep quiescent collection as the fallback for cycles
+  that still cannot converge, and keep widening wait/cleanup stress around this
+  protocol, especially async-grant execution while a mid-script collection is in
+  flight.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught
   exceptions/finally, nested thread lifecycle, `asyncJoin`, property
   `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and

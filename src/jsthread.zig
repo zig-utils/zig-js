@@ -443,6 +443,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
 }
 
 fn publishThreadCompletion(rec: *ThreadRecord, threw: bool, result: Value) std.ArrayListUnmanaged(PendingJoin) {
+    gc_mod.barrierValue(result);
     const io = agent.engineIo();
     rec.join_mutex.lockUncancelable(io);
     defer rec.join_mutex.unlock(io);
@@ -641,6 +642,71 @@ const UnlockTokenRecord = struct {
     brand: SyncBrand = sync_brand_unlock_token,
     lock: ?*LockRecord = null,
 };
+
+inline fn traceThreadValue(v: anytype, val: Value) void {
+    if (val.isObject()) v.mark(val.asObj());
+}
+
+fn traceHoldJob(job: *HoldJob, v: anytype) void {
+    v.mark(job.outer);
+    if (job.cb) |cb| traceThreadValue(v, cb);
+}
+
+fn barrierHoldJob(job: *HoldJob) void {
+    gc_mod.barrierCell(@ptrCast(job.outer));
+    if (job.cb) |cb| gc_mod.barrierValue(cb);
+}
+
+fn traceLockRecordRoots(rec: *LockRecord, v: anytype) void {
+    rec.mutex.lockUncancelable(agent.engineIo());
+    defer rec.mutex.unlock(agent.engineIo());
+    for (rec.pending.items[rec.pending_head..]) |job| traceHoldJob(job, v);
+}
+
+fn traceCondRecordRoots(rec: *CondRecord, v: anytype) void {
+    rec.mutex.lockUncancelable(agent.engineIo());
+    defer rec.mutex.unlock(agent.engineIo());
+    for (rec.queue.items) |entry| switch (entry) {
+        .sync => {},
+        .asynchronous => |w| v.mark(w.outer),
+    };
+}
+
+fn traceThreadLocalRoots(rec: *TLRecord, v: anytype) void {
+    rec.lockMap();
+    defer rec.unlockMap();
+    var it = rec.map.valueIterator();
+    while (it.next()) |val| traceThreadValue(v, val.*);
+}
+
+/// Trace JS roots hidden behind native `private_data` records owned by this
+/// module. `gc.zig` calls this from the Object tracer after the object itself is
+/// marked; this covers host-side queues that are not ordinary JS properties.
+pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
+    const pd = o.private_data orelse return;
+    const brand: *const SyncBrand = @ptrCast(@alignCast(pd));
+    switch (brand.*) {
+        sync_brand_lock => traceLockRecordRoots(@ptrCast(@alignCast(pd)), v),
+        sync_brand_condition => traceCondRecordRoots(@ptrCast(@alignCast(pd)), v),
+        sync_brand_thread_local => traceThreadLocalRoots(@ptrCast(@alignCast(pd)), v),
+        sync_brand_unlock_token => {},
+        else => {},
+    }
+}
+
+/// Trace the realm run-loop task queue (`Gil.tasks`). Entries are pending
+/// `HoldJob`s for `Lock.asyncHold` / async condition reacquire delivery; if a
+/// mid-script GC runs while sync waiters pump this queue, the callback and outer
+/// promise must stay live until the task executes.
+pub fn traceGilTaskRoots(g: *gil_mod.Gil, v: anytype) void {
+    g.lockApi();
+    defer g.unlockApi();
+    if (g.tasks_head >= g.tasks.items.len) return;
+    for (g.tasks.items[g.tasks_head..]) |raw| {
+        const job: *HoldJob = @ptrCast(@alignCast(raw));
+        traceHoldJob(job, v);
+    }
+}
 
 fn currentTid() u64 {
     return @intCast(std.Thread.getCurrentId());
@@ -1980,6 +2046,34 @@ test "jsthread lock pending async jobs are cursor FIFO" {
     try std.testing.expectEqual(@as(?*HoldJob, null), rec.popPending());
 }
 
+test "jsthread traces queued async hold task roots" {
+    const Visitor = struct {
+        outer: *value.Object,
+        cb: *value.Object,
+        saw_outer: bool = false,
+        saw_cb: bool = false,
+
+        pub fn mark(self: *@This(), cell: ?*anyopaque) void {
+            const ptr = cell orelse return;
+            if (ptr == @as(*anyopaque, @ptrCast(self.outer))) self.saw_outer = true;
+            if (ptr == @as(*anyopaque, @ptrCast(self.cb))) self.saw_cb = true;
+        }
+    };
+
+    var g = gil_mod.Gil{};
+    defer g.tasks.deinit(std.testing.allocator);
+    var rec = LockRecord{ .gil = &g };
+    var outer = value.Object{};
+    var cb = value.Object{};
+    var job = HoldJob{ .lock = &rec, .outer = &outer, .cb = Value.obj(&cb) };
+
+    try g.enqueueTask(std.testing.allocator, @ptrCast(&job));
+    var visitor = Visitor{ .outer = &outer, .cb = &cb };
+    traceGilTaskRoots(&g, &visitor);
+    try std.testing.expect(visitor.saw_outer);
+    try std.testing.expect(visitor.saw_cb);
+}
+
 /// `holder` value for an asyncHold grant: the hold belongs to the JOB, not
 /// to any thread — a same-thread sync `hold` must read as CONTENDED (block
 /// or gate), never as recursive.
@@ -2191,6 +2285,7 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
     const outer = try promise.newPromise(self);
     const job = try self.arena.create(HoldJob);
     job.* = .{ .lock = rec, .outer = outer, .cb = if (cb.isUndefined()) null else cb };
+    barrierHoldJob(job);
     var enqueue_now = false;
     rec.mutex.lockUncancelable(agent.engineIo());
     if (rec.locked and (rec.holder == currentTid() or rec.async_runner == currentTid())) {
@@ -2274,6 +2369,7 @@ fn condAsyncWaitFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
 fn wakeAsyncCondWaiter(self: *Interpreter, w: *AsyncCondWaiter) void {
     const job = self.arena.create(HoldJob) catch return;
     job.* = .{ .lock = w.lock, .outer = w.outer, .cb = null };
+    barrierHoldJob(job);
     var enqueue_now = false;
     w.lock.mutex.lockUncancelable(agent.engineIo());
     if (!w.lock.locked and w.lock.sync_waiting == 0) {
