@@ -166,7 +166,11 @@ including `Thread.join`.
 The `empty`/`jobs` columns split the run-loop task pump into empty atomic
 fast-path hits and real async-hold job delivery. Run it before and after
 synchronization or lifecycle changes so performance work has an attributed
-baseline instead of only elapsed time. Empty sync-wait task pumps now have a
+baseline instead of only elapsed time. The profile also prints a separate
+isolated `Worker` table for structured-clone inbox/outbox round-trips and
+spawn/post/receive/join/destroy lifecycle churn; it intentionally has no
+`.gil = true` column because each Worker owns its own `Context`.
+Empty sync-wait task pumps now have a
 lock-free fast path;
 real async-hold delivery drains bounded FIFO bursts from the realm task queue
 under one API-lock acquisition before running grants outside that lock; condition

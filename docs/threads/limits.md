@@ -111,7 +111,11 @@ context APIs.
   table before signal, and matching `waitAsync` tickets are collected without
   repeated middle removals. Worker inbox/outbox channels now drain
   structured-clone messages with FIFO head cursors as well, avoiding front
-  shifts in receive-heavy Worker loops.
+  shifts in receive-heavy Worker loops. The profile now includes a separate
+  isolated `Worker` section for structured-clone inbox/outbox round-trips and
+  spawn/post/receive/join/destroy lifecycle cost, so Worker-heavy follow-up
+  optimization has its own baseline instead of being inferred from shared-realm
+  `Thread` rows.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

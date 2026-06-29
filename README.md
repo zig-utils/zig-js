@@ -262,9 +262,12 @@ threading architecture:
   empty/job counts beside wall-clock time, so follow-up optimization can separate
   property waiters, condition waiters, user-level lock pressure,
   thread-join/lifecycle waiting, async-hold delivery, object/element storage
-  contention, and GC allocation costs under high thread counts. The
-  sync-wait pump path now skips the shared run-loop task lock entirely when no
-  async hold jobs are queued, and async-hold delivery now dequeues both the
+  contention, and GC allocation costs under high thread counts. It also prints
+  a separate isolated `Worker` section for structured-clone inbox/outbox
+  round-trips and spawn/post/receive/join/destroy lifecycle cost; that section
+  has no `.gil = true` comparison because each Worker owns its own `Context`.
+  The sync-wait pump path now skips the shared run-loop task lock entirely when
+  no async hold jobs are queued, and async-hold delivery now dequeues both the
   per-lock pending list and the realm task queue through FIFO head cursors
   instead of front-shifting task lists. Realm task pumps also copy bounded FIFO
   bursts under the shared API lock before running grants outside it, so delivery
@@ -276,7 +279,7 @@ threading architecture:
   repeated `orderedRemove` shifts. Worker inbox/outbox channels now drain
   through the same FIFO head-cursor shape instead of front-shifting
   structured-clone message queues. Continue using the profile for the remaining
-  contended-lock and lifecycle hot spots.
+  contended-lock, Worker message, and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

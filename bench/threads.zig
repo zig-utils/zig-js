@@ -1,11 +1,13 @@
-//! Shared-realm Thread contention profile.
+//! Shared-realm Thread contention and isolated Worker profile.
 //!
 //! `zig build threads-profile`
 //!
 //! This is a repeatable local profiler for issue #1's long-tail performance
-//! work. It compares the shipping no-GIL default against the `.gil = true`
-//! serialized fallback on the same workloads, so regressions in scaling or
-//! newly-hot locks are visible without depending on wall-clock numbers alone.
+//! work. The shared-realm section compares the shipping no-GIL default against
+//! the `.gil = true` serialized fallback on the same workloads, so regressions
+//! in scaling or newly-hot locks are visible without depending on wall-clock
+//! numbers alone. The Worker section separately attributes structured-clone
+//! message traffic and spawn/post/receive/join/destroy lifecycle cost.
 
 const std = @import("std");
 const js = @import("js");
@@ -20,6 +22,9 @@ const Timing = struct {
     ns: u64,
     stats: js.jsthread.ContentionStats,
 };
+
+const worker_message_batches = 160;
+const worker_lifecycle_rounds = 12;
 
 const scenarios = [_]Scenario{
     .{
@@ -288,6 +293,137 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
     }
 }
 
+fn cleanupWorkers(workers: []const *js.Worker) void {
+    for (workers) |w| w.terminate();
+    for (workers) |w| {
+        w.join();
+        w.destroy();
+    }
+}
+
+fn expectWorkerReply(reply: js.Value, expected: f64) !void {
+    if (!reply.isNumber() or reply.asNum() != expected) return error.UnexpectedWorkerReply;
+}
+
+fn timeWorkerMessages(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, batches: usize) !u64 {
+    const src =
+        \\globalThis.onmessage = function(e) {
+        \\  postMessage(e.data + 1);
+        \\};
+    ;
+
+    const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const workers = try gpa.alloc(*js.Worker, worker_count);
+    defer gpa.free(workers);
+
+    var spawned: usize = 0;
+    errdefer cleanupWorkers(workers[0..spawned]);
+    while (spawned < worker_count) : (spawned += 1) {
+        workers[spawned] = try js.Worker.spawn(src);
+    }
+
+    // Warm each worker so the timed section is dominated by message traffic,
+    // not first-delivery startup.
+    for (workers) |w| try w.postMessage(&machine, js.Value.num(0));
+    for (workers) |w| {
+        const reply = (try w.receive(&machine, 10_000)) orelse return error.WorkerTimeout;
+        try expectWorkerReply(reply, 1);
+    }
+
+    const t0 = nowNs(io);
+    var batch: usize = 0;
+    while (batch < batches) : (batch += 1) {
+        const base = batch * worker_count;
+        for (workers, 0..) |w, i| {
+            try w.postMessage(&machine, js.Value.num(@floatFromInt(base + i)));
+        }
+        for (workers, 0..) |w, i| {
+            const reply = (try w.receive(&machine, 10_000)) orelse return error.WorkerTimeout;
+            const expected: f64 = @floatFromInt(base + i + 1);
+            try expectWorkerReply(reply, expected);
+        }
+    }
+    const ns: u64 = @intCast(nowNs(io) - t0);
+
+    for (workers) |w| w.close();
+    for (workers) |w| {
+        w.join();
+        w.destroy();
+    }
+    return ns;
+}
+
+fn timeWorkerLifecycle(gpa: std.mem.Allocator, io: std.Io, worker_count: usize, rounds: usize) !u64 {
+    const src =
+        \\globalThis.onmessage = function(e) {
+        \\  postMessage(e.data + 1);
+        \\  close();
+        \\};
+    ;
+
+    const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const workers = try gpa.alloc(*js.Worker, worker_count);
+    defer gpa.free(workers);
+
+    const t0 = nowNs(io);
+    var round: usize = 0;
+    while (round < rounds) : (round += 1) {
+        var spawned: usize = 0;
+        errdefer cleanupWorkers(workers[0..spawned]);
+        while (spawned < worker_count) : (spawned += 1) {
+            workers[spawned] = try js.Worker.spawn(src);
+        }
+
+        const base = round * worker_count;
+        for (workers) |w| try w.postMessage(&machine, js.Value.num(@floatFromInt(base)));
+        for (workers) |w| {
+            const reply = (try w.receive(&machine, 10_000)) orelse return error.WorkerTimeout;
+            const expected: f64 = @floatFromInt(base + 1);
+            try expectWorkerReply(reply, expected);
+        }
+        for (workers) |w| {
+            w.join();
+            w.destroy();
+        }
+    }
+    return @intCast(nowNs(io) - t0);
+}
+
+fn printWorkerProfile(gpa: std.mem.Allocator, io: std.Io, workers: []const usize) !void {
+    std.debug.print("\nWorker message/lifecycle profile\n", .{});
+    std.debug.print("isolated Worker API: one Context per OS thread, structured-clone inbox/outbox, no shared-realm .gil fallback\n", .{});
+    std.debug.print("{s:>8} {s:>14} {s:>12} {s:>14} {s:>12} {s:>12}\n", .{
+        "workers",
+        "message ns",
+        "ns/msg",
+        "lifecycle ns",
+        "ns/worker",
+        "spawns",
+    });
+
+    for (workers) |n| {
+        const message_ns = try timeWorkerMessages(gpa, io, n, worker_message_batches);
+        const total_messages: u64 = @intCast(n * worker_message_batches);
+        const lifecycle_ns = try timeWorkerLifecycle(gpa, io, n, worker_lifecycle_rounds);
+        const total_spawns: u64 = @intCast(n * worker_lifecycle_rounds);
+
+        std.debug.print("{d:>8} {d:>14} {d:>12} {d:>14} {d:>12} {d:>12}\n", .{
+            n,
+            message_ns,
+            message_ns / @max(total_messages, 1),
+            lifecycle_ns,
+            lifecycle_ns / @max(total_spawns, 1),
+            total_spawns,
+        });
+    }
+}
+
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .environ = .empty });
@@ -308,4 +444,5 @@ pub fn main() !void {
     std.debug.print("empty/jobs = run-loop task-pump empty fast-path hits / delivered asyncHold jobs\n", .{});
 
     for (scenarios) |scenario| try printScenario(gpa, io, scenario, worker_counts);
+    try printWorkerProfile(gpa, io, worker_counts);
 }

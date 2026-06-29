@@ -118,6 +118,11 @@ Known performance/maturity work:
 - Worker inbox/outbox channels now use FIFO head cursors for structured-clone
   message queues, so Worker-heavy lifecycle and receive loops do not pay one
   front shift per delivered message.
+- The same `threads-profile` run now includes a separate isolated `Worker`
+  section for structured-clone inbox/outbox round-trips and
+  spawn/post/receive/join/destroy lifecycle cost. It is reported outside the
+  no-GIL versus `.gil = true` table because Workers already isolate each
+  `Context` onto its own OS thread.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 
