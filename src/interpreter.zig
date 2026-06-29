@@ -27443,7 +27443,7 @@ fn differenceISODate(y1: i64, m1: u8, d1: u8, y2: i64, m2: u8, d2: u8, largest: 
 }
 
 /// A resolved `relativeTo` anchor: an ISO date plus its time-of-day in ns.
-const RelTo = struct { y: i64, m: u8, d: u8, time_ns: i128, zoned: bool = false, epoch_ns: i128 = 0 };
+const RelTo = struct { y: i64, m: u8, d: u8, time_ns: i128, zoned: bool = false, epoch_ns: i128 = 0, tz_name: []const u8 = "UTC", tz_offset_ns: i64 = 0 };
 
 /// Resolve the `relativeTo` option (a Temporal date/dateTime/zonedDateTime, an
 /// ISO string, or a property bag). Null when absent.
@@ -27459,7 +27459,7 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
             .plain_date_time => return .{ .y = t.year, .m = t.month, .d = t.day, .time_ns = timeToNs(t) },
             .zoned_date_time => {
                 const local = zdtLocal(t);
-                return .{ .y = local.year, .m = local.month, .d = local.day, .time_ns = timeToNs(&local), .zoned = true, .epoch_ns = t.epoch_ns };
+                return .{ .y = local.year, .m = local.month, .d = local.day, .time_ns = timeToNs(&local), .zoned = true, .epoch_ns = t.epoch_ns, .tz_name = t.tz_name, .tz_offset_ns = t.tz_offset_ns };
             },
             else => return self.throwError("TypeError", "relativeTo must be a PlainDate, PlainDateTime, or ZonedDateTime"),
         }
@@ -27470,11 +27470,16 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         if (p.z and !ann.has_tz)
             return self.throwError("RangeError", "relativeTo exact time string requires a time-zone annotation");
         var rel_epoch_ns = p.epoch_ns;
-        if (ann.has_tz and p.has_offset) {
-            const tz = try parseTimeZone(self, rv.asStr());
+        var rel_tz: TimeZone = .{ .name = "UTC", .offset_ns = 0 };
+        if (ann.has_tz) {
+            rel_tz = try parseTimeZone(self, rv.asStr());
             const local_ns_from_offset = p.epoch_ns + p.offset_ns;
-            const actual_offset = try relativeTimeZoneOffset(self, tz, local_ns_from_offset, p.offset_ns, p.offset_has_seconds, true);
-            rel_epoch_ns = local_ns_from_offset - @as(i128, actual_offset);
+            if (p.has_offset) {
+                const actual_offset = try relativeTimeZoneOffset(self, rel_tz, local_ns_from_offset, p.offset_ns, p.offset_has_seconds, true);
+                rel_epoch_ns = local_ns_from_offset - @as(i128, actual_offset);
+            } else if (!p.z) {
+                rel_epoch_ns = local_ns_from_offset - @as(i128, zdtActualOffsetForLocal(rel_tz, local_ns_from_offset));
+            }
         }
         const tod: i128 = @as(i128, p.h) * nsPerUnit(.hour) + @as(i128, p.mi) * nsPerUnit(.minute) +
             @as(i128, p.s) * nsPerUnit(.second) + @as(i128, p.ms) * nsPerUnit(.millisecond) +
@@ -27485,7 +27490,7 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
             if (local_ns < -max_temporal_instant_ns)
                 return self.throwError("RangeError", "relativeTo date-time out of range");
         }
-        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod, .zoned = ann.has_tz, .epoch_ns = rel_epoch_ns };
+        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod, .zoned = ann.has_tz and !isFixedTimeZone(rel_tz), .epoch_ns = rel_epoch_ns, .tz_name = rel_tz.name, .tz_offset_ns = rel_tz.offset_ns };
     }
     if (rv.isObject()) {
         const bag_cal = try readCalendarField(self, rv);
@@ -27538,7 +27543,7 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
             @as(i128, @intFromFloat(vals[4])) * nsPerUnit(.microsecond) +
             @as(i128, @intFromFloat(vals[5]));
         const local_ns = @as(i128, tDaysFromCivil(y.?, @intFromFloat(m.?), @intFromFloat(d.?))) * DAY_NS + time_ns;
-        const zoned = time_zone != null;
+        const zoned = if (time_zone) |tz| !isFixedTimeZone(tz) else false;
         const epoch_ns = if (time_zone) |tz| blk: {
             const actual_offset = if (offset_ns) |off|
                 try relativeTimeZoneOffset(self, tz, local_ns, off, true, false)
@@ -27553,6 +27558,8 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
             .time_ns = time_ns,
             .zoned = zoned,
             .epoch_ns = epoch_ns,
+            .tz_name = if (time_zone) |tz| tz.name else "UTC",
+            .tz_offset_ns = if (time_zone) |tz| tz.offset_ns else 0,
         };
     }
     return self.throwError("TypeError", "invalid relativeTo");
@@ -27621,18 +27628,72 @@ fn durTimeOnlyNs(dur: [10]f64) i128 {
         @as(i128, @intFromFloat(dur[9]));
 }
 
+fn relLocalNs(y: i64, m: u8, d: u8, time_ns: i128) i128 {
+    return @as(i128, tDaysFromCivil(y, m, d)) * DAY_NS + time_ns;
+}
+
+fn relLocalEpochNs(rel: RelTo, y: i64, m: u8, d: u8, time_ns: i128) i128 {
+    const local_ns = relLocalNs(y, m, d, time_ns);
+    const tz: TimeZone = .{ .name = rel.tz_name, .offset_ns = rel.tz_offset_ns };
+    return local_ns - @as(i128, zdtActualOffsetForLocal(tz, local_ns));
+}
+
+fn relEpochToLocalNs(rel: RelTo, epoch_ns: i128) i128 {
+    if (!rel.zoned) return epoch_ns;
+    return epoch_ns + @as(i128, timeZoneOffsetAtEpoch(rel.tz_name, epoch_ns, rel.tz_offset_ns));
+}
+
+fn relEpochForDate(rel: RelTo, y: i64, m: u8, d: u8, time_ns: i128) i128 {
+    if (!rel.zoned) return relLocalNs(y, m, d, time_ns);
+    return relLocalEpochNs(rel, y, m, d, time_ns);
+}
+
 /// The absolute end nanoseconds of `rel + dur` (calendar part added on the date,
 /// time part added on top), and the start nanoseconds of `rel`.
 fn durEndpointsNs(self: *Interpreter, dur: [10]f64, rel: RelTo) EvalError!struct { start: i128, end: i128 } {
     const end_date = isoDateAdd(rel.y, rel.m, rel.d, @intFromFloat(dur[0]), @intFromFloat(dur[1]), @intFromFloat(dur[2]), @intFromFloat(dur[3]));
     try checkIsoDate(self, @floatFromInt(end_date.y), @floatFromInt(end_date.m), @floatFromInt(end_date.d));
-    const start = @as(i128, tDaysFromCivil(rel.y, rel.m, rel.d)) * DAY_NS + rel.time_ns;
-    const end = @as(i128, tDaysFromCivil(end_date.y, end_date.m, end_date.d)) * DAY_NS + rel.time_ns + durTimeOnlyNs(dur);
+    const start = if (rel.zoned) rel.epoch_ns else relLocalNs(rel.y, rel.m, rel.d, rel.time_ns);
+    const same_date = end_date.y == rel.y and end_date.m == rel.m and end_date.d == rel.d;
+    const date_end = if (same_date) start else relEpochForDate(rel, end_date.y, end_date.m, end_date.d, rel.time_ns);
+    const end = date_end + durTimeOnlyNs(dur);
     if (start < -max_temporal_instant_ns)
         return self.throwError("RangeError", "relativeTo date-time out of range");
-    try checkPlainDateTimeNs(self, end);
-    if (rel.zoned) try checkInstantEpochNs(self, rel.epoch_ns + (end - start));
+    if (rel.zoned) {
+        try checkInstantEpochNs(self, end);
+    } else {
+        try checkPlainDateTimeNs(self, end);
+    }
     return .{ .start = start, .end = end };
+}
+
+fn totalZonedDaysRel(self: *Interpreter, start_epoch: i128, end_epoch: i128, rel: RelTo) EvalError!f64 {
+    if (start_epoch == end_epoch) return 0;
+    const forward = end_epoch > start_epoch;
+    const direction: i64 = if (forward) 1 else -1;
+    var whole: i64 = 0;
+    var cur_y = rel.y;
+    var cur_m = rel.m;
+    var cur_d = rel.d;
+    var cur_epoch = start_epoch;
+    while (true) {
+        const next_date = isoDateAdd(cur_y, cur_m, cur_d, 0, 0, 0, direction);
+        try checkIsoDate(self, @floatFromInt(next_date.y), @floatFromInt(next_date.m), @floatFromInt(next_date.d));
+        const next_epoch = relLocalEpochNs(rel, next_date.y, next_date.m, next_date.d, rel.time_ns);
+        const span = next_epoch - cur_epoch;
+        if (span == 0) break;
+        const reaches_next = if (forward) end_epoch >= next_epoch else end_epoch <= next_epoch;
+        if (!reaches_next) {
+            const abs_span = if (span < 0) -span else span;
+            return @as(f64, @floatFromInt(whole)) + try decimalRatio(self, end_epoch - cur_epoch, abs_span, 40);
+        }
+        whole += direction;
+        cur_y = next_date.y;
+        cur_m = next_date.m;
+        cur_d = next_date.d;
+        cur_epoch = next_epoch;
+    }
+    return @floatFromInt(whole);
 }
 
 /// Temporal.Duration.prototype.total with a `relativeTo` anchor (ISO calendar):
@@ -27641,6 +27702,7 @@ fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) E
     const ep = try durEndpointsNs(self, dur, rel);
     // Day-and-smaller units (and weeks) have a fixed nanosecond length.
     if (unit == .day or @intFromEnum(unit) > @intFromEnum(TUnit.day)) {
+        if (rel.zoned and unit == .day) return totalZonedDaysRel(self, ep.start, ep.end, rel);
         return decimalTotalFromNs(self, ep.end - ep.start, nsPerUnit(unit), 40);
     }
     if (unit == .week) {
@@ -27648,7 +27710,7 @@ fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) E
     }
     // Year/month: whole calendar units toward the end, plus a fraction of the
     // next unit (variable length).
-    const end_floor = tCivilFromDays(@intCast(@divFloor(ep.end, DAY_NS)));
+    const end_floor = tCivilFromDays(@intCast(@divFloor(relEpochToLocalNs(rel, ep.end), DAY_NS)));
     const diff = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, unit);
     const whole: i64 = if (unit == .year) @intFromFloat(diff[0]) else @intFromFloat(diff[1]);
     const lo_date = if (unit == .year)
@@ -27662,8 +27724,8 @@ fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) E
         isoDateAdd(rel.y, rel.m, rel.d, 0, whole + sign, 0, 0);
     try checkIsoDate(self, @floatFromInt(lo_date.y), @floatFromInt(lo_date.m), @floatFromInt(lo_date.d));
     try checkIsoDate(self, @floatFromInt(hi_date.y), @floatFromInt(hi_date.m), @floatFromInt(hi_date.d));
-    const lo_ns = @as(i128, tDaysFromCivil(lo_date.y, lo_date.m, lo_date.d)) * DAY_NS + rel.time_ns;
-    const hi_ns = @as(i128, tDaysFromCivil(hi_date.y, hi_date.m, hi_date.d)) * DAY_NS + rel.time_ns;
+    const lo_ns = relEpochForDate(rel, lo_date.y, lo_date.m, lo_date.d, rel.time_ns);
+    const hi_ns = relEpochForDate(rel, hi_date.y, hi_date.m, hi_date.d, rel.time_ns);
     const span = hi_ns - lo_ns;
     if (span == 0) return @floatFromInt(whole);
     return decimalRatio(self, @as(i128, whole) * span + @as(i128, sign) * (ep.end - lo_ns), span, 40);
@@ -27694,8 +27756,9 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         // Calendar largestUnit: re-difference the rounded end date, keep sub-day
         // time (zero when smallestUnit ≥ day).
         const rounded_abs = ep.start + rounded_ns;
-        var rounded_end_days = @divFloor(rounded_abs, DAY_NS);
-        var time_ns = rounded_abs - rounded_end_days * DAY_NS - rel.time_ns;
+        const rounded_local = relEpochToLocalNs(rel, rounded_abs);
+        var rounded_end_days = @divFloor(rounded_local, DAY_NS);
+        var time_ns = rounded_local - rounded_end_days * DAY_NS - rel.time_ns;
         if (rounded_ns >= 0 and time_ns < 0) {
             rounded_end_days -= 1;
             time_ns += DAY_NS;
@@ -27739,16 +27802,16 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         try checkIsoDate(self, @floatFromInt(probe.y), @floatFromInt(probe.m), @floatFromInt(probe.d));
     }
     if (smallest == .week and @intFromEnum(largest) < @intFromEnum(TUnit.week)) {
-        const end_floor = tCivilFromDays(@intCast(@divFloor(ep.end, DAY_NS)));
+        const end_floor = tCivilFromDays(@intCast(@divFloor(relEpochToLocalNs(rel, ep.end), DAY_NS)));
         const exact = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, largest);
         const lo_date = isoDateAdd(rel.y, rel.m, rel.d, @intFromFloat(exact[0]), @intFromFloat(exact[1]), 0, 0);
-        const lo_ns = @as(i128, tDaysFromCivil(lo_date.y, lo_date.m, lo_date.d)) * DAY_NS + rel.time_ns;
+        const lo_ns = relEpochForDate(rel, lo_date.y, lo_date.m, lo_date.d, rel.time_ns);
         const inc: i128 = @intFromFloat(opts.increment);
         const rounded_weeks = applyRounding(ep.end - lo_ns, inc * 7 * DAY_NS, opts.mode) * inc;
         return .{ exact[0], exact[1], @floatFromInt(rounded_weeks), 0, 0, 0, 0, 0, 0, 0 };
     }
     if (@intFromEnum(largest) < @intFromEnum(smallest)) {
-        const end_floor = tCivilFromDays(@intCast(@divFloor(ep.end, DAY_NS)));
+        const end_floor = tCivilFromDays(@intCast(@divFloor(relEpochToLocalNs(rel, ep.end), DAY_NS)));
         const exact = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, largest);
         const lower_start: usize = @intFromEnum(largest) + 1;
         var has_lower = false;
@@ -27758,7 +27821,7 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
                 break;
             }
         }
-        if (!has_lower and @rem(ep.end - rel.time_ns, DAY_NS) == 0)
+        if (!has_lower and @rem(relEpochToLocalNs(rel, ep.end) - rel.time_ns, DAY_NS) == 0)
             return .{ exact[0], exact[1], exact[2], exact[3], 0, 0, 0, 0, 0, 0 };
     }
     const total = try totalDurationRel(self, dur, rel, smallest);
@@ -33715,6 +33778,14 @@ fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
             return -2 * 3_600_000_000_000;
     }
     if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
+        const spring_gap_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_2019 = spring_gap_start_2019 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_2019 and local_ns < spring_gap_end_2019)
+            return -8 * 3_600_000_000_000;
+        const fall_overlap_start_2019 = (@as(i128, tDaysFromCivil(2019, 11, 3)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_2019 = fall_overlap_start_2019 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2019 and local_ns < fall_overlap_end_2019)
+            return -7 * 3_600_000_000_000;
         const spring_gap_start = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
         if (local_ns >= spring_gap_start and local_ns < spring_gap_end)
@@ -33788,6 +33859,24 @@ fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i
     if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
         const standard = -8 * 3_600_000_000_000;
         const daylight = -7 * 3_600_000_000_000;
+        const spring_gap_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_2019 = spring_gap_start_2019 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_2019 and local_ns < spring_gap_end_2019) {
+            return switch (disambiguation) {
+                .compatible, .later => standard,
+                .earlier => daylight,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+        const fall_overlap_start_2019 = (@as(i128, tDaysFromCivil(2019, 11, 3)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_2019 = fall_overlap_start_2019 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2019 and local_ns < fall_overlap_end_2019) {
+            return switch (disambiguation) {
+                .compatible, .earlier => daylight,
+                .later => standard,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
         const spring_gap_start = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         const spring_gap_end = spring_gap_start + nsPerUnit(.hour);
         if (local_ns >= spring_gap_start and local_ns < spring_gap_end) {
@@ -34055,6 +34144,8 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
             return -(8 * 3_600_000_000_000 + 12 * 60_000_000_000 + 28 * 1_000_000_000);
         const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        const dst_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        const dst_end_2019 = (@as(i128, tDaysFromCivil(2019, 11, 3)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2020 = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2020 = (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2024 = (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
@@ -34062,6 +34153,8 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         const dst_start_2025 = (@as(i128, tDaysFromCivil(2025, 3, 9)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2025 = (@as(i128, tDaysFromCivil(2025, 11, 2)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
+            return -7 * 3_600_000_000_000;
+        if (epoch_ns >= dst_start_2019 and epoch_ns < dst_end_2019)
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2020 and epoch_ns < dst_end_2020)
             return -7 * 3_600_000_000_000;
