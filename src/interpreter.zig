@@ -20217,6 +20217,13 @@ fn dtfResolveHourCycle(self: *Interpreter, locale: []const u8, opt_hc: []const u
     return hcd.def;
 }
 
+fn localeDefaultNumberingSystem(locale: []const u8) []const u8 {
+    const t = parseTriple(locale);
+    if (std.mem.eql(u8, t.l, "ar")) return "arab";
+    if (std.mem.eql(u8, t.l, "fa")) return "arabext";
+    return "latn";
+}
+
 /// ResolveLocale for DateTimeFormat's relevant extension keys (ca, hc, nu): an
 /// option overrides a `-u-` keyword, but the keyword survives in the resolved
 /// locale only when it came from a supported extension and an option did not
@@ -20255,7 +20262,7 @@ fn dtfResolveLocaleExt(
     const ext_nu = localeUValue(tag, "nu");
     const ext_nu_ok = if (ext_nu) |e| numbering_systems.digits(e) != null else false;
     const opt_nu_ok = opt_nu.len > 0 and numbering_systems.digits(opt_nu) != null;
-    const nu_val: []const u8 = if (opt_nu_ok) opt_nu else if (ext_nu_ok) ext_nu.? else "latn";
+    const nu_val: []const u8 = if (opt_nu_ok) opt_nu else if (ext_nu_ok) ext_nu.? else localeDefaultNumberingSystem(tag);
     const keep_nu = ext_nu_ok and std.mem.eql(u8, ext_nu.?, nu_val);
 
     const base = if (std.mem.indexOf(u8, tag, "-u-")) |u| tag[0..u] else tag;
@@ -20908,6 +20915,23 @@ fn dtfTimeZoneName(self: *Interpreter, name: []const u8, off_ns: i64, width: []c
     return if (eq(width, "long") or eq(width, "longGeneric")) "Coordinated Universal Time" else "UTC";
 }
 
+fn dtfChineseYearName(self: *Interpreter, year: i64) EvalError![]const u8 {
+    const stems = [_][]const u8{ "\u{7532}", "\u{4e59}", "\u{4e19}", "\u{4e01}", "\u{620a}", "\u{5df1}", "\u{5e9a}", "\u{8f9b}", "\u{58ec}", "\u{7678}" };
+    const branches = [_][]const u8{ "\u{5b50}", "\u{4e11}", "\u{5bc5}", "\u{536f}", "\u{8fb0}", "\u{5df3}", "\u{5348}", "\u{672a}", "\u{7533}", "\u{9149}", "\u{620c}", "\u{4ea5}" };
+    const offset = year - 4;
+    return std.fmt.allocPrint(self.arena, "{s}{s}", .{ stems[@intCast(@mod(offset, 10))], branches[@intCast(@mod(offset, 12))] });
+}
+
+fn dtfAppendYearPart(self: *Interpreter, parts: *std.ArrayListUnmanaged(DtfPart), cal: []const u8, display_year: i64, fmt: []const u8) EvalError!void {
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
+        try parts.append(self.arena, .{ .typ = "relatedYear", .value = try fmtYear(self, display_year, fmt) });
+        try parts.append(self.arena, .{ .typ = "yearName", .value = try dtfChineseYearName(self, display_year) });
+        try parts.append(self.arena, .{ .typ = "literal", .value = "\u{5e74}" });
+        return;
+    }
+    try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, display_year, fmt) });
+}
+
 /// Build the formatted parts for an Intl.DateTimeFormat (en locale, UTC, ISO
 /// calendar). Shared by `format` (joins the values) and `formatToParts`. Covers
 /// the common component options; locale-specific extras (era, timeZoneName,
@@ -21210,7 +21234,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             }
             if (o_year.len > 0) {
                 try P.lit(self, &parts, ", ");
-                try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, display_year, o_year) });
+                try dtfAppendYearPart(self, &parts, if (std.mem.eql(u8, temporal_calendar, "iso8601")) o_calendar else temporal_calendar, display_year, o_year);
             }
         } else {
             // All-numeric "M/D/Y" (only the requested parts, slash-separated).
@@ -21227,7 +21251,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             if (o_year.len > 0) {
                 if (!first) try P.lit(self, &parts, "/");
                 first = false;
-                try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, display_year, o_year) });
+                try dtfAppendYearPart(self, &parts, if (std.mem.eql(u8, temporal_calendar, "iso8601")) o_calendar else temporal_calendar, display_year, o_year);
             }
         }
         if (o_era.len > 0) if (era_info.era) |raw_era| {
