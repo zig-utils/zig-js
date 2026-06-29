@@ -536,6 +536,7 @@ const LockRecord = struct {
     cond: std.Io.Condition = .init,
     /// Queued asyncHold jobs, granted FIFO at release time.
     pending: std.ArrayListUnmanaged(*HoldJob) = .empty,
+    pending_head: usize = 0,
     /// An async grant exists but its job hasn't run yet (D6: a
     /// granted-but-UNDELIVERED hold is NOT "held" — consuming it would
     /// unlock the lock under the not-yet-run fn).
@@ -556,6 +557,39 @@ const LockRecord = struct {
     /// current value before parking and can acquire only after a release
     /// advances it, so a fresh barger cannot steal the signaled handoff.
     sync_generation: u64 = 0,
+
+    fn hasPending(self: *const LockRecord) bool {
+        return self.pending_head < self.pending.items.len;
+    }
+
+    fn appendPending(self: *LockRecord, arena: std.mem.Allocator, job: *HoldJob) !void {
+        try self.pending.append(arena, job);
+    }
+
+    fn pushFrontPending(self: *LockRecord, arena: std.mem.Allocator, job: *HoldJob) !void {
+        if (self.pending_head > 0) {
+            self.pending_head -= 1;
+            self.pending.items[self.pending_head] = job;
+            return;
+        }
+        try self.pending.insert(arena, 0, job);
+    }
+
+    fn popPending(self: *LockRecord) ?*HoldJob {
+        if (!self.hasPending()) {
+            self.pending.clearRetainingCapacity();
+            self.pending_head = 0;
+            return null;
+        }
+        const job = self.pending.items[self.pending_head];
+        self.pending.items[self.pending_head] = undefined;
+        self.pending_head += 1;
+        if (self.pending_head == self.pending.items.len) {
+            self.pending.clearRetainingCapacity();
+            self.pending_head = 0;
+        }
+        return job;
+    }
 };
 
 /// A parked sync waiter's ticket (on the waiting thread's stack; unlinked
@@ -1913,6 +1947,39 @@ const HoldJob = struct {
 
 const ReleaseState = struct { lock: *LockRecord, used: bool = false };
 
+test "jsthread lock pending async jobs are cursor FIFO" {
+    var rec = LockRecord{ .gil = undefined };
+    const a = std.testing.allocator;
+
+    var one = HoldJob{ .lock = &rec, .outer = undefined, .cb = null };
+    var two = HoldJob{ .lock = &rec, .outer = undefined, .cb = null };
+    var three = HoldJob{ .lock = &rec, .outer = undefined, .cb = null };
+    var front = HoldJob{ .lock = &rec, .outer = undefined, .cb = null };
+
+    try rec.appendPending(a, &one);
+    try rec.appendPending(a, &two);
+    try rec.appendPending(a, &three);
+    defer rec.pending.deinit(a);
+
+    try std.testing.expect(rec.hasPending());
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
+    try std.testing.expectEqual(@as(usize, 3), rec.pending.items.len);
+
+    try std.testing.expectEqual(@intFromPtr(&one), @intFromPtr(rec.popPending().?));
+    try std.testing.expectEqual(@as(usize, 1), rec.pending_head);
+    try std.testing.expectEqual(@as(usize, 3), rec.pending.items.len);
+
+    try rec.pushFrontPending(a, &front);
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
+    try std.testing.expectEqual(@intFromPtr(&front), @intFromPtr(rec.popPending().?));
+    try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(rec.popPending().?));
+    try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(rec.popPending().?));
+    try std.testing.expect(!rec.hasPending());
+    try std.testing.expectEqual(@as(usize, 0), rec.pending_head);
+    try std.testing.expectEqual(@as(usize, 0), rec.pending.items.len);
+    try std.testing.expectEqual(@as(?*HoldJob, null), rec.popPending());
+}
+
 /// `holder` value for an asyncHold grant: the hold belongs to the JOB, not
 /// to any thread — a same-thread sync `hold` must read as CONTENDED (block
 /// or gate), never as recursive.
@@ -1945,8 +2012,8 @@ fn lockReleaseLocked(rec: *LockRecord) ?*HoldJob {
         rec.cond.signal(agent.engineIo());
         return null;
     }
-    if (rec.pending.items.len > 0) {
-        const job = rec.pending.orderedRemove(0);
+    if (rec.hasPending()) {
+        const job = rec.popPending().?;
         rec.locked = false;
         rec.holder = 0;
         rec.grant_pending = false;
@@ -2050,7 +2117,7 @@ fn runHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
         job.lock.locked = true;
         job.lock.holder = async_holder;
     } else if (!job.lock.grant_pending or job.lock.holder != async_holder) {
-        job.lock.pending.insert(self.arena, 0, job) catch |err| {
+        job.lock.pushFrontPending(self.arena, job) catch |err| {
             job.lock.mutex.unlock(agent.engineIo());
             return err;
         };
@@ -2137,7 +2204,7 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
         enqueue_now = true;
     } else {
         bumpContention("async_hold_queued");
-        rec.pending.append(self.arena, job) catch |err| {
+        rec.appendPending(self.arena, job) catch |err| {
             rec.mutex.unlock(agent.engineIo());
             return err;
         };
@@ -2215,7 +2282,7 @@ fn wakeAsyncCondWaiter(self: *Interpreter, w: *AsyncCondWaiter) void {
         w.lock.grant_pending = true;
         enqueue_now = true;
     } else {
-        w.lock.pending.append(self.arena, job) catch {
+        w.lock.appendPending(self.arena, job) catch {
             w.lock.mutex.unlock(agent.engineIo());
             return;
         };
