@@ -28808,6 +28808,10 @@ fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!Is
         const t = v.asObj().temporal.?;
         return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
     }
+    if (tIsZdt(v)) {
+        const t = zdtLocal(v.asObj().temporal.?);
+        return .{ .y = t.year, .m = t.month, .d = t.day, .cal = t.calendar };
+    }
     if (v.isObject()) {
         const bag_cal = try readCalendarField(self, v);
         // The displayed `year` (or an `{era, eraYear}` pair) resolves to the
@@ -29627,7 +29631,6 @@ fn temporalPlainDateWithFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!bag.isObject()) return self.throwError("TypeError", "Temporal.PlainDate.prototype.with: argument must be an object");
-    try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
     const m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, !reject);
@@ -29663,7 +29666,6 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     const t = this.asObj().temporal.?;
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be an object");
-    try rejectUnsupportedEraFieldsForWith(self, bag, t.calendar);
     const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
     const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
     const m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, !reject);
