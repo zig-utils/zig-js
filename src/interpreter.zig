@@ -31595,6 +31595,7 @@ fn temporalPlainDateTimeAddFn(comptime sign: f64) value.NativeFn {
             o.temporal.?.day = cc.d;
             o.temporal.?.calendar = t.calendar; // add/subtract preserve the calendar
             nsToTime(o.temporal.?, time_ns);
+            try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
             return Value.obj(o);
         }
     }.call;
