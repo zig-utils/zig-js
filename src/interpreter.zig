@@ -27132,6 +27132,17 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         }
         if (!has_lower) return dur;
     }
+    if (opts.increment != 1) {
+        const dir: i64 = if (ep.end >= ep.start) 1 else -1;
+        const inc: i64 = @intFromFloat(opts.increment);
+        const probe = switch (smallest) {
+            .year => isoDateAdd(rel.y, rel.m, rel.d, dir * inc, 0, 0, 0),
+            .month => isoDateAdd(rel.y, rel.m, rel.d, 0, dir * inc, 0, 0),
+            .week => isoDateAdd(rel.y, rel.m, rel.d, 0, 0, dir * inc, 0),
+            else => unreachable,
+        };
+        try checkIsoDate(self, @floatFromInt(probe.y), @floatFromInt(probe.m), @floatFromInt(probe.d));
+    }
     const total = totalDurationRel(self, dur, rel, smallest);
     const inc = opts.increment;
     const scale: i128 = 1_000_000_000;
@@ -32044,13 +32055,8 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             const l = if (fwd) b else IsoYMD{ .y = t.year, .m = t.month, .d = t.day };
             var dd = calendarDateDiff(t.calendar, e.y, e.m, e.d, l.y, l.m, l.d, largest);
             const s2 = sign * (if (fwd) @as(f64, 1) else -1);
-            // Round the (positive) magnitude to smallestUnit relative to the
-            // earlier date when a calendar smallestUnit / increment is requested;
-            // a negative result (since/backward) flips the rounding mode.
-            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1) {
-                const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
-                dd = try roundDurationRel(self, dd, .{ .y = e.y, .m = e.m, .d = e.d, .time_ns = 0 }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
-            }
+            const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
+            dd = try roundDurationRel(self, dd, .{ .y = e.y, .m = e.m, .d = e.d, .time_ns = 0 }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
             if (s2 < 0) for (&dd) |*c| {
                 c.* = -c.*;
             };
