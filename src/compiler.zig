@@ -1492,20 +1492,14 @@ pub const Compiler = struct {
         try self.emitLoad(it);
         _ = try ch.emit(.get_prop, try ch.addName("throw"));
         try self.emitDefine(m);
-        try self.emitLoad(m);
-        _ = try ch.emit(.load_null, 0);
-        _ = try ch.emit(.eq, 0); // m == null  (true for undefined/null: GetMethod absent)
-        const to_has_throw = try ch.emit(.jump_if_false, 0);
+        const to_has_throw = try self.emitJumpIfNotStrictlyNullish(m);
         // No `throw` method: IteratorClose(it) (call `return` if present, ignoring
         // its result) then throw a TypeError. Closing first lets the inner
         // iterator release resources, matching the spec.
         try self.emitLoad(it);
         _ = try ch.emit(.get_prop, try ch.addName("return"));
         try self.emitDefine(m);
-        try self.emitLoad(m);
-        _ = try ch.emit(.load_null, 0);
-        _ = try ch.emit(.eq, 0);
-        const to_skip_close = try ch.emit(.jump_if_false, 0);
+        const to_skip_close = try self.emitJumpIfNotStrictlyNullish(m);
         const to_after_close = try ch.emit(.jump, 0); // return absent: skip the call
         ch.patchToHere(to_skip_close);
         try self.emitLoad(m); // func
@@ -1535,10 +1529,7 @@ pub const Compiler = struct {
         try self.emitLoad(it);
         _ = try ch.emit(.get_prop, try ch.addName("return"));
         try self.emitDefine(m);
-        try self.emitLoad(m);
-        _ = try ch.emit(.load_null, 0);
-        _ = try ch.emit(.eq, 0);
-        const to_has_return = try ch.emit(.jump_if_false, 0);
+        const to_has_return = try self.emitJumpIfNotStrictlyNullish(m);
         // No `return` method: the delegating generator itself returns recv_v
         // (Await it first in an async generator), running any enclosing finally.
         try self.emitLoad(recv_v);
@@ -1609,6 +1600,25 @@ pub const Compiler = struct {
         ch.patchToHere(to_end);
         try self.emitLoad(r);
         _ = try ch.emit(.get_prop, value_n);
+    }
+
+    fn emitJumpIfNotStrictlyNullish(self: *Compiler, name: []const u8) CompileError!usize {
+        const ch = self.chunk;
+
+        try self.emitLoad(name);
+        _ = try ch.emit(.load_undefined, 0);
+        _ = try ch.emit(.eq_strict, 0);
+        const to_check_null = try ch.emit(.jump_if_false, 0);
+        const to_absent = try ch.emit(.jump, 0);
+
+        ch.patchToHere(to_check_null);
+        try self.emitLoad(name);
+        _ = try ch.emit(.load_null, 0);
+        _ = try ch.emit(.eq_strict, 0);
+        const to_present = try ch.emit(.jump_if_false, 0);
+
+        ch.patchToHere(to_absent);
+        return to_present;
     }
 
     /// A unique, user-unreferenceable temp name (contains a NUL byte).
