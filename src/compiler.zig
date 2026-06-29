@@ -475,7 +475,7 @@ pub const Compiler = struct {
                 if (!f.is_of and !self.in_generator) return error.Unsupported;
                 if (f.is_await and !self.in_async) return error.Unsupported;
                 if (f.dispose != 0) return error.Unsupported; // `for (using x of …)` disposal → tree-walk
-                try self.compileForOf(f.decl_kind, f.target, f.iterable, f.body, !f.is_of, f.is_await);
+                try self.compileForOf(f.decl_kind, f.target, f.var_init, f.iterable, f.body, !f.is_of, f.is_await);
             },
             .try_stmt => |t| try self.compileTry(t),
             .with_stmt => |w| {
@@ -723,10 +723,14 @@ pub const Compiler = struct {
         _ = try self.chunk.emitAB(.bind_pattern, pi, mode);
     }
 
-    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool) CompileError!void {
+    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool) CompileError!void {
         const it_name = try self.freshTemp();
         const r_name = try self.freshTemp();
 
+        if (var_init) |ini| {
+            try self.compileExpr(ini);
+            try self.compileLoopBind(decl_kind, target);
+        }
         try self.compileExpr(iterable);
         if (keys_first) _ = try self.chunk.emit(.enum_keys, 0); // for-in: iterate the key array
         // for-await uses the async-iterator protocol (Symbol.asyncIterator, else

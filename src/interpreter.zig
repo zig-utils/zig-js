@@ -2575,20 +2575,24 @@ pub const Interpreter = struct {
             },
             .for_stmt => |f| try self.evalFor(f.init, f.cond, f.update, f.body),
             .switch_stmt => |s| try self.evalSwitch(s.disc, s.cases),
-            .for_in => |f| try self.evalForInOf(f.decl_kind, f.target, f.iterable, f.body, f.is_of, f.is_await, f.dispose),
+            .for_in => |f| try self.evalForInOf(f.decl_kind, f.target, f.var_init, f.iterable, f.body, f.is_of, f.is_await, f.dispose),
         };
     }
 
     /// `for-of` (values of arrays/strings) and `for-in` (own keys of objects /
     /// indices of arrays). Each iteration binds the loop variable then runs the
     /// body, honoring break/continue/return.
-    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool, dispose: u8) EvalError!Value {
+    fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool, dispose: u8) EvalError!Value {
         const my_label = self.takeLabel();
         // A `let`/`const` loop binding gets a fresh declarative environment per
         // iteration, so a closure created in the head or body captures *that*
         // iteration's binding (`var` is function-scoped, so it doesn't).
         const lexical = decl_kind != null and decl_kind.? != .@"var";
         const outer_env = self.env;
+        if (var_init) |ini| {
+            const init_value = try self.eval(ini);
+            try self.bindLoopTarget(decl_kind, target, init_value);
+        }
         // Head evaluation: per spec the loop bindings are declared (in their TDZ)
         // in a fresh environment while the iterable expression runs, so a closure
         // captured there sees them uninitialized (`typeof x` throws).
@@ -3858,6 +3862,7 @@ pub const Interpreter = struct {
             },
             .for_in => |f| {
                 try self.rewritePrivateNamesInNode(f.target, map);
+                if (f.var_init) |ini| try self.rewritePrivateNamesInNode(ini, map);
                 try self.rewritePrivateNamesInNode(f.iterable, map);
                 try self.rewritePrivateNamesInNode(f.body, map);
             },
@@ -3992,7 +3997,7 @@ pub const Interpreter = struct {
             .while_stmt => |w| .{ .while_stmt = .{ .cond = try self.deepCopyNode(w.cond), .body = try self.deepCopyNode(w.body) } },
             .do_while_stmt => |d| .{ .do_while_stmt = .{ .body = try self.deepCopyNode(d.body), .cond = try self.deepCopyNode(d.cond) } },
             .for_stmt => |f| .{ .for_stmt = .{ .init = try self.deepCopyOpt(f.init), .cond = try self.deepCopyOpt(f.cond), .update = try self.deepCopyOpt(f.update), .body = try self.deepCopyNode(f.body) } },
-            .for_in => |f| .{ .for_in = .{ .decl_kind = f.decl_kind, .target = try self.deepCopyNode(f.target), .iterable = try self.deepCopyNode(f.iterable), .body = try self.deepCopyNode(f.body), .is_of = f.is_of, .is_await = f.is_await } },
+            .for_in => |f| .{ .for_in = .{ .decl_kind = f.decl_kind, .target = try self.deepCopyNode(f.target), .var_init = try self.deepCopyOpt(f.var_init), .iterable = try self.deepCopyNode(f.iterable), .body = try self.deepCopyNode(f.body), .is_of = f.is_of, .is_await = f.is_await, .dispose = f.dispose } },
             .switch_stmt => |s| blk: {
                 const cases = try self.arena.alloc(ast.SwitchCase, s.cases.len);
                 for (s.cases, 0..) |c, i| cases[i] = .{ .@"test" = try self.deepCopyOpt(c.@"test"), .body = try self.deepCopyNodes(c.body) };

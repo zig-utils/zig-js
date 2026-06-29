@@ -1601,6 +1601,13 @@ pub const Parser = struct {
         // member expression. Parse a target, then require `in`/`of`; otherwise
         // rewind to `save` and parse a classic `for(;;)`.
         if (!classic_using_of_decl and !classic_async_of_arrow) if (self.tryForTarget(decl_kind) catch null) |target| {
+            var var_init: ?*Node = null;
+            if (!self.strict and decl_kind != null and decl_kind.? == .@"var" and target.* == .identifier and self.match(.assign)) {
+                const saved_no_in = self.no_in;
+                self.no_in = true;
+                var_init = try self.parseExpression();
+                self.no_in = saved_no_in;
+            }
             // `in`/`of` written with a Unicode escape (`of`) is never the
             // contextual keyword, so it cannot introduce an iteration head.
             const at_iter = !self.cur().escaped_identifier and
@@ -1613,6 +1620,7 @@ pub const Parser = struct {
                 // A `using`/`await using` head is valid only in a for-of/-await-of,
                 // never a for-in: `for (using x in obj)` is a SyntaxError.
                 if (is_using and !is_of) return ParseError.UnexpectedToken;
+                if (var_init != null and is_of) return ParseError.UnexpectedToken;
                 // `for-in` takes an Expression, `for-of` an AssignmentExpression.
                 const iterable = if (is_of) try self.parseAssignment() else try self.parseExpression();
                 try self.expect(.rparen);
@@ -1621,6 +1629,7 @@ pub const Parser = struct {
                 return self.alloc(.{ .for_in = .{
                     .decl_kind = decl_kind,
                     .target = target,
+                    .var_init = var_init,
                     .iterable = iterable,
                     .body = body,
                     .is_of = is_of,
@@ -3553,6 +3562,7 @@ pub const Parser = struct {
                 try self.scanSuperAndArgs(fo.body);
             },
             .for_in => |fo| {
+                if (fo.var_init) |ini| try self.scanSuperAndArgs(ini);
                 try self.scanSuperAndArgs(fo.iterable);
                 try self.scanSuperAndArgs(fo.body);
             },
@@ -3732,6 +3742,7 @@ pub const Parser = struct {
             },
             .for_in => |stmt| {
                 try self.checkPrivateUsesInNode(declared, stmt.target);
+                if (stmt.var_init) |ini| try self.checkPrivateUsesInNode(declared, ini);
                 try self.checkPrivateUsesInNode(declared, stmt.iterable);
                 try self.checkPrivateUsesInNode(declared, stmt.body);
             },

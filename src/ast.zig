@@ -276,7 +276,7 @@ pub const Node = union(enum) {
     /// assignment form) a member expression. `is_of` picks `for-of` (values) vs
     /// `for-in` (keys).
     // `dispose`: 0 = ordinary head, 1 = `for (using x of …)`, 2 = `for (await using x of …)`.
-    for_in: struct { decl_kind: ?DeclKind, target: *Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool = false, dispose: u8 = 0 },
+    for_in: struct { decl_kind: ?DeclKind, target: *Node, var_init: ?*Node = null, iterable: *Node, body: *Node, is_of: bool, is_await: bool = false, dispose: u8 = 0 },
     switch_stmt: struct { disc: *Node, cases: []SwitchCase },
     with_stmt: struct { obj: *Node, body: *Node },
     /// `import ... from "spec"` / `import "spec"`. `entries` carries each binding
