@@ -31198,6 +31198,11 @@ fn checkInstantEpochNs(self: *Interpreter, ns: i128) EvalError!void {
         return self.throwError("RangeError", "epoch nanoseconds out of range");
 }
 
+fn checkZdtLocalDateTimeNs(self: *Interpreter, ns: i128) EvalError!void {
+    if (ns < -max_temporal_instant_ns or ns >= max_temporal_instant_ns + DAY_NS)
+        return self.throwError("RangeError", "ZonedDateTime date-time out of range");
+}
+
 fn checkedEpochNsFromBigInt(self: *Interpreter, v: Value) EvalError!i128 {
     const bv = try self.toBigIntValueImpl(v, false);
     const big = bv.asObj();
@@ -32506,26 +32511,30 @@ fn zdtOffsetMatchesLocal(tz: TimeZone, local_ns: i128, offset_ns: i128) bool {
 }
 
 fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: ZdtOffsetBehavior, disambiguation: ZdtDisambiguation) EvalError!i128 {
-    if (p.z) return p.epoch_ns;
     const local_ns = p.epoch_ns + p.offset_ns;
-    const actual = if (p.has_offset and p.offset_has_seconds)
-        timeZoneOffsetAtEpoch(tz.name, p.epoch_ns, tz.offset_ns)
-    else
-        try zdtOffsetForLocalDisambiguation(self, tz, local_ns, disambiguation);
-    if (!p.has_offset) return local_ns - @as(i128, actual);
-    if (isFixedTimeZone(tz)) {
-        if (p.offset_ns != @as(i128, tz.offset_ns))
-            return self.throwError("RangeError", "offset does not match time zone");
-        return local_ns - @as(i128, tz.offset_ns);
-    }
-    const exact_match = zdtOffsetMatchesLocal(tz, local_ns, p.offset_ns);
-    const rounded_match = !p.offset_has_seconds and p.offset_ns == roundOffsetToMinute(@as(i128, actual));
-    return switch (behavior) {
-        .use => local_ns - p.offset_ns,
-        .ignore => local_ns - @as(i128, actual),
-        .prefer => if (rounded_match) local_ns - @as(i128, actual) else if (exact_match) local_ns - p.offset_ns else local_ns - @as(i128, actual),
-        .reject => if (rounded_match) local_ns - @as(i128, actual) else if (exact_match) local_ns - p.offset_ns else self.throwError("RangeError", "offset does not match time zone"),
+    try checkZdtLocalDateTimeNs(self, local_ns);
+    const epoch_ns: i128 = if (p.z) p.epoch_ns else blk: {
+        const actual = if (p.has_offset and p.offset_has_seconds)
+            timeZoneOffsetAtEpoch(tz.name, p.epoch_ns, tz.offset_ns)
+        else
+            try zdtOffsetForLocalDisambiguation(self, tz, local_ns, disambiguation);
+        if (!p.has_offset) break :blk local_ns - @as(i128, actual);
+        if (isFixedTimeZone(tz)) {
+            if (p.offset_ns != @as(i128, tz.offset_ns))
+                return self.throwError("RangeError", "offset does not match time zone");
+            break :blk local_ns - @as(i128, tz.offset_ns);
+        }
+        const exact_match = zdtOffsetMatchesLocal(tz, local_ns, p.offset_ns);
+        const rounded_match = !p.offset_has_seconds and p.offset_ns == roundOffsetToMinute(@as(i128, actual));
+        break :blk switch (behavior) {
+            .use => local_ns - p.offset_ns,
+            .ignore => local_ns - @as(i128, actual),
+            .prefer => if (rounded_match) local_ns - @as(i128, actual) else if (exact_match) local_ns - p.offset_ns else local_ns - @as(i128, actual),
+            .reject => if (rounded_match) local_ns - @as(i128, actual) else if (exact_match) local_ns - p.offset_ns else return self.throwError("RangeError", "offset does not match time zone"),
+        };
     };
+    try checkInstantEpochNs(self, epoch_ns);
+    return epoch_ns;
 }
 
 fn canonicalTimeZoneName(name: []const u8) []const u8 {
@@ -33265,6 +33274,7 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtO
             l.nanosecond = tm.nanosecond;
             const iso = calendarDateToIso(f.cal, l.year, l.month, l.day);
             const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
+            try checkZdtLocalDateTimeNs(self, local_ns);
             var out: value.TemporalData = .{ .kind = .zoned_date_time };
             const actual_offset = try zdtOffsetForLocalDisambiguation(self, tz, local_ns, disambiguation);
             const epoch_offset: i128 = if (offset_ns) |off| blk: {
@@ -33281,6 +33291,7 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtO
                 };
             } else @as(i128, actual_offset);
             out.epoch_ns = local_ns - epoch_offset;
+            try checkInstantEpochNs(self, out.epoch_ns);
             out.tz_name = tz.name;
             out.tz_offset_ns = tz.offset_ns;
             out.year = @intCast(f.y);
@@ -33643,7 +33654,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "round", 1, temporalZdtRoundFn);
         try setNative(a, rs, p, "equals", 1, temporalZdtEqualsFn);
         try setNative(a, rs, p, "with", 1, temporalZdtWithFn);
-        try setNative(a, rs, p, "withPlainTime", 1, temporalZdtWithPlainTimeFn);
+        try setNative(a, rs, p, "withPlainTime", 0, temporalZdtWithPlainTimeFn);
         try setNative(a, rs, p, "withTimeZone", 1, temporalZdtWithTimeZoneFn);
         try setNative(a, rs, p, "withCalendar", 1, temporalZdtWithCalendarFn);
         try setNative(a, rs, p, "startOfDay", 0, temporalZdtStartOfDayFn);
