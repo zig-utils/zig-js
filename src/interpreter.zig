@@ -30557,6 +30557,10 @@ fn makeMonthDay(self: *Interpreter, y: i64, m: u8, d: u8, cal: []const u8) EvalE
     return Value.obj(o);
 }
 
+fn monthDayReferenceYearForConversion(t: *const value.TemporalData) i64 {
+    return if (std.mem.eql(u8, t.calendar, "iso8601")) 1972 else t.year;
+}
+
 fn temporalMonthDayFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -31883,7 +31887,7 @@ fn temporalDateTimeToPlainMonthDayFn(ctx: *anyopaque, this: Value, args: []const
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
     const t = this.asObj().temporal.?;
-    return makeMonthDay(self, t.year, t.month, t.day, t.calendar);
+    return makeMonthDay(self, monthDayReferenceYearForConversion(t), t.month, t.day, t.calendar);
 }
 
 fn temporalDateTimeWithPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -32211,7 +32215,7 @@ fn temporalDateTimeToZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const
     // GetTemporalDisambiguationOption (validated even though fixed-offset zones
     // ignore it — an invalid value must still throw).
     if (args.len > 1 and !args[1].isUndefined()) {
-        if (!args[1].isObject()) return self.throwError("TypeError", "options must be an object");
+        if (!isObjectLike(args[1])) return self.throwError("TypeError", "options must be an object");
         _ = try dtfGetStr(self, args[1], "disambiguation", &.{ "compatible", "earlier", "later", "reject" }, "compatible");
     }
     const local = dtLocalNs(this.asObj().temporal.?);
@@ -32293,7 +32297,7 @@ fn temporalDateToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const t = this.asObj().temporal.?;
-    return makeMonthDay(self, t.year, t.month, t.day, t.calendar);
+    return makeMonthDay(self, monthDayReferenceYearForConversion(t), t.month, t.day, t.calendar);
 }
 
 fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -33254,8 +33258,9 @@ fn temporalZdtToMonthDayFn(ctx: *anyopaque, this: Value, args: []const Value) va
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const l = zdtLocal(this.asObj().temporal.?);
-    return makeMonthDay(self, l.year, l.month, l.day, this.asObj().temporal.?.calendar);
+    const t = this.asObj().temporal.?;
+    const l = zdtLocal(t);
+    return makeMonthDay(self, monthDayReferenceYearForConversion(t), l.month, l.day, t.calendar);
 }
 
 /// ZDT add/subtract: time units shift the epoch; calendar units shift the local
