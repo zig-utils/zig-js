@@ -22361,6 +22361,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         digits = ex.int_str;
         frac_str = ex.frac_str;
         while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
+        while (frac_str.len > min_frac and frac_str[frac_str.len - 1] == '0') frac_str = frac_str[0 .. frac_str.len - 1];
         if (frac_str.len < min_frac) {
             var fb: std.ArrayListUnmanaged(u8) = .empty;
             try fb.appendSlice(self.arena, frac_str);
