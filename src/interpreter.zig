@@ -27958,7 +27958,7 @@ fn temporalPlainDateGetter(comptime f: PlainDateField) value.NativeFn {
                 .days_in_year => Value.num(@floatFromInt(calDaysInYear(t.calendar, t.year))),
                 .months_in_year => Value.num(@floatFromInt(calMonthsInYear(t.calendar, t.year))),
                 .days_in_week => Value.num(7),
-                .week_of_year => Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).week)),
+                .week_of_year => if (std.mem.eql(u8, t.calendar, "iso8601")) Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).week)) else Value.undef(),
                 .in_leap_year => Value.boolVal(calInLeapYear(t.calendar, t.year)),
             };
         }
@@ -28883,6 +28883,7 @@ fn temporalYearOfWeekGetter(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().temporal == null) return self.throwError("TypeError", "Temporal yearOfWeek accessor on incompatible receiver");
     const t = this.asObj().temporal.?;
+    if (!std.mem.eql(u8, t.calendar, "iso8601")) return Value.undef();
     return Value.num(@floatFromInt(isoWeekOfYear(t.year, t.month, t.day).year));
 }
 
@@ -33679,8 +33680,8 @@ fn temporalZdtGetter(comptime f: ZdtField) value.NativeFn {
                     break :blk Value.num(@as(f64, @floatFromInt(tomorrow_ns - today_ns)) / @as(f64, @floatFromInt(DAY_NS)) * 24);
                 },
                 .offset_ns => Value.num(@floatFromInt(zdtOffsetAt(t))),
-                .week_of_year => Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).week)),
-                .year_of_week => Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).year)),
+                .week_of_year => if (std.mem.eql(u8, t.calendar, "iso8601")) Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).week)) else Value.undef(),
+                .year_of_week => if (std.mem.eql(u8, t.calendar, "iso8601")) Value.num(@floatFromInt(isoWeekOfYear(iso.y, iso.m, iso.d).year)) else Value.undef(),
             };
         }
     }.call;
