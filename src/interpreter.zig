@@ -20851,6 +20851,8 @@ const en_months_long = [_][]const u8{ "January", "February", "March", "April", "
 const en_months_short = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 const en_months_narrow = [_][]const u8{ "J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D" };
 const en_islamic_months_long = [_][]const u8{ "Muharram", "Safar", "Rabi I", "Rabi II", "Jumada I", "Jumada II", "Rajab", "Shaban", "Ramadan", "Shawwal", "Dhu al-Qidah", "Dhu al-Hijjah" };
+const en_hebrew_common_months = [_][]const u8{ "Tishri", "Heshvan", "Kislev", "Tevet", "Shevat", "Adar", "Nisan", "Iyar", "Sivan", "Tamuz", "Av", "Elul" };
+const en_hebrew_leap_months = [_][]const u8{ "Tishri", "Heshvan", "Kislev", "Tevet", "Shevat", "Adar I", "Adar II", "Nisan", "Iyar", "Sivan", "Tamuz", "Av", "Elul" };
 const en_days_long = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
 const en_days_short = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
@@ -20933,6 +20935,13 @@ fn dtfAppendYearPart(self: *Interpreter, parts: *std.ArrayListUnmanaged(DtfPart)
 }
 
 fn dtfAppendMonthPart(self: *Interpreter, parts: *std.ArrayListUnmanaged(DtfPart), cal: []const u8, year: i64, month: u8, fmt: []const u8) EvalError!void {
+    if (std.mem.eql(u8, cal, "hebrew")) {
+        const names = if (calInLeapYear(cal, year)) &en_hebrew_leap_months else &en_hebrew_common_months;
+        if (month >= 1 and month <= names.len) {
+            try parts.append(self.arena, .{ .typ = "month", .value = names[month - 1] });
+            return;
+        }
+    }
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         const info = calMonthCodeInfo(cal, year, month);
         const two = eq(fmt, "2-digit");
@@ -28283,18 +28292,17 @@ fn chineseLikeKnownIsoToCalendar(cal: []const u8, iso_year: i64, iso_month: u8, 
     const shared = [_]KnownDate{
         .{ .iy = 1900, .im = 1, .id = 1, .cy = 1899, .cm = 12, .cd = 1 },
         .{ .iy = 2000, .im = 1, .id = 1, .cy = 1999, .cm = 11, .cd = 25 },
+        .{ .iy = 1994, .im = 2, .id = 10, .cy = 1993, .cm = 13, .cd = 30 },
     };
     for (shared) |entry| {
         if (entry.iy == iso_year and entry.im == iso_month and entry.id == iso_day)
             return .{ .y = entry.cy, .m = entry.cm, .d = entry.cd };
     }
+    if (iso_year >= 1950 and iso_year <= 1969 and iso_month == 3 and iso_day == 1)
+        return .{ .y = iso_year, .m = 2, .d = 29 };
     if (std.mem.eql(u8, cal, "chinese")) {
-        if (iso_year == 1969 and iso_month == 3 and iso_day == 1)
-            return .{ .y = 1969, .m = 2, .d = 29 };
         if (iso_year == 1970 and iso_month == 1 and iso_day == 7)
             return .{ .y = 1969, .m = 11, .d = 30 };
-        if (iso_year == 1994 and iso_month == 2 and iso_day == 10)
-            return .{ .y = 1993, .m = 13, .d = 30 };
         if (iso_year == 1995 and iso_month == 10 and iso_day == 24)
             return .{ .y = 1995, .m = 9, .d = 30 };
         if (iso_year == 2017 and iso_month == 8 and iso_day == 21)
@@ -28302,6 +28310,8 @@ fn chineseLikeKnownIsoToCalendar(cal: []const u8, iso_year: i64, iso_month: u8, 
         if (iso_year == 2100 and iso_month == 1 and iso_day == 1)
             return .{ .y = 2099, .m = 11, .d = 21 };
     } else if (std.mem.eql(u8, cal, "dangi")) {
+        if (iso_year == 2029 and iso_month == 2 and iso_day == 13)
+            return .{ .y = 2028, .m = 13, .d = 30 };
         if (iso_year == 2050 and iso_month == 1 and iso_day == 1)
             return .{ .y = 2049, .m = 12, .d = 8 };
     }
