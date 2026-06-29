@@ -31767,7 +31767,7 @@ fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Valu
     try validatePlainDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
     const t = this.asObj().temporal.?;
     const total = dateTimeToNs(t);
-    const rounded = roundNs(total, opts.smallest, opts.increment, opts.mode);
+    const rounded = roundInstantNs(total, opts.smallest, opts.increment, opts.mode);
     try checkPlainDateTimeNs(self, rounded);
     const days = @divFloor(rounded, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
