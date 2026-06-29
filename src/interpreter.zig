@@ -31985,6 +31985,7 @@ fn temporalDateToPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Val
     o.temporal.?.microsecond = tm.microsecond;
     o.temporal.?.nanosecond = tm.nanosecond;
     o.temporal.?.calendar = t.calendar;
+    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
     return Value.obj(o);
 }
 
@@ -33659,7 +33660,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "with", 1, temporalPlainDateWithFn);
         try setNative(a, rs, p, "until", 1, temporalPlainDateUntilFn(1));
         try setNative(a, rs, p, "since", 1, temporalPlainDateUntilFn(-1));
-        try setNative(a, rs, p, "toPlainDateTime", 1, temporalDateToPlainDateTimeFn);
+        try setNative(a, rs, p, "toPlainDateTime", 0, temporalDateToPlainDateTimeFn);
         try setNative(a, rs, p, "toPlainYearMonth", 0, temporalDateToYearMonthFn);
         try setNative(a, rs, p, "toPlainMonthDay", 0, temporalDateToMonthDayFn);
         try setNative(a, rs, p, "withCalendar", 1, temporalPlainDateWithCalendarFn);
