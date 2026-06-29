@@ -1597,6 +1597,18 @@ pub const Interpreter = struct {
         return null;
     }
 
+    fn catchParamBindingEnvOf(start: *Environment, name: []const u8) ?*Environment {
+        var env: ?*Environment = start;
+        while (env) |e| {
+            e.lockBindings();
+            const owns = e.vars.contains(name) or e.aliases.get(name) != null;
+            e.unlockBindings();
+            if (owns) return if (e.is_catch_param) e else null;
+            env = e.parent;
+        }
+        return null;
+    }
+
     pub fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
         var env: ?*Environment = self.env;
         while (env) |e| {
@@ -2377,6 +2389,10 @@ pub const Interpreter = struct {
                     if (d.init != null) {
                         if (with_target) |o| {
                             try self.setMember(Value.obj(o), d.name, v);
+                            break :blk Value.undef();
+                        }
+                        if (catchParamBindingEnvOf(self.env, d.name)) |catch_env| {
+                            try catch_env.assign(d.name, v);
                             break :blk Value.undef();
                         }
                         try self.globalDefine(d.name, v);
@@ -35555,6 +35571,22 @@ test "interpreter throw / try / catch / finally" {
         \\try { r = 1; } catch (e) { r = 2; } finally { r = 3; }
         \\r
     )).asNum());
+    try std.testing.expect((try evalSource(a,
+        \\var outer = "prior";
+        \\try { throw "exception"; } catch (outer) { var outer = "catch init"; }
+        \\outer === "prior"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\var before, during, after;
+        \\try { throw "exception"; } catch (err) {
+        \\  before = err;
+        \\  for (var err = "loop initializer"; err !== "increment"; err = "increment") {
+        \\    during = err;
+        \\  }
+        \\  after = err;
+        \\}
+        \\before === "exception" && during === "loop initializer" && after === "increment"
+    )).asBool());
     // an uncaught throw propagates as error.Throw
     try std.testing.expectError(error.Throw, evalSource(a, "throw 'boom';"));
 }
