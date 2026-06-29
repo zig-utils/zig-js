@@ -27681,7 +27681,13 @@ fn totalZonedDaysRel(self: *Interpreter, start_epoch: i128, end_epoch: i128, rel
         try checkIsoDate(self, @floatFromInt(next_date.y), @floatFromInt(next_date.m), @floatFromInt(next_date.d));
         const next_epoch = relLocalEpochNs(rel, next_date.y, next_date.m, next_date.d, rel.time_ns);
         const span = next_epoch - cur_epoch;
-        if (span == 0) break;
+        if (span == 0) {
+            whole += direction;
+            cur_y = next_date.y;
+            cur_m = next_date.m;
+            cur_d = next_date.d;
+            continue;
+        }
         const reaches_next = if (forward) end_epoch >= next_epoch else end_epoch <= next_epoch;
         if (!reaches_next) {
             const abs_span = if (span < 0) -span else span;
@@ -33771,6 +33777,16 @@ fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
         if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end)
             return -7 * 3_600_000_000_000;
     }
+    if (std.mem.eql(u8, tz.name, "America/New_York")) {
+        const spring_gap_start_2024 = (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_2024 = spring_gap_start_2024 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_2024 and local_ns < spring_gap_end_2024)
+            return -5 * 3_600_000_000_000;
+        const fall_overlap_start_2024 = (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_2024 = fall_overlap_start_2024 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2024 and local_ns < fall_overlap_end_2024)
+            return -4 * 3_600_000_000_000;
+    }
     if (std.mem.eql(u8, tz.name, "America/Sao_Paulo")) {
         const fall_overlap_start = (@as(i128, tDaysFromCivil(2019, 2, 16)) * nsPerUnit(.day)) + 23 * nsPerUnit(.hour);
         const fall_overlap_end = (@as(i128, tDaysFromCivil(2019, 2, 17)) * nsPerUnit(.day));
@@ -33778,6 +33794,14 @@ fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
             return -2 * 3_600_000_000_000;
     }
     if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
+        const spring_gap_start_1999 = (@as(i128, tDaysFromCivil(1999, 4, 4)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_1999 = spring_gap_start_1999 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_1999 and local_ns < spring_gap_end_1999)
+            return -8 * 3_600_000_000_000;
+        const fall_overlap_start_1999 = (@as(i128, tDaysFromCivil(1999, 10, 31)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_1999 = fall_overlap_start_1999 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_1999 and local_ns < fall_overlap_end_1999)
+            return -7 * 3_600_000_000_000;
         const spring_gap_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         const spring_gap_end_2019 = spring_gap_start_2019 + nsPerUnit(.hour);
         if (local_ns >= spring_gap_start_2019 and local_ns < spring_gap_end_2019)
@@ -33843,6 +33867,28 @@ fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i
             };
         }
     }
+    if (std.mem.eql(u8, tz.name, "America/New_York")) {
+        const standard = -5 * 3_600_000_000_000;
+        const daylight = -4 * 3_600_000_000_000;
+        const spring_gap_start_2024 = (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_2024 = spring_gap_start_2024 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_2024 and local_ns < spring_gap_end_2024) {
+            return switch (disambiguation) {
+                .compatible, .later => standard,
+                .earlier => daylight,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+        const fall_overlap_start_2024 = (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_2024 = fall_overlap_start_2024 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2024 and local_ns < fall_overlap_end_2024) {
+            return switch (disambiguation) {
+                .compatible, .earlier => daylight,
+                .later => standard,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+    }
     if (std.mem.eql(u8, tz.name, "America/Sao_Paulo")) {
         const daylight = -2 * 3_600_000_000_000;
         const standard = -3 * 3_600_000_000_000;
@@ -33859,6 +33905,24 @@ fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i
     if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
         const standard = -8 * 3_600_000_000_000;
         const daylight = -7 * 3_600_000_000_000;
+        const spring_gap_start_1999 = (@as(i128, tDaysFromCivil(1999, 4, 4)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_1999 = spring_gap_start_1999 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_1999 and local_ns < spring_gap_end_1999) {
+            return switch (disambiguation) {
+                .compatible, .later => standard,
+                .earlier => daylight,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+        const fall_overlap_start_1999 = (@as(i128, tDaysFromCivil(1999, 10, 31)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_1999 = fall_overlap_start_1999 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_1999 and local_ns < fall_overlap_end_1999) {
+            return switch (disambiguation) {
+                .compatible, .earlier => daylight,
+                .later => standard,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
         const spring_gap_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         const spring_gap_end_2019 = spring_gap_start_2019 + nsPerUnit(.hour);
         if (local_ns >= spring_gap_start_2019 and local_ns < spring_gap_end_2019) {
@@ -34090,6 +34154,8 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             3 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "America/Sao_Paulo"))
             -3 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "Pacific/Apia"))
+            -10 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "Pacific/Niue"))
             -(11 * 3_600_000_000_000 + 19 * 60_000_000_000 + 40 * 1_000_000_000)
         else if (std.mem.eql(u8, name, "Africa/Monrovia"))
@@ -34127,6 +34193,19 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
             return -7 * 3_600_000_000_000;
         return -8 * 3_600_000_000_000;
     }
+    if (std.mem.eql(u8, name, "America/New_York")) {
+        const dst_start_2024 = (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 7 * nsPerUnit(.hour);
+        const dst_end_2024 = (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + 6 * nsPerUnit(.hour);
+        if (epoch_ns >= dst_start_2024 and epoch_ns < dst_end_2024)
+            return -4 * 3_600_000_000_000;
+        return -5 * 3_600_000_000_000;
+    }
+    if (std.mem.eql(u8, name, "Pacific/Apia")) {
+        const dateline_skip = (@as(i128, tDaysFromCivil(2011, 12, 30)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        if (epoch_ns >= dateline_skip)
+            return 14 * 3_600_000_000_000;
+        return -10 * 3_600_000_000_000;
+    }
     if (std.mem.eql(u8, name, "America/Toronto")) {
         const dst_start_1919 = (@as(i128, tDaysFromCivil(1919, 3, 31)) * nsPerUnit(.day)) + 4 * nsPerUnit(.hour) + 30 * nsPerUnit(.minute);
         if (epoch_ns >= dst_start_1919)
@@ -34142,6 +34221,8 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         const standard_time_start_1883 = -2_717_650_800_000_000_000; // 1883-11-18T17:00:00Z
         if (epoch_ns < standard_time_start_1883)
             return -(8 * 3_600_000_000_000 + 12 * 60_000_000_000 + 28 * 1_000_000_000);
+        const dst_start_1999 = (@as(i128, tDaysFromCivil(1999, 4, 4)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        const dst_end_1999 = (@as(i128, tDaysFromCivil(1999, 10, 31)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2000 = (@as(i128, tDaysFromCivil(2000, 4, 2)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2019 = (@as(i128, tDaysFromCivil(2019, 3, 10)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
@@ -34152,6 +34233,8 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         const dst_end_2024 = (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2025 = (@as(i128, tDaysFromCivil(2025, 3, 9)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2025 = (@as(i128, tDaysFromCivil(2025, 11, 2)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        if (epoch_ns >= dst_start_1999 and epoch_ns < dst_end_1999)
+            return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2019 and epoch_ns < dst_end_2019)
