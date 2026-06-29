@@ -21420,10 +21420,44 @@ fn dtfSharedDateTimePrefixLen(xp: []const DtfPart, yp: []const DtfPart) usize {
     return 0;
 }
 
+fn dtfIsTextualDateOnly(parts: []const DtfPart) bool {
+    return parts.len == 5 and
+        std.mem.eql(u8, parts[0].typ, "month") and
+        std.mem.eql(u8, parts[1].typ, "literal") and std.mem.eql(u8, parts[1].value, " ") and
+        std.mem.eql(u8, parts[2].typ, "day") and
+        std.mem.eql(u8, parts[3].typ, "literal") and std.mem.eql(u8, parts[3].value, ", ") and
+        std.mem.eql(u8, parts[4].typ, "year");
+}
+
+fn dtfAppendTextualDateRangeText(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), xp: []const DtfPart, yp: []const DtfPart) EvalError!bool {
+    if (!dtfIsTextualDateOnly(xp) or !dtfIsTextualDateOnly(yp)) return false;
+    if (!std.mem.eql(u8, xp[4].value, yp[4].value)) return false;
+    if (std.mem.eql(u8, xp[0].value, yp[0].value)) {
+        try dtfAppendPartValues(self, buf, xp[0..3]);
+        try buf.appendSlice(self.arena, dtf_range_sep);
+        try buf.appendSlice(self.arena, yp[2].value);
+        try dtfAppendPartValues(self, buf, xp[3..5]);
+    } else {
+        try dtfAppendPartValues(self, buf, xp[0..3]);
+        try buf.appendSlice(self.arena, dtf_range_sep);
+        try dtfAppendPartValues(self, buf, yp[0..3]);
+        try dtfAppendPartValues(self, buf, xp[3..5]);
+    }
+    return true;
+}
+
 fn dtfFormatRangePartsText(self: *Interpreter, xp: []const DtfPart, yp: []const DtfPart) EvalError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (dtfPartsSameValues(xp, yp)) {
         try dtfAppendPartValues(self, &buf, xp);
+        return buf.toOwnedSlice(self.arena);
+    }
+    if (try dtfAppendTextualDateRangeText(self, &buf, xp, yp))
+        return buf.toOwnedSlice(self.arena);
+    if (dtfIsTextualDateOnly(xp) and dtfIsTextualDateOnly(yp)) {
+        try dtfAppendPartValues(self, &buf, xp);
+        try buf.appendSlice(self.arena, dtf_range_sep);
+        try dtfAppendPartValues(self, &buf, yp);
         return buf.toOwnedSlice(self.arena);
     }
     const shared_prefix = dtfSharedDateTimePrefixLen(xp, yp);
@@ -21440,9 +21474,9 @@ fn dtfFormatRangePartsText(self: *Interpreter, xp: []const DtfPart, yp: []const 
     return buf.toOwnedSlice(self.arena);
 }
 
-/// `Intl.DateTimeFormat.prototype.formatRange(start, end)` — en. Equal-formatting
-/// dates collapse to the single date; otherwise "<start> – <end>" (no
-/// shared-field collapsing).
+/// `Intl.DateTimeFormat.prototype.formatRange(start, end)` — compact en range
+/// formatting with equal dates collapsed and textual date intervals sharing
+/// stable month/year fields.
 fn intlDateTimeFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatRange on incompatible receiver");
@@ -21466,18 +21500,52 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     const yp = try dtfBuildParts(self, this, &.{end});
     const arr = (try self.newArray()).asObj();
     const emit = struct {
+        fn part(s: *Interpreter, a: *value.Object, p: DtfPart, src: []const u8) value.HostError!void {
+            const o = (try s.newObject()).asObj();
+            try s.setProp(o, "type", Value.str(p.typ));
+            try s.setProp(o, "value", Value.str(p.value));
+            try s.setProp(o, "source", Value.str(src));
+            try a.elements.append(a.elementsAllocator(s.arena), Value.obj(o));
+        }
         fn one(s: *Interpreter, a: *value.Object, prts: []const DtfPart, src: []const u8) value.HostError!void {
-            for (prts) |p| {
-                const o = (try s.newObject()).asObj();
-                try s.setProp(o, "type", Value.str(p.typ));
-                try s.setProp(o, "value", Value.str(p.value));
-                try s.setProp(o, "source", Value.str(src));
-                try a.elements.append(a.elementsAllocator(s.arena), Value.obj(o));
-            }
+            for (prts) |p| try part(s, a, p, src);
         }
     }.one;
     if (dtfPartsSameValues(xp.items, yp.items)) {
         try emit(self, arr, xp.items, "shared");
+        return Value.obj(arr);
+    }
+    if (dtfIsTextualDateOnly(xp.items) and dtfIsTextualDateOnly(yp.items) and std.mem.eql(u8, xp.items[4].value, yp.items[4].value)) {
+        if (std.mem.eql(u8, xp.items[0].value, yp.items[0].value)) {
+            try emit(self, arr, xp.items[0..2], "shared");
+            try emit(self, arr, xp.items[2..3], "startRange");
+            const lo = (try self.newObject()).asObj();
+            try self.setProp(lo, "type", Value.str("literal"));
+            try self.setProp(lo, "value", Value.str(dtf_range_sep));
+            try self.setProp(lo, "source", Value.str("shared"));
+            try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+            try emit(self, arr, yp.items[2..3], "endRange");
+            try emit(self, arr, xp.items[3..5], "shared");
+        } else {
+            try emit(self, arr, xp.items[0..3], "startRange");
+            const lo = (try self.newObject()).asObj();
+            try self.setProp(lo, "type", Value.str("literal"));
+            try self.setProp(lo, "value", Value.str(dtf_range_sep));
+            try self.setProp(lo, "source", Value.str("shared"));
+            try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+            try emit(self, arr, yp.items[0..3], "endRange");
+            try emit(self, arr, xp.items[3..5], "shared");
+        }
+        return Value.obj(arr);
+    }
+    if (dtfIsTextualDateOnly(xp.items) and dtfIsTextualDateOnly(yp.items)) {
+        try emit(self, arr, xp.items, "startRange");
+        const lo = (try self.newObject()).asObj();
+        try self.setProp(lo, "type", Value.str("literal"));
+        try self.setProp(lo, "value", Value.str(dtf_range_sep));
+        try self.setProp(lo, "source", Value.str("shared"));
+        try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+        try emit(self, arr, yp.items, "endRange");
         return Value.obj(arr);
     }
     const shared_prefix = dtfSharedDateTimePrefixLen(xp.items, yp.items);
