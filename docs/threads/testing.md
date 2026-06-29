@@ -122,6 +122,14 @@ if any non-allowlisted executable file lacks an explicit reference-only blocker
 classification. This keeps shell-hook, WebAssembly, JIT, deep-stack, and
 heap-cap gaps visible without inflating the green allowlist with no-op passes.
 
+`zig build threads-profile` is not a pass/fail correctness gate. It is the local
+scaling and contention profiler for issue #1. The wall-clock columns compare the
+no-GIL default with `.gil = true`, while `events` count logical contention in
+`Lock`/`Condition`/property waits and queued `asyncHold` grants, and `parks`
+count timed wait/pump iterations including `Thread.join`. Run it before and
+after synchronization or lifecycle changes so performance work has an
+attributed baseline instead of only elapsed time.
+
 ## Focused Runs
 
 Use `-Dthreads-case=<path>` to run one vendored thread test. A comma-separated

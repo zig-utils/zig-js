@@ -72,8 +72,97 @@ pub const ThreadRecord = struct {
 
 threadlocal var t_current: ?*ThreadRecord = null;
 
+/// Internal profiling counters for issue #1's long-tail contention work.
+/// These are deliberately not part of the embedder API; local tools such as
+/// `zig build threads-profile` snapshot them to attribute wall-clock scaling
+/// regressions to synchronization paths.
+pub const ContentionStats = struct {
+    thread_join_parks: u64 = 0,
+    lock_contentions: u64 = 0,
+    lock_wait_parks: u64 = 0,
+    async_hold_queued: u64 = 0,
+    condition_waits: u64 = 0,
+    condition_wait_parks: u64 = 0,
+    property_waits: u64 = 0,
+    property_wait_parks: u64 = 0,
+
+    pub fn events(self: ContentionStats) u64 {
+        return self.lock_contentions + self.async_hold_queued +
+            self.condition_waits + self.property_waits;
+    }
+
+    pub fn parks(self: ContentionStats) u64 {
+        return self.thread_join_parks + self.lock_wait_parks +
+            self.condition_wait_parks + self.property_wait_parks;
+    }
+};
+
+const ContentionCounters = struct {
+    thread_join_parks: std.atomic.Value(u64) = .init(0),
+    lock_contentions: std.atomic.Value(u64) = .init(0),
+    lock_wait_parks: std.atomic.Value(u64) = .init(0),
+    async_hold_queued: std.atomic.Value(u64) = .init(0),
+    condition_waits: std.atomic.Value(u64) = .init(0),
+    condition_wait_parks: std.atomic.Value(u64) = .init(0),
+    property_waits: std.atomic.Value(u64) = .init(0),
+    property_wait_parks: std.atomic.Value(u64) = .init(0),
+};
+
+var contention_counters: ContentionCounters = .{};
+
+pub fn resetContentionStats() void {
+    contention_counters.thread_join_parks.store(0, .release);
+    contention_counters.lock_contentions.store(0, .release);
+    contention_counters.lock_wait_parks.store(0, .release);
+    contention_counters.async_hold_queued.store(0, .release);
+    contention_counters.condition_waits.store(0, .release);
+    contention_counters.condition_wait_parks.store(0, .release);
+    contention_counters.property_waits.store(0, .release);
+    contention_counters.property_wait_parks.store(0, .release);
+}
+
+pub fn contentionStats() ContentionStats {
+    return .{
+        .thread_join_parks = contention_counters.thread_join_parks.load(.acquire),
+        .lock_contentions = contention_counters.lock_contentions.load(.acquire),
+        .lock_wait_parks = contention_counters.lock_wait_parks.load(.acquire),
+        .async_hold_queued = contention_counters.async_hold_queued.load(.acquire),
+        .condition_waits = contention_counters.condition_waits.load(.acquire),
+        .condition_wait_parks = contention_counters.condition_wait_parks.load(.acquire),
+        .property_waits = contention_counters.property_waits.load(.acquire),
+        .property_wait_parks = contention_counters.property_wait_parks.load(.acquire),
+    };
+}
+
+inline fn bumpContention(comptime field: []const u8) void {
+    _ = @field(contention_counters, field).fetchAdd(1, .monotonic);
+}
+
 pub fn currentThreadId() u64 {
     return if (t_current) |rec| rec.id else 0;
+}
+
+test "jsthread contention stats reset and snapshot" {
+    resetContentionStats();
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().parks());
+
+    bumpContention("lock_contentions");
+    bumpContention("async_hold_queued");
+    bumpContention("condition_waits");
+    bumpContention("property_waits");
+    bumpContention("thread_join_parks");
+    bumpContention("lock_wait_parks");
+    bumpContention("condition_wait_parks");
+    bumpContention("property_wait_parks");
+
+    const stats = contentionStats();
+    try std.testing.expectEqual(@as(u64, 4), stats.events());
+    try std.testing.expectEqual(@as(u64, 4), stats.parks());
+
+    resetContentionStats();
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().parks());
 }
 
 /// Install the `Thread` global into an `enable_threads` Context. Called by
@@ -681,6 +770,7 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
         if (timeout_ns != null and timeout_ns.? == 0) return .timed_out;
         if (!self.main_can_block)
             return self.throwError("TypeError", err_name);
+        bumpContention("lock_contentions");
         const deadline_ns: ?i96 = if (timeout_ns) |ns|
             std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + ns
         else
@@ -711,6 +801,7 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
             if (stopped)
                 return self.throwError("Error", "worker terminated");
             if (!rec.locked and rec.sync_generation != my_generation) break;
+            bumpContention("lock_wait_parks");
             waitOnLockCond(self, rec, .{ .duration = .{
                 .raw = .fromNanoseconds(tick_ns),
                 .clock = .awake,
@@ -903,6 +994,7 @@ fn waitOnCondRecord(self: *Interpreter, rec: *CondRecord, timeout: std.Io.Timeou
 
 fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout_ns: ?u64) value.HostError!bool {
     const io = agent.engineIo();
+    bumpContention("condition_waits");
     rec.mutex.lockUncancelable(io);
     lock.mutex.lockUncancelable(io);
     const held_by_me = lock.locked and lock.holder == currentTid();
@@ -976,6 +1068,7 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
             }
             tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
         }
+        bumpContention("condition_wait_parks");
         waitOnCondRecord(self, rec, .{ .duration = .{
             .raw = .fromNanoseconds(tick_ns),
             .clock = .awake,
@@ -1632,6 +1725,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
     if (!sameValueZero(cur_locked, expected)) return Value.str("not-equal");
     g.prop_waiters.append(prop_alloc, @ptrCast(&ticket)) catch return error.OutOfMemory;
     linked = true;
+    bumpContention("property_waits");
     const deadline_ns: ?i96 = if (timeout_ns) |ns|
         std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds + ns
     else
@@ -1649,6 +1743,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
             if (d <= now) return Value.str("timed-out");
             tick_ns = @min(tick_ns, @as(u64, @intCast(d - now)));
         }
+        bumpContention("property_wait_parks");
         waitPropTicketTimeout(self, g, &ticket, .{ .duration = .{
             .raw = .fromNanoseconds(tick_ns),
             .clock = .awake,
@@ -1886,6 +1981,7 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     stack_scan.beginPark();
     const released_gil = self.use_thread_gil;
     if (released_gil) rec.gil.release();
+    bumpContention("thread_join_parks");
     io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
         .raw = .fromMilliseconds(5),
         .clock = .awake,
@@ -2002,6 +2098,7 @@ fn lockAsyncHoldFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.
         rec.grant_pending = true;
         enqueue_now = true;
     } else {
+        bumpContention("async_hold_queued");
         rec.pending.append(self.arena, job) catch |err| {
             rec.mutex.unlock(agent.engineIo());
             return err;

@@ -244,9 +244,11 @@ threading architecture:
   work and context lifecycle reductions for create-per-task embedders.
 - **Parallel scaling** - `zig build threads-profile` compares the no-GIL
   default against `.gil = true` across independent compute, shared object
-  properties, array append, typed-array Atomics, and lifecycle churn; use it to
-  reduce lock contention in shared global bindings, object/element storage, and
-  GC allocation under high thread counts.
+  properties, array append, typed-array Atomics, contended `Lock.hold`, and
+  lifecycle churn. It now prints internal contention events and timed
+  wait/pump parks beside wall-clock time, so follow-up optimization can separate
+  user-level lock pressure from thread-join/lifecycle waiting, object/element
+  storage contention, and GC allocation costs under high thread counts.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

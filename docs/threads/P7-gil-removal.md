@@ -263,7 +263,10 @@ per-thread before threads stop holding the GIL):
      not a quick wiring follow-up; it needs either a genuinely-parked wait
      primitive (no periodic pump) under `parallel_midscript_gc`, or to be left to
      the quiescent fallback (current behavior, which is correct). Recorded here so
-     it is not re-attempted as low-hanging fruit.
+     this stays a known maturity item rather than a rediscovered bug, not
+     re-attempted as low-hanging fruit. `zig build threads-profile` now reports
+     wait/pump `parks` and logical contention `events`, which gives this work an
+     executable baseline when the sync-wait protocol changes.
    - **Terminate or abort.** The collector drives root-publication generations,
      marking between, until a *born-cell-stable, nothing-deferred* quiescent
      window, then attempts `finishConcurrentMarkParallel`. That fold-traces the

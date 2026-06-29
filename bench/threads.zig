@@ -16,6 +16,11 @@ const Scenario = struct {
     rounds: usize,
 };
 
+const Timing = struct {
+    ns: u64,
+    stats: js.jsthread.ContentionStats,
+};
+
 const scenarios = [_]Scenario{
     .{
         .name = "independent compute",
@@ -73,6 +78,26 @@ const scenarios = [_]Scenario{
         .rounds = 8,
     },
     .{
+        .name = "lock contention",
+        .setup =
+        \\globalThis.lock = new Lock();
+        \\globalThis.box = { n: 0 };
+        \\globalThis.worker = function(id) {
+        \\  var local = id;
+        \\  for (var i = 0; i < 400; i = i + 1) {
+        \\    lock.hold(function() {
+        \\      var next = (box.n | 0) + 1;
+        \\      for (var j = 0; j < 120; j = j + 1)
+        \\        local = (local + next + j) % 1000003;
+        \\      box.n = next;
+        \\    });
+        \\  }
+        \\  return local;
+        \\};
+        ,
+        .rounds = 5,
+    },
+    .{
         .name = "thread lifecycle",
         .setup =
         \\globalThis.worker = function(id) { return id + 1; };
@@ -100,7 +125,7 @@ fn installHarness(ctx: *js.Context, scenario: Scenario) !void {
     );
 }
 
-fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: usize, gil: bool) !u64 {
+fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: usize, gil: bool) !Timing {
     const ctx = try js.Context.createWith(gpa, .{ .enable_threads = true, .gil = gil });
     defer ctx.destroy();
     try installHarness(ctx, scenario);
@@ -108,22 +133,38 @@ fn timeScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers:
     const src = try std.fmt.allocPrint(ctx.arena(), "spawnBatch({d})", .{workers});
     _ = try ctx.evaluate(src);
 
+    js.jsthread.resetContentionStats();
     const t0 = nowNs(io);
     var round: usize = 0;
     while (round < scenario.rounds) : (round += 1) {
         _ = try ctx.evaluate(src);
     }
-    return @intCast(nowNs(io) - t0);
+    return .{
+        .ns = @intCast(nowNs(io) - t0),
+        .stats = js.jsthread.contentionStats(),
+    };
 }
 
 fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers: []const usize) !void {
     std.debug.print("\n{s}\n", .{scenario.name});
-    std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12}\n", .{ "threads", "no-gil ns", "gil ns", "no-gil x1", "vs gil" });
+    std.debug.print("{s:>8} {s:>14} {s:>14} {s:>12} {s:>12} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{
+        "threads",
+        "no-gil ns",
+        "gil ns",
+        "no-gil x1",
+        "vs gil",
+        "ng events",
+        "ng parks",
+        "gil events",
+        "gil parks",
+    });
 
     var base_parallel: u64 = 1;
     for (workers) |n| {
-        const parallel_ns = try timeScenario(gpa, io, scenario, n, false);
-        const gil_ns = try timeScenario(gpa, io, scenario, n, true);
+        const parallel = try timeScenario(gpa, io, scenario, n, false);
+        const gil = try timeScenario(gpa, io, scenario, n, true);
+        const parallel_ns = parallel.ns;
+        const gil_ns = gil.ns;
         if (n == workers[0]) base_parallel = @max(parallel_ns, 1);
 
         const scaling = @as(f64, @floatFromInt(n)) *
@@ -132,7 +173,17 @@ fn printScenario(gpa: std.mem.Allocator, io: std.Io, scenario: Scenario, workers
         const vs_gil = @as(f64, @floatFromInt(gil_ns)) /
             @as(f64, @floatFromInt(@max(parallel_ns, 1)));
 
-        std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x\n", .{ n, parallel_ns, gil_ns, scaling, vs_gil });
+        std.debug.print("{d:>8} {d:>14} {d:>14} {d:>11.2}x {d:>11.2}x {d:>10} {d:>10} {d:>10} {d:>10}\n", .{
+            n,
+            parallel_ns,
+            gil_ns,
+            scaling,
+            vs_gil,
+            parallel.stats.events(),
+            parallel.stats.parks(),
+            gil.stats.events(),
+            gil.stats.parks(),
+        });
     }
 }
 
@@ -152,6 +203,7 @@ pub fn main() !void {
 
     std.debug.print("zig-js shared-realm Thread contention profile\n", .{});
     std.debug.print("cores: {d}; no-GIL is Context.createWith(.{{ .enable_threads = true }}), serialized is .gil = true\n", .{cores});
+    std.debug.print("events = logical contention (Lock/Condition/property wait/asyncHold); parks = timed wait/pump iterations including Thread.join\n", .{});
 
     for (scenarios) |scenario| try printScenario(gpa, io, scenario, worker_counts);
 }

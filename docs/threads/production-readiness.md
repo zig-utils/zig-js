@@ -71,13 +71,17 @@ Known performance/maturity work:
   independent compute loops in one GIL-free context.
 - `zig build threads-profile` is the dedicated contention harness. It compares
   the no-GIL default with `.gil = true` across independent compute, shared
-  object properties, shared array append, typed-array Atomics, and thread
-  lifecycle churn.
+  object properties, shared array append, typed-array Atomics, contended
+  `Lock.hold`, and thread lifecycle churn. Each row includes internal
+  contention counters: `events` count logical contention (`Lock`/`Condition`/
+  property wait and queued `asyncHold` grants), while `parks` count timed
+  wait/pump iterations including `Thread.join`.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 
-Remaining: use the contention and GC profiles to drive targeted lock reductions,
-context lifecycle pooling, and nursery/generational work.
+Remaining: use the attribution columns to drive targeted reductions in
+contended user-level locks, join/lifecycle waiting, object/element storage
+contention, context lifecycle pooling, and nursery/generational work.
 
 ## 4. Embedder API
 
