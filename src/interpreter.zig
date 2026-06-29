@@ -26938,6 +26938,12 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         const tod: i128 = @as(i128, p.h) * nsPerUnit(.hour) + @as(i128, p.mi) * nsPerUnit(.minute) +
             @as(i128, p.s) * nsPerUnit(.second) + @as(i128, p.ms) * nsPerUnit(.millisecond) +
             @as(i128, p.us) * nsPerUnit(.microsecond) + @as(i128, p.ns);
+        if (ann.has_tz) {
+            try checkInstantEpochNs(self, p.epoch_ns);
+            const local_ns = @as(i128, tDaysFromCivil(p.y, p.mo, p.d)) * DAY_NS + tod;
+            if (local_ns < -max_temporal_instant_ns)
+                return self.throwError("RangeError", "relativeTo date-time out of range");
+        }
         return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod, .zoned = ann.has_tz, .epoch_ns = p.epoch_ns };
     }
     if (rv.isObject()) {
@@ -27063,6 +27069,8 @@ fn durEndpointsNs(self: *Interpreter, dur: [10]f64, rel: RelTo) EvalError!struct
     try checkIsoDate(self, @floatFromInt(end_date.y), @floatFromInt(end_date.m), @floatFromInt(end_date.d));
     const start = @as(i128, tDaysFromCivil(rel.y, rel.m, rel.d)) * DAY_NS + rel.time_ns;
     const end = @as(i128, tDaysFromCivil(end_date.y, end_date.m, end_date.d)) * DAY_NS + rel.time_ns + durTimeOnlyNs(dur);
+    if (start < -max_temporal_instant_ns)
+        return self.throwError("RangeError", "relativeTo date-time out of range");
     try checkPlainDateTimeNs(self, end);
     if (rel.zoned) try checkInstantEpochNs(self, rel.epoch_ns + (end - start));
     return .{ .start = start, .end = end };
@@ -27357,6 +27365,11 @@ fn durSame(a: [10]f64, b: [10]f64) bool {
     return true;
 }
 
+fn durIsBlank(dur: [10]f64) bool {
+    for (dur) |c| if (c != 0) return false;
+    return true;
+}
+
 fn durationLargestPresentUnit(dur: [10]f64) TUnit {
     inline for (.{
         .{ 3, TUnit.day },
@@ -27466,6 +27479,13 @@ fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) va
         return self.throwError("TypeError", "Temporal.Duration.prototype.total requires a string or options object");
     const rel = try resolveRelativeTo(self, a0);
     const unit = (try readUnitOption(self, a0, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
+    if (durIsBlank(dur)) {
+        if (unit == .day) if (rel) |anchor| {
+            if (anchor.zoned and (anchor.epoch_ns < -max_temporal_instant_ns or anchor.epoch_ns > max_temporal_instant_ns - DAY_NS))
+                return self.throwError("RangeError", "relativeTo date-time out of range");
+        };
+        if (@intFromEnum(unit) >= @intFromEnum(TUnit.day)) return Value.num(0);
+    }
     // With a relativeTo anchor, compute the calendar-aware (fractional) total.
     if (rel) |anchor| return Value.num(try totalDurationRel(self, dur, anchor, unit));
     if (durHasCalendar(dur) or @intFromEnum(unit) < @intFromEnum(TUnit.day))
@@ -27490,6 +27510,7 @@ fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!read.has_unit) return self.throwError("RangeError", "Temporal.Duration.prototype.round requires largestUnit or smallestUnit");
     // largestUnit must be ≥ smallestUnit.
     if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) opts.largest = opts.smallest;
+    if (durIsBlank(dur)) return makeDuration(self, dur);
     if (read.relative_to) |rel| return makeDuration(self, try roundDurationRel(self, dur, rel, opts));
     if (durHasCalendar(dur) or @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.round with calendar units requires relativeTo");
