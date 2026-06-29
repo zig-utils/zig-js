@@ -140,9 +140,13 @@ heap-cap gaps visible without inflating the green allowlist with no-op passes.
 
 `zig build threads-profile` is not a pass/fail correctness gate. It is the local
 scaling and contention profiler for issue #1. The wall-clock columns compare the
-no-GIL default with `.gil = true`, while its opt-in counters let `events` count
-logical contention in `Lock`/`Condition`/property waits and queued `asyncHold`
-grants, and `parks` count timed wait/pump iterations including `Thread.join`.
+no-GIL default with `.gil = true` across independent compute, shared object
+properties, shared array append, typed-array Atomics, property `Atomics.wait` /
+`notify`, `Condition.wait` / `notifyAll`, contended `Lock.hold`,
+`Lock.asyncHold` delivery, and thread lifecycle churn. Its opt-in counters let
+`events` count logical contention in `Lock`/`Condition`/property waits and
+queued `asyncHold` grants, and `parks` count timed wait/pump iterations
+including `Thread.join`.
 The `empty`/`jobs` columns split the run-loop task pump into empty atomic
 fast-path hits and real async-hold job delivery. Run it before and after
 synchronization or lifecycle changes so performance work has an attributed

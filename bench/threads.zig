@@ -78,6 +78,78 @@ const scenarios = [_]Scenario{
         .rounds = 8,
     },
     .{
+        .name = "property wait/notify",
+        .setup =
+        \\globalThis.propBox = { epoch: 0, ready: 0 };
+        \\globalThis.worker = function(id) {
+        \\  var workers = globalThis.__profileWorkers | 0;
+        \\  if (workers <= 1) return id + 1;
+        \\  var rounds = 180;
+        \\  if (id === 0) {
+        \\    for (var i = 0; i < rounds; i = i + 1) {
+        \\      var need = (workers - 1) * (i + 1);
+        \\      while (Atomics.load(propBox, 'ready') < need)
+        \\        ;
+        \\      Atomics.store(propBox, 'epoch', i + 1);
+        \\      Atomics.notify(propBox, 'epoch', workers);
+        \\    }
+        \\    return rounds;
+        \\  }
+        \\  var score = 0;
+        \\  for (var j = 0; j < rounds; j = j + 1) {
+        \\    var target = j + 1;
+        \\    Atomics.add(propBox, 'ready', 1);
+        \\    Atomics.notify(propBox, 'ready');
+        \\    while (Atomics.load(propBox, 'epoch') < target) {
+        \\      var cur = Atomics.load(propBox, 'epoch');
+        \\      var r = Atomics.wait(propBox, 'epoch', cur, 100);
+        \\      if (r === 'ok' || r === 'not-equal' || r === 'timed-out') score = score + 1;
+        \\    }
+        \\  }
+        \\  return score;
+        \\};
+        ,
+        .rounds = 5,
+    },
+    .{
+        .name = "condition wait/notify",
+        .setup =
+        \\globalThis.condLock = new Lock();
+        \\globalThis.cond = new Condition();
+        \\globalThis.condBox = { epoch: 0, ready: 0 };
+        \\globalThis.worker = function(id) {
+        \\  var workers = globalThis.__profileWorkers | 0;
+        \\  if (workers <= 1) return id + 1;
+        \\  var rounds = 120;
+        \\  if (id === 0) {
+        \\    for (var i = 0; i < rounds; i = i + 1) {
+        \\      var need = (workers - 1) * (i + 1);
+        \\      while (Atomics.load(condBox, 'ready') < need)
+        \\        ;
+        \\      condLock.hold(function() {
+        \\        condBox.epoch = i + 1;
+        \\        cond.notifyAll();
+        \\      });
+        \\    }
+        \\    return rounds;
+        \\  }
+        \\  var score = 0;
+        \\  for (var j = 0; j < rounds; j = j + 1) {
+        \\    condLock.hold(function() {
+        \\      var target = j + 1;
+        \\      Atomics.add(condBox, 'ready', 1);
+        \\      Atomics.notify(condBox, 'ready');
+        \\      while (condBox.epoch < target)
+        \\        cond.wait(condLock);
+        \\      score = score + condBox.epoch;
+        \\    });
+        \\  }
+        \\  return score;
+        \\};
+        ,
+        .rounds = 5,
+    },
+    .{
         .name = "lock contention",
         .setup =
         \\globalThis.lock = new Lock();
@@ -131,6 +203,7 @@ fn installHarness(ctx: *js.Context, scenario: Scenario) !void {
     _ = try ctx.evaluate(scenario.setup);
     _ = try ctx.evaluate(
         \\globalThis.spawnBatch = function(n) {
+        \\  globalThis.__profileWorkers = n;
         \\  var ts = [];
         \\  for (var i = 0; i < n; i = i + 1)
         \\    ts.push(new Thread(worker, i));

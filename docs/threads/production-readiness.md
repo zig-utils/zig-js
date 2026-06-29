@@ -86,6 +86,7 @@ Known performance/maturity work:
 - `zig build threads-profile` is the dedicated contention harness. It compares
   the no-GIL default with `.gil = true` across independent compute, shared
   object properties, shared array append, typed-array Atomics, contended
+  property `Atomics.wait` / `notify`, `Condition.wait` / `notifyAll`,
   `Lock.hold`, `Lock.asyncHold` delivery, and thread lifecycle churn. Each row
   enables and includes internal contention counters: `events` count logical
   contention (`Lock`/`Condition`/property wait and queued `asyncHold` grants),
