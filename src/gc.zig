@@ -778,8 +778,12 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
     active_heap = h;
     if (h) |raw| {
         const heap: *Heap = @ptrCast(@alignCast(raw));
+        // Non-cell object side stores do not need the GC cell slab classifier in
+        // single-mutator GC mode. True-parallel JS keeps the synchronized wrapper
+        // because the embedder's allocator may not be thread-safe.
+        const backing_allocator = if (heap.ctx.context.parallel_js) heap.backing else heap.ctx.context.gpa;
         _ = gc_runtime.setActive(.{ .object_backing = .{
-            .allocator = heap.backing,
+            .allocator = backing_allocator,
             .stores_live = &heap.ctx.context.gc_object_backing_stores_live,
         } });
         _ = gc_runtime.setBarrier(raw, barrierThunk);

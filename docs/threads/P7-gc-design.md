@@ -158,7 +158,10 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   instead of the entire backing. At context teardown the backing switches to
   bulk-teardown mode: `zig-gc` still finalizes every live cell, but owned cell
   frees skip freelist rebuilds because the backing releases all chunks
-  immediately afterward.
+  immediately afterward. Single-mutator object side stores now bypass the
+  `GcCellBacking` wrapper and allocate directly from the context allocator;
+  true-parallel JS keeps the synchronized wrapper for those stores so no-GIL
+  embedders are not required to provide a thread-safe allocator.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron

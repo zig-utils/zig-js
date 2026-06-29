@@ -75,7 +75,11 @@ context APIs.
   also keep a per-bucket recent-chunk hint, avoiding repeated full bucket walks
   when GC frees/remaps arrive from the same slab chunk. Context teardown also
   skips rebuilding slab freelists and reclassifying bucket ownership for cells
-  that will be released by the following whole-chunk free.
+  that will be released by the following whole-chunk free. Single-mutator GC
+  object side stores bypass the cell-slab classifier and allocate from the
+  context allocator directly; true-parallel JS contexts still route side stores
+  through the synchronized backing wrapper because an embedder allocator may not
+  be thread-safe.
   Correctness is gated, but tight-loop block-scope allocation and
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable

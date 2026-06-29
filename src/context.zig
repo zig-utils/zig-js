@@ -9231,6 +9231,29 @@ test "enable_gc: Object named-property backing stores release when collected" {
     try std.testing.expectEqual(baseline, ctx.gc_object_backing_stores_live);
 }
 
+test "enable_gc: Object backing allocator avoids cell classifier outside parallel_js" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const v = try ctx.evaluate("globalThis.keep = {}; globalThis.keep.x = 1; globalThis.keep");
+    const o = v.asObj();
+    try std.testing.expect(o.backing_allocator != null);
+    const backing = o.backing_allocator.?;
+    try std.testing.expectEqual(ctx.gpa.ptr, backing.ptr);
+    try std.testing.expectEqual(ctx.gpa.vtable, backing.vtable);
+}
+
+test "enable_threads: Object backing allocator stays synchronized under parallel_js" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+
+    const v = try ctx.evaluate("globalThis.keep = {}; globalThis.keep.x = 1; globalThis.keep");
+    const o = v.asObj();
+    try std.testing.expect(o.backing_allocator != null);
+    const backing = o.backing_allocator.?;
+    try std.testing.expectEqual(@intFromPtr(ctx.gc_cell_backing.?), @intFromPtr(backing.ptr));
+}
+
 test "enable_gc parallel_gc: Object accessor backing stores release when collected" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true });
     defer ctx.destroy();

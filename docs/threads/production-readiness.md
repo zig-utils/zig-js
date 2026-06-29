@@ -56,6 +56,11 @@ Known performance/maturity work:
   per-cell frees do not rebuild freelists or reclassify bucket ownership
   immediately before the backing releases whole chunks. This cuts the old
   one-general-allocator-call-per-cell profile without changing the collector API.
+- Single-mutator GC contexts now allocate object side stores directly from the
+  context allocator instead of going through the cell-slab classifier only to
+  delegate. True-parallel JS contexts keep the synchronized backing wrapper for
+  those side stores because the embedder-provided allocator may not be
+  thread-safe.
 - Tight-loop block-scoped allocation is still slower under the GC path compared
   with arena bulk allocation. This still needs a nursery/generational strategy
   or an engine optimization for non-captured per-iteration bindings.
