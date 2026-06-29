@@ -98,6 +98,15 @@ pub const GcCellBacking = struct {
     lock: std.atomic.Value(u32) = .init(0),
     bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
+    bucket_addr_min: [bucket_count]usize = .{
+        std.math.maxInt(usize),
+        std.math.maxInt(usize),
+        std.math.maxInt(usize),
+        std.math.maxInt(usize),
+        std.math.maxInt(usize),
+        std.math.maxInt(usize),
+    },
+    bucket_addr_max: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
 
     inline fn acquire(self: *GcCellBacking) void {
         if (!self.parallel) return;
@@ -124,6 +133,10 @@ pub const GcCellBacking = struct {
             self.inner.free(chunk);
             return false;
         };
+        const start = @intFromPtr(chunk.ptr);
+        const end = start + chunk.len;
+        self.bucket_addr_min[idx] = @min(self.bucket_addr_min[idx], start);
+        self.bucket_addr_max[idx] = @max(self.bucket_addr_max[idx], end);
         var off: usize = 0;
         while (off < chunk.len) : (off += slot_size) {
             const node: *FreeNode = @ptrCast(@alignCast(chunk.ptr + off));
@@ -135,6 +148,7 @@ pub const GcCellBacking = struct {
 
     fn ownsPtrLocked(self: *GcCellBacking, idx: usize, ptr: [*]u8) bool {
         const addr = @intFromPtr(ptr);
+        if (addr < self.bucket_addr_min[idx] or addr >= self.bucket_addr_max[idx]) return false;
         for (self.bucket_chunks[idx].items) |chunk| {
             const start = @intFromPtr(chunk.ptr);
             const end = start + chunk.len;
@@ -226,10 +240,12 @@ pub const GcCellBacking = struct {
     }
 
     pub fn deinit(self: *GcCellBacking) void {
-        for (&self.bucket_chunks) |*chunks| {
+        for (&self.bucket_chunks, 0..) |*chunks, idx| {
             for (chunks.items) |chunk| self.inner.free(chunk);
             chunks.deinit(self.inner);
             chunks.* = .empty;
+            self.bucket_addr_min[idx] = std.math.maxInt(usize);
+            self.bucket_addr_max[idx] = 0;
         }
         self.free_lists = .{ null, null, null, null, null, null };
         self.bulk_teardown = false;
@@ -265,6 +281,26 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     const side = try a.alignedAlloc(u8, .@"8", 200);
     try std.testing.expect(@intFromPtr(side.ptr) != @intFromPtr(first_ptr));
     a.free(side);
+}
+
+test "GC cell backing rejects pointers outside bucket address spans before scanning chunks" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const cell = try a.alignedAlloc(u8, .@"16", 200);
+    defer a.free(cell);
+
+    const foreign = try std.testing.allocator.alignedAlloc(u8, .@"16", 200);
+    defer std.testing.allocator.free(foreign);
+
+    backing.acquire();
+    defer backing.unlock();
+    try std.testing.expect(backing.ownsPtrLocked(idx, cell.ptr));
+    try std.testing.expect(!backing.ownsPtrLocked(idx, foreign.ptr));
+    try std.testing.expect(@intFromPtr(cell.ptr) >= backing.bucket_addr_min[idx]);
+    try std.testing.expect(@intFromPtr(cell.ptr) < backing.bucket_addr_max[idx]);
 }
 
 test "GC cell backing bulk teardown skips freelist rebuilds and still delegates side storage" {
