@@ -27380,6 +27380,10 @@ fn durHasCalendar(dur: [10]f64) bool {
     return dur[0] != 0 or dur[1] != 0 or dur[2] != 0;
 }
 
+fn durHasDateUnits(dur: [10]f64) bool {
+    return dur[0] != 0 or dur[1] != 0 or dur[2] != 0 or dur[3] != 0;
+}
+
 /// Validate all nonzero components share one sign (the Duration invariant).
 fn durSignOk(dur: [10]f64) bool {
     var s: f64 = 0;
@@ -27574,6 +27578,11 @@ fn temporalDurationCompareFn(ctx: *anyopaque, this: Value, args: []const Value) 
     // With a relativeTo anchor, compare the two durations' absolute endpoints
     // (handles calendar units of differing real length).
     if (try resolveRelativeTo(self, options)) |rel| {
+        if (!durHasDateUnits(a) and !durHasDateUnits(b)) {
+            const na = durationTimeNs(a);
+            const nb = durationTimeNs(b);
+            return Value.num(if (na < nb) -1 else if (na > nb) 1 else 0);
+        }
         const ea = try durEndpointsNs(self, a, rel);
         const eb = try durEndpointsNs(self, b, rel);
         return Value.num(if (ea.end < eb.end) -1 else if (ea.end > eb.end) 1 else 0);
@@ -27605,26 +27614,20 @@ fn temporalDurationToStringFn(ctx: *anyopaque, this: Value, args: []const Value)
         try buf.append(self.arena, 'T');
         if (d[4] != 0) try tfmt(self, &buf, "{d}H", .{@abs(d[4])});
         if (d[5] != 0) try tfmt(self, &buf, "{d}M", .{@abs(d[5])});
-        var whole = @abs(d[6]);
-        var frac_ns = @as(f64, 0);
-        const ms = @abs(d[7]);
-        const us = @abs(d[8]);
-        const ns = @abs(d[9]);
-        if (!std.math.isFinite(ms) or !std.math.isFinite(us) or !std.math.isFinite(ns)) return self.throwError("RangeError", "duration value out of range");
-        whole += @floor(ms / 1_000) + @floor(us / 1_000_000) + @floor(ns / 1_000_000_000);
-        frac_ns += @mod(ms, 1_000) * 1_000_000;
-        frac_ns += @mod(us, 1_000_000) * 1_000;
-        frac_ns += @mod(ns, 1_000_000_000);
-        if (frac_ns >= 1_000_000_000) {
-            whole += @floor(frac_ns / 1_000_000_000);
-            frac_ns = @mod(frac_ns, 1_000_000_000);
-        }
+        if (!std.math.isFinite(d[6]) or !std.math.isFinite(d[7]) or !std.math.isFinite(d[8]) or !std.math.isFinite(d[9]))
+            return self.throwError("RangeError", "duration value out of range");
+        const second_ns =
+            @as(i128, @intFromFloat(@abs(d[6]))) * nsPerUnit(.second) +
+            @as(i128, @intFromFloat(@abs(d[7]))) * nsPerUnit(.millisecond) +
+            @as(i128, @intFromFloat(@abs(d[8]))) * nsPerUnit(.microsecond) +
+            @as(i128, @intFromFloat(@abs(d[9])));
+        const whole = @divTrunc(second_ns, nsPerUnit(.second));
+        const frac_ns = @mod(second_ns, nsPerUnit(.second));
         if (!precision.auto or whole != 0 or frac_ns != 0 or (d[4] == 0 and d[5] == 0)) {
             const digits = precision.digits;
             if (frac_ns != 0 or (digits != null and digits.? > 0)) {
                 var fb: [9]u8 = undefined;
-                const ns_int: u64 = @intFromFloat(frac_ns);
-                _ = std.fmt.bufPrint(&fb, "{d:0>9}", .{ns_int}) catch {};
+                _ = std.fmt.bufPrint(&fb, "{d:0>9}", .{@as(u64, @intCast(frac_ns))}) catch {};
                 var flen: usize = if (digits) |digs| digs else 9;
                 if (digits == null) {
                     while (flen > 0 and fb[flen - 1] == '0') flen -= 1;
