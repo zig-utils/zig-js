@@ -127,15 +127,16 @@ context APIs.
   reacquire grants from those pump points, and verifies exact
   `FinalizationRegistry` cleanup count/sum delivery afterward. The lifecycle
   profile now adds deterministic termination storms,
-  script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import and
-  graph-shaped module Worker/thread overlap with exact Atomics counter oracles,
-  mixed terminate/close/postMessage races, and worker handler-exception recovery
-  plus Thread exception identity through `join()` / `asyncJoin()` while property
-  and condition waiters are parked, thread-returned typed-array `waitAsync`
-  promise assimilation through `join()` / `asyncJoin()` while waiters are
-  parked, and cross-thread `FinalizationRegistry` cleanup count/sum oracles.
-  Keep extending it toward more teardown ordering, additional module-worker
-  graph shapes, and richer cleanup/finalization interleavings.
+  script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,
+  diamond-shaped, and fanout/rejoin module Worker/thread overlap with exact
+  Atomics counter oracles, mixed terminate/close/postMessage races, and worker
+  handler-exception recovery plus Thread exception identity through `join()` /
+  `asyncJoin()` while property and condition waiters are parked,
+  thread-returned typed-array `waitAsync` promise assimilation through `join()` /
+  `asyncJoin()` while waiters are parked, and cross-thread
+  `FinalizationRegistry` cleanup count/sum oracles. Keep extending it toward
+  more teardown ordering, broader cross-realm scheduling, and richer
+  cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow

@@ -144,6 +144,117 @@ const ModuleGraphFuzzHost = struct {
     }
 };
 
+const ModuleFanoutFuzzHost = struct {
+    const Entry = struct { path: []const u8, source: []const u8 };
+    var host_ctx: u8 = 0;
+    const entries = [_]Entry{
+        .{
+            .path = "core.js",
+            .source =
+            \\export function addSlot(sab, slot, n) {
+            \\  const v = new Int32Array(sab);
+            \\  for (let i = 0; i < n; i++) Atomics.add(v, slot, 1);
+            \\  return n;
+            \\}
+            ,
+        },
+        .{
+            .path = "leaf-a.js",
+            .source =
+            \\import { addSlot } from "./core.js";
+            \\export function leafA(sab, n) {
+            \\  const ran = addSlot(sab, 0, n);
+            \\  const v = new Int32Array(sab);
+            \\  Atomics.add(v, 3, ran);
+            \\  Atomics.add(v, 4, 1);
+            \\  return ran;
+            \\}
+            ,
+        },
+        .{
+            .path = "leaf-b.js",
+            .source =
+            \\import { addSlot } from "./core.js";
+            \\export function leafB(sab, n) {
+            \\  const ran = addSlot(sab, 0, n + 1);
+            \\  const v = new Int32Array(sab);
+            \\  Atomics.add(v, 3, ran);
+            \\  Atomics.add(v, 4, 1);
+            \\  return ran;
+            \\}
+            ,
+        },
+        .{
+            .path = "leaf-c.js",
+            .source =
+            \\import { addSlot } from "./core.js";
+            \\export function leafC(sab, n) {
+            \\  const ran = addSlot(sab, 0, n + 2);
+            \\  const v = new Int32Array(sab);
+            \\  Atomics.add(v, 3, ran);
+            \\  Atomics.add(v, 4, 1);
+            \\  return ran;
+            \\}
+            ,
+        },
+        .{
+            .path = "branch-left.js",
+            .source =
+            \\import { leafA } from "./leaf-a.js";
+            \\import { leafB } from "./leaf-b.js";
+            \\export function branchLeft(sab, n) {
+            \\  return leafA(sab, n) + leafB(sab, n);
+            \\}
+            ,
+        },
+        .{
+            .path = "branch-right.js",
+            .source =
+            \\import { leafB } from "./leaf-b.js";
+            \\import { leafC } from "./leaf-c.js";
+            \\export function branchRight(sab, n) {
+            \\  return leafB(sab, n + 3) + leafC(sab, n);
+            \\}
+            ,
+        },
+        .{
+            .path = "entry.js",
+            .source =
+            \\import { branchLeft } from "./branch-left.js";
+            \\import { branchRight } from "./branch-right.js";
+            \\function runFanout(sab, n) {
+            \\  return branchLeft(sab, n) + branchRight(sab, n);
+            \\}
+            \\globalThis.onmessage = (e) => {
+            \\  const v = new Int32Array(e.data.sab);
+            \\  Atomics.add(v, 2, 1);
+            \\  Atomics.notify(v, 2);
+            \\  while (Atomics.load(v, 1) === 0)
+            \\    Atomics.wait(v, 1, 0, 100);
+            \\  const score = runFanout(e.data.sab, e.data.iters);
+            \\  postMessage({ done: true, fanout: true, score });
+            \\  close();
+            \\};
+            ,
+        },
+    };
+
+    fn load(_: *anyopaque, _: []const u8, specifier: []const u8, out_path: *[]const u8) ?[]const u8 {
+        const name = if (std.mem.startsWith(u8, specifier, "./")) specifier[2..] else specifier;
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.path, name)) {
+                out_path.* = e.path;
+                return e.source;
+            }
+        }
+        return null;
+    }
+
+    fn host() js.Context.ModuleHost {
+        return .{ .ctx = &host_ctx, .load = load };
+    }
+};
+
 /// One random shared-state operation, emitted into a worker's loop body. Every
 /// op targets the shared structures declared by `genProgram` and cannot throw.
 fn op(r: std.Random) []const u8 {
@@ -830,6 +941,158 @@ fn runModuleWorkerGraphOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
     }
     if (!module_only.isNumber() or module_only.asNum() != expected_worker) {
         std.debug.print("seed {d}: module graph module-only counter got {d}, expected {d}\n", .{ seed, if (module_only.isNumber()) module_only.asNum() else -1, expected_worker });
+        return false;
+    }
+    return true;
+}
+
+fn runModuleWorkerFanoutOverlap(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0xfade_100d_5eed_2026);
+    const r = prng.random();
+    const nworkers = 1 + r.uintLessThan(usize, 3);
+    const nthreads = 1 + r.uintLessThan(usize, 4);
+    const worker_iters = 70 + r.uintLessThan(usize, 180);
+    const thread_iters = 80 + r.uintLessThan(usize, 220);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: module fanout context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+
+    const msg_src = try std.fmt.allocPrint(
+        gpa,
+        "globalThis.__moduleFanoutMsg = {{ sab: new SharedArrayBuffer(24), iters: {d} }}; globalThis.__moduleFanoutMsg",
+        .{worker_iters},
+    );
+    defer gpa.free(msg_src);
+    const msg = ctx.evaluate(msg_src) catch |err| {
+        std.debug.print("seed {d}: cannot create module fanout SAB: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+
+    var workers: std.ArrayListUnmanaged(*Worker) = .empty;
+    defer workers.deinit(gpa);
+    var cleanup_workers = true;
+    defer if (cleanup_workers) {
+        for (workers.items) |w| {
+            w.terminate();
+            w.join();
+            w.destroy();
+        }
+    };
+
+    var wi: usize = 0;
+    while (wi < nworkers) : (wi += 1) {
+        const w = Worker.spawnModule("entry.js", ModuleFanoutFuzzHost.entries[6].source, ModuleFanoutFuzzHost.host()) catch {
+            std.debug.print("seed {d}: fanout module worker spawn failed\n", .{seed});
+            return false;
+        };
+        try workers.append(gpa, w);
+        w.postMessage(&machine, msg) catch |err| {
+            std.debug.print("seed {d}: fanout module postMessage failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+    }
+
+    const js_src = try std.fmt.allocPrint(
+        gpa,
+        \\const fv = new Int32Array(globalThis.__moduleFanoutMsg.sab);
+        \\const fts = [];
+        \\for (let t = 0; t < {d}; t++) {{
+        \\  fts.push(new Thread(function(){{
+        \\    const local = new Int32Array(globalThis.__moduleFanoutMsg.sab);
+        \\    while (Atomics.load(local, 1) === 0) ;
+        \\    for (let i = 0; i < {d}; i++) Atomics.add(local, 0, 1);
+        \\    return 1;
+        \\  }}));
+        \\}}
+        \\let spins = 0;
+        \\while (Atomics.load(fv, 2) < {d} && spins++ < 10000000) ;
+        \\if (Atomics.load(fv, 2) < {d}) throw new Error('fanout module workers not ready');
+        \\Atomics.store(fv, 1, 1);
+        \\Atomics.notify(fv, 1, {d});
+        \\let joined = 0;
+        \\for (const t of fts) joined += t.join();
+        \\joined;
+        \\
+    ,
+        .{ nthreads, thread_iters, nworkers, nworkers, nworkers + nthreads + 4 },
+    );
+    defer gpa.free(js_src);
+
+    const joined = ctx.evaluate(js_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: module fanout JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(nthreads))) {
+        std.debug.print("seed {d}: module fanout joined {d} threads, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, nthreads });
+        return false;
+    }
+
+    const worker_score: f64 = @floatFromInt(4 * worker_iters + 7);
+    for (workers.items) |w| {
+        const reply = (w.receive(&machine, 10_000) catch |err| {
+            std.debug.print("seed {d}: fanout module receive failed: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        }) orelse {
+            std.debug.print("seed {d}: fanout module receive timed out\n", .{seed});
+            return false;
+        };
+        const done = machine.getProperty(reply, "done") catch |err| {
+            std.debug.print("seed {d}: cannot read fanout module done: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const fanout = machine.getProperty(reply, "fanout") catch |err| {
+            std.debug.print("seed {d}: cannot read fanout module flag: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        const score = machine.getProperty(reply, "score") catch |err| {
+            std.debug.print("seed {d}: cannot read fanout module score: {s}\n", .{ seed, @errorName(err) });
+            return false;
+        };
+        if (!done.isBoolean() or !done.asBool() or !fanout.isBoolean() or !fanout.asBool() or !score.isNumber() or score.asNum() != worker_score) {
+            std.debug.print("seed {d}: bad fanout module reply\n", .{seed});
+            return false;
+        }
+    }
+
+    for (workers.items) |w| {
+        w.join();
+        w.destroy();
+    }
+    cleanup_workers = false;
+
+    const count = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleFanoutMsg.sab), 0)") catch |err| {
+        std.debug.print("seed {d}: cannot read module fanout counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const module_only = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleFanoutMsg.sab), 3)") catch |err| {
+        std.debug.print("seed {d}: cannot read module fanout score counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const leaf_calls = ctx.evaluate("Atomics.load(new Int32Array(globalThis.__moduleFanoutMsg.sab), 4)") catch |err| {
+        std.debug.print("seed {d}: cannot read module fanout leaf-call counter: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    const expected_worker: f64 = @floatFromInt(nworkers * (4 * worker_iters + 7));
+    const expected_total = expected_worker + @as(f64, @floatFromInt(nthreads * thread_iters));
+    const expected_leaf_calls: f64 = @floatFromInt(nworkers * 4);
+    if (!count.isNumber() or count.asNum() != expected_total) {
+        std.debug.print("seed {d}: module fanout counter got {d}, expected {d}\n", .{ seed, if (count.isNumber()) count.asNum() else -1, expected_total });
+        return false;
+    }
+    if (!module_only.isNumber() or module_only.asNum() != expected_worker) {
+        std.debug.print("seed {d}: module fanout module-only counter got {d}, expected {d}\n", .{ seed, if (module_only.isNumber()) module_only.asNum() else -1, expected_worker });
+        return false;
+    }
+    if (!leaf_calls.isNumber() or leaf_calls.asNum() != expected_leaf_calls) {
+        std.debug.print("seed {d}: module fanout leaf calls got {d}, expected {d}\n", .{ seed, if (leaf_calls.isNumber()) leaf_calls.asNum() else -1, expected_leaf_calls });
         return false;
     }
     return true;
@@ -1898,8 +2161,9 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
-    // Worker/thread SAB overlap, simple and graph-shaped module-worker/thread
-    // overlap, mixed close/terminate/postMessage ordering, worker handler
+    // Worker/thread SAB overlap, simple, diamond, and fanout/rejoin
+    // module-worker/thread overlap, mixed close/terminate/postMessage ordering,
+    // worker handler
     // exception recovery, Thread exception identity and returned waitAsync
     // promise assimilation across join/asyncJoin while waiters are parked,
     // cross-thread FinalizationRegistry cleanup, and ThreadLocal isolation
@@ -1927,6 +2191,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWorkerThreadOverlap(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerThreadOverlap(gpa, seed))) lfail += 1;
             if (!(try runModuleWorkerGraphOverlap(gpa, seed))) lfail += 1;
+            if (!(try runModuleWorkerFanoutOverlap(gpa, seed))) lfail += 1;
             if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
@@ -1934,7 +2199,7 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 10, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 11, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

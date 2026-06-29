@@ -154,11 +154,11 @@ as embedders exercise more threaded host patterns.
   hidden JS values instead of relying on a JS property path.
 - The lifecycle fuzzer profile adds deterministic termination storms where main
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
-  `Worker`s plus simple-import and graph-shaped module `Worker`s overlapping
-  shared-realm `Thread`s on one retained `SharedArrayBuffer`, and mixed
-  `close` / `terminate` / `postMessage` ordering coverage plus worker
-  handler-exception recovery, Thread exception identity through `join()` /
-  `asyncJoin()` while property and condition waiters are parked,
+  `Worker`s plus simple-import, diamond-shaped, and fanout/rejoin module
+  `Worker`s overlapping shared-realm `Thread`s on one retained
+  `SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage` ordering
+  coverage plus worker handler-exception recovery, Thread exception identity
+  through `join()` / `asyncJoin()` while property and condition waiters are parked,
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /
   `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
   cleanup count/sum oracles, and `ThreadLocal` isolation across normal,
@@ -168,9 +168,8 @@ as embedders exercise more threaded host patterns.
   and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
-scheduling, additional worker module-graph shapes, richer cleanup/finalization
-interleavings, more async-grant/mid-script-GC variants, and additional teardown
-race variants.
+scheduling, richer cleanup/finalization interleavings, more async-grant/
+mid-script-GC variants, and additional teardown race variants.
 
 ## 6. CI Gating
 

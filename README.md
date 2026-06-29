@@ -289,10 +289,10 @@ threading architecture:
   mid-script sweeps, async condition reacquire delivery, and deterministic
   cleanup count/sum delivery; the lifecycle
   profile adds deterministic termination storms, script Worker/thread overlap
-  and both simple-import and graph-shaped module Worker/thread overlap over
-  retained `SharedArrayBuffer` storage, and mixed `close` / `terminate` /
-  `postMessage` ordering plus worker handler-exception recovery, Thread
-  exception identity through `join()` / `asyncJoin()` while property and
+  plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
+  overlap over retained `SharedArrayBuffer` storage, and mixed `close` /
+  `terminate` / `postMessage` ordering plus worker handler-exception recovery,
+  Thread exception identity through `join()` / `asyncJoin()` while property and
   condition waiters are parked, thread-returned typed-array `waitAsync` promise
   assimilation through `join()` / `asyncJoin()` while waiters are parked,
   cross-thread `FinalizationRegistry` cleanup count/sum oracles, and
