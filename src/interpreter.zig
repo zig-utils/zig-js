@@ -11932,16 +11932,17 @@ pub const Interpreter = struct {
         }
         if (eq(name, "substr")) {
             // `substr(start, length)`: start may count from the end.
-            const start = try relIndex(self, arg0(args), s.len, 0);
-            const remaining = s.len - start;
+            const size = utf16LenOfString(s);
+            const start = try relIndex(self, arg0(args), size, 0);
+            const remaining = size - start;
             const len: usize = if (args.len > 1 and !arg(args, 1).isUndefined()) blk: {
-                const l = arg(args, 1).toNumber();
+                const l = try self.toNumberV(arg(args, 1));
                 if (std.math.isNan(l) or l <= 0) break :blk 0;
                 if (std.math.isInf(l) or l >= @as(f64, @floatFromInt(remaining))) break :blk remaining;
                 const lu: usize = @intFromFloat(@trunc(l));
                 break :blk @min(lu, remaining);
             } else remaining;
-            return Value.str(try self.arena.dupe(u8, s[start .. start + len]));
+            return Value.str(try self.stringSliceUtf16(s, start, start + len));
         }
         if (eq(name, "trimLeft")) return Value.str(jsTrim(s, true, false));
         if (eq(name, "trimRight")) return Value.str(jsTrim(s, false, true));
@@ -35754,7 +35755,16 @@ test "interpreter String.prototype methods" {
         \\s.slice(0, 1) === "\uD83D" &&
         \\s.slice(1) === "\uDCA9" &&
         \\s.slice(0, 2) === s &&
-        \\s.substring(0, 1) === "\uD83D"
+        \\s.substring(0, 1) === "\uD83D" &&
+        \\s.substr(1) === "\uDCA9" &&
+        \\s.substr(0, 1) === "\uD83D"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let threwValue = false;
+        \\try { "".substr(0, { valueOf() { throw 1; } }); } catch (e) { threwValue = e === 1; }
+        \\let threwSymbol = false;
+        \\try { "".substr(0, Symbol("length")); } catch (e) { threwSymbol = e instanceof TypeError; }
+        \\threwValue && threwSymbol
     )).asBool());
     try std.testing.expect((try evalSource(a,
         \\let o = Object.create(null);
