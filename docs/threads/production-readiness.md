@@ -82,6 +82,9 @@ Known performance/maturity work:
   contention counters: `events` count logical contention (`Lock`/`Condition`/
   property wait and queued `asyncHold` grants), while `parks` count timed
   wait/pump iterations including `Thread.join`.
+- Parked sync waiters still pump the realm run-loop so async-hold grants make
+  progress, but empty pumps now use an atomic queue-count fast path and avoid
+  taking the shared threading API lock.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 

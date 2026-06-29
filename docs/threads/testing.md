@@ -136,7 +136,9 @@ no-GIL default with `.gil = true`, while `events` count logical contention in
 `Lock`/`Condition`/property waits and queued `asyncHold` grants, and `parks`
 count timed wait/pump iterations including `Thread.join`. Run it before and
 after synchronization or lifecycle changes so performance work has an
-attributed baseline instead of only elapsed time.
+attributed baseline instead of only elapsed time. Empty sync-wait task pumps
+now have a lock-free fast path; `threads-profile` remains the check that this
+kind of targeted optimization does not merely move overhead elsewhere.
 
 ## Focused Runs
 

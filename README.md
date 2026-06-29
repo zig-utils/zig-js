@@ -254,7 +254,10 @@ threading architecture:
   lifecycle churn. It now prints internal contention events and timed
   wait/pump parks beside wall-clock time, so follow-up optimization can separate
   user-level lock pressure from thread-join/lifecycle waiting, object/element
-  storage contention, and GC allocation costs under high thread counts.
+  storage contention, and GC allocation costs under high thread counts. The
+  sync-wait pump path now skips the shared run-loop task lock entirely when no
+  async hold jobs are queued; continue using the profile for the remaining
+  contended-lock and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

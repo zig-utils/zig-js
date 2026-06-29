@@ -28,6 +28,10 @@ pub const Gil = struct {
     /// microtasks as its own turn) — the semantics the threads corpus pins.
     /// Entries are type-erased `*jsthread.HoldJob` (owned by their arena).
     tasks: std.ArrayListUnmanaged(*anyopaque) = .empty,
+    /// Cheap empty-queue signal for park/pump hot paths. The authoritative
+    /// queue remains `tasks` under `api_lock`; this lets sync waiters skip the
+    /// lock entirely when no task has been enqueued.
+    tasks_queued: std.atomic.Value(usize) = .init(0),
     /// Property-mode `Atomics.wait` waiters for this realm. Entries are
     /// type-erased `*jsthread.PropTicket` and live on waiting thread stacks.
     prop_waiters: std.ArrayListUnmanaged(*anyopaque) = .empty,

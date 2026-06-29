@@ -428,7 +428,8 @@ close object/heap/shape/promise mutation paths called out in the blocker map.
   move from "GIL-protected" to "`rec.mutex`-protected". The async hold-job
   machinery (`HoldJob`, `pending`, grant delivery, `enqueueHoldJob`/`pumpTasks`)
   re-expresses "deliver a grant" as a `rec.mutex`-guarded transition plus the
-  existing `api_lock`-guarded run-loop queue.
+  existing `api_lock`-guarded run-loop queue. The queue now carries an atomic
+  count so ordinary sync waiters skip `api_lock` when no hold job is pending.
 - `Condition`: the condition record has its own queue mutex. A waiter registers
   in the FIFO while holding `CondRecord.mutex`, releases the associated `Lock`
   under that mutex, then parks on `CondRecord.cond`; `notify` pops, marks, and

@@ -1943,6 +1943,7 @@ fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
     g.lockApi();
     defer g.unlockApi();
     try g.tasks.append(self.arena, @ptrCast(job));
+    _ = g.tasks_queued.fetchAdd(1, .release);
 }
 
 /// Pump the realm's run-loop tasks: run each pending grant delivery as its
@@ -1951,11 +1952,16 @@ fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
 pub fn pumpTasks(self: *Interpreter) void {
     const g = self.gil orelse return;
     while (true) {
+        if (g.tasks_queued.load(.acquire) == 0) return;
         // Dequeue under api_lock (consistent with `enqueueHoldJob`), but run the
         // job OUTSIDE the lock — runHoldJob executes JS and takes per-structure
         // locks, so holding api_lock across it would invert lock order.
         g.lockApi();
-        const raw: ?*anyopaque = if (g.tasks.items.len > 0) g.tasks.orderedRemove(0) else null;
+        const raw: ?*anyopaque = if (g.tasks.items.len > 0) blk: {
+            const item = g.tasks.orderedRemove(0);
+            _ = g.tasks_queued.fetchSub(1, .release);
+            break :blk item;
+        } else null;
         g.unlockApi();
         const r = raw orelse break;
         const job: *HoldJob = @ptrCast(@alignCast(r));

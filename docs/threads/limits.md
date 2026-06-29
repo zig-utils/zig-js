@@ -85,7 +85,9 @@ context APIs.
   against the `.gil = true` fallback for independent compute, shared object
   properties, shared array append, typed-array Atomics, and lifecycle churn. Use
   it to drive contention reductions in global/environment bindings,
-  property/element locks, collection helpers, and GC allocation.
+  property/element locks, collection helpers, and GC allocation. Empty
+  sync-wait task pumps no longer take the shared run-loop task lock, reducing
+  one measured cost in contended lock/lifecycle paths.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.
