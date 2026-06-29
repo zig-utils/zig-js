@@ -29671,7 +29671,7 @@ fn temporalPlainDateEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) 
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
     const t = this.asObj().temporal.?;
     const b = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), true);
-    return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d);
+    return Value.boolVal(t.year == b.y and t.month == b.m and t.day == b.d and temporalCalendarIdsEqual(t.calendar, b.cal));
 }
 
 /// PlainDate add/subtract a Duration (years/months adjust the calendar fields
@@ -32416,8 +32416,9 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
 fn temporalPlainDateTimeEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
+    const t = this.asObj().temporal.?;
     const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else Value.undef(), true);
-    return Value.boolVal(dateTimeToNs(this.asObj().temporal.?) == dateTimeToNs(&other));
+    return Value.boolVal(dateTimeToNs(t) == dateTimeToNs(&other) and temporalCalendarIdsEqual(t.calendar, other.calendar));
 }
 
 fn temporalPlainDateTimeCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
