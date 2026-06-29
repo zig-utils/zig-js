@@ -28846,6 +28846,7 @@ fn readOverflowRejectIfOptionsObject(self: *Interpreter, options: Value) EvalErr
 const IsoYMD = struct { y: i64, m: u8, d: u8, cal: []const u8 = "iso8601" };
 const PlainDateBagFields = struct { y: i64, m: ?f64, mc: ?MonthCodeInfo, d: f64, cal: []const u8 };
 const PlainDateTimeBagFields = struct { date: PlainDateBagFields, time: [6]i64 };
+const ZonedDateTimeBagFields = struct { date: PlainDateBagFields, time: [6]i64, tz: TimeZone, offset_ns: ?i128 };
 
 fn resolvePlainDateBagMonth(self: *Interpreter, cal: []const u8, year: i64, month: ?f64, month_code: ?MonthCodeInfo, constrain: bool) EvalError!f64 {
     if (month) |m| {
@@ -28938,6 +28939,95 @@ fn finishPlainDateTimeBagFields(self: *Interpreter, f: PlainDateTimeBagFields, c
     t.nanosecond = tm.nanosecond;
     try checkPlainDateTimeNs(self, dateTimeToNs(&t));
     return t;
+}
+
+fn readZonedDateTimeBagFields(self: *Interpreter, v: Value) EvalError!ZonedDateTimeBagFields {
+    const bag_cal = try readCalendarField(self, v);
+
+    const dv = try self.getProperty(v, "day");
+    if (dv.isUndefined()) return self.throwError("TypeError", "ZonedDateTime fields require year and day");
+    const d = try temporalIntArg(self, dv, "day");
+
+    var time_raw: [6]i64 = .{ 0, 0, 0, 0, 0, 0 };
+    const hv = try self.getProperty(v, "hour");
+    if (!hv.isUndefined()) time_raw[0] = @intFromFloat(try temporalIntArg(self, hv, "hour"));
+    const usv = try self.getProperty(v, "microsecond");
+    if (!usv.isUndefined()) time_raw[4] = @intFromFloat(try temporalIntArg(self, usv, "microsecond"));
+    const msv = try self.getProperty(v, "millisecond");
+    if (!msv.isUndefined()) time_raw[3] = @intFromFloat(try temporalIntArg(self, msv, "millisecond"));
+    const minv = try self.getProperty(v, "minute");
+    if (!minv.isUndefined()) time_raw[1] = @intFromFloat(try temporalIntArg(self, minv, "minute"));
+
+    const mv = try self.getProperty(v, "month");
+    const month: ?f64 = if (mv.isUndefined()) null else try temporalIntArg(self, mv, "month");
+    const mcv = try self.getProperty(v, "monthCode");
+    const month_code: ?MonthCodeInfo = if (mcv.isUndefined()) null else try readMonthCodeInfo(self, mcv);
+
+    const nsv = try self.getProperty(v, "nanosecond");
+    if (!nsv.isUndefined()) time_raw[5] = @intFromFloat(try temporalIntArg(self, nsv, "nanosecond"));
+
+    const offv = try self.getProperty(v, "offset");
+    const offset_ns: ?i128 = if (offv.isUndefined()) null else try validateRelativeOffset(self, offv);
+
+    const sv = try self.getProperty(v, "second");
+    if (!sv.isUndefined()) time_raw[2] = @intFromFloat(try temporalIntArg(self, sv, "second"));
+
+    const tzv = try self.getProperty(v, "timeZone");
+    if (tzv.isUndefined()) return self.throwError("TypeError", "ZonedDateTime fields require timeZone");
+    const tz = try resolveTimeZoneArg(self, tzv);
+
+    const cal_year = try bagCalendarYear(self, v, bag_cal) orelse return self.throwError("TypeError", "ZonedDateTime fields require year and day");
+    return .{ .date = .{ .y = cal_year, .m = month, .mc = month_code, .d = d, .cal = bag_cal }, .time = time_raw, .tz = tz, .offset_ns = offset_ns };
+}
+
+fn finishZonedDateTimeBagFields(self: *Interpreter, f: ZonedDateTimeBagFields, constrain: bool, offset_behavior: ZdtOffsetBehavior, disambiguation: ZdtDisambiguation) EvalError!value.TemporalData {
+    const date = try finishPlainDateBagFields(self, f.date, constrain);
+    const tm = try regulatePlainTimeRawFields(self, f.time, false);
+    var l: value.TemporalData = .{ .kind = .plain_date_time };
+    l.year = @intCast(date.y);
+    l.month = date.m;
+    l.day = date.d;
+    l.calendar = date.cal;
+    l.hour = tm.hour;
+    l.minute = tm.minute;
+    l.second = tm.second;
+    l.millisecond = tm.millisecond;
+    l.microsecond = tm.microsecond;
+    l.nanosecond = tm.nanosecond;
+
+    const iso = calendarDateToIso(date.cal, l.year, l.month, l.day);
+    const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
+    try checkZdtLocalDateTimeNs(self, local_ns);
+    const actual_offset = try zdtOffsetForLocalDisambiguation(self, f.tz, local_ns, disambiguation);
+    const epoch_offset: i128 = if (f.offset_ns) |off| blk: {
+        if (isFixedTimeZone(f.tz)) {
+            if (off != @as(i128, f.tz.offset_ns)) return self.throwError("RangeError", "offset does not match time zone");
+            break :blk @as(i128, f.tz.offset_ns);
+        }
+        const exact_match = zdtOffsetMatchesLocal(f.tz, local_ns, off);
+        break :blk switch (offset_behavior) {
+            .use => off,
+            .ignore => @as(i128, actual_offset),
+            .prefer => if (exact_match) off else @as(i128, actual_offset),
+            .reject => if (exact_match) off else return self.throwError("RangeError", "offset does not match time zone"),
+        };
+    } else @as(i128, actual_offset);
+    var out: value.TemporalData = .{ .kind = .zoned_date_time };
+    out.epoch_ns = local_ns - epoch_offset;
+    try checkInstantEpochNs(self, out.epoch_ns);
+    out.tz_name = f.tz.name;
+    out.tz_offset_ns = f.tz.offset_ns;
+    out.year = l.year;
+    out.month = l.month;
+    out.day = l.day;
+    out.hour = l.hour;
+    out.minute = l.minute;
+    out.second = l.second;
+    out.millisecond = l.millisecond;
+    out.microsecond = l.microsecond;
+    out.nanosecond = l.nanosecond;
+    out.calendar = date.cal;
+    return out;
 }
 
 fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYMD {
@@ -29787,6 +29877,7 @@ fn withCalendarMonthField(self: *Interpreter, bag: Value, cal: []const u8, year:
 }
 
 const PlainDateWithFields = struct { y: ?i64, m: ?f64, mc: ?MonthCodeInfo, d: ?i64, any: bool };
+const PlainDateTimeWithFields = struct { date: PlainDateWithFields, time: [6]i64, any: bool };
 
 fn readPlainDateWithFields(self: *Interpreter, bag: Value, cal: []const u8) EvalError!PlainDateWithFields {
     const dv = try self.getProperty(bag, "day");
@@ -29797,6 +29888,54 @@ fn readPlainDateWithFields(self: *Interpreter, bag: Value, cal: []const u8) Eval
     const mc: ?MonthCodeInfo = if (mcv.isUndefined()) null else try readMonthCodeInfo(self, mcv);
     const y = try bagCalendarYear(self, bag, cal);
     return .{ .y = y, .m = m, .mc = mc, .d = d, .any = d != null or m != null or mc != null or y != null };
+}
+
+fn readPlainDateTimeWithFields(self: *Interpreter, bag: Value, cal: []const u8, time_defaults: [6]i64) EvalError!PlainDateTimeWithFields {
+    const dv = try self.getProperty(bag, "day");
+    const d: ?i64 = if (dv.isUndefined()) null else @intFromFloat(try temporalIntArg(self, dv, "day"));
+
+    var time_raw = time_defaults;
+    var time_any = false;
+    const hv = try self.getProperty(bag, "hour");
+    if (!hv.isUndefined()) {
+        time_raw[0] = @intFromFloat(try temporalIntArg(self, hv, "hour"));
+        time_any = true;
+    }
+    const usv = try self.getProperty(bag, "microsecond");
+    if (!usv.isUndefined()) {
+        time_raw[4] = @intFromFloat(try temporalIntArg(self, usv, "microsecond"));
+        time_any = true;
+    }
+    const msv = try self.getProperty(bag, "millisecond");
+    if (!msv.isUndefined()) {
+        time_raw[3] = @intFromFloat(try temporalIntArg(self, msv, "millisecond"));
+        time_any = true;
+    }
+    const minv = try self.getProperty(bag, "minute");
+    if (!minv.isUndefined()) {
+        time_raw[1] = @intFromFloat(try temporalIntArg(self, minv, "minute"));
+        time_any = true;
+    }
+
+    const mv = try self.getProperty(bag, "month");
+    const m: ?f64 = if (mv.isUndefined()) null else try temporalIntArg(self, mv, "month");
+    const mcv = try self.getProperty(bag, "monthCode");
+    const mc: ?MonthCodeInfo = if (mcv.isUndefined()) null else try readMonthCodeInfo(self, mcv);
+
+    const nsv = try self.getProperty(bag, "nanosecond");
+    if (!nsv.isUndefined()) {
+        time_raw[5] = @intFromFloat(try temporalIntArg(self, nsv, "nanosecond"));
+        time_any = true;
+    }
+    const sv = try self.getProperty(bag, "second");
+    if (!sv.isUndefined()) {
+        time_raw[2] = @intFromFloat(try temporalIntArg(self, sv, "second"));
+        time_any = true;
+    }
+
+    const y = try bagCalendarYear(self, bag, cal);
+    const date_any = d != null or m != null or mc != null or y != null;
+    return .{ .date = .{ .y = y, .m = m, .mc = mc, .d = d, .any = date_any }, .time = time_raw, .any = date_any or time_any };
 }
 
 fn resolvePlainDateWithMonth(self: *Interpreter, cal: []const u8, fields: PlainDateWithFields, year: i64, cur_year: i64, cur_month: u8, constrain: bool) EvalError!u8 {
@@ -29865,33 +30004,32 @@ fn temporalPlainDateTimeWithFn(ctx: *anyopaque, this: Value, args: []const Value
     const bag = if (args.len > 0) args[0] else Value.undef();
     if (!isObjectLike(bag)) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: argument must be a PlainDateTime-like object");
     try rejectObjectWithCalendarOrTimeZone(self, bag);
-    if (!(try hasPlainDateTimeLikeField(self, bag))) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: no supported fields");
+    const cur_time = [_]i64{ t.hour, t.minute, t.second, t.millisecond, t.microsecond, t.nanosecond };
+    const fields = try readPlainDateTimeWithFields(self, bag, t.calendar, cur_time);
+    if (!fields.any) return self.throwError("TypeError", "Temporal.PlainDateTime.prototype.with: no supported fields");
     const options = if (args.len > 1) args[1] else Value.undef();
-    const y = (try bagCalendarYear(self, bag, t.calendar)) orelse t.year;
+    const y = fields.date.y orelse t.year;
     const object_options_reject = try readOverflowRejectIfOptionsObject(self, options);
-    const constrained_m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, true);
-    const d = try withIntField(self, bag, "day", t.day);
+    const constrained_m = try resolvePlainDateWithMonth(self, t.calendar, fields.date, y, t.year, t.month, true);
+    const d = fields.date.d orelse t.day;
     const constrained = try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, constrained_m)), @floatFromInt(d), true);
     const reject = object_options_reject orelse try readOverflowReject(self, options);
     const r = if (reject) blk: {
-        const reject_m = try withCalendarMonthField(self, bag, t.calendar, y, t.year, t.month, false);
+        const reject_m = try resolvePlainDateWithMonth(self, t.calendar, fields.date, y, t.year, t.month, false);
         break :blk try regulateCalendarDate(self, t.calendar, @floatFromInt(y), @floatFromInt(@as(i64, reject_m)), @floatFromInt(d), false);
     } else constrained;
-    const names = [_][]const u8{ "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
-    const maxes = [_]i64{ 23, 59, 59, 999, 999, 999 };
-    const cur = [_]i64{ t.hour, t.minute, t.second, t.millisecond, t.microsecond, t.nanosecond };
-    var vals: [6]f64 = undefined;
-    for (names, 0..) |nm, i| {
-        const v = try withIntField(self, bag, nm, cur[i]);
-        if (reject and (v < 0 or v > maxes[i])) return self.throwError("RangeError", "time component out of range");
-        vals[i] = @floatFromInt(@max(0, @min(maxes[i], v))); // constrain (no-op when already in range)
-    }
+    const tm = try regulatePlainTimeRawFields(self, fields.time, reject);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = @intCast(r.y);
     o.temporal.?.month = r.m;
     o.temporal.?.day = r.d;
     o.temporal.?.calendar = t.calendar; // with() preserves the calendar
-    setTimeFields(o.temporal.?, vals);
+    o.temporal.?.hour = tm.hour;
+    o.temporal.?.minute = tm.minute;
+    o.temporal.?.second = tm.second;
+    o.temporal.?.millisecond = tm.millisecond;
+    o.temporal.?.microsecond = tm.microsecond;
+    o.temporal.?.nanosecond = tm.nanosecond;
     try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
     return Value.obj(o);
 }
@@ -33770,59 +33908,7 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtO
     if (tIsZdt(v)) return v.asObj().temporal.?.*;
     if (v.isString()) return parseZdtString(self, v.asStr(), offset_behavior, disambiguation);
     if (v.isObject()) {
-        // A fields bag with timeZone.
-        if (!(try self.getProperty(v, "calendar")).isUndefined()) _ = try readCalendarField(self, v);
-        const tzv = try self.getProperty(v, "timeZone");
-        if (!tzv.isUndefined()) {
-            const tz = try resolveTimeZoneArg(self, tzv);
-            const offv = try self.getProperty(v, "offset");
-            const offset_ns: ?i128 = if (!offv.isUndefined()) try validateRelativeOffset(self, offv) else null;
-            const f = try toPlainDateFields(self, v, constrain);
-            const tm = try toPlainTimeDataOpt(self, v, false, false);
-            var l: value.TemporalData = .{ .kind = .plain_date_time };
-            l.year = @intCast(f.y);
-            l.month = f.m;
-            l.day = f.d;
-            l.hour = tm.hour;
-            l.minute = tm.minute;
-            l.second = tm.second;
-            l.millisecond = tm.millisecond;
-            l.microsecond = tm.microsecond;
-            l.nanosecond = tm.nanosecond;
-            const iso = calendarDateToIso(f.cal, l.year, l.month, l.day);
-            const local_ns = @as(i128, tDaysFromCivil(iso.y, iso.m, iso.d)) * 86_400_000_000_000 + timeToNs(&l);
-            try checkZdtLocalDateTimeNs(self, local_ns);
-            var out: value.TemporalData = .{ .kind = .zoned_date_time };
-            const actual_offset = try zdtOffsetForLocalDisambiguation(self, tz, local_ns, disambiguation);
-            const epoch_offset: i128 = if (offset_ns) |off| blk: {
-                if (isFixedTimeZone(tz)) {
-                    if (off != @as(i128, tz.offset_ns)) return self.throwError("RangeError", "offset does not match time zone");
-                    break :blk @as(i128, tz.offset_ns);
-                }
-                const exact_match = zdtOffsetMatchesLocal(tz, local_ns, off);
-                break :blk switch (offset_behavior) {
-                    .use => off,
-                    .ignore => @as(i128, actual_offset),
-                    .prefer => if (exact_match) off else @as(i128, actual_offset),
-                    .reject => if (exact_match) off else return self.throwError("RangeError", "offset does not match time zone"),
-                };
-            } else @as(i128, actual_offset);
-            out.epoch_ns = local_ns - epoch_offset;
-            try checkInstantEpochNs(self, out.epoch_ns);
-            out.tz_name = tz.name;
-            out.tz_offset_ns = tz.offset_ns;
-            out.year = @intCast(f.y);
-            out.month = f.m;
-            out.day = f.d;
-            out.hour = tm.hour;
-            out.minute = tm.minute;
-            out.second = tm.second;
-            out.millisecond = tm.millisecond;
-            out.microsecond = tm.microsecond;
-            out.nanosecond = tm.nanosecond;
-            out.calendar = f.cal;
-            return out;
-        }
+        return finishZonedDateTimeBagFields(self, try readZonedDateTimeBagFields(self, v), constrain, offset_behavior, disambiguation);
     }
     return self.throwError("TypeError", "cannot convert to a ZonedDateTime");
 }
@@ -33863,8 +33949,14 @@ fn temporalZdtFromFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         return self.throwError("TypeError", "cannot convert to a ZonedDateTime");
     }
     const options = if (args.len > 1) args[1] else Value.undef();
-    const zdt_opts = try readZdtOptions(self, options);
-    const d = try toZdtArg(self, item, !zdt_opts.reject, zdt_opts.offset_behavior, zdt_opts.disambiguation);
+    const d = if (item.isObject() and !tIsZdt(item)) blk: {
+        const fields = try readZonedDateTimeBagFields(self, item);
+        const zdt_opts = try readZdtOptions(self, options);
+        break :blk try finishZonedDateTimeBagFields(self, fields, !zdt_opts.reject, zdt_opts.offset_behavior, zdt_opts.disambiguation);
+    } else blk: {
+        const zdt_opts = try readZdtOptions(self, options);
+        break :blk try toZdtArg(self, item, !zdt_opts.reject, zdt_opts.offset_behavior, zdt_opts.disambiguation);
+    };
     const o = try zdtMake(self, d.epoch_ns, d.tz_name, d.tz_offset_ns);
     const t = o.asObj().temporal.?;
     t.year = d.year;
