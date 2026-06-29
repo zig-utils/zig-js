@@ -27702,6 +27702,68 @@ fn totalZonedDaysRel(self: *Interpreter, start_epoch: i128, end_epoch: i128, rel
     return @floatFromInt(whole);
 }
 
+fn balanceZonedDaysRel(self: *Interpreter, start_epoch: i128, span_ns: i128, rel: RelTo) EvalError![10]f64 {
+    var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (span_ns == 0) return out;
+
+    const end_epoch = start_epoch + span_ns;
+    const forward = span_ns > 0;
+    const direction: i64 = if (forward) 1 else -1;
+    var whole: i64 = 0;
+    var cur_y = rel.y;
+    var cur_m = rel.m;
+    var cur_d = rel.d;
+    var cur_epoch = start_epoch;
+    while (true) {
+        const next_date = isoDateAdd(cur_y, cur_m, cur_d, 0, 0, 0, direction);
+        try checkIsoDate(self, @floatFromInt(next_date.y), @floatFromInt(next_date.m), @floatFromInt(next_date.d));
+        const next_epoch = relLocalEpochNs(rel, next_date.y, next_date.m, next_date.d, rel.time_ns);
+        if (next_epoch == cur_epoch) {
+            whole += direction;
+            cur_y = next_date.y;
+            cur_m = next_date.m;
+            cur_d = next_date.d;
+            continue;
+        }
+        const reaches_next = if (forward) end_epoch >= next_epoch else end_epoch <= next_epoch;
+        if (!reaches_next) break;
+        whole += direction;
+        cur_y = next_date.y;
+        cur_m = next_date.m;
+        cur_d = next_date.d;
+        cur_epoch = next_epoch;
+    }
+    out[3] = @floatFromInt(whole);
+    const rem = balanceTimeNs(end_epoch - cur_epoch, .hour);
+    for (4..10) |i| out[i] = rem[i];
+    return out;
+}
+
+fn roundZonedDayCountRel(self: *Interpreter, start_epoch: i128, end_epoch: i128, rel: RelTo, increment: f64, mode: RoundMode) EvalError!i64 {
+    const total = try totalZonedDaysRel(self, start_epoch, end_epoch, rel);
+    const scale: i128 = 1_000_000_000;
+    const inc_scaled: i128 = @intFromFloat(@round(increment * @as(f64, @floatFromInt(scale))));
+    const total_scaled: i128 = @intFromFloat(@round(total * @as(f64, @floatFromInt(scale))));
+    const rounded_scaled = applyRounding(total_scaled, inc_scaled, mode) * inc_scaled;
+    return @intFromFloat(@as(f64, @floatFromInt(rounded_scaled)) / @as(f64, @floatFromInt(scale)));
+}
+
+fn shouldPreserveZonedCalendarTime(self: *Interpreter, dur: [10]f64, rel: RelTo) EvalError!bool {
+    const time_ns = durTimeOnlyNs(dur);
+    if (time_ns == 0) return false;
+    const date = isoDateAdd(rel.y, rel.m, rel.d, @intFromFloat(dur[0]), @intFromFloat(dur[1]), @intFromFloat(dur[2]), @intFromFloat(dur[3]));
+    try checkIsoDate(self, @floatFromInt(date.y), @floatFromInt(date.m), @floatFromInt(date.d));
+    const next = isoDateAdd(date.y, date.m, date.d, 0, 0, 0, if (time_ns > 0) 1 else -1);
+    try checkIsoDate(self, @floatFromInt(next.y), @floatFromInt(next.m), @floatFromInt(next.d));
+    const date_epoch = relEpochForDate(rel, date.y, date.m, date.d, rel.time_ns);
+    const next_epoch = relEpochForDate(rel, next.y, next.m, next.d, rel.time_ns);
+    const day_span = next_epoch - date_epoch;
+    return if (time_ns > 0)
+        day_span > DAY_NS and time_ns < day_span
+    else
+        day_span < -DAY_NS and time_ns > day_span;
+}
+
 /// Temporal.Duration.prototype.total with a `relativeTo` anchor (ISO calendar):
 /// the (fractional) total of the duration measured in `unit`.
 fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) EvalError!f64 {
@@ -27742,6 +27804,10 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
     const ep = try durEndpointsNs(self, dur, rel);
     const smallest = opts.smallest;
     const largest = opts.largest;
+    if (rel.zoned and !opts.smallest_set and opts.increment == 1 and durHasCalendar(dur) and
+        @intFromEnum(largest) <= @intFromEnum(durPresentLargest(dur)) and
+        try shouldPreserveZonedCalendarTime(self, dur, rel))
+        return dur;
     // Case 1: smallestUnit is day or a time unit — round on the nanosecond span.
     if (@intFromEnum(smallest) >= @intFromEnum(TUnit.day)) {
         if (rel.zoned and largest == .day and @intFromEnum(smallest) > @intFromEnum(TUnit.day) and
@@ -27750,13 +27816,45 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
             const date_part_ns = (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * DAY_NS;
             const time_part_ns = durationDayTimeNs(dur) - date_part_ns;
             const rounded_time = roundNs(time_part_ns, smallest, opts.increment, opts.mode);
+            if (largest == .day and dur[3] == 0)
+                return balanceZonedDaysRel(self, ep.start, date_part_ns + rounded_time, rel);
             return balanceTimeNs(date_part_ns + rounded_time, largest);
         }
         const total_ns = ep.end - ep.start;
+        if (rel.zoned and largest == .day and smallest == .day) {
+            var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            out[3] = @floatFromInt(try roundZonedDayCountRel(self, ep.start, ep.end, rel, opts.increment, opts.mode));
+            return out;
+        }
+        if (rel.zoned and @intFromEnum(largest) < @intFromEnum(TUnit.day) and smallest == .day) {
+            const rounded_days = try roundZonedDayCountRel(self, ep.start, ep.end, rel, opts.increment, opts.mode);
+            const placed = isoDateAdd(rel.y, rel.m, rel.d, 0, 0, 0, rounded_days);
+            const diff = differenceISODate(rel.y, rel.m, rel.d, placed.y, placed.m, placed.d, largest);
+            return .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
+        }
+        if (rel.zoned and @intFromEnum(largest) < @intFromEnum(TUnit.day) and
+            @intFromEnum(smallest) > @intFromEnum(TUnit.day) and opts.increment != 1)
+        {
+            const raw_days = try balanceZonedDaysRel(self, ep.start, total_ns, rel);
+            var raw_time_zero = true;
+            for (4..10) |i| {
+                if (raw_days[i] != 0) {
+                    raw_time_zero = false;
+                    break;
+                }
+            }
+            if (raw_time_zero and raw_days[3] != 0) {
+                const placed = isoDateAdd(rel.y, rel.m, rel.d, 0, 0, 0, @intFromFloat(raw_days[3]));
+                const diff = differenceISODate(rel.y, rel.m, rel.d, placed.y, placed.m, placed.d, largest);
+                return .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
+            }
+        }
         const rounded_ns = roundNs(total_ns, smallest, opts.increment, opts.mode);
         // Express the rounded span balanced to largestUnit.
         if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
             // Time/day-only output (no calendar units in the result).
+            if (rel.zoned and largest == .day)
+                return balanceZonedDaysRel(self, ep.start, rounded_ns, rel);
             return balanceTimeNs(rounded_ns, largest);
         }
         // Calendar largestUnit: re-difference the rounded end date, keep sub-day
@@ -27775,6 +27873,8 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         const ed = tCivilFromDays(@intCast(rounded_end_days));
         const diff = differenceISODate(rel.y, rel.m, rel.d, ed.y, ed.m, ed.d, largest);
         var out: [10]f64 = .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
+        if (rel.zoned and @intFromEnum(smallest) > @intFromEnum(TUnit.day) and opts.increment != 1)
+            time_ns = roundNs(time_ns, smallest, opts.increment, opts.mode);
         const tparts = balanceTimeNs(time_ns, .hour);
         for (4..10) |i| out[i] = tparts[i];
         return out;
