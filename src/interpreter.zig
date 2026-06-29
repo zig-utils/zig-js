@@ -28845,6 +28845,7 @@ fn readOverflowRejectIfOptionsObject(self: *Interpreter, options: Value) EvalErr
 /// a fields object.
 const IsoYMD = struct { y: i64, m: u8, d: u8, cal: []const u8 = "iso8601" };
 const PlainDateBagFields = struct { y: i64, m: ?f64, mc: ?MonthCodeInfo, d: f64, cal: []const u8 };
+const PlainDateTimeBagFields = struct { date: PlainDateBagFields, time: [6]i64 };
 
 fn resolvePlainDateBagMonth(self: *Interpreter, cal: []const u8, year: i64, month: ?f64, month_code: ?MonthCodeInfo, constrain: bool) EvalError!f64 {
     if (month) |m| {
@@ -28888,6 +28889,55 @@ fn finishPlainDateBagFields(self: *Interpreter, f: PlainDateBagFields, constrain
     var r = try regulateCalendarDate(self, f.cal, @floatFromInt(f.y), m, f.d, constrain);
     r.cal = f.cal;
     return r;
+}
+
+fn readPlainDateTimeBagFields(self: *Interpreter, v: Value) EvalError!PlainDateTimeBagFields {
+    const bag_cal = try readCalendarField(self, v);
+
+    const dv = try self.getProperty(v, "day");
+    if (dv.isUndefined()) return self.throwError("TypeError", "PlainDateTime fields require year and day");
+    const d = try temporalIntArg(self, dv, "day");
+
+    var time_raw: [6]i64 = .{ 0, 0, 0, 0, 0, 0 };
+    const hv = try self.getProperty(v, "hour");
+    if (!hv.isUndefined()) time_raw[0] = @intFromFloat(try temporalIntArg(self, hv, "hour"));
+    const usv = try self.getProperty(v, "microsecond");
+    if (!usv.isUndefined()) time_raw[4] = @intFromFloat(try temporalIntArg(self, usv, "microsecond"));
+    const msv = try self.getProperty(v, "millisecond");
+    if (!msv.isUndefined()) time_raw[3] = @intFromFloat(try temporalIntArg(self, msv, "millisecond"));
+    const minv = try self.getProperty(v, "minute");
+    if (!minv.isUndefined()) time_raw[1] = @intFromFloat(try temporalIntArg(self, minv, "minute"));
+
+    const mv = try self.getProperty(v, "month");
+    const month: ?f64 = if (mv.isUndefined()) null else try temporalIntArg(self, mv, "month");
+    const mcv = try self.getProperty(v, "monthCode");
+    const month_code: ?MonthCodeInfo = if (mcv.isUndefined()) null else try readMonthCodeInfo(self, mcv);
+
+    const nsv = try self.getProperty(v, "nanosecond");
+    if (!nsv.isUndefined()) time_raw[5] = @intFromFloat(try temporalIntArg(self, nsv, "nanosecond"));
+    const sv = try self.getProperty(v, "second");
+    if (!sv.isUndefined()) time_raw[2] = @intFromFloat(try temporalIntArg(self, sv, "second"));
+
+    const cal_year = try bagCalendarYear(self, v, bag_cal) orelse return self.throwError("TypeError", "PlainDateTime fields require year and day");
+    return .{ .date = .{ .y = cal_year, .m = month, .mc = month_code, .d = d, .cal = bag_cal }, .time = time_raw };
+}
+
+fn finishPlainDateTimeBagFields(self: *Interpreter, f: PlainDateTimeBagFields, constrain: bool) EvalError!value.TemporalData {
+    const date = try finishPlainDateBagFields(self, f.date, constrain);
+    const tm = try regulatePlainTimeRawFields(self, f.time, !constrain);
+    var t: value.TemporalData = .{ .kind = .plain_date_time };
+    t.year = @intCast(date.y);
+    t.month = date.m;
+    t.day = date.d;
+    t.calendar = date.cal;
+    t.hour = tm.hour;
+    t.minute = tm.minute;
+    t.second = tm.second;
+    t.millisecond = tm.millisecond;
+    t.microsecond = tm.microsecond;
+    t.nanosecond = tm.nanosecond;
+    try checkPlainDateTimeNs(self, dateTimeToNs(&t));
+    return t;
 }
 
 fn toPlainDateFields(self: *Interpreter, v: Value, constrain: bool) EvalError!IsoYMD {
@@ -31936,21 +31986,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
         return t;
     }
     if (v.isObject()) {
-        const f = try toPlainDateFields(self, v, constrain);
-        const tm = try toPlainTimeDataOpt(self, v, false, !constrain);
-        var t: value.TemporalData = .{ .kind = .plain_date_time };
-        t.year = @intCast(f.y);
-        t.month = f.m;
-        t.day = f.d;
-        t.calendar = f.cal;
-        t.hour = tm.hour;
-        t.minute = tm.minute;
-        t.second = tm.second;
-        t.millisecond = tm.millisecond;
-        t.microsecond = tm.microsecond;
-        t.nanosecond = tm.nanosecond;
-        try checkPlainDateTimeNs(self, dateTimeToNs(&t));
-        return t;
+        return finishPlainDateTimeBagFields(self, try readPlainDateTimeBagFields(self, v), constrain);
     }
     if (v.isString()) {
         const p = try parseDateTimeNs(self, v.asStr());
@@ -32078,8 +32114,9 @@ fn temporalDateTimeFromFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const item = if (args.len > 0) args[0] else Value.undef();
     const options = if (args.len > 1) args[1] else Value.undef();
     const t = if (isObjectLike(item) and !isAnyTemporal(item)) blk: {
+        const fields = try readPlainDateTimeBagFields(self, item);
         const reject = try readOverflowReject(self, options);
-        break :blk try toPlainDateTimeData(self, item, !reject);
+        break :blk try finishPlainDateTimeBagFields(self, fields, !reject);
     } else blk: {
         const parsed = try toPlainDateTimeData(self, item, true);
         _ = try readOverflowReject(self, options);
