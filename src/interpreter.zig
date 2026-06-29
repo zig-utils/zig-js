@@ -20852,7 +20852,7 @@ const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
 /// ("weekday"/"year"/…/"literal") and its formatted `value`.
 const DtfPart = struct { typ: []const u8, value: []const u8 };
 
-fn dtfTimeZoneOffsetMs(this: Value) i64 {
+fn dtfTimeZoneOffsetMs(this: Value, epoch_ms: f64) i64 {
     const ov = this.asObj().getOwn("\x00opts") orelse return 0;
     if (!ov.isObject()) return 0;
     const tv = ov.asObj().getOwn("timeZone") orelse return 0;
@@ -20865,11 +20865,14 @@ fn dtfTimeZoneOffsetMs(this: Value) i64 {
         const sign: i64 = if (sign_ch == '+') -1 else 1;
         return sign * hours * 60 * 60_000;
     }
-    if (s.len != 6 or (s[0] != '+' and s[0] != '-') or s[3] != ':') return 0;
+    const epoch_ns: i128 = @as(i128, @intFromFloat(@trunc(epoch_ms))) * 1_000_000;
+    if (s.len != 6 or (s[0] != '+' and s[0] != '-') or s[3] != ':')
+        return @intCast(@divTrunc(timeZoneOffsetAtEpoch(s, epoch_ns, 0), 1_000_000));
     const hh = std.fmt.parseInt(i64, s[1..3], 10) catch return 0;
     const mm = std.fmt.parseInt(i64, s[4..6], 10) catch return 0;
     const sign: i64 = if (s[0] == '-') -1 else 1;
-    return sign * (hh * 60 + mm) * 60_000;
+    const fallback = sign * (hh * 60 + mm) * 60_000;
+    return @intCast(@divTrunc(timeZoneOffsetAtEpoch(s, epoch_ns, fallback * 1_000_000), 1_000_000));
 }
 
 fn dtfMonthName(cal: []const u8, month: u8, width: []const u8) ?[]const u8 {
@@ -20931,6 +20934,8 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         };
         if (direct) {
             const t = t_obj.?;
+            if (t.kind == .zoned_date_time and this.asObj().getOwn("\x00allowTemporalZonedDateTime") == null)
+                return self.throwError("TypeError", "Intl.DateTimeFormat does not support Temporal.ZonedDateTime");
             temporal_kind = t.kind;
             temporal_calendar = t.calendar;
             if (t.kind == .zoned_date_time) {
@@ -20970,7 +20975,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 try self.toNumberV(args[0]);
             if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
             const day_ms: i64 = 86_400_000;
-            const total_ms: i64 = @intFromFloat(@trunc(ms + @as(f64, @floatFromInt(dtfTimeZoneOffsetMs(this)))));
+            const total_ms: i64 = @intFromFloat(@trunc(ms + @as(f64, @floatFromInt(dtfTimeZoneOffsetMs(this, ms)))));
             const epoch_days = @divFloor(total_ms, day_ms);
             var tod = @mod(total_ms, day_ms);
             if (tod < 0) tod += day_ms;
@@ -32674,6 +32679,8 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (t.kind != .duration) {
         const dtf = (try self.newObject()).asObj();
         try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
+        if (t.kind == .zoned_date_time)
+            try self.setProp(dtf, "\x00allowTemporalZonedDateTime", Value.boolVal(true));
         const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
         const loc = if (locs.elements.items.len > 0) locs.elements.items[0].asStr() else "en";
         try self.setProp(dtf, "\x00locale", Value.str(loc));
@@ -33544,9 +33551,13 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         const dst_end_2000 = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2020 = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2020 = (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        const dst_start_2024 = (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        const dst_end_2024 = (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2020 and epoch_ns < dst_end_2020)
+            return -7 * 3_600_000_000_000;
+        if (epoch_ns >= dst_start_2024 and epoch_ns < dst_end_2024)
             return -7 * 3_600_000_000_000;
     }
     return fallback;
