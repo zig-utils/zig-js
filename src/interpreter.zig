@@ -29522,6 +29522,7 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporal.?.day = cd.d;
     o.temporal.?.calendar = cal;
     setTimeFields(o.temporal.?, vals);
+    try checkPlainDateTimeNs(self, dateTimeToNs(o.temporal.?));
     try applyTemporalNewTargetProto(self, o);
     return Value.obj(o);
 }
@@ -31781,6 +31782,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
     if (tIsTemporal(v, .plain_date)) {
         var t = v.asObj().temporal.?.*;
         t.kind = .plain_date_time;
+        try checkPlainDateTimeNs(self, dateTimeToNs(&t));
         return t;
     }
     if (v.isObject()) {
@@ -31797,6 +31799,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
         t.millisecond = tm.millisecond;
         t.microsecond = tm.microsecond;
         t.nanosecond = tm.nanosecond;
+        try checkPlainDateTimeNs(self, dateTimeToNs(&t));
         return t;
     }
     if (v.isString()) {
@@ -31813,6 +31816,7 @@ fn toPlainDateTimeData(self: *Interpreter, v: Value, constrain: bool) EvalError!
         t.millisecond = p.ms;
         t.microsecond = p.us;
         t.nanosecond = p.ns;
+        try checkPlainDateTimeNs(self, dateTimeToNs(&t));
         return t;
     }
     return self.throwError("TypeError", "cannot convert to a PlainDateTime");
