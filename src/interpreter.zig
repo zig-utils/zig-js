@@ -21090,6 +21090,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 o_hour = "numeric";
                 o_minute = "numeric";
                 o_second = "numeric";
+                if (tk == .instant and requested_tzname.len > 0) o_tzname = requested_tzname;
             },
             .plain_time => {
                 o_hour = "numeric";
