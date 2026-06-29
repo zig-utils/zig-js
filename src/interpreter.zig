@@ -22350,12 +22350,15 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     }
     const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     const syms = localeNumberSymbols(locale);
-    // USD's symbol is "$" only in en-based locales; elsewhere CLDR uses "US$".
-    if (std.mem.eql(u8, cur_code, "USD") and !(locale.len >= 2 and locale[0] == 'e' and locale[1] == 'n')) cur_symbol = "US$";
+    if (std.mem.eql(u8, cur_code, "USD")) {
+        const lang = parseTriple(locale).l;
+        if (!std.ascii.eqlIgnoreCase(lang, "en") and !std.ascii.eqlIgnoreCase(lang, "de") and !std.ascii.eqlIgnoreCase(lang, "ja"))
+            cur_symbol = "US$";
+    }
     // Place the currency symbol before or after the number per the locale's CLDR
     // pattern (e.g. en "$1.00" vs de "1,00\u{a0}\u{20ac}").
     if (cur_symbol.len > 0) {
-        if (syms.symbol_before) cur_prefix = cur_symbol else cur_suffix = try std.fmt.allocPrint(self.arena, "\u{00a0}{s}", .{cur_symbol});
+        if (syms.symbol_before) cur_prefix = cur_symbol else cur_suffix = cur_symbol;
     }
     // Accounting negatives wrap in parentheses only in locales whose accounting
     // pattern does (en "($1.00)"); others (de) just use the minus sign.
@@ -22421,7 +22424,10 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         try push(self, &parts, "compact", compact_suffix);
     }
     if (is_percent) try push(self, &parts, "percentSign", syms.percent);
-    if (cur_suffix.len > 0) try push(self, &parts, "currency", cur_suffix);
+    if (cur_suffix.len > 0) {
+        try push(self, &parts, "literal", "\u{00a0}");
+        try push(self, &parts, "currency", cur_suffix);
+    }
     if (unit_suffix.len > 0) {
         if (unit_space) try push(self, &parts, "literal", " ");
         try push(self, &parts, "unit", unit_suffix);
