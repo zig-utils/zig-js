@@ -32790,22 +32790,27 @@ fn temporalNowInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value
 }
 fn temporalNowPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
-    _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const total_ms = @divFloor(nowEpochNs(self), 1_000_000);
-    const days = @divFloor(total_ms, 86_400_000);
+    const tz = if (args.len > 0 and !args[0].isUndefined()) try resolveTimeZoneArg(self, args[0]) else TimeZone{ .name = "UTC", .offset_ns = 0 };
+    const epoch_ns = nowEpochNs(self);
+    const local_ns = epoch_ns + @as(i128, timeZoneOffsetAtEpoch(tz.name, epoch_ns, tz.offset_ns));
+    const days = @divFloor(local_ns, 86_400_000_000_000);
     const c = tCivilFromDays(@intCast(days));
-    var rem = @mod(total_ms, 86_400_000);
+    var rem = @mod(local_ns, 86_400_000_000_000);
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = @intCast(c.y);
     o.temporal.?.month = c.m;
     o.temporal.?.day = c.d;
-    o.temporal.?.hour = @intCast(@divFloor(rem, 3_600_000));
-    rem = @mod(rem, 3_600_000);
-    o.temporal.?.minute = @intCast(@divFloor(rem, 60_000));
-    rem = @mod(rem, 60_000);
-    o.temporal.?.second = @intCast(@divFloor(rem, 1000));
-    o.temporal.?.millisecond = @intCast(@mod(rem, 1000));
+    o.temporal.?.hour = @intCast(@divFloor(rem, nsPerUnit(.hour)));
+    rem = @mod(rem, nsPerUnit(.hour));
+    o.temporal.?.minute = @intCast(@divFloor(rem, nsPerUnit(.minute)));
+    rem = @mod(rem, nsPerUnit(.minute));
+    o.temporal.?.second = @intCast(@divFloor(rem, nsPerUnit(.second)));
+    rem = @mod(rem, nsPerUnit(.second));
+    o.temporal.?.millisecond = @intCast(@divFloor(rem, nsPerUnit(.millisecond)));
+    rem = @mod(rem, nsPerUnit(.millisecond));
+    o.temporal.?.microsecond = @intCast(@divFloor(rem, nsPerUnit(.microsecond)));
+    o.temporal.?.nanosecond = @intCast(@mod(rem, nsPerUnit(.microsecond)));
     return Value.obj(o);
 }
 fn temporalNowPlainDateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -32837,7 +32842,7 @@ fn temporalNowTimeZoneIdFn(ctx: *anyopaque, this: Value, args: []const Value) va
 fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const tz = if (args.len > 0 and !args[0].isUndefined()) try parseTimeZone(self, try self.toStringV(args[0])) else TimeZone{ .name = "UTC", .offset_ns = 0 };
+    const tz = if (args.len > 0 and !args[0].isUndefined()) try resolveTimeZoneArg(self, args[0]) else TimeZone{ .name = "UTC", .offset_ns = 0 };
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
     o.temporal.?.epoch_ns = nowEpochNs(self);
     o.temporal.?.tz_name = tz.name;
