@@ -193,6 +193,7 @@ zig build threads-test          # runs the green WebKit PR-249 threads corpus (2
 zig build threads-reference-audit # classifies the remaining reference-only PR-249 files
 zig build test -Dtsan=true      # unit suite under ThreadSanitizer
 zig build threadfuzz            # seeded concurrent-JS fuzzer
+zig build threadfuzz -Dfuzz-midgc=true # mid-script GC wait-pump fuzzer
 zig build test262               # runs the real tc39/test262 corpus, prints pass %
 zig build test262 -Dtest262=DIR # …with an explicit corpus root
 zig build bench                 # times the bytecode VM against the tree-walker
@@ -231,8 +232,9 @@ Correctness is now gated by the ordinary unit/corpus suite plus no-GIL coverage:
 ThreadSanitizer unit tests, a sharded no-GIL PR-249 corpus TSan sweep, a
 suppression-narrowness witness for JS-defined program-byte races,
 `test262-parallel`, and seeded concurrent-JS fuzzing (`threadfuzz`, TSan
-fuzzing, amplified fuzzing, broad semantic fuzzing, lifecycle fuzzing,
-ReleaseSafe fuzzing, and deterministic-result verification).
+fuzzing, amplified fuzzing, broad semantic fuzzing, mid-script-GC wait-pump
+fuzzing, lifecycle fuzzing, ReleaseSafe fuzzing, and deterministic-result
+verification).
 
 Remaining work is concentrated in production hardening rather than the core
 threading architecture:
@@ -261,10 +263,12 @@ threading architecture:
   maturing convergence and stress coverage for heavier wait/cleanup mixes.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
-  the lifecycle profile adds deterministic termination storms, script and module
-  Worker/thread overlap over retained `SharedArrayBuffer` storage, and mixed
-  `close` / `terminate` / `postMessage` ordering; keep extending both toward
-  more teardown and cross-realm scheduling oracles.
+  the mid-GC profile covers sync-wait root publication during finishing
+  mid-script sweeps; the lifecycle profile adds deterministic termination
+  storms, script and module Worker/thread overlap over retained
+  `SharedArrayBuffer` storage, and mixed `close` / `terminate` / `postMessage`
+  ordering. Keep extending the fuzzers toward more teardown and cross-realm
+  scheduling oracles.
 - **Reference-only PR-249 files** - promote only when the needed engine feature
   exists, especially WebAssembly/JIT shell hooks, deep recursive VM-stack
   behavior, heap caps/OOM semantics, and unsupported `$vm` controls.

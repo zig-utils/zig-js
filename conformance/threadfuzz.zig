@@ -763,6 +763,132 @@ fn runWorkerCloseTerminateRace(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_635f_7761);
+    const r = prng.random();
+    const rounds = 8 + r.uintLessThan(usize, 8);
+    const per_round = 650 + r.uintLessThan(usize, 500);
+    const spin_iters = 4000 + r.uintLessThan(usize, 6000);
+    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
+
+    const ctx = js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    }) catch {
+        std.debug.print("seed {d}: midgc context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0 }};
+        \\  const condLock = new Lock();
+        \\  const cond = new Condition();
+        \\  const heldLock = new Lock();
+        \\  let cleanupSeen = 0;
+        \\  const registry = (typeof FinalizationRegistry === 'function')
+        \\    ? new FinalizationRegistry((held) => {{ cleanupSeen += held; }})
+        \\    : null;
+        \\  const propWaiter = new Thread(() => {{
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    return Atomics.wait(gate, 'state', 0, {d});
+        \\  }});
+        \\  const condWaiter = new Thread(() => {{
+        \\    condLock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (Atomics.load(gate, 'state') === 0) cond.wait(condLock);
+        \\    }});
+        \\    return 1;
+        \\  }});
+        \\  const holder = new Thread(() => {{
+        \\    heldLock.hold(() => {{
+        \\      Atomics.store(gate, 'holderReady', 1);
+        \\      Atomics.notify(gate, 'holderReady');
+        \\      while (Atomics.load(gate, 'releaseLock') === 0)
+        \\        Atomics.wait(gate, 'releaseLock', 0, {d});
+        \\    }});
+        \\    return 1;
+        \\  }});
+        \\  while (Atomics.load(gate, 'holderReady') === 0)
+        \\    Atomics.wait(gate, 'holderReady', 0, 1);
+        \\  const lockWaiter = new Thread(() => {{
+        \\    Atomics.store(gate, 'lockReady', 1);
+        \\    Atomics.notify(gate, 'lockReady');
+        \\    heldLock.hold(() => {{ Atomics.store(gate, 'lockDone', 1); }});
+        \\    return 1;
+        \\  }});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\  while (Atomics.load(gate, 'lockReady') === 0)
+        \\    Atomics.wait(gate, 'lockReady', 0, 1);
+        \\  const keep = [];
+        \\  for (let round = 0; round < {d}; round++) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      const cell = {{ round, i, nested: {{ v: i + round }}, text: 'midgc-' + round + '-' + i }};
+        \\      keep.push(cell);
+        \\      if (registry && ((i + round) & 31) === 0)
+        \\        registry.register({{ ephemeral: i, round }}, 1);
+        \\    }}
+        \\    let spin = 0;
+        \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
+        \\    if (spin < 0) keep.push({{ never: true }});
+        \\  }}
+        \\  condLock.hold(() => {{
+        \\    Atomics.store(gate, 'state', 1);
+        \\    Atomics.notify(gate, 'state');
+        \\    cond.notifyAll();
+        \\  }});
+        \\  Atomics.store(gate, 'releaseLock', 1);
+        \\  Atomics.notify(gate, 'releaseLock');
+        \\  const wr = propWaiter.join();
+        \\  if (wr !== 'ok' && wr !== 'timed-out') throw new Error('bad property wait result: ' + wr);
+        \\  if (condWaiter.join() !== 1) throw new Error('bad condition waiter');
+        \\  if (holder.join() !== 1) throw new Error('bad lock holder');
+        \\  if (lockWaiter.join() !== 1 || Atomics.load(gate, 'lockDone') !== 1) throw new Error('bad lock waiter');
+        \\  if (registry) registry.cleanupSome((held) => {{ cleanupSeen += held; }});
+        \\  return keep.length;
+        \\}})();
+        \\
+    ,
+        .{ wait_timeout_ms, wait_timeout_ms, rounds, per_round, spin_iters },
+    );
+    defer gpa.free(src);
+
+    const before_attempts = ctx.gc_par_attempts.load(.monotonic);
+    const before_collections = ctx.gc_par_collections.load(.monotonic);
+    const expected: f64 = @floatFromInt(rounds * per_round);
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!result.isNumber() or result.asNum() != expected) {
+        std.debug.print("seed {d}: midgc result got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected });
+        return false;
+    }
+    if (ctx.gc_par_attempts.load(.monotonic) <= before_attempts) {
+        std.debug.print("seed {d}: midgc did not attempt a parallel collection\n", .{seed});
+        return false;
+    }
+    if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
+        std.debug.print("seed {d}: midgc did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+    return true;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator; // thread-safe; contexts manage their own GC
     var iters: usize = 200;
@@ -852,6 +978,25 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 4, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
+        return;
+    };
+    // `threadfuzz midgc <iters> <seed>`: targeted mid-script parallel-GC
+    // profile. Each seed blocks peers in property `Atomics.wait`,
+    // `Condition.wait`, and contended `Lock` acquisition while allocation
+    // pressure triggers the experimental collector. The oracle requires exact
+    // program completion and at least one finishing parallel sweep.
+    if (first) |a| if (std.mem.eql(u8, a, "midgc")) {
+        iters = 20;
+        if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
+        if (args.next()) |b| base_seed = std.fmt.parseInt(u64, b, 10) catch 1;
+        var mfail: usize = 0;
+        var mi: usize = 0;
+        while (mi < iters) : (mi += 1) {
+            const seed = base_seed +% mi;
+            if (!(try runMidScriptWaitPumpGc(gpa, seed))) mfail += 1;
+        }
+        std.debug.print("threadfuzz midgc: {d} programs from seed {d}, {d} failures\n", .{ iters, base_seed, mfail });
+        if (mfail != 0) std.process.exit(1);
         return;
     };
     // `threadfuzz amplify <iters> <seed>`: high-contention profile (more threads,

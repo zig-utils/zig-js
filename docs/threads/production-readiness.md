@@ -113,17 +113,22 @@ as embedders exercise more threaded host patterns.
   `asyncJoin`, property `wait` / `waitAsync`, `Condition`, `Thread.restrict`,
   and `FinalizationRegistry` cleanup coverage under GC-backed parallel
   contexts.
+- The mid-script GC fuzzer profile blocks peers in property `Atomics.wait`,
+  `Condition.wait`, and contended `Lock` acquisition while allocation pressure
+  drives `parallel_midscript_gc`; every seed must complete exactly and finish at
+  least one parallel sweep.
 - The lifecycle fuzzer profile adds deterministic termination storms where main
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   and module `Worker`s overlapping shared-realm `Thread`s on one retained
   `SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage`
   ordering coverage.
 - CI runs the fuzzer in several modes: default seeded, TSan, high-contention
-  amplified, broad semantic, lifecycle, ReleaseSafe, and deterministic-result
-  verification.
+  amplified, broad semantic, mid-script GC wait-pump, lifecycle, ReleaseSafe,
+  and deterministic-result verification.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
-scheduling, worker module-graph shapes, and teardown race variants.
+scheduling, worker module-graph shapes, cleanup/finalization interleavings, and
+teardown race variants.
 
 ## 6. CI Gating
 
@@ -138,6 +143,7 @@ Every pull request and push to `main` runs:
 - TSan `threadfuzz`,
 - amplified `threadfuzz`,
 - broad semantic `threadfuzz`,
+- mid-script GC wait-pump `threadfuzz`,
 - lifecycle `threadfuzz`,
 - ReleaseSafe `threadfuzz`,
 - deterministic-result `threadfuzz-verify`,

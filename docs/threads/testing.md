@@ -15,6 +15,7 @@ zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-
 zig build test -Dtsan=true
 zig build test -Dtsan=true -Dtest-filter=parallel_js
 zig build threadfuzz -Dfuzz-iters=20
+zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=5
 zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=20
 zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
 bun run docs:build
@@ -42,6 +43,7 @@ zig build threadfuzz -Dfuzz-iters=400
 zig build threadfuzz -Dtsan=true -Dfuzz-iters=60
 zig build threadfuzz -Dfuzz-amplify=true -Dfuzz-iters=30
 zig build threadfuzz -Dfuzz-broad=true -Dfuzz-iters=80
+zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=20
 zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=60
 zig build threadfuzz -Doptimize=ReleaseSafe -Dfuzz-iters=400
 zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
@@ -107,11 +109,15 @@ deterministic atomic programs whose exact result is predicted. The broad profile
 (`-Dfuzz-broad=true`) enables GC and adds caught exception/finally paths, nested
 thread lifecycle, `asyncJoin`, property `wait` / `waitAsync`, `Condition`
 wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars. The
-lifecycle profile (`-Dfuzz-lifecycle=true`) adds expected-throw termination
-storms for parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles
-for script and module `Worker` overlap with shared-realm `Thread`s on one
-retained `SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage`
-ordering coverage.
+mid-script GC profile (`-Dfuzz-midgc=true`) uses the internal testing context to
+enable `parallel_midscript_gc`, blocks peers in property `Atomics.wait`,
+`Condition.wait`, and contended `Lock` acquisition, then requires exact script
+completion plus at least one finishing parallel sweep. The lifecycle profile
+(`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
+parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script
+and module `Worker` overlap with shared-realm `Thread`s on one retained
+`SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage` ordering
+coverage.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
 GIL-free parallel contexts. The full corpus is too slow for every PR, so CI
