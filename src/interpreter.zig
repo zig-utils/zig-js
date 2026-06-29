@@ -29067,6 +29067,20 @@ fn plainTimeStringNeedsDesignator(s: []const u8) bool {
     return false;
 }
 
+fn isTemporalDateTimeString(s: []const u8) bool {
+    var i: usize = 0;
+    const ylen: usize = if (s.len > 0 and (s[0] == '+' or s[0] == '-')) blk: {
+        i = 1;
+        break :blk 6;
+    } else 4;
+    if (i + ylen >= s.len) return false;
+    const date_end = if (s[i + ylen] == '-') blk: {
+        if (i + ylen + 6 > s.len or s[i + ylen + 3] != '-') return false;
+        break :blk i + ylen + 6;
+    } else i + ylen + 4;
+    return date_end < s.len and (s[date_end] == 'T' or s[date_end] == 't' or s[date_end] == ' ');
+}
+
 /// Parse "HH[[:]MM[[:]SS[.fraction]]]" at `*i` (no leading designator). The ':'
 /// separators are optional (compact ISO form is accepted); a fraction is allowed
 /// only on seconds — the caller's full-consume check rejects fractional
@@ -29074,12 +29088,19 @@ fn plainTimeStringNeedsDesignator(s: []const u8) bool {
 fn parseTimeSection(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalError!void {
     out.h = twoDigits(s, i.*) orelse return self.throwError("RangeError", "invalid ISO time");
     i.* += 2;
-    if (i.* < s.len and s[i.*] == ':') i.* += 1;
+    const hour_had_colon = i.* < s.len and s[i.*] == ':';
+    if (hour_had_colon) i.* += 1;
     if (twoDigits(s, i.*)) |mm| {
         out.mi = mm;
         i.* += 2;
-        if (i.* < s.len and s[i.*] == ':') i.* += 1;
-        if (twoDigits(s, i.*)) |ss| {
+        const minute_had_colon = i.* < s.len and s[i.*] == ':';
+        if (minute_had_colon) {
+            if (!hour_had_colon) return self.throwError("RangeError", "invalid ISO time");
+            i.* += 1;
+        }
+        const may_parse_seconds = minute_had_colon or !hour_had_colon;
+        if (may_parse_seconds and twoDigits(s, i.*) != null) {
+            const ss = twoDigits(s, i.*).?;
             out.s = ss;
             i.* += 2;
             if (i.* < s.len and (s[i.*] == '.' or s[i.*] == ',')) {
@@ -29129,6 +29150,7 @@ fn parseOffset(self: *Interpreter, s: []const u8, i: *usize, out: *TBody) EvalEr
         // Optional offset seconds and fraction (consumed and validated, ignored).
         var parse_seconds = false;
         if (i.* < s.len and s[i.*] == ':') {
+            if (!minute_had_colon) return self.throwError("RangeError", "invalid UTC offset");
             i.* += 1;
             parse_seconds = true;
         } else if (!minute_had_colon) {
@@ -29393,7 +29415,7 @@ fn temporalPlainTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     const fields = [_]struct { max: f64 }{ .{ .max = 23 }, .{ .max = 59 }, .{ .max = 59 }, .{ .max = 999 }, .{ .max = 999 }, .{ .max = 999 } };
     var vals: [6]f64 = .{ 0, 0, 0, 0, 0, 0 };
     for (fields, 0..) |fl, i| {
-        const v = if (args.len > i) args[i] else Value.num(0);
+        const v = if (args.len > i and !args[i].isUndefined()) args[i] else Value.num(0);
         const n = try temporalIntArg(self, v, "time component");
         if (n < 0 or n > fl.max) return self.throwError("RangeError", "time component out of range");
         vals[i] = n;
@@ -31361,7 +31383,7 @@ fn toPlainTimeDataOpt(self: *Interpreter, v: Value, require_any: bool, reject: b
             try parseTimeSection(self, s, &i, &tb);
             try parseOffset(self, s, &i, &tb);
             if (i != s.len) return self.throwError("RangeError", "trailing characters in ISO time");
-        } else if (s.len >= 10 and s[4] == '-' and s[7] == '-') {
+        } else if (isTemporalDateTimeString(s)) {
             // A full date-time string: parse it and take the time portion.
             tb = try parseTemporalBody(self, s, true);
             if (!tb.has_time) return self.throwError("RangeError", "PlainTime string has no time component");
