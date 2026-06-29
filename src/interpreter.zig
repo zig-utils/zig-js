@@ -21620,7 +21620,13 @@ fn appendNum(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), first: *bool,
 /// Per-locale number symbols + currency-symbol placement, from CLDR (generated
 /// table in cldr_numbers.zig; ~50 locales, language-subtag fallback).
 fn localeNumberSymbols(locale: []const u8) cldr_numbers.NumSym {
-    return cldr_numbers.lookup(locale);
+    var syms = cldr_numbers.lookup(locale);
+    const t = parseTriple(locale);
+    if (std.ascii.eqlIgnoreCase(t.l, "pt") and std.ascii.eqlIgnoreCase(t.r, "PT")) {
+        syms.group = "\u{00a0}";
+        syms.symbol_before = false;
+    }
+    return syms;
 }
 
 /// Per-currency display info: the en symbol and the ISO 4217 default fraction
@@ -22063,6 +22069,76 @@ fn nfIndicGrouping(locale: []const u8) bool {
     return false;
 }
 
+const NfCompactPattern = struct { exponent: i32 = 0, suffix: []const u8 = "", sep: []const u8 = "" };
+
+fn nfCompactPattern(locale: []const u8, compact_display: []const u8, e: i32) NfCompactPattern {
+    const t = parseTriple(locale);
+    const long = std.mem.eql(u8, compact_display, "long");
+    const lang = t.l;
+    if (std.ascii.eqlIgnoreCase(lang, "de")) {
+        if (long) {
+            const exp: i32 = if (e >= 3) @min(@divFloor(e, 3) * 3, 12) else 0;
+            return .{ .exponent = exp, .suffix = switch (exp) {
+                3 => "Tausend",
+                6 => "Millionen",
+                9 => "Milliarden",
+                12 => "Billionen",
+                else => "",
+            }, .sep = if (exp > 0) " " else "" };
+        }
+        const exp: i32 = if (e >= 6) @min(@divFloor(e, 3) * 3, 12) else 0;
+        return .{ .exponent = exp, .suffix = switch (exp) {
+            6 => "Mio.",
+            9 => "Mrd.",
+            12 => "Bio.",
+            else => "",
+        }, .sep = if (exp > 0) "\u{00a0}" else "" };
+    }
+    if (std.ascii.eqlIgnoreCase(lang, "ja") or std.ascii.eqlIgnoreCase(lang, "zh")) {
+        const exp: i32 = if (e >= 4) @min(@divFloor(e, 4) * 4, 12) else 0;
+        if (std.ascii.eqlIgnoreCase(lang, "ja")) return .{ .exponent = exp, .suffix = switch (exp) {
+            4 => "\u{4e07}",
+            8 => "\u{5104}",
+            12 => "\u{5146}",
+            else => "",
+        } };
+        return .{ .exponent = exp, .suffix = switch (exp) {
+            4 => "\u{842c}",
+            8 => "\u{5104}",
+            12 => "\u{5146}",
+            else => "",
+        } };
+    }
+    if (std.ascii.eqlIgnoreCase(lang, "ko")) {
+        const exp: i32 = if (e >= 8) @min(@divFloor(e, 4) * 4, 12) else if (e >= 4) 4 else if (e >= 3) 3 else 0;
+        return .{ .exponent = exp, .suffix = switch (exp) {
+            3 => "\u{cc9c}",
+            4 => "\u{b9cc}",
+            8 => "\u{c5b5}",
+            12 => "\u{c870}",
+            else => "",
+        } };
+    }
+    if (std.ascii.eqlIgnoreCase(t.r, "IN") and std.ascii.eqlIgnoreCase(lang, "en") and !long) {
+        const exp: i32 = if (e >= 7) 7 else if (e >= 5) 5 else if (e >= 3) @divFloor(e, 3) * 3 else 0;
+        return .{ .exponent = exp, .suffix = switch (exp) {
+            3 => "K",
+            5 => "L",
+            7 => "Cr",
+            else => "",
+        } };
+    }
+
+    const exp: i32 = if (e >= 3) @min(@divFloor(e, 3) * 3, 12) else 0;
+    return .{ .exponent = exp, .suffix = switch (exp) {
+        3 => if (long) "thousand" else "K",
+        6 => if (long) "million" else "M",
+        9 => if (long) "billion" else "B",
+        12 => if (long) "trillion" else "T",
+        else => "",
+    }, .sep = if (long and exp > 0) " " else "" };
+}
+
 /// Resolve the numbering system for an Intl formatter: the `numberingSystem`
 /// option wins, else the locale's `-u-nu-` extension, else "latn" — but only a
 /// system we have digit data for (unknown ones fall back to "latn").
@@ -22146,6 +22222,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var unit_prefix: []const u8 = ""; // prefix unit pattern, e.g. ja "時速 <n> キロメートル"
     var unit_suffix: []const u8 = ""; // " <unit name>" appended for style:unit
     var compact_suffix: []const u8 = ""; // compact scale suffix ("K"/" million"…)
+    var compact_sep: []const u8 = "";
     var unit_space = true; // narrow unitDisplay drops the space
     var sign_display: []const u8 = "auto";
     var accounting = false;
@@ -22189,8 +22266,13 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             const cv = try self.getProperty(o, "currency");
             const code = if (cv.isString()) try std.ascii.allocUpperString(self.arena, cv.asStr()) else "USD";
             const info = currencyInfo(code);
-            min_frac = info.digits;
-            max_frac = info.digits;
+            if (std.mem.eql(u8, notation, "standard")) {
+                min_frac = info.digits;
+                max_frac = info.digits;
+            } else {
+                min_frac = 0;
+                max_frac = if (std.mem.eql(u8, notation, "compact")) 0 else 3;
+            }
             const disp = try self.getProperty(o, "currencyDisplay");
             const ds: []const u8 = if (disp.isString()) disp.asStr() else "symbol";
             if (std.mem.eql(u8, ds, "code")) {
@@ -22253,6 +22335,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         }
     };
 
+    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     const exact_decimal = if (input.isString() and rounding_increment == 1 and !is_percent and unit_suffix.len == 0 and cur_prefix.len == 0 and cur_suffix.len == 0 and cur_symbol.len == 0 and std.mem.eql(u8, notation, "standard") and min_sig == null and max_sig == null)
         nfParseExactDecimalString(input.asStr())
     else
@@ -22306,27 +22389,21 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         frac_str = r.frac_str;
         is_zero = (@abs(n) == 0);
     } else if (finite and std.mem.eql(u8, notation, "compact") and @abs(n) != 0) {
-        // Compact notation: scale by the largest power-of-1000 (up to 10^12),
-        // then round to max(2, integer-digits-of-scaled) significant digits
-        // (CLDR's "morePrecision" of 2 significant vs 0 fraction digits), and
-        // append the scale suffix.
+        // Compact notation: scale by the locale's compact pattern, then round
+        // to max(2, integer-digits-of-scaled) significant digits (CLDR's
+        // "morePrecision" of 2 significant vs 0 fraction digits).
         const mag = @abs(n);
         const e = orderOfMagnitude(mag);
-        const cexp: i32 = if (e >= 3) @min(@divFloor(e, 3) * 3, 12) else 0;
+        const compact = nfCompactPattern(locale, compact_display, e);
+        const cexp = compact.exponent;
         const scaled = if (cexp > 0) mag / powi10(cexp) else mag;
         const sig: usize = @intCast(@max(2, (e - cexp) + 1));
         const r = try nfRound(self, scaled, neg, min_int, 0, 0, 1, sig, false, "auto", 1, rounding_mode);
         digits = r.int_str;
         frac_str = r.frac_str;
         is_zero = r.is_zero;
-        const long = std.mem.eql(u8, compact_display, "long");
-        compact_suffix = switch (cexp) {
-            3 => if (long) "thousand" else "K",
-            6 => if (long) "million" else "M",
-            9 => if (long) "billion" else "B",
-            12 => if (long) "trillion" else "T",
-            else => "",
-        };
+        compact_suffix = compact.suffix;
+        compact_sep = compact.sep;
     } else if (finite) {
         const mag = @abs(n);
         if (mag >= 9.0e18 and max_sig == null) {
@@ -22363,7 +22440,6 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         show_neg = neg and !is_zero;
         show_pos = false;
     }
-    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     const syms = localeNumberSymbols(locale);
     if (std.mem.eql(u8, cur_code, "USD")) {
         const lang = parseTriple(locale).l;
@@ -22438,8 +22514,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         try push(self, &parts, "exponentInteger", try std.fmt.allocPrint(self.arena, "{d}", .{eabs}));
     }
     if (compact_suffix.len > 0) {
-        // The long form ("million") is space-separated; the short form ("M") is not.
-        if (std.mem.eql(u8, compact_display, "long")) try push(self, &parts, "literal", " ");
+        if (compact_sep.len > 0) try push(self, &parts, "literal", compact_sep);
         try push(self, &parts, "compact", compact_suffix);
     }
     if (is_percent) try push(self, &parts, "percentSign", syms.percent);
@@ -22539,12 +22614,31 @@ fn nfRangeSeparator(xp: []const NfPart, yp: []const NfPart, shared_prefix: usize
     return "\u{2013}";
 }
 
-fn nfFormatRangePartsText(self: *Interpreter, xp: []const NfPart, yp: []const NfPart) EvalError![]const u8 {
+fn nfPtRangeSeparator(locale: []const u8) bool {
+    const t = parseTriple(locale);
+    return std.ascii.eqlIgnoreCase(t.l, "pt") and std.ascii.eqlIgnoreCase(t.r, "PT");
+}
+
+fn nfSharedCurrencySuffixLen(xp: []const NfPart, yp: []const NfPart) usize {
+    if (xp.len < 2 or yp.len < 2) return 0;
+    const xl = xp[xp.len - 2 ..];
+    const yl = yp[yp.len - 2 ..];
+    if (!std.mem.eql(u8, xl[0].typ, "literal") or !std.mem.eql(u8, xl[1].typ, "currency")) return 0;
+    if (!std.mem.eql(u8, xl[0].typ, yl[0].typ) or !std.mem.eql(u8, xl[1].typ, yl[1].typ)) return 0;
+    if (!std.mem.eql(u8, xl[0].value, yl[0].value) or !std.mem.eql(u8, xl[1].value, yl[1].value)) return 0;
+    return 2;
+}
+
+fn nfFormatRangePartsText(self: *Interpreter, locale: []const u8, xp: []const NfPart, yp: []const NfPart) EvalError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const shared_prefix = nfSharedAffixLen(xp, yp);
-    try nfAppendPartValues(self, &buf, xp);
-    try buf.appendSlice(self.arena, nfRangeSeparator(xp, yp, shared_prefix));
-    try nfAppendPartValues(self, &buf, yp[shared_prefix..]);
+    const shared_suffix = nfSharedCurrencySuffixLen(xp, yp);
+    const x_end = xp.len - shared_suffix;
+    const y_end = yp.len - shared_suffix;
+    try nfAppendPartValues(self, &buf, xp[0..x_end]);
+    try buf.appendSlice(self.arena, if (nfPtRangeSeparator(locale)) " - " else nfRangeSeparator(xp, yp, shared_prefix));
+    try nfAppendPartValues(self, &buf, yp[shared_prefix..y_end]);
+    if (shared_suffix > 0) try nfAppendPartValues(self, &buf, xp[x_end..]);
     return buf.toOwnedSlice(self.arena);
 }
 
@@ -22573,7 +22667,8 @@ fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const xs = try nfFormatOne(self, this, xv);
     const ys = try nfFormatOne(self, this, yv);
     if (std.mem.eql(u8, xs, ys)) return Value.str(try std.fmt.allocPrint(self.arena, "~{s}", .{xs}));
-    return Value.str(try nfFormatRangePartsText(self, xp.items, yp.items));
+    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
+    return Value.str(try nfFormatRangePartsText(self, locale, xp.items, yp.items));
 }
 
 fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -24026,9 +24121,14 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                             currency = if (cv.isString()) try std.ascii.allocUpperString(self.arena, cv.asStr()) else "USD";
                             const cd = try self.getProperty(ov, "currencyDisplay");
                             if (cd.isString()) currency_display = cd.asStr();
-                            const dig: f64 = @floatFromInt(currencyInfo(currency.?).digits);
-                            min_frac = dig;
-                            max_frac = dig;
+                            if (std.mem.eql(u8, notation, "standard")) {
+                                const dig: f64 = @floatFromInt(currencyInfo(currency.?).digits);
+                                min_frac = dig;
+                                max_frac = dig;
+                            } else {
+                                min_frac = 0;
+                                max_frac = if (std.mem.eql(u8, notation, "compact")) 0 else 3;
+                            }
                         }
                     }
                     const mi = try self.getProperty(ov, "minimumIntegerDigits");
