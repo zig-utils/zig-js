@@ -109,7 +109,9 @@ context APIs.
   waiter. Property-mode `Atomics.notify` now stable-compacts matching sync and
   async waiters in one pass: notified sync stack tickets leave the realm waiter
   table before signal, and matching `waitAsync` tickets are collected without
-  repeated middle removals.
+  repeated middle removals. Worker inbox/outbox channels now drain
+  structured-clone messages with FIFO head cursors as well, avoiding front
+  shifts in receive-heavy Worker loops.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

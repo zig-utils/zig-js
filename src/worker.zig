@@ -31,8 +31,21 @@ const alloc = std.heap.page_allocator;
 const Channel = struct {
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
+    /// FIFO message storage. `queue_head` is the first live entry; `pop`
+    /// advances it and clears the list when drained, avoiding O(n)
+    /// front-removal shifts in Worker-heavy host loops.
     queue: std.ArrayListUnmanaged([]u8) = .empty,
+    queue_head: usize = 0,
     closed: bool = false,
+
+    fn hasQueued(ch: *const Channel) bool {
+        return ch.queue_head < ch.queue.items.len;
+    }
+
+    fn clearQueue(ch: *Channel) void {
+        ch.queue.clearRetainingCapacity();
+        ch.queue_head = 0;
+    }
 
     fn push(ch: *Channel, bytes: []u8) void {
         const io = agent.engineIo();
@@ -57,18 +70,23 @@ const Channel = struct {
         const io = agent.engineIo();
         ch.mutex.lockUncancelable(io);
         defer ch.mutex.unlock(io);
-        while (ch.queue.items.len == 0) {
+        while (!ch.hasQueued()) {
             if (ch.closed) return null;
+            ch.clearQueue();
             const tmo: std.Io.Timeout = if (timeout_ms) |ms| .{ .duration = .{
                 .raw = .fromMilliseconds(@intCast(ms)),
                 .clock = .awake,
             } } else .none;
             io_compat.conditionWaitTimeout(&ch.cond, io, &ch.mutex, tmo) catch |err| switch (err) {
-                error.Timeout => if (ch.queue.items.len == 0) return null else break,
+                error.Timeout => if (!ch.hasQueued()) return null else break,
                 error.Canceled => continue,
             };
         }
-        return ch.queue.orderedRemove(0);
+        const bytes = ch.queue.items[ch.queue_head];
+        ch.queue.items[ch.queue_head] = undefined;
+        ch.queue_head += 1;
+        if (ch.queue_head == ch.queue.items.len) ch.clearQueue();
+        return bytes;
     }
 
     fn close(ch: *Channel) void {
@@ -80,13 +98,43 @@ const Channel = struct {
     }
 
     fn deinit(ch: *Channel) void {
-        for (ch.queue.items) |bytes| {
+        for (ch.queue.items[ch.queue_head..]) |bytes| {
             structured_clone.releaseSerialized(bytes);
             alloc.free(bytes);
         }
         ch.queue.deinit(alloc);
     }
 };
+
+test "worker channel pops FIFO without front shifts" {
+    var ch = Channel{};
+    defer ch.deinit();
+
+    const first = try alloc.dupe(u8, &.{1});
+    const second = try alloc.dupe(u8, &.{2});
+    const third = try alloc.dupe(u8, &.{3});
+    ch.push(first);
+    ch.push(second);
+    ch.push(third);
+
+    const got_first = ch.pop(0) orelse return error.TestUnexpectedResult;
+    defer alloc.free(got_first);
+    try std.testing.expectEqual(@as(u8, 1), got_first[0]);
+    try std.testing.expectEqual(@as(usize, 1), ch.queue_head);
+    try std.testing.expectEqual(@as(usize, 3), ch.queue.items.len);
+
+    const got_second = ch.pop(0) orelse return error.TestUnexpectedResult;
+    defer alloc.free(got_second);
+    try std.testing.expectEqual(@as(u8, 2), got_second[0]);
+    const got_third = ch.pop(0) orelse return error.TestUnexpectedResult;
+    defer alloc.free(got_third);
+    try std.testing.expectEqual(@as(u8, 3), got_third[0]);
+    try std.testing.expectEqual(@as(usize, 0), ch.queue_head);
+    try std.testing.expectEqual(@as(usize, 0), ch.queue.items.len);
+
+    ch.close();
+    try std.testing.expect(ch.pop(0) == null);
+}
 
 /// A module-graph entry point for a module worker. The host's `load`
 /// callback runs on the worker thread, so it must be thread-safe (an

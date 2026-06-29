@@ -115,12 +115,16 @@ Known performance/maturity work:
   longer each rescan and front-shift the table on return; matching `waitAsync`
   tickets are collected for post-unlock settlement without repeated middle
   removals.
+- Worker inbox/outbox channels now use FIFO head cursors for structured-clone
+  message queues, so Worker-heavy lifecycle and receive loops do not pay one
+  front shift per delivered message.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 
 Remaining: use the attribution columns to drive targeted reductions in
-contended user-level locks, join/lifecycle waiting, object/element storage
-contention, context lifecycle pooling, and nursery/generational work.
+contended user-level locks, Worker-heavy lifecycle and message traffic,
+join/lifecycle waiting, object/element storage contention, context lifecycle
+pooling, and nursery/generational work.
 
 ## 4. Embedder API
 

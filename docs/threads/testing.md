@@ -164,7 +164,10 @@ baseline instead of only elapsed time. Empty sync-wait task pumps now have a
 lock-free fast path;
 real async-hold delivery drains bounded FIFO bursts from the realm task queue
 under one API-lock acquisition before running grants outside that lock; condition
-notify/notifyAll uses a FIFO head cursor for the mixed sync/async waiter queue.
+notify/notifyAll uses a FIFO head cursor for the mixed sync/async waiter queue;
+Worker inbox/outbox channels use the same shape for structured-clone message
+delivery. `worker channel pops FIFO without front shifts` keeps that queue shape
+under a direct unit guard.
 `threads-profile` remains the check that this kind of targeted optimization
 does not merely move overhead elsewhere.
 

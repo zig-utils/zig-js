@@ -273,7 +273,9 @@ threading architecture:
   avoiding one front shift per notified waiter. Property-mode `Atomics.notify`
   now stable-compacts matching waiters in one pass: sync stack tickets are
   unlinked before signal, and matching `waitAsync` tickets are collected without
-  repeated `orderedRemove` shifts. Continue using the profile for the remaining
+  repeated `orderedRemove` shifts. Worker inbox/outbox channels now drain
+  through the same FIFO head-cursor shape instead of front-shifting
+  structured-clone message queues. Continue using the profile for the remaining
   contended-lock and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the

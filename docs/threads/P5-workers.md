@@ -17,9 +17,11 @@ storage** (the refcounted `SharedBufferStorage` from Phase 1). Nothing that
 lives in a worker arena ever escapes it — same lifetime rule as agents.
 
 Messages flow over two `Channel`s (mutex + condition FIFOs of `[]u8`): `inbox`
-(main→worker) and `outbox` (worker→main). A channel `close()` wakes every
-waiter; already-queued messages stay poppable (drain-then-stop). `deinit`
-releases any bytes (and the SAB refs inside them) never consumed.
+(main→worker) and `outbox` (worker→main). Each channel drains with a FIFO head
+cursor, so Worker-heavy receive loops do not front-shift remaining serialized
+messages on every `pop`. A channel `close()` wakes every waiter; already-queued
+messages stay poppable (drain-then-stop). `deinit` releases any bytes (and the
+SAB refs inside them) never consumed.
 
 ## Worker lifecycle (`src/worker.zig`)
 
@@ -86,10 +88,10 @@ context's handles are ever touched.
 ## Verification
 
 `src/worker.zig` tests: 4-way SAB counter + terminate-mid-loop, module-graph
-import round-trip, host-hook wake. `src/c_api.zig` test: `JSWorkerCreate` →
-post a number → receive the doubled reply. All TSan-clean. `worker.zig` and the
-C-API are not exercised by the test262 shards, so the conformance total is
-unaffected.
+import round-trip, host-hook wake, and FIFO channel drain without front shifts.
+`src/c_api.zig` test: `JSWorkerCreate` → post a number → receive the doubled
+reply. All TSan-clean. `worker.zig` and the C-API are not exercised by the
+test262 shards, so the conformance total is unaffected.
 
 ## Deferred
 
