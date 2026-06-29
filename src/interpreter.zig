@@ -27469,10 +27469,12 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         const p = try parseDateTimeNs(self, rv.asStr());
         if (p.z and !ann.has_tz)
             return self.throwError("RangeError", "relativeTo exact time string requires a time-zone annotation");
+        var rel_epoch_ns = p.epoch_ns;
         if (ann.has_tz and p.has_offset) {
             const tz = try parseTimeZone(self, rv.asStr());
-            if (isFixedTimeZone(tz) and p.offset_ns != tz.offset_ns)
-                return self.throwError("RangeError", "offset does not match time zone");
+            const local_ns_from_offset = p.epoch_ns + p.offset_ns;
+            const actual_offset = try relativeTimeZoneOffset(self, tz, local_ns_from_offset, p.offset_ns, p.offset_has_seconds, true);
+            rel_epoch_ns = local_ns_from_offset - @as(i128, actual_offset);
         }
         const tod: i128 = @as(i128, p.h) * nsPerUnit(.hour) + @as(i128, p.mi) * nsPerUnit(.minute) +
             @as(i128, p.s) * nsPerUnit(.second) + @as(i128, p.ms) * nsPerUnit(.millisecond) +
@@ -27483,12 +27485,11 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
             if (local_ns < -max_temporal_instant_ns)
                 return self.throwError("RangeError", "relativeTo date-time out of range");
         }
-        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod, .zoned = ann.has_tz, .epoch_ns = p.epoch_ns };
+        return .{ .y = p.y, .m = p.mo, .d = p.d, .time_ns = tod, .zoned = ann.has_tz, .epoch_ns = rel_epoch_ns };
     }
     if (rv.isObject()) {
-        const cv = try self.getProperty(rv, "calendar");
-        if (!cv.isUndefined()) try validateRelativeCalendar(self, cv);
-        var y: ?f64 = null;
+        const bag_cal = try readCalendarField(self, rv);
+        var y: ?i64 = null;
         var m: ?f64 = null;
         var d: ?f64 = null;
         var vals: [6]f64 = .{ 0, 0, 0, 0, 0, 0 };
@@ -27525,27 +27526,28 @@ fn resolveRelativeTo(self: *Interpreter, opts: Value) EvalError!?RelTo {
         if (!sv.isUndefined()) vals[2] = try relativeTimeField(self, sv, "second", 59);
         const tzv = try self.getProperty(rv, "timeZone");
         if (!tzv.isUndefined()) time_zone = try relativeTimeZoneField(self, tzv);
-        const yv = try self.getProperty(rv, "year");
-        if (!yv.isUndefined()) y = try temporalIntArg(self, yv, "year");
+        y = try bagCalendarYear(self, rv, bag_cal);
 
         if (y == null or m == null or d == null)
             return self.throwError("TypeError", "relativeTo object must have year, month, and day");
-        if (offset_ns) |off| if (time_zone) |tz| {
-            if (isFixedTimeZone(tz) and off != tz.offset_ns)
-                return self.throwError("RangeError", "offset does not match time zone");
-        };
-        try checkIsoDate(self, y.?, m.?, d.?);
+        try checkIsoDate(self, @floatFromInt(y.?), m.?, d.?);
         const time_ns = @as(i128, @intFromFloat(vals[0])) * nsPerUnit(.hour) +
             @as(i128, @intFromFloat(vals[1])) * nsPerUnit(.minute) +
             @as(i128, @intFromFloat(vals[2])) * nsPerUnit(.second) +
             @as(i128, @intFromFloat(vals[3])) * nsPerUnit(.millisecond) +
             @as(i128, @intFromFloat(vals[4])) * nsPerUnit(.microsecond) +
             @as(i128, @intFromFloat(vals[5]));
-        const local_ns = @as(i128, tDaysFromCivil(@intFromFloat(y.?), @intFromFloat(m.?), @intFromFloat(d.?))) * DAY_NS + time_ns;
+        const local_ns = @as(i128, tDaysFromCivil(y.?, @intFromFloat(m.?), @intFromFloat(d.?))) * DAY_NS + time_ns;
         const zoned = time_zone != null;
-        const epoch_ns = if (time_zone) |tz| local_ns - @as(i128, tz.offset_ns) else 0;
+        const epoch_ns = if (time_zone) |tz| blk: {
+            const actual_offset = if (offset_ns) |off|
+                try relativeTimeZoneOffset(self, tz, local_ns, off, true, false)
+            else
+                zdtActualOffsetForLocal(tz, local_ns);
+            break :blk local_ns - @as(i128, actual_offset);
+        } else 0;
         return .{
-            .y = @intFromFloat(y.?),
+            .y = y.?,
             .m = @intFromFloat(m.?),
             .d = @intFromFloat(d.?),
             .time_ns = time_ns,
@@ -27565,6 +27567,24 @@ fn relativeTimeField(self: *Interpreter, v: Value, name: []const u8, max: f64) E
 fn relativeTimeZoneField(self: *Interpreter, v: Value) EvalError!TimeZone {
     if (!v.isString()) return self.throwError("TypeError", "invalid timeZone");
     return parseTimeZone(self, v.asStr());
+}
+
+fn relativeTimeZoneOffset(self: *Interpreter, tz: TimeZone, local_ns: i128, offset_ns: i128, offset_has_seconds: bool, allow_rounded: bool) EvalError!i64 {
+    if (isFixedTimeZone(tz)) {
+        if (offset_ns != @as(i128, tz.offset_ns)) return self.throwError("RangeError", "offset does not match time zone");
+        return tz.offset_ns;
+    }
+    if (offset_ns < std.math.minInt(i64) or offset_ns > std.math.maxInt(i64))
+        return self.throwError("RangeError", "offset does not match time zone");
+    const off: i64 = @intCast(offset_ns);
+    const actual = if (offset_has_seconds)
+        timeZoneOffsetAtEpoch(tz.name, local_ns - offset_ns, tz.offset_ns)
+    else
+        zdtActualOffsetForLocal(tz, local_ns);
+    if (off == actual) return actual;
+    if (allow_rounded and !offset_has_seconds and offset_ns == roundOffsetToMinute(@as(i128, actual))) return actual;
+    if (zdtOffsetMatchesLocal(tz, local_ns, offset_ns)) return off;
+    return self.throwError("RangeError", "offset does not match time zone");
 }
 
 fn validateRelativeCalendar(self: *Interpreter, v: Value) EvalError!void {
@@ -33703,6 +33723,14 @@ fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
         const fall_overlap_end = fall_overlap_start + nsPerUnit(.hour);
         if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end)
             return -7 * 3_600_000_000_000;
+        const spring_gap_start_2025 = (@as(i128, tDaysFromCivil(2025, 3, 9)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_2025 = spring_gap_start_2025 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_2025 and local_ns < spring_gap_end_2025)
+            return -8 * 3_600_000_000_000;
+        const fall_overlap_start_2025 = (@as(i128, tDaysFromCivil(2025, 11, 2)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_2025 = fall_overlap_start_2025 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2025 and local_ns < fall_overlap_end_2025)
+            return -7 * 3_600_000_000_000;
     }
     const candidate_epoch = local_ns - @as(i128, tz.offset_ns);
     return timeZoneOffsetAtEpoch(tz.name, candidate_epoch, tz.offset_ns);
@@ -33772,6 +33800,24 @@ fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i
         const fall_overlap_start = (@as(i128, tDaysFromCivil(2000, 10, 29)) * nsPerUnit(.day)) + nsPerUnit(.hour);
         const fall_overlap_end = fall_overlap_start + nsPerUnit(.hour);
         if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end) {
+            return switch (disambiguation) {
+                .compatible, .earlier => daylight,
+                .later => standard,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+        const spring_gap_start_2025 = (@as(i128, tDaysFromCivil(2025, 3, 9)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
+        const spring_gap_end_2025 = spring_gap_start_2025 + nsPerUnit(.hour);
+        if (local_ns >= spring_gap_start_2025 and local_ns < spring_gap_end_2025) {
+            return switch (disambiguation) {
+                .compatible, .later => standard,
+                .earlier => daylight,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+        const fall_overlap_start_2025 = (@as(i128, tDaysFromCivil(2025, 11, 2)) * nsPerUnit(.day)) + nsPerUnit(.hour);
+        const fall_overlap_end_2025 = fall_overlap_start_2025 + nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2025 and local_ns < fall_overlap_end_2025) {
             return switch (disambiguation) {
                 .compatible, .earlier => daylight,
                 .later => standard,
@@ -34013,11 +34059,15 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         const dst_end_2020 = (@as(i128, tDaysFromCivil(2020, 11, 1)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         const dst_start_2024 = (@as(i128, tDaysFromCivil(2024, 3, 10)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
         const dst_end_2024 = (@as(i128, tDaysFromCivil(2024, 11, 3)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
+        const dst_start_2025 = (@as(i128, tDaysFromCivil(2025, 3, 9)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
+        const dst_end_2025 = (@as(i128, tDaysFromCivil(2025, 11, 2)) * nsPerUnit(.day)) + 9 * nsPerUnit(.hour);
         if (epoch_ns >= dst_start_2000 and epoch_ns < dst_end_2000)
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2020 and epoch_ns < dst_end_2020)
             return -7 * 3_600_000_000_000;
         if (epoch_ns >= dst_start_2024 and epoch_ns < dst_end_2024)
+            return -7 * 3_600_000_000_000;
+        if (epoch_ns >= dst_start_2025 and epoch_ns < dst_end_2025)
             return -7 * 3_600_000_000_000;
     }
     return fallback;
