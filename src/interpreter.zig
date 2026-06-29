@@ -20999,6 +20999,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     var hour_cycle: []const u8 = "";
     var any_comp = false;
     var defaults_applied = false;
+    var explicit_hour_setting = false;
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         const get = struct {
             fn s(slf: *Interpreter, obj: Value, k: []const u8) EvalError![]const u8 {
@@ -21025,7 +21026,6 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         const hc = try get(self, ov, "hourCycle");
         hour_cycle = hc;
         const h12 = try self.getProperty(ov, "hour12");
-        var explicit_hour_setting = false;
         if (h12.isBoolean()) {
             hour12 = h12.asBool();
             explicit_hour_setting = true;
@@ -21039,14 +21039,6 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (ov.asObj().getOwn("\x00temporalDefaultHour12")) |tdh| {
             if (tdh.toBoolean()) hour12 = true;
         }
-        if (temporal_kind != null and !explicit_hour_setting) if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
-            const ls = lv.asStr();
-            if ((ls.len == 2 and asciiEqlIgnoreCase(ls, "en")) or
-                (ls.len > 3 and asciiEqlIgnoreCase(ls[0..2], "en") and ls[2] == '-'))
-            {
-                hour12 = true;
-            }
-        };
         // dateStyle/timeStyle expand to a representative set of components (an
         // en approximation; the localized patterns/time-zone parts are not
         // modeled). Both can't combine with explicit components (enforced at
@@ -21125,6 +21117,11 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         }
         any_comp = true;
     };
+    if (temporal_kind != null and !explicit_hour_setting and o_hour.len > 0) {
+        const loc = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
+        hour_cycle = dtfResolveHourCycle(self, loc, hour_cycle, null);
+        hour12 = std.mem.eql(u8, hour_cycle, "h11") or std.mem.eql(u8, hour_cycle, "h12");
+    }
 
     // Restrict the components to those the Temporal value's type can provide; a
     // requested component the type lacks is dropped, and if NOTHING the formatter
