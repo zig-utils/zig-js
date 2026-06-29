@@ -31959,18 +31959,20 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             const b = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), true);
             if (!temporalCalendarIdsEqual(t.calendar, b.cal)) return self.throwError("RangeError", "calendar mismatch");
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 }, false);
-            const lg = if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.day)) TUnit.day else opts.largest;
+            const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
+            if (@intFromEnum(largest) > @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDate largestUnit cannot be a time unit");
+            if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDate smallestUnit cannot be a time unit");
             const fwd = calendarEpochDay(t.calendar, t.year, t.month, t.day) <= calendarEpochDay(t.calendar, b.y, b.m, b.d);
             const e = if (fwd) IsoYMD{ .y = t.year, .m = t.month, .d = t.day } else b;
             const l = if (fwd) b else IsoYMD{ .y = t.year, .m = t.month, .d = t.day };
-            var dd = calendarDateDiff(t.calendar, e.y, e.m, e.d, l.y, l.m, l.d, lg);
+            var dd = calendarDateDiff(t.calendar, e.y, e.m, e.d, l.y, l.m, l.d, largest);
             const s2 = sign * (if (fwd) @as(f64, 1) else -1);
             // Round the (positive) magnitude to smallestUnit relative to the
             // earlier date when a calendar smallestUnit / increment is requested;
             // a negative result (since/backward) flips the rounding mode.
             if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1) {
                 const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
-                dd = try roundDurationRel(self, dd, .{ .y = e.y, .m = e.m, .d = e.d, .time_ns = 0 }, .{ .largest = lg, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+                dd = try roundDurationRel(self, dd, .{ .y = e.y, .m = e.m, .d = e.d, .time_ns = 0 }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
             }
             if (s2 < 0) for (&dd) |*c| {
                 c.* = -c.*;
