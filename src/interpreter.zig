@@ -27087,7 +27087,7 @@ fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) f
     const span = hi_ns - lo_ns;
     if (span == 0) return @floatFromInt(whole);
     const frac = @as(f64, @floatFromInt(ep.end - lo_ns)) / @as(f64, @floatFromInt(span));
-    return @as(f64, @floatFromInt(whole)) + frac;
+    return @as(f64, @floatFromInt(whole)) + @as(f64, @floatFromInt(sign)) * frac;
 }
 
 /// Temporal.Duration.prototype.round with a `relativeTo` anchor (ISO calendar).
@@ -27106,8 +27106,16 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         }
         // Calendar largestUnit: re-difference the rounded end date, keep sub-day
         // time (zero when smallestUnit ≥ day).
-        const rounded_end_days = @divFloor(ep.start + rounded_ns, DAY_NS);
-        const time_ns = (ep.start + rounded_ns) - rounded_end_days * DAY_NS;
+        const rounded_abs = ep.start + rounded_ns;
+        var rounded_end_days = @divFloor(rounded_abs, DAY_NS);
+        var time_ns = rounded_abs - rounded_end_days * DAY_NS - rel.time_ns;
+        if (rounded_ns >= 0 and time_ns < 0) {
+            rounded_end_days -= 1;
+            time_ns += DAY_NS;
+        } else if (rounded_ns < 0 and time_ns > 0) {
+            rounded_end_days += 1;
+            time_ns -= DAY_NS;
+        }
         const ed = tCivilFromDays(@intCast(rounded_end_days));
         const diff = differenceISODate(rel.y, rel.m, rel.d, ed.y, ed.m, ed.d, largest);
         var out: [10]f64 = .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
@@ -31751,22 +31759,23 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             }
             const tparts = balanceTimeNs(time_diff, .hour);
             for (4..10) |i| dd[i] = tparts[i];
-            if (!(opts.smallest == .nanosecond and opts.increment == 1) and (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1)) {
-                const earlier = if (dateTimeToNs(a) <= dateTimeToNs(b)) a else b;
-                const later = if (dateTimeToNs(a) <= dateTimeToNs(b)) b else a;
-                dd = calendarDateDiff(earlier.calendar, earlier.year, earlier.month, earlier.day, later.year, later.month, later.day, largest);
-                time_diff = timeToNs(later) - timeToNs(earlier);
-                if (time_diff < 0) {
-                    const adjusted_later = calendarDateMinusDays(later.calendar, later.year, later.month, later.day, 1);
-                    dd = calendarDateDiff(earlier.calendar, earlier.year, earlier.month, earlier.day, adjusted_later.y, adjusted_later.m, adjusted_later.d, largest);
+            if (opts.smallest != .nanosecond or opts.increment != 1) {
+                dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, b.year, b.month, b.day, largest);
+                time_diff = timeToNs(b) - timeToNs(a);
+                if (dateTimeToNs(b) >= dateTimeToNs(a) and time_diff < 0) {
+                    const adjusted_end = calendarDateMinusDays(b.calendar, b.year, b.month, b.day, 1);
+                    dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
                     time_diff += 86_400_000_000_000;
+                } else if (dateTimeToNs(b) < dateTimeToNs(a) and time_diff > 0) {
+                    const adjusted_end = calendarDateMinusDays(b.calendar, b.year, b.month, b.day, -1);
+                    dd = calendarDateDiff(a.calendar, a.year, a.month, a.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
+                    time_diff -= 86_400_000_000_000;
                 }
                 const rounded_tparts = balanceTimeNs(time_diff, .hour);
                 for (4..10) |i| dd[i] = rounded_tparts[i];
-                const s2 = sign * (if (dateTimeToNs(a) <= dateTimeToNs(b)) @as(f64, 1) else -1);
-                const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
-                dd = try roundDurationRel(self, dd, .{ .y = earlier.year, .m = earlier.month, .d = earlier.day, .time_ns = timeToNs(earlier) }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
-                if (s2 < 0) for (&dd) |*c| {
+                const mode = if (sign < 0) negateRoundMode(opts.mode) else opts.mode;
+                dd = try roundDurationRel(self, dd, .{ .y = a.year, .m = a.month, .d = a.day, .time_ns = timeToNs(a) }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+                if (sign < 0) for (&dd) |*c| {
                     c.* = -c.*;
                 };
             }
@@ -33520,24 +33529,23 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             }
             const tparts = balanceTimeNs(time_diff, .hour);
             for (4..10) |i| dd[i] = tparts[i];
-            if (!(opts.smallest == .nanosecond and opts.increment == 1) and (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1)) {
-                const local_a = zdtLocal(t);
-                const local_b = zdtLocal(&other);
-                const earlier = if (dateTimeToNs(&local_a) <= dateTimeToNs(&local_b)) &local_a else &local_b;
-                const later = if (dateTimeToNs(&local_a) <= dateTimeToNs(&local_b)) &local_b else &local_a;
-                dd = calendarDateDiff(earlier.calendar, earlier.year, earlier.month, earlier.day, later.year, later.month, later.day, largest);
-                time_diff = timeToNs(later) - timeToNs(earlier);
-                if (time_diff < 0) {
-                    const adjusted_later = calendarDateMinusDays(later.calendar, later.year, later.month, later.day, 1);
-                    dd = calendarDateDiff(earlier.calendar, earlier.year, earlier.month, earlier.day, adjusted_later.y, adjusted_later.m, adjusted_later.d, largest);
+            if (opts.smallest != .nanosecond or opts.increment != 1) {
+                dd = calendarDateDiff(local_this.calendar, local_this.year, local_this.month, local_this.day, local_other.year, local_other.month, local_other.day, largest);
+                time_diff = timeToNs(&local_other) - timeToNs(&local_this);
+                if (dateTimeToNs(&local_other) >= dateTimeToNs(&local_this) and time_diff < 0) {
+                    const adjusted_end = calendarDateMinusDays(local_other.calendar, local_other.year, local_other.month, local_other.day, 1);
+                    dd = calendarDateDiff(local_this.calendar, local_this.year, local_this.month, local_this.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
                     time_diff += 86_400_000_000_000;
+                } else if (dateTimeToNs(&local_other) < dateTimeToNs(&local_this) and time_diff > 0) {
+                    const adjusted_end = calendarDateMinusDays(local_other.calendar, local_other.year, local_other.month, local_other.day, -1);
+                    dd = calendarDateDiff(local_this.calendar, local_this.year, local_this.month, local_this.day, adjusted_end.y, adjusted_end.m, adjusted_end.d, largest);
+                    time_diff -= 86_400_000_000_000;
                 }
                 const rounded_tparts = balanceTimeNs(time_diff, .hour);
                 for (4..10) |i| dd[i] = rounded_tparts[i];
-                const s2 = sign * (if (dateTimeToNs(&local_a) <= dateTimeToNs(&local_b)) @as(f64, 1) else -1);
-                const mode = if (s2 < 0) negateRoundMode(opts.mode) else opts.mode;
-                dd = try roundDurationRel(self, dd, .{ .y = earlier.year, .m = earlier.month, .d = earlier.day, .time_ns = timeToNs(earlier) }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
-                if (s2 < 0) for (&dd) |*c| {
+                const mode = if (sign < 0) negateRoundMode(opts.mode) else opts.mode;
+                dd = try roundDurationRel(self, dd, .{ .y = local_this.year, .m = local_this.month, .d = local_this.day, .time_ns = timeToNs(&local_this) }, .{ .largest = largest, .smallest = opts.smallest, .mode = mode, .increment = opts.increment });
+                if (sign < 0) for (&dd) |*c| {
                     c.* = -c.*;
                 };
             }
