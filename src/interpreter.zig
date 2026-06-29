@@ -27510,9 +27510,19 @@ fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!read.has_unit) return self.throwError("RangeError", "Temporal.Duration.prototype.round requires largestUnit or smallestUnit");
     // largestUnit must be ≥ smallestUnit.
     if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) opts.largest = opts.smallest;
-    if (durIsBlank(dur)) return makeDuration(self, dur);
+    if (durIsBlank(dur)) {
+        if (read.relative_to) |rel| {
+            if (rel.zoned and opts.largest_set and opts.largest == .day and
+                @intFromEnum(opts.smallest) > @intFromEnum(TUnit.day) and
+                rel.epoch_ns > max_temporal_instant_ns - DAY_NS)
+            {
+                return self.throwError("RangeError", "relativeTo date-time out of range");
+            }
+        }
+        return makeDuration(self, dur);
+    }
     if (read.relative_to) |rel| return makeDuration(self, try roundDurationRel(self, dur, rel, opts));
-    if (durHasCalendar(dur) or @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day))
+    if (durHasCalendar(dur) or @intFromEnum(opts.largest) < @intFromEnum(TUnit.day) or @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.round with calendar units requires relativeTo");
     const rounded = roundNs(durationTimeNs(dur), opts.smallest, opts.increment, opts.mode);
     return makeDuration(self, balanceTimeNs(rounded, opts.largest));
@@ -31509,6 +31519,7 @@ fn readDurationRoundOptions(self: *Interpreter, opts_v: Value, dur: [10]f64) Eva
     if (!lu.isUndefined()) {
         const s = try self.toStringV(lu);
         largest_set = true;
+        r.largest_set = true;
         if (!std.mem.eql(u8, s, "auto"))
             r.largest = tUnitFromStr(s) orelse return self.throwError("RangeError", "invalid largestUnit");
     }
@@ -31532,10 +31543,13 @@ fn readDurationRoundOptions(self: *Interpreter, opts_v: Value, dur: [10]f64) Eva
     if (!su.isUndefined()) {
         r.smallest = tUnitFromStr(try self.toStringV(su)) orelse return self.throwError("RangeError", "invalid smallestUnit");
         smallest_set = true;
+        r.smallest_set = true;
     }
 
     if (largest_set and smallest_set and @intFromEnum(r.largest) > @intFromEnum(r.smallest))
         return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
+    if (largest_set and smallest_set and r.increment != 1 and @intFromEnum(r.largest) < @intFromEnum(r.smallest) and @intFromEnum(r.smallest) <= @intFromEnum(TUnit.day))
+        return self.throwError("RangeError", "roundingIncrement cannot be combined with calendar unit balancing");
     try validateDurationRoundingIncrement(self, r.smallest, r.increment);
     return .{ .opts = r, .relative_to = rel, .has_unit = largest_set or smallest_set };
 }
