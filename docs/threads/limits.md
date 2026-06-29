@@ -103,7 +103,8 @@ context APIs.
   `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and
   `FinalizationRegistry` cleanup under GC-backed parallel contexts. The mid-GC
   profile now hammers sync-wait root publication during finishing
-  `parallel_midscript_gc` sweeps. The lifecycle profile now adds deterministic
+  `parallel_midscript_gc` sweeps and verifies exact `FinalizationRegistry`
+  cleanup count/sum delivery afterward. The lifecycle profile now adds deterministic
   termination storms and Worker/thread retained-`SharedArrayBuffer` overlap with
   an exact Atomics counter oracle, mixed terminate/close/postMessage races, and
   worker handler-exception recovery plus Thread exception identity through

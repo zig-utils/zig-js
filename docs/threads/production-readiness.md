@@ -122,7 +122,8 @@ as embedders exercise more threaded host patterns.
 - The mid-script GC fuzzer profile blocks peers in property `Atomics.wait`,
   `Condition.wait`, and contended `Lock` acquisition while allocation pressure
   drives `parallel_midscript_gc`; every seed must complete exactly and finish at
-  least one parallel sweep.
+  least one parallel sweep, then deliver the expected `FinalizationRegistry`
+  cleanup count/sum after a quiescent collect.
 - The lifecycle fuzzer profile adds deterministic termination storms where main
   JS throws with parked/unjoined `Thread`s, exact-counter oracles for script
   and module `Worker`s overlapping shared-realm `Thread`s on one retained

@@ -1155,9 +1155,13 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
-        \\  let cleanupSeen = 0;
-        \\  const registry = (typeof FinalizationRegistry === 'function')
-        \\    ? new FinalizationRegistry((held) => {{ cleanupSeen += held; }})
+        \\  globalThis.__midgcCleanupCount = 0;
+        \\  globalThis.__midgcCleanupSum = 0;
+        \\  globalThis.__midgcRegistry = (typeof FinalizationRegistry === 'function')
+        \\    ? new FinalizationRegistry(function(held) {{
+        \\        globalThis.__midgcCleanupCount = globalThis.__midgcCleanupCount + 1;
+        \\        globalThis.__midgcCleanupSum = globalThis.__midgcCleanupSum + held;
+        \\      }})
         \\    : null;
         \\  const propWaiter = new Thread(() => {{
         \\    Atomics.store(gate, 'propReady', 1);
@@ -1200,8 +1204,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    for (let i = 0; i < {d}; i++) {{
         \\      const cell = {{ round, i, nested: {{ v: i + round }}, text: 'midgc-' + round + '-' + i }};
         \\      keep.push(cell);
-        \\      if (registry && ((i + round) & 31) === 0)
-        \\        registry.register({{ ephemeral: i, round }}, 1);
+        \\      if (globalThis.__midgcRegistry && ((i + round) & 31) === 0)
+        \\        globalThis.__midgcRegistry.register({{ ephemeral: i, round }}, round * {d} + i + 1);
         \\    }}
         \\    let spin = 0;
         \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
@@ -1219,18 +1223,29 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\  if (condWaiter.join() !== 1) throw new Error('bad condition waiter');
         \\  if (holder.join() !== 1) throw new Error('bad lock holder');
         \\  if (lockWaiter.join() !== 1 || Atomics.load(gate, 'lockDone') !== 1) throw new Error('bad lock waiter');
-        \\  if (registry) registry.cleanupSome((held) => {{ cleanupSeen += held; }});
         \\  return keep.length;
         \\}})();
         \\
     ,
-        .{ wait_timeout_ms, wait_timeout_ms, rounds, per_round, spin_iters },
+        .{ wait_timeout_ms, wait_timeout_ms, rounds, per_round, per_round, spin_iters },
     );
     defer gpa.free(src);
 
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
     const before_collections = ctx.gc_par_collections.load(.monotonic);
     const expected: f64 = @floatFromInt(rounds * per_round);
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var round: usize = 0;
+    while (round < rounds) : (round += 1) {
+        var i: usize = 0;
+        while (i < per_round) : (i += 1) {
+            if (((i + round) & 31) == 0) {
+                expected_cleanup_count += 1;
+                expected_cleanup_sum += round * per_round + i + 1;
+            }
+        }
+    }
     const result = ctx.evaluate(src) catch |err| {
         const msg_txt = if (ctx.exception) |ex| blk: {
             var render = ctx.interpreter();
@@ -1249,6 +1264,38 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     }
     if (ctx.gc_par_collections.load(.monotonic) <= before_collections) {
         std.debug.print("seed {d}: midgc did not finish a parallel collection\n", .{seed});
+        return false;
+    }
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  if (globalThis.__midgcRegistry)
+        \\    globalThis.__midgcRegistry.cleanupSome(function(held) {{
+        \\      globalThis.__midgcCleanupCount = globalThis.__midgcCleanupCount + 1;
+        \\      globalThis.__midgcCleanupSum = globalThis.__midgcCleanupSum + held;
+        \\    }});
+        \\  if (globalThis.__midgcCleanupCount !== {d})
+        \\    throw new Error('midgc cleanup count ' + globalThis.__midgcCleanupCount);
+        \\  if (globalThis.__midgcCleanupSum !== {d})
+        \\    throw new Error('midgc cleanup sum ' + globalThis.__midgcCleanupSum);
+        \\  return globalThis.__midgcCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: midgc cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: midgc cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
         return false;
     }
     return true;

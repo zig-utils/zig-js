@@ -265,12 +265,15 @@ threading architecture:
 - **Mid-script parallel GC** - sync-wait pump points now publish roots for
   property `Atomics.wait`, `Condition.wait`, and contended `Lock` acquisition,
   so the abort-safe collector can finish while those peers are blocked. Keep
-  maturing convergence and stress coverage for heavier wait/cleanup mixes.
+  maturing convergence and stress coverage for heavier wait/cleanup mixes; the
+  mid-GC fuzzer now also verifies exact `FinalizationRegistry` cleanup count/sum
+  delivery after those wait-pump sweeps.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing
-  mid-script sweeps; the lifecycle profile adds deterministic termination
-  storms, script and module Worker/thread overlap over retained
+  mid-script sweeps plus deterministic cleanup count/sum delivery; the lifecycle
+  profile adds deterministic termination storms, script and module Worker/thread
+  overlap over retained
   `SharedArrayBuffer` storage, and mixed `close` / `terminate` / `postMessage`
   ordering plus worker handler-exception recovery, Thread exception identity
   through `join()` / `asyncJoin()` while property and condition waiters are

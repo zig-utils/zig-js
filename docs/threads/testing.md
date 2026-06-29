@@ -112,7 +112,9 @@ wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars. The
 mid-script GC profile (`-Dfuzz-midgc=true`) uses the internal testing context to
 enable `parallel_midscript_gc`, blocks peers in property `Atomics.wait`,
 `Condition.wait`, and contended `Lock` acquisition, then requires exact script
-completion plus at least one finishing parallel sweep. The lifecycle profile
+completion plus at least one finishing parallel sweep and exact
+`FinalizationRegistry` cleanup count/sum delivery after a quiescent collect. The
+lifecycle profile
 (`-Dfuzz-lifecycle=true`) adds expected-throw termination storms for
 parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script
 and module `Worker` overlap with shared-realm `Thread`s on one retained
