@@ -1128,6 +1128,130 @@ fn runFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runThreadLocalLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x746c_735f_6c69_6665);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 8 + r.uintLessThan(usize, 12);
+
+    var expected_success_sum: usize = 0;
+    var expected_reject_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        if ((id & 1) == 0) {
+            expected_success_sum += per_thread + id * 100_000;
+        } else {
+            expected_reject_sum += id + 1;
+        }
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: ThreadLocal lifecycle context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__tlsLifecycleOracle = 0;
+        \\  const tls = new ThreadLocal();
+        \\  const mainMarker = {{ seed: {d}, owner: 'main' }};
+        \\  tls.value = mainMarker;
+        \\  let asyncScore = 0;
+        \\  let rejectScore = 0;
+        \\  const threads = [];
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per) => {{
+        \\      if (tls.value !== undefined)
+        \\        throw new Error('fresh thread inherited ThreadLocal value');
+        \\      const local = {{ id, count: 0, tag: 'tls-' + id }};
+        \\      tls.value = local;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        if (tls.value !== local)
+        \\          throw new Error('ThreadLocal changed under thread ' + id);
+        \\        tls.value.count = tls.value.count + 1;
+        \\        if (i === (per >> 1)) {{
+        \\          const nested = new Thread(() => tls.value === undefined ? 1 : -1);
+        \\          if (nested.join() !== 1)
+        \\            throw new Error('nested thread saw parent ThreadLocal');
+        \\        }}
+        \\      }}
+        \\      if ((id & 1) === 1)
+        \\        throw local;
+        \\      return tls.value.count + id * 100000;
+        \\    }}, id, {d});
+        \\    t.asyncJoin().then(
+        \\      (v) => {{ asyncScore += v; }},
+        \\      (e) => {{
+        \\        if (e && e.id === id && e.count === {d} && e.tag === 'tls-' + id)
+        \\          rejectScore += id + 1;
+        \\        else
+        \\          rejectScore = -1000000;
+        \\      }});
+        \\    threads.push(t);
+        \\  }}
+        \\  let successSum = 0;
+        \\  let caughtRejectSum = 0;
+        \\  for (let id = 0; id < threads.length; id++) {{
+        \\    try {{
+        \\      const v = threads[id].join();
+        \\      if ((id & 1) !== 0)
+        \\        throw new Error('odd ThreadLocal worker returned normally');
+        \\      successSum += v;
+        \\    }} catch (e) {{
+        \\      if ((id & 1) === 0)
+        \\        throw e;
+        \\      if (!e || e.id !== id || e.count !== {d} || e.tag !== 'tls-' + id)
+        \\        throw new Error('bad ThreadLocal thrown object for ' + id);
+        \\      caughtRejectSum += id + 1;
+        \\    }}
+        \\  }}
+        \\  if (tls.value !== mainMarker)
+        \\    throw new Error('main ThreadLocal value was overwritten');
+        \\  if (successSum !== {d})
+        \\    throw new Error('bad ThreadLocal success sum ' + successSum);
+        \\  if (caughtRejectSum !== {d})
+        \\    throw new Error('bad ThreadLocal reject sum ' + caughtRejectSum);
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncScore !== {d})
+        \\      throw new Error('bad ThreadLocal asyncJoin success score ' + asyncScore);
+        \\    if (rejectScore !== {d})
+        \\      throw new Error('bad ThreadLocal asyncJoin reject score ' + rejectScore);
+        \\    globalThis.__tlsLifecycleOracle = 1;
+        \\  }});
+        \\  return successSum + caughtRejectSum;
+        \\}})();
+        \\
+    ,
+        .{ seed, nthreads, per_thread, per_thread, per_thread, expected_success_sum, expected_reject_sum, expected_success_sum, expected_reject_sum },
+    );
+    defer gpa.free(src);
+
+    const result = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: ThreadLocal lifecycle JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    const expected_return = expected_success_sum + expected_reject_sum;
+    if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected_return))) {
+        std.debug.print("seed {d}: ThreadLocal lifecycle got {d}, expected {d}\n", .{ seed, if (result.isNumber()) result.asNum() else -1, expected_return });
+        return false;
+    }
+    const oracle = ctx.evaluate("globalThis.__tlsLifecycleOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read ThreadLocal lifecycle oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: ThreadLocal lifecycle oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_635f_7761);
     const r = prng.random();
@@ -1372,15 +1496,17 @@ pub fn main(init: std.process.Init) !void {
     // Worker/thread SAB overlap, module-worker/thread overlap, mixed
     // close/terminate/postMessage ordering, worker handler exception recovery,
     // Thread exception identity across join/asyncJoin while waiters are parked,
-    // and cross-thread FinalizationRegistry cleanup. The oracle is not "no
+    // cross-thread FinalizationRegistry cleanup, and ThreadLocal isolation across
+    // nested threads plus throwing and async-joined workers. The oracle is not "no
     // throw":
     // termination storms must throw from the main script and still tear down
     // cleanly, overlap must produce exact synchronized counter values, and
     // close/terminate races must drain/drop messages according to channel
     // lifetime rules, thrown worker handlers must not poison later deliveries,
     // thread exceptions must keep identity through blocking and async joiners
-    // while waiters resume cleanly, and cleanup delivery must match exact
-    // count/sum oracles.
+    // while waiters resume cleanly, cleanup delivery must match exact count/sum
+    // oracles, and ThreadLocal values must stay per-thread across normal,
+    // throwing, nested, and async-joined lifecycles.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -1396,8 +1522,9 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
             if (!(try runThreadExceptionWaiterInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 7, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 8, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

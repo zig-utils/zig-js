@@ -122,7 +122,8 @@ and module `Worker` overlap with shared-realm `Thread`s on one retained
 coverage plus worker handler-exception recovery after a thrown `onmessage`,
 Thread exception identity through `join()` / `asyncJoin()` while property and
 condition waiters are parked, and cross-thread `FinalizationRegistry` cleanup
-count/sum oracles.
+count/sum oracles, plus `ThreadLocal` isolation across normal, throwing,
+nested, and async-joined thread lifecycles.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
 GIL-free parallel contexts. The full corpus is too slow for every PR, so CI
