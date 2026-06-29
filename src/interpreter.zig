@@ -33095,9 +33095,18 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "ZonedDateTime.round smallestUnit must be day or smaller");
     try validateZonedDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
     const t = this.asObj().temporal.?;
+    if (opts.smallest == .day) {
+        const l = zdtLocal(t);
+        const start_ns = try zdtStartOfDayEpochNs(self, t, l.year, l.month, l.day);
+        const tomorrow = addCalendarDate(t.calendar, l.year, l.month, l.day, 0, 0, 0, 1, 1, true) orelse
+            return self.throwError("RangeError", "date overflow");
+        const end_ns = try zdtStartOfDayEpochNs(self, t, @intCast(tomorrow.y), tomorrow.m, tomorrow.d);
+        const rounded_days = applyRounding(t.epoch_ns - start_ns, end_ns - start_ns, opts.mode);
+        return zdtMakeWithCalendar(self, start_ns + rounded_days * (end_ns - start_ns), t.tz_name, t.tz_offset_ns, t.calendar);
+    }
     // Round the local wall-clock, then re-apply the offset.
     const local = t.epoch_ns + t.tz_offset_ns;
-    const rounded = roundNs(local, opts.smallest, opts.increment, opts.mode);
+    const rounded = roundInstantNs(local, opts.smallest, opts.increment, opts.mode);
     return zdtMake(self, rounded - t.tz_offset_ns, t.tz_name, t.tz_offset_ns);
 }
 
