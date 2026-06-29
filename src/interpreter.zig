@@ -32928,6 +32928,11 @@ fn temporalZdtToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     return Value.str(try buf.toOwnedSlice(self.arena));
 }
 
+fn temporalZdtToJSONFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    return temporalZdtToStringFn(ctx, this, &.{});
+}
+
 fn zdtMake(self: *Interpreter, epoch_ns: i128, tz_name: []const u8, tz_offset: i64) EvalError!Value {
     try checkInstantEpochNs(self, epoch_ns);
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
@@ -33624,7 +33629,7 @@ fn installTemporal(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         try setNative(a, rs, p, "toString", 0, temporalZdtToStringFn);
         try setNative(a, rs, p, "valueOf", 0, temporalValueOfFn);
         try setNative(a, rs, p, "toLocaleString", 0, temporalToLocaleStringFn);
-        try setNative(a, rs, p, "toJSON", 0, temporalZdtToStringFn);
+        try setNative(a, rs, p, "toJSON", 0, temporalZdtToJSONFn);
         try setNative(a, rs, p, "toInstant", 0, temporalZdtToInstantFn);
         try setNative(a, rs, p, "toPlainDateTime", 0, temporalZdtToPlainDateTimeFn);
         try setNative(a, rs, p, "toPlainDate", 0, temporalZdtToPlainDateFn);
