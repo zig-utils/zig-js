@@ -209,8 +209,10 @@ per-thread before threads stop holding the GIL):
    zig-gc collector runs concurrently with parallel mutators: atomic
    `marking`/`concurrent` flags, atomic born-grey mark-bit init, whiten-under-
    `alloc_lock` (`beginConcurrentMarkParallel`), and sweep-under-`alloc_lock`,
-   all TSan-validated by a stress test (collector marks+sweeps while 4 mutators
-   allocate, no GIL). On the engine side, `gc.publishInterpreterRoots(machine)`
+   all TSan-validated by stress tests (collector marks+sweeps while 4 mutators
+   allocate, no GIL, plus a stale-barrier regression that proves abort cannot
+   clear `barrier_buf` while a delayed mutator appends after the fact). On the
+   engine side, `gc.publishInterpreterRoots(machine)`
    is the per-mutator side of the handshake: it routes a running interpreter's
    *precise* roots (`traceInterpreterRoots`) through the insertion barrier into
    `barrier_buf` (the only mutator→marker channel that is safe off the collector

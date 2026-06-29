@@ -72,7 +72,12 @@ Known performance/maturity work:
   root publication, and the collector waits long enough for one bounded park
   wake. This lets property `Atomics.wait`, `Condition.wait`, and contended
   `Lock` acquisition converge under the mid-script collector while preserving
-  quiescent collection as the fallback for heavier non-converging cycles.
+  quiescent collection as the fallback for heavier non-converging cycles. The
+  `zig-gc` barrier hand-off also re-checks `marking` and `concurrent` while
+  holding the barrier lock, so a stale mutator that observed an active
+  collection just before an abort cannot append into `barrier_buf` after the
+  abort path has cleared it; the dependency has a deterministic regression test
+  for that abort boundary and is covered by the local `parallel_js` TSan slice.
 
 ## 3. Parallel Performance
 

@@ -522,14 +522,17 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   root mid-mark, drain, ephemeron/weak pass, sweep). The white→grey claim is an
   atomic compare-and-set (`claimMark`) so the marker and the mutator's
   `writeBarrier` never double-push; the barrier and born-grey allocations hand
-  cells to the marker through a lock-guarded `barrier_buf`. Two races against a
+  cells to the marker through a lock-guarded `barrier_buf`. Three races against a
   live mutator were closed and proven TSan-clean: (1) GC scratch
   (`mark_stack`/`barrier_buf`) moved onto a separate thread-safe `aux` allocator
   (cell slabs stay on the mutator-only `backing`) — the localized answer to
   blocker #1 for the one-mutator model; (2) a bare reference slot the marker
   reads while a mutator writes is accessed with relaxed atomics (a plain mov on
   x86_64/arm64), and collection-backed storage is read under the same per-object
-  lock the mutator takes. `Visitor.concurrent()` lets the binding choose the
+  lock the mutator takes; (3) the abort path and `writeBarrier` now meet under
+  the barrier lock, where the mutator re-checks `marking` and `concurrent`
+  before appending, so a stale hand-off cannot repopulate `barrier_buf` after
+  abort cleared it. `Visitor.concurrent()` lets the binding choose the
   locking path only when marking concurrently, so M1/M2 stay byte-identical.
   *Engine binding wired + validated.* `gc.zig`'s `traceObject` takes
   `property_lock`/`elements_lock` around slot/accessor/element reads and reads
