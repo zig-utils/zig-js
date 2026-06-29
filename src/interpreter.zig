@@ -21359,12 +21359,55 @@ fn dtfRangeCheckKinds(self: *Interpreter, a: Value, b: Value) value.HostError!vo
     const kb = dtfArgKind(b);
     const same = (ka == null and kb == null) or (ka != null and kb != null and ka.? == kb.?);
     if (!same) return self.throwError("TypeError", "Intl.DateTimeFormat range: start and end must be the same type");
+    if (ka != null and a.isObject() and b.isObject()) {
+        const ta = a.asObj().temporal orelse return;
+        const tb = b.asObj().temporal orelse return;
+        if (temporalCarriesCalendar(ta) and !std.mem.eql(u8, ta.calendar, tb.calendar))
+            return self.throwError("RangeError", "Intl.DateTimeFormat range: start and end calendars must match");
+    }
 }
 
-fn dtfFormatOne(self: *Interpreter, this: Value, v: Value) value.HostError![]const u8 {
-    const parts = try dtfBuildParts(self, this, &.{v});
+fn dtfAppendPartValues(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), parts: []const DtfPart) EvalError!void {
+    for (parts) |p| try buf.appendSlice(self.arena, p.value);
+}
+
+fn dtfPartsSameValues(xp: []const DtfPart, yp: []const DtfPart) bool {
+    if (xp.len != yp.len) return false;
+    for (xp, 0..) |p, i| {
+        if (!std.mem.eql(u8, p.value, yp[i].value)) return false;
+    }
+    return true;
+}
+
+fn dtfSharedDateTimePrefixLen(xp: []const DtfPart, yp: []const DtfPart) usize {
+    const n = @min(xp.len, yp.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const a = xp[i];
+        const b = yp[i];
+        if (!std.mem.eql(u8, a.typ, b.typ) or !std.mem.eql(u8, a.value, b.value)) break;
+        if (std.mem.eql(u8, a.typ, "literal") and std.mem.eql(u8, a.value, ", ")) return i + 1;
+    }
+    return 0;
+}
+
+fn dtfFormatRangePartsText(self: *Interpreter, xp: []const DtfPart, yp: []const DtfPart) EvalError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
+    if (dtfPartsSameValues(xp, yp)) {
+        try dtfAppendPartValues(self, &buf, xp);
+        return buf.toOwnedSlice(self.arena);
+    }
+    const shared_prefix = dtfSharedDateTimePrefixLen(xp, yp);
+    if (shared_prefix > 0) {
+        try dtfAppendPartValues(self, &buf, xp[0..shared_prefix]);
+        try dtfAppendPartValues(self, &buf, xp[shared_prefix..]);
+        try buf.appendSlice(self.arena, dtf_range_sep);
+        try dtfAppendPartValues(self, &buf, yp[shared_prefix..]);
+        return buf.toOwnedSlice(self.arena);
+    }
+    try dtfAppendPartValues(self, &buf, xp);
+    try buf.appendSlice(self.arena, dtf_range_sep);
+    try dtfAppendPartValues(self, &buf, yp);
     return buf.toOwnedSlice(self.arena);
 }
 
@@ -21376,10 +21419,9 @@ fn intlDateTimeFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) 
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatRange on incompatible receiver");
     if (args.len < 2 or args[0].isUndefined() or args[1].isUndefined()) return self.throwError("TypeError", "formatRange requires two defined arguments");
     try dtfRangeCheckKinds(self, args[0], args[1]);
-    const xs = try dtfFormatOne(self, this, args[0]); // dtfBuildParts TimeClips (RangeError on bad value)
-    const ys = try dtfFormatOne(self, this, args[1]);
-    if (std.mem.eql(u8, xs, ys)) return Value.str(xs);
-    return Value.str(try std.fmt.allocPrint(self.arena, "{s}{s}{s}", .{ xs, dtf_range_sep, ys }));
+    const xp = try dtfBuildParts(self, this, &.{args[0]}); // dtfBuildParts TimeClips (RangeError on bad value)
+    const yp = try dtfBuildParts(self, this, &.{args[1]});
+    return Value.str(try dtfFormatRangePartsText(self, xp.items, yp.items));
 }
 
 fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -21401,16 +21443,20 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
             }
         }
     }.one;
-    // Equal-formatting dates: a single date with every part source "shared".
-    var same = xp.items.len == yp.items.len;
-    if (same) for (xp.items, 0..) |p, i| {
-        if (!std.mem.eql(u8, p.value, yp.items[i].value)) {
-            same = false;
-            break;
-        }
-    };
-    if (same) {
+    if (dtfPartsSameValues(xp.items, yp.items)) {
         try emit(self, arr, xp.items, "shared");
+        return Value.obj(arr);
+    }
+    const shared_prefix = dtfSharedDateTimePrefixLen(xp.items, yp.items);
+    if (shared_prefix > 0) {
+        try emit(self, arr, xp.items[0..shared_prefix], "shared");
+        try emit(self, arr, xp.items[shared_prefix..], "startRange");
+        const lo = (try self.newObject()).asObj();
+        try self.setProp(lo, "type", Value.str("literal"));
+        try self.setProp(lo, "value", Value.str(dtf_range_sep));
+        try self.setProp(lo, "source", Value.str("shared"));
+        try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
+        try emit(self, arr, yp.items[shared_prefix..], "endRange");
         return Value.obj(arr);
     }
     try emit(self, arr, xp.items, "startRange");
