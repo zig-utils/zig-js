@@ -29380,6 +29380,7 @@ fn parseDurationString(self: *Interpreter, s: []const u8) EvalError![10]f64 {
     if (sign < 0) for (&out) |*v| {
         if (v.* != 0) v.* = -v.*;
     };
+    if (!durInRange(out)) return self.throwError("RangeError", "duration out of range");
     return out;
 }
 
