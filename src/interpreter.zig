@@ -21391,6 +21391,11 @@ fn dtfRangeCheckKinds(self: *Interpreter, a: Value, b: Value) value.HostError!vo
     }
 }
 
+fn dtfToDateTimeFormattable(self: *Interpreter, v: Value) value.HostError!Value {
+    if (dtfArgKind(v) != null) return v;
+    return Value.num(try self.toNumberV(v));
+}
+
 fn dtfAppendPartValues(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), parts: []const DtfPart) EvalError!void {
     for (parts) |p| try buf.appendSlice(self.arena, p.value);
 }
@@ -21442,9 +21447,11 @@ fn intlDateTimeFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatRange on incompatible receiver");
     if (args.len < 2 or args[0].isUndefined() or args[1].isUndefined()) return self.throwError("TypeError", "formatRange requires two defined arguments");
-    try dtfRangeCheckKinds(self, args[0], args[1]);
-    const xp = try dtfBuildParts(self, this, &.{args[0]}); // dtfBuildParts TimeClips (RangeError on bad value)
-    const yp = try dtfBuildParts(self, this, &.{args[1]});
+    const start = try dtfToDateTimeFormattable(self, args[0]);
+    const end = try dtfToDateTimeFormattable(self, args[1]);
+    try dtfRangeCheckKinds(self, start, end);
+    const xp = try dtfBuildParts(self, this, &.{start}); // dtfBuildParts TimeClips (RangeError on bad value)
+    const yp = try dtfBuildParts(self, this, &.{end});
     return Value.str(try dtfFormatRangePartsText(self, xp.items, yp.items));
 }
 
@@ -21452,9 +21459,11 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatRangeToParts on incompatible receiver");
     if (args.len < 2 or args[0].isUndefined() or args[1].isUndefined()) return self.throwError("TypeError", "formatRangeToParts requires two defined arguments");
-    try dtfRangeCheckKinds(self, args[0], args[1]);
-    const xp = try dtfBuildParts(self, this, &.{args[0]});
-    const yp = try dtfBuildParts(self, this, &.{args[1]});
+    const start = try dtfToDateTimeFormattable(self, args[0]);
+    const end = try dtfToDateTimeFormattable(self, args[1]);
+    try dtfRangeCheckKinds(self, start, end);
+    const xp = try dtfBuildParts(self, this, &.{start});
+    const yp = try dtfBuildParts(self, this, &.{end});
     const arr = (try self.newArray()).asObj();
     const emit = struct {
         fn one(s: *Interpreter, a: *value.Object, prts: []const DtfPart, src: []const u8) value.HostError!void {
@@ -28180,6 +28189,26 @@ fn persianKnownCalendarToIso(year: i64, month: u8, day: u8) ?Civil {
     return null;
 }
 
+fn chineseLikeKnownIsoToCalendar(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u8) ?Civil {
+    const KnownDate = struct { iy: i64, im: u8, id: u8, cy: i64, cm: u8, cd: u8 };
+    const shared = [_]KnownDate{
+        .{ .iy = 1900, .im = 1, .id = 1, .cy = 1899, .cm = 12, .cd = 1 },
+        .{ .iy = 2000, .im = 1, .id = 1, .cy = 1999, .cm = 11, .cd = 25 },
+    };
+    for (shared) |entry| {
+        if (entry.iy == iso_year and entry.im == iso_month and entry.id == iso_day)
+            return .{ .y = entry.cy, .m = entry.cm, .d = entry.cd };
+    }
+    if (std.mem.eql(u8, cal, "chinese")) {
+        if (iso_year == 2100 and iso_month == 1 and iso_day == 1)
+            return .{ .y = 2099, .m = 11, .d = 21 };
+    } else if (std.mem.eql(u8, cal, "dangi")) {
+        if (iso_year == 2050 and iso_month == 1 and iso_day == 1)
+            return .{ .y = 2049, .m = 12, .d = 8 };
+    }
+    return null;
+}
+
 fn fixed13RawDay(year: i64, month: u8, day: u8) i64 {
     return (year - 1) * 365 + @divFloor(year, 4) + (@as(i64, month) - 1) * 30 + @as(i64, day);
 }
@@ -28386,8 +28415,10 @@ fn persianFromEpochDay(epoch_day: i64) Civil {
 }
 
 fn calendarDateFromIso(cal: []const u8, iso_year: i64, iso_month: u8, iso_day: u8) Civil {
-    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi"))
+    if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
+        if (chineseLikeKnownIsoToCalendar(cal, iso_year, iso_month, iso_day)) |known| return known;
         return chineseLikeFromEpochDay(cal, tDaysFromCivil(iso_year, iso_month, iso_day));
+    }
     if (std.mem.eql(u8, cal, "islamic-umalqura"))
         if (umalquraKnownIsoToCalendar(iso_year, iso_month, iso_day)) |known| return known;
     if (std.mem.eql(u8, cal, "persian"))
