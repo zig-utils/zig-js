@@ -27057,16 +27057,14 @@ fn durEndpointsNs(dur: [10]f64, rel: RelTo) struct { start: i128, end: i128 } {
 
 /// Temporal.Duration.prototype.total with a `relativeTo` anchor (ISO calendar):
 /// the (fractional) total of the duration measured in `unit`.
-fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) f64 {
-    _ = self;
+fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) EvalError!f64 {
     const ep = durEndpointsNs(dur, rel);
     // Day-and-smaller units (and weeks) have a fixed nanosecond length.
     if (unit == .day or @intFromEnum(unit) > @intFromEnum(TUnit.day)) {
-        const per: f64 = @floatFromInt(nsPerUnit(unit));
-        return @as(f64, @floatFromInt(ep.end - ep.start)) / per;
+        return decimalTotalFromNs(self, ep.end - ep.start, nsPerUnit(unit), 40);
     }
     if (unit == .week) {
-        return @as(f64, @floatFromInt(ep.end - ep.start)) / @as(f64, @floatFromInt(7 * DAY_NS));
+        return decimalTotalFromNs(self, ep.end - ep.start, 7 * DAY_NS, 40);
     }
     // Year/month: whole calendar units toward the end, plus a fraction of the
     // next unit (variable length).
@@ -27086,8 +27084,7 @@ fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) f
     const hi_ns = @as(i128, tDaysFromCivil(hi_date.y, hi_date.m, hi_date.d)) * DAY_NS + rel.time_ns;
     const span = hi_ns - lo_ns;
     if (span == 0) return @floatFromInt(whole);
-    const frac = @as(f64, @floatFromInt(ep.end - lo_ns)) / @as(f64, @floatFromInt(span));
-    return @as(f64, @floatFromInt(whole)) + @as(f64, @floatFromInt(sign)) * frac;
+    return decimalRatio(self, @as(i128, whole) * span + @as(i128, sign) * (ep.end - lo_ns), span, 40);
 }
 
 /// Temporal.Duration.prototype.round with a `relativeTo` anchor (ISO calendar).
@@ -27151,7 +27148,7 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         };
         try checkIsoDate(self, @floatFromInt(probe.y), @floatFromInt(probe.m), @floatFromInt(probe.d));
     }
-    const total = totalDurationRel(self, dur, rel, smallest);
+    const total = try totalDurationRel(self, dur, rel, smallest);
     const inc = opts.increment;
     const scale: i128 = 1_000_000_000;
     const inc_scaled: i128 = @intFromFloat(@round(inc * @as(f64, @floatFromInt(scale))));
@@ -27455,12 +27452,10 @@ fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const rel = try resolveRelativeTo(self, a0);
     const unit = (try readUnitOption(self, a0, "unit")) orelse return self.throwError("RangeError", "Temporal.Duration.prototype.total requires a unit");
     // With a relativeTo anchor, compute the calendar-aware (fractional) total.
-    if (rel) |anchor| return Value.num(totalDurationRel(self, dur, anchor, unit));
+    if (rel) |anchor| return Value.num(try totalDurationRel(self, dur, anchor, unit));
     if (durHasCalendar(dur) or @intFromEnum(unit) < @intFromEnum(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.total with calendar units requires relativeTo");
-    const total_ns: f64 = @floatFromInt(durationTimeNs(dur));
-    const per: f64 = @floatFromInt(nsPerUnit(unit));
-    return Value.num(total_ns / per);
+    return Value.num(try totalDurationFixed(self, dur, unit));
 }
 
 /// The largest non-zero unit of a duration (default `day`), for `largestUnit:
@@ -31260,6 +31255,55 @@ fn durationDayTimeNs(dur: [10]f64) i128 {
         @as(i128, @intFromFloat(dur[7])) * nsPerUnit(.millisecond) +
         @as(i128, @intFromFloat(dur[8])) * nsPerUnit(.microsecond) +
         @as(i128, @intFromFloat(dur[9]));
+}
+
+fn decimalRatio(self: *Interpreter, numerator: i128, denominator: i128, frac_digits: usize) EvalError!f64 {
+    if (denominator == 1) return @floatFromInt(numerator);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var n = numerator;
+    var d = denominator;
+    if (d < 0) {
+        n = -n;
+        d = -d;
+    }
+    if (n < 0) {
+        try buf.append(self.arena, '-');
+        n = -n;
+    }
+    const whole = @divTrunc(n, d);
+    const frac = @rem(n, d);
+    try buf.print(self.arena, "{d}", .{whole});
+    if (frac_digits != 0 and frac != 0) {
+        try buf.append(self.arena, '.');
+        var rem = frac;
+        for (0..frac_digits) |_| {
+            rem *= 10;
+            const digit = @divTrunc(rem, d);
+            try buf.append(self.arena, @intCast('0' + digit));
+            rem = @rem(rem, d);
+            if (rem == 0) break;
+        }
+    }
+    return std.fmt.parseFloat(f64, try buf.toOwnedSlice(self.arena)) catch self.throwError("RangeError", "duration total out of range");
+}
+
+fn decimalTotalFromNs(self: *Interpreter, total_ns: i128, per: i128, frac_digits: usize) EvalError!f64 {
+    return decimalRatio(self, total_ns, per, frac_digits);
+}
+
+fn totalDurationFixed(self: *Interpreter, dur: [10]f64, unit: TUnit) EvalError!f64 {
+    const total_ns = durationDayTimeNs(dur);
+    switch (unit) {
+        .week => return decimalTotalFromNs(self, total_ns, 7 * DAY_NS, 40),
+        .day => return decimalTotalFromNs(self, total_ns, DAY_NS, 40),
+        .hour => return decimalTotalFromNs(self, total_ns, nsPerUnit(.hour), 40),
+        .minute => return decimalTotalFromNs(self, total_ns, nsPerUnit(.minute), 40),
+        .second => return decimalTotalFromNs(self, total_ns, nsPerUnit(.second), 40),
+        .millisecond => return decimalTotalFromNs(self, total_ns, nsPerUnit(.millisecond), 40),
+        .microsecond => return decimalTotalFromNs(self, total_ns, nsPerUnit(.microsecond), 40),
+        .nanosecond => return decimalTotalFromNs(self, total_ns, nsPerUnit(.nanosecond), 0),
+        else => unreachable,
+    }
 }
 
 fn durationApplyStringPrecision(self: *Interpreter, dur: [10]f64, p: TemporalStringPrecision) EvalError![10]f64 {
