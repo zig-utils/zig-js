@@ -27616,6 +27616,7 @@ fn regulateIsoDate(self: *Interpreter, yf: f64, mf: f64, df: f64, constrain: boo
     var m = mf;
     var d = df;
     if (constrain) {
+        if (mf < 1 or df < 1) return self.throwError("RangeError", "date component out of range");
         m = @max(1, @min(12, mf));
         const dim: f64 = @floatFromInt(isoDaysInMonth(@intFromFloat(yf), @intFromFloat(m)));
         d = @max(1, @min(dim, df));
@@ -27640,6 +27641,7 @@ fn regulateCalendarDate(self: *Interpreter, cal: []const u8, yf: f64, mf: f64, d
     const max_month = calMonthsInYear(cal, year);
     var m = mf;
     if (constrain) {
+        if (mf < 1) return self.throwError("RangeError", "month out of range");
         m = @max(1, @min(@as(f64, @floatFromInt(max_month)), mf));
     } else if (mf < 1 or mf > @as(f64, @floatFromInt(max_month))) {
         return self.throwError("RangeError", "month out of range");
@@ -27648,6 +27650,7 @@ fn regulateCalendarDate(self: *Interpreter, cal: []const u8, yf: f64, mf: f64, d
     const dim: f64 = @floatFromInt(calDaysInMonth(cal, year, month));
     var d = df;
     if (constrain) {
+        if (df < 1) return self.throwError("RangeError", "day out of range");
         d = @max(1, @min(dim, df));
     } else if (df < 1 or df > dim) {
         return self.throwError("RangeError", "day out of range");
