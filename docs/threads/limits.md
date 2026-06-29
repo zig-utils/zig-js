@@ -84,11 +84,14 @@ context APIs.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
-  properties, shared array append, typed-array Atomics, and lifecycle churn. Use
-  it to drive contention reductions in global/environment bindings,
-  property/element locks, collection helpers, and GC allocation. Empty
-  sync-wait task pumps no longer take the shared run-loop task lock, reducing
-  one measured cost in contended lock/lifecycle paths.
+  properties, shared array append, typed-array Atomics, `Lock.asyncHold`
+  delivery, and lifecycle churn. Use it to drive contention reductions in
+  global/environment bindings,
+  property/element locks, async-hold delivery, collection helpers, and GC
+  allocation. Its `empty`/`jobs` columns now show whether run-loop task-pump
+  overhead is empty fast-path churn or real async-hold delivery. Empty sync-wait
+  task pumps no longer take the shared run-loop task lock, reducing one measured
+  cost in contended lock/lifecycle paths.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

@@ -251,10 +251,12 @@ threading architecture:
 - **Parallel scaling** - `zig build threads-profile` compares the no-GIL
   default against `.gil = true` across independent compute, shared object
   properties, array append, typed-array Atomics, contended `Lock.hold`, and
-  lifecycle churn. It now prints internal contention events and timed
-  wait/pump parks beside wall-clock time, so follow-up optimization can separate
-  user-level lock pressure from thread-join/lifecycle waiting, object/element
-  storage contention, and GC allocation costs under high thread counts. The
+  `Lock.asyncHold` delivery plus lifecycle churn. It now enables and prints
+  internal contention events, timed wait/pump parks, and run-loop task-pump
+  empty/job counts beside wall-clock time, so follow-up optimization can separate
+  user-level lock pressure from thread-join/lifecycle waiting, async-hold
+  delivery, object/element storage contention, and GC allocation costs under
+  high thread counts. The
   sync-wait pump path now skips the shared run-loop task lock entirely when no
   async hold jobs are queued; continue using the profile for the remaining
   contended-lock and lifecycle hot spots.

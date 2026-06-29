@@ -136,13 +136,16 @@ heap-cap gaps visible without inflating the green allowlist with no-op passes.
 
 `zig build threads-profile` is not a pass/fail correctness gate. It is the local
 scaling and contention profiler for issue #1. The wall-clock columns compare the
-no-GIL default with `.gil = true`, while `events` count logical contention in
-`Lock`/`Condition`/property waits and queued `asyncHold` grants, and `parks`
-count timed wait/pump iterations including `Thread.join`. Run it before and
-after synchronization or lifecycle changes so performance work has an
-attributed baseline instead of only elapsed time. Empty sync-wait task pumps
-now have a lock-free fast path; `threads-profile` remains the check that this
-kind of targeted optimization does not merely move overhead elsewhere.
+no-GIL default with `.gil = true`, while its opt-in counters let `events` count
+logical contention in `Lock`/`Condition`/property waits and queued `asyncHold`
+grants, and `parks` count timed wait/pump iterations including `Thread.join`.
+The `empty`/`jobs` columns split the run-loop task pump into empty atomic
+fast-path hits and real async-hold job delivery. Run it before and after
+synchronization or lifecycle changes so performance work has an attributed
+baseline instead of only elapsed time. Empty sync-wait task pumps now have a
+lock-free fast path;
+`threads-profile` remains the check that this kind of targeted optimization does
+not merely move overhead elsewhere.
 
 ## Focused Runs
 

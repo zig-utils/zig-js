@@ -85,6 +85,8 @@ pub const ContentionStats = struct {
     condition_wait_parks: u64 = 0,
     property_waits: u64 = 0,
     property_wait_parks: u64 = 0,
+    task_pump_empty: u64 = 0,
+    task_pump_jobs: u64 = 0,
 
     pub fn events(self: ContentionStats) u64 {
         return self.lock_contentions + self.async_hold_queued +
@@ -106,11 +108,15 @@ const ContentionCounters = struct {
     condition_wait_parks: std.atomic.Value(u64) = .init(0),
     property_waits: std.atomic.Value(u64) = .init(0),
     property_wait_parks: std.atomic.Value(u64) = .init(0),
+    task_pump_empty: std.atomic.Value(u64) = .init(0),
+    task_pump_jobs: std.atomic.Value(u64) = .init(0),
 };
 
 var contention_counters: ContentionCounters = .{};
+var contention_stats_enabled: std.atomic.Value(bool) = .init(false);
 
 pub fn resetContentionStats() void {
+    contention_stats_enabled.store(false, .release);
     contention_counters.thread_join_parks.store(0, .release);
     contention_counters.lock_contentions.store(0, .release);
     contention_counters.lock_wait_parks.store(0, .release);
@@ -119,6 +125,13 @@ pub fn resetContentionStats() void {
     contention_counters.condition_wait_parks.store(0, .release);
     contention_counters.property_waits.store(0, .release);
     contention_counters.property_wait_parks.store(0, .release);
+    contention_counters.task_pump_empty.store(0, .release);
+    contention_counters.task_pump_jobs.store(0, .release);
+    contention_stats_enabled.store(true, .release);
+}
+
+pub fn disableContentionStats() void {
+    contention_stats_enabled.store(false, .release);
 }
 
 pub fn contentionStats() ContentionStats {
@@ -131,10 +144,13 @@ pub fn contentionStats() ContentionStats {
         .condition_wait_parks = contention_counters.condition_wait_parks.load(.acquire),
         .property_waits = contention_counters.property_waits.load(.acquire),
         .property_wait_parks = contention_counters.property_wait_parks.load(.acquire),
+        .task_pump_empty = contention_counters.task_pump_empty.load(.acquire),
+        .task_pump_jobs = contention_counters.task_pump_jobs.load(.acquire),
     };
 }
 
 inline fn bumpContention(comptime field: []const u8) void {
+    if (!contention_stats_enabled.load(.monotonic)) return;
     _ = @field(contention_counters, field).fetchAdd(1, .monotonic);
 }
 
@@ -143,6 +159,10 @@ pub fn currentThreadId() u64 {
 }
 
 test "jsthread contention stats reset and snapshot" {
+    disableContentionStats();
+    bumpContention("lock_contentions");
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
+
     resetContentionStats();
     try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
     try std.testing.expectEqual(@as(u64, 0), contentionStats().parks());
@@ -155,14 +175,21 @@ test "jsthread contention stats reset and snapshot" {
     bumpContention("lock_wait_parks");
     bumpContention("condition_wait_parks");
     bumpContention("property_wait_parks");
+    bumpContention("task_pump_empty");
+    bumpContention("task_pump_jobs");
 
     const stats = contentionStats();
     try std.testing.expectEqual(@as(u64, 4), stats.events());
     try std.testing.expectEqual(@as(u64, 4), stats.parks());
+    try std.testing.expectEqual(@as(u64, 1), stats.task_pump_empty);
+    try std.testing.expectEqual(@as(u64, 1), stats.task_pump_jobs);
 
     resetContentionStats();
     try std.testing.expectEqual(@as(u64, 0), contentionStats().events());
     try std.testing.expectEqual(@as(u64, 0), contentionStats().parks());
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_empty);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().task_pump_jobs);
+    disableContentionStats();
 }
 
 /// Install the `Thread` global into an `enable_threads` Context. Called by
@@ -1952,7 +1979,10 @@ fn enqueueHoldJob(self: *Interpreter, job: *HoldJob) value.HostError!void {
 pub fn pumpTasks(self: *Interpreter) void {
     const g = self.gil orelse return;
     while (true) {
-        if (g.tasks_queued.load(.acquire) == 0) return;
+        if (g.tasks_queued.load(.acquire) == 0) {
+            bumpContention("task_pump_empty");
+            return;
+        }
         // Dequeue under api_lock (consistent with `enqueueHoldJob`), but run the
         // job OUTSIDE the lock — runHoldJob executes JS and takes per-structure
         // locks, so holding api_lock across it would invert lock order.
@@ -1964,6 +1994,7 @@ pub fn pumpTasks(self: *Interpreter) void {
         } else null;
         g.unlockApi();
         const r = raw orelse break;
+        bumpContention("task_pump_jobs");
         const job: *HoldJob = @ptrCast(@alignCast(r));
         runHoldJob(self, job) catch {};
         self.drainMicrotasks() catch {};

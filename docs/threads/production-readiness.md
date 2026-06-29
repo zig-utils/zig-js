@@ -79,10 +79,12 @@ Known performance/maturity work:
 - `zig build threads-profile` is the dedicated contention harness. It compares
   the no-GIL default with `.gil = true` across independent compute, shared
   object properties, shared array append, typed-array Atomics, contended
-  `Lock.hold`, and thread lifecycle churn. Each row includes internal
-  contention counters: `events` count logical contention (`Lock`/`Condition`/
-  property wait and queued `asyncHold` grants), while `parks` count timed
-  wait/pump iterations including `Thread.join`.
+  `Lock.hold`, `Lock.asyncHold` delivery, and thread lifecycle churn. Each row
+  enables and includes internal contention counters: `events` count logical
+  contention (`Lock`/`Condition`/property wait and queued `asyncHold` grants),
+  `parks` count timed wait/pump iterations including `Thread.join`, and
+  `empty`/`jobs` split the run-loop task pump into empty fast-path hits and
+  delivered async-hold jobs.
 - Parked sync waiters still pump the realm run-loop so async-hold grants make
   progress, but empty pumps now use an atomic queue-count fast path and avoid
   taking the shared threading API lock.

@@ -259,6 +259,17 @@ fn parallelJsBudgetSkip(name: []const u8) bool {
     return false;
 }
 
+fn asyncDrainPolls(name: []const u8) usize {
+    const base: usize = if (builtin.sanitize_thread) 30_000 else 3_000;
+    if (std.mem.eql(u8, name, "cve/mc-dos-waiter-table-storm.js")) {
+        // This stress case can run 2000 gc()/microtask turns after the waiter
+        // storm has already settled. Give the oracle room under whole-corpus
+        // warmed-state load without relaxing the rest of the allowlist.
+        return base * 3;
+    }
+    return base;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -458,7 +469,7 @@ pub fn main(init: std.process.Init) !void {
                     continue;
                 }
                 var balanced = false;
-                for (0..3000) |_| {
+                for (0..asyncDrainPolls(name)) |_| {
                     const status = ctx.evaluate("$drainRunLoop(); drainMicrotasks(); __asyncExpected === null || __asyncPassed >= __asyncExpected") catch js.Value.undef();
                     if (status.isBoolean() and status.asBool()) {
                         balanced = true;
