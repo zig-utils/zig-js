@@ -21123,6 +21123,9 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         hour_cycle = dtfResolveHourCycle(self, loc, hour_cycle, null);
         hour12 = std.mem.eql(u8, hour_cycle, "h11") or std.mem.eql(u8, hour_cycle, "h12");
     }
+    if (temporal_kind == null or temporal_kind.? == .instant) {
+        civ = calendarDateFromIso(o_calendar, civ.y, civ.m, civ.d);
+    }
 
     // Restrict the components to those the Temporal value's type can provide; a
     // requested component the type lacks is dropped, and if NOTHING the formatter
