@@ -103,8 +103,9 @@ context APIs.
   `parallel_midscript_gc` sweeps. The lifecycle profile now adds deterministic
   termination storms and Worker/thread retained-`SharedArrayBuffer` overlap with
   an exact Atomics counter oracle, mixed terminate/close/postMessage races, and
-  worker handler-exception recovery. Keep extending it toward more teardown
-  ordering, module-worker overlap, and cleanup/finalization interleavings.
+  worker handler-exception recovery plus cross-thread `FinalizationRegistry`
+  cleanup count/sum oracles. Keep extending it toward more teardown ordering,
+  module-worker overlap, and richer cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow

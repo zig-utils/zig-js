@@ -79,8 +79,10 @@ jobs:
           - name: threadfuzz-midgc
             cmd: zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=20
           # Lifecycle profile: deterministic termination storms (main throws
-          # with parked/unjoined Threads) and cross-realm Worker + shared-realm
-          # Thread overlap on one SharedArrayBuffer with an exact counter oracle.
+          # with parked/unjoined Threads), cross-realm Worker + shared-realm
+          # Thread overlap on one SharedArrayBuffer with an exact counter oracle,
+          # Worker handler exception recovery, and cross-thread finalization
+          # cleanup count/sum oracles.
           - name: threadfuzz-lifecycle
             cmd: zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=60
           # Sanitizer combo: ReleaseSafe keeps Zig's safety checks (UB, bounds,

@@ -895,6 +895,114 @@ fn runWorkerExceptionRecovery(gpa: std.mem.Allocator, seed: u64) !bool {
     return true;
 }
 
+fn runFinalizationCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6669_6e61_6c69_7a65);
+    const r = prng.random();
+    const nthreads = 2 + r.uintLessThan(usize, 4);
+    const per_thread = 12 + r.uintLessThan(usize, 12);
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: finalization context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__finCleanupCount = 0;
+        \\  globalThis.__finCleanupSum = 0;
+        \\  globalThis.__finRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__finCleanupCount++;
+        \\    globalThis.__finCleanupSum += held;
+        \\  }});
+        \\  function registerRange(base) {{
+        \\    for (let i = 0; i < {d}; i++) {{
+        \\      let target = {{ base, i, pad: 'cleanup-' + base + '-' + i }};
+        \\      globalThis.__finRegistry.register(target, base + i);
+        \\      target = null;
+        \\    }}
+        \\    return {d};
+        \\  }}
+        \\  const threads = [];
+        \\
+    ,
+        .{ per_thread, per_thread },
+    );
+    defer gpa.free(src);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(gpa);
+    try buf.appendSlice(gpa, src);
+    var expected_count: usize = 0;
+    var expected_sum: usize = 0;
+    var i: usize = 0;
+    while (i < nthreads) : (i += 1) {
+        const base = (i + 1) * 1000;
+        expected_count += per_thread;
+        expected_sum += per_thread * base + (per_thread * (per_thread - 1)) / 2;
+        const line = try std.fmt.allocPrint(gpa, "  threads.push(new Thread(registerRange, {d}));\n", .{base});
+        defer gpa.free(line);
+        try buf.appendSlice(gpa, line);
+    }
+    const tail = try std.fmt.allocPrint(
+        gpa,
+        \\  let joined = 0;
+        \\  for (const t of threads) joined += t.join();
+        \\  if (joined !== {d}) throw new Error('bad finalization registration count: ' + joined);
+        \\  return joined;
+        \\}})();
+        \\
+    ,
+        .{expected_count},
+    );
+    defer gpa.free(tail);
+    try buf.appendSlice(gpa, tail);
+
+    const registered = ctx.evaluate(buf.items) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!registered.isNumber() or registered.asNum() != @as(f64, @floatFromInt(expected_count))) {
+        std.debug.print("seed {d}: finalization registered got {d}, expected {d}\n", .{ seed, if (registered.isNumber()) registered.asNum() else -1, expected_count });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const cleanup_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__finRegistry.cleanupSome();
+        \\  if (globalThis.__finCleanupCount !== {d})
+        \\    throw new Error('bad cleanup count: ' + globalThis.__finCleanupCount);
+        \\  if (globalThis.__finCleanupSum !== {d})
+        \\    throw new Error('bad cleanup sum: ' + globalThis.__finCleanupSum);
+        \\  return globalThis.__finCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_count, expected_sum },
+    );
+    defer gpa.free(cleanup_src);
+    const cleaned = ctx.evaluate(cleanup_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: finalization cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_count))) {
+        std.debug.print("seed {d}: finalization cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_count });
+        return false;
+    }
+    return true;
+}
+
 fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6d69_6467_635f_7761);
     const r = prng.random();
@@ -1090,13 +1198,14 @@ pub fn main(init: std.process.Init) !void {
     };
     // `threadfuzz lifecycle <iters> <seed>`: deterministic termination storms,
     // Worker/thread SAB overlap, module-worker/thread overlap, mixed
-    // close/terminate/postMessage ordering, and worker handler exception
-    // recovery. The oracle is not "no throw":
+    // close/terminate/postMessage ordering, worker handler exception recovery,
+    // and cross-thread FinalizationRegistry cleanup. The oracle is not "no
+    // throw":
     // termination storms must throw from the main script and still tear down
     // cleanly, overlap must produce exact synchronized counter values, and
     // close/terminate races must drain/drop messages according to channel
-    // lifetime rules, and thrown worker handlers must not poison later
-    // deliveries.
+    // lifetime rules, thrown worker handlers must not poison later deliveries,
+    // and cleanup delivery must match exact count/sum oracles.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
         if (args.next()) |b| iters = std.fmt.parseInt(usize, b, 10) catch iters;
@@ -1110,8 +1219,9 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runModuleWorkerThreadOverlap(gpa, seed))) lfail += 1;
             if (!(try runWorkerCloseTerminateRace(gpa, seed))) lfail += 1;
             if (!(try runWorkerExceptionRecovery(gpa, seed))) lfail += 1;
+            if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 5, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 6, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

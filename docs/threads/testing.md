@@ -117,7 +117,8 @@ completion plus at least one finishing parallel sweep. The lifecycle profile
 parked/unjoined shared-realm `Thread`s, exact Atomics counter oracles for script
 and module `Worker` overlap with shared-realm `Thread`s on one retained
 `SharedArrayBuffer`, and mixed `close` / `terminate` / `postMessage` ordering
-coverage plus worker handler-exception recovery after a thrown `onmessage`.
+coverage plus worker handler-exception recovery after a thrown `onmessage` and
+cross-thread `FinalizationRegistry` cleanup count/sum oracles.
 
 `zig build test262 -Dtest262-parallel-js=true` runs test262 programs in
 GIL-free parallel contexts. The full corpus is too slow for every PR, so CI
