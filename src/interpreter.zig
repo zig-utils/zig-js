@@ -27018,7 +27018,7 @@ fn validateRelativeCalendar(self: *Interpreter, v: Value) EvalError!void {
         return;
     }
     if (!v.isString()) return self.throwError("TypeError", "calendar is not a valid calendar");
-    _ = try toCalendarId(self, v);
+    _ = try toCalendarId(self, v, false);
 }
 
 fn isFixedTimeZone(tz: TimeZone) bool {
@@ -27680,7 +27680,7 @@ fn temporalPlainDateConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     const d = try temporalIntArg(self, if (args.len > 2) args[2] else Value.undef(), "day");
     try checkIsoDate(self, y, m, d);
     // Optional 4th argument is the calendar (defaults to iso8601).
-    const cal = if (args.len > 3 and !args[3].isUndefined()) try toCalendarId(self, args[3]) else "iso8601";
+    const cal = if (args.len > 3 and !args[3].isUndefined()) try toCalendarId(self, args[3], false) else "iso8601";
     const cd = calendarDateFromIso(cal, @intFromFloat(y), @intFromFloat(m), @intFromFloat(d));
     const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
     o.temporal.?.year = @intCast(cd.y);
@@ -28587,10 +28587,10 @@ fn calIsoFromEra(cal: []const u8, era: []const u8, era_year: i64) ?i64 {
 }
 
 /// ToTemporalCalendarIdentifier for constructor/withCalendar arguments: a
-/// date-bearing Temporal instance contributes its own calendar, and a string is
-/// a bare calendar id. Temporal ISO strings are not calendar identifiers here.
-/// Other values are TypeError; malformed or unknown ids are RangeError.
-fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
+/// date-bearing Temporal instance contributes its own calendar, a string is a
+/// bare calendar id or Temporal ISO string, and other values are TypeError.
+/// Malformed or unknown ids are RangeError.
+fn toCalendarId(self: *Interpreter, v: Value, allow_iso_string: bool) value.HostError![]const u8 {
     if (v.isObject() and v.asObj().temporal != null) {
         const t = v.asObj().temporal.?;
         if (temporalCarriesCalendar(t)) return t.calendar;
@@ -28598,6 +28598,10 @@ fn toCalendarId(self: *Interpreter, v: Value) value.HostError![]const u8 {
     }
     if (!v.isString()) return self.throwError("TypeError", "calendar must be a string or a Temporal object");
     const s = v.asStr();
+    if (allow_iso_string and isTemporalIsoString(self, s)) {
+        const ann = stripTemporalAnnotations(self, s) catch return "iso8601";
+        return if (ann.cal) |cal| canonCalendarId(self, cal) else "iso8601";
+    }
     if (isCalendarId(s)) {
         if (isKnownCalendar(s)) return canonCalendarId(self, s);
         return self.throwError("RangeError", "unknown calendar");
@@ -28757,6 +28761,11 @@ fn isTemporalIsoString(self: *Interpreter, s: []const u8) bool {
         return b.len >= 3 and std.ascii.isDigit(b[1]) and std.ascii.isDigit(b[2]);
     if (b.len >= 2 and std.ascii.isDigit(b[0]) and std.ascii.isDigit(b[1])) {
         if (b.len == 2 or b[2] == ':') return true; // "HH" / "HH:MM…"
+        if (b.len >= 6 and std.ascii.isDigit(b[2]) and std.ascii.isDigit(b[3]) and std.ascii.isDigit(b[4]) and std.ascii.isDigit(b[5])) {
+            if (b.len == 6) return true; // "HHMMSS"
+            if (b[6] == '.' or b[6] == ',') return true; // "HHMMSS.f…", optionally with offset
+            if (b[6] == '+' or b[6] == '-') return true; // "HHMMSS±HH[:MM]"
+        }
         if (b.len == 5 and b[2] == '-') return true; // "MM-DD" month-day
     }
     if (std.mem.startsWith(u8, b, "--")) return true; // "--MM-DD" month-day
@@ -29438,7 +29447,7 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
         if (n < 0 or n > maxes[i]) return self.throwError("RangeError", "time component out of range");
         vals[i] = n;
     }
-    const cal = if (args.len > 9 and !args[9].isUndefined()) try toCalendarId(self, args[9]) else "iso8601";
+    const cal = if (args.len > 9 and !args[9].isUndefined()) try toCalendarId(self, args[9], false) else "iso8601";
     const cd = calendarDateFromIso(cal, @intFromFloat(y), @intFromFloat(m), @intFromFloat(d));
     const o = try makeTemporal(self, .plain_date_time, "\x00T.PlainDateTime");
     o.temporal.?.year = @intCast(cd.y);
@@ -29621,7 +29630,7 @@ fn temporalPlainYearMonthConstructorFn(ctx: *anyopaque, this: Value, args: []con
     const y = try temporalIntArg(self, if (args.len > 0) args[0] else Value.undef(), "year");
     const m = try temporalIntArg(self, if (args.len > 1) args[1] else Value.undef(), "month");
     // arg[2] is the calendar (only "iso8601" supported); arg[3] a reference day.
-    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2]) else "iso8601";
+    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2], false) else "iso8601";
     const refd = if (args.len > 3 and !args[3].isUndefined()) try temporalIntArg(self, args[3], "day") else 1;
     if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
     const month: u8 = @intFromFloat(m);
@@ -30058,7 +30067,7 @@ fn temporalPlainMonthDayConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     const m = try temporalIntArg(self, if (args.len > 0) args[0] else Value.undef(), "month");
     const d = try temporalIntArg(self, if (args.len > 1) args[1] else Value.undef(), "day");
     // arg[2] is the calendar; arg[3] a reference year (default 1972, a leap year).
-    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2]) else "iso8601";
+    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2], false) else "iso8601";
     const refy: f64 = if (args.len > 3 and !args[3].isUndefined()) try temporalIntArg(self, args[3], "year") else 1972;
     if (m < 1 or m > 12) return self.throwError("RangeError", "month out of range");
     const dim = isoDaysInMonth(@intFromFloat(refy), @intFromFloat(m));
@@ -31966,7 +31975,7 @@ fn requireIsoCalendarArg(self: *Interpreter, v: Value) value.HostError!void {
 fn temporalPlainDateWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date)) return self.throwError("TypeError", "non-PlainDate");
-    const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef());
+    const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef(), true);
     const t = this.asObj().temporal.?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
@@ -31981,7 +31990,7 @@ fn temporalPlainDateWithCalendarFn(ctx: *anyopaque, this: Value, args: []const V
 fn temporalDateTimeWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsTemporal(this, .plain_date_time)) return self.throwError("TypeError", "non-PlainDateTime");
-    const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef());
+    const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef(), true);
     const t = this.asObj().temporal.?;
     const iso = calendarDateToIso(t.calendar, t.year, t.month, t.day);
     const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
@@ -32777,7 +32786,7 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     if (args.len < 2 or args[1].isUndefined()) return self.throwError("TypeError", "ZonedDateTime requires a time zone");
     if (!args[1].isString()) return self.throwError("TypeError", "time zone must be a string");
     const tz = try parseTimeZone(self, args[1].asStr());
-    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2]) else "iso8601";
+    const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2], false) else "iso8601";
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
     o.temporal.?.epoch_ns = epoch_ns;
     o.temporal.?.tz_name = tz.name;
@@ -33205,7 +33214,7 @@ fn temporalZdtWithTimeZoneFn(ctx: *anyopaque, this: Value, args: []const Value) 
 fn temporalZdtWithCalendarFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!tIsZdt(this)) return self.throwError("TypeError", "non-ZonedDateTime");
-    const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef());
+    const cal = try toCalendarId(self, if (args.len > 0) args[0] else Value.undef(), true);
     const t = this.asObj().temporal.?;
     const r = try zdtMake(self, t.epoch_ns, t.tz_name, t.tz_offset_ns);
     r.asObj().temporal.?.calendar = cal;
