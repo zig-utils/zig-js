@@ -2431,11 +2431,15 @@ pub const Interpreter = struct {
                 // as block-scoped: it creates the legacy var binding only when the
                 // name is eligible; otherwise the binding is purely local (and dies
                 // with the statement, so nothing leaks to the enclosing scope).
-                const fnv = try self.makeFunction(fnode, self.env);
+                const block_env = try gc_mod.allocEnv(self.arena);
+                self.initEnvironment(block_env, self.env, false);
+                const saved_env = self.env;
+                self.env = block_env;
+                defer self.env = saved_env;
+                const fnv = try self.makeFunction(fnode, block_env);
+                try block_env.put(fnode.name, fnv);
                 if (self.annexb_legacy) |set| {
                     if (set.contains(fnode.name)) try self.globalDefineDeletable(fnode.name, fnv);
-                } else {
-                    try self.globalDefine(fnode.name, fnv);
                 }
                 break :blk Value.undef();
             },
