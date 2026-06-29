@@ -32840,9 +32840,13 @@ fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: Z
             try zdtOffsetForLocalDisambiguation(self, tz, local_ns, disambiguation);
         if (!p.has_offset) break :blk local_ns - @as(i128, actual);
         if (isFixedTimeZone(tz)) {
-            if (p.offset_ns != @as(i128, tz.offset_ns))
-                return self.throwError("RangeError", "offset does not match time zone");
-            break :blk local_ns - @as(i128, tz.offset_ns);
+            const tz_off: i128 = @as(i128, tz.offset_ns);
+            break :blk switch (behavior) {
+                .use => local_ns - p.offset_ns,
+                .ignore => local_ns - tz_off,
+                .prefer => if (p.offset_ns == tz_off) local_ns - tz_off else local_ns - p.offset_ns,
+                .reject => if (p.offset_ns == tz_off) local_ns - tz_off else return self.throwError("RangeError", "offset does not match time zone"),
+            };
         }
         const exact_match = zdtOffsetMatchesLocal(tz, local_ns, p.offset_ns);
         const rounded_match = !p.offset_has_seconds and p.offset_ns == roundOffsetToMinute(@as(i128, actual));
@@ -33114,7 +33118,7 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     const epoch_ns = try checkedEpochNsFromBigInt(self, if (args.len > 0) args[0] else Value.undef());
     if (args.len < 2 or args[1].isUndefined()) return self.throwError("TypeError", "ZonedDateTime requires a time zone");
     if (!args[1].isString()) return self.throwError("TypeError", "time zone must be a string");
-    const tz = try parseTimeZone(self, args[1].asStr());
+    const tz = try parseTimeZoneBare(self, args[1].asStr());
     const cal = if (args.len > 2 and !args[2].isUndefined()) try toCalendarId(self, args[2], false) else "iso8601";
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
     o.temporal.?.epoch_ns = epoch_ns;
@@ -33636,8 +33640,8 @@ fn toZdtArg(self: *Interpreter, v: Value, constrain: bool, offset_behavior: ZdtO
         // A fields bag with timeZone.
         if (!(try self.getProperty(v, "calendar")).isUndefined()) _ = try readCalendarField(self, v);
         const tzv = try self.getProperty(v, "timeZone");
-        if (tzv.isString()) {
-            const tz = try parseTimeZone(self, tzv.asStr());
+        if (!tzv.isUndefined()) {
+            const tz = try resolveTimeZoneArg(self, tzv);
             const offv = try self.getProperty(v, "offset");
             const offset_ns: ?i128 = if (!offv.isUndefined()) try validateRelativeOffset(self, offv) else null;
             const f = try toPlainDateFields(self, v, constrain);
