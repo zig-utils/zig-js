@@ -29281,6 +29281,12 @@ fn temporalPlainDateEqualsFn(ctx: *anyopaque, this: Value, args: []const Value) 
 
 /// PlainDate add/subtract a Duration (years/months adjust the calendar fields
 /// with `constrain` overflow, then weeks+days shift the epoch day).
+fn durationWholeTimeDays(dur: [10]f64) f64 {
+    const time_ns = durationTimeNs(dur) -
+        (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * nsPerUnit(.day);
+    return @floatFromInt(@divTrunc(time_ns, nsPerUnit(.day)));
+}
+
 fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -29289,7 +29295,7 @@ fn temporalPlainDateAddFn(comptime sign: f64) value.NativeFn {
             const t = this.asObj().temporal.?;
             const dur = try durationFromArg(self, if (args.len > 0) args[0] else Value.undef());
             const reject = try readOverflowReject(self, if (args.len > 1) args[1] else Value.undef());
-            const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3], sign, reject) orelse return self.throwError("RangeError", "date overflow");
+            const c = addCalendarDate(t.calendar, t.year, t.month, t.day, dur[0], dur[1], dur[2], dur[3] + durationWholeTimeDays(dur), sign, reject) orelse return self.throwError("RangeError", "date overflow");
             const iso = calendarDateToIso(t.calendar, c.y, c.m, c.d);
             try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
             const o = try makeTemporal(self, .plain_date, "\x00T.PlainDate");
