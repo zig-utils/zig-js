@@ -105,24 +105,26 @@ context APIs.
   tracing those peers as frozen parked stacks. Host-side thread queues are part
   of the root set too: `Gil.tasks`, `LockRecord.pending`, async condition
   waiters, ThreadLocal maps, and thread completion results now trace or barrier
-  their hidden JS values. Keep quiescent collection as the fallback for cycles
-  that still cannot converge, and keep widening wait/cleanup stress around this
-  protocol, especially async-grant execution while a mid-script collection is in
-  flight.
+  their hidden JS values. The mid-GC fuzzer now queues a `Lock.asyncHold` grant
+  with captured JS roots and requires sync-wait pump points to execute it during
+  the same allocation-pressure window that produces a finishing parallel sweep.
+  Keep quiescent collection as the fallback for cycles that still cannot
+  converge, and keep widening wait/cleanup stress around this protocol.
 - **Fuzzer breadth.** The broad `threadfuzz` profile now covers caught
   exceptions/finally, nested thread lifecycle, `asyncJoin`, property
   `wait`/`waitAsync`, `Condition`, `Thread.restrict`, and
   `FinalizationRegistry` cleanup under GC-backed parallel contexts. The mid-GC
   profile now hammers sync-wait root publication during finishing
-  `parallel_midscript_gc` sweeps and verifies exact `FinalizationRegistry`
-  cleanup count/sum delivery afterward. The lifecycle profile now adds deterministic
-  termination storms and Worker/thread retained-`SharedArrayBuffer` overlap with
-  an exact Atomics counter oracle, mixed terminate/close/postMessage races, and
-  worker handler-exception recovery plus Thread exception identity through
-  `join()` / `asyncJoin()` while property and condition waiters are parked, and
-  cross-thread `FinalizationRegistry` cleanup count/sum oracles. Keep extending
-  it toward more teardown ordering, module-worker overlap, and richer
-  cleanup/finalization interleavings.
+  `parallel_midscript_gc` sweeps, executes an async-hold grant from those pump
+  points, and verifies exact `FinalizationRegistry` cleanup count/sum delivery
+  afterward. The lifecycle profile now adds deterministic termination storms and
+  Worker/thread retained-`SharedArrayBuffer` overlap with an exact Atomics
+  counter oracle, mixed terminate/close/postMessage races, and worker
+  handler-exception recovery plus Thread exception identity through `join()` /
+  `asyncJoin()` while property and condition waiters are parked, and cross-thread
+  `FinalizationRegistry` cleanup count/sum oracles. Keep extending it toward
+  more teardown ordering, module-worker overlap, and richer cleanup/finalization
+  interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, JIT/shell-hook witnesses, deep stack-overflow

@@ -8204,10 +8204,26 @@ test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC
 
     const src =
         \\(() => {
-        \\  const gate = { state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0 };
+        \\  const gate = { state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0 };
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
+        \\  const asyncTaskLock = new Lock();
+        \\  const asyncRoot = { nested: { base: 41 }, label: 'async-midgc-root' };
+        \\  let asyncScore = 0;
+        \\  let asyncThen = 0;
+        \\  const asyncGrant = asyncTaskLock.asyncHold(() => {
+        \\    const taskKeep = [];
+        \\    for (let a = 0; a < 128; a++)
+        \\      taskKeep.push({ a: a, root: asyncRoot, payload: 'async-grant-' + a });
+        \\    asyncScore = asyncRoot.nested.base + taskKeep.length;
+        \\    Atomics.store(gate, 'asyncDone', 1);
+        \\    Atomics.notify(gate, 'asyncDone');
+        \\    return asyncScore;
+        \\  });
+        \\  asyncGrant.then(
+        \\    (v) => { asyncThen = v; },
+        \\    () => { asyncThen = -1; });
         \\  const propWaiter = new Thread(() => {
         \\    Atomics.store(gate, 'propReady', 1);
         \\    Atomics.notify(gate, 'propReady');
@@ -8252,6 +8268,12 @@ test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC
         \\    for (let j = 0; j < 8000; j++) spin = (spin + j) & 0x3fffffff;
         \\    if (spin < 0) keep.push({ never: true });
         \\  }
+        \\  let asyncSpins = 0;
+        \\  while (Atomics.load(gate, 'asyncDone') === 0 && asyncSpins++ < 10000000) ;
+        \\  if (Atomics.load(gate, 'asyncDone') !== 1)
+        \\    throw new Error('asyncHold grant was not pumped during mid-script GC pressure');
+        \\  if (asyncScore !== 169 || asyncThen !== 169)
+        \\    throw new Error('bad asyncHold midgc score: ' + asyncScore + '/' + asyncThen);
         \\  condLock.hold(() => {
         \\    Atomics.store(gate, 'state', 1);
         \\    Atomics.notify(gate, 'state');

@@ -135,8 +135,10 @@ as embedders exercise more threaded host patterns.
 - The mid-script GC fuzzer profile blocks peers in property `Atomics.wait`,
   `Condition.wait`, and contended `Lock` acquisition while allocation pressure
   drives `parallel_midscript_gc`; every seed must complete exactly and finish at
-  least one parallel sweep, then deliver the expected `FinalizationRegistry`
-  cleanup count/sum after a quiescent collect.
+  least one parallel sweep. It also queues a `Lock.asyncHold` grant with hidden
+  captured JS roots and requires sync-wait pump points to deliver that grant
+  during the same mid-script GC pressure window, then deliver the expected
+  `FinalizationRegistry` cleanup count/sum after a quiescent collect.
 - Host-side thread queues are now explicit GC roots: queued `Lock.asyncHold`
   tasks in `Gil.tasks`, per-lock pending grants, async condition waiters,
   ThreadLocal values, and thread completion results trace or barrier their
@@ -156,8 +158,8 @@ as embedders exercise more threaded host patterns.
 
 Remaining: keep extending the lifecycle profile toward more cross-realm
 scheduling, worker module-graph shapes, richer cleanup/finalization
-interleavings, async-grant execution during active mid-script GC windows, and
-additional teardown race variants.
+interleavings, more async-grant/mid-script-GC variants, and additional teardown
+race variants.
 
 ## 6. CI Gating
 

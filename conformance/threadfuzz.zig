@@ -1257,6 +1257,9 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const r = prng.random();
     const rounds = 8 + r.uintLessThan(usize, 8);
     const per_round = 650 + r.uintLessThan(usize, 500);
+    const async_allocs = 96 + r.uintLessThan(usize, 96);
+    const async_base = seed & 1023;
+    const async_expected = async_base + async_allocs;
     const spin_iters = 4000 + r.uintLessThan(usize, 6000);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
 
@@ -1275,10 +1278,26 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0 }};
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0 }};
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
+        \\  const asyncTaskLock = new Lock();
+        \\  const asyncRoot = {{ nested: {{ base: {d} }}, label: 'async-midgc-root' }};
+        \\  let asyncScore = 0;
+        \\  let asyncThen = 0;
+        \\  const asyncGrant = asyncTaskLock.asyncHold(() => {{
+        \\    const taskKeep = [];
+        \\    for (let a = 0; a < {d}; a++)
+        \\      taskKeep.push({{ a, root: asyncRoot, payload: 'async-grant-' + a }});
+        \\    asyncScore = asyncRoot.nested.base + taskKeep.length;
+        \\    Atomics.store(gate, 'asyncDone', 1);
+        \\    Atomics.notify(gate, 'asyncDone');
+        \\    return asyncScore;
+        \\  }});
+        \\  asyncGrant.then(
+        \\    (v) => {{ asyncThen = v; }},
+        \\    () => {{ asyncThen = -1; }});
         \\  globalThis.__midgcCleanupCount = 0;
         \\  globalThis.__midgcCleanupSum = 0;
         \\  globalThis.__midgcRegistry = (typeof FinalizationRegistry === 'function')
@@ -1335,6 +1354,12 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    for (let j = 0; j < {d}; j++) spin = (spin + j + round) & 0x3fffffff;
         \\    if (spin < 0) keep.push({{ never: true }});
         \\  }}
+        \\  let asyncSpins = 0;
+        \\  while (Atomics.load(gate, 'asyncDone') === 0 && asyncSpins++ < 10000000) ;
+        \\  if (Atomics.load(gate, 'asyncDone') !== 1)
+        \\    throw new Error('asyncHold grant was not pumped during mid-script GC pressure');
+        \\  if (asyncScore !== {d} || asyncThen !== {d})
+        \\    throw new Error('bad asyncHold midgc score: ' + asyncScore + '/' + asyncThen);
         \\  condLock.hold(() => {{
         \\    Atomics.store(gate, 'state', 1);
         \\    Atomics.notify(gate, 'state');
@@ -1351,7 +1376,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\}})();
         \\
     ,
-        .{ wait_timeout_ms, wait_timeout_ms, rounds, per_round, per_round, spin_iters },
+        .{ async_base, async_allocs, wait_timeout_ms, wait_timeout_ms, rounds, per_round, per_round, spin_iters, async_expected, async_expected },
     );
     defer gpa.free(src);
 
