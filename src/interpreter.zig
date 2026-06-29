@@ -30856,12 +30856,15 @@ fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
     const maybe_year = try bagCalendarYear(self, v, cal);
     const has_year = maybe_year != null;
     if (maybe_year) |y| {
-        const iso = calendarDateToIso(cal, y, 1, 1);
-        try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
+        if (!std.mem.eql(u8, cal, "iso8601")) {
+            const iso = calendarDateToIso(cal, y, 1, 1);
+            try checkIsoDate(self, @floatFromInt(iso.y), @floatFromInt(iso.m), @floatFromInt(iso.d));
+        }
     }
     if (!std.mem.eql(u8, cal, "iso8601") and !has_year and maybe_m != null)
         return self.throwError("TypeError", "non-ISO PlainMonthDay fields require monthCode or year");
     const validation_year: i64 = if (maybe_year) |y| y else if (mc) |info| blk: {
+        if (std.mem.eql(u8, cal, "iso8601")) break :blk 1972;
         if (monthDayReferenceIsoMaybe(cal, info, 0, d)) |ref| break :blk ref.cal_year;
         var probe_day = d - 1;
         while (probe_day >= 1) : (probe_day -= 1) {
@@ -30871,10 +30874,10 @@ fn readMonthDayBagRaw(self: *Interpreter, v: Value) EvalError!RawMD {
             const cd = calendarDateFromIso(cal, iso.y, iso.m, iso.d);
             break :blk cd.y;
         }
-        break :blk (try monthDayReferenceIso(self, cal, info, 0, 1)).cal_year;
+        break :blk 1972;
     } else 1972;
     const m = maybe_m orelse if (mc) |info|
-        @as(i64, calMonthFromCodeMaybe(cal, validation_year, info) orelse if (info.leap and calIsChineseLike(cal)) info.month else return self.throwError("RangeError", "bad monthCode"))
+        @as(i64, calMonthFromCodeMaybe(cal, validation_year, info) orelse info.month)
     else
         unreachable;
     return .{
@@ -30999,7 +31002,7 @@ fn readMonthDayPartialRaw(self: *Interpreter, bag: Value, t: *const value.Tempor
     return .{
         .validation_year = ref_year,
         .m = maybe_m orelse if (mc) |info|
-            @as(i64, calMonthFromCodeMaybe(t.calendar, ref_year, info) orelse if (info.leap and calIsChineseLike(t.calendar)) info.month else return self.throwError("RangeError", "bad monthCode"))
+            @as(i64, calMonthFromCodeMaybe(t.calendar, ref_year, info) orelse info.month)
         else
             base.m,
         .d = d,
