@@ -32686,10 +32686,13 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
             const ext = try dtfResolveLocaleExt(self, loc, r.calendar, r.hour_cycle, r.hour12, r.numbering_system);
             break :blk ext.calendar;
         };
-        if (t.kind == .plain_month_day or t.kind == .plain_year_month) {
+        if (t.kind == .plain_date or t.kind == .plain_month_day or t.kind == .plain_year_month) {
             if (r.time_style.len > 0)
                 return self.throwError("TypeError", "Temporal toLocaleString does not accept timeStyle");
-            if (!std.mem.eql(u8, t.calendar, effective_calendar))
+        }
+        if (t.kind == .plain_date or t.kind == .plain_date_time or t.kind == .plain_month_day or t.kind == .plain_year_month) {
+            const iso_ok = (t.kind == .plain_date or t.kind == .plain_date_time) and std.mem.eql(u8, t.calendar, "iso8601");
+            if (!iso_ok and !std.mem.eql(u8, t.calendar, effective_calendar))
                 return self.throwError("RangeError", "Temporal calendar does not match locale calendar");
         }
         if (t.kind == .zoned_date_time) {
