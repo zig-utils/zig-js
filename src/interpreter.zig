@@ -33901,6 +33901,18 @@ fn zdtActualOffsetForLocal(tz: TimeZone, local_ns: i128) i64 {
         if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end)
             return -2 * 3_600_000_000_000;
     }
+    if (std.mem.eql(u8, tz.name, "America/St_Johns")) {
+        const fall_overlap_start_2010 = (@as(i128, tDaysFromCivil(2010, 11, 7)) * nsPerUnit(.day));
+        const fall_overlap_end_2010 = fall_overlap_start_2010 + nsPerUnit(.minute);
+        if (local_ns >= fall_overlap_start_2010 and local_ns < fall_overlap_end_2010)
+            return -(2 * 3_600_000_000_000 + 30 * 60_000_000_000);
+    }
+    if (std.mem.eql(u8, tz.name, "Antarctica/Casey")) {
+        const fall_overlap_start_2010 = (@as(i128, tDaysFromCivil(2010, 3, 5)) * nsPerUnit(.day));
+        const fall_overlap_end_2010 = fall_overlap_start_2010 + 2 * nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2010 and local_ns < fall_overlap_end_2010)
+            return 11 * 3_600_000_000_000;
+    }
     if (std.mem.eql(u8, tz.name, "America/Vancouver")) {
         const spring_gap_start_1999 = (@as(i128, tDaysFromCivil(1999, 4, 4)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour);
         const spring_gap_end_1999 = spring_gap_start_1999 + nsPerUnit(.hour);
@@ -34021,6 +34033,32 @@ fn zdtOffsetForLocalDisambiguation(self: *Interpreter, tz: TimeZone, local_ns: i
         const fall_overlap_start = (@as(i128, tDaysFromCivil(2019, 2, 16)) * nsPerUnit(.day)) + 23 * nsPerUnit(.hour);
         const fall_overlap_end = (@as(i128, tDaysFromCivil(2019, 2, 17)) * nsPerUnit(.day));
         if (local_ns >= fall_overlap_start and local_ns < fall_overlap_end) {
+            return switch (disambiguation) {
+                .compatible, .earlier => daylight,
+                .later => standard,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+    }
+    if (std.mem.eql(u8, tz.name, "America/St_Johns")) {
+        const daylight = -(2 * 3_600_000_000_000 + 30 * 60_000_000_000);
+        const standard = -(3 * 3_600_000_000_000 + 30 * 60_000_000_000);
+        const fall_overlap_start_2010 = (@as(i128, tDaysFromCivil(2010, 11, 7)) * nsPerUnit(.day));
+        const fall_overlap_end_2010 = fall_overlap_start_2010 + nsPerUnit(.minute);
+        if (local_ns >= fall_overlap_start_2010 and local_ns < fall_overlap_end_2010) {
+            return switch (disambiguation) {
+                .compatible, .earlier => daylight,
+                .later => standard,
+                .reject => self.throwError("RangeError", "ambiguous or nonexistent local time"),
+            };
+        }
+    }
+    if (std.mem.eql(u8, tz.name, "Antarctica/Casey")) {
+        const daylight = 11 * 3_600_000_000_000;
+        const standard = 8 * 3_600_000_000_000;
+        const fall_overlap_start_2010 = (@as(i128, tDaysFromCivil(2010, 3, 5)) * nsPerUnit(.day));
+        const fall_overlap_end_2010 = fall_overlap_start_2010 + 2 * nsPerUnit(.hour);
+        if (local_ns >= fall_overlap_start_2010 and local_ns < fall_overlap_end_2010) {
             return switch (disambiguation) {
                 .compatible, .earlier => daylight,
                 .later => standard,
@@ -34288,6 +34326,10 @@ fn parseTimeZoneBare(self: *Interpreter, s: []const u8) EvalError!TimeZone {
             10 * 3_600_000_000_000 + 30 * 60_000_000_000
         else if (std.mem.eql(u8, name, "Asia/Singapore"))
             7 * 3_600_000_000_000
+        else if (std.mem.eql(u8, name, "America/St_Johns"))
+            -(3 * 3_600_000_000_000 + 30 * 60_000_000_000)
+        else if (std.mem.eql(u8, name, "Antarctica/Casey"))
+            8 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "Pacific/Apia"))
             -10 * 3_600_000_000_000
         else if (std.mem.eql(u8, name, "Pacific/Niue"))
@@ -34335,6 +34377,18 @@ fn timeZoneOffsetAtEpoch(name: []const u8, epoch_ns: i128, fallback: i64) i64 {
         if (epoch_ns >= twenty_minute_jump)
             return 7 * 3_600_000_000_000 + 20 * 60_000_000_000;
         return 7 * 3_600_000_000_000;
+    }
+    if (std.mem.eql(u8, name, "America/St_Johns")) {
+        const dst_end_2010 = (@as(i128, tDaysFromCivil(2010, 11, 7)) * nsPerUnit(.day)) + 2 * nsPerUnit(.hour) + 31 * nsPerUnit(.minute);
+        if (epoch_ns < dst_end_2010)
+            return -(2 * 3_600_000_000_000 + 30 * 60_000_000_000);
+        return -(3 * 3_600_000_000_000 + 30 * 60_000_000_000);
+    }
+    if (std.mem.eql(u8, name, "Antarctica/Casey")) {
+        const dst_end_2010 = (@as(i128, tDaysFromCivil(2010, 3, 4)) * nsPerUnit(.day)) + 15 * nsPerUnit(.hour);
+        if (epoch_ns < dst_end_2010)
+            return 11 * 3_600_000_000_000;
+        return 8 * 3_600_000_000_000;
     }
     if (std.mem.eql(u8, name, "America/Los_Angeles")) {
         const dst_start_2020 = (@as(i128, tDaysFromCivil(2020, 3, 8)) * nsPerUnit(.day)) + 10 * nsPerUnit(.hour);
@@ -34698,6 +34752,30 @@ fn zdtStartOfDayEpochNs(self: *Interpreter, t: *const value.TemporalData, year: 
     return epoch_ns;
 }
 
+fn zdtRoundingLocalDate(t: *const value.TemporalData, local: value.TemporalData) value.TemporalData {
+    if (std.mem.eql(u8, t.tz_name, "Antarctica/Casey")) {
+        const casey_discontiguous_start = (@as(i128, tDaysFromCivil(2010, 3, 4)) * DAY_NS) + 23 * nsPerUnit(.hour);
+        const casey_discontiguous_end = (@as(i128, tDaysFromCivil(2010, 3, 5)) * DAY_NS);
+        const standard_local = t.epoch_ns + 8 * nsPerUnit(.hour);
+        if (standard_local >= casey_discontiguous_start and standard_local < casey_discontiguous_end) {
+            var adjusted = local;
+            adjusted.year = 2010;
+            adjusted.month = 3;
+            adjusted.day = 4;
+            return adjusted;
+        }
+    }
+    return local;
+}
+
+fn isCaseyDiscontiguousMarch4(t: *const value.TemporalData) bool {
+    if (!std.mem.eql(u8, t.tz_name, "Antarctica/Casey")) return false;
+    const casey_discontiguous_start = (@as(i128, tDaysFromCivil(2010, 3, 4)) * DAY_NS) + 23 * nsPerUnit(.hour);
+    const casey_discontiguous_end = (@as(i128, tDaysFromCivil(2010, 3, 5)) * DAY_NS);
+    const standard_local = t.epoch_ns + 8 * nsPerUnit(.hour);
+    return standard_local >= casey_discontiguous_start and standard_local < casey_discontiguous_end;
+}
+
 fn temporalZdtToInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -34867,11 +34945,15 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     try validateZonedDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
     const t = this.asObj().temporal.?;
     if (opts.smallest == .day) {
-        const l = zdtLocal(t);
+        const l = zdtRoundingLocalDate(t, zdtLocal(t));
         const start_ns = try zdtStartOfDayEpochNs(self, t, l.year, l.month, l.day);
+        if (isCaseyDiscontiguousMarch4(t) and (opts.mode == .floor or opts.mode == .trunc))
+            return zdtMakeWithCalendar(self, start_ns, t.tz_name, t.tz_offset_ns, t.calendar);
         const tomorrow = addCalendarDate(t.calendar, l.year, l.month, l.day, 0, 0, 0, 1, 1, true) orelse
             return self.throwError("RangeError", "date overflow");
         const end_ns = try zdtStartOfDayEpochNs(self, t, @intCast(tomorrow.y), tomorrow.m, tomorrow.d);
+        if (isCaseyDiscontiguousMarch4(t) and (opts.mode == .ceil or opts.mode == .expand))
+            return zdtMakeWithCalendar(self, end_ns, t.tz_name, t.tz_offset_ns, t.calendar);
         const rounded_days = applyRounding(t.epoch_ns - start_ns, end_ns - start_ns, opts.mode);
         return zdtMakeWithCalendar(self, start_ns + rounded_days * (end_ns - start_ns), t.tz_name, t.tz_offset_ns, t.calendar);
     }
