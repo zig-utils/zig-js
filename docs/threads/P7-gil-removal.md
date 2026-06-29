@@ -144,8 +144,9 @@ are done and validated:
 
 - **Thread-safe allocation.** GC cell slabs: `Context.GcCellBacking` recycles
   16-byte-aligned cell slabs from size-class chunks, keeps chunk ownership
-  bucket-local for cheaper frees during collection/teardown, and locks
-  internally under no-GIL `parallel_gc`; `zig-gc` `Heap.setParallel` still
+  bucket-local for cheaper frees during collection/teardown, skips freelist
+  rebuilds during context bulk teardown, and locks internally under no-GIL
+  `parallel_gc`; `zig-gc` `Heap.setParallel` still
   serializes all-list prepend + counters + born hand-off under `alloc_lock`.
   Arena (shapes, strings, AST, binding tables): `Context.LockedArena`,
   installed **before** the create-time arena is captured, so `root_shape`/`env`

@@ -49,15 +49,17 @@ Known performance/maturity work:
   that recycles 16-byte-aligned cell allocations and delegates non-cell heap side
   storage unchanged. Ownership classification is now bucket-local too, so
   collection and context teardown do not scan unrelated size-class chunks when
-  freeing a cell. This cuts the old one-general-allocator-call-per-cell profile
-  without changing the collector API.
+  freeing a cell. During `Context.destroy`, the backing enters bulk-teardown
+  mode so `zig-gc`'s per-cell frees do not rebuild freelists immediately before
+  the backing releases whole chunks. This cuts the old
+  one-general-allocator-call-per-cell profile without changing the collector API.
 - Tight-loop block-scoped allocation is still slower under the GC path compared
   with arena bulk allocation. This still needs a nursery/generational strategy
   or an engine optimization for non-captured per-iteration bindings.
 - Context create/destroy remains more expensive than the arena model because
   global setup and GC finalization still touch many cells. Long-lived contexts
-  amortize this; create-per-task embedders need either a faster lifecycle path or
-  guidance.
+  amortize this; create-per-task embedders still need additional lifecycle
+  reductions or guidance.
 - `zig build gc-profile` is the local baseline for those costs. It compares
   arena, explicit-GC, no-GIL threaded GC, and `.gil = true` contexts across
   create/destroy, object-heavy allocation, block-scoped `let` allocation, and

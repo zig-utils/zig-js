@@ -94,6 +94,7 @@ pub const GcCellBacking = struct {
 
     inner: std.mem.Allocator,
     parallel: bool = false,
+    bulk_teardown: bool = false,
     lock: std.atomic.Value(u32) = .init(0),
     bucket_chunks: [bucket_count]std.ArrayListUnmanaged([]align(16) u8) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     free_lists: [bucket_count]?*FreeNode = .{ null, null, null, null, null, null },
@@ -147,6 +148,7 @@ pub const GcCellBacking = struct {
         if (bucketIndex(len, alignment)) |idx| {
             self.acquire();
             defer self.unlock();
+            if (self.bulk_teardown) return null;
             if (self.free_lists[idx] == null and !self.addChunk(idx)) return null;
             const node = self.free_lists[idx].?;
             self.free_lists[idx] = node.next;
@@ -190,6 +192,7 @@ pub const GcCellBacking = struct {
             self.acquire();
             defer self.unlock();
             if (self.ownsPtrLocked(idx, mem.ptr)) {
+                if (self.bulk_teardown) return;
                 const node: *FreeNode = @ptrCast(@alignCast(mem.ptr));
                 node.next = self.free_lists[idx];
                 self.free_lists[idx] = node;
@@ -212,6 +215,16 @@ pub const GcCellBacking = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
+    /// During `Context.destroy`, `zig-gc` frees every live cell and then this
+    /// backing immediately frees whole chunks. Rebuilding freelists in that
+    /// phase is pure teardown churn, so owned cell frees become no-ops.
+    pub fn beginBulkTeardown(self: *GcCellBacking) void {
+        self.acquire();
+        defer self.unlock();
+        self.bulk_teardown = true;
+        self.free_lists = .{ null, null, null, null, null, null };
+    }
+
     pub fn deinit(self: *GcCellBacking) void {
         for (&self.bucket_chunks) |*chunks| {
             for (chunks.items) |chunk| self.inner.free(chunk);
@@ -219,6 +232,7 @@ pub const GcCellBacking = struct {
             chunks.* = .empty;
         }
         self.free_lists = .{ null, null, null, null, null, null };
+        self.bulk_teardown = false;
     }
 };
 
@@ -251,6 +265,24 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     const side = try a.alignedAlloc(u8, .@"8", 200);
     try std.testing.expect(@intFromPtr(side.ptr) != @intFromPtr(first_ptr));
     a.free(side);
+}
+
+test "GC cell backing bulk teardown skips freelist rebuilds and still delegates side storage" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const idx = GcCellBacking.bucketIndex(200, .@"16").?;
+    const cell = try a.alignedAlloc(u8, .@"16", 200);
+    const side = try a.alignedAlloc(u8, .@"8", 200);
+
+    backing.beginBulkTeardown();
+    a.free(cell);
+    a.free(side);
+
+    try std.testing.expect(backing.bulk_teardown);
+    try std.testing.expectEqual(@as(?*GcCellBacking.FreeNode, null), backing.free_lists[idx]);
+    try std.testing.expectError(error.OutOfMemory, a.alignedAlloc(u8, .@"16", 200));
 }
 
 /// An isolated engine instance — the homegrown analogue of a JSC
@@ -772,6 +804,7 @@ pub const Context = struct {
         // there when GC is enabled.
         self.finishConcurrentGCIfActive(); // join any marker before heap teardown
         if (self.gc) |h| {
+            if (self.gc_cell_backing) |backing| backing.beginBulkTeardown();
             h.deinit(); // frees logical cells back into gc_cell_backing
             self.gpa.destroy(h);
             self.gc = null;

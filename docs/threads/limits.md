@@ -71,6 +71,8 @@ context APIs.
   landed: GC cells use a reusable size-class slab backing instead of calling the
   backing allocator for every cell, and slab ownership checks are bucket-local
   so frees do not scan unrelated size-class chunks during collection or teardown.
+  Context teardown also skips rebuilding slab freelists for cells that will be
+  released by the following whole-chunk free.
   Correctness is gated, but tight-loop block-scope allocation and
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable
