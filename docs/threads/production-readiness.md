@@ -53,8 +53,8 @@ Known performance/maturity work:
   A per-bucket recent-chunk hint keeps repeated frees/remaps from the same slab
   on the fast path instead of restarting the bucket chunk walk each time.
   During `Context.destroy`, the backing enters bulk-teardown mode so `zig-gc`'s
-  per-cell frees do not rebuild freelists immediately before the backing releases
-  whole chunks. This cuts the old
+  per-cell frees do not rebuild freelists or reclassify bucket ownership
+  immediately before the backing releases whole chunks. This cuts the old
   one-general-allocator-call-per-cell profile without changing the collector API.
 - Tight-loop block-scoped allocation is still slower under the GC path compared
   with arena bulk allocation. This still needs a nursery/generational strategy

@@ -74,8 +74,8 @@ context APIs.
   unrelated size-class chunks during collection or teardown. Ownership lookups
   also keep a per-bucket recent-chunk hint, avoiding repeated full bucket walks
   when GC frees/remaps arrive from the same slab chunk. Context teardown also
-  skips rebuilding slab freelists for cells that will be released by the
-  following whole-chunk free.
+  skips rebuilding slab freelists and reclassifying bucket ownership for cells
+  that will be released by the following whole-chunk free.
   Correctness is gated, but tight-loop block-scope allocation and
   create/destroy-heavy context lifecycles are still slower under the GC path than
   under the old arena model. `zig build gc-profile` remains the repeatable

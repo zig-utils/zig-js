@@ -245,8 +245,9 @@ threading architecture:
   allocator call per cell, and freed cells are classified against per-size-class
   address spans plus a recent-chunk hint before scanning chunk lists to keep
   collection/destroy lookup costs bounded. Context teardown now enters a slab
-  bulk-teardown mode so per-cell frees do not rebuild freelists immediately
-  before whole chunks are released; keep using the profile to drive
+  bulk-teardown mode so per-cell frees do not rebuild freelists or reclassify
+  bucket ownership immediately before whole chunks are released; keep using the
+  profile to drive
   nursery/generational work and further lifecycle reductions for create-per-task
   embedders.
 - **Parallel scaling** - `zig build threads-profile` compares the no-GIL

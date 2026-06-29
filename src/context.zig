@@ -219,10 +219,13 @@ pub const GcCellBacking = struct {
     fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
+            // Context teardown frees every bucket chunk wholesale immediately
+            // after `zig-gc` walks live cells. Avoid re-locking and re-checking
+            // ownership for each cell/side slab in that one-way phase.
+            if (self.bulk_teardown) return;
             self.acquire();
             defer self.unlock();
             if (self.ownsPtrLocked(idx, mem.ptr)) {
-                if (self.bulk_teardown) return;
                 const node: *FreeNode = @ptrCast(@alignCast(mem.ptr));
                 node.next = self.free_lists[idx];
                 self.free_lists[idx] = node;
