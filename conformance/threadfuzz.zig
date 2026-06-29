@@ -1894,6 +1894,162 @@ fn runFinalizationAsyncJoinCleanupInterleaving(gpa: std.mem.Allocator, seed: u64
     return true;
 }
 
+fn runFinalizationWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7761_6974_6669_6e63);
+    const r = prng.random();
+    const nthreads = 3 + r.uintLessThan(usize, 4);
+    const per_thread = 8 + r.uintLessThan(usize, 10);
+    const wait_timeout_ms = 1200 + r.uintLessThan(usize, 800);
+
+    var expected_cleanup_count: usize = 0;
+    var expected_cleanup_sum: usize = 0;
+    var expected_join_sum: usize = 0;
+    var id: usize = 0;
+    while (id < nthreads) : (id += 1) {
+        const base = (id + 1) * 20_000;
+        expected_join_sum += base + per_thread + id;
+        var i: usize = 0;
+        while (i < per_thread) : (i += 1) {
+            expected_cleanup_count += 1;
+            expected_cleanup_sum += base + i;
+        }
+    }
+
+    const ctx = js.Context.createWith(gpa, .{ .enable_threads = true, .enable_gc = true }) catch {
+        std.debug.print("seed {d}: finalization waiter cleanup context creation failed\n", .{seed});
+        return false;
+    };
+    defer ctx.destroy();
+
+    const src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__finWaiterCleanupCount = 0;
+        \\  globalThis.__finWaiterCleanupSum = 0;
+        \\  globalThis.__finWaiterOracle = 0;
+        \\  globalThis.__finWaiterRegistry = new FinalizationRegistry((held) => {{
+        \\    globalThis.__finWaiterCleanupCount++;
+        \\    globalThis.__finWaiterCleanupSum += held;
+        \\  }});
+        \\  const registry = globalThis.__finWaiterRegistry;
+        \\  const gate = {{ prop: 0, propReady: 0, condReady: 0, condOpen: false }};
+        \\  const lock = new Lock();
+        \\  const cond = new Condition();
+        \\  const propWaiter = new Thread(() => {{
+        \\    Atomics.store(gate, 'propReady', 1);
+        \\    Atomics.notify(gate, 'propReady');
+        \\    return Atomics.wait(gate, 'prop', 0, {d});
+        \\  }});
+        \\  const condWaiter = new Thread(() => {{
+        \\    lock.hold(() => {{
+        \\      Atomics.store(gate, 'condReady', 1);
+        \\      Atomics.notify(gate, 'condReady');
+        \\      while (!gate.condOpen) cond.wait(lock);
+        \\    }});
+        \\    return 'cond-open';
+        \\  }});
+        \\  while (Atomics.load(gate, 'propReady') === 0)
+        \\    Atomics.wait(gate, 'propReady', 0, 1);
+        \\  while (Atomics.load(gate, 'condReady') === 0)
+        \\    Atomics.wait(gate, 'condReady', 0, 1);
+        \\  const threads = [];
+        \\  let asyncSum = 0;
+        \\  for (let id = 0; id < {d}; id++) {{
+        \\    const t = new Thread((id, per) => {{
+        \\      const base = (id + 1) * 20000;
+        \\      for (let i = 0; i < per; i++) {{
+        \\        let target = {{ id, i, payload: 'fin-waiter-' + id + '-' + i }};
+        \\        registry.register(target, base + i);
+        \\        target = null;
+        \\      }}
+        \\      return base + per + id;
+        \\    }}, id, {d});
+        \\    t.asyncJoin().then(
+        \\      (v) => {{ asyncSum += v; }},
+        \\      () => {{ asyncSum = -1000000; }});
+        \\    threads.push(t);
+        \\  }}
+        \\  let joinSum = 0;
+        \\  for (const t of threads)
+        \\    joinSum += t.join();
+        \\  if (joinSum !== {d})
+        \\    throw new Error('bad finalization waiter join sum ' + joinSum);
+        \\  Atomics.store(gate, 'prop', 1);
+        \\  Atomics.notify(gate, 'prop');
+        \\  lock.hold(() => {{
+        \\    gate.condOpen = true;
+        \\    cond.notifyAll();
+        \\  }});
+        \\  const propResult = propWaiter.join();
+        \\  if (propResult !== 'ok' && propResult !== 'not-equal' && propResult !== 'timed-out')
+        \\    throw new Error('bad finalization waiter property result: ' + propResult);
+        \\  if (condWaiter.join() !== 'cond-open')
+        \\    throw new Error('finalization waiter condition did not resume');
+        \\  Promise.resolve().then(() => {{
+        \\    if (asyncSum !== {d})
+        \\      throw new Error('bad finalization waiter async sum ' + asyncSum);
+        \\    globalThis.__finWaiterOracle = 1;
+        \\  }});
+        \\  return joinSum;
+        \\}})();
+        \\
+    ,
+        .{ wait_timeout_ms, nthreads, per_thread, expected_join_sum, expected_join_sum },
+    );
+    defer gpa.free(src);
+
+    const joined = ctx.evaluate(src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: finalization waiter cleanup JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!joined.isNumber() or joined.asNum() != @as(f64, @floatFromInt(expected_join_sum))) {
+        std.debug.print("seed {d}: finalization waiter cleanup joined got {d}, expected {d}\n", .{ seed, if (joined.isNumber()) joined.asNum() else -1, expected_join_sum });
+        return false;
+    }
+    const oracle = ctx.evaluate("globalThis.__finWaiterOracle") catch |err| {
+        std.debug.print("seed {d}: cannot read finalization waiter oracle: {s}\n", .{ seed, @errorName(err) });
+        return false;
+    };
+    if (!oracle.isNumber() or oracle.asNum() != 1) {
+        std.debug.print("seed {d}: finalization waiter oracle got {d}\n", .{ seed, if (oracle.isNumber()) oracle.asNum() else -1 });
+        return false;
+    }
+
+    ctx.collectGarbage();
+    const check_src = try std.fmt.allocPrint(
+        gpa,
+        \\(() => {{
+        \\  globalThis.__finWaiterRegistry.cleanupSome();
+        \\  if (globalThis.__finWaiterCleanupCount !== {d})
+        \\    throw new Error('bad finalization waiter cleanup count: ' + globalThis.__finWaiterCleanupCount);
+        \\  if (globalThis.__finWaiterCleanupSum !== {d})
+        \\    throw new Error('bad finalization waiter cleanup sum: ' + globalThis.__finWaiterCleanupSum);
+        \\  return globalThis.__finWaiterCleanupCount;
+        \\}})();
+        \\
+    ,
+        .{ expected_cleanup_count, expected_cleanup_sum },
+    );
+    defer gpa.free(check_src);
+    const cleaned = ctx.evaluate(check_src) catch |err| {
+        const msg_txt = if (ctx.exception) |ex| blk: {
+            var render = ctx.interpreter();
+            break :blk render.toStringV(ex) catch "<unstringifiable>";
+        } else "<none>";
+        std.debug.print("seed {d}: finalization waiter cleanup check JS threw {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        return false;
+    };
+    if (!cleaned.isNumber() or cleaned.asNum() != @as(f64, @floatFromInt(expected_cleanup_count))) {
+        std.debug.print("seed {d}: finalization waiter cleanup got {d}, expected {d}\n", .{ seed, if (cleaned.isNumber()) cleaned.asNum() else -1, expected_cleanup_count });
+        return false;
+    }
+    return true;
+}
+
 fn runThreadRestrictLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bool {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374_7269_6374);
     const r = prng.random();
@@ -2503,7 +2659,8 @@ pub fn main(init: std.process.Init) !void {
     // worker handler exception recovery, Thread exception identity and returned
     // waitAsync promise assimilation across join/asyncJoin while waiters are
     // parked, cross-thread FinalizationRegistry cleanup, FinalizationRegistry
-    // cleanup interleaved with join/asyncJoin and unregister tokens,
+    // cleanup interleaved with join/asyncJoin and unregister tokens, cleanup
+    // delivery after parked property/condition waiters resume,
     // Thread.restrict lifecycle isolation, and ThreadLocal isolation across
     // nested threads plus throwing and async-joined workers. The oracle is not "no
     // throw":
@@ -2514,8 +2671,9 @@ pub fn main(init: std.process.Init) !void {
     // thread exceptions must keep identity through blocking and async joiners,
     // thread-returned waitAsync promises must settle through join/asyncJoin
     // while waiters resume cleanly, cleanup delivery must match exact count/sum
-    // oracles even when thread results are observed through both join paths and
-    // unregister tokens suppress some records, and ThreadLocal values must stay
+    // oracles when thread results are observed through both join paths, when
+    // unregister tokens suppress some records, and after parked property and
+    // condition waiters resume; ThreadLocal values must stay
     // per-thread across normal, throwing, nested, and async-joined lifecycles.
     if (first) |a| if (std.mem.eql(u8, a, "lifecycle")) {
         iters = 60;
@@ -2536,10 +2694,11 @@ pub fn main(init: std.process.Init) !void {
             if (!(try runReturnedWaitAsyncLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runFinalizationAsyncJoinCleanupInterleaving(gpa, seed))) lfail += 1;
+            if (!(try runFinalizationWaiterCleanupInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadRestrictLifecycleInterleaving(gpa, seed))) lfail += 1;
             if (!(try runThreadLocalLifecycleInterleaving(gpa, seed))) lfail += 1;
         }
-        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 13, base_seed, lfail });
+        std.debug.print("threadfuzz lifecycle: {d} programs from seed {d}, {d} failures\n", .{ iters * 14, base_seed, lfail });
         if (lfail != 0) std.process.exit(1);
         return;
     };

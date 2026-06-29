@@ -138,7 +138,8 @@ context APIs.
   thread-returned typed-array `waitAsync` promise assimilation through `join()` /
   `asyncJoin()` while waiters are parked, cross-thread `FinalizationRegistry`
   cleanup count/sum oracles, and cleanup delivery interleaved with `join()` /
-  `asyncJoin()` plus unregister-token suppression. Keep extending it toward more
+  `asyncJoin()` plus unregister-token suppression, plus cleanup delivery after
+  parked property/condition waiters resume. Keep extending it toward more
   teardown ordering, broader cross-realm scheduling, and richer
   cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the

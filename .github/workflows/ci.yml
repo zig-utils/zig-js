@@ -83,7 +83,7 @@ jobs:
           # Thread overlap on one SharedArrayBuffer with an exact counter oracle,
           # Worker handler exception recovery, Thread.restrict lifecycle
           # isolation, and cross-thread finalization cleanup count/sum oracles
-          # including unregister-token suppression.
+          # including parked-waiter delivery and unregister-token suppression.
           - name: threadfuzz-lifecycle
             cmd: zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=60
           # Sanitizer combo: ReleaseSafe keeps Zig's safety checks (UB, bounds,
