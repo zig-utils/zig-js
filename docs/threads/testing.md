@@ -109,6 +109,9 @@ deterministic atomic programs whose exact result is predicted. The broad profile
 (`-Dfuzz-broad=true`) enables GC and adds caught exception/finally paths, nested
 thread lifecycle, `asyncJoin`, property `wait` / `waitAsync`, `Condition`
 wakeups, `Thread.restrict`, and `FinalizationRegistry` cleanup sidecars. The
+focused unit suite also locks in property-mode `Atomics.notify` queue
+compaction: matching sync waiters are unlinked before signal, unmatched waiters
+keep FIFO order, and async tickets are collected without repeated removals. The
 mid-script GC profile (`-Dfuzz-midgc=true`) uses the internal testing context to
 enable `parallel_midscript_gc`, blocks peers in property `Atomics.wait`,
 `Condition.wait`, and contended `Lock` acquisition, queues a FIFO async-hold

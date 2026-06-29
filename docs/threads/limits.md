@@ -106,7 +106,10 @@ context APIs.
   outside it, so queue drains do not front-shift remaining jobs or lock once per
   delivered job. Condition notify/notifyAll also dequeues the mixed sync/async
   waiter queue through a FIFO head cursor instead of shifting every notified
-  waiter.
+  waiter. Property-mode `Atomics.notify` now stable-compacts matching sync and
+  async waiters in one pass: notified sync stack tickets leave the realm waiter
+  table before signal, and matching `waitAsync` tickets are collected without
+  repeated middle removals.
 - **Memory model maintenance.** Keep [Memory Model](./memory-model.md) aligned
   with the TSan suppression witness, new synchronization primitives, and any
   promoted PR-249 coverage that exercises JS-defined races.

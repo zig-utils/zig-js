@@ -270,8 +270,11 @@ threading architecture:
   bursts under the shared API lock before running grants outside it, so delivery
   no longer takes that lock once per job. `Condition.notify` / `notifyAll` now
   use the same FIFO head-cursor shape for their mixed sync/async waiter queue,
-  avoiding one front shift per notified waiter; continue using the profile for
-  the remaining contended-lock and lifecycle hot spots.
+  avoiding one front shift per notified waiter. Property-mode `Atomics.notify`
+  now stable-compacts matching waiters in one pass: sync stack tickets are
+  unlinked before signal, and matching `waitAsync` tickets are collected without
+  repeated `orderedRemove` shifts. Continue using the profile for the remaining
+  contended-lock and lifecycle hot spots.
 - **Memory-model maintenance** - keep
   [docs/threads/memory-model.md](docs/threads/memory-model.md) aligned with the
   TSan suppression witness, synchronization primitives, and promoted corpus

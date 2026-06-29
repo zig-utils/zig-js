@@ -1682,6 +1682,10 @@ const PropTicket = struct {
     key: []const u8,
     cond: std.Io.Condition = .init,
     woken: bool = false,
+    /// True while `Gil.prop_waiters` owns a pointer to this stack ticket.
+    /// Notify unlinks matching tickets before signaling them; timeout and
+    /// termination paths unlink their own ticket before returning.
+    queued: bool = false,
 };
 const prop_alloc = std.heap.page_allocator;
 
@@ -1854,13 +1858,125 @@ pub fn abandonPropAsync(g: *gil_mod.Gil) void {
 }
 
 fn removePropTicketLocked(g: *gil_mod.Gil, ticket: *PropTicket) void {
+    if (!ticket.queued) return;
     for (g.prop_waiters.items, 0..) |raw, i| {
         const t: *PropTicket = @ptrCast(@alignCast(raw));
         if (t == ticket) {
+            ticket.queued = false;
             _ = g.prop_waiters.orderedRemove(i);
             return;
         }
     }
+}
+
+fn propTicketMatches(t: anytype, obj: *value.Object, key: []const u8) bool {
+    return t.obj == obj and std.mem.eql(u8, t.key, key);
+}
+
+fn shrinkPropWaitersLocked(g: *gil_mod.Gil, len: usize) void {
+    if (len == 0) {
+        g.prop_waiters.clearRetainingCapacity();
+    } else {
+        g.prop_waiters.shrinkRetainingCapacity(len);
+    }
+}
+
+fn shrinkPropAsyncLocked(g: *gil_mod.Gil, len: usize) void {
+    if (len == 0) {
+        g.prop_async.clearRetainingCapacity();
+    } else {
+        g.prop_async.shrinkRetainingCapacity(len);
+    }
+}
+
+fn notifyPropWaitersLocked(g: *gil_mod.Gil, obj: *value.Object, key: []const u8, count: usize, io: std.Io) usize {
+    var n: usize = 0;
+    var write: usize = 0;
+    var read: usize = 0;
+    while (read < g.prop_waiters.items.len) : (read += 1) {
+        const raw = g.prop_waiters.items[read];
+        const t: *PropTicket = @ptrCast(@alignCast(raw));
+        if (n < count and !t.woken and propTicketMatches(t, obj, key)) {
+            t.woken = true;
+            t.queued = false;
+            t.cond.signal(io);
+            n += 1;
+            continue;
+        }
+        if (write != read) g.prop_waiters.items[write] = raw;
+        write += 1;
+    }
+    shrinkPropWaitersLocked(g, write);
+    return n;
+}
+
+fn countPropAsyncMatchesLocked(g: *gil_mod.Gil, obj: *value.Object, key: []const u8, limit: usize) usize {
+    var n: usize = 0;
+    for (g.prop_async.items) |raw| {
+        if (n >= limit) break;
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
+        if (propTicketMatches(t, obj, key)) n += 1;
+    }
+    return n;
+}
+
+fn collectPropAsyncNotifyLocked(
+    g: *gil_mod.Gil,
+    obj: *value.Object,
+    key: []const u8,
+    limit: usize,
+    settle: *std.ArrayListUnmanaged(*PropAsyncTicket),
+) void {
+    var n: usize = 0;
+    var write: usize = 0;
+    var read: usize = 0;
+    while (read < g.prop_async.items.len) : (read += 1) {
+        const raw = g.prop_async.items[read];
+        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
+        if (n < limit and propTicketMatches(t, obj, key)) {
+            settle.appendAssumeCapacity(t);
+            n += 1;
+            continue;
+        }
+        if (write != read) g.prop_async.items[write] = raw;
+        write += 1;
+    }
+    shrinkPropAsyncLocked(g, write);
+}
+
+test "property waiter notify stable-compacts matching sync tickets" {
+    var g = gil_mod.Gil{};
+    defer g.prop_waiters.deinit(std.testing.allocator);
+    var obj_a: value.Object = undefined;
+    var obj_b: value.Object = undefined;
+    var t0 = PropTicket{ .obj = &obj_a, .key = "x", .queued = true };
+    var t1 = PropTicket{ .obj = &obj_b, .key = "x", .queued = true };
+    var t2 = PropTicket{ .obj = &obj_a, .key = "y", .queued = true };
+    var t3 = PropTicket{ .obj = &obj_a, .key = "x", .queued = true };
+    try g.prop_waiters.append(std.testing.allocator, @ptrCast(&t0));
+    try g.prop_waiters.append(std.testing.allocator, @ptrCast(&t1));
+    try g.prop_waiters.append(std.testing.allocator, @ptrCast(&t2));
+    try g.prop_waiters.append(std.testing.allocator, @ptrCast(&t3));
+
+    const woke = notifyPropWaitersLocked(&g, &obj_a, "x", 1, agent.engineIo());
+    try std.testing.expectEqual(@as(usize, 1), woke);
+    try std.testing.expect(t0.woken);
+    try std.testing.expect(!t0.queued);
+    try std.testing.expect(!t1.woken and t1.queued);
+    try std.testing.expect(!t2.woken and t2.queued);
+    try std.testing.expect(!t3.woken and t3.queued);
+    try std.testing.expectEqual(@as(usize, 3), g.prop_waiters.items.len);
+    try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[0])))));
+    try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[1])))));
+    try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[2])))));
+
+    const woke_rest = notifyPropWaitersLocked(&g, &obj_a, "x", std.math.maxInt(usize), agent.engineIo());
+    try std.testing.expectEqual(@as(usize, 1), woke_rest);
+    try std.testing.expect(t3.woken);
+    try std.testing.expect(!t3.queued);
+    try std.testing.expectEqual(@as(usize, 2), g.prop_waiters.items.len);
+    try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[0])))));
+    try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(@as(*PropTicket, @ptrCast(@alignCast(g.prop_waiters.items[1])))));
 }
 
 fn waitPropTicketTimeout(self: *Interpreter, g: *gil_mod.Gil, ticket: *PropTicket, timeout: std.Io.Timeout) error{Timeout}!void {
@@ -1913,6 +2029,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
     const cur_locked = try ownDataOrThrow(self, o, key_tmp, "Atomics.wait: object has no own data property");
     if (!sameValueZero(cur_locked, expected)) return Value.str("not-equal");
     g.prop_waiters.append(prop_alloc, @ptrCast(&ticket)) catch return error.OutOfMemory;
+    ticket.queued = true;
     linked = true;
     bumpContention("property_waits");
     const deadline_ns: ?i96 = if (timeout_ns) |ns|
@@ -1961,25 +2078,13 @@ pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value
     g.lockPropWaiters();
     var locked = true;
     defer if (locked) g.unlockPropWaiters();
-    for (g.prop_waiters.items) |raw| {
-        const t: *PropTicket = @ptrCast(@alignCast(raw));
-        if (n >= count) break;
-        if (!t.woken and t.obj == o and std.mem.eql(u8, t.key, key)) {
-            t.woken = true;
-            t.cond.signal(io);
-            n += 1;
-        }
-    }
-    var i: usize = 0;
-    while (i < g.prop_async.items.len and n < count) {
-        const t: *PropAsyncTicket = @ptrCast(@alignCast(g.prop_async.items[i]));
-        if (t.obj == o and std.mem.eql(u8, t.key, key)) {
-            try settle.append(prop_alloc, t);
-            _ = g.prop_async.orderedRemove(i);
-            n += 1;
-            continue;
-        }
-        i += 1;
+    n += notifyPropWaitersLocked(g, o, key, count, io);
+    if (n < count) {
+        const limit = count - n;
+        const async_matches = countPropAsyncMatchesLocked(g, o, key, limit);
+        try settle.ensureTotalCapacity(prop_alloc, async_matches);
+        collectPropAsyncNotifyLocked(g, o, key, limit, &settle);
+        n += async_matches;
     }
     g.unlockPropWaiters();
     locked = false;

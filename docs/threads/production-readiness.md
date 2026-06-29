@@ -110,6 +110,11 @@ Known performance/maturity work:
   one per job to one per burst.
 - Condition notify/notifyAll use the same FIFO head-cursor pattern for the
   mixed sync/async waiter queue, avoiding one front-shift per notified waiter.
+- Property-mode `Atomics.notify` stable-compacts matching waiter queues in one
+  pass. Sync wait stack tickets are unlinked before signal, so awakened peers no
+  longer each rescan and front-shift the table on return; matching `waitAsync`
+  tickets are collected for post-unlock settlement without repeated middle
+  removals.
 - Measured speedup shows real parallelism: roughly 1.8x at 2 threads and 2.5x
   at 4 threads in the recorded checkpoint.
 
