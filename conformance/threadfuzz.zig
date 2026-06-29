@@ -2331,6 +2331,7 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const async_expected = async_base + async_allocs;
     const async_second_expected = async_base + 1024 + async_second_allocs;
     const async_cond_expected = async_base + 2048 + async_cond_allocs;
+    const tls_expected = async_base + 4096;
     const spin_iters = 4000 + r.uintLessThan(usize, 6000);
     const wait_timeout_ms = 1200 + r.uintLessThan(usize, 900);
 
@@ -2349,13 +2350,14 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0 }};
+        \\  const gate = {{ state: 0, propReady: 0, condReady: 0, holderReady: 0, lockReady: 0, releaseLock: 0, lockDone: 0, asyncDone: 0, asyncSecondDone: 0, asyncCondReady: 0, asyncCondDone: 0, tlsReady: 0, tlsRelease: 0 }};
         \\  const condLock = new Lock();
         \\  const cond = new Condition();
         \\  const heldLock = new Lock();
         \\  const asyncTaskLock = new Lock();
         \\  const asyncCondLock = new Lock();
         \\  const asyncCond = new Condition();
+        \\  const tls = new ThreadLocal();
         \\  const asyncRoot = {{ nested: {{ base: {d} }}, label: 'async-midgc-root' }};
         \\  let asyncScore = 0;
         \\  let asyncThen = 0;
@@ -2419,6 +2421,21 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\        globalThis.__midgcCleanupSum = globalThis.__midgcCleanupSum + held;
         \\      }})
         \\    : null;
+        \\  const tlsWaiter = new Thread(() => {{
+        \\    let target = {{ marker: {d}, nested: {{ label: 'threadlocal-midgc-root' }} }};
+        \\    tls.value = target;
+        \\    if (globalThis.__midgcRegistry)
+        \\      globalThis.__midgcRegistry.register(target, {d});
+        \\    target = null;
+        \\    Atomics.store(gate, 'tlsReady', 1);
+        \\    Atomics.notify(gate, 'tlsReady');
+        \\    while (Atomics.load(gate, 'tlsRelease') === 0)
+        \\      Atomics.wait(gate, 'tlsRelease', 0, {d});
+        \\    const kept = tls.value;
+        \\    if (!kept || kept.marker !== {d})
+        \\      throw new Error('ThreadLocal midgc root was not preserved');
+        \\    return kept;
+        \\  }});
         \\  const propWaiter = new Thread(() => {{
         \\    Atomics.store(gate, 'propReady', 1);
         \\    Atomics.notify(gate, 'propReady');
@@ -2457,6 +2474,8 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    Atomics.wait(gate, 'condReady', 0, 1);
         \\  while (Atomics.load(gate, 'lockReady') === 0)
         \\    Atomics.wait(gate, 'lockReady', 0, 1);
+        \\  while (Atomics.load(gate, 'tlsReady') === 0)
+        \\    Atomics.wait(gate, 'tlsReady', 0, 1);
         \\  while (Atomics.load(gate, 'asyncCondReady') === 0)
         \\    Atomics.wait(gate, 'asyncCondReady', 0, 1);
         \\  const keep = [];
@@ -2501,18 +2520,45 @@ fn runMidScriptWaitPumpGc(gpa: std.mem.Allocator, seed: u64) !bool {
         \\    throw new Error('bad async condition midgc score: ' + asyncCondScore + '/' + asyncCondThen);
         \\  Atomics.store(gate, 'releaseLock', 1);
         \\  Atomics.notify(gate, 'releaseLock');
+        \\  Atomics.store(gate, 'tlsRelease', 1);
+        \\  Atomics.notify(gate, 'tlsRelease');
         \\  const wr = propWaiter.join();
         \\  if (wr !== 'ok' && wr !== 'timed-out') throw new Error('bad property wait result: ' + wr);
         \\  if (condWaiter.join() !== 1) throw new Error('bad condition waiter');
         \\  if (holder.join() !== 1) throw new Error('bad lock holder');
         \\  const lockJoin = lockWaiter.join();
         \\  if (lockJoin !== 1 || Atomics.load(gate, 'lockDone') !== 1) throw new Error('bad lock waiter');
+        \\  globalThis.__midgcTlsHold = tlsWaiter.join();
+        \\  if (!globalThis.__midgcTlsHold || globalThis.__midgcTlsHold.marker !== {d})
+        \\    throw new Error('bad ThreadLocal midgc return');
         \\  if (asyncCondTicket instanceof Promise === false) throw new Error('bad async condition promise');
         \\  return keep.length;
         \\}})();
         \\
     ,
-        .{ async_base, async_allocs, async_second_allocs, async_cond_allocs, wait_timeout_ms, wait_timeout_ms, rounds, per_round, per_round, spin_iters, async_expected, async_expected, async_second_expected, async_second_expected, async_cond_expected, async_cond_expected },
+        .{
+            async_base,
+            async_allocs,
+            async_second_allocs,
+            async_cond_allocs,
+            tls_expected,
+            tls_expected + 111,
+            wait_timeout_ms,
+            tls_expected,
+            wait_timeout_ms,
+            wait_timeout_ms,
+            rounds,
+            per_round,
+            per_round,
+            spin_iters,
+            async_expected,
+            async_expected,
+            async_second_expected,
+            async_second_expected,
+            async_cond_expected,
+            async_cond_expected,
+            tls_expected,
+        },
     );
     defer gpa.free(src);
 

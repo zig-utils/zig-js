@@ -149,8 +149,9 @@ as embedders exercise more threaded host patterns.
   least one parallel sweep. It also queues a FIFO `Lock.asyncHold` grant chain
   plus an async `Condition.wait` reacquire with hidden captured JS roots and
   requires sync-wait pump points to deliver both during the same mid-script GC
-  pressure window, then deliver the expected `FinalizationRegistry` cleanup
-  count/sum after a quiescent collect.
+  pressure window, keeps a registered object reachable only through
+  `ThreadLocal.value` while that owner is parked, then deliver the expected
+  `FinalizationRegistry` cleanup count/sum after a quiescent collect.
 - Host-side thread queues are now explicit GC roots: queued `Lock.asyncHold`
   tasks in `Gil.tasks`, per-lock pending grants, async condition waiters,
   ThreadLocal values, and thread completion results trace or barrier their

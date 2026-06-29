@@ -128,7 +128,8 @@ context APIs.
   `FinalizationRegistry` cleanup under GC-backed parallel contexts. The mid-GC
   profile now hammers sync-wait root publication during finishing
   `parallel_midscript_gc` sweeps, executes a queued async-hold grant chain and
-  async condition reacquire grants from those pump points, and verifies exact
+  async condition reacquire grants from those pump points, keeps a
+  ThreadLocal-only hidden root live in a parked peer, and verifies exact
   `FinalizationRegistry` cleanup count/sum delivery afterward. The lifecycle
   profile now adds deterministic termination storms,
   script Worker/thread retained-`SharedArrayBuffer` overlap, simple-import,

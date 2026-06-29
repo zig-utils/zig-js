@@ -74,8 +74,9 @@ jobs:
             cmd: zig build threadfuzz -Dfuzz-broad=true -Dfuzz-iters=80
           # Mid-script GC wait-pump profile: blocks peers in property
           # Atomics.wait, Condition.wait, and contended Lock acquisition while
-          # allocation pressure drives the experimental parallel collector. Each
-          # seed must complete exactly and finish at least one parallel sweep.
+          # allocation pressure drives the experimental parallel collector. It
+          # also keeps ThreadLocal-only roots live across that pressure window.
+          # Each seed must complete exactly and finish at least one parallel sweep.
           - name: threadfuzz-midgc
             cmd: zig build threadfuzz -Dfuzz-midgc=true -Dfuzz-iters=20
           # Lifecycle profile: deterministic termination storms (main throws

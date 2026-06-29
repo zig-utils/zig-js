@@ -285,12 +285,15 @@ threading architecture:
   wait/cleanup mixes; the mid-GC fuzzer now queues a FIFO `Lock.asyncHold`
   grant chain plus an async `Condition.wait` reacquire path, and verifies exact
   `FinalizationRegistry` cleanup count/sum delivery after those wait-pump
-  sweeps.
+  sweeps. It also keeps a registered object reachable only through
+  `ThreadLocal.value` while the owning thread is parked, proving that hidden
+  native ThreadLocal roots survive the mid-script collection window.
 - **Stress breadth** - the broad fuzzer profile now covers exceptions/finally,
   cleanup, waiters, `asyncJoin`, `Thread.restrict`, and nested thread lifecycle;
   the mid-GC profile covers sync-wait root publication during finishing
   mid-script sweeps, queued async-hold delivery, async condition reacquire
-  delivery, and deterministic cleanup count/sum delivery; the lifecycle
+  delivery, ThreadLocal-only hidden roots in parked peers, and deterministic
+  cleanup count/sum delivery; the lifecycle
   profile adds deterministic termination storms, script Worker/thread overlap
   plus simple-import, diamond-shaped, and fanout/rejoin module Worker/thread
   overlap over retained `SharedArrayBuffer` storage, and mixed `close` /
