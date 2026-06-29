@@ -22089,6 +22089,34 @@ fn translateDigits(self: *Interpreter, s: []const u8, ds: []const u8) EvalError!
 
 /// One element of a NumberFormat formatToParts result.
 const NfPart = struct { typ: []const u8, value: []const u8 };
+const NfExactDecimal = struct { neg: bool, int_str: []const u8, frac_str: []const u8 };
+
+fn nfParseExactDecimalString(s: []const u8) ?NfExactDecimal {
+    if (s.len == 0) return null;
+    var i: usize = 0;
+    var neg = false;
+    if (s[i] == '+' or s[i] == '-') {
+        neg = s[i] == '-';
+        i += 1;
+        if (i == s.len) return null;
+    }
+    const int_start = i;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+    if (i == int_start) return null;
+    const int_end = i;
+    var frac: []const u8 = "";
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        const frac_start = i;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+        if (i == frac_start) return null;
+        frac = s[frac_start..i];
+    }
+    if (i != s.len) return null;
+    var first_nonzero = int_start;
+    while (first_nonzero + 1 < int_end and s[first_nonzero] == '0') : (first_nonzero += 1) {}
+    return .{ .neg = neg, .int_str = s[first_nonzero..int_end], .frac_str = frac };
+}
 
 /// Build the formatted parts for an Intl.NumberFormat value (en-style algorithm,
 /// CLDR symbols). Shared by `format` (joins the values) and `formatToParts`.
@@ -22210,10 +22238,14 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         }
     };
 
+    const exact_decimal = if (input.isString() and rounding_increment == 1 and !is_percent and unit_suffix.len == 0 and cur_prefix.len == 0 and cur_suffix.len == 0 and cur_symbol.len == 0 and std.mem.eql(u8, notation, "standard") and min_sig == null and max_sig == null)
+        nfParseExactDecimalString(input.asStr())
+    else
+        null;
     const is_nan = std.math.isNan(n);
     const is_inf = std.math.isInf(n);
     const finite = !is_nan and !is_inf;
-    const neg = !is_nan and std.math.signbit(n);
+    const neg = if (exact_decimal) |ex| ex.neg else !is_nan and std.math.signbit(n);
     if (is_percent and finite) n *= 100;
     // Build the unsigned magnitude. NaN and Infinity have fixed glyphs (and still
     // take a signDisplay indicator); finite values split into integer and fraction
@@ -22226,6 +22258,26 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var is_zero = false;
     if (is_nan) {
         is_zero = true; // NaN suppresses the exceptZero/negative sign (but not "always")
+    } else if (finite and exact_decimal != null and exact_decimal.?.frac_str.len <= max_frac) {
+        const ex = exact_decimal.?;
+        digits = ex.int_str;
+        frac_str = ex.frac_str;
+        while (digits.len < min_int) digits = try std.fmt.allocPrint(self.arena, "0{s}", .{digits});
+        if (frac_str.len < min_frac) {
+            var fb: std.ArrayListUnmanaged(u8) = .empty;
+            try fb.appendSlice(self.arena, frac_str);
+            for (frac_str.len..min_frac) |_| try fb.append(self.arena, '0');
+            frac_str = try fb.toOwnedSlice(self.arena);
+        }
+        is_zero = true;
+        for (digits) |c| if (c != '0') {
+            is_zero = false;
+            break;
+        };
+        if (is_zero) for (frac_str) |c| if (c != '0') {
+            is_zero = false;
+            break;
+        };
     } else if (finite and sci) {
         // Scientific: one integer digit; engineering: exponent is a multiple of 3.
         var mant = @abs(n);
@@ -22426,9 +22478,44 @@ fn nfFormatOne(self: *Interpreter, this: Value, v: Value) value.HostError![]cons
     return buf.toOwnedSlice(self.arena);
 }
 
-/// `Intl.NumberFormat.prototype.formatRange(start, end)` — en. Disjoint values
-/// give "<start> – <end>"; values that format identically collapse to "~<x>".
-/// (The shared-affix collapsing of partially-equal values is not modeled.)
+fn nfAppendPartValues(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), parts: []const NfPart) EvalError!void {
+    for (parts) |p| try buf.appendSlice(self.arena, p.value);
+}
+
+fn nfSharedAffixLen(xp: []const NfPart, yp: []const NfPart) usize {
+    if (xp.len == 0 or yp.len == 0) return 0;
+    if (!std.mem.eql(u8, xp[0].typ, "plusSign") and !std.mem.eql(u8, xp[0].typ, "minusSign"))
+        return 0;
+    const n = @min(xp.len, yp.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (std.mem.eql(u8, xp[i].typ, "integer")) break;
+        if (!std.mem.eql(u8, xp[i].typ, yp[i].typ) or !std.mem.eql(u8, xp[i].value, yp[i].value)) break;
+    }
+    return i;
+}
+
+fn nfHasCurrencyPrefix(parts: []const NfPart) bool {
+    return parts.len > 0 and std.mem.eql(u8, parts[0].typ, "currency");
+}
+
+fn nfRangeSeparator(xp: []const NfPart, yp: []const NfPart, shared_prefix: usize) []const u8 {
+    if (shared_prefix > 0) return "\u{2013}";
+    if (nfHasCurrencyPrefix(xp) and nfHasCurrencyPrefix(yp)) return " \u{2013} ";
+    return "\u{2013}";
+}
+
+fn nfFormatRangePartsText(self: *Interpreter, xp: []const NfPart, yp: []const NfPart) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const shared_prefix = nfSharedAffixLen(xp, yp);
+    try nfAppendPartValues(self, &buf, xp);
+    try buf.appendSlice(self.arena, nfRangeSeparator(xp, yp, shared_prefix));
+    try nfAppendPartValues(self, &buf, yp[shared_prefix..]);
+    return buf.toOwnedSlice(self.arena);
+}
+
+/// `Intl.NumberFormat.prototype.formatRange(start, end)` — en. Equal formatted
+/// values collapse to "~<x>"; signed ranges share their stable prefix.
 /// Coerce a formatRange argument: a BigInt becomes its numeric value; other
 /// values pass through (nfFormatOne handles numbers and numeric strings).
 fn nfNumericArg(v: Value) Value {
@@ -22447,10 +22534,12 @@ fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const x = try self.toNumberV(xv);
     const y = try self.toNumberV(yv);
     if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRange arguments must not be NaN");
+    const xp = try nfBuildParts(self, this, &.{xv});
+    const yp = try nfBuildParts(self, this, &.{yv});
     const xs = try nfFormatOne(self, this, xv);
     const ys = try nfFormatOne(self, this, yv);
     if (std.mem.eql(u8, xs, ys)) return Value.str(try std.fmt.allocPrint(self.arena, "~{s}", .{xs}));
-    return Value.str(try std.fmt.allocPrint(self.arena, "{s} \u{2013} {s}", .{ xs, ys }));
+    return Value.str(try nfFormatRangePartsText(self, xp.items, yp.items));
 }
 
 fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -22462,29 +22551,36 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     const x = try self.toNumberV(xv);
     const y = try self.toNumberV(yv);
     if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRangeToParts arguments must not be NaN");
-    // Emit the start value's parts (source "startRange"), a shared literal
-    // separator, then the end value's parts ("endRange").
     const arr = (try self.newArray()).asObj();
-    const emit = struct {
-        fn one(s: *Interpreter, a: *value.Object, prts: []const NfPart, src: []const u8) value.HostError!void {
-            for (prts) |p| {
-                const po = (try s.newObject()).asObj();
-                try s.setProp(po, "type", Value.str(p.typ));
-                try s.setProp(po, "value", Value.str(p.value));
-                try s.setProp(po, "source", Value.str(src));
-                try a.elements.append(a.elementsAllocator(s.arena), Value.obj(po));
-            }
+    const Emit = struct {
+        fn part(s: *Interpreter, a: *value.Object, typ: []const u8, part_value: []const u8, src: []const u8) value.HostError!void {
+            const po = (try s.newObject()).asObj();
+            try s.setProp(po, "type", Value.str(typ));
+            try s.setProp(po, "value", Value.str(part_value));
+            try s.setProp(po, "source", Value.str(src));
+            try a.elements.append(a.elementsAllocator(s.arena), Value.obj(po));
         }
-    }.one;
+        fn one(s: *Interpreter, a: *value.Object, prts: []const NfPart, src: []const u8) value.HostError!void {
+            for (prts) |p| try part(s, a, p.typ, p.value, src);
+        }
+    };
     const xp = try nfBuildParts(self, this, &.{xv});
-    try emit(self, arr, xp.items, "startRange");
+    const yp = try nfBuildParts(self, this, &.{yv});
+    const xs = try nfFormatOne(self, this, xv);
+    const ys = try nfFormatOne(self, this, yv);
+    if (std.mem.eql(u8, xs, ys)) {
+        try Emit.part(self, arr, "approximatelySign", "~", "shared");
+        try Emit.one(self, arr, xp.items, "shared");
+        return Value.obj(arr);
+    }
+    const shared_prefix = nfSharedAffixLen(xp.items, yp.items);
+    try Emit.one(self, arr, xp.items, "startRange");
     const lo = (try self.newObject()).asObj();
     try self.setProp(lo, "type", Value.str("literal"));
-    try self.setProp(lo, "value", Value.str("\u{2013}"));
+    try self.setProp(lo, "value", Value.str(nfRangeSeparator(xp.items, yp.items, shared_prefix)));
     try self.setProp(lo, "source", Value.str("shared"));
     try arr.elements.append(arr.elementsAllocator(self.arena), Value.obj(lo));
-    const yp = try nfBuildParts(self, this, &.{yv});
-    try emit(self, arr, yp.items, "endRange");
+    try Emit.one(self, arr, yp.items[shared_prefix..], "endRange");
     return Value.obj(arr);
 }
 
