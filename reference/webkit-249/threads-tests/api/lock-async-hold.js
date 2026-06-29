@@ -83,8 +83,8 @@ const cond = new Condition();
     // still be granted afterwards. ----
     {
         let ticket;
-        const t = new Thread(() => lock.asyncHold()); // registered on the spawned thread
         lock.hold(() => {
+            const t = new Thread(() => lock.asyncHold()); // registered on the spawned thread
             ticket = t.join(); // thread queues its ticket against our hold
             shouldBeTrue(ticket instanceof Promise);
         });

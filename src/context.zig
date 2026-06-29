@@ -8437,8 +8437,8 @@ test "parallel_js: await joined asyncHold promise without releasing absent GIL" 
         \\(async () => {
         \\  const lock = new Lock();
         \\  let ticket;
-        \\  const t = new Thread(() => lock.asyncHold());
         \\  lock.hold(() => {
+        \\    const t = new Thread(() => lock.asyncHold());
         \\    ticket = t.join();
         \\    if (!(ticket instanceof Promise)) throw new Error("join did not return promise");
         \\  });

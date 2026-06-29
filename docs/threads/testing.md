@@ -98,6 +98,10 @@ covers:
 `zig build threads-test -Dthreads-parallel-js=true` runs the allowlist through
 the same no-GIL path that `enable_threads` uses by default. CI's TSan sweep uses
 `threads-test-bin -Dtsan=true` and invokes each case with `parallel-js one`.
+The `api/lock-async-hold.js` barging witness now starts its child `Thread`
+inside the setup `lock.hold`, so the async ticket is deterministically queued
+against an already-active sync hold instead of racing with immediate no-fn
+`asyncHold()` grant delivery under true parallel scheduling.
 
 `zig build threadfuzz` generates random programs that share objects, arrays,
 closures, constructors, Maps/Sets, accessors, and typed arrays across JS
